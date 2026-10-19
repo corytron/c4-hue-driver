@@ -21,4 +21,6 @@ files["src/hue_light/driver.lua"] = files["src/hue_bridge/driver.lua"]
 files["tests"] = {
 	std = "+busted",
 	globals = { "C4", "Properties" },
+	-- The fake C4 methods mirror the real colon-call signatures.
+	self = false,
 }
