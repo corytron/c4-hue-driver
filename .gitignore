@@ -1,0 +1,4 @@
+build/
+*.c4z
+luacov.*.out
+.DS_Store
