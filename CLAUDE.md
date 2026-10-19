@@ -58,7 +58,8 @@ docs/           design notes and the testing checklist I run in Composer
 
 - Lint: `luacheck src tests`
 - Test: `busted tests`
-- Build: `tools/build.sh` → `build/<driver>.c4z`
+- Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z` (`--dev` enables the Lua command window; `<version>` = git commit count)
+- Design notes: `docs/design.md`; Composer checklist: `docs/composer-checklist.md`
 - Deploy: TBD — copy the `.c4z` to a folder the Windows VM can see; I'll import it in Composer Pro.
 
 ## Hue references
