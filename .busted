@@ -1,0 +1,9 @@
+return {
+	_all = {
+		lpath = "src/?.lua;src/hue_bridge/?.lua;src/hue_light/?.lua;tests/?.lua",
+	},
+	default = {
+		ROOT = { "tests/spec" },
+		pattern = "_spec",
+	},
+}
