@@ -164,6 +164,68 @@ local function new_c4(env)
 		c4.persist[name] = nil
 	end
 
+	-- File API: the driver's sandbox directory as a name -> contents table.
+	-- Handles mirror the controller: FileOpen positions at end-of-file.
+	c4.sandbox_dir = "/control4/drivers/lua/sandbox/15"
+	c4.files = {}
+	c4.handles = {}
+
+	function c4:GetSandboxDir() return c4.sandbox_dir end
+	function c4:GetC4zDir() return "/opt/control4/var/drivers/c4z" end
+	function c4:GetDriverFileName() return "hue_bridge.c4z" end
+
+	function c4:FileExists(name)
+		return c4.files[name] ~= nil
+	end
+
+	function c4:FileOpen(name)
+		record("FileOpen", name)
+		if c4.files[name] == nil then
+			c4.files[name] = ""
+		end
+		local fh = #c4.handles + 1
+		c4.handles[fh] = { name = name, pos = #c4.files[name] }
+		return fh
+	end
+
+	function c4:FileSetPos(fh, pos)
+		c4.handles[fh].pos = pos
+	end
+
+	function c4:FileGetSize(fh)
+		return #c4.files[c4.handles[fh].name]
+	end
+
+	function c4:FileRead(fh, count)
+		local h = c4.handles[fh]
+		local data = c4.files[h.name]:sub(h.pos + 1, h.pos + count)
+		h.pos = h.pos + #data
+		return data
+	end
+
+	function c4:FileWriteString(fh, text)
+		local h = c4.handles[fh]
+		c4.files[h.name] = c4.files[h.name] .. text
+		h.pos = #c4.files[h.name]
+		record("FileWriteString", h.name, #text)
+		return #text
+	end
+
+	function c4:FileClose(fh)
+		c4.handles[fh] = nil
+	end
+
+	function c4:FileDelete(name)
+		record("FileDelete", name)
+		c4.files[name] = nil
+	end
+
+	function c4:FileList()
+		local names = {}
+		for name in pairs(c4.files) do names[#names + 1] = name end
+		return names
+	end
+
 	function c4:JsonEncode(value)
 		return json.encode(value)
 	end

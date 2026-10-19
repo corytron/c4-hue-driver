@@ -10,6 +10,7 @@ local dispatch = require("common.dispatch")
 local config = require("bridge.config")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
+local certs = require("bridge.certs")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
 
@@ -18,6 +19,7 @@ local state = {
 	creds = nil,         -- credentials.load() result
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
 	late_init_done = false,
+	certs_error = nil,   -- set when the CA bundle could not be installed
 }
 
 local function prop(name, value)
@@ -29,7 +31,10 @@ local function paired()
 end
 
 local function refresh_status()
-	if not state.ip then
+	if state.certs_error then
+		-- Nothing works without the bundle; keep that visible over everything.
+		prop("Status", "Certificate install failed: " .. state.certs_error)
+	elseif not state.ip then
 		prop("Status", "Enter the bridge IP address")
 	elseif not paired() then
 		prop("Status", "Not paired: press the link button, then run Pair Bridge")
@@ -187,6 +192,15 @@ dispatch.commands["Disconnect_Event_Stream"] = function()
 	state.stream:stop()
 end
 
+dispatch.commands["Diagnose_Certificates"] = function()
+	local lines = certs.diagnose()
+	lines[#lines + 1] = "http CA bundle: " .. tostring(http.ca_bundle)
+	for _, line in ipairs(lines) do
+		log.always("diag %s", line)
+	end
+	prop("Status", "Diagnostics written to the Lua output (" .. #lines .. " lines)")
+end
+
 dispatch.commands["Forget_Pairing"] = function()
 	state.stream:stop()
 	credentials.clear()
@@ -205,13 +219,29 @@ dispatch.install(_G)
 function OnDriverInit()
 end
 
+-- Write the Signify CA bundle into the sandbox and point the HTTP client at
+-- it. Without this every HTTPS call fails, so the failure is made loud.
+local function install_certificates()
+	local path, err = certs.install()
+	if path then
+		http.set_ca_bundle(path)
+		state.certs_error = nil
+		log.info("CA bundle at %s", path)
+	else
+		state.certs_error = tostring(err)
+		log.error("CA bundle install failed: %s", err)
+	end
+	return path ~= nil
+end
+
 function OnDriverLateInit()
 	state.creds = credentials.load()
+	local certs_ok = install_certificates()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
 	state.late_init_done = true
 	refresh_status()
-	if connection() then
+	if connection() and certs_ok then
 		state.stream:start()
 	else
 		prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")

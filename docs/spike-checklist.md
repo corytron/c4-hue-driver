@@ -12,7 +12,14 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
    bridge device keeps its IP. `Driver Version` shows the new build.
 2. New properties appear: `Bridge Model`, `Event Stream`, `Events Received`,
    `Last Event`, `Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 300.
-   `Event Stream` reads "Not paired".
+   `Event Stream` reads "Not paired". `Status` must *not* say "Certificate
+   install failed"; if it does, copy the message and stop here.
+2a. Actions → **Diagnose Certificates**. Copy the `diag` lines from the Lua
+   output. They show where the controller keeps the sandbox and the driver
+   archive, and that the CA bundle was written there. (The first run failed
+   because `ssl_cacerts` with a path "relative to the .c4z" hit
+   `fopen: No such file or directory`; this build writes the bundle into the
+   sandbox and passes an absolute path instead.)
 3. Actions → **Pair Bridge** *without* pressing the link button.
    - Expect `Bridge Model` = `BSB002` (or `BSB003` on a Bridge Pro) and
      `Status` = "Press the link button on the bridge, then run Pair Bridge
