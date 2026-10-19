@@ -97,8 +97,8 @@ The two drivers talk through `C4:SendToDevice` in both directions.
 - Transport: `C4:url()` with `OnBodyChunk` (body arrives unbuffered).
   `timeout` covers the total transfer time (default 300 s) **[verified]**, so
   the stream also reconnects on a schedule. Whether chunks arrive in real time
-  on the controller is **[assumed]**; this is the first thing to spike on
-  hardware. The fallback is a raw SSL network connection
+  on the controller is **[assumed]**; `docs/spike-checklist.md` tests this
+  with `bridge/stream.lua`. The fallback is a raw SSL network connection
   (`CreateNetworkConnection` + `NetPortOptions`) with HTTP and chunked
   encoding handled in Lua.
 
