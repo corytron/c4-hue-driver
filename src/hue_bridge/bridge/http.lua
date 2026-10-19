@@ -1,19 +1,24 @@
 -- HTTPS client for the Hue bridge, built on C4:url().
 --
--- Every request verifies the bridge certificate against the Signify roots
--- bundled in certs/. Hostname verification is off because the certificate's
--- CN is the bridge ID, not the IP; the bridge ID is checked at the
--- application layer instead (see bridge/pairing.lua and docs/design.md).
+-- Every request verifies the bridge certificate against the Signify roots.
+-- Hostname verification is off because the certificate's CN is the bridge ID,
+-- not the IP; the bridge ID is checked at the application layer instead (see
+-- bridge/pairing.lua and docs/design.md). The CA bundle path is set once at
+-- startup by bridge/certs.lua; until then every request fails fast.
 
 local log = require("common.log")
 
 local http = {}
 
--- Paths are relative to the .c4z root, as the ssl_cacerts option requires.
-http.CA_CERTS = { "certs/hue_root_bridge.pem", "certs/hue_root_ca_01.pem" }
-
 http.DEFAULT_TIMEOUT = 15
 http.CONNECT_TIMEOUT = 5
+
+-- Absolute path of the CA bundle, see certs.install().
+http.ca_bundle = nil
+
+function http.set_ca_bundle(path)
+	http.ca_bundle = path
+end
 
 -- Shared TLS and timing options for every transfer.
 function http.options(overrides)
@@ -23,7 +28,7 @@ function http.options(overrides)
 		connect_timeout = http.CONNECT_TIMEOUT,
 		ssl_verify_peer = true,
 		ssl_verify_host = false,
-		ssl_cacerts = http.CA_CERTS,
+		ssl_cabundle = http.ca_bundle,
 	}
 	for k, v in pairs(overrides or {}) do
 		opts[k] = v
@@ -58,6 +63,16 @@ function http.decode(body)
 	return value
 end
 
+-- C4:url raises a Lua error at Get()/Post() time for some problems (a CA
+-- file it can't open, for one). Turn that into a normal failure.
+local function start(transfer, fn)
+	local ok, err = pcall(fn)
+	if ok then
+		return transfer
+	end
+	return nil, "could not start transfer: " .. tostring(err)
+end
+
 -- One request/response exchange. `req` has:
 --   ip, path, method ("GET"|"POST"|"PUT"|"DELETE"), key (optional),
 --   body (table, JSON-encoded, optional), timeout (optional).
@@ -66,12 +81,19 @@ end
 --   code  HTTP status, or nil when no response arrived
 --   json  decoded body when it parsed, else nil
 --   err   a human-readable reason when ok is false
--- Returns the C4LuaUrl transfer so callers can Cancel() it.
+-- Returns the C4LuaUrl transfer so callers can Cancel() it, or nil when the
+-- transfer could not be started (the callback has then already been called).
 function http.request(req, callback)
+	local method = req.method or "GET"
+	if not http.ca_bundle then
+		log.warn("%s %s: CA bundle not installed", method, req.path)
+		callback({ ok = false, err = "CA bundle not installed" })
+		return nil
+	end
+
 	local url = http.url(req.ip, req.path)
 	local data = req.body and C4:JsonEncode(req.body) or nil
 	local headers = headers_for(req.key, data and { ["Content-Type"] = "application/json" } or nil)
-	local method = req.method or "GET"
 
 	log.debug("%s %s", method, url)
 
@@ -101,34 +123,47 @@ function http.request(req, callback)
 			callback(result)
 		end)
 
-	if method == "GET" then
-		transfer:Get(url, headers)
-	elseif method == "POST" then
-		transfer:Post(url, data or "", headers)
-	elseif method == "PUT" then
-		transfer:Put(url, data or "", headers)
-	elseif method == "DELETE" then
-		transfer:Delete(url, headers)
-	else
-		transfer:Custom(url, method, data or "", headers)
+	local started, err = start(transfer, function()
+		if method == "GET" then
+			transfer:Get(url, headers)
+		elseif method == "POST" then
+			transfer:Post(url, data or "", headers)
+		elseif method == "PUT" then
+			transfer:Put(url, data or "", headers)
+		elseif method == "DELETE" then
+			transfer:Delete(url, headers)
+		else
+			transfer:Custom(url, method, data or "", headers)
+		end
+	end)
+	if not started then
+		log.warn("%s %s: %s", method, req.path, err)
+		callback({ ok = false, err = err })
 	end
-	return transfer
+	return started
 end
 
 -- A long-lived GET whose body is handed over chunk by chunk.
 -- `handlers`:
 --   on_headers(code, headers)  once per response; return true to abort
 --   on_chunk(data)             each body chunk
---   on_done(err_code, err_msg, code)  when the transfer ends for any reason
--- Returns the transfer so the caller can Cancel() it.
+--   on_done(err_code, err_msg, code)  when the transfer ends for any reason;
+--                              err_code -2 means it never started
+-- Returns the transfer so the caller can Cancel() it, or nil when it could
+-- not be started (on_done has then already been called).
 function http.stream(req, handlers)
+	if not http.ca_bundle then
+		handlers.on_done(-2, "CA bundle not installed", nil)
+		return nil
+	end
+
 	local url = http.url(req.ip, req.path)
 	local headers = headers_for(req.key, req.headers)
 	local last_code
 
 	log.debug("STREAM %s (timeout %s s)", url, tostring(req.timeout))
 
-	return C4:url()
+	local transfer = C4:url()
 		:SetOptions(http.options({ timeout = req.timeout }))
 		:OnHeaders(function(_, response)
 			last_code = response.code
@@ -146,7 +181,15 @@ function http.stream(req, handlers)
 				handlers.on_done(err_code, err_msg, last_code)
 			end
 		end)
-		:Get(url, headers)
+
+	local started, err = start(transfer, function()
+		transfer:Get(url, headers)
+	end)
+	if not started then
+		log.warn("STREAM %s: %s", req.path, err)
+		handlers.on_done(-2, err, nil)
+	end
+	return started
 end
 
 return http

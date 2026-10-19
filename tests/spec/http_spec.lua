@@ -9,15 +9,42 @@ describe("bridge.http", function()
 		c4 = fake.install_c4()
 		package.loaded["bridge.http"] = nil
 		http = require("bridge.http")
+		http.set_ca_bundle("/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem")
 	end)
 
-	it("verifies the peer against the bundled Signify roots, not the hostname", function()
+	it("verifies the peer against the installed Signify bundle, not the hostname", function()
 		http.request({ ip = "192.0.2.10", path = "/clip/v2/resource/bridge", key = "k" }, function() end)
 		local t = c4.last_transfer()
 		assert.is_true(t.options.ssl_verify_peer)
 		assert.is_false(t.options.ssl_verify_host)
-		assert.same({ "certs/hue_root_bridge.pem", "certs/hue_root_ca_01.pem" }, t.options.ssl_cacerts)
+		assert.equal("/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem", t.options.ssl_cabundle)
+		assert.is_nil(t.options.ssl_cacerts)
 		assert.is_false(t.options.fail_on_error)
+	end)
+
+	it("fails fast when no CA bundle is installed", function()
+		http.set_ca_bundle(nil)
+		local got
+		local t = http.request({ ip = "192.0.2.10", path = "/x" }, function(r) got = r end)
+		assert.is_nil(t)
+		assert.is_false(got.ok)
+		assert.equal("CA bundle not installed", got.err)
+		assert.equal(0, #c4.transfers)
+	end)
+
+	it("turns a Lua error raised at transfer start into a failed result", function()
+		local real_url = c4.url
+		c4.url = function(self)
+			local t = real_url(self)
+			t.Get = function() error("Error loading certificate: fopen: No such file or directory") end
+			return t
+		end
+		local got
+		local t = http.request({ ip = "192.0.2.10", path = "/x" }, function(r) got = r end)
+		assert.is_nil(t)
+		assert.is_false(got.ok)
+		assert.truthy(got.err:find("could not start transfer", 1, true))
+		assert.truthy(got.err:find("Error loading certificate", 1, true))
 	end)
 
 	it("sends the application key header and an https URL", function()
@@ -95,6 +122,22 @@ describe("bridge.http", function()
 			assert.equal(200, seen.code)
 			assert.same({ "id: 1\n", "data: x\n\n" }, seen.chunks)
 			assert.same({ 28, "Operation timed out", 200 }, seen.done)
+		end)
+
+		it("reports a start failure through on_done with code -2", function()
+			local real_url = c4.url
+			c4.url = function(self)
+				local t = real_url(self)
+				t.Get = function() error("Error loading certificate") end
+				return t
+			end
+			local done
+			local t = http.stream({ ip = "192.0.2.10", path = "/e" }, {
+				on_done = function(code, msg) done = { code, msg } end,
+			})
+			assert.is_nil(t)
+			assert.equal(-2, done[1])
+			assert.truthy(done[2]:find("Error loading certificate", 1, true))
 		end)
 
 		it("lets on_headers abort the transfer", function()

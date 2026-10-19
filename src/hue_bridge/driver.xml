@@ -112,6 +112,11 @@
 				<params/>
 			</action>
 			<action>
+				<name>Diagnose Certificates</name>
+				<command>Diagnose Certificates</command>
+				<params/>
+			</action>
+			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
 				<params/>

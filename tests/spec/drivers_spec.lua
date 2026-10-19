@@ -22,6 +22,40 @@ describe("Hue Bridge driver", function()
 		assert.equal("Not paired", env.Properties["Event Stream"])
 	end)
 
+	it("installs the CA bundle in the sandbox and uses it for every transfer", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "192.0.2.10" })
+		c4.persist.hue_app_key = "abc123"
+		c4.persist.hue_bridge_id = "001788fffe25b8f8"
+		env.OnDriverLateInit("DIT_STARTUP")
+
+		assert.equal(require("bridge.ca_bundle"), c4.files["hue_ca_bundle.pem"])
+		assert.equal("/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem", c4.last_transfer().options.ssl_cabundle)
+	end)
+
+	it("reports a certificate install failure instead of connecting", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "192.0.2.10" })
+		c4.persist.hue_app_key = "abc123"
+		c4.persist.hue_bridge_id = "001788fffe25b8f8"
+		c4.FileOpen = function() return -1 end
+		env.OnDriverLateInit("DIT_STARTUP")
+
+		assert.truthy(env.Properties["Status"]:find("^Certificate install failed"))
+		assert.equal(0, #c4.transfers)
+	end)
+
+	it("Diagnose Certificates prints facts whatever the debug level", function()
+		local lines = {}
+		log.sink = function(line) table.insert(lines, line) end
+		local env = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "" })
+		env.OnDriverLateInit("DIT_STARTUP")
+		lines = {}
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnose Certificates" })
+		local text = table.concat(lines, "\n")
+		assert.truthy(text:find("GetSandboxDir: /control4/drivers/lua/sandbox/15", 1, true))
+		assert.truthy(text:find("http CA bundle: /control4/drivers/lua/sandbox/15/hue_ca_bundle.pem", 1, true))
+		assert.truthy(env.Properties["Status"]:find("^Diagnostics written"))
+	end)
+
 	it("asks for pairing once a valid IP is entered", function()
 		local env = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "" })
 		env.OnDriverLateInit("DIT_STARTUP")

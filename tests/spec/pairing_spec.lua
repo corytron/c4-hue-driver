@@ -22,6 +22,7 @@ describe("bridge.pairing", function()
 		for _, m in ipairs({ "bridge.http", "bridge.config", "bridge.credentials", "bridge.pairing" }) do
 			package.loaded[m] = nil
 		end
+		require("bridge.http").set_ca_bundle("/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem")
 		pairing = require("bridge.pairing")
 		credentials = require("bridge.credentials")
 		events = {}
