@@ -97,13 +97,37 @@ The two drivers talk through `C4:SendToDevice` in both directions.
   `Last-Event-ID`, connection limits **[unknown]**. Design for the worst case:
   a watchdog reconnects on silence, and every reconnect is followed by a full
   GET resync.
-- Transport: `C4:url()` with `OnBodyChunk` (body arrives unbuffered).
-  `timeout` covers the total transfer time (default 300 s) **[verified]**, so
-  the stream also reconnects on a schedule. Whether chunks arrive in real time
-  on the controller is **[assumed]**; `docs/spike-checklist.md` tests this
-  with `bridge/stream.lua`. The fallback is a raw SSL network connection
-  (`CreateNetworkConnection` + `NetPortOptions`) with HTTP and chunked
-  encoding handled in Lua.
+- Transport: `C4:url()` with `OnBodyChunk`. Spike results on OS 3.4.2
+  **[verified]**:
+  - Chunks are delivered while the transfer is still open: events logged with
+    per-second ids arrived long before the 3600 s transfer timeout, so
+    `OnBodyChunk` does not buffer. Latency looked immediate; a stopwatch
+    figure is still to be taken.
+  - The bridge sends no keepalive on the stream: 300 s of silence tripped the
+    watchdog, which reconnected cleanly. So in a quiet house the stream will
+    be reopened every watchdog period; the period can be long, but there is
+    no application-level liveness signal to rely on.
+  - **While the stream was open, an authenticated `GET
+    /clip/v2/resource/bridge` to the same bridge timed out (curl 28) after
+    the 15 s total timeout.** Requests to a different host (the pinning
+    check) succeeded with the stream open, and requests to the bridge
+    succeeded with the stream closed. The strongest explanation is a
+    per-host connection limit of one in Director's curl pool, so the request
+    queued behind the stream until its timeout; a bridge-side limit of one
+    connection per client is unlikely because Signify's own guidance is to
+    use a second HTTP/1.1 connection for requests. Cause to be attributed
+    (see the spike checklist); either way the stream cannot share
+    `C4:url()` with light commands as things stand.
+  - `timeout` covers the total transfer time (default 300 s) **[verified]**,
+    so a `C4:url()` stream also reconnects on a schedule.
+- Fallback transport for the stream, now the likely design: a raw SSL
+  network connection (`CreateNetworkConnection` + `NetPortOptions` with
+  `CACERTFILE`, `VERIFY_MODE=peer`, `KEEP_ALIVE`) with the HTTP request and
+  chunked transfer decoding written in Lua. It keeps `C4:url()` free for
+  commands, has no total-transfer timeout, and TCP keepalive gives dead-peer
+  detection the SSE stream itself lacks. `CACERTFILE` is documented as
+  relative to the .c4z, the convention `ssl_cabundle` turned out to follow
+  **[assumed until tested]**.
 
 ## Discovery
 
