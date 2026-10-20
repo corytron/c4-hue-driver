@@ -83,6 +83,17 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
 14. Actions → **Forget Pairing**: `Status` returns to "Not paired",
     `Event Stream` = "Stopped". Pair again afterwards (steps 3–4).
 
+## E. Attributing the request timeout (added after step 5 failed)
+
+With the stream connected, `Test Connection` timed out. To tell a Director
+connection limit from a bridge limit:
+
+15. Actions → **Disconnect Event Stream**, then **Test Connection**. Expect
+    "Test OK". Then **Connect Event Stream**, wait for "Connected since", and
+    **Test Connection** again. Note roughly how long it takes to fail: about
+    5 s points at the connect phase (bridge not accepting), about 15 s at
+    the total timeout (request never started, queued in Director).
+
 ## What to report
 
 For each step, the property text and any Lua output lines. For steps 3, 6,
