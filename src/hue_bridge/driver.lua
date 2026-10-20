@@ -10,21 +10,15 @@ local dispatch = require("common.dispatch")
 local config = require("bridge.config")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
-local certs = require("bridge.certs")
-local ca_probe = require("bridge.ca_probe")
+local pinning = require("bridge.pinning")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
 
 local state = {
 	ip = nil,            -- validated Bridge IP Address property
-	creds = nil,         -- credentials.load() result
+	creds = nil,         -- what pairing produced; loaded from the store at startup
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
 	late_init_done = false,
-	certs_error = nil,   -- set when the CA bundle could not be installed
-	probing = false,     -- a CA probe is running
-	probe_handle = nil,  -- its handle, for cancelling
-	probe_failed = false,
-	after_probe = {},    -- callbacks waiting for the probe result
 }
 
 local function prop(name, value)
@@ -32,18 +26,11 @@ local function prop(name, value)
 end
 
 local function paired()
-	return state.creds ~= nil and credentials.paired(state.creds)
+	return credentials.paired(state.creds)
 end
 
 local function refresh_status()
-	if state.certs_error then
-		-- Nothing works without the bundle; keep that visible over everything.
-		prop("Status", "Certificate install failed: " .. state.certs_error)
-	elseif state.probing then
-		prop("Status", "Probing how to load the CA bundle (see Lua output)")
-	elseif state.probe_failed then
-		prop("Status", "No CA configuration works on this controller; see the CA probe lines in the Lua output")
-	elseif not state.ip then
+	if not state.ip then
 		prop("Status", "Enter the bridge IP address")
 	elseif not paired() then
 		prop("Status", "Not paired: press the link button, then run Pair Bridge")
@@ -62,8 +49,7 @@ local function connection()
 end
 
 local function number_property(name, default)
-	local n = tonumber(Properties[name])
-	return n or default
+	return tonumber(Properties[name]) or default
 end
 
 local function new_stream()
@@ -83,51 +69,8 @@ local function new_stream()
 	})
 end
 
--- Make sure http has a working CA configuration, then call `callback(ok)`.
--- The first call per IP runs the probe (one request per candidate); later
--- calls return at once.
-local function ensure_ca(callback)
-	if http.ca then
-		return callback(true)
-	end
-	if state.certs_error or not state.ip then
-		return callback(false)
-	end
-	table.insert(state.after_probe, callback)
-	if state.probing then
-		return
-	end
-	state.probing = true
-	state.probe_failed = false
-	refresh_status()
-	prop("CA Mode", "probing")
-	state.probe_handle = ca_probe.run(state.ip, {
-		on_candidate = function(index, count, name)
-			prop("CA Mode", string.format("probing %d/%d: %s", index, count, name))
-		end,
-		on_done = function(winner, insecure_ok)
-			state.probing = false
-			state.probe_handle = nil
-			if winner then
-				http.set_ca(winner)
-				prop("CA Mode", http.describe_ca(winner))
-			else
-				state.probe_failed = true
-				prop("CA Mode", "none works; unverified handshake " .. (insecure_ok and "works" or "fails too"))
-			end
-			refresh_status()
-			local waiting = state.after_probe
-			state.after_probe = {}
-			for _, cb in ipairs(waiting) do
-				cb(winner ~= nil)
-			end
-		end,
-	})
-end
-
--- Rebuild the stream with the current properties and CA configuration. It
--- is started again if it was running, or if `force` is set and the driver
--- is paired with an IP.
+-- Rebuild the stream with the current properties. It is started again if it
+-- was running, or if `force` is set and the driver is paired with an IP.
 local function restart_stream(force)
 	if not state.stream then
 		return
@@ -163,8 +106,7 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 			credentials.save_ip(ip)
 			state.creds.ip = ip
 		end
-		state.probe_failed = false
-		ensure_ca(function() restart_stream() end)
+		restart_stream()
 	end
 end
 
@@ -183,61 +125,35 @@ dispatch.commands["Pair_Bridge"] = function()
 		prop("Status", "Enter the bridge IP address first")
 		return
 	end
-	ensure_ca(function(ok)
-		if not ok then
-			return -- Status already explains why
-		end
-		prop("Status", "Pairing: contacting bridge")
-		pairing.pair(state.ip, {
-			on_probed = function(info)
-				prop("Bridge Model", info.model or "")
-				prop("Status", string.format("Pairing: found %s %s, requesting key", tostring(info.model), info.bridge_id))
-			end,
-			on_link_button = function()
-				prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
-			end,
-			on_paired = function(creds)
-				-- Use the in-memory result: the store may not return it yet.
-				state.creds = creds
-				prop("Bridge Model", creds.model or "")
-				refresh_status()
-				local stored = credentials.load()
-				if stored.key == creds.key and stored.bridge_id == creds.bridge_id then
-					log.info("credentials read back from the store immediately")
-				else
-					log.info("store not yet readable after save (expected; it writes on its own thread): %s",
-						credentials.summary(stored))
-				end
-				if state.stream then
-					state.stream:start()
-				end
-			end,
-			on_error = function(message)
-				prop("Status", "Pairing failed: " .. message)
-			end,
-		})
-	end)
-end
-
-dispatch.commands["Probe_CA_Paths"] = function()
-	if not state.ip then
-		prop("Status", "Enter the bridge IP address first")
-		return
-	end
-	-- Abort any probe in progress (it may be stuck waiting for a callback
-	-- Director will never deliver) and start over.
-	if state.probe_handle then
-		state.probe_handle:cancel()
-		state.probe_handle = nil
-	end
-	state.probing = false
-	state.after_probe = {}
-	http.set_ca(nil)
-	ensure_ca(function(ok)
-		if ok then
-			restart_stream(true)
-		end
-	end)
+	prop("Status", "Pairing: contacting bridge")
+	pairing.pair(state.ip, {
+		on_probed = function(info)
+			prop("Bridge Model", info.model or "")
+			prop("Status", string.format("Pairing: found %s %s, requesting key", tostring(info.model), info.bridge_id))
+		end,
+		on_link_button = function()
+			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
+		end,
+		on_paired = function(creds)
+			-- Use the in-memory result: the store writes on its own thread
+			-- and may not return the value yet.
+			state.creds = creds
+			prop("Bridge Model", creds.model or "")
+			refresh_status()
+			local stored = credentials.load()
+			if stored.key == creds.key and stored.bridge_id == creds.bridge_id then
+				log.info("credentials read back from the store immediately")
+			else
+				log.info("store not yet readable after save (expected): %s", credentials.summary(stored))
+			end
+			if state.stream then
+				state.stream:start()
+			end
+		end,
+		on_error = function(message)
+			prop("Status", "Pairing failed: " .. message)
+		end,
+	})
 end
 
 dispatch.commands["Test_Connection"] = function()
@@ -298,34 +214,21 @@ dispatch.commands["Reload_Credentials"] = function()
 end
 
 dispatch.commands["Check_CA_Pinning"] = function()
-	if not http.ca then
-		prop("Status", "No CA configuration yet; run Probe CA Paths first")
-		return
-	end
-	prop("Status", "Checking CA pinning against " .. ca_probe.PUBLIC_HOST)
-	ca_probe.pinning_check(http.ca, function(verdict)
+	prop("Status", "Checking CA pinning against " .. pinning.PUBLIC_HOST)
+	pinning.check(http.ca, function(verdict)
 		local text = {
 			pinned = "Pinning check passed: only Signify-signed certificates are trusted",
 			not_pinned = "Pinning check FAILED: public CAs are trusted too; see Lua output",
-			inconclusive = "Pinning check inconclusive: " .. ca_probe.PUBLIC_HOST .. " unreachable",
+			inconclusive = "Pinning check inconclusive: " .. pinning.PUBLIC_HOST .. " unreachable",
 		}
 		prop("Status", text[verdict] or verdict)
 	end)
 end
 
-dispatch.commands["Diagnose_Certificates"] = function()
-	local lines = certs.diagnose()
-	lines[#lines + 1] = "http CA: " .. http.describe_ca()
-	for _, line in ipairs(lines) do
-		log.always("diag %s", line)
-	end
-	prop("Status", "Diagnostics written to the Lua output (" .. #lines .. " lines)")
-end
-
 dispatch.commands["Forget_Pairing"] = function()
 	state.stream:stop()
 	credentials.clear()
-	state.creds = credentials.load()
+	state.creds = nil
 	prop("Bridge Model", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
@@ -340,45 +243,16 @@ dispatch.install(_G)
 function OnDriverInit()
 end
 
--- Write the Signify CA bundle into the sandbox and point the HTTP client at
--- it. Without this every HTTPS call fails, so the failure is made loud.
-local function install_certificates()
-	local result = certs.install()
-	for _, err in ipairs(result.errors) do
-		log.warn("CA bundle: %s", err)
-	end
-	if result.removed_c4z then
-		log.info("removed the CA bundle copy an earlier build wrote to the c4z directory")
-	end
-	if result.sandbox then
-		state.certs_error = nil
-		log.info("CA bundle written to %s", result.sandbox)
-	else
-		state.certs_error = table.concat(result.errors, "; ")
-		log.error("CA bundle install failed: %s", state.certs_error)
-	end
-	return result.sandbox ~= nil
-end
-
 function OnDriverLateInit()
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
-	local certs_ok = install_certificates()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
 	state.late_init_done = true
 	refresh_status()
-	if not certs_ok then
-		return
-	end
-	-- Probe as soon as there is an IP, paired or not, so the CA result is
-	-- visible right after a driver update without pressing anything.
-	if state.ip then
-		ensure_ca(function(ok)
-			if ok and connection() then state.stream:start() end
-		end)
-	end
-	if not connection() then
+	if connection() then
+		state.stream:start()
+	else
 		prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")
 	end
 end
