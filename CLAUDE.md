@@ -9,11 +9,23 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 - When something about the Control4 or Hue APIs is uncertain, check the docs (paths below) and tell me what you verified versus what you're assuming. Do not invent DriverWorks API calls.
 - Never commit secrets: Hue application keys, bridge IPs from my LAN, or certificates. Use placeholders in tests and examples.
 
+## Working with agents
+
+Use parallel agents whenever a task splits into pieces that touch disjoint files; a single long serial pass is the slow path.
+
+- **Coordinator first.** Before spawning, write the contract the pieces share (an interface, a wire protocol, a file layout) into `docs/` so every agent builds against the same text. Then spawn them in one go, in the background.
+- **One writer per file.** Each brief names the exact files the agent may create or edit and says that others are editing the rest of the checkout concurrently. No agent runs `git`; the coordinator integrates, runs `luacheck src tests`, `busted` and `tools/build.sh`, and commits.
+- **Briefs are self-contained.** Agents start cold: include the doc paths to read, the conventions (Lua 5.1, tabs, `.luacheckrc`, busted style, the fake C4 runtime), the hardware facts that matter, and what "done" looks like, including the verification commands to run.
+- **Research agents are read-only** and write one new file under `docs/` (for example a design for a new transport), citing the SDK doc file for every API claim.
+- Typical split for a feature: VM-side tooling (Python) / driver-side Lua module plus its spec / changes to existing modules plus their specs / a design or research document. Integration into `driver.lua`, `driver.xml`, `tools/build.sh` and `CLAUDE.md` stays with the coordinator.
+- Don't spawn for quick things (one file, a handful of edits); do it inline.
+
 ## Environment
 
 - This repo lives on an Ubuntu 26.04 VM on my home LAN. You run everything here: builds, lint, tests.
 - I drive you from a Mac via the Claude Desktop app (SSH session). I can't run commands on the Mac for you.
-- Loading the driver onto the real controller happens in **Composer Pro on a separate Windows VM**. You can't run Composer. Your job ends at a built `.c4z` plus clear instructions for what I should click and observe.
+- Loading the driver onto the real controller happens in **Composer Pro on a separate Windows VM**. You can't run Composer. For `driver.xml` changes and Director restarts your job ends at a built `.c4z` plus clear instructions for what I should click and observe. **For Lua changes use the dev loop** (`docs/dev-loop.md`): a dev build of the bridge driver fetches its code from `tools/devserver.py` on this VM, reloads itself, runs actions queued with `tools/devctl.py` and ships its log back, so you can test on the live controller yourself. Always update the driver **in place** in Composer; deleting and re-adding it loses the pairing.
+- The controller runs OS 3.4.2 and is on this VM's LAN; the house bridge is a Hue Bridge Pro (BSB003).
 - Local tools installed by `setup-vm.sh`:
   - `lua5.1`, `luacheck` (lint), `busted` (unit tests)
   - `~/c4-tools/drivers-driverpackager/` — official Python packager for `.c4z` files (read its README for invocation)
@@ -58,7 +70,8 @@ docs/           design notes and the testing checklist I run in Composer
 
 - Lint: `luacheck src tests`
 - Test: `busted tests`
-- Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z` (`--dev` enables the Lua command window; `<version>` = git commit count)
+- Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z` (`<version>` = git commit count). `tools/build.sh --dev` adds the dev loop and the Lua command window; never install a dev build as the production driver.
+- Dev loop: `tools/devserver.py` (background, once), `tools/devctl.py status|run|set|reload|wait|log`; details in `docs/dev-loop.md`
 - Design notes: `docs/design.md`; Composer checklist: `docs/composer-checklist.md`
 - Deploy: TBD — copy the `.c4z` to a folder the Windows VM can see; I'll import it in Composer Pro.
 

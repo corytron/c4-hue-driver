@@ -15,6 +15,14 @@ local conntest = require("bridge.conntest")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
 
+-- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
+-- driver fetches its code from a server on the LAN and reloads itself.
+-- See docs/dev-loop.md. Release builds have no such module, so this is nil.
+local devloop_ok, devloop = pcall(require, "common.devloop")
+if not devloop_ok then
+	devloop = nil
+end
+
 local state = {
 	ip = nil,            -- validated Bridge IP Address property
 	creds = nil,         -- what pairing produced; loaded from the store at startup
@@ -108,6 +116,19 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 			state.creds.ip = ip
 		end
 		restart_stream()
+	end
+end
+
+-- host:port of tools/devserver.py; empty disables the loop. Dev builds only.
+dispatch.properties["Dev_Server"] = function(value)
+	if not devloop then
+		return
+	end
+	local host = (value or ""):match("^%s*(.-)%s*$")
+	if host == "" then
+		devloop.stop()
+	elseif state.late_init_done then
+		devloop.start(host)
 	end
 end
 
@@ -293,6 +314,14 @@ function OnDriverLateInit()
 		state.stream:start()
 	else
 		prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")
+	end
+	-- Started last so a reload pushed through the loop sees a fully
+	-- initialised driver; the property handler above only arms it after this.
+	if devloop then
+		local host = (Properties["Dev Server"] or ""):match("^%s*(.-)%s*$")
+		if host ~= "" then
+			devloop.start(host)
+		end
 	end
 end
 
