@@ -164,6 +164,7 @@ describe("Hue Bridge driver", function()
 		assert.equal("abc123", test_stream.headers["hue-application-key"])
 
 		test_stream:respond_headers(200, {})
+		c4.fire_timers()                                         -- conntest's 1 ms hop out of OnHeaders
 		c4.last_transfer():respond(200, '{"data":[]}')          -- step 2
 		local n = #c4.transfers
 		c4.transfers[n - 1]:respond(200, '{"data":[]}')          -- step 3a

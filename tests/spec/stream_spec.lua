@@ -25,6 +25,29 @@ describe("bridge.stream", function()
 		return t
 	end
 
+	-- Fire only the short deferral timers (the 1 ms on_connected hop), leaving
+	-- the watchdog and retry timers armed. Returns how many fired.
+	local function fire_deferrals()
+		local fired = 0
+		for _, timer in ipairs(c4.active_timers()) do
+			if timer.delay <= 1 then
+				timer.active = false
+				timer.callback(timer, 0)
+				fired = fired + 1
+			end
+		end
+		return fired
+	end
+
+	local function timer_delays()
+		local delays = {}
+		for _, timer in ipairs(c4.active_timers()) do
+			delays[#delays + 1] = timer.delay
+		end
+		table.sort(delays)
+		return delays
+	end
+
 	before_each(function()
 		log.sink = function() end
 		c4 = fake.install_c4()
@@ -52,9 +75,56 @@ describe("bridge.stream", function()
 		assert.equal("Not paired", seen.status[#seen.status])
 	end)
 
+	it("defers on_connected to a 1 ms timer instead of calling it inside OnHeaders", function()
+		s:start()
+		open_ok()
+		assert.equal("connected", s.state)
+		assert.equal(0, seen.connected, "not called from inside the headers callback")
+		assert.same({ 1, stream.DEFAULT_WATCHDOG * 1000 }, timer_delays(), "1 ms deferral plus the watchdog")
+
+		assert.equal(1, fire_deferrals())
+		assert.equal(1, seen.connected)
+		assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays(), "only the watchdog remains")
+	end)
+
+	it("does not arm the deferral when no on_connected handler is given", function()
+		s = new_stream({ on_connected = false })
+		s:start()
+		open_ok()
+		assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays())
+	end)
+
+	it("a stale on_connected timer does nothing after drop_transfer", function()
+		s:start()
+		local t = open_ok()
+		local deferral = c4.active_timers()[2]
+		assert.equal(1, deferral.delay)
+
+		s:drop_transfer()
+		assert.is_true(t.cancelled)
+		assert.is_false(deferral.active, "deferral cancelled with the transfer")
+		assert.equal(0, c4.fire_timers(), "no timers left: watchdog and deferral both cancelled")
+		assert.equal(0, seen.connected)
+
+		-- Even if the controller delivered the already-cancelled timer, the
+		-- generation check keeps on_connected from firing for a dead stream.
+		deferral.callback(deferral, 0)
+		assert.equal(0, seen.connected)
+	end)
+
+	it("drops the on_connected deferral when the stream ends before it fires", function()
+		s:start()
+		local t = open_ok()
+		t:done(0, nil)
+		assert.equal("waiting", s.state)
+		assert.same({ stream.BACKOFF_MIN * 1000 }, timer_delays(), "only the retry timer is left")
+		assert.equal(0, seen.connected)
+	end)
+
 	it("delivers each container as chunks arrive and arms the watchdog", function()
 		s:start()
 		local t = open_ok()
+		fire_deferrals()
 		assert.equal("connected", s.state)
 		assert.equal(1, seen.connected)
 		assert.equal(1, #c4.active_timers(), "watchdog armed")
@@ -81,6 +151,7 @@ describe("bridge.stream", function()
 	it("reconnects after the transfer ends, with growing backoff", function()
 		s:start()
 		local t = open_ok()
+		fire_deferrals()
 		t:done(28, "Operation timed out")
 
 		assert.equal("waiting", s.state)
@@ -117,7 +188,8 @@ describe("bridge.stream", function()
 	it("reconnects when the watchdog fires", function()
 		s:start()
 		local t = open_ok()
-		c4.fire_timers() -- the watchdog
+		assert.equal(1, fire_deferrals(), "on_connected delivered first")
+		assert.equal(1, c4.fire_timers(), "the watchdog, and nothing else")
 		assert.is_true(t.cancelled)
 		assert.equal("waiting", s.state)
 		assert.truthy(s.stats.last_error:find("watchdog", 1, true))
@@ -129,6 +201,7 @@ describe("bridge.stream", function()
 	it("stop() cancels the transfer and does not reconnect", function()
 		s:start()
 		local t = open_ok()
+		fire_deferrals()
 		s:stop()
 		assert.is_true(t.cancelled)
 		assert.equal("stopped", s.state)
@@ -136,6 +209,27 @@ describe("bridge.stream", function()
 		assert.equal(0, c4.fire_timers())
 		assert.equal(1, #c4.transfers)
 		assert.equal("Stopped", seen.status[#seen.status])
+	end)
+
+	it("stop() before the deferral fires also drops on_connected", function()
+		s:start()
+		open_ok()
+		s:stop()
+		assert.equal(0, c4.fire_timers())
+		assert.equal(0, seen.connected)
+	end)
+
+	it("aborts late callbacks from an abandoned transfer by returning true", function()
+		s:start()
+		local t = open_ok()
+		fire_deferrals()
+		s:stop()
+		-- Cancel() is unreliable on the controller: pretend it had no effect
+		-- and the old transfer keeps delivering. The callback must return true.
+		t.cancelled = false
+		t:chunk("data: " .. CONTAINER .. "\n\n")
+		assert.is_true(t.cancelled, "chunk callback returned true to abort")
+		assert.equal(0, #seen.containers, "nothing from the dead stream is delivered")
 	end)
 
 	it("start() while connected is a no-op", function()

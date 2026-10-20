@@ -3,10 +3,15 @@
 --
 -- One scripted sequence, each step timed with C4:GetTime:
 --   1. open a stream to the target and wait for its response headers
+--   1b. wait 1 ms: a transfer started from inside OnHeaders fails with curl
+--       error 2 "Failed initialization", so step 2 runs from a timer and the
+--       experiment measures the connection limit, not re-entrancy
 --   2. GET the target's ping path (15 s timeout)
 --   3. two concurrent GETs of the ping path, to find the actual limit
 --   4. GET a different host as a control
---   5. cancel the stream and report
+--   5. end the stream and report. Cancel() does not stop a streaming
+--      transfer on OS 3.4.2, so the next chunk's callback returns true, which
+--      does abort it.
 -- Run it against the diagnostic server on the LAN (which logs every
 -- connection it sees) and against the bridge; the two together attribute a
 -- timeout to Director or to the bridge.
@@ -36,6 +41,7 @@ function conntest.run(target, report, done)
 	local summary = { lines = lines }
 	local started = now_ms()
 	local stream_transfer
+	local finished, abort_reported = false, false
 
 	local function say(fmt, ...)
 		local line = string.format(fmt, ...)
@@ -49,7 +55,10 @@ function conntest.run(target, report, done)
 	end
 
 	local function finish()
+		finished = true
 		if stream_transfer then
+			-- Unreliable on OS 3.4.2; on_chunk returns true from now on, which
+			-- is what actually ends the stream.
 			stream_transfer:Cancel()
 			stream_transfer = nil
 		end
@@ -119,13 +128,26 @@ function conntest.run(target, report, done)
 			headers_seen = true
 			summary.stream_ok = code == 200
 			say("step 1 stream headers: HTTP %s in %d ms", tostring(code), now_ms() - t0)
-			if code == 200 then
-				step2()
-			else
+			if code ~= 200 then
 				finish()
+				return true -- abort the stream here; Cancel() alone may not
 			end
+			-- Not step2() directly: we are inside OnHeaders (see 1b above).
+			say("step 1b deferring 1 ms before step 2")
+			C4:SetTimer(1, function()
+				if not finished then
+					step2()
+				end
+			end)
 		end,
 		on_chunk = function(data)
+			if finished then
+				if not abort_reported then
+					abort_reported = true
+					say("stream aborted on next chunk at %d ms", elapsed())
+				end
+				return true
+			end
 			say("stream chunk %d bytes at %d ms", #data, elapsed())
 		end,
 		on_done = function(err_code, err_msg)

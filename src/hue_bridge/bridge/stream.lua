@@ -5,6 +5,21 @@
 -- transfer ends, and a watchdog reconnects if nothing at all arrives for a
 -- while. Every reconnect is reported through on_status so the owner can
 -- resync state with a full GET.
+--
+-- Two rules, both from the spike on OS 3.4.2 (docs/design.md, Event stream):
+--
+-- 1. on_container and on_connected run inside C4:url callbacks (OnBodyChunk,
+--    OnHeaders). A C4:url transfer started from inside OnHeaders fails at
+--    once with curl error 2 "Failed initialization", so never start a
+--    transfer from those callbacks without deferring it. on_connected is
+--    already deferred to a 1 ms C4:SetTimer here, so the owner's resync GET
+--    is safe; anything the owner starts from on_container must defer the same
+--    way.
+-- 2. C4LuaUrl:Cancel() does not stop an active streaming transfer: chunks keep
+--    arriving until the transfer's total timeout. Returning true from the next
+--    OnHeaders/OnBodyChunk callback does abort it, which is what the
+--    generation check at the top of every callback does for an abandoned
+--    transfer. drop_transfer still calls Cancel() for the case where it works.
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -34,6 +49,7 @@ function stream.new(opts)
 		transfer = nil,
 		parser = nil,
 		watchdog = nil,
+		connected_timer = nil,      -- defers on_connected out of OnHeaders
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
 		stats = { containers = 0, events = 0, keepalives = 0, reconnects = 0,
@@ -76,11 +92,13 @@ function stream:arm_watchdog()
 	end)
 end
 
--- Abandon the current transfer. Any late callbacks from it are ignored
--- because the generation has moved on.
+-- Abandon the current transfer. Any late callbacks from it are aborted (they
+-- return true) because the generation has moved on; Cancel() alone is not
+-- enough, see rule 2 above.
 function stream:drop_transfer()
 	self.generation = self.generation + 1
 	self:cancel_timer("watchdog")
+	self:cancel_timer("connected_timer")
 	if self.transfer then
 		self.transfer:Cancel()
 		self.transfer = nil
@@ -155,8 +173,18 @@ function stream:handle_headers(code)
 	self.stats.connected_since = clock()
 	self:arm_watchdog()
 	self:status("Connected since " .. self.stats.connected_since)
+	-- Deferred: this runs inside OnHeaders, and the owner issues a resync GET
+	-- from on_connected, which would fail if started here (rule 1 above).
+	self:cancel_timer("connected_timer")
 	if self.opts.on_connected then
-		self.opts.on_connected()
+		local gen = self.generation
+		self.connected_timer = C4:SetTimer(1, function()
+			self.connected_timer = nil
+			if gen ~= self.generation then
+				return
+			end
+			self.opts.on_connected()
+		end)
 	end
 	return false
 end
@@ -204,6 +232,7 @@ end
 function stream:handle_done(err_code, err_msg, code)
 	self.transfer = nil
 	self:cancel_timer("watchdog")
+	self:cancel_timer("connected_timer") -- the stream ended before it fired
 	local reason
 	if err_code == -1 then
 		reason = self.stats.last_error or "aborted"
