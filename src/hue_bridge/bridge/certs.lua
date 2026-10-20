@@ -1,16 +1,16 @@
--- Puts the Signify CA bundle where C4:url might be able to open it.
+-- Where the Signify CA bundle lives on the controller.
 --
--- Hardware runs on OS 3.4.2 showed that neither a path "relative to the
--- .c4z" nor the absolute sandbox path works for C4:url's CA options (see
--- bridge/ca_probe.lua). So the bundle is embedded (bridge/ca_bundle.lua) and
--- written with the File API into both places a driver may write to: its
--- sandbox directory and its C4Z directory (…/drivers/c4z/<driver_name>/,
--- reachable through the "C4Z" alias of C4:FileSetDir). The probe then finds
--- out which path C4:url accepts.
+-- The preferred copy ships inside the .c4z as certs/hue_ca_bundle.pem; the
+-- archive is extracted to /opt/control4/var/drivers/c4z/<driver_name>/ and
+-- C4:url resolves ssl_cabundle relative to that directory (OS 3.4.2, spike
+-- run 4). A second copy, embedded in bridge/ca_bundle.lua, is written into
+-- the sandbox at startup for the ssl_cacerts fallback, which needs an
+-- absolute path.
 
 local certs = {}
 
 certs.FILE = "hue_ca_bundle.pem"
+certs.SHIPPED = "certs/" .. certs.FILE
 
 local function driver_name()
 	local ok, file = pcall(function() return C4:GetDriverFileName() end)
@@ -20,12 +20,17 @@ local function driver_name()
 	return "hue_bridge"
 end
 
-function certs.sandbox_path()
-	return C4:GetSandboxDir() .. "/" .. certs.FILE
+local function join(dir, name)
+	return (dir:gsub("/+$", "")) .. "/" .. name
 end
 
-function certs.c4z_path()
-	return C4:GetC4zDir() .. "/" .. driver_name() .. "/" .. certs.FILE
+function certs.sandbox_path()
+	return join(C4:GetSandboxDir(), certs.FILE)
+end
+
+-- The extracted archive's directory.
+function certs.c4z_dir()
+	return join(C4:GetC4zDir(), driver_name())
 end
 
 local function read_all(name)
@@ -43,28 +48,6 @@ local function read_all(name)
 	return data
 end
 
--- Write `bundle` as certs.FILE in the File API's current directory unless an
--- identical file is already there. Returns true, or nil and a reason.
-local function write_here(bundle, where)
-	if C4:FileExists(certs.FILE) then
-		if read_all(certs.FILE) == bundle then
-			return true
-		end
-		-- Stale or truncated: FileOpen appends, so remove it first.
-		C4:FileDelete(certs.FILE)
-	end
-	local fh = C4:FileOpen(certs.FILE)
-	if fh == -1 then
-		return nil, "cannot create " .. where
-	end
-	local written = C4:FileWriteString(fh, bundle)
-	C4:FileClose(fh)
-	if written ~= #bundle then
-		return nil, string.format("short write to %s (%s of %d bytes)", where, tostring(written), #bundle)
-	end
-	return true
-end
-
 -- Switch the File API to an alias directory. Returns true on success.
 local function set_dir(alias)
 	local ok, err = pcall(function() return C4:FileSetDir(alias) end)
@@ -74,33 +57,49 @@ local function set_dir(alias)
 	return true
 end
 
--- Ensure copies of the bundle exist in the sandbox and, if possible, the C4Z
--- directory. Returns a table { sandbox = path|nil, c4z = path|nil,
--- errors = {..} }; `sandbox` nil means nothing usable was written.
+-- Earlier spike builds wrote a copy into the c4z directory; remove it so the
+-- probe can tell the shipped file from a written one. Best effort.
+local function remove_c4z_copy()
+	if not set_dir("C4Z") then
+		return false
+	end
+	local removed = false
+	if C4:FileExists(certs.FILE) then
+		C4:FileDelete(certs.FILE)
+		removed = true
+	end
+	set_dir("SANDBOX")
+	return removed
+end
+
+-- Ensure the sandbox copy exists and matches the embedded bundle.
+-- Returns { sandbox = path|nil, removed_c4z = bool, errors = {...} }.
 function certs.install()
 	local bundle = require("bridge.ca_bundle")
-	local result = { errors = {} }
+	local result = { errors = {}, removed_c4z = remove_c4z_copy() }
+	local path = certs.sandbox_path()
 
-	local ok, err = write_here(bundle, certs.sandbox_path())
-	if ok then
-		result.sandbox = certs.sandbox_path()
-	else
-		result.errors[#result.errors + 1] = err
+	if C4:FileExists(certs.FILE) and read_all(certs.FILE) == bundle then
+		result.sandbox = path
+		return result
 	end
-
-	-- Best effort: the C4Z alias needs OS 3.3.0+ and a writable directory.
-	local switched, serr = set_dir("C4Z")
-	if switched then
-		ok, err = write_here(bundle, certs.c4z_path())
-		if ok then
-			result.c4z = certs.c4z_path()
-		else
-			result.errors[#result.errors + 1] = "C4Z: " .. err
-		end
-		set_dir("SANDBOX")
-	else
-		result.errors[#result.errors + 1] = "FileSetDir(C4Z): " .. serr
+	if C4:FileExists(certs.FILE) then
+		-- Stale or truncated: FileOpen appends, so remove it first.
+		C4:FileDelete(certs.FILE)
 	end
+	local fh = C4:FileOpen(certs.FILE)
+	if fh == -1 then
+		result.errors[#result.errors + 1] = "cannot create " .. path
+		return result
+	end
+	local written = C4:FileWriteString(fh, bundle)
+	C4:FileClose(fh)
+	if written ~= #bundle then
+		result.errors[#result.errors + 1] =
+			string.format("short write to %s (%s of %d bytes)", path, tostring(written), #bundle)
+		return result
+	end
+	result.sandbox = path
 	return result
 end
 
@@ -124,6 +123,7 @@ function certs.diagnose()
 	end
 	try("GetSandboxDir", function() return C4:GetSandboxDir() end)
 	try("GetC4zDir", function() return C4:GetC4zDir() end)
+	try("c4z directory", certs.c4z_dir)
 	try("GetDriverFileName", function() return C4:GetDriverFileName() end)
 	try("GetDeviceID", function() return C4:GetDeviceID() end)
 	try("embedded bundle bytes", function() return #require("bridge.ca_bundle") end)
@@ -133,11 +133,9 @@ function certs.diagnose()
 		return data and #data or "unreadable"
 	end)
 	try("SANDBOX listing", list_dir)
-	try("FileExists(abs sandbox path)", function() return C4:FileExists(certs.sandbox_path()) end)
 	if set_dir("C4Z") then
-		try("C4Z bundle exists", function() return C4:FileExists(certs.FILE) end)
 		try("C4Z listing", list_dir)
-		try("C4Z certs/ pem exists", function() return C4:FileExists("certs/hue_root_bridge.pem") end)
+		try("C4Z stale bundle exists", function() return C4:FileExists(certs.FILE) end)
 		set_dir("SANDBOX")
 	else
 		add("FileSetDir(C4Z): failed")

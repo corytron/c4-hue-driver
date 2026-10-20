@@ -5,12 +5,17 @@
 -- not the IP; the bridge ID is checked at the application layer instead (see
 -- bridge/pairing.lua and docs/design.md).
 --
--- How the CA bundle is handed to C4:url is still being established on
--- hardware (see bridge/ca_probe.lua). http.ca describes the chosen way:
---   { mode = "cabundle", path = <file> }   ssl_cabundle = path
---   { mode = "cacerts",  paths = {...} }    ssl_cacerts = paths
+-- http.ca describes how the CA bundle is handed to C4:url (chosen by
+-- bridge/ca_probe.lua at startup):
+--   { mode = "cabundle", path = <file> }   ssl_cabundle = path; replaces the
+--                                          system CAs, relative to the c4z dir
+--   { mode = "cacerts",  paths = {...} }    ssl_cacerts = paths; adds to the
+--                                          system CAs, absolute paths only
+--   { mode = "system" }                     system CAs, hostname checked; for
+--                                          public hosts such as discovery
 --   { mode = "insecure" }                   no verification; diagnostics only
--- Until http.ca is set every request fails fast.
+-- Any description may carry verify_host = true to turn hostname checking on.
+-- Until http.ca is set every bridge request fails fast.
 
 local log = require("common.log")
 
@@ -38,6 +43,8 @@ function http.describe_ca(ca)
 		return "ssl_cabundle=" .. tostring(ca.path)
 	elseif ca.mode == "cacerts" then
 		return "ssl_cacerts={" .. table.concat(ca.paths or {}, ",") .. "}"
+	elseif ca.mode == "system" then
+		return "system CAs"
 	elseif ca.mode == "insecure" then
 		return "INSECURE (no verification)"
 	end
@@ -49,7 +56,7 @@ function http.ssl_options(ca)
 	if ca.mode == "insecure" then
 		return { ssl_verify_peer = false, ssl_verify_host = false }
 	end
-	local opts = { ssl_verify_peer = true, ssl_verify_host = false }
+	local opts = { ssl_verify_peer = true, ssl_verify_host = ca.mode == "system" or ca.verify_host == true }
 	if ca.mode == "cabundle" then
 		opts.ssl_cabundle = ca.path
 	elseif ca.mode == "cacerts" then

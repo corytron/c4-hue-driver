@@ -272,6 +272,22 @@ dispatch.commands["Disconnect_Event_Stream"] = function()
 	state.stream:stop()
 end
 
+dispatch.commands["Check_CA_Pinning"] = function()
+	if not http.ca then
+		prop("Status", "No CA configuration yet; run Probe CA Paths first")
+		return
+	end
+	prop("Status", "Checking CA pinning against " .. ca_probe.PUBLIC_HOST)
+	ca_probe.pinning_check(http.ca, function(verdict)
+		local text = {
+			pinned = "Pinning check passed: only Signify-signed certificates are trusted",
+			not_pinned = "Pinning check FAILED: public CAs are trusted too; see Lua output",
+			inconclusive = "Pinning check inconclusive: " .. ca_probe.PUBLIC_HOST .. " unreachable",
+		}
+		prop("Status", text[verdict] or verdict)
+	end)
+end
+
 dispatch.commands["Diagnose_Certificates"] = function()
 	local lines = certs.diagnose()
 	lines[#lines + 1] = "http CA: " .. http.describe_ca()
@@ -306,9 +322,12 @@ local function install_certificates()
 	for _, err in ipairs(result.errors) do
 		log.warn("CA bundle: %s", err)
 	end
+	if result.removed_c4z then
+		log.info("removed the CA bundle copy an earlier build wrote to the c4z directory")
+	end
 	if result.sandbox then
 		state.certs_error = nil
-		log.info("CA bundle written to %s%s", result.sandbox, result.c4z and (" and " .. result.c4z) or "")
+		log.info("CA bundle written to %s", result.sandbox)
 	else
 		state.certs_error = table.concat(result.errors, "; ")
 		log.error("CA bundle install failed: %s", state.certs_error)
