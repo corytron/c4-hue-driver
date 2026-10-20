@@ -36,6 +36,10 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
 4. Press the bridge's link button, then **Pair Bridge** again within 30 s.
    - Expect `Status` = "Paired", `Bridge ID` = 16 hex digits, and
      `Event Stream` = "Connecting" then "Connected since HH:MM:SS".
+4a. Actions → **Reload Credentials**. Expect `Status` = "Stored credentials
+   readable and match memory". "NOT readable" a minute after pairing would
+   mean the encrypted store doesn't return the key at all, which step 12
+   would also show.
 5. Actions → **Test Connection**. Expect `Status` = "Test OK: HTTP 200,
    bridge <id>". Anything else: copy it.
 

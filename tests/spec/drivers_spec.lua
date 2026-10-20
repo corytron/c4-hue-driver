@@ -156,6 +156,42 @@ describe("Hue Bridge driver", function()
 		assert.equal(3600, s.options.timeout)
 	end)
 
+	it("stays paired after pairing even when the store is not readable yet", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "192.0.2.10" })
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_probe(c4, 1)
+		local n = #c4.transfers
+		-- The persistence thread hasn't written yet: reads return nothing.
+		c4.PersistGetValue = function() return nil end
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+		c4.transfers[n + 1]:respond(200, CONFIG)
+		c4.transfers[n + 2]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
+
+		assert.equal("Paired", env.Properties["Status"])
+		assert.equal("001788fffe25b8f8", env.Properties["Bridge ID"])
+		assert.truthy(c4.transfers[n + 3].url:find("/eventstream", 1, true))
+		assert.equal("abc123", c4.transfers[n + 3].headers["hue-application-key"])
+	end)
+
+	it("Reload Credentials reports whether the store can be read back", function()
+		local lines = {}
+		log.sink = function(line) table.insert(lines, line) end
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_probe(c4, 1)
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Reload Credentials" })
+		assert.equal("Stored credentials readable and match memory", env.Properties["Status"])
+		local text = table.concat(lines, "\n")
+		assert.truthy(text:find("key present (6 chars)", 1, true))
+		assert.is_nil(text:find("abc123", 1, true), "the key itself is never logged")
+
+		c4.PersistGetValue = function() return nil end
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Reload Credentials" })
+		assert.truthy(env.Properties["Status"]:find("NOT readable", 1, true))
+	end)
+
 	it("counts events and honours the Stream Timeout property", function()
 		local env, c4 = paired_driver({ ["Stream Timeout (s)"] = "600" })
 		env.OnDriverLateInit("DIT_STARTUP")

@@ -194,5 +194,10 @@ Discovery runs only at setup, or when the stored bridge stops answering
 
 - The application key is stored with `C4:PersistSetValue(name, value, true)`
   (encrypted, 2.10.0+) **[verified]**. Properties only show status.
+- `PersistSetValue` writes on its own thread, so `PersistGetValue` may not
+  return a value saved moments earlier **[verified: docs, and on hardware
+  right after pairing]**. The driver keeps what it saved in memory and reads
+  the store only at startup. Whether an encrypted value is readable after a
+  Director restart is **[pending: checklist step 12]**.
 - Persisted alongside it: bridge ID, last known IP, and the time of the last
   discovery-endpoint request.
