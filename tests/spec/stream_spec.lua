@@ -31,7 +31,6 @@ describe("bridge.stream", function()
 		for _, m in ipairs({ "bridge.http", "bridge.sse", "bridge.stream" }) do
 			package.loaded[m] = nil
 		end
-		require("bridge.http").set_ca_bundle("/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem")
 		stream = require("bridge.stream")
 		s = new_stream()
 	end)

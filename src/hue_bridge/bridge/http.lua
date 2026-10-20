@@ -5,17 +5,20 @@
 -- not the IP; the bridge ID is checked at the application layer instead (see
 -- bridge/pairing.lua and docs/design.md).
 --
--- http.ca describes how the CA bundle is handed to C4:url (chosen by
--- bridge/ca_probe.lua at startup):
---   { mode = "cabundle", path = <file> }   ssl_cabundle = path; replaces the
---                                          system CAs, relative to the c4z dir
---   { mode = "cacerts",  paths = {...} }    ssl_cacerts = paths; adds to the
---                                          system CAs, absolute paths only
+-- The CA bundle ships inside the .c4z as certs/hue_ca_bundle.pem and is
+-- referenced relative to the archive: on OS 3.4.2, C4:url prefixes
+-- ssl_cabundle with the extracted archive's directory, and the option
+-- replaces the system CA bundle, so trust is pinned to the two Signify roots
+-- (spike runs 4 and 5; see docs/design.md). http.ca describes the
+-- configuration in use:
+--   { mode = "cabundle", path = <file> }   ssl_cabundle, relative to the c4z
+--   { mode = "cacerts",  paths = {...} }    ssl_cacerts; Director opens the
+--                                          files (absolute paths only) and
+--                                          ADDS them to the system CAs
 --   { mode = "system" }                     system CAs, hostname checked; for
 --                                          public hosts such as discovery
 --   { mode = "insecure" }                   no verification; diagnostics only
 -- Any description may carry verify_host = true to turn hostname checking on.
--- Until http.ca is set every bridge request fails fast.
 
 local log = require("common.log")
 
@@ -24,7 +27,10 @@ local http = {}
 http.DEFAULT_TIMEOUT = 15
 http.CONNECT_TIMEOUT = 5
 
-http.ca = nil
+-- Path inside the archive, see tools/gen_ca_bundle.sh.
+http.CA_BUNDLE = "certs/hue_ca_bundle.pem"
+
+http.ca = { mode = "cabundle", path = http.CA_BUNDLE }
 
 function http.set_ca(ca)
 	http.ca = ca

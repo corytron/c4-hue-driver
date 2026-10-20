@@ -8,24 +8,18 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
 
 ## A. Update and pair
 
-1. Drivers → Add or update drivers → update `hue_bridge.c4z`. The existing
-   bridge device keeps its IP. `Driver Version` shows the new build.
+1. Drivers → Add or update drivers → update `hue_bridge.c4z`. Do **not**
+   delete and re-add the driver: that gives it a new device ID and an empty
+   persistence store, so the pairing is lost. Updated in place, the bridge
+   device keeps its IP and key. `Driver Version` shows the new build.
 2. New properties appear: `Bridge Model`, `Event Stream`, `Events Received`,
    `Last Event`, `Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 300.
    `Event Stream` reads "Not paired". `Status` must *not* say "Certificate
    install failed"; if it does, copy the message and stop here.
-2a. As soon as an IP is set the driver probes four ways of handing the CA
-   bundle to `C4:url` against `/api/0/config`. Expected Lua output:
-   `CA probe cabundle certs/ in archive  OK` (the bundle shipped inside the
-   .c4z), `cabundle sandbox relative` FAIL or OK (tells us whether the base
-   directory is the archive or the sandbox), `cacerts sandbox absolute OK`
-   (known from run 4), `insecure OK`. `CA Mode` should read
-   `ssl_cabundle=certs/hue_ca_bundle.pem`. Copy the four lines.
-   Then Actions → **Check CA Pinning**: `Status` should end with "Pinning
-   check passed". "FAILED" would mean the bundle doesn't replace the system
-   CAs; "inconclusive" means the controller couldn't reach example.com.
-2b. Actions → **Diagnose Certificates** is optional now; run 4 answered the
-   directory questions. **Probe CA Paths** re-runs the probe at any time.
+2a. The CA question is settled (runs 4 and 5): the driver uses the bundle
+   shipped in the archive. If `Status` ever shows "transfer failed (77)" or
+   "(60)" against the bridge after an OS upgrade, run **Check CA Pinning**
+   and report its `Status` line.
 3. Actions → **Pair Bridge** *without* pressing the link button.
    - Expect `Bridge Model` = `BSB002` (or `BSB003` on a Bridge Pro) and
      `Status` = "Press the link button on the bridge, then run Pair Bridge

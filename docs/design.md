@@ -54,13 +54,13 @@ The two drivers talk through `C4:SendToDevice` in both directions.
   byte-identical to the bundle on Signify's "Using HTTPS" page, and to copies
   in openHAB, callionica/hue and LumaSync **[verified]**.
 - How the bundle reaches `C4:url`, established on OS 3.4.2 by the spike's
-  CA probe (four hardware runs) **[verified]**:
-  - The `.c4z` is extracted on disk to `/opt/control4/var/drivers/c4z/<name>/`
-    (`FileSetDir("C4Z")` + `FileList()` shows `bridge, certs, common,
-    driver.lua, driver.xml, …`).
-  - `ssl_cabundle` is prefixed with that directory: a path relative to the
-    archive works, an absolute path fails with curl error 77. It replaces
-    the system CA bundle, so trust is pinned to the two Signify roots.
+  CA probe (five hardware runs) **[verified]**:
+  - The `.c4z` is extracted on disk to `/opt/control4/var/drivers/c4z/<name>/`.
+  - `ssl_cabundle` is prefixed with that directory (not the sandbox): a path
+    relative to the archive works, an absolute path fails with curl error
+    77. It replaces the system CA bundle, so trust is pinned to the two
+    Signify roots; the **Check CA Pinning** action confirmed that a public
+    CA-signed site is rejected with it (curl error 60).
   - `ssl_cacerts` is opened by Director itself: absolute paths work, relative
     paths fail with an asynchronous `LUA_ERROR` and no callback (so the
     documented "relative to the .c4z" is true for `ssl_cabundle` only). It
@@ -69,18 +69,13 @@ The two drivers talk through `C4:SendToDevice` in both directions.
   - `SANDBOX:/` and `C4Z:/` aliases are not understood by either option.
   - The sandbox is `/control4/drivers/lua/sandbox/<device id>`; the
     `/lua/sandbox/<id>` in the File API docs is an abbreviation.
-  - `FileExists` only accepts a bare file name in the current alias
-    directory, not absolute paths.
+  - The Bridge Pro's certificate verifies against the bundle.
 
   Design: the bundle ships in the archive as `certs/hue_ca_bundle.pem`
-  (generated from the two PEMs by `tools/gen_ca_bundle.sh`) and is referenced
-  as `ssl_cabundle = "certs/hue_ca_bundle.pem"`. An embedded copy
-  (`bridge/ca_bundle.lua`) is written into the sandbox at startup for the
-  `ssl_cacerts` fallback. `bridge/ca_probe.lua` still confirms the choice at
-  startup with up to four requests to `/api/0/config`; once the next run
-  confirms the archive-relative path, the probe can go. The **Check CA
-  Pinning** action verifies that a public CA-signed site is rejected with the
-  chosen configuration **[pending hardware run]**.
+  (generated from the two PEMs by `tools/gen_ca_bundle.sh`; a spec fails on
+  drift) and `bridge/http.lua` uses `ssl_cabundle = "certs/hue_ca_bundle.pem"`
+  for every bridge request. Requests to public hosts use the system CAs with
+  hostname checking (`mode = "system"`).
 - Bridge IDs are 16 hex digits, compared lower-case. The discovery endpoint
   returns lower case (`001788fffe100491`), `/api/0/config` upper case
   (`001788FFFE25B8F8`) **[verified]**.
@@ -196,8 +191,11 @@ Discovery runs only at setup, or when the stored bridge stops answering
   (encrypted, 2.10.0+) **[verified]**. Properties only show status.
 - `PersistSetValue` writes on its own thread, so `PersistGetValue` may not
   return a value saved moments earlier **[verified: docs, and on hardware
-  right after pairing]**. The driver keeps what it saved in memory and reads
-  the store only at startup. Whether an encrypted value is readable after a
-  Director restart is **[pending: checklist step 12]**.
+  right after pairing; a later run read back immediately]**. The driver keeps
+  what it saved in memory and reads the store only at startup. Whether an
+  encrypted value is readable after a Director restart is **[pending:
+  checklist step 12]**. Note that deleting and re-adding the driver in
+  Composer gives it a new device ID and an empty store; use Composer's
+  update-in-place to keep the pairing.
 - Persisted alongside it: bridge ID, last known IP, and the time of the last
   discovery-endpoint request.

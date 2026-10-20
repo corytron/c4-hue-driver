@@ -56,12 +56,6 @@
 				<readonly>true</readonly>
 			</property>
 			<property>
-				<name>CA Mode</name>
-				<default></default>
-				<type>STRING</type>
-				<readonly>true</readonly>
-			</property>
-			<property>
 				<name>Event Stream</name>
 				<default></default>
 				<type>STRING</type>
@@ -118,11 +112,6 @@
 				<params/>
 			</action>
 			<action>
-				<name>Probe CA Paths</name>
-				<command>Probe CA Paths</command>
-				<params/>
-			</action>
-			<action>
 				<name>Reload Credentials</name>
 				<command>Reload Credentials</command>
 				<params/>
@@ -130,11 +119,6 @@
 			<action>
 				<name>Check CA Pinning</name>
 				<command>Check CA Pinning</command>
-				<params/>
-			</action>
-			<action>
-				<name>Diagnose Certificates</name>
-				<command>Diagnose Certificates</command>
 				<params/>
 			</action>
 			<action>
