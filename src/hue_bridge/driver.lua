@@ -11,6 +11,7 @@ local config = require("bridge.config")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
 local pinning = require("bridge.pinning")
+local conntest = require("bridge.conntest")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
 
@@ -222,6 +223,44 @@ dispatch.commands["Check_CA_Pinning"] = function()
 			inconclusive = "Pinning check inconclusive: " .. pinning.PUBLIC_HOST .. " unreachable",
 		}
 		prop("Status", text[verdict] or verdict)
+	end)
+end
+
+-- The connection experiment, see bridge/conntest.lua. The driver's own
+-- stream is stopped for the duration so it cannot confound the result.
+dispatch.commands["Connection_Test"] = function(params)
+	local target
+	if params.Target == "Diagnostic Server" then
+		local host = (Properties["Diagnostic Server"] or ""):match("^%s*(.-)%s*$")
+		if host == "" then
+			prop("Status", "Set the Diagnostic Server property first (host:port)")
+			return
+		end
+		target = { name = "diagnostic server", ip = host, stream_path = "/stream", ping_path = "/ping",
+			ca = { mode = "insecure" } }
+	else
+		if not connection() then
+			prop("Status", "Not paired")
+			return
+		end
+		target = { name = "bridge", ip = state.ip, key = state.creds.key,
+			stream_path = "/eventstream/clip/v2", ping_path = "/clip/v2/resource/bridge",
+			headers = { Accept = "text/event-stream" }, ca = http.ca }
+	end
+
+	local was_running = state.stream:running()
+	state.stream:stop()
+	prop("Status", "Connection test against " .. target.name .. " running; see Lua output")
+	conntest.run(target, nil, function(summary)
+		prop("Status", string.format("Connection test (%s): stream %s, GET with stream open %s, concurrent %s/2, control %s",
+			target.name,
+			summary.stream_ok and "OK" or "FAIL",
+			summary.ping_ok and "OK" or "FAIL",
+			tostring(summary.concurrent_ok or 0),
+			summary.control_ok and "OK" or "FAIL"))
+		if was_running then
+			restart_stream(true)
+		end
 	end)
 end
 

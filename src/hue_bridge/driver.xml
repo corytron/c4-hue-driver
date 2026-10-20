@@ -74,6 +74,12 @@
 				<readonly>true</readonly>
 			</property>
 			<property>
+				<name>Diagnostic Server</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+			</property>
+			<property>
 				<name>Stream Timeout (s)</name>
 				<type>RANGED_INTEGER</type>
 				<minimum>30</minimum>
@@ -110,6 +116,20 @@
 				<name>Disconnect Event Stream</name>
 				<command>Disconnect Event Stream</command>
 				<params/>
+			</action>
+			<action>
+				<name>Connection Test</name>
+				<command>Connection Test</command>
+				<params>
+					<param>
+						<name>Target</name>
+						<type>LIST</type>
+						<items>
+							<item>Bridge</item>
+							<item>Diagnostic Server</item>
+						</items>
+					</param>
+				</params>
 			</action>
 			<action>
 				<name>Reload Credentials</name>

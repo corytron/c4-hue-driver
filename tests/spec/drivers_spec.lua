@@ -152,6 +152,44 @@ describe("Hue Bridge driver", function()
 		assert.truthy(env.Properties["Status"]:find("^Pinning check passed"))
 	end)
 
+	it("Connection Test against the bridge pauses the driver's stream and restores it", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		local own = c4.last_transfer()
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connection Test", Target = "Bridge" })
+		assert.is_true(own.cancelled, "driver's own stream stopped for the test")
+		local test_stream = c4.last_transfer()
+		assert.truthy(test_stream.url:find("/eventstream/clip/v2", 1, true))
+		assert.equal("abc123", test_stream.headers["hue-application-key"])
+
+		test_stream:respond_headers(200, {})
+		c4.last_transfer():respond(200, '{"data":[]}')          -- step 2
+		local n = #c4.transfers
+		c4.transfers[n - 1]:respond(200, '{"data":[]}')          -- step 3a
+		c4.transfers[n]:respond(200, '{"data":[]}')              -- step 3b
+		c4.last_transfer():respond(200, "<html>")               -- step 4 control
+
+		assert.truthy(env.Properties["Status"]:find(
+			"Connection test (bridge): stream OK, GET with stream open OK, concurrent 2/2, control OK", 1, true))
+		assert.is_true(test_stream.cancelled)
+		assert.truthy(c4.last_transfer().url:find("/eventstream", 1, true), "driver's stream reopened")
+		assert.is_false(c4.last_transfer().cancelled)
+	end)
+
+	it("Connection Test against the diagnostic server needs the property", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connection Test", Target = "Diagnostic Server" })
+		assert.truthy(env.Properties["Status"]:find("^Set the Diagnostic Server property"))
+
+		env.Properties["Diagnostic Server"] = " 192.0.2.7:8443 "
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connection Test", Target = "Diagnostic Server" })
+		local t = c4.last_transfer()
+		assert.equal("https://192.0.2.7:8443/stream", t.url)
+		assert.is_false(t.options.ssl_verify_peer, "diagnostic server is self-signed")
+	end)
+
 	it("Forget Pairing stops the stream and clears the key", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
