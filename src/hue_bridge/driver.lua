@@ -11,6 +11,7 @@ local config = require("bridge.config")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
 local certs = require("bridge.certs")
+local ca_probe = require("bridge.ca_probe")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
 
@@ -20,6 +21,9 @@ local state = {
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
 	late_init_done = false,
 	certs_error = nil,   -- set when the CA bundle could not be installed
+	probing = false,     -- a CA probe is running
+	probe_failed = false,
+	after_probe = {},    -- callbacks waiting for the probe result
 }
 
 local function prop(name, value)
@@ -34,6 +38,10 @@ local function refresh_status()
 	if state.certs_error then
 		-- Nothing works without the bundle; keep that visible over everything.
 		prop("Status", "Certificate install failed: " .. state.certs_error)
+	elseif state.probing then
+		prop("Status", "Probing how to load the CA bundle (see Lua output)")
+	elseif state.probe_failed then
+		prop("Status", "No CA configuration works on this controller; see the CA probe lines in the Lua output")
 	elseif not state.ip then
 		prop("Status", "Enter the bridge IP address")
 	elseif not paired() then
@@ -74,6 +82,44 @@ local function new_stream()
 	})
 end
 
+-- Make sure http has a working CA configuration, then call `callback(ok)`.
+-- The first call per IP runs the probe (one request per candidate); later
+-- calls return at once.
+local function ensure_ca(callback)
+	if http.ca then
+		return callback(true)
+	end
+	if state.certs_error or not state.ip then
+		return callback(false)
+	end
+	table.insert(state.after_probe, callback)
+	if state.probing then
+		return
+	end
+	state.probing = true
+	state.probe_failed = false
+	refresh_status()
+	prop("CA Mode", "probing")
+	ca_probe.run(state.ip, {
+		on_done = function(winner, insecure_ok)
+			state.probing = false
+			if winner then
+				http.set_ca(winner)
+				prop("CA Mode", http.describe_ca(winner))
+			else
+				state.probe_failed = true
+				prop("CA Mode", "none works; unverified handshake " .. (insecure_ok and "works" or "fails too"))
+			end
+			refresh_status()
+			local waiting = state.after_probe
+			state.after_probe = {}
+			for _, cb in ipairs(waiting) do
+				cb(winner ~= nil)
+			end
+		end,
+	})
+end
+
 -- Restart the stream with the current properties, if it should be running.
 local function restart_stream()
 	if not state.stream then
@@ -110,7 +156,8 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 			credentials.save_ip(ip)
 			state.creds.ip = ip
 		end
-		restart_stream()
+		state.probe_failed = false
+		ensure_ca(function() restart_stream() end)
 	end
 end
 
@@ -129,27 +176,45 @@ dispatch.commands["Pair_Bridge"] = function()
 		prop("Status", "Enter the bridge IP address first")
 		return
 	end
-	prop("Status", "Pairing: contacting bridge")
-	pairing.pair(state.ip, {
-		on_probed = function(info)
-			prop("Bridge Model", info.model or "")
-			prop("Status", string.format("Pairing: found %s %s, requesting key", tostring(info.model), info.bridge_id))
-		end,
-		on_link_button = function()
-			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
-		end,
-		on_paired = function(creds)
-			state.creds = credentials.load()
-			prop("Bridge Model", creds.model or "")
-			refresh_status()
-			if state.stream then
-				state.stream:start()
-			end
-		end,
-		on_error = function(message)
-			prop("Status", "Pairing failed: " .. message)
-		end,
-	})
+	ensure_ca(function(ok)
+		if not ok then
+			return -- Status already explains why
+		end
+		prop("Status", "Pairing: contacting bridge")
+		pairing.pair(state.ip, {
+			on_probed = function(info)
+				prop("Bridge Model", info.model or "")
+				prop("Status", string.format("Pairing: found %s %s, requesting key", tostring(info.model), info.bridge_id))
+			end,
+			on_link_button = function()
+				prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
+			end,
+			on_paired = function(creds)
+				state.creds = credentials.load()
+				prop("Bridge Model", creds.model or "")
+				refresh_status()
+				if state.stream then
+					state.stream:start()
+				end
+			end,
+			on_error = function(message)
+				prop("Status", "Pairing failed: " .. message)
+			end,
+		})
+	end)
+end
+
+dispatch.commands["Probe_CA_Paths"] = function()
+	if not state.ip then
+		prop("Status", "Enter the bridge IP address first")
+		return
+	end
+	http.set_ca(nil)
+	ensure_ca(function(ok)
+		if ok and connection() then
+			restart_stream()
+		end
+	end)
 end
 
 dispatch.commands["Test_Connection"] = function()
@@ -194,7 +259,7 @@ end
 
 dispatch.commands["Diagnose_Certificates"] = function()
 	local lines = certs.diagnose()
-	lines[#lines + 1] = "http CA bundle: " .. tostring(http.ca_bundle)
+	lines[#lines + 1] = "http CA: " .. http.describe_ca()
 	for _, line in ipairs(lines) do
 		log.always("diag %s", line)
 	end
@@ -224,9 +289,8 @@ end
 local function install_certificates()
 	local path, err = certs.install()
 	if path then
-		http.set_ca_bundle(path)
 		state.certs_error = nil
-		log.info("CA bundle at %s", path)
+		log.info("CA bundle written to %s", path)
 	else
 		state.certs_error = tostring(err)
 		log.error("CA bundle install failed: %s", err)
@@ -241,9 +305,17 @@ function OnDriverLateInit()
 	state.stream = new_stream()
 	state.late_init_done = true
 	refresh_status()
-	if connection() and certs_ok then
-		state.stream:start()
-	else
+	if not certs_ok then
+		return
+	end
+	-- Probe as soon as there is an IP, paired or not, so the CA result is
+	-- visible right after a driver update without pressing anything.
+	if state.ip then
+		ensure_ca(function(ok)
+			if ok and connection() then state.stream:start() end
+		end)
+	end
+	if not connection() then
 		prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")
 	end
 end

@@ -3,8 +3,14 @@
 -- Every request verifies the bridge certificate against the Signify roots.
 -- Hostname verification is off because the certificate's CN is the bridge ID,
 -- not the IP; the bridge ID is checked at the application layer instead (see
--- bridge/pairing.lua and docs/design.md). The CA bundle path is set once at
--- startup by bridge/certs.lua; until then every request fails fast.
+-- bridge/pairing.lua and docs/design.md).
+--
+-- How the CA bundle is handed to C4:url is still being established on
+-- hardware (see bridge/ca_probe.lua). http.ca describes the chosen way:
+--   { mode = "cabundle", path = <file> }   ssl_cabundle = path
+--   { mode = "cacerts",  paths = {...} }    ssl_cacerts = paths
+--   { mode = "insecure" }                   no verification; diagnostics only
+-- Until http.ca is set every request fails fast.
 
 local log = require("common.log")
 
@@ -13,23 +19,55 @@ local http = {}
 http.DEFAULT_TIMEOUT = 15
 http.CONNECT_TIMEOUT = 5
 
--- Absolute path of the CA bundle, see certs.install().
-http.ca_bundle = nil
+http.ca = nil
 
-function http.set_ca_bundle(path)
-	http.ca_bundle = path
+function http.set_ca(ca)
+	http.ca = ca
 end
 
--- Shared TLS and timing options for every transfer.
-function http.options(overrides)
+-- Convenience for the common case.
+function http.set_ca_bundle(path)
+	http.set_ca(path and { mode = "cabundle", path = path } or nil)
+end
+
+function http.describe_ca(ca)
+	ca = ca or http.ca
+	if not ca then
+		return "none"
+	elseif ca.mode == "cabundle" then
+		return "ssl_cabundle=" .. tostring(ca.path)
+	elseif ca.mode == "cacerts" then
+		return "ssl_cacerts={" .. table.concat(ca.paths or {}, ",") .. "}"
+	elseif ca.mode == "insecure" then
+		return "INSECURE (no verification)"
+	end
+	return "unknown mode " .. tostring(ca.mode)
+end
+
+-- TLS options for a given CA description.
+function http.ssl_options(ca)
+	if ca.mode == "insecure" then
+		return { ssl_verify_peer = false, ssl_verify_host = false }
+	end
+	local opts = { ssl_verify_peer = true, ssl_verify_host = false }
+	if ca.mode == "cabundle" then
+		opts.ssl_cabundle = ca.path
+	elseif ca.mode == "cacerts" then
+		opts.ssl_cacerts = ca.paths
+	end
+	return opts
+end
+
+-- Shared options for every transfer. `ca` defaults to http.ca.
+function http.options(overrides, ca)
 	local opts = {
 		fail_on_error = false,
 		timeout = http.DEFAULT_TIMEOUT,
 		connect_timeout = http.CONNECT_TIMEOUT,
-		ssl_verify_peer = true,
-		ssl_verify_host = false,
-		ssl_cabundle = http.ca_bundle,
 	}
+	for k, v in pairs(http.ssl_options(ca or http.ca)) do
+		opts[k] = v
+	end
 	for k, v in pairs(overrides or {}) do
 		opts[k] = v
 	end
@@ -75,7 +113,8 @@ end
 
 -- One request/response exchange. `req` has:
 --   ip, path, method ("GET"|"POST"|"PUT"|"DELETE"), key (optional),
---   body (table, JSON-encoded, optional), timeout (optional).
+--   body (table, JSON-encoded, optional), timeout (optional),
+--   ca (optional CA description overriding http.ca, used by the probe).
 -- `callback(result)` receives { ok, code, body, json, err }:
 --   ok    true when the transfer completed and the status is 2xx
 --   code  HTTP status, or nil when no response arrived
@@ -85,9 +124,10 @@ end
 -- transfer could not be started (the callback has then already been called).
 function http.request(req, callback)
 	local method = req.method or "GET"
-	if not http.ca_bundle then
-		log.warn("%s %s: CA bundle not installed", method, req.path)
-		callback({ ok = false, err = "CA bundle not installed" })
+	local ca = req.ca or http.ca
+	if not ca then
+		log.warn("%s %s: no CA configuration", method, req.path)
+		callback({ ok = false, err = "no CA configuration" })
 		return nil
 	end
 
@@ -98,7 +138,7 @@ function http.request(req, callback)
 	log.debug("%s %s", method, url)
 
 	local transfer = C4:url()
-		:SetOptions(http.options({ timeout = req.timeout }))
+		:SetOptions(http.options({ timeout = req.timeout }, ca))
 		:OnDone(function(_, responses, err_code, err_msg)
 			local result = {}
 			local response = responses[#responses]
@@ -152,8 +192,8 @@ end
 -- Returns the transfer so the caller can Cancel() it, or nil when it could
 -- not be started (on_done has then already been called).
 function http.stream(req, handlers)
-	if not http.ca_bundle then
-		handlers.on_done(-2, "CA bundle not installed", nil)
+	if not http.ca then
+		handlers.on_done(-2, "no CA configuration", nil)
 		return nil
 	end
 

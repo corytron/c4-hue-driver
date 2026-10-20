@@ -171,6 +171,7 @@ local function new_c4(env)
 	c4.handles = {}
 
 	function c4:GetSandboxDir() return c4.sandbox_dir end
+	function c4:GetDeviceID() return 15 end
 	function c4:GetC4zDir() return "/opt/control4/var/drivers/c4z" end
 	function c4:GetDriverFileName() return "hue_bridge.c4z" end
 
