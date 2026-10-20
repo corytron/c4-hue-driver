@@ -123,6 +123,11 @@
 				<params/>
 			</action>
 			<action>
+				<name>Reload Credentials</name>
+				<command>Reload Credentials</command>
+				<params/>
+			</action>
+			<action>
 				<name>Check CA Pinning</name>
 				<command>Check CA Pinning</command>
 				<params/>

@@ -197,9 +197,17 @@ dispatch.commands["Pair_Bridge"] = function()
 				prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
 			end,
 			on_paired = function(creds)
-				state.creds = credentials.load()
+				-- Use the in-memory result: the store may not return it yet.
+				state.creds = creds
 				prop("Bridge Model", creds.model or "")
 				refresh_status()
+				local stored = credentials.load()
+				if stored.key == creds.key and stored.bridge_id == creds.bridge_id then
+					log.info("credentials read back from the store immediately")
+				else
+					log.info("store not yet readable after save (expected; it writes on its own thread): %s",
+						credentials.summary(stored))
+				end
 				if state.stream then
 					state.stream:start()
 				end
@@ -272,6 +280,23 @@ dispatch.commands["Disconnect_Event_Stream"] = function()
 	state.stream:stop()
 end
 
+-- Shows whether the persisted credentials can be read back, without
+-- exposing the key. Compares against what the driver holds in memory.
+dispatch.commands["Reload_Credentials"] = function()
+	local stored = credentials.load()
+	log.always("stored credentials: %s", credentials.summary(stored))
+	log.always("in-memory credentials: %s", credentials.summary(state.creds))
+	if credentials.paired(stored) then
+		local same = state.creds and stored.key == state.creds.key and stored.bridge_id == state.creds.bridge_id
+		prop("Status", same and "Stored credentials readable and match memory"
+			or "Stored credentials readable but differ from memory; see Lua output")
+	elseif paired() then
+		prop("Status", "Stored credentials NOT readable although paired in memory; see Lua output")
+	else
+		prop("Status", "No stored credentials")
+	end
+end
+
 dispatch.commands["Check_CA_Pinning"] = function()
 	if not http.ca then
 		prop("Status", "No CA configuration yet; run Probe CA Paths first")
@@ -337,6 +362,7 @@ end
 
 function OnDriverLateInit()
 	state.creds = credentials.load()
+	log.info("credentials at startup: %s", credentials.summary(state.creds))
 	local certs_ok = install_certificates()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()

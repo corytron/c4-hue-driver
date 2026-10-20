@@ -100,6 +100,13 @@ describe("bridge.pairing", function()
 		assert.equal("error", events[1][1])
 	end)
 
+	it("summarises credentials without the key", function()
+		local text = credentials.summary({ key = "secret", bridge_id = "001788fffe25b8f8", ip = "192.0.2.10" })
+		assert.equal("key present (6 chars), bridge id 001788fffe25b8f8, ip 192.0.2.10", text)
+		assert.equal("key absent, bridge id absent, ip absent", credentials.summary({}))
+		assert.equal("none", credentials.summary(nil))
+	end)
+
 	it("clears stored credentials", function()
 		credentials.save({ key = "k", bridge_id = "001788fffe25b8f8", ip = "192.0.2.10" })
 		credentials.clear()
