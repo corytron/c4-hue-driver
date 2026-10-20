@@ -22,6 +22,7 @@ local state = {
 	late_init_done = false,
 	certs_error = nil,   -- set when the CA bundle could not be installed
 	probing = false,     -- a CA probe is running
+	probe_handle = nil,  -- its handle, for cancelling
 	probe_failed = false,
 	after_probe = {},    -- callbacks waiting for the probe result
 }
@@ -100,9 +101,13 @@ local function ensure_ca(callback)
 	state.probe_failed = false
 	refresh_status()
 	prop("CA Mode", "probing")
-	ca_probe.run(state.ip, {
+	state.probe_handle = ca_probe.run(state.ip, {
+		on_candidate = function(index, count, name)
+			prop("CA Mode", string.format("probing %d/%d: %s", index, count, name))
+		end,
 		on_done = function(winner, insecure_ok)
 			state.probing = false
+			state.probe_handle = nil
 			if winner then
 				http.set_ca(winner)
 				prop("CA Mode", http.describe_ca(winner))
@@ -120,15 +125,17 @@ local function ensure_ca(callback)
 	})
 end
 
--- Restart the stream with the current properties, if it should be running.
-local function restart_stream()
+-- Rebuild the stream with the current properties and CA configuration. It
+-- is started again if it was running, or if `force` is set and the driver
+-- is paired with an IP.
+local function restart_stream(force)
 	if not state.stream then
 		return
 	end
 	local was_running = state.stream:running()
 	state.stream:stop()
 	state.stream = new_stream()
-	if was_running and connection() then
+	if (was_running or force) and connection() then
 		state.stream:start()
 	end
 end
@@ -209,10 +216,18 @@ dispatch.commands["Probe_CA_Paths"] = function()
 		prop("Status", "Enter the bridge IP address first")
 		return
 	end
+	-- Abort any probe in progress (it may be stuck waiting for a callback
+	-- Director will never deliver) and start over.
+	if state.probe_handle then
+		state.probe_handle:cancel()
+		state.probe_handle = nil
+	end
+	state.probing = false
+	state.after_probe = {}
 	http.set_ca(nil)
 	ensure_ca(function(ok)
-		if ok and connection() then
-			restart_stream()
+		if ok then
+			restart_stream(true)
 		end
 	end)
 end
@@ -287,15 +302,18 @@ end
 -- Write the Signify CA bundle into the sandbox and point the HTTP client at
 -- it. Without this every HTTPS call fails, so the failure is made loud.
 local function install_certificates()
-	local path, err = certs.install()
-	if path then
-		state.certs_error = nil
-		log.info("CA bundle written to %s", path)
-	else
-		state.certs_error = tostring(err)
-		log.error("CA bundle install failed: %s", err)
+	local result = certs.install()
+	for _, err in ipairs(result.errors) do
+		log.warn("CA bundle: %s", err)
 	end
-	return path ~= nil
+	if result.sandbox then
+		state.certs_error = nil
+		log.info("CA bundle written to %s%s", result.sandbox, result.c4z and (" and " .. result.c4z) or "")
+	else
+		state.certs_error = table.concat(result.errors, "; ")
+		log.error("CA bundle install failed: %s", state.certs_error)
+	end
+	return result.sandbox ~= nil
 end
 
 function OnDriverLateInit()

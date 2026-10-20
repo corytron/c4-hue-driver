@@ -164,28 +164,42 @@ local function new_c4(env)
 		c4.persist[name] = nil
 	end
 
-	-- File API: the driver's sandbox directory as a name -> contents table.
-	-- Handles mirror the controller: FileOpen positions at end-of-file.
+	-- File API: one name -> contents table per alias directory, with the
+	-- File API's current directory selectable through FileSetDir, as on the
+	-- controller. c4.files is the SANDBOX directory for convenience. Handles
+	-- mirror the controller: FileOpen positions at end-of-file.
 	c4.sandbox_dir = "/control4/drivers/lua/sandbox/15"
-	c4.files = {}
+	c4.dirs = { SANDBOX = {}, C4Z = {} }
+	c4.files = c4.dirs.SANDBOX
+	c4.cwd = "SANDBOX"
 	c4.handles = {}
 
+	local function cwd() return c4.dirs[c4.cwd] end
+
 	function c4:GetSandboxDir() return c4.sandbox_dir end
-	function c4:GetDeviceID() return 15 end
 	function c4:GetC4zDir() return "/opt/control4/var/drivers/c4z" end
 	function c4:GetDriverFileName() return "hue_bridge.c4z" end
+	function c4:GetDeviceID() return 15 end
+
+	function c4:FileSetDir(alias)
+		record("FileSetDir", alias)
+		assert(c4.dirs[alias], "unknown path alias " .. tostring(alias))
+		c4.cwd = alias
+		return true
+	end
 
 	function c4:FileExists(name)
-		return c4.files[name] ~= nil
+		return cwd()[name] ~= nil
 	end
 
 	function c4:FileOpen(name)
 		record("FileOpen", name)
-		if c4.files[name] == nil then
-			c4.files[name] = ""
+		local dir = cwd()
+		if dir[name] == nil then
+			dir[name] = ""
 		end
 		local fh = #c4.handles + 1
-		c4.handles[fh] = { name = name, pos = #c4.files[name] }
+		c4.handles[fh] = { dir = dir, name = name, pos = #dir[name] }
 		return fh
 	end
 
@@ -194,20 +208,21 @@ local function new_c4(env)
 	end
 
 	function c4:FileGetSize(fh)
-		return #c4.files[c4.handles[fh].name]
+		local h = c4.handles[fh]
+		return #h.dir[h.name]
 	end
 
 	function c4:FileRead(fh, count)
 		local h = c4.handles[fh]
-		local data = c4.files[h.name]:sub(h.pos + 1, h.pos + count)
+		local data = h.dir[h.name]:sub(h.pos + 1, h.pos + count)
 		h.pos = h.pos + #data
 		return data
 	end
 
 	function c4:FileWriteString(fh, text)
 		local h = c4.handles[fh]
-		c4.files[h.name] = c4.files[h.name] .. text
-		h.pos = #c4.files[h.name]
+		h.dir[h.name] = h.dir[h.name] .. text
+		h.pos = #h.dir[h.name]
 		record("FileWriteString", h.name, #text)
 		return #text
 	end
@@ -218,12 +233,12 @@ local function new_c4(env)
 
 	function c4:FileDelete(name)
 		record("FileDelete", name)
-		c4.files[name] = nil
+		cwd()[name] = nil
 	end
 
 	function c4:FileList()
 		local names = {}
-		for name in pairs(c4.files) do names[#names + 1] = name end
+		for name in pairs(cwd()) do names[#names + 1] = name end
 		return names
 	end
 

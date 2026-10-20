@@ -14,17 +14,21 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
    `Last Event`, `Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 300.
    `Event Stream` reads "Not paired". `Status` must *not* say "Certificate
    install failed"; if it does, copy the message and stop here.
-2a. If the bridge is already paired (or as soon as you run Pair Bridge), the
-   driver probes ten ways of handing the CA bundle to `C4:url` against
-   `/api/0/config`. Watch the Lua output for lines like
-   `CA probe cabundle SANDBOX alias   OK   [HTTP 200]` /
-   `CA probe cabundle GetSandboxDir   FAIL [transfer failed (77): …]`.
-   **Copy all of them.** `CA Mode` then shows the winner, or
-   "none works; unverified handshake works/fails too". The last candidate
-   turns verification off purely to show whether TLS works at all; it is
-   never used for real requests. (Run 1 failed with `fopen: No such file or
-   directory` for a path relative to the .c4z; run 2 failed with curl error
-   77 for an absolute `GetSandboxDir()` path.)
+2a. As soon as an IP is set the driver probes nine ways of handing the CA
+   bundle to `C4:url` against `/api/0/config`, one at a time. `CA Mode` shows
+   `probing i/9: <name>` while it runs; a candidate that never calls back is
+   skipped after 15 s, so the whole probe takes at most about two minutes.
+   Watch the Lua output for lines like
+   `CA probe cacerts GetSandboxDir   OK   [HTTP 200]` /
+   `CA probe cabundle C4Z dir        FAIL [transfer failed (77): …]` /
+   `… FAIL [no callback: Director probably logged a LUA_ERROR for this path]`.
+   **Copy all of them**, including any `LUA_ERROR` lines Director prints
+   between them. `CA Mode` then shows the winner, or "none works; unverified
+   handshake works/fails too". The last candidate turns verification off
+   purely to show whether TLS works at all; it is never used for real
+   requests. Runs so far: 1) path relative to the .c4z → `fopen` error;
+   2) absolute `GetSandboxDir()` as `ssl_cabundle` → curl 77; 3) `SANDBOX:/`
+   alias → curl 77 as `ssl_cabundle`, silent `LUA_ERROR` as `ssl_cacerts`.
 2b. Actions → **Diagnose Certificates**. Copy the `diag` lines too: they show
    the controller's sandbox and c4z directories and whether the bundle file
    was written. Actions → **Probe CA Paths** re-runs the probe at any time.
