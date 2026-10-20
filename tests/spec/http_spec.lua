@@ -22,14 +22,37 @@ describe("bridge.http", function()
 		assert.is_false(t.options.fail_on_error)
 	end)
 
-	it("fails fast when no CA bundle is installed", function()
+	it("fails fast when no CA configuration is set", function()
 		http.set_ca_bundle(nil)
 		local got
 		local t = http.request({ ip = "192.0.2.10", path = "/x" }, function(r) got = r end)
 		assert.is_nil(t)
 		assert.is_false(got.ok)
-		assert.equal("CA bundle not installed", got.err)
+		assert.equal("no CA configuration", got.err)
 		assert.equal(0, #c4.transfers)
+	end)
+
+	it("supports ssl_cacerts and insecure CA descriptions", function()
+		http.request({ ip = "192.0.2.10", path = "/x", ca = { mode = "cacerts", paths = { "a.pem", "b.pem" } } },
+			function() end)
+		local t = c4.last_transfer()
+		assert.same({ "a.pem", "b.pem" }, t.options.ssl_cacerts)
+		assert.is_nil(t.options.ssl_cabundle)
+		assert.is_true(t.options.ssl_verify_peer)
+
+		http.request({ ip = "192.0.2.10", path = "/x", ca = { mode = "insecure" } }, function() end)
+		t = c4.last_transfer()
+		assert.is_false(t.options.ssl_verify_peer)
+		assert.is_nil(t.options.ssl_cabundle)
+		assert.is_nil(t.options.ssl_cacerts)
+	end)
+
+	it("describes CA configurations for logging", function()
+		assert.equal("ssl_cabundle=/x/b.pem", http.describe_ca({ mode = "cabundle", path = "/x/b.pem" }))
+		assert.equal("ssl_cacerts={a,b}", http.describe_ca({ mode = "cacerts", paths = { "a", "b" } }))
+		assert.equal("INSECURE (no verification)", http.describe_ca({ mode = "insecure" }))
+		http.set_ca(nil)
+		assert.equal("none", http.describe_ca())
 	end)
 
 	it("turns a Lua error raised at transfer start into a failed result", function()
@@ -138,6 +161,15 @@ describe("bridge.http", function()
 			assert.is_nil(t)
 			assert.equal(-2, done[1])
 			assert.truthy(done[2]:find("Error loading certificate", 1, true))
+		end)
+
+		it("fails through on_done when no CA configuration is set", function()
+			http.set_ca(nil)
+			local done
+			assert.is_nil(http.stream({ ip = "192.0.2.10", path = "/e" }, {
+				on_done = function(code, msg) done = { code, msg } end,
+			}))
+			assert.same({ -2, "no CA configuration" }, done)
 		end)
 
 		it("lets on_headers abort the transfer", function()

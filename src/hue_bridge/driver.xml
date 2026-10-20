@@ -56,6 +56,12 @@
 				<readonly>true</readonly>
 			</property>
 			<property>
+				<name>CA Mode</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
 				<name>Event Stream</name>
 				<default></default>
 				<type>STRING</type>
@@ -109,6 +115,11 @@
 			<action>
 				<name>Disconnect Event Stream</name>
 				<command>Disconnect Event Stream</command>
+				<params/>
+			</action>
+			<action>
+				<name>Probe CA Paths</name>
+				<command>Probe CA Paths</command>
 				<params/>
 			</action>
 			<action>

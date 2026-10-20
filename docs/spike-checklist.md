@@ -14,12 +14,20 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
    `Last Event`, `Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 300.
    `Event Stream` reads "Not paired". `Status` must *not* say "Certificate
    install failed"; if it does, copy the message and stop here.
-2a. Actions → **Diagnose Certificates**. Copy the `diag` lines from the Lua
-   output. They show where the controller keeps the sandbox and the driver
-   archive, and that the CA bundle was written there. (The first run failed
-   because `ssl_cacerts` with a path "relative to the .c4z" hit
-   `fopen: No such file or directory`; this build writes the bundle into the
-   sandbox and passes an absolute path instead.)
+2a. If the bridge is already paired (or as soon as you run Pair Bridge), the
+   driver probes ten ways of handing the CA bundle to `C4:url` against
+   `/api/0/config`. Watch the Lua output for lines like
+   `CA probe cabundle SANDBOX alias   OK   [HTTP 200]` /
+   `CA probe cabundle GetSandboxDir   FAIL [transfer failed (77): …]`.
+   **Copy all of them.** `CA Mode` then shows the winner, or
+   "none works; unverified handshake works/fails too". The last candidate
+   turns verification off purely to show whether TLS works at all; it is
+   never used for real requests. (Run 1 failed with `fopen: No such file or
+   directory` for a path relative to the .c4z; run 2 failed with curl error
+   77 for an absolute `GetSandboxDir()` path.)
+2b. Actions → **Diagnose Certificates**. Copy the `diag` lines too: they show
+   the controller's sandbox and c4z directories and whether the bundle file
+   was written. Actions → **Probe CA Paths** re-runs the probe at any time.
 3. Actions → **Pair Bridge** *without* pressing the link button.
    - Expect `Bridge Model` = `BSB002` (or `BSB003` on a Bridge Pro) and
      `Status` = "Press the link button on the bridge, then run Pair Bridge
