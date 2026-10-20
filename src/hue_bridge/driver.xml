@@ -80,6 +80,12 @@
 				<readonly>false</readonly>
 			</property>
 			<property>
+				<name>Dev Server</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+			</property>
+			<property>
 				<name>Stream Timeout (s)</name>
 				<type>RANGED_INTEGER</type>
 				<minimum>30</minimum>
