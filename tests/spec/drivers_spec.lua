@@ -191,6 +191,42 @@ describe("Hue Bridge driver", function()
 		assert.is_false(t.options.ssl_verify_peer, "diagnostic server is self-signed")
 	end)
 
+	it("starts the dev loop from the Dev Server property and stops it when cleared", function()
+		local devloop = require("common.devloop")
+		local env, c4 = paired_driver({ ["Dev Server"] = " 192.0.2.7:8080 " })
+		local real_print = _G.print
+		_G.print = function() end -- the loop's own messages bypass log.sink
+		local ok, err = pcall(function()
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.is_true(devloop.running())
+			local repeating = {}
+			for _, args in ipairs(c4.calls_to("SetTimer")) do
+				if args[2] == true then repeating[#repeating + 1] = args[1] end
+			end
+			assert.same({ 3000 }, repeating, "one repeating poll timer")
+			local startup
+			for _, t in ipairs(c4.transfers) do
+				if t.url == "http://192.0.2.7:8080/report" then startup = t end
+			end
+			assert.truthy(startup, "startup report posted to the dev server")
+			assert.equal("startup", c4:JsonDecode(startup.data).event)
+
+			env.Properties["Dev Server"] = ""
+			env.OnPropertyChanged("Dev Server")
+			assert.is_false(devloop.running())
+		end)
+		devloop.stop()
+		_G.print = real_print
+		assert(ok, err)
+	end)
+
+	it("leaves the dev loop alone when Dev Server is empty", function()
+		local devloop = require("common.devloop")
+		local env = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		assert.is_false(devloop.running())
+	end)
+
 	it("Forget Pairing stops the stream and clears the key", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
