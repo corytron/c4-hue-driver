@@ -5,27 +5,33 @@ local fake = require("helpers.fake_c4")
 local log = require("common.log")
 
 local CONFIG = '{"name":"Hue Bridge","swversion":"1968096020","bridgeid":"001788FFFE25B8F8","modelid":"BSB002"}'
-local SANDBOX_ALIAS = "SANDBOX:/hue_ca_bundle.pem"
+local SANDBOX_PATH = "/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem"
+local C4Z_PATH = "/opt/control4/var/drivers/c4z/hue_bridge/hue_ca_bundle.pem"
 
 local function quiet()
 	log.sink = function() end
 end
 
--- Answer the CA probe that a paired-with-IP bridge driver runs: every
--- candidate fails except `winner` (a candidate index), which gets the config.
+-- Answer the CA probe a bridge driver with an IP runs: every pending probe
+-- request (recognisable by the probe's 10 s timeout) fails except the
+-- `winner`-th one, which gets the config. Candidates already settled, for
+-- example by the guard timer, are skipped.
 local function answer_probe(c4, winner)
-	local candidates = require("bridge.ca_probe").candidates()
-	local first = #c4.transfers
-	assert(first >= 1, "no probe request in flight")
-	for i = 1, #candidates do
-		local t = c4.transfers[first + i - 1]
-		assert(t and t.url:find("/api/0/config", 1, true), "expected probe request " .. i)
+	local i = 0
+	while true do
+		local t = c4.last_transfer()
+		if not (t and t.options.timeout == 10 and t.url:find("/api/0/config", 1, true) and not t.answered) then
+			break
+		end
+		t.answered = true
+		i = i + 1
 		if i == (winner or 1) then
 			t:respond(200, CONFIG)
 		else
 			t:done(77, "Problem with the SSL CA cert (path? access rights?)")
 		end
 	end
+	assert(i > 0, "no probe request in flight")
 end
 
 local function paired_driver(extra)
@@ -68,16 +74,16 @@ describe("Hue Bridge driver", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
 		assert.truthy(env.Properties["Status"]:find("^Probing"))
-		assert.equal("probing", env.Properties["CA Mode"])
+		assert.truthy(env.Properties["CA Mode"]:find("^probing 1/"))
 
-		answer_probe(c4, 2) -- "cacerts SANDBOX alias"
+		answer_probe(c4, 3) -- "cabundle C4Z dir"
 		assert.equal("Paired", env.Properties["Status"])
-		assert.equal("ssl_cacerts={" .. SANDBOX_ALIAS .. "}", env.Properties["CA Mode"])
+		assert.equal("ssl_cabundle=" .. C4Z_PATH, env.Properties["CA Mode"])
 
 		local s = c4.last_transfer()
 		assert.truthy(s.url:find("/eventstream/clip/v2", 1, true))
-		assert.same({ SANDBOX_ALIAS }, s.options.ssl_cacerts)
-		assert.is_nil(s.options.ssl_cabundle)
+		assert.equal(C4Z_PATH, s.options.ssl_cabundle)
+		assert.is_nil(s.options.ssl_cacerts)
 		assert.equal("Connecting", env.Properties["Event Stream"])
 	end)
 
@@ -145,7 +151,7 @@ describe("Hue Bridge driver", function()
 		local s = c4.transfers[n + 5]
 		assert.truthy(s.url:find("/eventstream/clip/v2", 1, true))
 		assert.equal("abc123", s.headers["hue-application-key"])
-		assert.equal(SANDBOX_ALIAS, s.options.ssl_cabundle)
+		assert.same({ SANDBOX_PATH }, s.options.ssl_cacerts)
 		assert.equal(3600, s.options.timeout)
 	end)
 
@@ -217,12 +223,39 @@ describe("Hue Bridge driver", function()
 		local first = c4.last_transfer()
 
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Probe CA Paths" })
-		assert.equal("probing", env.Properties["CA Mode"])
-		answer_probe(c4, 3) -- "cacerts C4Z alias"
+		assert.truthy(env.Properties["CA Mode"]:find("^probing 1/"))
+		answer_probe(c4, 4) -- "cacerts C4Z dir"
 		assert.is_true(first.cancelled)
 		local s = c4.last_transfer()
 		assert.truthy(s.url:find("/eventstream", 1, true))
-		assert.same({ "C4Z:/certs/hue_root_bridge.pem", "C4Z:/certs/hue_root_ca_01.pem" }, s.options.ssl_cacerts)
+		assert.same({ C4Z_PATH }, s.options.ssl_cacerts)
+	end)
+
+	it("Probe CA Paths aborts a probe that is stuck and starts over", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		local stuck = c4.transfers[1]
+		assert.truthy(env.Properties["Status"]:find("^Probing"))
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Probe CA Paths" })
+		assert.is_true(stuck.cancelled)
+		assert.equal(2, #c4.transfers, "a fresh probe started")
+		stuck:done(0, nil) -- late callback from the abandoned transfer
+		assert.equal(2, #c4.transfers)
+
+		answer_probe(c4, 1)
+		assert.equal("Paired", env.Properties["Status"])
+		assert.truthy(c4.last_transfer().url:find("/eventstream", 1, true))
+	end)
+
+	it("skips a silent probe candidate via the guard timer and still finds a winner", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		c4.fire_timers() -- candidate 1 never called back
+		assert.is_true(c4.transfers[1].cancelled)
+		answer_probe(c4, 1) -- now answers from candidate 2 onwards; 2 wins
+		assert.equal("Paired", env.Properties["Status"])
+		assert.equal("ssl_cacerts={hue_ca_bundle.pem}", env.Properties["CA Mode"])
 	end)
 end)
 
