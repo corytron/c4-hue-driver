@@ -92,42 +92,56 @@ The two drivers talk through `C4:SendToDevice` in both directions.
   twice in that second only reports its last value, and changes to several
   resources are grouped in one container **[verified]**.
 - On HTTP/1.1 the stream needs its own connection, separate from REST calls
-  **[verified]**, which suits `C4:url()`.
+  **[verified]**. `C4:url()` cannot provide that second connection on OS
+  3.4.2 (see below).
 - Not documented: keepalive or heartbeat messages, resuming with
   `Last-Event-ID`, connection limits **[unknown]**. Design for the worst case:
   a watchdog reconnects on silence, and every reconnect is followed by a full
   GET resync.
-- Transport: `C4:url()` with `OnBodyChunk`. Spike results on OS 3.4.2
-  **[verified]**:
-  - Chunks are delivered while the transfer is still open: events logged with
-    per-second ids arrived long before the 3600 s transfer timeout, so
-    `OnBodyChunk` does not buffer. Latency looked immediate; a stopwatch
-    figure is still to be taken.
+- Spike transport: `C4:url()` with `OnBodyChunk`. Results on OS 3.4.2, from
+  the bridge and from a controlled experiment against a multithreaded HTTPS
+  test server on the LAN whose connection log was inspected (the **Connection
+  Test** action, `bridge/conntest.lua`) **[verified]**:
+  - `OnBodyChunk` delivers data live, without buffering: chunks the test
+    server sent every 2000 ms were logged by the driver every ~2000 ms, the
+    first one 9 ms after the headers. Against the bridge, events with
+    per-second ids likewise arrived long before the 3600 s transfer timeout.
   - The bridge sends no keepalive on the stream: 300 s of silence tripped the
     watchdog, which reconnected cleanly. So in a quiet house the stream will
     be reopened every watchdog period; the period can be long, but there is
     no application-level liveness signal to rely on.
-  - **While the stream was open, an authenticated `GET
-    /clip/v2/resource/bridge` to the same bridge timed out (curl 28) after
-    the 15 s total timeout.** Requests to a different host (the pinning
-    check) succeeded with the stream open, and requests to the bridge
-    succeeded with the stream closed. The strongest explanation is a
-    per-host connection limit of one in Director's curl pool, so the request
-    queued behind the stream until its timeout; a bridge-side limit of one
-    connection per client is unlikely because Signify's own guidance is to
-    use a second HTTP/1.1 connection for requests. Cause to be attributed
-    (see the spike checklist); either way the stream cannot share
-    `C4:url()` with light commands as things stand.
+  - **While a `C4:url()` streaming transfer to a host is open, Director opens
+    no second connection to that host.** A GET to the streaming host started
+    from a timer or an `OnDone` callback timed out after the full 15 s (curl
+    28); two concurrent GETs timed out the same way; and the test server saw
+    exactly one connection, the stream's. A GET to a different host succeeded
+    meanwhile. The same timeout seen earlier against the bridge (`GET
+    /clip/v2/resource/bridge` with the stream open) is therefore Director's
+    doing, not the bridge's. The stream cannot share `C4:url()` with light
+    commands on this OS.
+  - A `C4:url()` transfer started from inside another transfer's `OnHeaders`
+    callback fails at once with curl error 2 "Failed initialization" (2 ms).
+    Transfers started from timers and from `OnDone` callbacks work. Rule:
+    never start a transfer from within `OnHeaders` or `OnBodyChunk`; defer it
+    with a 1 ms `C4:SetTimer`. `stream.lua` defers `on_connected` that way,
+    and `conntest.lua` its step 2.
+  - `C4LuaUrl:Cancel()` does not stop an active streaming transfer: after
+    `Cancel()` the body chunks kept arriving every 2 s, and the server saw the
+    connection close only when the transfer's 300 s total timeout expired.
+    Returning `true` from the `OnBodyChunk`/`OnHeaders` callback does abort
+    it. `stream.lua` aborts abandoned transfers that way (the generation
+    check at the top of every callback); `conntest.lua` does the same after
+    its last step.
   - `timeout` covers the total transfer time (default 300 s) **[verified]**,
     so a `C4:url()` stream also reconnects on a schedule.
-- Fallback transport for the stream, now the likely design: a raw SSL
-  network connection (`CreateNetworkConnection` + `NetPortOptions` with
-  `CACERTFILE`, `VERIFY_MODE=peer`, `KEEP_ALIVE`) with the HTTP request and
-  chunked transfer decoding written in Lua. It keeps `C4:url()` free for
-  commands, has no total-transfer timeout, and TCP keepalive gives dead-peer
-  detection the SSE stream itself lacks. `CACERTFILE` is documented as
-  relative to the .c4z, the convention `ssl_cabundle` turned out to follow
-  **[assumed until tested]**.
+- Transport for the stream, now the planned design: a raw SSL network
+  connection (`CreateNetworkConnection` + `NetPortOptions` with `CACERTFILE`,
+  `VERIFY_MODE=peer`, `KEEP_ALIVE`) with the HTTP request and chunked
+  transfer decoding written in Lua. It keeps `C4:url()` free for commands,
+  has no total-transfer timeout, and TCP keepalive gives dead-peer detection
+  the SSE stream itself lacks. `CACERTFILE` is documented as relative to the
+  .c4z, the convention `ssl_cabundle` turned out to follow **[assumed until
+  tested]**.
 
 ## Discovery
 
@@ -216,10 +230,11 @@ Discovery runs only at setup, or when the stored bridge stops answering
 - `PersistSetValue` writes on its own thread, so `PersistGetValue` may not
   return a value saved moments earlier **[verified: docs, and on hardware
   right after pairing; a later run read back immediately]**. The driver keeps
-  what it saved in memory and reads the store only at startup. Whether an
-  encrypted value is readable after a Director restart is **[pending:
-  checklist step 12]**. Note that deleting and re-adding the driver in
-  Composer gives it a new device ID and an empty store; use Composer's
-  update-in-place to keep the pairing.
+  what it saved in memory and reads the store only at startup. Updating the
+  driver in place in Composer keeps the pairing: the encrypted value survives
+  a driver update **[verified on hardware]**. Deleting and re-adding the
+  driver does not, because the device ID and sandbox change **[verified]**,
+  so always use Composer's update-in-place. Whether the value is readable
+  after a Director restart is still **[pending: checklist step 12]**.
 - Persisted alongside it: bridge ID, last known IP, and the time of the last
   discovery-endpoint request.
