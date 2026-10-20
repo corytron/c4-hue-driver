@@ -14,24 +14,18 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
    `Last Event`, `Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 300.
    `Event Stream` reads "Not paired". `Status` must *not* say "Certificate
    install failed"; if it does, copy the message and stop here.
-2a. As soon as an IP is set the driver probes nine ways of handing the CA
-   bundle to `C4:url` against `/api/0/config`, one at a time. `CA Mode` shows
-   `probing i/9: <name>` while it runs; a candidate that never calls back is
-   skipped after 15 s, so the whole probe takes at most about two minutes.
-   Watch the Lua output for lines like
-   `CA probe cacerts GetSandboxDir   OK   [HTTP 200]` /
-   `CA probe cabundle C4Z dir        FAIL [transfer failed (77): …]` /
-   `… FAIL [no callback: Director probably logged a LUA_ERROR for this path]`.
-   **Copy all of them**, including any `LUA_ERROR` lines Director prints
-   between them. `CA Mode` then shows the winner, or "none works; unverified
-   handshake works/fails too". The last candidate turns verification off
-   purely to show whether TLS works at all; it is never used for real
-   requests. Runs so far: 1) path relative to the .c4z → `fopen` error;
-   2) absolute `GetSandboxDir()` as `ssl_cabundle` → curl 77; 3) `SANDBOX:/`
-   alias → curl 77 as `ssl_cabundle`, silent `LUA_ERROR` as `ssl_cacerts`.
-2b. Actions → **Diagnose Certificates**. Copy the `diag` lines too: they show
-   the controller's sandbox and c4z directories and whether the bundle file
-   was written. Actions → **Probe CA Paths** re-runs the probe at any time.
+2a. As soon as an IP is set the driver probes four ways of handing the CA
+   bundle to `C4:url` against `/api/0/config`. Expected Lua output:
+   `CA probe cabundle certs/ in archive  OK` (the bundle shipped inside the
+   .c4z), `cabundle sandbox relative` FAIL or OK (tells us whether the base
+   directory is the archive or the sandbox), `cacerts sandbox absolute OK`
+   (known from run 4), `insecure OK`. `CA Mode` should read
+   `ssl_cabundle=certs/hue_ca_bundle.pem`. Copy the four lines.
+   Then Actions → **Check CA Pinning**: `Status` should end with "Pinning
+   check passed". "FAILED" would mean the bundle doesn't replace the system
+   CAs; "inconclusive" means the controller couldn't reach example.com.
+2b. Actions → **Diagnose Certificates** is optional now; run 4 answered the
+   directory questions. **Probe CA Paths** re-runs the probe at any time.
 3. Actions → **Pair Bridge** *without* pressing the link button.
    - Expect `Bridge Model` = `BSB002` (or `BSB003` on a Bridge Pro) and
      `Status` = "Press the link button on the bridge, then run Pair Bridge

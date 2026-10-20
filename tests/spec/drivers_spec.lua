@@ -6,7 +6,7 @@ local log = require("common.log")
 
 local CONFIG = '{"name":"Hue Bridge","swversion":"1968096020","bridgeid":"001788FFFE25B8F8","modelid":"BSB002"}'
 local SANDBOX_PATH = "/control4/drivers/lua/sandbox/15/hue_ca_bundle.pem"
-local C4Z_PATH = "/opt/control4/var/drivers/c4z/hue_bridge/hue_ca_bundle.pem"
+local SHIPPED = "certs/hue_ca_bundle.pem"
 
 local function quiet()
 	log.sink = function() end
@@ -76,14 +76,15 @@ describe("Hue Bridge driver", function()
 		assert.truthy(env.Properties["Status"]:find("^Probing"))
 		assert.truthy(env.Properties["CA Mode"]:find("^probing 1/"))
 
-		answer_probe(c4, 3) -- "cabundle C4Z dir"
+		answer_probe(c4, 1) -- "cabundle certs/ in archive"
 		assert.equal("Paired", env.Properties["Status"])
-		assert.equal("ssl_cabundle=" .. C4Z_PATH, env.Properties["CA Mode"])
+		assert.equal("ssl_cabundle=" .. SHIPPED, env.Properties["CA Mode"])
 
 		local s = c4.last_transfer()
 		assert.truthy(s.url:find("/eventstream/clip/v2", 1, true))
-		assert.equal(C4Z_PATH, s.options.ssl_cabundle)
+		assert.equal(SHIPPED, s.options.ssl_cabundle)
 		assert.is_nil(s.options.ssl_cacerts)
+		assert.is_false(s.options.ssl_verify_host)
 		assert.equal("Connecting", env.Properties["Event Stream"])
 	end)
 
@@ -151,7 +152,7 @@ describe("Hue Bridge driver", function()
 		local s = c4.transfers[n + 5]
 		assert.truthy(s.url:find("/eventstream/clip/v2", 1, true))
 		assert.equal("abc123", s.headers["hue-application-key"])
-		assert.same({ SANDBOX_PATH }, s.options.ssl_cacerts)
+		assert.equal(SHIPPED, s.options.ssl_cabundle)
 		assert.equal(3600, s.options.timeout)
 	end)
 
@@ -224,11 +225,11 @@ describe("Hue Bridge driver", function()
 
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Probe CA Paths" })
 		assert.truthy(env.Properties["CA Mode"]:find("^probing 1/"))
-		answer_probe(c4, 4) -- "cacerts C4Z dir"
+		answer_probe(c4, 3) -- "cacerts sandbox absolute"
 		assert.is_true(first.cancelled)
 		local s = c4.last_transfer()
 		assert.truthy(s.url:find("/eventstream", 1, true))
-		assert.same({ C4Z_PATH }, s.options.ssl_cacerts)
+		assert.same({ SANDBOX_PATH }, s.options.ssl_cacerts)
 	end)
 
 	it("Probe CA Paths aborts a probe that is stuck and starts over", function()
@@ -255,7 +256,18 @@ describe("Hue Bridge driver", function()
 		assert.is_true(c4.transfers[1].cancelled)
 		answer_probe(c4, 1) -- now answers from candidate 2 onwards; 2 wins
 		assert.equal("Paired", env.Properties["Status"])
-		assert.equal("ssl_cacerts={hue_ca_bundle.pem}", env.Properties["CA Mode"])
+		assert.equal("ssl_cabundle=hue_ca_bundle.pem", env.Properties["CA Mode"])
+	end)
+
+	it("Check CA Pinning reports the verdict in Status", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_probe(c4, 1)
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Check CA Pinning" })
+		c4.last_transfer():respond(200, "<html>")
+		c4.last_transfer():done(60, "SSL certificate problem")
+		assert.truthy(env.Properties["Status"]:find("^Pinning check passed"))
 	end)
 end)
 
