@@ -18,7 +18,8 @@ Discovery and the CLIP v2 API reference, as of 2025), or independent sources;
   conditionals are 4.1+, so they're not used) **[verified]**.
 - Hue: CLIP API v2 is the current local API; there is no v3 **[verified]**.
   Bridge models are `BSB002` (square bridge) and `BSB003` (Bridge Pro)
-  **[verified for BSB002; BSB003 from community sources]**.
+  **[verified: the house bridge reports `modelid` BSB003]**. Its certificate
+  verified against the two bundled roots **[verified on hardware]**.
 
 ## Driver structure
 
