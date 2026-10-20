@@ -7,8 +7,9 @@
 -- 3. Store the key, bridge ID and IP.
 --
 -- The POST goes to the v1-era /api endpoint because key creation is the one
--- operation CLIP v2 does not offer. [assumed: devicetype format and error
--- type 101 are from memory of the Hue getting-started page]
+-- operation CLIP v2 does not offer. Verified against a Bridge Pro (BSB003)
+-- on OS 3.4.2: the devicetype body below yields a key. [assumed: error type
+-- 101 for "link button not pressed" is from memory of the Hue docs]
 
 local log = require("common.log")
 local http = require("bridge.http")
