@@ -205,7 +205,8 @@ end
 -- Returns the transfer so the caller can Cancel() it, or nil when it could
 -- not be started (on_done has then already been called).
 function http.stream(req, handlers)
-	if not http.ca then
+	local ca = req.ca or http.ca
+	if not ca then
 		handlers.on_done(-2, "no CA configuration", nil)
 		return nil
 	end
@@ -217,7 +218,7 @@ function http.stream(req, handlers)
 	log.debug("STREAM %s (timeout %s s)", url, tostring(req.timeout))
 
 	local transfer = C4:url()
-		:SetOptions(http.options({ timeout = req.timeout }))
+		:SetOptions(http.options({ timeout = req.timeout }, ca))
 		:OnHeaders(function(_, response)
 			last_code = response.code
 			if handlers.on_headers then

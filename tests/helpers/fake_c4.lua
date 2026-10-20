@@ -176,6 +176,10 @@ local function new_c4(env)
 
 	local function cwd() return c4.dirs[c4.cwd] end
 
+	-- Millisecond clock; specs advance c4.now_ms to simulate elapsed time.
+	c4.now_ms = 1000000
+	function c4:GetTime() return c4.now_ms end
+
 	function c4:GetSandboxDir() return c4.sandbox_dir end
 	function c4:GetC4zDir() return "/opt/control4/var/drivers/c4z" end
 	function c4:GetDriverFileName() return "hue_bridge.c4z" end
