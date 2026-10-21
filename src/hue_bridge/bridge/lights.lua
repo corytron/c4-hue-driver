@@ -64,7 +64,7 @@ function lights.new(ctx)
 
 	return setmetatable({
 		ctx = ctx,
-		registry = {},          -- rid → { device_id, name, model, caps }, persisted
+		registry = {},          -- rid → { device_id, proxy_id?, name, model, caps }, persisted
 		models = {},            -- rid → normalised light, from the last GET (memory only)
 		devices = {},           -- device rid → hue_model.devices() record (memory only)
 		configured_once = false,
@@ -121,30 +121,88 @@ function lights.dump(value, depth)
 	return "{" .. table.concat(parts, ", ") .. "}"
 end
 
--- [assumed] The AddDevice callback's second argument carries "the IDs of the
--- Proxy devices and the Protocol Driver's ID" for a proxy driver, in a shape
--- the docs do not give. Look for a key naming the protocol with a positive
--- numeric value, anywhere in the table.
-function lights.protocol_id_from(info, depth)
-	depth = depth or 0
-	if type(info) ~= "table" or depth > 4 then
+-- The AddDevice callback's second argument carries "the IDs of the Proxy
+-- devices and the Protocol Driver's ID" for a proxy driver. [verified on OS
+-- 3.4.2] It is the parsed-XML table C4:ParseXml produces: a node { Name,
+-- Value, Attributes, ChildNodes } whose children named "protocol" and "proxy"
+-- carry the ids as string Values, and deviceId equals the protocol id.
+local ID_ROLES = { "protocol", "proxy" }
+
+local function positive(value)
+	local n = tonumber(value)
+	if n and n > 0 then
+		return n
+	end
+	return nil
+end
+
+-- "protocol" or "proxy" when name is one of them (exact) or contains one.
+local function role_of(name, exact)
+	if type(name) ~= "string" then
 		return nil
 	end
-	for k, v in pairs(info) do
-		if type(k) == "string" and k:lower():find("protocol", 1, true) then
-			local id = tonumber(v)
-			if id and id > 0 then
-				return id
-			end
-		end
-	end
-	for _, v in pairs(info) do
-		local id = lights.protocol_id_from(v, depth + 1)
-		if id then
-			return id
+	name = name:lower()
+	for _, role in ipairs(ID_ROLES) do
+		if (exact and name == role) or (not exact and name:find(role, 1, true)) then
+			return role
 		end
 	end
 	return nil
+end
+
+-- { protocol = number|nil, proxy = number|nil } from the callback info: the
+-- node tree first (ChildNodes recursively, names case-insensitive), then for
+-- other shapes any key whose name contains "protocol" or "proxy" with a
+-- positive numeric value (the pre-3.4.2 guess). Empty for nil or a non-table.
+function lights.ids_from(info)
+	local ids = {}
+	if type(info) ~= "table" then
+		return ids
+	end
+
+	local function walk_nodes(node, depth)
+		if type(node) ~= "table" or depth > 8 then
+			return
+		end
+		local role = role_of(node.Name, true)
+		if role and ids[role] == nil then
+			ids[role] = positive(node.Value)
+		end
+		if type(node.ChildNodes) == "table" then
+			for _, child in ipairs(node.ChildNodes) do
+				walk_nodes(child, depth + 1)
+			end
+		end
+	end
+
+	local function walk_keys(t, depth)
+		if type(t) ~= "table" or depth > 4 then
+			return
+		end
+		for k, v in pairs(t) do
+			local role = role_of(k, false)
+			if role and ids[role] == nil then
+				ids[role] = positive(v)
+			end
+		end
+		for _, v in pairs(t) do
+			if ids.protocol and ids.proxy then
+				return
+			end
+			walk_keys(v, depth + 1)
+		end
+	end
+
+	walk_nodes(info, 0)
+	if not (ids.protocol and ids.proxy) then
+		walk_keys(info, 0)
+	end
+	return ids
+end
+
+-- The protocol id alone; the name the import used before ids_from.
+function lights.protocol_id_from(info)
+	return lights.ids_from(info).protocol
 end
 
 local function by_name(a, b)
@@ -191,7 +249,8 @@ local function same_caps(a, b)
 end
 
 -- Read the persisted registry. Entries are validated: a string rid and a
--- numeric device id are required, everything else is optional.
+-- numeric device id are required, everything else is optional (entries
+-- written before proxy_id existed have none).
 function lights:load()
 	local stored = self.ctx.persist_get(lights.REGISTRY_KEY)
 	self.registry = {}
@@ -201,6 +260,7 @@ function lights:load()
 			if type(rid) == "string" and device_id then
 				self.registry[rid] = {
 					device_id = device_id,
+					proxy_id = positive(entry.proxy_id),
 					name = entry.name ~= nil and tostring(entry.name) or "",
 					model = entry.model ~= nil and tostring(entry.model) or nil,
 					caps = copy_caps(entry.caps),
@@ -218,6 +278,28 @@ end
 function lights:device_for(rid)
 	local entry = rid ~= nil and self.registry[rid] or nil
 	return entry and entry.device_id or nil
+end
+
+-- The proxy device id AddDevice reported for the light, or nil (not every
+-- OS reports one, and entries imported before it was kept have none).
+function lights:proxy_for(rid)
+	local entry = rid ~= nil and self.registry[rid] or nil
+	return entry and entry.proxy_id or nil
+end
+
+-- A copy of the registry entry, or nil for an unknown rid.
+function lights:entry(rid)
+	local entry = rid ~= nil and self.registry[rid] or nil
+	if not entry then
+		return nil
+	end
+	return {
+		device_id = entry.device_id,
+		proxy_id = entry.proxy_id,
+		name = entry.name,
+		model = entry.model,
+		caps = copy_caps(entry.caps),
+	}
 end
 
 function lights:rid_for(device_id)
@@ -330,6 +412,18 @@ function lights:absorb(res)
 	self:refresh_registry()
 end
 
+-- Bring the registry entry's cached name up to the model's. True when it
+-- changed (the caller saves). The Composer device keeps its own name.
+function lights:take_name(entry, model)
+	if entry.name == model.name then
+		return false
+	end
+	self.ctx.log.info("lights: %s was renamed to %s in Hue (Composer name unchanged)",
+		tostring(entry.name), tostring(model.name))
+	entry.name = model.name
+	return true
+end
+
 function lights:refresh_registry()
 	local dirty = false
 	for _, rid in ipairs(self:registered_rids()) do
@@ -338,10 +432,7 @@ function lights:refresh_registry()
 			self.ctx.log.warn("lights: %s (device %s) is registered but no longer on the bridge",
 				tostring(entry.name), tostring(entry.device_id))
 		else
-			if entry.name ~= model.name then
-				self.ctx.log.info("lights: %s was renamed to %s in Hue (Composer name unchanged)",
-					tostring(entry.name), tostring(model.name))
-				entry.name = model.name
+			if self:take_name(entry, model) then
 				dirty = true
 			end
 			local device = self.devices[model.device_rid]
@@ -491,15 +582,16 @@ function lights:import_fetched(res, report)
 				tostring(model.name), tostring(device_id))
 			return
 		end
-		local protocol_id = lights.protocol_id_from(info)
-		if protocol_id and protocol_id ~= device_id then
+		local ids = lights.ids_from(info)
+		if ids.protocol and ids.protocol ~= device_id then
 			self.ctx.log.always("AddDevice for %s: binding protocol id %d rather than deviceId %d",
-				tostring(model.name), protocol_id, device_id)
-			device_id = protocol_id
+				tostring(model.name), ids.protocol, device_id)
+			device_id = ids.protocol
 		end
 		self.ctx.bind(self:bridge_id(), device_id)
 		self.registry[model.rid] = {
 			device_id = device_id,
+			proxy_id = ids.proxy,
 			name = model.name,
 			model = self.devices[model.device_rid] and self.devices[model.device_rid].model or nil,
 			caps = hue_model.caps(model),
@@ -588,10 +680,22 @@ end
 
 -- Event fan-out --------------------------------------------------------------
 
+local function has_field(fields, name)
+	for _, field in ipairs(fields) do
+		if field == name then
+			return true
+		end
+	end
+	return false
+end
+
 -- One event-stream container. Returns the number of messages sent. Runs
--- inside OnBodyChunk: no transfers are started here.
+-- inside OnBodyChunk: no transfers are started here. A Hue rename in an
+-- event refreshes the registry's cached name at once (a name is not a state
+-- field, so nothing is sent for it), rather than at the next resync.
 function lights:on_container(container)
 	local sent = 0
+	local dirty = false
 	if type(container) ~= "table" or type(container.data) ~= "table" then
 		return 0
 	end
@@ -608,6 +712,9 @@ function lights:on_container(container)
 				end
 			elseif entry and model then
 				local changed = hue_model.update(model, item)
+				if has_field(changed, "name") and self:take_name(entry, model) then
+					dirty = true
+				end
 				local params = hue_model.state_params(model, changed, "event")
 				if hue_model.has_state(params) then
 					self.ctx.send(entry.device_id, "HUE_STATE", params)
@@ -626,6 +733,9 @@ function lights:on_container(container)
 				end
 			end
 		end
+	end
+	if dirty then
+		self:save()
 	end
 	return sent
 end

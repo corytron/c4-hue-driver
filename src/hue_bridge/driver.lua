@@ -351,7 +351,16 @@ dispatch.commands["Hue_Request"] = function(params)
 	http.request({ ip = host, key = state.creds.key, method = method, path = path, body = body }, function(r)
 		local summary
 		local items = r.json and type(r.json.data) == "table" and r.json.data or nil
-		if items and #items > 0 and items[1].id then
+		if items and #items == 1 and items[1].type == "light" then
+			-- A single light: show the fields that matter for state tests.
+			local it = items[1]
+			summary = string.format("%s on=%s brightness=%s mirek=%s valid=%s xy=%s,%s",
+				it.metadata and it.metadata.name or it.id, tostring(it.on and it.on.on),
+				tostring(it.dimming and it.dimming.brightness),
+				tostring(it.color_temperature and it.color_temperature.mirek),
+				tostring(it.color_temperature and it.color_temperature.mirek_valid),
+				tostring(it.color and it.color.xy and it.color.xy.x), tostring(it.color and it.color.xy and it.color.xy.y))
+		elseif items and #items > 0 and items[1].id then
 			local parts = {}
 			for i = 1, math.min(#items, 15) do
 				local item = items[i]
@@ -436,9 +445,15 @@ dispatch.commands["Proxy_Command"] = function(params)
 	end
 	local proxy = state.lights.proxy_for and state.lights:proxy_for(rid)
 	if not proxy then
-		-- The proxy is the provider on the protocol driver's binding 5001.
-		proxy = C4:GetBoundProviderDevice(entry.device_id, 5001)
-		if type(proxy) == "table" then proxy = next(proxy) end
+		-- The protocol driver provides binding 5001 (driver.xml: consumer
+		-- False) and its light_v2 proxy consumes it, so the proxy is a bound
+		-- consumer of that binding. Seen on hardware: proxy id = protocol id + 1.
+		local consumers = C4:GetBoundConsumerDevices(entry.device_id, 5001)
+		if type(consumers) == "table" then proxy = next(consumers) end
+		if proxy and state.lights.registry[rid] then
+			state.lights.registry[rid].proxy_id = proxy
+			if state.lights.save then state.lights:save() end
+		end
 	end
 	if not proxy then
 		return log.always("Proxy Command: no proxy found for %s (device %s)", entry.name, tostring(entry.device_id))
