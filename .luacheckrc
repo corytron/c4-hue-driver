@@ -6,13 +6,15 @@ max_line_length = 120
 read_globals = {
 	"C4",
 	"Properties",
+	"C4SystemEvents",
 }
 
 files["src/hue_bridge/driver.lua"] = {
 	-- DriverWorks entry points are globals the controller calls by name.
 	globals = {
-		"OnDriverInit", "OnDriverLateInit", "OnDriverDestroyed",
-		"ExecuteCommand", "OnPropertyChanged", "ReceivedFromProxy", "OnBindingChanged",
+		"OnDriverInit", "OnDriverLateInit", "OnDriverDestroyed", "OnDriverRemovedFromProject",
+		"ExecuteCommand", "OnPropertyChanged", "ReceivedFromProxy", "OnBindingChanged", "OnBindingValidate",
+		"OnSystemEvent",
 	},
 }
 
