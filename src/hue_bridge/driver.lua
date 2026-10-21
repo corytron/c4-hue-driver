@@ -8,6 +8,7 @@
 local log = require("common.log")
 local dispatch = require("common.dispatch")
 local config = require("bridge.config")
+local altaddr = require("bridge.altaddr")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
 local pinning = require("bridge.pinning")
@@ -32,8 +33,13 @@ local state = {
 	ip = nil,            -- validated Bridge IP Address property
 	creds = nil,         -- what pairing produced; loaded from the store at startup
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
+	stream_ip = nil,     -- spelling of the bridge address the stream uses, see choose_stream_address
 	late_init_done = false,
 }
+
+-- Stream timeout in single-queue mode: commands wait for the stream to
+-- end, so it must end often.
+local SINGLE_QUEUE_TIMEOUT = 60
 
 local function prop(name, value)
 	C4:UpdateProperty(name, tostring(value == nil and "" or value))
@@ -57,7 +63,7 @@ end
 -- What the stream needs to connect, or nil when it can't.
 local function connection()
 	if state.ip and paired() then
-		return { ip = state.ip, key = state.creds.key }
+		return { ip = state.ip, key = state.creds.key, stream_ip = state.stream_ip or state.ip }
 	end
 	return nil
 end
@@ -66,10 +72,24 @@ local function number_property(name, default)
 	return tonumber(Properties[name]) or default
 end
 
+-- True when the stream has its own C4:url queue (a padded address spelling
+-- that the startup self-check confirmed), so commands never wait for it.
+local function dual_queue()
+	return state.stream_ip ~= nil and state.stream_ip ~= state.ip
+end
+
+local function stream_timeout()
+	local configured = number_property("Stream Timeout (s)", stream.DEFAULT_TIMEOUT)
+	if dual_queue() then
+		return configured
+	end
+	return math.min(configured, SINGLE_QUEUE_TIMEOUT)
+end
+
 local function new_stream()
 	return stream.new({
 		connection = connection,
-		timeout = number_property("Stream Timeout (s)", stream.DEFAULT_TIMEOUT),
+		timeout = stream_timeout(),
 		watchdog = number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG),
 		on_status = function(text) prop("Event Stream", text) end,
 		on_connected = function()
@@ -97,6 +117,37 @@ local function restart_stream(force)
 	end
 end
 
+-- Decide which spelling of the bridge address the stream uses (docs/design.md,
+-- "Two ways to keep commands flowing"). Director queues C4:url transfers per
+-- host text, so a zero-padded spelling gives the stream its own queue. The
+-- self-check uses a third spelling, so it can never queue behind a stream,
+-- or an abandoned stream, on the stream's spelling. Calls back when done;
+-- until then the stream must not be started.
+local function choose_stream_address(callback)
+	local check_ip = altaddr.for_check(state.ip)
+	local padded = altaddr.for_stream(state.ip)
+	local function single(reason)
+		state.stream_ip = state.ip
+		prop("Stream Address", string.format("%s (shared queue with commands: %s; stream timeout capped at %d s)",
+			state.ip, reason, SINGLE_QUEUE_TIMEOUT))
+		log.warn("stream shares the command queue: %s", reason)
+		callback()
+	end
+	if not padded or not check_ip or not paired() then
+		return single(paired() and "no octet below 8 to pad" or "not paired")
+	end
+	http.request({ ip = check_ip, key = state.creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+		if r.ok then
+			state.stream_ip = padded
+			prop("Stream Address", padded .. " (own queue; commands use " .. state.ip .. ")")
+			log.info("stream will use %s; self-check via %s OK", padded, check_ip)
+			callback()
+		else
+			single("self-check via " .. check_ip .. " failed: " .. tostring(r.err))
+		end
+	end)
+end
+
 -- Properties ---------------------------------------------------------------
 
 dispatch.properties["Driver_Version"] = function()
@@ -116,11 +167,16 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 	state.ip = ip
 	refresh_status()
 	if changed and state.late_init_done then
+		state.stream_ip = nil
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
+			local was_running = state.stream and state.stream:running()
+			if state.stream then state.stream:stop() end
+			choose_stream_address(function() restart_stream(was_running) end)
+		else
+			restart_stream()
 		end
-		restart_stream()
 	end
 end
 
@@ -177,9 +233,7 @@ dispatch.commands["Pair_Bridge"] = function()
 			else
 				log.info("store not yet readable after save (expected): %s", credentials.summary(stored))
 			end
-			if state.stream then
-				state.stream:start()
-			end
+			choose_stream_address(function() restart_stream(true) end)
 		end,
 		on_error = function(message)
 			prop("Status", "Pairing failed: " .. message)
@@ -232,6 +286,9 @@ dispatch.commands["Connect_Event_Stream"] = function()
 	if not connection() then
 		prop("Event Stream", "Not paired")
 		return
+	end
+	if not state.stream_ip then
+		return choose_stream_address(function() restart_stream(true) end)
 	end
 	state.stream:start()
 end
@@ -311,6 +368,8 @@ dispatch.commands["Forget_Pairing"] = function()
 	state.stream:stop()
 	credentials.clear()
 	state.creds = nil
+	state.stream_ip = nil
+	prop("Stream Address", "")
 	prop("Bridge Model", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
@@ -333,7 +392,7 @@ function OnDriverLateInit()
 	state.late_init_done = true
 	refresh_status()
 	if connection() then
-		state.stream:start()
+		choose_stream_address(function() restart_stream(true) end)
 	else
 		prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")
 	end
