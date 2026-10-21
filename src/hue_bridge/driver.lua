@@ -118,7 +118,37 @@ local function new_lights()
 		bridge_id = C4:GetDeviceID(),
 		room_id = C4:RoomGetId(),
 		log = log,
+		now = os.time,
+		-- The project calls (docs/import-design.md §13), wrapped so lights.lua
+		-- stays free of C4. Shapes verified on hardware (design.md "Project
+		-- APIs"): GetDevices wants comma-separated strings; GetBoundConsumerDevices
+		-- values are driver names, not Composer names.
+		project = {
+			rooms = function() return C4:GetDevicesByC4iName("roomdevice.c4i") end,
+			hierarchy = function() return C4:GetProjectHierarchy() end,
+			devices = function(filter) return C4:GetDevices(filter) end,
+			bound = function() return C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1) end,
+			unbind = function(device_id) C4:Unbind(device_id, 1) end,
+			rename = function(proxy_id, name) C4:RenameDevice(proxy_id, name) end,
+			display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+		},
 	})
+end
+
+-- The owner-facing counts and lists (docs/import-design.md §6). Methods the
+-- running lights.lua does not have yet are skipped: the integration lands
+-- in pieces and the driver must keep loading in between.
+local function refresh_lights_props()
+	if not state.lights then
+		return
+	end
+	prop("Lights", state.lights:summary())
+	if state.lights.attention then
+		prop("Attention", state.lights:attention())
+	end
+	if state.lights.room_mappings_text then
+		prop("Room Mappings", state.lights:room_mappings_text())
+	end
 end
 
 local function new_queue()
@@ -145,6 +175,7 @@ local function new_stream()
 				else
 					log.warn("resync failed: %s", tostring(err))
 				end
+				refresh_lights_props()
 			end)
 		end,
 		on_container = function(container)
@@ -456,15 +487,153 @@ dispatch.commands["Probe_Call"] = function(params)
 	end)
 end
 
--- Import Lights: one Control4 light per Hue light, idempotent; see
--- docs/lights-design.md. Progress and the final count go to the Lights
--- property.
-dispatch.commands["Import_Lights"] = function()
+-- Owner actions (docs/import-design.md §6): every click writes its result to
+-- Last Action and refreshes the counts. The pickers are CUSTOM_SELECT lists
+-- built on demand by the global functions below [verified: FUND 12.3].
+
+local function last_action(text)
+	text = tostring(text == nil and "" or text)
+	log.always("%s", text)
+	prop("Last Action", text)
+	refresh_lights_props()
+end
+
+-- False, with the reason in Last Action, when the action cannot run.
+local function can(method)
 	if not connection() then
-		prop("Lights", "Not paired")
-		return
+		last_action("Not paired")
+		return false
 	end
+	if not state.lights or type(state.lights[method]) ~= "function" then
+		last_action("Not available in this build (" .. method .. ")")
+		return false
+	end
+	return true
+end
+
+-- A picker value, or nil for the empty-list entry and a missing param.
+local function selection(params, name)
+	local value = params and params[name]
+	if value == nil or value == "" then
+		return nil
+	end
+	return tostring(value)
+end
+
+local function picker(method, ...)
+	if state.lights and type(state.lights[method]) == "function" then
+		local ok, list = pcall(state.lights[method], state.lights, ...)
+		if ok and type(list) == "table" then
+			return list
+		end
+		log.warn("%s: %s", method, tostring(list))
+		return { { text = "(error building the list; see Lua output)", value = "" } }
+	end
+	return { { text = "(not available in this build)", value = "" } }
+end
+
+function HueLightList() return picker("picker_lights") end
+function RoomList() return picker("picker_rooms", "add") end
+function RelinkDeviceList() return picker("picker_relink_devices") end
+function ForgetDeviceList() return picker("picker_forget_devices") end
+function HueRoomList() return picker("picker_hue_rooms") end
+function MappingTargetList() return picker("picker_rooms", "mapping") end
+
+dispatch.commands["Add_Light"] = function(params)
+	if not can("add_light") then return end
+	local rid = selection(params, "Light")
+	if not rid then
+		return last_action("Not added: pick a light first")
+	end
+	state.lights:add_light(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
+end
+
+dispatch.commands["Import_All_New_Lights"] = function()
+	if not connection() then
+		return last_action("Not paired")
+	end
+	if type(state.lights.import_new) == "function" then
+		return state.lights:import_new(function(_, text) last_action(text) end)
+	end
+	-- Until lights.lua's integration lands: the scaffold import (every light
+	-- into the bridge's room), reporting through Lights as before.
 	state.lights:import(function(text) prop("Lights", text) end)
+end
+dispatch.commands["Import_Lights"] = dispatch.commands["Import_All_New_Lights"]
+
+dispatch.commands["Re-link_Device_To_Light"] = function(params)
+	if not can("relink") then return end
+	local device, rid = tonumber(selection(params, "Device")), selection(params, "Light")
+	if not device or not rid then
+		return last_action("Not re-linked: pick a device and a light")
+	end
+	local _, text = state.lights:relink(device, rid)
+	last_action(text)
+end
+
+dispatch.commands["Link_Devices"] = function()
+	if can("link_devices") then last_action(state.lights:link_devices()) end
+end
+
+dispatch.commands["Forget_Light"] = function(params)
+	if not can("forget") then return end
+	local device = tonumber(selection(params, "Device"))
+	if not device then
+		return last_action("Not forgotten: pick a device first")
+	end
+	local _, text = state.lights:forget(device)
+	last_action(text)
+end
+
+dispatch.commands["Adopt_Hue_Names"] = function()
+	if can("adopt_hue_names") then last_action(state.lights:adopt_hue_names()) end
+end
+
+dispatch.commands["Accept_Names_As_They_Are"] = function()
+	if can("accept_names") then last_action(state.lights:accept_names()) end
+end
+
+dispatch.commands["Set_Room_Mapping"] = function(params)
+	if not can("set_room_mapping") then return end
+	local group, target = selection(params, "Hue Room"), selection(params, "Room")
+	if not group then
+		return last_action("Not mapped: pick a Hue room first")
+	end
+	local room_id = nil
+	if target ~= "none" then
+		room_id = tonumber(target)
+		if not room_id then
+			return last_action("Not mapped: pick a Control4 room or (no mapping)")
+		end
+	end
+	local _, text = state.lights:set_room_mapping(group, room_id)
+	last_action(text)
+end
+
+dispatch.commands["Map_Rooms_By_Name"] = function()
+	if can("map_rooms_by_name") then last_action(state.lights:map_rooms_by_name()) end
+end
+
+dispatch.commands["Room_Audit"] = function()
+	if can("room_audit") then last_action(state.lights:room_audit()) end
+end
+
+-- From a light being deleted in Composer (docs/import-design.md §4).
+dispatch.commands["HUE_GOODBYE"] = function(params)
+	if state.lights and state.lights.goodbye then
+		state.lights:goodbye(params or {})
+		refresh_lights_props()
+	else
+		log.warn("HUE_GOODBYE ignored: not available in this build")
+	end
+end
+
+-- From a light's Forget This Light action.
+dispatch.commands["HUE_FORGET"] = function(params)
+	if can("forget_request") then
+		local _, text = state.lights:forget_request(params or {})
+		last_action(text)
+	end
 end
 
 -- From a light driver: a proxy command mapped to Hue fields (strings).
@@ -571,9 +740,10 @@ end
 -- From a light driver at its startup or binding: resend its configuration
 -- and state.
 dispatch.commands["HUE_HELLO"] = function(params)
-	local rid = params and params.rid or ""
-	if not state.lights:hello(rid) then
-		log.debug("HUE_HELLO from unregistered light %q", tostring(rid))
+	params = params or {}
+	local rid = params.rid or ""
+	if not state.lights:hello(rid, params) then
+		log.debug("HUE_HELLO from unregistered light %q (device %s)", tostring(rid), tostring(params.device_id))
 	end
 end
 
@@ -679,6 +849,10 @@ end
 function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBindingID)
 	log.always("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
 		tostring(otherDeviceID), tostring(otherBindingID))
+	if state.lights and state.lights.on_binding_changed then
+		state.lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
+		refresh_lights_props()
+	end
 end
 
 -- Called before Director adds a binding [verified: API 32/_26]; only the
@@ -735,7 +909,14 @@ function OnDriverLateInit()
 	-- GET: a light that restarted with us gets its capabilities at once.
 	state.lights:configure_all()
 	state.queue = new_queue()
-	prop("Lights", state.lights:summary())
+	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
+	-- registered devices are still bound and present (docs/import-design.md §5).
+	if state.lights.reconcile then
+		local r = state.lights:reconcile()
+		log.info("startup reconcile: %d unbound, %d relinked, %d deleted in Composer",
+			#(r.unbound or {}), #(r.relinked or {}), #(r.tombstoned or {}))
+	end
+	refresh_lights_props()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
 	state.late_init_done = true
