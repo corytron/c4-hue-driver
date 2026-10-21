@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DP3="${DP3:-$HOME/c4-tools/drivers-driverpackager/dp3/driverpackager.py}"
-DRIVERS=(hue_bridge hue_light)
+DRIVERS=(hue_bridge hue_light hue_scene)
 
 extra_args=()
 dev_build=no
