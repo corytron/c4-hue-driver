@@ -276,4 +276,44 @@ describe("bridge.stream", function()
 		assert.is_true(t.cancelled)
 		assert.equal(0, #seen.containers)
 	end)
+
+	it("asks connection() again on every connect so the owner can rotate the address spelling", function()
+		local spellings = { "192.000.002.10", "192.000.02.10", "192.000.2.10" }
+		local calls = 0
+		s = new_stream({ connection = function()
+			calls = calls + 1
+			return { ip = "192.0.2.10", stream_ip = spellings[calls], key = "k" }
+		end })
+
+		s:start()
+		assert.equal("https://192.000.002.10/eventstream/clip/v2", c4.last_transfer().url)
+		assert.equal("192.000.002.10", s.stats.address)
+
+		-- A watchdog reconnect: the abandoned transfer stays on its spelling,
+		-- the replacement must take the next one.
+		open_ok()
+		fire_deferrals()
+		assert.equal(1, c4.fire_timers(), "the watchdog fires")
+		assert.equal("waiting", s.state)
+		assert.equal(1, c4.fire_timers(), "the retry timer reconnects")
+		assert.equal(2, #c4.transfers)
+		assert.equal("https://192.000.02.10/eventstream/clip/v2", c4.last_transfer().url)
+		assert.equal("192.000.02.10", s.stats.address)
+
+		-- A transfer that ends on its own moves on too.
+		c4.last_transfer():done(28, "Operation timed out")
+		assert.equal("waiting", s.state)
+		assert.equal(1, c4.fire_timers(), "the retry timer reconnects")
+		assert.equal(3, #c4.transfers)
+		assert.equal("https://192.000.2.10/eventstream/clip/v2", c4.last_transfer().url)
+		assert.equal("192.000.2.10", s.stats.address)
+		assert.equal(3, calls, "connection() asked once per connect")
+	end)
+
+	it("records the dotted address when no stream_ip is given", function()
+		assert.is_nil(s.stats.address, "nothing before the first connect")
+		s:start()
+		assert.equal("192.0.2.10", s.stats.address)
+		assert.equal("https://192.0.2.10/eventstream/clip/v2", c4.last_transfer().url)
+	end)
 end)
