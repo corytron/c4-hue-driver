@@ -1,9 +1,8 @@
 -- Hue Bridge driver: owns the connection to one Hue bridge and serves the
--- Hue Light drivers bound to it.
---
--- This build is the hardware spike: pairing, one authenticated request, and
--- the event stream, with enough Composer-visible diagnostics to judge how
--- C4:url behaves on the controller. No light control yet.
+-- Hue Light drivers bound to it: pairing, the event stream (on its own
+-- address spelling, see choose_stream_address), the light registry and
+-- import, state fan-out to the light drivers, and the coalesced command
+-- queue. docs/lights-design.md is the contract with the light driver.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -15,6 +14,8 @@ local pinning = require("bridge.pinning")
 local conntest = require("bridge.conntest")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
+local lights_mod = require("bridge.lights")
+local commands = require("bridge.commands")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -34,6 +35,8 @@ local state = {
 	creds = nil,         -- what pairing produced; loaded from the store at startup
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
 	stream_ip = nil,     -- spelling of the bridge address the stream uses, see choose_stream_address
+	lights = nil,        -- bridge.lights registry, created in OnDriverLateInit
+	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	late_init_done = false,
 }
 
@@ -86,6 +89,36 @@ local function stream_timeout()
 	return math.min(configured, SINGLE_QUEUE_TIMEOUT)
 end
 
+-- Authenticated request on the dotted address. The registry and the command
+-- queue go through this, so they never learn about addresses or keys.
+local function bridge_request(req, callback)
+	if not connection() then
+		return callback({ ok = false, err = "not paired" })
+	end
+	req.ip = state.ip
+	req.key = state.creds.key
+	return http.request(req, callback)
+end
+
+
+local function new_lights()
+	return lights_mod.new({
+		http = bridge_request,
+		send = function(id, command, params) C4:SendToDevice(id, command, params) end,
+		bridge_id = C4:GetDeviceID(),
+		room_id = C4:RoomGetId(),
+		log = log,
+	})
+end
+
+local function new_queue()
+	return commands.new({
+		send = function(rid, body, done)
+			bridge_request({ method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }, done)
+		end,
+	})
+end
+
 local function new_stream()
 	return stream.new({
 		connection = connection,
@@ -93,10 +126,21 @@ local function new_stream()
 		watchdog = number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG),
 		on_status = function(text) prop("Event Stream", text) end,
 		on_connected = function()
-			-- The real driver resyncs all light state here.
-			log.info("event stream connected")
+			-- Runs from a timer, never inside the stream's callbacks (see
+			-- stream.lua); events may have been missed while reconnecting.
+			log.info("event stream connected; resyncing %d lights", state.lights:count())
+			state.lights:resync(function(ok, err, sent)
+				if ok then
+					log.info("resync done: %d state messages", tonumber(sent) or 0)
+				else
+					log.warn("resync failed: %s", tostring(err))
+				end
+			end)
 		end,
-		on_container = function()
+		on_container = function(container)
+			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
+			-- callback; nothing here starts a transfer.
+			state.lights:on_container(container)
 			prop("Events Received", state.stream.stats.containers)
 			prop("Last Event", state.stream.stats.last_event)
 		end,
@@ -323,6 +367,46 @@ dispatch.commands["Hue_Request"] = function(params)
 	end)
 end
 
+-- Import Lights: one Control4 light per Hue light, idempotent; see
+-- docs/lights-design.md. Progress and the final count go to the Lights
+-- property.
+dispatch.commands["Import_Lights"] = function()
+	if not connection() then
+		prop("Lights", "Not paired")
+		return
+	end
+	state.lights:import(function(text) prop("Lights", text) end)
+end
+
+-- From a light driver: a proxy command mapped to Hue fields (strings).
+dispatch.commands["HUE_SET"] = function(params)
+	params = params or {}
+	local rid = params.rid
+	if not rid or rid == "" or not state.lights:device_for(rid) then
+		log.warn("HUE_SET for unknown light %s", tostring(rid))
+		return
+	end
+	local fields = {
+		brightness = tonumber(params.brightness),
+		x = tonumber(params.x),
+		y = tonumber(params.y),
+		mirek = tonumber(params.mirek),
+		rate = tonumber(params.rate),
+	}
+	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
+	state.queue:limits(rid, state.lights:limits(rid))
+	state.queue:set(rid, fields)
+end
+
+-- From a light driver at its startup or binding: resend its configuration
+-- and state.
+dispatch.commands["HUE_HELLO"] = function(params)
+	local rid = params and params.rid or ""
+	if not state.lights:hello(rid) then
+		log.debug("HUE_HELLO from unregistered light %q", tostring(rid))
+	end
+end
+
 dispatch.commands["Connect_Event_Stream"] = function()
 	if not connection() then
 		prop("Event Stream", "Not paired")
@@ -428,6 +512,13 @@ end
 function OnDriverLateInit()
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
+	state.lights = new_lights()
+	state.lights:load()
+	-- Configure every known light from the persisted registry before any
+	-- GET: a light that restarted with us gets its capabilities at once.
+	state.lights:configure_all()
+	state.queue = new_queue()
+	prop("Lights", state.lights:summary())
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
 	state.late_init_done = true
@@ -450,5 +541,8 @@ end
 function OnDriverDestroyed()
 	if state.stream then
 		state.stream:stop()
+	end
+	if state.queue then
+		state.queue:stop()
 	end
 end
