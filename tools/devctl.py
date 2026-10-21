@@ -3,7 +3,8 @@
 its plain-HTTP port; `log` reads build/dev/driver.log directly, so run it on
 the VM the server runs on.
 
-  devctl.py status                               versions, last contact, properties
+  devctl.py status                               bridge and light versions (running vs
+                                                 local), last contact, properties
   devctl.py run "Connection Test" Target=Bridge  queue ExecuteCommand(name, params)
   devctl.py set "Stream Timeout (s)" 60          queue a property change
   devctl.py reload                               queue a reload of the current code
@@ -95,9 +96,25 @@ def describe(command):
     return "#%s %s" % (command.get("id"), kind)
 
 
+LABEL_WIDTH = 22   # fits "running_light_version"
+
+
+def row(label, value):
+    print("%-*s %s" % (LABEL_WIDTH, label, value))
+
+
+def version_note(running, local, action, unreported):
+    """How a reported version relates to the local tree, for `status`."""
+    if not running:
+        return unreported
+    if running == local:
+        return "matches local"
+    return "DIFFERS from local; a %s is due" % action
+
+
 def print_properties(properties):
     if not properties:
-        print("properties       (none reported)")
+        row("properties", "(none reported)")
         return
     print("properties:")
     width = max(len(str(name)) for name in properties)
@@ -112,20 +129,21 @@ def print_properties(properties):
 def cmd_status(args):
     st = api(args.server, "GET", "/status")
     running, local = st.get("running_version"), st.get("local_version")
-    if not running:
-        note = "driver has not reported yet"
-    elif running == local:
-        note = "matches local"
-    else:
-        note = "DIFFERS from local; a reload is due"
-    print("running_version  %s  (%s)" % (short(running), note))
-    print("local_version    %s" % short(local))
-    print("last_seen        %s" % ago(st.get("last_seen"), st.get("server_time")))
-    print("last_event       %s" % (st.get("last_event") or "-"))
+    row("running_version", "%s  (%s)" % (short(running),
+                                         version_note(running, local, "reload", "driver has not reported yet")))
+    row("local_version", short(local))
+    if "local_light_version" in st:   # a server from before the light tree has neither field
+        running_light, local_light = st.get("running_light_version"), st.get("local_light_version")
+        row("running_light_version", "%s  (%s)" % (short(running_light),
+                                                   version_note(running_light, local_light, "forward",
+                                                                "bridge has not forwarded yet")))
+        row("local_light_version", short(local_light))
+    row("last_seen", ago(st.get("last_seen"), st.get("server_time")))
+    row("last_event", st.get("last_event") or "-")
     if st.get("last_error"):
-        print("last_error       %s" % st["last_error"])
+        row("last_error", st["last_error"])
     pending = st.get("pending_commands") or []
-    print("pending          %d command(s)" % len(pending))
+    row("pending", "%d command(s)" % len(pending))
     for command in pending:
         print("  %s" % describe(command))
     print_properties(st.get("properties") or {})

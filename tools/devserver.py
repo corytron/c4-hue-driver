@@ -10,11 +10,16 @@ Two listeners share one handler:
 The TLS certificate is self-signed, generated with openssl into --cert-dir on
 first run; the driver talks to it in "insecure" mode, so its contents don't matter.
 
-Served tree (published path -> file), exactly the layout tools/build.sh stages:
-  src/hue_bridge/**/*.lua, **/*.xml, certs/*  ->  driver.lua, bridge/http.lua, certs/x.pem
-  src/common/*.lua                            ->  common/log.lua
-The tree version is sha1 over, in sorted published-path order,
+Two served trees (published path -> file), each exactly the layout
+tools/build.sh stages for that driver; /manifest, /bundle and /file take
+?tree=bridge (the default) or ?tree=light:
+  bridge: src/hue_bridge/**/*.lua, **/*.xml, certs/*  ->  driver.lua, bridge/http.lua, certs/x.pem
+  light:  src/hue_light/**/*.lua, **/*.xml, certs/*   ->  driver.lua, light/state.lua
+  both:   src/common/*.lua                            ->  common/log.lua
+A tree's version is sha1 over, in sorted published-path order,
 path + "\\0" + contents. It is recomputed on every /manifest and /bundle.
+Only the bridge driver talks to this server; it forwards the light tree to
+its bound light drivers itself (docs/dev-loop.md).
 
 State lives under --state-dir (default build/dev, gitignored):
   driver.log     one "HH:MM:SS.mmm <line>" per shipped log line (echoed to
@@ -75,21 +80,26 @@ def now():
 # The served tree
 # ---------------------------------------------------------------------------
 
-class Tree:
-    """The source files the driver fetches. Listed afresh on every call: a few
-    dozen small files, so there is nothing worth caching (and nothing to go stale)."""
+TREES = ("bridge", "light")
 
-    def __init__(self, root):
-        self.bridge = os.path.join(root, "src", "hue_bridge")
+
+class Tree:
+    """The source files of one driver, src/hue_<name> with src/common mounted
+    as common/. Listed afresh on every call: a few dozen small files, so there
+    is nothing worth caching (and nothing to go stale)."""
+
+    def __init__(self, root, name):
+        self.name = name
+        self.driver = os.path.join(root, "src", "hue_" + name)
         self.common = os.path.join(root, "src", "common")
 
     def files(self):
         """Return {published_path: absolute_path}. Published paths are relative
         with forward slashes, e.g. "driver.lua", "bridge/http.lua", "common/log.lua"."""
         out = {}
-        for dirpath, dirnames, filenames in os.walk(self.bridge):
+        for dirpath, dirnames, filenames in os.walk(self.driver):
             dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
-            rel_dir = os.path.relpath(dirpath, self.bridge)
+            rel_dir = os.path.relpath(dirpath, self.driver)
             in_certs = rel_dir.split(os.sep)[0] == "certs"
             for name in filenames:
                 if name.startswith("."):
@@ -144,6 +154,7 @@ class State:
         self.commands = []        # pending commands, in id order
         self.done = []            # ids the driver reported command_done for, oldest first
         self.running_version = None
+        self.running_light_version = None   # what the bridge last forwarded to its lights
         self.last_seen = None
         self.last_event = None
         self.last_error = None    # text of the most recent report that carried "error"
@@ -175,12 +186,14 @@ class State:
             json.dump({"next_id": self.next_id, "commands": self.commands, "done": self.done}, f, indent=1)
         os.replace(tmp, self.commands_path)
 
-    def touch(self, version=None):
+    def touch(self, version=None, light_version=None):
         """The driver talked to us."""
         with self.lock:
             self.last_seen = now()
             if isinstance(version, str) and version:
                 self.running_version = version
+            if isinstance(light_version, str) and light_version:
+                self.running_light_version = light_version
 
     def enqueue(self, command):
         with self.lock:
@@ -240,6 +253,8 @@ class State:
             summary += " cmd=%d" % command_id
         if isinstance(report.get("version"), str):
             summary += " v=%s" % report["version"][:12]
+        if isinstance(report.get("light_version"), str):
+            summary += " lv=%s" % report["light_version"][:12]
         if isinstance(report.get("elapsed_ms"), (int, float)):
             summary += " %dms" % report["elapsed_ms"]
         if isinstance(report.get("properties"), dict):
@@ -250,7 +265,7 @@ class State:
             summary += " error=%s" % report["error"].replace("\n", " ")[:300]
         return summary
 
-    def status(self, local_version):
+    def status(self, local_version, local_light_version):
         """/status. Beyond the fields in docs/dev-loop.md this adds:
           done_commands  ids the driver has reported command_done for (last
                          DONE_KEEP, oldest first); `devctl wait` polls this
@@ -261,6 +276,8 @@ class State:
             return {
                 "running_version": self.running_version,
                 "local_version": local_version,
+                "running_light_version": self.running_light_version,
+                "local_light_version": local_light_version,
                 "last_seen": self.last_seen,
                 "last_event": self.last_event,
                 "last_error": self.last_error,
@@ -440,20 +457,38 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- dev-loop endpoints -------------------------------------------------
 
+    def tree_from(self, query):
+        """The tree a request names (?tree=bridge|light, default bridge), or
+        None after a 400 has been sent."""
+        name = query.get("tree", ["bridge"])[0]
+        tree = self.server.trees.get(name)
+        if tree is None:
+            self.send_bad_request("unknown tree %r (%s)" % (name, " or ".join(TREES)))
+        return tree
+
     def get_manifest(self, query):
-        version, contents = self.server.tree.snapshot()
+        tree = self.tree_from(query)
+        if tree is None:
+            return
+        version, contents = tree.snapshot()
         self.server.state.touch()
-        self.send_json({"version": version, "files": sorted(contents), "server_time": now()})
+        self.send_json({"version": version, "tree": tree.name, "files": sorted(contents), "server_time": now()})
 
     def get_bundle(self, query):
-        version, contents = self.server.tree.snapshot()
+        tree = self.tree_from(query)
+        if tree is None:
+            return
+        version, contents = tree.snapshot()
         self.server.state.touch()
         files = {path: data.decode("utf-8", "replace") for path, data in contents.items()}
-        self.send_json({"version": version, "files": files})
+        self.send_json({"version": version, "tree": tree.name, "files": files})
 
     def get_file(self, query):
+        tree = self.tree_from(query)
+        if tree is None:
+            return
         path = query.get("path", [""])[0]
-        files = self.server.tree.files()
+        files = tree.files()
         # Only published paths are served, so "../x", "/etc/passwd" and the
         # like simply are not in the table and get a 404.
         if not path or path.startswith("/") or ".." in path.split("/") or path not in files:
@@ -475,8 +510,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"commands": self.server.state.commands_after(after)})
 
     def get_status(self, query):
-        version, _ = self.server.tree.snapshot()
-        self.send_json(self.server.state.status(version))
+        version, _ = self.server.trees["bridge"].snapshot()
+        light_version, _ = self.server.trees["light"].snapshot()
+        self.send_json(self.server.state.status(version, light_version))
 
     def post_log(self, query):
         body, err = self.read_json_body()
@@ -498,7 +534,7 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             self.send_bad_request(err)
             return
-        self.server.state.touch(body.get("version"))
+        self.server.state.touch(body.get("version"), body.get("light_version"))
         summary = self.server.state.add_report(body)
         if body["event"] != "heartbeat" or not self.server.quiet:
             log(summary)
@@ -546,14 +582,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class DevServer(ThreadingHTTPServer):
-    """One listener. The handler reaches the shared tree and state via self.server."""
+    """One listener. The handler reaches the shared trees and state via self.server."""
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, tree, state, tls_context=None, quiet=False):
+    def __init__(self, address, trees, state, tls_context=None, quiet=False):
         super().__init__(address, Handler)
-        self.tree = tree
+        self.trees = trees        # {name: Tree}
         self.state = state
         self.tls_context = tls_context
         self.quiet = quiet
@@ -620,7 +656,7 @@ def main():
     cert_dir = args.cert_dir or os.path.join(root, "build", "diag")
     state_dir = args.state_dir or os.path.join(root, "build", "dev")
 
-    tree = Tree(root)
+    trees = {name: Tree(root, name) for name in TREES}
     state = State(state_dir)
     try:
         crt, key = ensure_cert(cert_dir)
@@ -630,11 +666,12 @@ def main():
     ctx.load_cert_chain(crt, key)
     ctx.set_alpn_protocols([p.strip() for p in args.alpn.split(",") if p.strip()])
 
-    plain = DevServer((args.bind, args.port), tree, state, quiet=args.quiet)
-    tls = DevServer((args.bind, args.tls_port), tree, state, tls_context=ctx, quiet=args.quiet)
+    plain = DevServer((args.bind, args.port), trees, state, quiet=args.quiet)
+    tls = DevServer((args.bind, args.tls_port), trees, state, tls_context=ctx, quiet=args.quiet)
 
-    version, contents = tree.snapshot()
-    log("serving %d files from %s, version %s" % (len(contents), root, version))
+    for name in TREES:
+        version, contents = trees[name].snapshot()
+        log("serving %s tree: %d files from %s, version %s" % (name, len(contents), trees[name].driver, version))
     log("state in %s: %d pending command(s), next id %d" % (state_dir, len(state.commands), state.next_id))
     log("listening on http://%s:%d and https://%s:%d" % (args.bind, args.port, args.bind, args.tls_port))
 

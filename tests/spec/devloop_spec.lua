@@ -13,8 +13,16 @@ function OnDriverLateInit(reason) table.insert(DEVLOOP_TEST_CALLS, "late:" .. to
 function OnDriverDestroyed() table.insert(DEVLOOP_TEST_CALLS, "destroyed") end
 ]]
 
+-- The light tree's driver.lua, distinguishable from the bridge's.
+local LIGHT_SRC = "DEVLOOP_TEST_MARK = 'light loaded'"
+
+-- Modules a reload clears; the other specs' instances are saved around each test.
+local function is_driver_module(name)
+	return name:match("^bridge%.") or name:match("^common%.") or name:match("^light%.")
+end
+
 describe("common.devloop", function()
-	local devloop, c4, server, printed, real_print, saved_modules
+	local devloop, c4, server, printed, real_print, saved_modules, sent
 	local HOST = "devvm:8080"
 
 	local function state()
@@ -34,6 +42,9 @@ describe("common.devloop", function()
 		return {
 			version = "v1",
 			files = { ["driver.lua"] = DRIVER_SRC },
+			light_version = "L1",
+			light_files = { ["driver.lua"] = LIGHT_SRC, ["light/state.lua"] = "return {}" },
+			trees = true,    -- false: an older server that knows no ?tree=
 			commands = {},
 			requests = {},   -- "METHOD /path" in order
 			reports = {},    -- decoded POST /report bodies
@@ -47,13 +58,19 @@ describe("common.devloop", function()
 		local path = t.url:match("^http://[^/]+(/.*)$")
 		table.insert(server.requests, t.method .. " " .. path)
 		local base = path:match("^[^?]+")
+		local light = server.trees and path:match("tree=(%w+)") == "light"
+		local tree = server.trees and (light and "light" or "bridge") or nil
 		if base == "/manifest" then
 			if server.manifest_error then
 				return t:done(server.manifest_error, "Failed to connect")
 			end
-			return t:respond(200, json({ version = server.version, files = {}, server_time = 1 }))
+			local version = light and server.light_version or server.version
+			return t:respond(200, json({ version = version, tree = tree, files = {}, server_time = 1 }))
 		elseif base == "/bundle" then
-			return t:respond(200, json({ version = server.version, files = server.files }))
+			if light then
+				return t:respond(200, json({ version = server.light_version, tree = tree, files = server.light_files }))
+			end
+			return t:respond(200, json({ version = server.version, tree = tree, files = server.files }))
 		elseif base == "/commands" then
 			local after = tonumber(path:match("after=(%d+)"))
 			local pending = {}
@@ -105,16 +122,35 @@ describe("common.devloop", function()
 		return server.reports[#server.reports]
 	end
 
-	-- Start the loop and bring it to the server's version.
+	-- Start the loop and bring it to the server's versions.
 	local function start_synced()
 		devloop.start(HOST)
 		serve()
 		tick()
-		server.requests, server.reports, server.logs = {}, {}, {}
+		server.requests, server.reports, server.logs, sent = {}, {}, {}, {}
+	end
+
+	-- What the bridge has bound on binding 1; tests override per case.
+	local function bind_lights(devices)
+		c4.GetBoundConsumerDevices = function(_, device_id, binding)
+			assert.equal(15, device_id, "the bridge's own device id")
+			assert.equal(1, binding)
+			return devices
+		end
 	end
 
 	before_each(function()
 		c4 = fake.install_c4({ ["Status"] = "Idle", ["Debug Mode"] = "Off" })
+		-- Stubbed here rather than in the fake: SendToDevice is recorded with all
+		-- five arguments, and GetBoundConsumerDevices answers "nothing bound"
+		-- unless a test binds lights.
+		sent = {}
+		c4.SendToDevice = function(_, device_id, command, params, allow_empty, log_command)
+			table.insert(sent, { device_id = device_id, command = command, params = params,
+				allow_empty = allow_empty, log_command = log_command, nargs = select("#", device_id, command, params,
+					allow_empty, log_command) })
+		end
+		bind_lights(nil)
 		real_print = print
 		printed = {}
 		rawset(_G, "print", function(...)
@@ -123,10 +159,10 @@ describe("common.devloop", function()
 			table.insert(printed, table.concat(parts, "\t"))
 		end)
 		rawset(_G, "DEVLOOP_TEST_CALLS", {})
-		-- A reload clears common.* and bridge.* modules; keep the other specs' instances.
+		-- A reload clears common.*, bridge.* and light.* modules; keep the other specs' instances.
 		saved_modules = {}
 		for name, mod in pairs(package.loaded) do
-			if name:match("^bridge%.") or name:match("^common%.") then saved_modules[name] = mod end
+			if is_driver_module(name) then saved_modules[name] = mod end
 		end
 		package.loaded["common.devloop"] = nil
 		rawset(_G, "__DEVLOOP", nil)
@@ -143,7 +179,7 @@ describe("common.devloop", function()
 		rawset(_G, "print", real_print)
 		for _, name in ipairs(DRIVER_GLOBALS) do rawset(_G, name, nil) end
 		for name in pairs(package.loaded) do
-			if name:match("^bridge%.") or name:match("^common%.") then package.loaded[name] = nil end
+			if is_driver_module(name) then package.loaded[name] = nil end
 		end
 		for name, mod in pairs(saved_modules) do package.loaded[name] = mod end
 	end)
@@ -158,6 +194,7 @@ describe("common.devloop", function()
 			local r = server.reports[1]
 			assert.equal("startup", r.event)
 			assert.is_nil(r.version)
+			assert.is_nil(r.light_version)
 			assert.equal("Idle", r.properties.Status)
 			assert.equal("Lua 5.1", r.sandbox._VERSION)
 			assert.equal("function", r.sandbox.loadstring)
@@ -202,20 +239,21 @@ describe("common.devloop", function()
 	end)
 
 	describe("tick", function()
-		it("fetches the manifest and, at a new version, the bundle, then commands and the log", function()
+		it("fetches both manifests and, at new versions, both bundles, then commands and the log", function()
 			devloop.start(HOST)
 			serve()
 			tick()
 			assert.equal("http://devvm:8080/manifest", c4.transfers[2].url)
 			assert.same({ "POST /report", "GET /manifest", "GET /bundle", "POST /report",
-				"GET /commands?after=0", "POST /log" }, server.requests)
-			assert.same({ "startup", "reload" }, events())
+				"GET /manifest?tree=light", "GET /bundle?tree=light",
+				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+			assert.same({ "startup", "reload", "heartbeat" }, events())
 		end)
 
-		it("at an unchanged version only polls the manifest and commands", function()
+		it("at unchanged versions only polls the manifests and commands", function()
 			start_synced()
 			tick()
-			assert.same({ "GET /manifest", "GET /commands?after=0" }, server.requests)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests)
 		end)
 
 		it("skips a tick while the previous chain is still in flight", function()
@@ -225,7 +263,8 @@ describe("common.devloop", function()
 			c4.fire_timers()
 			assert.equal(2, #c4.transfers, "one manifest request, not two")
 			serve()
-			assert.equal("reload", last_report().event)
+			assert.equal("heartbeat", last_report().event)
+			assert.same({ "startup", "reload", "heartbeat" }, events())
 		end)
 
 		it("abandons a chain stuck for STUCK_TICKS ticks and starts a new one", function()
@@ -238,7 +277,7 @@ describe("common.devloop", function()
 			route(c4.transfers[2])
 			assert.equal(3, #c4.transfers)
 			serve()
-			assert.equal("reload", last_report().event)
+			assert.same({ "startup", "reload", "heartbeat" }, events())
 		end)
 
 		it("posts a heartbeat when idle for 30 s, not sooner", function()
@@ -342,6 +381,180 @@ describe("common.devloop", function()
 		end)
 	end)
 
+	describe("light tree (bridge side)", function()
+		it("forwards a new light version to every bound light as DEV_RELOAD", function()
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.equal(2, #sent)
+			table.sort(sent, function(a, b) return a.device_id < b.device_id end)
+			assert.equal(2001, sent[1].device_id)
+			assert.equal(2002, sent[2].device_id)
+			for _, msg in ipairs(sent) do
+				assert.equal("DEV_RELOAD", msg.command)
+				assert.equal("L1", msg.params.version)
+				assert.is_string(msg.params.files, "the bundle travels as JSON text")
+				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+				assert.is_false(msg.allow_empty, "allowEmptyValues")
+				assert.is_false(msg.log_command, "logCommand: the bundle must not land in Director's log")
+			end
+			assert.equal("L1", devloop.light_version())
+			assert.equal("v1", devloop.version(), "the bridge's own version is untouched")
+			assert.same({ "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls(), "the bridge did not reload again")
+			assert.equal("devloop: light version L1 forwarded to 2 light(s)", printed[#printed])
+		end)
+
+		it("does not re-forward an unchanged version and forwards again when it changes", function()
+			bind_lights({ [2001] = "A" })
+			start_synced()
+			tick()
+			assert.same({}, sent)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests)
+
+			server.light_version, server.light_files["driver.lua"] = "L2", LIGHT_SRC .. " .. ' 2'"
+			server.requests = {}
+			tick()
+			assert.equal(1, #sent)
+			assert.equal("L2", sent[1].params.version)
+			assert.same(server.light_files, c4:JsonDecode(sent[1].params.files))
+			assert.is_false(sent[1].log_command)
+			assert.equal("L2", devloop.light_version())
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
+				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+		end)
+
+		it("reports light_version in the heartbeat right after a forward, and in later reports", function()
+			bind_lights({ [2001] = "A" })
+			start_synced()
+			assert.equal("L1", devloop.light_version())
+			server.light_version = "L2"
+			tick()
+			assert.same({ "heartbeat" }, events(), "a forward makes a heartbeat due at once")
+			assert.equal("L2", last_report().light_version)
+			assert.equal("v1", last_report().version)
+
+			server.reports = {}
+			server.commands = { { id = 1, type = "execute", command = "A" } }
+			rawset(_G, "ExecuteCommand", function() end)
+			tick()
+			assert.equal("command_done", last_report().event)
+			assert.equal("L2", last_report().light_version)
+		end)
+
+		it("remembers the version when no lights are bound, and says so once", function()
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({}, sent)
+			assert.equal("L1", devloop.light_version())
+			assert.equal("devloop: light version L1: no bound lights", printed[#printed])
+			local said = #printed
+			tick()
+			tick()
+			assert.equal(said, #printed)
+			assert.equal(0, #c4.calls_to("SendToDevice"))
+		end)
+
+		it("skips a tree-less server instead of forwarding the bridge bundle", function()
+			bind_lights({ [2001] = "A" })
+			server.trees = false
+			devloop.start(HOST)
+			serve()
+			tick()
+			server.requests = {}
+			tick()
+			assert.same({}, sent)
+			assert.is_nil(devloop.light_version())
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests,
+				"the light manifest is still polled, so a restarted server with trees is picked up")
+			local count = 0
+			for _, line in ipairs(printed) do
+				if line:find("no light tree", 1, true) then count = count + 1 end
+			end
+			assert.equal(1, count, "said once")
+		end)
+
+		it("keeps the loop going when SendToDevice raises", function()
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			c4.SendToDevice = function(_, device_id)
+				if device_id == 2002 then error("device gone") end
+				table.insert(sent, { device_id = device_id })
+			end
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.equal(1, #sent)
+			assert.equal("L1", devloop.light_version())
+			assert.equal("devloop: light version L1 forwarded to 1 light(s), 1 failed", printed[#printed])
+			assert.equal("GET /commands?after=0", server.requests[7])
+		end)
+	end)
+
+	describe("apply_forwarded (light side)", function()
+		local function forwarded(version, files)
+			return devloop.apply_forwarded({ version = version, files = json(files) })
+		end
+
+		it("reloads from the forwarded bundle without start() ever being called", function()
+			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "old destroyed") end)
+			package.loaded["light.x"] = { old = true }
+			package.loaded["common.dispatch"] = { old = true }
+			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }))
+			assert.same({ "old destroyed", "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls())
+			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.is_nil(package.loaded["light.x"])
+			assert.is_nil(package.loaded["common.dispatch"])
+			assert.equal(devloop, package.loaded["common.devloop"], "never cleared")
+			assert.equal("L1", devloop.version())
+			assert.is_false(devloop.running())
+			assert.equal(0, #c4.transfers, "a light never contacts the server")
+			assert.equal("devloop: light reload complete: version L1", printed[#printed])
+		end)
+
+		it("serves light.* modules from the forwarded bundle", function()
+			assert.is_true(forwarded("L1", {
+				["driver.lua"] = "DEVLOOP_TEST_MARK = require('light.state')",
+				["light/state.lua"] = "return { from_bundle = true }",
+			}))
+			assert.is_true(rawget(_G, "DEVLOOP_TEST_MARK").from_bundle)
+			assert.equal(state().loader, package.loaders[1])
+		end)
+
+		it("prints the failure for a broken bundle and stays usable", function()
+			assert.is_false(forwarded("L2", { ["driver.lua"] = "function (" }))
+			assert.truthy(printed[#printed]:find("^devloop: light reload failed: "))
+			assert.truthy(printed[#printed]:find("driver.lua", 1, true))
+			assert.equal("L2", devloop.version())
+
+			assert.is_false(forwarded("L3", { ["driver.lua"] = "error('boom')" }))
+			assert.truthy(printed[#printed]:find("boom", 1, true))
+
+			assert.is_true(forwarded("L4", { ["driver.lua"] = DRIVER_SRC }))
+			assert.equal("L4", devloop.version())
+			assert.equal("devloop: light reload complete: version L4", printed[#printed])
+		end)
+
+		it("rejects params without a decodable files object", function()
+			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
+			assert.is_false(devloop.apply_forwarded({ version = "L1", files = "not json" }))
+			assert.truthy(printed[#printed]:find("^devloop: light reload failed: files param"))
+			assert.is_false(devloop.apply_forwarded({ version = "L1" }))
+			assert.is_false(devloop.apply_forwarded(nil))
+			assert.same({}, calls(), "nothing was torn down")
+			assert.is_nil(devloop.version())
+		end)
+
+		it("works as a dispatch command handler", function()
+			package.loaded["common.dispatch"] = nil
+			local dispatch = require("common.dispatch")
+			dispatch.commands["DEV_RELOAD"] = devloop.apply_forwarded
+			dispatch.execute_command("DEV_RELOAD", { version = "L1", files = json({ ["driver.lua"] = DRIVER_SRC }) })
+			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.equal("L1", devloop.version())
+		end)
+	end)
+
 	describe("commands", function()
 		it("execute goes through ExecuteCommand and reports command_done", function()
 			start_synced()
@@ -378,8 +591,8 @@ describe("common.devloop", function()
 				"destroyed", "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls())
 			assert.same({ "reload", "command_done" }, events())
 			assert.equal(9, last_report().command_id)
-			assert.same({ "GET /manifest", "GET /commands?after=0", "POST /report", "POST /report", "POST /log" },
-				server.requests)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0",
+				"POST /report", "POST /report", "POST /log" }, server.requests)
 		end)
 
 		it("runs commands in order and advances the after= cursor", function()
@@ -490,7 +703,7 @@ describe("common.devloop", function()
 			assert.equal(2, #printed, "the startup line, then unreachable said once")
 			server.manifest_error = nil
 			tick()
-			assert.equal("reload", last_report().event)
+			assert.same({ "startup", "reload", "heartbeat" }, events())
 		end)
 
 		it("survive Get() raising at transfer start", function()
@@ -505,7 +718,8 @@ describe("common.devloop", function()
 			assert.is_false(state().busy)
 			c4.url = real_url
 			tick()
-			assert.same({ "GET /manifest", "GET /commands?after=0", "POST /log" }, server.requests)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0", "POST /log" },
+				server.requests)
 			assert.truthy(server.logs[1].lines[1].line:find("unreachable", 1, true))
 		end)
 	end)
