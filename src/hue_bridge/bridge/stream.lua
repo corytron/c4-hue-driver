@@ -35,7 +35,9 @@ stream.BACKOFF_MIN = 1              -- seconds
 stream.BACKOFF_MAX = 60
 
 -- opts:
---   connection()    returns { ip, key } or nil when not paired
+--   connection()    returns { ip, key, stream_ip } or nil when not paired;
+--                   stream_ip (optional) is the address spelling the stream
+--                   uses so that it has its own C4:url queue (bridge/altaddr)
 --   timeout         seconds, see DEFAULT_TIMEOUT
 --   watchdog        seconds, see DEFAULT_WATCHDOG
 --   on_container(container, event)  one Hue event container (type, data, ...)
@@ -137,11 +139,12 @@ function stream:connect()
 	local gen = self.generation
 	self.state = "connecting"
 	self.parser = sse.new()
+	local parser = self.parser -- this connection's own parser, for its late chunks
 	self:status("Connecting")
 	log.info("event stream: connecting to %s", conn.ip)
 
 	self.transfer = http.stream({
-		ip = conn.ip,
+		ip = conn.stream_ip or conn.ip, -- a second spelling keeps commands unblocked
 		key = conn.key,
 		path = stream.PATH,
 		headers = { Accept = "text/event-stream" },
@@ -152,7 +155,18 @@ function stream:connect()
 			return self:handle_headers(code)
 		end,
 		on_chunk = function(data)
-			if gen ~= self.generation then return true end
+			if gen ~= self.generation then
+				-- An abandoned transfer: Cancel() did not end it, and the
+				-- replacement stream is queued behind it, so the events in
+				-- this chunk would otherwise be lost. Deliver them, then abort
+				-- by returning true.
+				if self.state ~= "stopped" then
+					for _, event in ipairs(parser:feed(data)) do
+						self:handle_event(event)
+					end
+				end
+				return true
+			end
 			self:handle_chunk(data)
 		end,
 		on_done = function(err_code, err_msg, code)
