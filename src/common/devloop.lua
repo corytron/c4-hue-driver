@@ -5,7 +5,8 @@
 -- Bridge side: one repeating timer polls a plain-HTTP server. Each tick is a
 -- chain of C4:url transfers, each started from the previous one's OnDone:
 --   GET /manifest -> (GET /bundle, reload, POST /report) ->
---   GET /manifest?tree=light -> (GET /bundle?tree=light, DEV_RELOAD to lights) ->
+--   GET /manifest?tree=light -> (GET /bundle?tree=light at a new version,
+--                                DEV_RELOAD to the lights that lack it) ->
 --   GET /commands -> (run each, POST /report command_done) ->
 --   POST /log -> (POST /report heartbeat)
 -- so no transfer ever starts inside OnHeaders or OnBodyChunk, which Director
@@ -52,7 +53,9 @@ if not S then
 		unreachable = false,     -- server down; said once per transition
 		version = nil,           -- version last loaded, or attempted and failed
 		bundle = nil,            -- files of the last bundle fetched
-		light_version = nil,     -- light-tree version last forwarded to the lights
+		light_version = nil,     -- light-tree version last fetched and forwarded
+		light_bundle = nil,      -- files of the light bundle at light_version
+		light_forwarded = {},    -- bound light device id -> version it last received
 		no_light_tree = false,   -- server predates trees; said once
 		last_command_id = 0,
 		last_report_ms = 0,
@@ -66,6 +69,9 @@ if not S then
 	}
 	rawset(_G, "__DEVLOOP", S)
 end
+-- Fields added after a state was created elsewhere (a newer module meeting
+-- an older state) start empty instead of nil.
+S.light_forwarded = S.light_forwarded or {}
 
 local compile = rawget(_G, "loadstring") or rawget(_G, "load")
 
@@ -325,18 +331,41 @@ end
 
 -- Light tree ---------------------------------------------------------------------
 
--- Hand the light tree's bundle to every bound light as one DEV_RELOAD command
--- { version, files = JSON text }; each light reloads itself through
--- devloop.apply_forwarded. The version is recorded first, so a forward that
--- fails is not retried until the server has a different one.
+-- Hand the light tree's bundle to every bound light that has not received
+-- this version, as one DEV_RELOAD command { version, files = JSON text }
+-- each; a light reloads itself through devloop.apply_forwarded. Runs every
+-- tick the server has a light tree, from the cached bundle when the version
+-- is unchanged: S.light_forwarded remembers, per bound device, the version
+-- it was last sent, so a light bound after the version was first forwarded
+-- (Import Lights creates lights while the loop runs; the first forward may
+-- have found none bound) catches up on the next tick. A device that leaves
+-- the bound set is forgotten. The version is recorded per device before the
+-- send, so a light whose send fails is not retried until the server has a
+-- different version.
 local function forward_light(files, version)
-	S.light_version = version
+	local changed = S.light_version ~= version
+	S.light_version, S.light_bundle = version, files
 	local ok, err = pcall(function()
+		local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)
+		if type(bound) ~= "table" then bound = {} end
+		local forwarded = S.light_forwarded
+		for id in pairs(forwarded) do
+			if bound[id] == nil then forwarded[id] = nil end
+		end
+		local due = {}
+		for id in pairs(bound) do
+			if forwarded[id] ~= version then due[#due + 1] = id end
+		end
+		if changed and next(bound) == nil then
+			say("light version %s: no bound lights", tostring(version))
+			return
+		end
+		if #due == 0 then return end
 		-- An object of strings, so Director's array quirk cannot bite.
 		local text = C4:JsonEncode(files, false, true)
-		local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)
 		local sent, failed = 0, 0
-		for id in pairs(type(bound) == "table" and bound or {}) do
+		for _, id in ipairs(due) do
+			forwarded[id] = version
 			-- Trailing args: allowEmptyValues = false, logCommand = false, so
 			-- Director does not write the whole bundle to its log every reload.
 			local ok_send, serr = pcall(function()
@@ -349,17 +378,14 @@ local function forward_light(files, version)
 				say("DEV_RELOAD to device %s failed: %s", tostring(id), tostring(serr))
 			end
 		end
-		if sent + failed == 0 then
-			say("light version %s: no bound lights", tostring(version))
-		else
-			say("light version %s forwarded to %d light(s)%s", tostring(version), sent,
-				failed > 0 and string.format(", %d failed", failed) or "")
-		end
+		say("light version %s forwarded to %d %slight(s)%s", tostring(version), sent,
+			changed and "" or "newly bound ",
+			failed > 0 and string.format(", %d failed", failed) or "")
 	end)
 	if not ok then say("light forward failed: %s", tostring(err)) end
-	-- A heartbeat is due at the end of this tick, so /status sees the new
-	-- light version at once instead of up to HEARTBEAT_MS later.
-	S.last_report_ms = 0
+	-- At a new version a heartbeat is due at the end of this tick, so /status
+	-- sees it at once instead of up to HEARTBEAT_MS later.
+	if changed then S.last_report_ms = 0 end
 end
 
 -- Tick chain ------------------------------------------------------------------
@@ -439,9 +465,10 @@ local function step_commands()
 	end)
 end
 
--- The light tree: forward a changed version to the bound lights. A server
--- without trees answers with the bridge manifest (no "tree" field), which
--- must never reach the lights; said once, then ignored.
+-- The light tree: fetch a changed version once, then forward it (from the
+-- cache while the version stays the same) to the bound lights that lack it.
+-- A server without trees answers with the bridge manifest (no "tree" field),
+-- which must never reach the lights; said once, then ignored.
 local function step_light()
 	request("GET", "/manifest?tree=light", nil, function(r)
 		local j = r.json
@@ -457,7 +484,10 @@ local function step_light()
 			return step_commands()
 		end
 		S.no_light_tree = false
-		if tostring(j.version) == S.light_version then return step_commands() end
+		if S.light_bundle and tostring(j.version) == S.light_version then
+			forward_light(S.light_bundle, S.light_version)
+			return step_commands()
+		end
 		fetch_bundle("light", function(files, version, err)
 			if not files then
 				say("light %s", err)
