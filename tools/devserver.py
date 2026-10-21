@@ -173,6 +173,7 @@ class State:
         self.done = []            # ids the driver reported command_done for, oldest first
         self.running_version = None
         self.running_light_version = None   # what the bridge last forwarded to its lights
+        self.running_scene_version = None   # ... and to its scene devices
         self.last_seen = None
         self.last_event = None
         self.last_error = None    # text of the most recent report that carried "error"
