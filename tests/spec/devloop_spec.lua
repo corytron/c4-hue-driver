@@ -442,7 +442,7 @@ describe("common.devloop", function()
 			assert.equal("L2", last_report().light_version)
 		end)
 
-		it("remembers the version when no lights are bound, and says so once", function()
+		it("remembers the version when no lights are bound, says so once, and catches up lights created later", function()
 			devloop.start(HOST)
 			serve()
 			tick()
@@ -454,6 +454,99 @@ describe("common.devloop", function()
 			tick()
 			assert.equal(said, #printed)
 			assert.equal(0, #c4.calls_to("SendToDevice"))
+
+			-- Import Lights binds new lights while the loop runs; the version has
+			-- not changed, yet every one of them must get it on the next tick.
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			server.requests = {}
+			tick()
+			assert.equal(2, #sent)
+			for _, msg in ipairs(sent) do
+				assert.equal("DEV_RELOAD", msg.command)
+				assert.equal("L1", msg.params.version)
+				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+			end
+			assert.equal("devloop: light version L1 forwarded to 2 newly bound light(s)", printed[#printed])
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0", "POST /log" },
+				server.requests, "the cached bundle is used; no second fetch")
+		end)
+
+		it("forwards the current version to a light bound after the first forward, without a refetch", function()
+			bind_lights({ [2001] = "A" })
+			start_synced()
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			tick()
+			assert.equal(1, #sent)
+			assert.equal(2002, sent[1].device_id)
+			assert.equal("DEV_RELOAD", sent[1].command)
+			assert.equal("L1", sent[1].params.version)
+			assert.same(server.light_files, c4:JsonDecode(sent[1].params.files))
+			assert.is_false(sent[1].allow_empty)
+			assert.is_false(sent[1].log_command)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0", "POST /log" },
+				server.requests, "no GET /bundle?tree=light and no heartbeat: the version did not change")
+			assert.equal("devloop: light version L1 forwarded to 1 newly bound light(s)", printed[#printed])
+			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded)
+			assert.equal("L1", devloop.light_version())
+		end)
+
+		it("sends nothing while the bound set and the version are unchanged", function()
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			start_synced()
+			local said = #printed
+			tick()
+			tick()
+			assert.same({}, sent)
+			assert.equal(said, #printed)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0",
+				"GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests)
+			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded)
+		end)
+
+		it("re-forwards a new version to every bound light, caught-up ones included", function()
+			bind_lights({ [2001] = "A" })
+			start_synced()
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			tick()
+			assert.equal(1, #sent, "2002 caught up with L1")
+			sent = {}
+			server.light_version, server.light_files["driver.lua"] = "L2", LIGHT_SRC .. " .. ' 2'"
+			server.requests = {}
+			tick()
+			assert.equal(2, #sent)
+			table.sort(sent, function(a, b) return a.device_id < b.device_id end)
+			assert.same({ 2001, 2002 }, { sent[1].device_id, sent[2].device_id })
+			for _, msg in ipairs(sent) do
+				assert.equal("L2", msg.params.version)
+				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+			end
+			assert.equal("devloop: light version L2 forwarded to 2 light(s)", printed[#printed])
+			assert.same({ [2001] = "L2", [2002] = "L2" }, state().light_forwarded)
+			assert.equal("L2", devloop.light_version())
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
+				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests,
+				"fetched once for the new version; a heartbeat is due at once")
+		end)
+
+		it("forgets a device that is no longer bound, and forwards again if it comes back", function()
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			start_synced()
+			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded)
+			bind_lights({ [2001] = "A" })
+			tick()
+			assert.same({}, sent)
+			assert.same({ [2001] = "L1" }, state().light_forwarded)
+
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			tick()
+			assert.equal(1, #sent)
+			assert.equal(2002, sent[1].device_id)
+			assert.equal("L1", sent[1].params.version)
+			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded)
+
+			bind_lights(nil)
+			tick()
+			assert.same({}, state().light_forwarded, "nothing bound: the table empties")
 		end)
 
 		it("skips a tree-less server instead of forwarding the bridge bundle", function()
@@ -488,6 +581,10 @@ describe("common.devloop", function()
 			assert.equal("L1", devloop.light_version())
 			assert.equal("devloop: light version L1 forwarded to 1 light(s), 1 failed", printed[#printed])
 			assert.equal("GET /commands?after=0", server.requests[7])
+			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded,
+				"a failed send is recorded too, so it is not retried at this version")
+			tick()
+			assert.equal(1, #sent)
 		end)
 	end)
 
