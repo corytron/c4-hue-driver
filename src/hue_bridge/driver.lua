@@ -20,6 +20,11 @@ local stream = require("bridge.stream")
 -- See docs/dev-loop.md. Release builds have no such module, so this is nil.
 local devloop_ok, devloop = pcall(require, "common.devloop")
 if not devloop_ok then
+	-- Absent in release builds (expected); anything else is a real error
+	-- that must be visible, since the loop is how the controller gets tested.
+	if not tostring(devloop):find("not found", 1, true) then
+		print("[ERROR] Hue Bridge: dev loop failed to load: " .. tostring(devloop))
+	end
 	devloop = nil
 end
 
@@ -121,13 +126,17 @@ end
 
 -- host:port of tools/devserver.py; empty disables the loop. Dev builds only.
 dispatch.properties["Dev_Server"] = function(value)
+	local host = (value or ""):match("^%s*(.-)%s*$")
 	if not devloop then
+		if host ~= "" then
+			log.always("dev loop: module not loaded in this build; Dev Server ignored")
+		end
 		return
 	end
-	local host = (value or ""):match("^%s*(.-)%s*$")
 	if host == "" then
 		devloop.stop()
 	elseif state.late_init_done then
+		log.always("dev loop: starting against %s", host)
 		devloop.start(host)
 	end
 end
