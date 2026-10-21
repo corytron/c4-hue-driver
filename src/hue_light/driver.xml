@@ -78,11 +78,13 @@
 			<action>
 				<name>Adopt Hue Name</name>
 				<command>Adopt Hue Name</command>
+				<sort_order>1</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Forget This Light</name>
 				<command>Forget This Light</command>
+				<sort_order>2</sort_order>
 				<params/>
 			</action>
 		</actions>
