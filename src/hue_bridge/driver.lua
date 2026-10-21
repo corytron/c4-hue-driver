@@ -282,6 +282,47 @@ dispatch.commands["Test_Connection"] = function(params)
 	end)
 end
 
+-- Dev-only (not in driver.xml, reachable through the dev loop): an arbitrary
+-- authenticated request to the bridge. Params: Method (GET/PUT/POST/DELETE),
+-- Path (/clip/v2/...), Body (JSON text, optional), Host (address spelling,
+-- optional; default the dotted address). Logs the status, elapsed time and
+-- a summary of the response: ids and names for resource lists, otherwise
+-- the first 300 characters of the body.
+dispatch.commands["Hue_Request"] = function(params)
+	params = params or {}
+	if not connection() then
+		return log.always("Hue Request: not paired")
+	end
+	local method = (params.Method or "GET"):upper()
+	local path = params.Path or "/clip/v2/resource/bridge"
+	local host = (params.Host and params.Host ~= "") and params.Host or state.ip
+	local body
+	if params.Body and params.Body ~= "" then
+		body = C4:JsonDecode(params.Body)
+		if body == nil then
+			return log.always("Hue Request: Body is not valid JSON")
+		end
+	end
+	local t0 = os.time()
+	http.request({ ip = host, key = state.creds.key, method = method, path = path, body = body }, function(r)
+		local summary
+		local items = r.json and type(r.json.data) == "table" and r.json.data or nil
+		if items and #items > 0 and items[1].id then
+			local parts = {}
+			for i = 1, math.min(#items, 15) do
+				local item = items[i]
+				local name = item.metadata and item.metadata.name or item.type or "?"
+				parts[#parts + 1] = string.format("%s=%s", item.id, tostring(name))
+			end
+			summary = string.format("%d items: %s", #items, table.concat(parts, "; "))
+		else
+			summary = tostring(r.body or ""):sub(1, 300)
+		end
+		log.always("Hue Request %s %s via %s: %s in %d s: %s", method, path, host,
+			r.ok and ("HTTP " .. tostring(r.code)) or tostring(r.err), os.time() - t0, summary)
+	end)
+end
+
 dispatch.commands["Connect_Event_Stream"] = function()
 	if not connection() then
 		prop("Event Stream", "Not paired")
