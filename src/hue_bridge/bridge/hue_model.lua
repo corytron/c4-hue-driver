@@ -4,14 +4,23 @@
 -- Pure Lua, no C4 calls.
 --
 -- Shapes consumed (from Signify's CLIP v2 reference):
---   light               { id, owner{rid}, metadata{name, archetype}, on{on},
+--   light               { id, id_v1, owner{rid}, service_id, metadata{name, archetype}, on{on},
 --                         dimming{brightness, min_dim_level},
 --                         color{xy{x,y}, gamut{red,green,blue}} (optional),
 --                         color_temperature{mirek, mirek_valid,
 --                           mirek_schema{mirek_minimum, mirek_maximum}} (optional) }
 --   device              { id, product_data{model_id, product_name}, metadata{name},
 --                         services[{rid, rtype}] }
---   zigbee_connectivity { id, owner{rid}, status }
+--   zigbee_connectivity { id, owner{rid}, status, mac_address }
+--   room / zone         { id, id_v1, metadata{name, archetype}, children[{rid, rtype}],
+--                         services[{rid, rtype}] }   -- room children are devices, zone
+--                                                    -- children are lights; rooms also carry
+--                                                    -- a geometry block (ignored); an empty
+--                                                    -- zone has [] children and [] services
+--                                                    -- [verified: hardware 2026-10-21]
+--   bridge_home         { id, id_v1, children[{rid, rtype}], services[{rid, rtype}] }
+--                         -- children mix room-less devices and rooms; no metadata
+--                         -- at all [verified: hardware 2026-10-21]
 -- Event-stream items have the same shapes with only the changed fields.
 -- A JSON null (mirek while mirek_valid is false) is treated like an absent
 -- field, whatever the decoder turns it into: only numbers count as numbers.
@@ -40,6 +49,14 @@ end
 local function point(value)
 	if type(value) == "table" and number(value.x) and number(value.y) then
 		return { x = value.x, y = value.y }
+	end
+	return nil
+end
+
+-- A non-empty string, else nil (the bridge's own device carries id_v1 "").
+local function text(value)
+	if type(value) == "string" and value ~= "" then
+		return value
 	end
 	return nil
 end
@@ -160,11 +177,16 @@ end
 
 -- One /clip/v2/resource/light item → the normalised light of the contract.
 -- `online` is not part of the resource; the registry owner sets it from
--- zigbee_connectivity (nil until known).
+-- zigbee_connectivity (nil until known). `id_v1` ("/lights/12") and
+-- `service_id` (0 for the only light of a device, 0/1/… on a multi-light
+-- device) are display and disambiguation data only; update() does not touch
+-- them, so an event never reports them as changed.
 function hue_model.light(item)
 	local light = {
 		rid = item.id,
+		id_v1 = text(item.id_v1),
 		device_rid = type(item.owner) == "table" and item.owner.rid or nil,
+		service_id = number(item.service_id),
 		name = nil,
 		archetype = nil,
 		on = nil,
@@ -234,15 +256,18 @@ function hue_model.devices(items)
 end
 
 -- One zigbee_connectivity item (full or event) → { rid, device_rid, status,
--- online }. Only "connected" counts as online; "connectivity_issue",
--- "disconnected" and "unidirectional_incoming" all mean commands may not
--- reach the light.
+-- online, mac_address }. Only "connected" counts as online;
+-- "connectivity_issue", "disconnected" and "unidirectional_incoming" all mean
+-- commands may not reach the light. `mac_address` is the radio's IEEE
+-- address, the registry's recovery key for a bulb deleted and re-added
+-- (docs/import-design.md §3); events carry it only when it is in the item.
 function hue_model.connectivity(item)
 	return {
 		rid = item.id,
 		device_rid = type(item.owner) == "table" and item.owner.rid or nil,
 		status = item.status,
 		online = item.status == "connected",
+		mac_address = text(item.mac_address),
 	}
 end
 
@@ -281,11 +306,29 @@ function hue_model.has_state(params)
 	return false
 end
 
+-- Merge the scalar fields of `extra` (expected: hue_room, id_v1, state; any
+-- string-keyed string, number or boolean is taken) into `params` as strings,
+-- after the existing fields. nil and "" are skipped for the same reason the
+-- functions below leave valueless fields out; tables are never a param.
+local function merge_extra(params, extra)
+	if type(extra) ~= "table" then
+		return params
+	end
+	for key, value in pairs(extra) do
+		local kind = type(value)
+		if type(key) == "string" and ((kind == "string" and value ~= "") or kind == "number" or kind == "boolean") then
+			params[key] = tostring(value)
+		end
+	end
+	return params
+end
+
 -- HUE_CONFIGURE params from a registry-shaped record { rid, name, model,
 -- caps }. Every value is a string; fields without a value are left out
 -- (C4:SendToDevice drops empty strings anyway, so this keeps the fake and
--- the controller identical).
-function hue_model.registry_configure_params(rid, entry)
+-- the controller identical). `extra` (optional) adds the import-ui fields
+-- `hue_room`, `id_v1`, `state` (docs/import-design.md §4).
+function hue_model.registry_configure_params(rid, entry, extra)
 	local caps = type(entry.caps) == "table" and entry.caps or {}
 	local params = {
 		rid = tostring(rid),
@@ -299,17 +342,118 @@ function hue_model.registry_configure_params(rid, entry)
 			params[name] = tostring(caps[name])
 		end
 	end
-	return params
+	return merge_extra(params, extra)
 end
 
 -- HUE_CONFIGURE params from a live normalised light and (optionally) its
--- device record from devices().
-function hue_model.configure_params(light, device)
+-- device record from devices(); `extra` as above.
+function hue_model.configure_params(light, device, extra)
 	return hue_model.registry_configure_params(light.rid, {
 		name = light.name,
 		model = device and device.model or nil,
 		caps = hue_model.caps(light),
-	})
+	}, extra)
+end
+
+-- Groups ---------------------------------------------------------------------
+
+-- The rtype a group's children nominally have [verified: Core Concepts, and
+-- hardware 2026-10-21: 46 room children all "device", 80 zone children all
+-- "light"]. bridge_home mixes devices and rooms; "room" is only its nominal
+-- value and `child_rtypes` is the truth per child.
+local GROUP_CHILD_RTYPE = { room = "device", zone = "light", bridge_home = "room" }
+
+-- Every field update_group() can report as changed, in a stable order.
+local GROUP_FIELD_ORDER = { "name", "children", "grouped_light_rid", "id_v1" }
+
+-- Merge a (possibly partial) room / zone / bridge_home item into `group` in
+-- place and return the field names the item carried, in GROUP_FIELD_ORDER
+-- (carried counts as changed, as update() does). A `children` array
+-- replaces the whole list [assumed: the bridge sends the array whole,
+-- docs/edge-cases-hue.md §2]; `child_rtype` follows the children when they
+-- all share one rtype and falls back to the group type's nominal rtype
+-- otherwise, while `child_rtypes` always records each child's own rtype.
+function hue_model.update_group(group, item)
+	local touched = {}
+	if type(item) ~= "table" then
+		return {}
+	end
+
+	if type(item.metadata) == "table" and item.metadata.name ~= nil then
+		group.name = tostring(item.metadata.name)
+		touched.name = true
+	end
+
+	if type(item.children) == "table" then
+		local children, rtypes, shared = {}, {}, nil
+		for _, ref in ipairs(item.children) do
+			if type(ref) == "table" and ref.rid ~= nil then
+				local rtype = text(ref.rtype) or "unknown"
+				children[#children + 1] = ref.rid
+				rtypes[ref.rid] = rtype
+				if shared == nil then
+					shared = rtype
+				elseif shared ~= rtype then
+					shared = false
+				end
+			end
+		end
+		group.children = children
+		group.child_rtypes = rtypes
+		group.child_rtype = (shared and shared ~= "unknown") and shared or GROUP_CHILD_RTYPE[group.type]
+		touched.children = true
+	end
+
+	if type(item.services) == "table" then
+		for _, service in ipairs(item.services) do
+			if type(service) == "table" and service.rtype == "grouped_light" and service.rid ~= nil then
+				group.grouped_light_rid = service.rid
+				touched.grouped_light_rid = true
+			end
+		end
+	end
+
+	if text(item.id_v1) then
+		group.id_v1 = item.id_v1
+		touched.id_v1 = true
+	end
+
+	local changed = {}
+	for _, name in ipairs(GROUP_FIELD_ORDER) do
+		if touched[name] then
+			changed[#changed + 1] = name
+		end
+	end
+	return changed
+end
+
+-- One /clip/v2/resource/room, /zone or /bridge_home item → the group of the
+-- contract (docs/import-design.md §13):
+--   { rid, type, name, children = { rid... }, child_rtype, child_rtypes = { [rid] = rtype },
+--     grouped_light_rid, id_v1 }
+-- nil for an item of any other type. A room or zone without a name gets a
+-- fallback like light(); bridge_home has no name (nil). `grouped_light_rid`
+-- is nil for an empty zone, whose services array is empty [verified:
+-- hardware 2026-10-21].
+function hue_model.group(item)
+	if type(item) ~= "table" or item.id == nil or GROUP_CHILD_RTYPE[item.type] == nil then
+		return nil
+	end
+	local group = {
+		rid = item.id,
+		type = item.type,
+		name = nil,
+		children = {},
+		child_rtype = GROUP_CHILD_RTYPE[item.type],
+		child_rtypes = {},
+		grouped_light_rid = nil,
+		id_v1 = nil,
+	}
+	hue_model.update_group(group, item)
+	if group.name == nil and item.type ~= "bridge_home" then
+		group.name = "Hue " .. item.type .. " " .. tostring(group.id_v1 or item.id)
+	end
+	return group
 end
 
 return hue_model

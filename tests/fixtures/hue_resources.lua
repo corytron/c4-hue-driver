@@ -11,6 +11,18 @@
 --   Garage White       LWA001  dimmable only, off, zigbee connectivity_issue
 -- The light list is deliberately not in name order. Ids are made up but
 -- UUID-shaped; the bridge id is the documentation example 001788fffe25b8f8.
+--
+-- Groups (F.room, F.zone, F.bridge_home); the key sets, child and service
+-- rtypes follow the bodies recorded from the house bridge [verified:
+-- hardware 2026-10-21, GET /room, /zone, /bridge_home], the data is this
+-- small bridge's own:
+--   Living Room   room   /groups/2  devices: Living Room Lamp, Hallway Ambiance
+--   Garage        room   /groups/1  devices: Garage White
+--   Downstairs    zone   /groups/3  lights: Living Room Lamp, Garage White
+--   Attic         zone   /groups/4  empty: no children, no services
+--   bridge_home          /groups/0  both rooms, plus the room-less devices:
+--                                   Kitchen Strip and the bridge itself
+-- Kitchen Strip is deliberately in no room and no zone.
 
 local F = {}
 
@@ -19,6 +31,32 @@ F.rids = {
 	kitchen = "7f3c9a2b-5e14-4d8f-b1a6-93c0e2d4f815",
 	hallway = "c48d1e6f-2a9b-4f3e-9c7d-8e5f1a2b3c03",
 	garage = "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c04",
+}
+
+-- Rooms, the zone and the bridge_home. The Garage's rids are the ones
+-- F.events.off already names as the owner of its grouped_light item.
+F.group_rids = {
+	living_room = "7d6c5b4a-0000-4000-8000-00000000r002",
+	garage = "7d6c5b4a-0000-4000-8000-00000000r001",
+	downstairs = "7d6c5b4a-0000-4000-8000-00000000z001",
+	attic = "7d6c5b4a-0000-4000-8000-00000000z003",
+	home = "7d6c5b4a-0000-4000-8000-00000000h000",
+}
+
+-- One grouped_light per group, same keys as F.group_rids; the empty zone
+-- has none [verified: hardware, an empty zone's services array is empty].
+F.grouped_light_rids = {
+	living_room = "8e7d6c5b-0000-4000-8000-00000000g002",
+	garage = "8e7d6c5b-0000-4000-8000-00000000g001",
+	downstairs = "8e7d6c5b-0000-4000-8000-00000000g003",
+	home = "8e7d6c5b-0000-4000-8000-00000000g000",
+}
+
+F.group_names = {
+	living_room = "Living Room",
+	garage = "Garage",
+	downstairs = "Downstairs",
+	attic = "Attic",
 }
 
 F.device_rids = {
@@ -51,7 +89,7 @@ local GAMUT_C = '"gamut":{"red":{"x":0.6915,"y":0.3083},"green":{"x":0.17,"y":0.
 
 F.light = [[{"errors":[],"data":[
 {"id":"]] .. F.rids.living .. [[","id_v1":"/lights/1",
- "owner":{"rid":"]] .. F.device_rids.living .. [[","rtype":"device"},
+ "owner":{"rid":"]] .. F.device_rids.living .. [[","rtype":"device"},"service_id":0,
  "metadata":{"name":"Living Room Lamp","archetype":"sultan_bulb","function":"mixed"},
  "identify":{},
  "on":{"on":true},
@@ -68,7 +106,7 @@ F.light = [[{"errors":[],"data":[
  "powerup":{"preset":"safety","configured":true,"on":{"mode":"on","on":{"on":true}},"dimming":{"mode":"dimming","dimming":{"brightness":100}},"color":{"mode":"color_temperature","color_temperature":{"mirek":366}}},
  "type":"light"},
 {"id":"]] .. F.rids.garage .. [[","id_v1":"/lights/4",
- "owner":{"rid":"]] .. F.device_rids.garage .. [[","rtype":"device"},
+ "owner":{"rid":"]] .. F.device_rids.garage .. [[","rtype":"device"},"service_id":0,
  "metadata":{"name":"Garage White","archetype":"classic_bulb","function":"functional"},
  "identify":{},
  "on":{"on":false},
@@ -82,7 +120,7 @@ F.light = [[{"errors":[],"data":[
  "powerup":{"preset":"safety","configured":true,"on":{"mode":"on","on":{"on":true}},"dimming":{"mode":"dimming","dimming":{"brightness":100}}},
  "type":"light"},
 {"id":"]] .. F.rids.kitchen .. [[","id_v1":"/lights/2",
- "owner":{"rid":"]] .. F.device_rids.kitchen .. [[","rtype":"device"},
+ "owner":{"rid":"]] .. F.device_rids.kitchen .. [[","rtype":"device"},"service_id":0,
  "metadata":{"name":"Kitchen Strip","archetype":"hue_lightstrip","function":"decorative"},
  "identify":{},
  "on":{"on":true},
@@ -99,7 +137,7 @@ F.light = [[{"errors":[],"data":[
  "powerup":{"preset":"last_on_state","configured":true,"on":{"mode":"on","on":{"on":true}},"dimming":{"mode":"previous"},"color":{"mode":"previous"}},
  "type":"light"},
 {"id":"]] .. F.rids.hallway .. [[","id_v1":"/lights/3",
- "owner":{"rid":"]] .. F.device_rids.hallway .. [[","rtype":"device"},
+ "owner":{"rid":"]] .. F.device_rids.hallway .. [[","rtype":"device"},"service_id":0,
  "metadata":{"name":"Hallway Ambiance","archetype":"ceiling_round","function":"functional"},
  "identify":{},
  "on":{"on":true},
@@ -160,6 +198,70 @@ F.zigbee_connectivity = '{"errors":[],"data":['
 	.. zigbee("garage", "connectivity_issue", "00:17:88:01:0b:12:34:04-0b")
 	.. ']}'
 
+-- Groups [verified: hardware 2026-10-21 for every key and rtype below]. A
+-- room item has id, id_v1, children (rtype device), services (one
+-- grouped_light), metadata {name, archetype} and a geometry block the
+-- driver ignores; a zone is the same without geometry and with light
+-- children; bridge_home has no metadata, its children mix the devices in no
+-- room (listed first, including the bridge's own device on this dataset
+-- [assumed: which room-less devices the house bridge lists was not
+-- resolved]) and the rooms; id_v1 /groups/0. An empty zone has `children`
+-- and `services` both []. The room list is not in name order and children
+-- are not sorted.
+
+local function child(rid, rtype)
+	return '{"rid":"' .. rid .. '","rtype":"' .. rtype .. '"}'
+end
+
+-- The per-device placement block rooms carry (all zeros on the house
+-- bridge); one object per child.
+local function geometry(children)
+	local objects = {}
+	for i, ref in ipairs(children) do
+		objects[i] = '{"reference":' .. ref .. ',"transform":{"position":{"x":0.0,"y":0.0,"z":0.0},'
+			.. '"rotation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}}}'
+	end
+	return '"geometry":{"objects":[' .. table.concat(objects, ",") .. ']},'
+end
+
+local function group(key, gtype, id_v1, archetype, children)
+	local text = '{"id":"' .. F.group_rids[key] .. '","id_v1":"' .. id_v1 .. '",'
+		.. '"children":[' .. table.concat(children, ",") .. '],'
+	if F.grouped_light_rids[key] then
+		text = text .. '"services":[' .. child(F.grouped_light_rids[key], "grouped_light") .. '],'
+	else
+		text = text .. '"services":[],'
+	end
+	if archetype then
+		text = text .. '"metadata":{"name":"' .. F.group_names[key] .. '","archetype":"' .. archetype .. '"},'
+	end
+	if gtype == "room" then
+		text = text .. geometry(children)
+	end
+	return text .. '"type":"' .. gtype .. '"}'
+end
+
+F.room = '{"errors":[],"data":['
+	.. group("living_room", "room", "/groups/2", "living_room",
+		{ child(F.device_rids.hallway, "device"), child(F.device_rids.living, "device") }) .. ','
+	.. group("garage", "room", "/groups/1", "garage", { child(F.device_rids.garage, "device") })
+	.. ']}'
+
+F.zone = '{"errors":[],"data":['
+	.. group("downstairs", "zone", "/groups/3", "downstairs",
+		{ child(F.rids.garage, "light"), child(F.rids.living, "light") }) .. ','
+	.. group("attic", "zone", "/groups/4", "attic", {})
+	.. ']}'
+
+F.bridge_home = '{"errors":[],"data":['
+	.. group("home", "bridge_home", "/groups/0", nil, {
+		child(F.device_rids.kitchen, "device"),
+		child(F.device_rids.bridge, "device"),
+		child(F.group_rids.living_room, "room"),
+		child(F.group_rids.garage, "room"),
+	})
+	.. ']}'
+
 -- A failed authenticated GET, as the bridge answers a revoked key.
 F.unauthorized = '{"errors":[{"description":"unauthorized user"}],"data":[]}'
 
@@ -207,5 +309,37 @@ F.events.add = '[{"creationtime":"2026-10-21T18:09:00Z","id":"9de116fc-0007-4a2b
 	.. '"data":[{"id":"ffffffff-0000-4000-8000-00000000new1","id_v1":"/lights/5","owner":{"rid":"ffffffff-0000-4000-8000-00000000dev5",'
 	.. '"rtype":"device"},"metadata":{"name":"New Bulb","archetype":"classic_bulb"},"on":{"on":true},'
 	.. '"dimming":{"brightness":100.0,"min_dim_level":2.0},"type":"light"}]}]'
+
+-- Group events [assumed: an update carries the whole children array, both
+-- rooms of a move share one container, items carry id_v1; delete items are
+-- bare id + type (docs/edge-cases-hue.md §2, §5)].
+
+-- Hallway Ambiance's device moved from Living Room to Garage in the Hue app.
+F.events.room_move = '[{"creationtime":"2026-10-21T18:10:00Z","id":"9de116fc-0008-4a2b-8c3d-000000000008","type":"update",'
+	.. '"data":[{"id":"' .. F.group_rids.living_room .. '","id_v1":"/groups/2","children":['
+	.. child(F.device_rids.living, "device") .. '],"type":"room"},'
+	.. '{"id":"' .. F.group_rids.garage .. '","id_v1":"/groups/1","children":['
+	.. child(F.device_rids.garage, "device") .. ',' .. child(F.device_rids.hallway, "device") .. '],"type":"room"}]}]'
+
+-- Living Room renamed to Lounge.
+F.events.room_rename = '[{"creationtime":"2026-10-21T18:11:00Z","id":"9de116fc-0009-4a2b-8c3d-000000000009","type":"update",'
+	.. '"data":[{"id":"' .. F.group_rids.living_room .. '","id_v1":"/groups/2","metadata":{"name":"Lounge"},"type":"room"}]}]'
+
+-- A new zone "Upstairs" holding Hallway Ambiance, with its grouped_light,
+-- in one add container.
+F.new_zone_rid = "7d6c5b4a-0000-4000-8000-00000000z002"
+F.new_zone_grouped_light_rid = "8e7d6c5b-0000-4000-8000-00000000g005"
+F.events.zone_add = '[{"creationtime":"2026-10-21T18:12:00Z","id":"9de116fc-000a-4a2b-8c3d-00000000000a","type":"add",'
+	.. '"data":[{"id":"' .. F.new_zone_grouped_light_rid .. '","id_v1":"/groups/5","owner":{"rid":"' .. F.new_zone_rid
+	.. '","rtype":"zone"},"on":{"on":true},"dimming":{"brightness":40.16},"alert":{"action_values":["breathe"]},'
+	.. '"signaling":{"signal_values":["no_signal","on_off"]},"type":"grouped_light"},'
+	.. '{"id":"' .. F.new_zone_rid .. '","id_v1":"/groups/5","children":[' .. child(F.rids.hallway, "light") .. '],'
+	.. '"services":[' .. child(F.new_zone_grouped_light_rid, "grouped_light") .. '],'
+	.. '"metadata":{"name":"Upstairs","archetype":"upstairs"},"type":"zone"}]}]'
+
+-- The same zone deleted again: bare identifiers only.
+F.events.zone_delete = '[{"creationtime":"2026-10-21T18:13:00Z","id":"9de116fc-000b-4a2b-8c3d-00000000000b","type":"delete",'
+	.. '"data":[{"id":"' .. F.new_zone_grouped_light_rid .. '","type":"grouped_light"},'
+	.. '{"id":"' .. F.new_zone_rid .. '","type":"zone"}]}]'
 
 return F
