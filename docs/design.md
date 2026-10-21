@@ -432,6 +432,16 @@ loop on OS 3.4.2:
   before `Add Scene` can create one; that and the switch round trip are the
   Composer checklist's section H.
 
+### Stream address rotation: verified on hardware (2026-10-21, branch `stream-rotate`)
+
+With the stream rotating over 7 spellings of the bridge address (PR #6):
+a fresh load on spelling 1, the one the previous instance's cancelled
+transfer still occupied, waited more than 40 s as before; the next two
+reloads picked spellings 2 and 3 and connected **200 ms and 160 ms** after
+the attempt, resync included within a second. The rotation index survives
+a reload, so reconnects after a driver update or a watchdog restart no
+longer queue behind the zombie.
+
 ### import-ui: verified on hardware (2026-10-21, dev loop)
 
 - Resync = six serial GETs (`light`, `device`, `zigbee_connectivity`,
@@ -472,6 +482,35 @@ loop on OS 3.4.2:
   `Set Room Mapping` says "Not mapped: Hue room … is not on the bridge
   (connect the event stream and try again)" — the groups come with the
   first resync or import.
+
+### Composer Pro 3.4.2 UI: verified through the Windows session (2026-10-21)
+
+Observed by the Claude Code session on the Windows VM (`docs/composer-remote.md`
+on branch `composer-remote`) with UI Automation, nothing changed in the
+project:
+
+- **CUSTOM_SELECT action parameters render.** An action with params opens
+  a modal "Action Parameter List" dialog: one row per parameter (label,
+  read-only value, a "…" button) plus OK/Cancel; "…" opens a "Select"
+  dialog holding a plain list (SysListView32) of exactly the strings the
+  driver's list function returned — arrows (→), parentheses and the "…" in
+  "#46 (e0e51794…)" all intact. OK stays disabled until an item is chosen.
+  `Add Light` showed "(every light on the bridge is imported)" and the 16
+  rooms as "First Floor / Kitchen", "Second / Office", "Attic / Room" …;
+  `Set Room Mapping` listed the 23 Hue rooms and zones with their mappings;
+  `Forget Light` the 47 devices as "Bar Bottom #80 (device 1036)".
+- **The Actions tab lists actions in the reverse of their `driver.xml`
+  order** (Forget Pairing at the top, Pair Bridge at the bottom), so every
+  action now carries `<sort_order>` (3.3.0+).
+- Properties pages read verbatim: the light's `Status` "Left Bedside Light
+  (Hue color lamp)", `Hue Light ID` "#46 (e0e51794…)", `Hue Room` "Master
+  Bedroom", `Online` "Online"; the bridge's 2.7 KB `Last Action` text in
+  full. A `Room Audit` click from Composer reached the driver (log 17:02:36)
+  and rewrote the same text.
+- Composer's controls are UIA `Pane`s with meaningful `Name`/`ClassName`
+  but no patterns: reading works through UIA, clicking through `SendInput`
+  at the reported rectangles; pickers and the System Design tree are
+  `SysListView32` controls read cross-process (`LVM_GETITEMTEXT`).
 
 ## Discovery
 

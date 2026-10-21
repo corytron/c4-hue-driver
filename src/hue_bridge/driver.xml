@@ -144,6 +144,7 @@
 			<action>
 				<name>Pair Bridge</name>
 				<command>Pair Bridge</command>
+				<sort_order>1</sort_order>
 				<params/>
 			</action>
 			<!-- Pickers are CUSTOM_SELECT lists built on demand by the named Lua
@@ -152,6 +153,7 @@
 			<action>
 				<name>Add Light</name>
 				<command>Add Light</command>
+				<sort_order>2</sort_order>
 				<params>
 					<param>
 						<name>Light</name>
@@ -166,11 +168,13 @@
 			<action>
 				<name>Import All New Lights</name>
 				<command>Import All New Lights</command>
+				<sort_order>3</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Re-link Device To Light</name>
 				<command>Re-link Device To Light</command>
+				<sort_order>4</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -185,11 +189,13 @@
 			<action>
 				<name>Link Devices</name>
 				<command>Link Devices</command>
+				<sort_order>5</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Forget Light</name>
 				<command>Forget Light</command>
+				<sort_order>6</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -200,16 +206,19 @@
 			<action>
 				<name>Adopt Hue Names</name>
 				<command>Adopt Hue Names</command>
+				<sort_order>7</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Accept Names As They Are</name>
 				<command>Accept Names As They Are</command>
+				<sort_order>8</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Set Room Mapping</name>
 				<command>Set Room Mapping</command>
+				<sort_order>9</sort_order>
 				<params>
 					<param>
 						<name>Hue Room</name>
@@ -224,11 +233,13 @@
 			<action>
 				<name>Map Rooms By Name</name>
 				<command>Map Rooms By Name</command>
+				<sort_order>10</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Room Audit</name>
 				<command>Room Audit</command>
+				<sort_order>11</sort_order>
 				<params/>
 			</action>
 			<!-- Scenes (docs/scenes-design.md §5): one light_v2 switch per Hue
@@ -236,6 +247,7 @@
 			<action>
 				<name>Add Scene</name>
 				<command>Add Scene</command>
+				<sort_order>12</sort_order>
 				<params>
 					<param>
 						<name>Scene</name>
@@ -250,6 +262,7 @@
 			<action>
 				<name>Add All Scenes Of Room</name>
 				<command>Add All Scenes Of Room</command>
+				<sort_order>13</sort_order>
 				<params>
 					<param>
 						<name>Hue Room</name>
@@ -260,6 +273,7 @@
 			<action>
 				<name>Re-link Scene</name>
 				<command>Re-link Scene</command>
+				<sort_order>14</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -274,6 +288,7 @@
 			<action>
 				<name>Forget Scene</name>
 				<command>Forget Scene</command>
+				<sort_order>15</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -284,26 +299,31 @@
 			<action>
 				<name>Refresh Scenes</name>
 				<command>Refresh Scenes</command>
+				<sort_order>16</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Test Connection</name>
 				<command>Test Connection</command>
+				<sort_order>17</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Connect Event Stream</name>
 				<command>Connect Event Stream</command>
+				<sort_order>18</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Disconnect Event Stream</name>
 				<command>Disconnect Event Stream</command>
+				<sort_order>19</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Connection Test</name>
 				<command>Connection Test</command>
+				<sort_order>20</sort_order>
 				<params>
 					<param>
 						<name>Target</name>
@@ -318,16 +338,19 @@
 			<action>
 				<name>Reload Credentials</name>
 				<command>Reload Credentials</command>
+				<sort_order>21</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Check CA Pinning</name>
 				<command>Check CA Pinning</command>
+				<sort_order>22</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
+				<sort_order>23</sort_order>
 				<params/>
 			</action>
 		</actions>
