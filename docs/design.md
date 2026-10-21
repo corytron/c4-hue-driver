@@ -339,8 +339,18 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   debounce) → the bridge's own event 110 ms after that → lamp at 30.04 %.
   `RAMP_TO_LEVEL 60 TIME 1000` and `OFF` behaved the same.
   `SET_BRIGHTNESS_TARGET` sent to the proxy with `SendToDevice` did nothing
-  while `ON`/`OFF`/`SET_LEVEL`/`RAMP_TO_LEVEL` worked **[verified]**; the
-  Navigator slider path is still to be observed by hand.
+  while `ON`/`OFF`/`SET_LEVEL`/`RAMP_TO_LEVEL` worked **[verified]**.
+- Navigator slider: a move arrives as `SET_BRIGHTNESS_TARGET`
+  { `LIGHT_BRIGHTNESS_TARGET` = 20, `RATE` = 0 } **[verified]**. The lamp
+  went to 20 %, but the bridge then reported `brightness` 20.16 and a
+  `LIGHT_BRIGHTNESS_CHANGED` carrying that decimal left the proxy at
+  0 %/off (the UI "returned to 0"); 100 and 0 worked, and whether the
+  integer fallback or the decimal event reported first made it look
+  intermittent. The proxy-protocol reference types the parameter as a
+  double, so this is observed behaviour, not documented. The light driver
+  now reports whole percents (never 0 while on); with that, the lamp Hue
+  reported at 20.16 read 20 % and slider moves to 25, 60, 100 and off all
+  stuck **[verified on hardware, 2026-10-21]**.
 - The light's `light_v2` proxy is a bound *consumer* of the protocol
   driver's binding 5001: `GetBoundConsumerDevices(protocolId, 5001)` finds
   it; `GetBoundProviderDevice` returns the protocol driver itself.

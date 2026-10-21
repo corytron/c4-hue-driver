@@ -158,6 +158,10 @@ end
 
 -- LIGHT_BRIGHTNESS_CURRENT, or nil while the bridge has not reported yet.
 -- Off is 0; on without a dimming value (a plug, an undimmable bulb) is 100.
+-- Always a whole percent: Hue reports its Zigbee level as a decimal (a
+-- requested 20 comes back as 20.16), and the proxy showed such a value as
+-- 0 %/off while the lamp was on. Never 0 while on, so Hue's lowest level
+-- (min_dim_level, below 0.5 on some bulbs) does not read as off either.
 function state.to_proxy_brightness(st)
 	if st.on == nil then
 		return nil
@@ -165,7 +169,7 @@ function state.to_proxy_brightness(st)
 	if not st.on then
 		return 0
 	end
-	return st.brightness or 100
+	return clamp(round(st.brightness or 100), 1, 100)
 end
 
 -- x, y, mode for LIGHT_COLOR_*; nil while no colour is known. In "ct" mode
