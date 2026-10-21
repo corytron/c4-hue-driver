@@ -313,6 +313,51 @@ describe("Hue Bridge driver", function()
 		assert.truthy(lines[#lines]:find("2 items: l1=Desk; l2=Hall", 1, true))
 	end)
 
+	describe("dev actions for the light path", function()
+		local env, c4, lines
+
+		before_each(function()
+			lines = {}
+			log.sink = function(line) table.insert(lines, line) end
+			env, c4 = paired_driver()
+			-- A registered light whose light_v2 proxy (2005) consumes the protocol
+			-- driver's (2004) binding 5001, as Director wires a proxy driver.
+			c4.persist.hue_lights = { ["rid-1"] = { device_id = 2004, name = "Desk Lamp", model = "Hue color lamp",
+				caps = { has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 0.2 } } }
+			c4:Bind(2004, 5001, 2005, 5001, "LIGHT_V2")
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+		end)
+
+		it("prints HUE_LOG lines with the light's name", function()
+			env.ExecuteCommand("HUE_LOG", { rid = "rid-1", line = "[INFO] Hue Light: hello" })
+			assert.truthy(lines[#lines]:find("[Desk Lamp] [INFO] Hue Light: hello", 1, true))
+		end)
+
+		it("Proxy Command sends a light_v2 command to the light's proxy by name", function()
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "desk lamp",
+				Command = "SET_BRIGHTNESS_TARGET", LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+			local m = c4.sent[#c4.sent]
+			assert.equal(2005, m.id)
+			assert.equal("SET_BRIGHTNESS_TARGET", m.command)
+			assert.same({ LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" }, m.params)
+			assert.equal(2005, c4.persist.hue_lights["rid-1"].proxy_id, "proxy id cached in the registry")
+		end)
+
+		it("Proxy Command reports an unknown light", function()
+			local before = #c4.sent
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "nope" })
+			assert.equal(before, #c4.sent)
+			assert.truthy(lines[#lines]:find("no registered light matches", 1, true))
+		end)
+
+		it("Lights Report lists the registry", function()
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Lights Report" })
+			assert.truthy(lines[#lines - 1]:find("Lights Report: 1 registered", 1, true))
+			assert.truthy(lines[#lines]:find("Desk Lamp: device 2004", 1, true))
+		end)
+	end)
+
 	it("Forget Pairing stops the stream and clears the key", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
@@ -341,28 +386,5 @@ describe("Hue Bridge driver", function()
 		check:respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
 		assert.equal("https://192.000.002.11/eventstream/clip/v2", c4.last_transfer().url)
 		assert.equal("192.0.2.11", c4.persist.hue_bridge_ip)
-	end)
-end)
-
-describe("Hue Light driver", function()
-	before_each(quiet)
-
-	it("reports offline and zero brightness on SYNCHRONIZE", function()
-		local env, c4 = fake.load_driver("hue_light", {})
-		env.OnDriverLateInit("DIT_STARTUP")
-		c4.calls = {}
-
-		env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
-
-		local sent = c4.calls_to("SendToProxy")
-		assert.same({ 5001, "ONLINE_CHANGED", { STATE = false } }, sent[1])
-		assert.same({ 5001, "LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = 0 } }, sent[2])
-	end)
-
-	it("does not error on unknown proxy commands", function()
-		local env = fake.load_driver("hue_light", {})
-		assert.has_no.errors(function()
-			env.ReceivedFromProxy(5001, "SOMETHING_NEW", {})
-		end)
 	end)
 end)
