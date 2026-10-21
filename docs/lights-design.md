@@ -44,6 +44,13 @@ Light → bridge:
 `ExecuteCommand` does not tell the receiver who sent a message, so `rid` is
 in every message and the bridge maps rid → deviceId through its registry.
 
+`C4:SendToDevice(id, command, params, allowEmptyValues, logCommand)`
+[verified: API 32/_19]: empty-string values are dropped unless the 4th
+argument is true, so receivers treat a missing `rid` as "unknown" (the
+light sends `HUE_HELLO` without `rid` when it has none); and every call is
+written to Director's log unless the 5th argument is false, so `DEV_RELOAD`
+passes `false` there (its `files` param is tens of kilobytes).
+
 ## Bridge: model, registry, import (`bridge/hue_model.lua`, `bridge/lights.lua`)
 
 Normalised light (`hue_model.light(resource)` from one `/clip/v2/resource/light`
@@ -64,8 +71,12 @@ light_rids, zigbee_rid } from `/clip/v2/resource/device`;
 `{ rid, device_rid, online }` (`status == "connected"`).
 
 Registry, persisted with `C4:PersistSetValue("hue_lights", table)` (tables
-allowed) [verified: API 26.5]: `{ [rid] = { device_id = N, name = "..." } }`,
-loaded at late init, written on every change.
+allowed) [verified: API 26.5]: `{ [rid] = { device_id = N, name = "...",
+model = "...", caps = { has_color, has_cct, mirek_min, mirek_max, min_dim }
+} }`, loaded at late init, written on every change. `caps` is what
+`HUE_CONFIGURE` and the command queue's limits need, so both work at bridge
+startup before any GET has completed; the resync refreshes it.
+`model` is `product_data.product_name` (falling back to `model_id`).
 
 Import (`lights.import(http_ctx, report)`), run from the **Import Lights**
 action, serially:
@@ -73,15 +84,23 @@ action, serially:
 2. For each light whose rid is not in the registry: `C4:AddDevice(
    "hue_light.c4z", roomId, name, callback)` with the bridge's room
    (`C4:RoomGetId()`), **one at a time** (next AddDevice from the callback;
-   47 at once is the risk); on callback `C4:Bind(bridgeId, 1, deviceId, 1,
-   "HUE_BRIDGE")`, registry entry, `HUE_CONFIGURE`, full `HUE_STATE`
-   (reason "resync").
+   47 at once is the risk). The callback is `(deviceId, tDeviceInfo)`;
+   `deviceId` is 0 on failure (log and continue), and for a driver with a
+   proxy `tDeviceInfo` carries the proxy and protocol ids [verified: API
+   9/_0.1] in a shape the docs don't spell out, so the first callback's
+   `tDeviceInfo` is logged in full and the protocol id is taken from it when
+   present [assumed until seen on hardware]. Then `C4:Bind(bridgeId, 1,
+   protocolId, 1, "HUE_BRIDGE")`, registry entry, `HUE_CONFIGURE`, full
+   `HUE_STATE` (reason "resync").
 3. Lights already registered: send `HUE_CONFIGURE` + state again (cheap,
    fixes a light that lost its persisted rid). Names are not renamed in
    Composer; a changed Hue name is logged.
 4. Lights in the registry but gone from the bridge: logged, left alone.
 5. `report(text)` after each step; the driver puts it in the `Lights`
-   property ("12 lights on bridge, 12 imported, 0 new").
+   property: "Importing: fetching lights", "Importing: added <name> (k of
+   n)", and finally "<on bridge> lights on bridge, <registry size> imported,
+   <created this run> new"; before any import it shows "<registry size>
+   imported".
 
 State fan-out (`lights.on_container(container)`): for each item of type
 `light` with a registered rid, `HUE_STATE` with the changed fields;
@@ -122,8 +141,12 @@ light.
 Modules under `src/hue_light/light/`: `state.lua` (cached Hue state, the
 mapping both ways), `caps.lua` (capability notify), plus `driver.lua`.
 Properties in `driver.xml`: `Hue Light ID`, `Hue Name`, `Model`, `Online`
-(read-only) alongside the existing ones. Persist `rid` with
-`C4:PersistSetValue("hue_rid", rid)`.
+("Online"/"Offline"/"" when unknown; read-only) alongside the existing
+ones. `Status` reads "Not bound to a Hue Bridge", then "Bound; waiting for
+the bridge", then "<Hue name> (<model>)" once configured. Persist `rid`
+with `C4:PersistSetValue("hue_rid", rid)`. `C4:GetBoundProviderDevice` is
+documented once as returning a table and once as a number [verified: API
+32/_4 vs the idc_client sample]; accept both.
 
 Proxy → bridge (`ReceivedFromProxy`, binding 5001):
 - `SET_BRIGHTNESS_TARGET` { `LIGHT_BRIGHTNESS_TARGET`, `RATE` }
