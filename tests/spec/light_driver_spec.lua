@@ -62,6 +62,40 @@ local function last_sent(c4)
 	return c4.sent[#c4.sent]
 end
 
+-- Every SendToDevice with that command, in order.
+local function messages(c4, command)
+	local out = {}
+	for _, m in ipairs(c4.sent) do
+		if m.command == command then out[#out + 1] = m end
+	end
+	return out
+end
+
+-- The fake records three SendToDevice arguments; this keeps all five, as
+-- { id, command, params, allow_empty, log_command }, from now on.
+local function capture_sends(c4)
+	local out = {}
+	local original = c4.SendToDevice
+	c4.SendToDevice = function(self, id, command, params, allow_empty, log_command)
+		out[#out + 1] = { id = id, command = command, params = params,
+			allow_empty = allow_empty, log_command = log_command }
+		return original(self, id, command, params, allow_empty, log_command)
+	end
+	return out
+end
+
+-- Run `body` with devloop.apply_forwarded replaced by `stub`, on the instance
+-- the driver loaded (fake.load_driver reloads common.* per driver, so this
+-- must run after the driver is up).
+local function with_apply_forwarded(stub, body)
+	local devloop = require("common.devloop")
+	local original = devloop.apply_forwarded
+	devloop.apply_forwarded = stub
+	local ok, err = pcall(body)
+	devloop.apply_forwarded = original
+	assert(ok, err)
+end
+
 describe("Hue Light driver", function()
 	before_each(quiet)
 
@@ -379,7 +413,7 @@ describe("Hue Light driver", function()
 
 			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35",
 				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
-			assert.equal(0, #c4.sent, "nothing goes to the bridge while off")
+			assert.equal(0, #messages(c4, "HUE_SET"), "nothing goes to the bridge while off")
 			assert.equal(0, #c4.active_timers())
 			assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGING"))
 			assert.same({ { LIGHT_COLOR_CURRENT_X = 0.4, LIGHT_COLOR_CURRENT_Y = 0.35, LIGHT_COLOR_CURRENT_COLOR_MODE = 0 } },
@@ -422,16 +456,138 @@ describe("Hue Light driver", function()
 	describe("DEV_RELOAD", function()
 		it("hands the bundle to the dev loop when the build has one with apply_forwarded", function()
 			local env = lit_light()
-			-- The instance the driver loaded (fake.load_driver reloads common.* per driver).
-			local devloop = require("common.devloop")
 			local got
-			local original = devloop.apply_forwarded
-			devloop.apply_forwarded = function(params) got = params end
-			local ok, err = pcall(function()
+			with_apply_forwarded(function(params) got = params end, function()
 				env.ExecuteCommand("DEV_RELOAD", { version = "7", files = "{}" })
 				assert.same({ version = "7", files = "{}" }, got)
 			end)
-			devloop.apply_forwarded = original
+		end)
+
+		it("logs the new version at info after a successful reload, forwarded to the bridge", function()
+			local env, c4 = load_light({ rid = "l1", props = { ["Debug Mode"] = "On" } })
+			c4.sent = {}
+			with_apply_forwarded(function() return true end, function()
+				env.ExecuteCommand("DEV_RELOAD", { version = "7", files = "{}" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_LOG",
+					params = { rid = "l1", line = "Hue Light: light reloaded to version 7" } } }, c4.sent)
+			end)
+		end)
+
+		it("warns, forwarded, when the reload fails", function()
+			local env, c4 = lit_light()
+			with_apply_forwarded(function() return false end, function()
+				env.ExecuteCommand("DEV_RELOAD", { version = "8", files = "{}" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_LOG",
+					params = { rid = "l1", line = "[WARN] Hue Light: light reload failed; see this light's Lua output" } } },
+					c4.sent)
+			end)
+		end)
+	end)
+
+	-- Dev builds (common/devloop.lua is present here, as in the test tree)
+	-- forward the light's log lines to the bridge as HUE_LOG.
+	describe("dev log forwarding", function()
+		after_each(function() log.set_debug(false) end)
+
+		it("buffers lines logged before the bridge is known and flushes them after HUE_HELLO", function()
+			local env, c4 = load_light({ bind = false, rid = "l1", props = { ["Debug Mode"] = "On" } })
+			local sends = capture_sends(c4)
+			log.info("warming up")
+			assert.equal(0, #c4.sent, "nowhere to send yet")
+
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			assert.equal(2, #sends)
+			assert.equal("HUE_HELLO", sends[1].command)
+			assert.same({ id = BRIDGE_ID, command = "HUE_LOG",
+				params = { rid = "l1", line = "[INFO] Hue Light: warming up" },
+				allow_empty = false, log_command = false }, sends[2], "allowEmptyValues and logCommand off")
+		end)
+
+		it("keeps only the newest 30 lines while the bridge is unknown", function()
+			local env, c4 = load_light({ bind = false, rid = "l1", props = { ["Debug Mode"] = "On" } })
+			for i = 1, 35 do
+				log.info("line %d", i)
+			end
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			local logs = messages(c4, "HUE_LOG")
+			assert.equal(30, #logs)
+			assert.equal("[INFO] Hue Light: line 6", logs[1].params.line)
+			assert.equal("[INFO] Hue Light: line 35", logs[30].params.line)
+		end)
+
+		it("never forwards debug lines, buffered or bound", function()
+			local env, c4 = load_light({ bind = false, rid = "l1", props = { ["Debug Mode"] = "On" } })
+			log.debug("noise before binding")
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			log.debug("noise after binding")
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true" }) -- dispatch logs it at debug
+			assert.equal(0, #messages(c4, "HUE_LOG"))
+			assert.equal(1, #c4.sent, "just the HUE_HELLO")
+		end)
+
+		it("sends lines straight through once bound, log.always included", function()
+			local _, c4 = lit_light()
+			log.warn("something odd")
+			log.always("diagnostic")
+			assert.same({
+				{ id = BRIDGE_ID, command = "HUE_LOG", params = { rid = "l1", line = "[WARN] Hue Light: something odd" } },
+				{ id = BRIDGE_ID, command = "HUE_LOG", params = { rid = "l1", line = "Hue Light: diagnostic" } },
+			}, c4.sent)
+		end)
+
+		it("omits rid while the light has none", function()
+			local _, c4 = load_light()
+			c4.sent = {}
+			log.warn("no light yet")
+			assert.same({ { id = BRIDGE_ID, command = "HUE_LOG", params = { line = "[WARN] Hue Light: no light yet" } } },
+				c4.sent)
+		end)
+
+		it("still feeds the previous sink", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			lit_light()
+			log.warn("both places")
+			assert.same({ "[WARN] Hue Light: both places" }, lines)
+		end)
+
+		it("reports a failing HUE_LOG send once, through print, without forwarding the failure", function()
+			local printed = {}
+			local real_print = print
+			_G.print = function(...) printed[#printed + 1] = table.concat({ ... }, " ") end
+			local ok, err = pcall(function()
+				local _, c4 = lit_light()
+				local original = c4.SendToDevice
+				c4.SendToDevice = function(self, id, command, ...)
+					if command == "HUE_LOG" then error("Director says no") end
+					return original(self, id, command, ...)
+				end
+				log.warn("one")
+				log.warn("two")
+				assert.equal(0, #c4.sent)
+				assert.equal(1, #printed)
+				assert.truthy(printed[1]:find("log forwarding to the bridge failed", 1, true))
+				assert.truthy(printed[1]:find("Director says no", 1, true))
+			end)
+			_G.print = real_print
+			assert(ok, err)
+		end)
+
+		it("leaves log.sink alone in a release build (no dev loop module)", function()
+			local sink = function() end
+			log.sink = sink
+			-- A preload loader that fails the way a missing module does.
+			package.preload["common.devloop"] = function() error("module 'common.devloop' not found: release build") end
+			local ok, err = pcall(function()
+				local _, c4 = load_light({ rid = "l1" })
+				assert.equal(sink, log.sink)
+				log.warn("stays local")
+				assert.equal(0, #messages(c4, "HUE_LOG"))
+			end)
+			package.preload["common.devloop"] = nil
 			assert(ok, err)
 		end)
 	end)

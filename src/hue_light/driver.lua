@@ -30,6 +30,13 @@ local BRIDGE_BINDING = 1
 -- is reported as reached, so the UI never sticks in "changing".
 local FALLBACK_MS = 1000
 
+-- Prefix of every line this driver logs; the dev-build log forwarding below
+-- recognises its own lines by it.
+local LOG_PREFIX = "Hue Light"
+
+-- Lines logged before the bridge is known wait for hello(); only this many.
+local LOG_BUFFER = 30
+
 -- SET_COLOR_TARGET parameter names are [assumed] (the docs print them with
 -- spaces, one with a "CIE 1931" suffix); the first one received is logged
 -- in full so the dev loop can settle them. Each list is tried in order.
@@ -44,6 +51,70 @@ local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local fallback = {}          -- "brightness" / "color" -> armed C4LuaTimer
 local color_params_logged = false
+
+-- Dev log forwarding -------------------------------------------------------
+
+-- Dev builds: every line this driver logs, debug excepted, also goes to the
+-- bridge as HUE_LOG { rid, line }, so the dev loop shows the lights' output
+-- next to the bridge's own (docs/dev-loop.md). Release builds leave log.sink
+-- alone. Lines logged before the bridge is known wait, newest LOG_BUFFER
+-- kept, and go out from hello().
+local flush_log = function() end
+
+if devloop then
+	local previous_sink = log.sink
+	local original_print = print
+	local pending = {}
+	local send_failed = false
+
+	-- Only lines our own logger produced: "[LEVEL] Hue Light: ..." or, from
+	-- log.always, "Hue Light: ...". On the controller that is every line;
+	-- the test harness shares one common.log between drivers, where
+	-- forwarding another driver's output would echo back and forth.
+	local OWN_PLAIN = "^" .. LOG_PREFIX .. ": "
+	local OWN_LEVELED = "^%[%u+%] " .. LOG_PREFIX .. ": "
+	local function own_line(line)
+		return line:find(OWN_PLAIN) ~= nil or line:find(OWN_LEVELED) ~= nil
+	end
+
+	-- A failing send is said once per failure streak, through print alone,
+	-- so it cannot feed back into the forwarding.
+	local function send_log(line)
+		local ok, err = pcall(function()
+			C4:SendToDevice(bridge, "HUE_LOG", { rid = st.rid, line = line }, false, false)
+		end)
+		if ok then
+			send_failed = false
+		elseif not send_failed then
+			send_failed = true
+			original_print("[WARN] " .. LOG_PREFIX .. ": log forwarding to the bridge failed: " .. tostring(err))
+		end
+	end
+
+	log.sink = function(line)
+		previous_sink(line)
+		line = tostring(line)
+		if line:sub(1, 7) == "[DEBUG]" or not own_line(line) then
+			return
+		end
+		if bridge then
+			send_log(line)
+		else
+			pending[#pending + 1] = line
+			if #pending > LOG_BUFFER then
+				table.remove(pending, 1)
+			end
+		end
+	end
+
+	flush_log = function()
+		local lines = pending
+		pending = {}
+		for _, line in ipairs(lines) do
+			send_log(line)
+		end
+	end
+end
 
 local function prop(name, value)
 	C4:UpdateProperty(name, tostring(value == nil and "" or value))
@@ -226,6 +297,7 @@ local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
 		C4:SendToDevice(bridge, "HUE_HELLO", st.rid and { rid = st.rid } or {})
+		flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
 end
@@ -283,10 +355,17 @@ dispatch.commands["HUE_STATE"] = function(params)
 end
 
 dispatch.commands["DEV_RELOAD"] = function(params)
-	if devloop and devloop.apply_forwarded then
-		devloop.apply_forwarded(params)
+	if not (devloop and devloop.apply_forwarded) then
+		return log.warn("DEV_RELOAD ignored: no dev loop in this build")
+	end
+	-- On success the new code is already running; this handler, its log
+	-- module and its bridge id are the old instance's, still good for one
+	-- more line. The failure detail went through devloop's own print, which
+	-- is not forwarded.
+	if devloop.apply_forwarded(params) then
+		log.always("light reloaded to version %s", tostring(params.version))
 	else
-		log.warn("DEV_RELOAD ignored: no dev loop in this build")
+		log.warn("light reload failed; see this light's Lua output")
 	end
 end
 
@@ -339,7 +418,7 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVE
 
 -- Lifecycle ----------------------------------------------------------------
 
-log.set_prefix("Hue Light")
+log.set_prefix(LOG_PREFIX)
 dispatch.install(_G)
 
 function OnDriverInit()
