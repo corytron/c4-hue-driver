@@ -276,6 +276,17 @@ class State:
 # HTTP handling
 # ---------------------------------------------------------------------------
 
+def as_list(value):
+    """Accept a JSON list, or the object Director's C4:JsonEncode produces for
+    a Lua array ({"1": ..., "2": ...}, string keys, unordered): return a list
+    in key order. Anything else is returned unchanged for the caller to reject."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict) and value and all(k.isdigit() for k in value):
+        return [value[k] for k in sorted(value, key=int)]
+    return value
+
+
 def validate_command(body):
     """Check a /admin/enqueue body; return (command, None) or (None, error)."""
     if not isinstance(body, dict):
@@ -403,6 +414,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_bad_request(self, message):
         self.close_connection = True   # the body may not have been consumed
+        raw = getattr(self, "_raw_body", b"")
+        snippet = raw[:300].decode("utf-8", "replace")
+        log("BAD   %s:%d  %s %s: %s body=%r" % (self.client_address[0], self.client_address[1],
+                                                 self.command, self.path, message, snippet))
         self.send_json({"error": message}, 400)
 
     def read_json_body(self):
@@ -415,6 +430,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return None, "bad Content-Length"
         raw = self.rfile.read(n) if n > 0 else b""
+        self._raw_body = raw   # kept so a rejection can be logged with context
         if not raw:
             return None, "empty body"
         try:
@@ -464,6 +480,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def post_log(self, query):
         body, err = self.read_json_body()
+        if err is None and isinstance(body, dict):
+            body["lines"] = as_list(body.get("lines"))
         if err is None and not (isinstance(body, dict) and isinstance(body.get("lines"), list)):
             err = "expected {\"version\": ..., \"lines\": [...]}"
         if err:
@@ -590,6 +608,10 @@ def main():
     parser.add_argument("--cert-dir", default=None, help="where the self-signed certificate lives (default <root>/build/diag)")
     parser.add_argument("--state-dir", default=None, help="where driver.log etc. are written (default <root>/build/dev)")
     parser.add_argument("--quiet", action="store_true", help="no connection/request lines for the plain listener, no heartbeat summaries")
+    parser.add_argument("--alpn", default="http/1.1",
+                        help="comma-separated ALPN protocols the TLS listener offers (default http/1.1). "
+                             "Offer 'h2,http/1.1' to learn whether a client asks for HTTP/2: the server "
+                             "cannot speak h2, so such a connection fails, but its OPEN line shows alpn=h2.")
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)
@@ -606,7 +628,7 @@ def main():
         sys.exit("could not create a certificate in %s: %s" % (cert_dir, exc))
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
-    ctx.set_alpn_protocols(["http/1.1"])
+    ctx.set_alpn_protocols([p.strip() for p in args.alpn.split(",") if p.strip()])
 
     plain = DevServer((args.bind, args.port), tree, state, quiet=args.quiet)
     tls = DevServer((args.bind, args.tls_port), tree, state, tls_context=ctx, quiet=args.quiet)
