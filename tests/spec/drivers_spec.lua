@@ -132,6 +132,18 @@ describe("Hue Bridge driver", function()
 		assert.truthy(env.Properties["Status"]:find("key rejected", 1, true))
 	end)
 
+	it("Test Connection can target an alternative spelling of the bridge address", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection", Host = "3221225994" })
+		local t = c4.last_transfer()
+		assert.equal("https://3221225994/clip/v2/resource/bridge", t.url)
+		assert.equal("abc123", t.headers["hue-application-key"])
+		t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
+		assert.truthy(env.Properties["Status"]:find("^Test OK: HTTP 200 via 3221225994"))
+	end)
+
 	it("Test Connection reports a bridge ID mismatch", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")

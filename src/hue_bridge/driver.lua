@@ -187,13 +187,25 @@ dispatch.commands["Pair_Bridge"] = function()
 	})
 end
 
-dispatch.commands["Test_Connection"] = function()
+-- Optional param Host: an alternative spelling of the bridge address (for
+-- example its decimal form) to probe whether Director's per-host transfer
+-- queue keys on the host string. Dev use only; the TLS check ignores the
+-- host name for the bridge anyway.
+dispatch.commands["Test_Connection"] = function(params)
 	if not connection() then
 		prop("Status", "Not paired")
 		return
 	end
-	prop("Status", "Testing: GET /clip/v2/resource/bridge")
-	http.request({ ip = state.ip, key = state.creds.key, path = "/clip/v2/resource/bridge" }, function(r)
+	local host = state.ip
+	if params and params.Host and params.Host ~= "" then
+		host = params.Host
+		log.always("Test Connection via host %s instead of %s", host, state.ip)
+	end
+	prop("Status", "Testing: GET /clip/v2/resource/bridge via " .. host)
+	local started = os.time()
+	http.request({ ip = host, key = state.creds.key, path = "/clip/v2/resource/bridge" }, function(r)
+		local secs = os.time() - started
+		log.always("Test Connection via %s: %s after %d s", host, r.ok and "OK" or tostring(r.err), secs)
 		if not r.ok then
 			if r.code == 401 or r.code == 403 then
 				prop("Status", "Test failed: key rejected (HTTP " .. r.code .. "). Re-pair with Pair Bridge")
@@ -211,7 +223,8 @@ dispatch.commands["Test_Connection"] = function()
 				reported, state.creds.bridge_id))
 			return
 		end
-		prop("Status", "Test OK: HTTP 200, bridge " .. tostring(reported or state.creds.bridge_id))
+		prop("Status", string.format("Test OK: HTTP 200 via %s in %d s, bridge %s", host, secs,
+			tostring(reported or state.creds.bridge_id)))
 	end)
 end
 
