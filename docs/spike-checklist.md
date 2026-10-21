@@ -105,3 +105,6 @@ Steps 1–9 and 15 are answered, most of them through the dev loop rather
 than by hand; see `docs/design.md` for the findings and the chosen stream
 design (option A). Still open: the hour-long soak (13) and the Director
 restart (12), which also checks that the encrypted key survives a reboot.
+
+The lights work has its own checklist, `docs/composer-checklist.md`, whose
+section F carries steps 12–13 of this spike, which remain open.

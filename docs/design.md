@@ -228,6 +228,104 @@ reconnect too, so a day of reloads can queue several zombies; bridge
 events drain them one per event (the `Hue Request` dev action can generate
 harmless events by renaming a light back and forth).
 
+## Lights
+
+How Hue lights become light_v2 devices and how state and commands move
+between the two drivers. The full contract (every parameter, the module
+layout, the test harness) is `docs/lights-design.md`; this is the summary.
+
+- **Roles.** The bridge driver is the only HTTPS speaker: it imports lights,
+  keeps the registry, fans state out, and coalesces and sends commands. The
+  light driver (one instance per Hue light) talks only to its bridge with
+  `C4:SendToDevice` and to its proxy with `C4:SendToProxy(5001, …)`. The
+  bridge lists its lights with `C4:GetBoundConsumerDevices(C4:GetDeviceID(),
+  1)` (a table of id → name, or nil) and a light finds its bridge with
+  `C4:GetBoundProviderDevice(C4:GetDeviceID(), 1)` **[verified: API docs and
+  the idc_client sample]**. The ids are protocol-driver ids.
+- **Messages.** All through `C4:SendToDevice(id, command, params)`.
+  `ExecuteCommand` does not tell the receiver who sent a message, so every
+  message carries the Hue resource id `rid`, and the bridge maps rid → device
+  id through its registry. Every param value is a string and receivers
+  `tonumber()` what they need **[assumed]**. `SendToDevice` drops a parameter
+  whose value is the empty string unless its fourth argument
+  (`allowEmptyValues`) is true, and logs the command unless its fifth is
+  false **[verified: API docs]**.
+
+  | Direction | Command | Params | When |
+  | --- | --- | --- | --- |
+  | bridge → light | `HUE_CONFIGURE` | `rid`, `name`, `model`, `has_color`, `has_cct`, `mirek_min`, `mirek_max`, `min_dim` | at import, at bridge startup for every registered light, in answer to `HUE_HELLO` |
+  | bridge → light | `HUE_STATE` | `rid`, any of `on`, `brightness` (0–100), `x`, `y`, `mirek`, `color_mode` (`xy`/`ct`), `online`; `reason` = `event`/`resync`/`hello` | each stream event for the light; full state after a (re)connect or a hello |
+  | bridge → light | `DEV_RELOAD` | `version`, `files` (JSON text) | dev builds only |
+  | light → bridge | `HUE_HELLO` | `rid` ("" while unknown) | light late init and when its binding is made; the bridge answers with `HUE_CONFIGURE` and full `HUE_STATE` when it knows the rid |
+  | light → bridge | `HUE_SET` | `rid`, any of `on`, `brightness`, `x`+`y`, `mirek`, `rate` (ms) | every proxy command, after mapping |
+
+- **Registry.** `{ [rid] = { device_id, name } }`, persisted as a table with
+  `C4:PersistSetValue("hue_lights", table)` **[verified: API docs allow
+  tables]**, loaded at late init and written on every change; between those
+  the in-memory copy is authoritative (see "Storage" for why). Each light
+  persists its own rid as `hue_rid`.
+- **Import** (the **Import Lights** action, serial). GET
+  `/clip/v2/resource/light`, `/device` and `/zigbee_connectivity`. For each
+  light whose rid is not in the registry: `C4:AddDevice("hue_light.c4z",
+  C4:RoomGetId(), name, callback)`, **one at a time**, the next from the
+  callback (47 at once is the risk); in the callback `C4:Bind(bridgeId, 1,
+  deviceId, 1, "HUE_BRIDGE")`, the registry entry, `HUE_CONFIGURE` and full
+  `HUE_STATE`. `C4:AddDevice` is 3.2.0+ and documented for user-initiated use
+  only **[verified: API docs]**; whether Director cares when the action is
+  run through the dev loop is **[assumed: untested]**. Lights already in the
+  registry get `HUE_CONFIGURE` and state again, which repairs a light that
+  lost its persisted rid; a renamed Hue light is logged, not renamed in
+  Composer; a registered light gone from the bridge is logged and left
+  alone. Progress goes to the `Lights` property ("12 lights on bridge, 12
+  imported, 0 new").
+- **State fan-out and resync.** Each `light` item in a stream container
+  becomes a `HUE_STATE` with just the changed fields; a `zigbee_connectivity`
+  item maps device → light rids → `HUE_STATE` with `online` (`status ==
+  "connected"`). After every stream connect the bridge re-GETs the three
+  resources and sends full state (reason `resync`) to every registered
+  light, `HUE_CONFIGURE` first at startup, so the connect-then-resync rule
+  from "Event stream" covers the lights too.
+- **Coalescer** (`bridge/commands.lua`). One pending state per rid, latest
+  value wins; setting `x`/`y` clears `mirek` and vice versa (the bridge
+  applies xy and ignores mirek when both are sent **[verified]**). A rid is
+  flushed 80 ms after its last change (one `C4:SetTimer` per rid), so a
+  brightness and a colour that arrive together become one PUT **[verified:
+  light_v2 best practice]**. One PUT in flight per rid; changes made
+  meanwhile go after it returns. Global token bucket of 10/s, burst 10
+  **[verified: Hue guidance]**. Body: `on`; `dimming.brightness` clamped to
+  [`min_dim`, 100], brightness 0 meaning `on:false` and no `dimming`;
+  `color.xy` or `color_temperature.mirek` clamped to the light's range;
+  `dynamics.duration` when `rate` > 0 **[assumed: the transition field]**.
+  PUTs go to `/clip/v2/resource/light/<rid>` on the dotted address, so they
+  never queue behind the stream (see the option A decision above). On 429 or
+  5xx: retry after 500 ms, doubling to 8 s; other 4xx: drop and log.
+- **Brightness and colour mapping.** Proxy → bridge:
+  `SET_BRIGHTNESS_TARGET` **[verified: sample light driver]** with target 0 →
+  `on=false`, otherwise `on=true, brightness=target`, `RATE` passed through;
+  the light replies `LIGHT_BRIGHTNESS_CHANGING` at once **[verified]** and
+  `LIGHT_BRIGHTNESS_CHANGED` when the matching `HUE_STATE` arrives, or after
+  rate + 1 s if it never does, so the UI never sticks. `SET_COLOR_TARGET`:
+  mode 1 (CCT) → `C4:ColorXYtoCCT` → mirek = 1,000,000 / K, clamped; mode 0
+  → xy as given (the bridge clamps to the gamut **[verified]**); the exact
+  parameter key spelling is **[assumed]**, so the first one received is
+  logged in full. A colour set while the light is off is stored and applied
+  at the next turn-on **[verified best practice]**. Legacy `ON`, `OFF`,
+  `SET_LEVEL` and `RAMP_TO_LEVEL` are handled defensively **[assumed: may
+  still arrive from old programming]**. Bridge → proxy: `HUE_CONFIGURE` → a
+  single `DYNAMIC_CAPABILITIES_CHANGED` carrying both `supports_*` flags and
+  the CCT range in Kelvin **[verified: both flags in one notify is
+  required]**; `HUE_STATE` → `LIGHT_BRIGHTNESS_CHANGED` (0 when off),
+  `LIGHT_COLOR_CHANGED` (mode 1 via `C4:ColorCCTtoXY(1,000,000 / mirek)` for
+  `ct`, mode 0 with the xy for `xy`), `ONLINE_CHANGED`. Notify parameter
+  names use underscores **[verified for brightness in the sample driver;
+  assumed for colour]**.
+- **Dev loop.** The bridge's loop polls the light tree too and forwards
+  `DEV_RELOAD` (version plus the bundle as JSON text) to every bound light
+  **[assumed: a ~40 KB string param survives `SendToDevice`; chunk it if
+  not]**. A dev-build light reloads itself with the same sequence as the
+  bridge and reports through its own `print`, which only its Lua output in
+  Composer shows.
+
 ## Discovery
 
 Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.

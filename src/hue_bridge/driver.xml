@@ -62,6 +62,12 @@
 				<readonly>true</readonly>
 			</property>
 			<property>
+				<name>Lights</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
 				<name>Stream Address</name>
 				<default></default>
 				<type>STRING</type>
@@ -112,6 +118,11 @@
 			<action>
 				<name>Pair Bridge</name>
 				<command>Pair Bridge</command>
+				<params/>
+			</action>
+			<action>
+				<name>Import Lights</name>
+				<command>Import Lights</command>
 				<params/>
 			</action>
 			<action>
