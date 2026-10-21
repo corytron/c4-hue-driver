@@ -401,6 +401,25 @@ loop on OS 3.4.2:
   three more serial GETs (18 KB together); the scenes feature decides how
   to handle its 351 KB separately, and nothing fetches everything at once.
 
+### Scenes: verified on hardware (2026-10-21, `Probe Scenes` and `Hue Request`)
+
+- The house bridge holds 125 scenes in 13 groups (zones carry most:
+  Basement 27, Downstairs 16, Whole House 14, Bedside Lights 12; rooms
+  2–11 each; Study none) and 15 smart scenes ("Golden hours …"); `GET
+  /scene` is 351 KB, `/smart_scene` 20 KB. Every scene carries
+  `status.active` ("inactive"/"static"/"dynamic_palette"),
+  `status.last_recall`, `auto_dynamic` and `speed`.
+- Recall `PUT /scene/<rid> {"recall":{"action":"active"}}` → HTTP 200 with
+  the scene's ResourceIdentifier; the bridge streamed a `scene` item **9 ms
+  later in its own container** (status → "static"), then `light × 6` and
+  `grouped_light × 5` in the next second.
+- Switching one member light off by hand → `light` item, then one container
+  with `grouped_light × 3, scene`: the scene's status is pushed when any
+  member changes, as the research assumed from openHAB **[verified]**. Scene
+  status mirroring onto a switch device therefore needs no polling.
+- `GET /scene/<rid>` after the recall: `"status":{"active":"static",
+  "last_recall":"…Z"}`, `"auto_dynamic":false`, `"speed":0.603`.
+
 ### import-ui: verified on hardware (2026-10-21, dev loop)
 
 - Resync = six serial GETs (`light`, `device`, `zigbee_connectivity`,
