@@ -420,6 +420,18 @@ loop on OS 3.4.2:
 - `GET /scene/<rid>` after the recall: `"status":{"active":"static",
   "last_recall":"…Z"}`, `"auto_dynamic":false`, `"speed":0.603`.
 
+### Scenes build: verified on hardware (2026-10-21, dev loop, branch `scenes`)
+
+- The bridge with `bridge/scenes.lua` loaded on the controller; the first
+  resync after the stream connected did the lights' six GETs, then
+  `GET /scene` (351 KB) and `/smart_scene`: "125 scenes cached, 15 smart
+  scenes (not listed in v1)", "125 scenes on the bridge not imported",
+  "scene resync done: 0 state messages" — all within 1.4 s of the connect.
+  No errors; the lights' resync and state fan-out unchanged.
+- Scene devices themselves need `hue_scene.c4z` installed through Composer
+  before `Add Scene` can create one; that and the switch round trip are the
+  Composer checklist's section H.
+
 ### import-ui: verified on hardware (2026-10-21, dev loop)
 
 - Resync = six serial GETs (`light`, `device`, `zigbee_connectivity`,
