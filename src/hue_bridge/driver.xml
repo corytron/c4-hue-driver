@@ -88,6 +88,12 @@
 				<readonly>true</readonly>
 			</property>
 			<property>
+				<name>Scenes</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
 				<name>Stream Address</name>
 				<default></default>
 				<type>STRING</type>
@@ -223,6 +229,61 @@
 			<action>
 				<name>Room Audit</name>
 				<command>Room Audit</command>
+				<params/>
+			</action>
+			<!-- Scenes (docs/scenes-design.md §5): one light_v2 switch per Hue
+			     scene, created only here. -->
+			<action>
+				<name>Add Scene</name>
+				<command>Add Scene</command>
+				<params>
+					<param>
+						<name>Scene</name>
+						<type>CUSTOM_SELECT:SceneList</type>
+					</param>
+					<param>
+						<name>Room</name>
+						<type>CUSTOM_SELECT:RoomList</type>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Add All Scenes Of Room</name>
+				<command>Add All Scenes Of Room</command>
+				<params>
+					<param>
+						<name>Hue Room</name>
+						<type>CUSTOM_SELECT:SceneGroupList</type>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Re-link Scene</name>
+				<command>Re-link Scene</command>
+				<params>
+					<param>
+						<name>Device</name>
+						<type>CUSTOM_SELECT:RelinkSceneList</type>
+					</param>
+					<param>
+						<name>Scene</name>
+						<type>CUSTOM_SELECT:SceneList</type>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Forget Scene</name>
+				<command>Forget Scene</command>
+				<params>
+					<param>
+						<name>Device</name>
+						<type>CUSTOM_SELECT:ForgetSceneList</type>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Refresh Scenes</name>
+				<command>Refresh Scenes</command>
 				<params/>
 			</action>
 			<action>
