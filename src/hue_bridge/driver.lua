@@ -585,8 +585,33 @@ dispatch.commands["Forget_Light"] = function(params)
 	last_action(text)
 end
 
+-- Entries created before proxy ids were recorded get theirs from the proxy's
+-- binding: the light_v2 proxy is the bound consumer of the protocol driver's
+-- binding 5001 [verified: hardware]. Renames need it (Composer shows the proxy).
+local function fill_proxy_ids()
+	local filled = 0
+	for rid, entry in pairs(state.lights.registry) do
+		if not entry.proxy_id and entry.device_id then
+			local consumers = C4:GetBoundConsumerDevices(entry.device_id, 5001)
+			local proxy = type(consumers) == "table" and next(consumers) or nil
+			if proxy then
+				entry.proxy_id = proxy
+				filled = filled + 1
+				log.debug("proxy id %s recorded for %s", tostring(proxy), rid:sub(1, 8))
+			end
+		end
+	end
+	if filled > 0 and state.lights.save then
+		state.lights:save()
+	end
+	return filled
+end
+
 dispatch.commands["Adopt_Hue_Names"] = function()
-	if can("adopt_hue_names") then last_action(state.lights:adopt_hue_names()) end
+	if can("adopt_hue_names") then
+		fill_proxy_ids()
+		last_action(state.lights:adopt_hue_names())
+	end
 end
 
 dispatch.commands["Accept_Names_As_They_Are"] = function()
@@ -727,13 +752,22 @@ dispatch.commands["Lights_Report"] = function(params)
 	local names = {}
 	for rid, entry in pairs(registry) do names[#names + 1] = { rid = rid, entry = entry } end
 	table.sort(names, function(a, b) return (a.entry.name or "") < (b.entry.name or "") end)
-	log.always("Lights Report: %d registered, queue %s", #names, C4:JsonEncode(state.queue:stats()))
+	local tombstones = state.lights.reg and state.lights.reg:tombstones() or {}
+	local deleted = 0
+	for _ in pairs(tombstones) do deleted = deleted + 1 end
+	log.always("Lights Report: %d registered, %d deleted in Composer, queue %s", #names, deleted,
+		C4:JsonEncode(state.queue:stats()))
 	for i = 1, math.min(limit, #names) do
 		local e = names[i].entry
 		local caps = e.caps or {}
-		log.always("  %s: device %s proxy %s rid %s color=%s cct=%s mirek %s-%s",
-			tostring(e.name), tostring(e.device_id), tostring(e.proxy_id), names[i].rid,
+		log.always("  %s: device %s proxy %s rid %s %s id_v1=%s room=%s mac=%s color=%s cct=%s mirek %s-%s",
+			tostring(e.name), tostring(e.device_id), tostring(e.proxy_id), names[i].rid, tostring(e.state),
+			tostring(e.id_v1), tostring(e.hue_room), tostring(e.mac_address),
 			tostring(caps.has_color), tostring(caps.has_cct), tostring(caps.mirek_min), tostring(caps.mirek_max))
+	end
+	for rid, tomb in pairs(tombstones) do
+		log.always("  deleted in Composer: %s rid %s at %s", tostring(tomb.name), rid,
+			os.date("%Y-%m-%d %H:%M", tomb.deleted_at))
 	end
 end
 
@@ -852,6 +886,14 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 	if state.lights and state.lights.on_binding_changed then
 		state.lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
 		refresh_lights_props()
+		-- Director settles the binding tables after the callback; the SDK's
+		-- own sample re-enumerates a second later [verified: sample idc_controller].
+		if state.lights.reconcile then
+			C4:SetTimer(1000, function()
+				state.lights:reconcile()
+				refresh_lights_props()
+			end)
+		end
 	end
 end
 
@@ -916,6 +958,7 @@ function OnDriverLateInit()
 		log.info("startup reconcile: %d unbound, %d relinked, %d deleted in Composer",
 			#(r.unbound or {}), #(r.relinked or {}), #(r.tombstoned or {}))
 	end
+	fill_proxy_ids()
 	refresh_lights_props()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
