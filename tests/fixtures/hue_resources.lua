@@ -23,6 +23,18 @@
 --   bridge_home          /groups/0  both rooms, plus the room-less devices:
 --                                   Kitchen Strip and the bridge itself
 -- Kitchen Strip is deliberately in no room and no zone.
+--
+-- Scenes (F.scene, F.smart_scene, F.scene_rids; the scene events are at the
+-- end). Item keys and nesting follow the one scene recorded from the house
+-- bridge [verified: hardware 2026-10-21, GET /scene/<rid> of a static zone
+-- scene]; the data is this small bridge's own:
+--   Relax           Living Room (room)  inactive, never recalled
+--   Savanna sunset  Living Room (room)  inactive, auto_dynamic (a dynamic palette)
+--   Nightlight      Downstairs (zone)   static, recalled (the recorded scene's shape and values)
+--   Bright          Downstairs (zone)   inactive, recalled earlier (keeps a last_recall)
+--   Concentrate     Garage (room)       inactive
+--   Golden hours    Downstairs (zone)   the one smart scene
+-- Attic, the empty zone, has no scenes.
 
 local F = {}
 
@@ -262,6 +274,156 @@ F.bridge_home = '{"errors":[],"data":['
 	})
 	.. ']}'
 
+-- Scenes. One scene was recorded whole from the house bridge [verified:
+-- hardware 2026-10-21, GET /scene/<rid>, a static zone scene recalled through
+-- the API a few seconds earlier]: id, id_v1 "/scenes/<16 chars>", actions[]
+-- (one per target light, rtype light, each with on / dimming / color or
+-- color_temperature), palette {color[], dimming[], color_temperature[],
+-- effects[], effects_v2[]}, recall {} (empty on a GET), metadata {name,
+-- image{rid, rtype public_image}}, group {rid, rtype zone}, speed,
+-- auto_dynamic, status {active, last_recall}, mapping {algorithm classic},
+-- last_actions_update {source autogrow}, type. Nightlight below reproduces
+-- that scene's values on this bridge's lights. Everything the recording did
+-- not show is [assumed]: a never-recalled scene has no last_recall; an
+-- inactive scene that was recalled earlier keeps its last_recall; a dynamic
+-- scene has auto_dynamic true and several palette colours; a room scene has
+-- group rtype "room"; the probe's 125 scenes (all inactive, speeds 0.603 /
+-- 0.6269841 / 0.6031746 …, a few "dynamic") are the source of the names and
+-- speeds. The list is not in name order, as the bridge's is not.
+
+F.scene_rids = {
+	relax = "5e4d3c2b-0000-4000-8000-00000000s001",
+	savanna = "5e4d3c2b-0000-4000-8000-00000000s002",
+	nightlight = "5e4d3c2b-0000-4000-8000-00000000s003",
+	bright = "5e4d3c2b-0000-4000-8000-00000000s004",
+	concentrate = "5e4d3c2b-0000-4000-8000-00000000s005",
+}
+
+F.scene_names = {
+	relax = "Relax",
+	savanna = "Savanna sunset",
+	nightlight = "Nightlight",
+	bright = "Bright",
+	concentrate = "Concentrate",
+}
+
+F.scene_id_v1 = {
+	relax = "/scenes/Ab3dEf7hIj9kLm1n",
+	savanna = "/scenes/Cd5fGh9jKl3mNo7p",
+	nightlight = "/scenes/Ef7hIj1kLm5nOp9q",
+	bright = "/scenes/Gh9jKl3mNo7pQr1s",
+	concentrate = "/scenes/Ij1kLm5nOp9qRs3t",
+}
+
+-- The group each scene belongs to (keys of F.group_rids) and its rtype.
+F.scene_groups = {
+	relax = { key = "living_room", rtype = "room" },
+	savanna = { key = "living_room", rtype = "room" },
+	nightlight = { key = "downstairs", rtype = "zone" },
+	bright = { key = "downstairs", rtype = "zone" },
+	concentrate = { key = "garage", rtype = "room" },
+}
+
+local function scene_action(light_key, body)
+	return '{"target":{"rid":"' .. F.rids[light_key] .. '","rtype":"light"},"action":{' .. body .. '}}'
+end
+
+local EMPTY_PALETTE = { color = "[]", dimming = "[]", color_temperature = "[]", effects = "[]", effects_v2 = "[]" }
+
+-- opts: actions (list of scene_action strings), palette (partial table of
+-- JSON arrays by palette key), speed, auto_dynamic, active, last_recall
+-- (optional), autogrow (adds last_actions_update, as the recorded scene had).
+local function scene(key, opts)
+	local palette = {}
+	for _, name in ipairs({ "color", "dimming", "color_temperature", "effects", "effects_v2" }) do
+		palette[#palette + 1] = '"' .. name .. '":' .. ((opts.palette or {})[name] or EMPTY_PALETTE[name])
+	end
+	local owner = F.scene_groups[key]
+	local status = '"active":"' .. (opts.active or "inactive") .. '"'
+	if opts.last_recall then
+		status = status .. ',"last_recall":"' .. opts.last_recall .. '"'
+	end
+	return '{"id":"' .. F.scene_rids[key] .. '","id_v1":"' .. F.scene_id_v1[key] .. '",'
+		.. '"actions":[' .. table.concat(opts.actions, ",") .. '],'
+		.. '"palette":{' .. table.concat(palette, ",") .. '},'
+		.. '"recall":{},'
+		.. '"metadata":{"name":"' .. F.scene_names[key] .. '","image":{"rid":"' .. F.scene_rids[key]:sub(1, 8)
+		.. '-img0-4000-8000-000000000000","rtype":"public_image"}},'
+		.. '"group":{"rid":"' .. F.group_rids[owner.key] .. '","rtype":"' .. owner.rtype .. '"},'
+		.. '"speed":' .. tostring(opts.speed) .. ',"auto_dynamic":' .. tostring(opts.auto_dynamic == true) .. ','
+		.. '"status":{' .. status .. '},'
+		.. '"mapping":{"algorithm":"classic"},'
+		.. (opts.autogrow and '"last_actions_update":{"source":"autogrow"},' or "")
+		.. '"type":"scene"}'
+end
+
+-- The recorded scene's last_recall [verified: hardware], reused for Nightlight.
+F.scene_last_recall = "2026-10-21T20:21:46.398Z"
+
+F.scene = '{"errors":[],"data":['
+	.. scene("nightlight", {
+		actions = {
+			scene_action("living", '"on":{"on":true},"dimming":{"brightness":0.0},"color":{"xy":{"x":0.5609999,"y":0.4042}}'),
+			scene_action("garage", '"on":{"on":true},"dimming":{"brightness":0.0}'),
+		},
+		palette = { color = '[{"color":{"xy":{"x":0.5609999,"y":0.4042}},"dimming":{"brightness":0.0}}]' },
+		speed = 0.603, active = "static", last_recall = F.scene_last_recall, autogrow = true,
+	}) .. ','
+	.. scene("relax", {
+		actions = {
+			scene_action("living", '"on":{"on":true},"dimming":{"brightness":56.69},"color_temperature":{"mirek":447}'),
+			scene_action("hallway", '"on":{"on":true},"dimming":{"brightness":56.69},"color_temperature":{"mirek":447}'),
+		},
+		palette = { color_temperature = '[{"color_temperature":{"mirek":447},"dimming":{"brightness":56.69}}]' },
+		speed = 0.603,
+	}) .. ','
+	.. scene("concentrate", {
+		actions = { scene_action("garage", '"on":{"on":true},"dimming":{"brightness":100.0}') },
+		palette = { dimming = '[{"brightness":100.0}]' },
+		speed = 0.603,
+	}) .. ','
+	.. scene("savanna", {
+		actions = {
+			scene_action("living", '"on":{"on":true},"dimming":{"brightness":80.0},"color":{"xy":{"x":0.5451,"y":0.4046}}'),
+			scene_action("hallway", '"on":{"on":true},"dimming":{"brightness":80.0},"color_temperature":{"mirek":443}'),
+		},
+		palette = { color = '[{"color":{"xy":{"x":0.5451,"y":0.4046}},"dimming":{"brightness":80.0}},'
+			.. '{"color":{"xy":{"x":0.6023,"y":0.3792}},"dimming":{"brightness":80.0}},'
+			.. '{"color":{"xy":{"x":0.4893,"y":0.4463}},"dimming":{"brightness":80.0}},'
+			.. '{"color":{"xy":{"x":0.5676,"y":0.3769}},"dimming":{"brightness":80.0}},'
+			.. '{"color":{"xy":{"x":0.4432,"y":0.4653}},"dimming":{"brightness":80.0}}]' },
+		speed = 0.6031746, auto_dynamic = true,
+	}) .. ','
+	.. scene("bright", {
+		actions = {
+			scene_action("living", '"on":{"on":true},"dimming":{"brightness":100.0},"color_temperature":{"mirek":233}'),
+			scene_action("garage", '"on":{"on":true},"dimming":{"brightness":100.0}'),
+		},
+		palette = { color_temperature = '[{"color_temperature":{"mirek":233},"dimming":{"brightness":100.0}}]' },
+		speed = 0.6269841, last_recall = "2026-10-20T07:12:03.110Z",
+	})
+	.. ']}'
+
+-- One smart scene, "Golden hours" over the Downstairs zone: two time slots
+-- targeting Bright and Nightlight, every day. Shape [community: aiohue,
+-- openhue; assumed]; the house bridge's 15 smart scenes did answer the
+-- probe with `state` and `active_timeslot.timeslot_id` [verified: hardware
+-- 2026-10-21]. The driver only counts these (docs/scenes-design.md §1).
+F.smart_scene_rid = "6f5e4d3c-0000-4000-8000-0000000ss001"
+F.smart_scene = '{"errors":[],"data":['
+	.. '{"id":"' .. F.smart_scene_rid .. '",'
+	.. '"metadata":{"name":"Golden hours","image":{"rid":"6f5e4d3c-img0-4000-8000-000000000000","rtype":"public_image"}},'
+	.. '"group":{"rid":"' .. F.group_rids.downstairs .. '","rtype":"zone"},'
+	.. '"week_timeslots":[{"timeslots":['
+	.. '{"start_time":{"kind":"time","time":{"hour":7,"minute":0,"second":0}},"target":{"rid":"' .. F.scene_rids.bright .. '","rtype":"scene"}},'
+	.. '{"start_time":{"kind":"sunset"},"target":{"rid":"' .. F.scene_rids.nightlight .. '","rtype":"scene"}}],'
+	.. '"recurrence":["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]}],'
+	.. '"transition_duration":60000,'
+	.. '"active_timeslot":{"timeslot_id":1,"weekday":"tuesday"},'
+	.. '"state":"inactive",'
+	.. '"type":"smart_scene"}'
+	.. ']}'
+
 -- A failed authenticated GET, as the bridge answers a revoked key.
 F.unauthorized = '{"errors":[{"description":"unauthorized user"}],"data":[]}'
 
@@ -341,5 +503,80 @@ F.events.zone_add = '[{"creationtime":"2026-10-21T18:12:00Z","id":"9de116fc-000a
 F.events.zone_delete = '[{"creationtime":"2026-10-21T18:13:00Z","id":"9de116fc-000b-4a2b-8c3d-00000000000b","type":"delete",'
 	.. '"data":[{"id":"' .. F.new_zone_grouped_light_rid .. '","type":"grouped_light"},'
 	.. '{"id":"' .. F.new_zone_rid .. '","type":"zone"}]}]'
+
+-- Scene events. Container composition [verified: hardware 2026-10-21, type
+-- lists in the dev log]: a recall through the API was answered 9 ms later by
+-- a container holding the `scene` item alone, and the lights and
+-- grouped_lights followed in the next second; a scene recalled elsewhere
+-- arrived as `grouped_light × 4, scene` in one container; one member light
+-- switched off by hand gave a `light` item, then `grouped_light × 3, scene`
+-- a second later. The item bodies were not logged, so their fields are
+-- [assumed], modelled on the light items the bridge does send (id, id_v1
+-- and only the changed block): a status change carries `status` with the
+-- leaves that changed (`active` plus `last_recall` on a recall, `active`
+-- alone when a scene goes inactive); a rename carries `metadata.name`; an
+-- add carries the whole resource; a delete is id + type only (as a zone's).
+
+local function scene_item(key, body)
+	return '{"id":"' .. F.scene_rids[key] .. '","id_v1":"' .. F.scene_id_v1[key] .. '",' .. body .. ',"type":"scene"}'
+end
+
+local function grouped_light_item(key, owner_key, owner_rtype, id_v1, body)
+	return '{"id":"' .. F.grouped_light_rids[key] .. '","id_v1":"' .. id_v1 .. '","owner":{"rid":"' .. F.group_rids[owner_key]
+		.. '","rtype":"' .. owner_rtype .. '"},' .. body .. ',"type":"grouped_light"}'
+end
+
+-- Relax recalled from the Hue app: the Living Room's, Downstairs' and the
+-- home's grouped_lights change, and the scene goes static in the same
+-- container.
+F.scene_recall_time = "2026-10-21T18:14:00.004Z"
+F.events.scene_recalled = '[{"creationtime":"2026-10-21T18:14:00Z","id":"9de116fc-000c-4a2b-8c3d-00000000000c","type":"update",'
+	.. '"data":['
+	.. grouped_light_item("living_room", "living_room", "room", "/groups/2", '"on":{"on":true},"dimming":{"brightness":56.69}') .. ','
+	.. grouped_light_item("downstairs", "downstairs", "zone", "/groups/3", '"dimming":{"brightness":56.69}') .. ','
+	.. grouped_light_item("home", "home", "bridge_home", "/groups/0", '"dimming":{"brightness":64.6}') .. ','
+	.. scene_item("relax", '"status":{"active":"static","last_recall":"' .. F.scene_recall_time .. '"}')
+	.. ']}]'
+
+-- Hallway Ambiance dimmed by hand a minute later: Relax is no longer what
+-- the room shows, so its status goes inactive together with the
+-- grouped_light updates (the light's own item came in the container before).
+F.events.scene_inactive = '[{"creationtime":"2026-10-21T18:15:01Z","id":"9de116fc-000d-4a2b-8c3d-00000000000d","type":"update",'
+	.. '"data":['
+	.. grouped_light_item("living_room", "living_room", "room", "/groups/2", '"dimming":{"brightness":48.35}') .. ','
+	.. grouped_light_item("home", "home", "bridge_home", "/groups/0", '"dimming":{"brightness":61.82}') .. ','
+	.. scene_item("relax", '"status":{"active":"inactive"}')
+	.. ']}]'
+
+-- Relax renamed to Chill in the Hue app.
+F.events.scene_renamed = '[{"creationtime":"2026-10-21T18:16:00Z","id":"9de116fc-000e-4a2b-8c3d-00000000000e","type":"update",'
+	.. '"data":[' .. scene_item("relax", '"metadata":{"name":"Chill"}') .. ']}]'
+
+-- Savanna sunset recalled with action "active": auto_dynamic starts the
+-- palette, so the status is dynamic_palette; alone in its container, as the
+-- API recall on hardware was.
+F.events.scene_dynamic = '[{"creationtime":"2026-10-21T18:17:00Z","id":"9de116fc-000f-4a2b-8c3d-00000000000f","type":"update",'
+	.. '"data":[' .. scene_item("savanna", '"status":{"active":"dynamic_palette","last_recall":"2026-10-21T18:17:00.219Z"}') .. ']}]'
+
+-- A new scene "Read" created in the Living Room: the whole resource in one
+-- add container.
+F.new_scene_rid = "5e4d3c2b-0000-4000-8000-00000000s006"
+F.new_scene_id_v1 = "/scenes/Kl3mNo7pQr1sTu5v"
+F.events.scene_added = '[{"creationtime":"2026-10-21T18:18:00Z","id":"9de116fc-0010-4a2b-8c3d-000000000010","type":"add",'
+	.. '"data":[{"id":"' .. F.new_scene_rid .. '","id_v1":"' .. F.new_scene_id_v1 .. '",'
+	.. '"actions":[' .. scene_action("living", '"on":{"on":true},"dimming":{"brightness":100.0},"color_temperature":{"mirek":346}') .. ','
+	.. scene_action("hallway", '"on":{"on":true},"dimming":{"brightness":100.0},"color_temperature":{"mirek":346}') .. '],'
+	.. '"palette":{"color":[],"dimming":[],"color_temperature":[{"color_temperature":{"mirek":346},"dimming":{"brightness":100.0}}],"effects":[],"effects_v2":[]},'
+	.. '"recall":{},'
+	.. '"metadata":{"name":"Read","image":{"rid":"5e4d3c2b-img6-4000-8000-000000000000","rtype":"public_image"}},'
+	.. '"group":{"rid":"' .. F.group_rids.living_room .. '","rtype":"room"},'
+	.. '"speed":0.6269841,"auto_dynamic":false,"status":{"active":"inactive"},"mapping":{"algorithm":"classic"},'
+	.. '"type":"scene"}]}]'
+
+-- Relax deleted in the Hue app: bare identifier only (the scene an owner
+-- is most likely to have imported, so specs can walk a linked scene to
+-- "gone").
+F.events.scene_deleted = '[{"creationtime":"2026-10-21T18:19:00Z","id":"9de116fc-0011-4a2b-8c3d-000000000011","type":"delete",'
+	.. '"data":[{"id":"' .. F.scene_rids.relax .. '","type":"scene"}]}]'
 
 return F

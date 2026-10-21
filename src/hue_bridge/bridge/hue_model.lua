@@ -21,6 +21,17 @@
 --   bridge_home         { id, id_v1, children[{rid, rtype}], services[{rid, rtype}] }
 --                         -- children mix room-less devices and rooms; no metadata
 --                         -- at all [verified: hardware 2026-10-21]
+--   scene               { id, id_v1, actions[{target{rid, rtype}, action{on, dimming, color,
+--                         color_temperature}}], palette{color[], dimming[], color_temperature[],
+--                         effects[], effects_v2[]}, recall{}, metadata{name, image{rid, rtype}},
+--                         group{rid, rtype}, speed, auto_dynamic,
+--                         status{active, last_recall}, mapping{algorithm},
+--                         last_actions_update{source} }   -- [verified: hardware 2026-10-21,
+--                                                        -- GET /scene/<rid>]; actions, palette
+--                                                        -- and image are dropped at decode time
+--   smart_scene         { id, metadata{name, image}, group{rid, rtype}, week_timeslots[],
+--                         transition_duration, active_timeslot{timeslot_id, weekday}, state }
+--                                                        -- only counted
 -- Event-stream items have the same shapes with only the changed fields.
 -- A JSON null (mirek while mirek_valid is false) is treated like an absent
 -- field, whatever the decoder turns it into: only numbers count as numbers.
@@ -454,6 +465,145 @@ function hue_model.group(item)
 		group.name = "Hue " .. item.type .. " " .. tostring(group.id_v1 or item.id)
 	end
 	return group
+end
+
+-- Scenes ---------------------------------------------------------------------
+-- docs/scenes-design.md §1 "Catalogue" and §8: the catalogue keeps one compact
+-- table per scene (125 scenes × ~3 KB on the house bridge, so `actions`,
+-- `palette` and `metadata.image` are dropped as the item is decoded).
+
+-- The group rtypes the contract names; a scene under any other rtype
+-- (aiohue also knows service_group and private_group, docs/edge-cases-hue.md
+-- §3) keeps its group_rid with a nil group_type.
+local SCENE_GROUP_TYPES = { room = true, zone = true, bridge_home = true }
+
+-- Every field update_scene() can report as changed, in a stable order.
+local SCENE_FIELD_ORDER = { "name", "active", "auto_dynamic", "speed", "group_rid" }
+
+-- Merge a (possibly partial) scene item into `scene` in place and return the
+-- field names the item carried, in SCENE_FIELD_ORDER (carried counts as
+-- changed, as update() does). A stream item carries only what changed: a
+-- status update `status{active, last_recall?}`, a rename `metadata{name}`,
+-- a group change `group{rid, rtype}` [assumed: modelled on the light items,
+-- docs/edge-cases-hue.md §3]. `last_recall` rides along with `active` and is
+-- never reported on its own; `status.active` is stored as sent (the bridge's
+-- values are inactive / static / dynamic_palette). `id_v1`, `actions`,
+-- `palette` and `metadata.image` are ignored. The controller decodes a JSON
+-- null as an empty table, so every field is type-checked.
+function hue_model.update_scene(scene, item)
+	local touched = {}
+	if type(item) ~= "table" then
+		return {}
+	end
+
+	if type(item.metadata) == "table" and text(item.metadata.name) then
+		scene.name = item.metadata.name
+		touched.name = true
+	end
+
+	if type(item.status) == "table" then
+		if text(item.status.active) then
+			scene.active = item.status.active
+			touched.active = true
+		end
+		if text(item.status.last_recall) then
+			scene.last_recall = item.status.last_recall
+		end
+	end
+
+	if type(item.auto_dynamic) == "boolean" then
+		scene.auto_dynamic = item.auto_dynamic
+		touched.auto_dynamic = true
+	end
+
+	if number(item.speed) then
+		scene.speed = item.speed
+		touched.speed = true
+	end
+
+	if type(item.group) == "table" and text(item.group.rid) then
+		scene.group_rid = item.group.rid
+		scene.group_type = SCENE_GROUP_TYPES[item.group.rtype] and item.group.rtype or nil
+		touched.group_rid = true
+	end
+
+	local changed = {}
+	for _, name in ipairs(SCENE_FIELD_ORDER) do
+		if touched[name] then
+			changed[#changed + 1] = name
+		end
+	end
+	return changed
+end
+
+-- One /clip/v2/resource/scene item (or a complete `add` stream item) → the
+-- compact scene of the contract (docs/scenes-design.md §8):
+--   { rid, name, group_rid, group_type ("room"|"zone"|"bridge_home"|nil), id_v1,
+--     active ("inactive"|"static"|"dynamic_palette"|nil), last_recall, auto_dynamic (boolean),
+--     speed (number|nil) }
+-- nil for an item of any other type (a grouped_light sharing the container,
+-- a smart_scene, a bare item without id or type). A nameless scene gets a
+-- fallback name like light(); `id_v1` ("/scenes/<16 chars>") is display data
+-- read once here, as for lights, so update_scene() never reports it.
+function hue_model.scene(item)
+	if type(item) ~= "table" or item.id == nil or item.type ~= "scene" then
+		return nil
+	end
+	local scene = {
+		rid = item.id,
+		name = nil,
+		group_rid = nil,
+		group_type = nil,
+		id_v1 = text(item.id_v1),
+		active = nil,
+		last_recall = nil,
+		auto_dynamic = false,
+		speed = nil,
+	}
+	hue_model.update_scene(scene, item)
+	if scene.name == nil then
+		scene.name = "Hue scene " .. tostring(scene.id_v1 or item.id)
+	end
+	return scene
+end
+
+-- HUE_SCENE_STATE params (docs/scenes-design.md §2): { rid, active, reason },
+-- every value a string. `active` is left out while the scene's status is
+-- unknown (nil), as state_params() leaves valueless fields out; every scene
+-- the house bridge serves carries one [verified: hardware 2026-10-21].
+function hue_model.scene_state_params(scene, reason)
+	local params = { rid = tostring(scene.rid), reason = reason or "event" }
+	if scene.active ~= nil then
+		params.active = tostring(scene.active)
+	end
+	return params
+end
+
+-- HUE_SCENE_CONFIGURE params from a scene-shaped record { rid, name, id_v1,
+-- auto_dynamic } (a catalogue scene, or a registry entry given its rid):
+-- { rid, name, id_v1?, auto_dynamic ("true"/"false") }, plus the string
+-- fields of `extra` (group_name, group_type, state, gone_since; nil and ""
+-- skipped) merged as configure_params() does. Every value is a string.
+function hue_model.scene_configure_params(scene, extra)
+	local params = {
+		rid = tostring(scene.rid),
+		name = scene.name ~= nil and tostring(scene.name) or nil,
+		id_v1 = text(scene.id_v1),
+		auto_dynamic = tostring(scene.auto_dynamic == true),
+	}
+	return merge_extra(params, extra)
+end
+
+-- The number of smart_scene items in a list (a GET /smart_scene body's data,
+-- or any mixed list); v1 only counts them (docs/scenes-design.md §1).
+function hue_model.smart_scene_count(items)
+	local count = 0
+	for _, item in ipairs(type(items) == "table" and items or {}) do
+		if type(item) == "table" and item.type == "smart_scene" then
+			count = count + 1
+		end
+	end
+	return count
 end
 
 return hue_model

@@ -21,6 +21,7 @@ files["src/hue_bridge/driver.lua"] = {
 }
 
 files["src/hue_light/driver.lua"] = files["src/hue_bridge/driver.lua"]
+files["src/hue_scene/driver.lua"] = files["src/hue_bridge/driver.lua"]
 
 files["tests"] = {
 	std = "+busted",
