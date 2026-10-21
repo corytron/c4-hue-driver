@@ -757,6 +757,11 @@ dispatch.commands["Lights_Report"] = function(params)
 	for _ in pairs(tombstones) do deleted = deleted + 1 end
 	log.always("Lights Report: %d registered, %d deleted in Composer, queue %s", #names, deleted,
 		C4:JsonEncode(state.queue:stats()))
+	-- The owner-facing texts, for dev builds whose installed driver.xml
+	-- predates the properties.
+	log.always("  Lights: %s", state.lights:summary())
+	if state.lights.attention then log.always("  Attention: %s", state.lights:attention()) end
+	if state.lights.room_mappings_text then log.always("  Room Mappings: %s", state.lights:room_mappings_text()) end
 	for i = 1, math.min(limit, #names) do
 		local e = names[i].entry
 		local caps = e.caps or {}
