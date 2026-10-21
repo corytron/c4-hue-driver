@@ -36,7 +36,9 @@ local state = {
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
 	stream_ip = nil,     -- spelling of the bridge address the stream uses, see choose_stream_address
 	lights = nil,        -- bridge.lights registry, created in OnDriverLateInit
+	scenes = nil,        -- bridge.scenes (docs/scenes-design.md), created in OnDriverLateInit when the module exists
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
+	group_queue = nil,   -- the same for grouped_light (scene OFF)
 	late_init_done = false,
 }
 
@@ -101,17 +103,36 @@ local function bridge_request(req, callback)
 end
 
 
+-- The project calls (docs/import-design.md §13), wrapped so the modules stay
+-- free of C4. Shapes verified on hardware (design.md "Project APIs"):
+-- GetDevices wants comma-separated strings; GetBoundConsumerDevices values
+-- are driver names, not Composer names.
+local project_calls = {
+	rooms = function() return C4:GetDevicesByC4iName("roomdevice.c4i") end,
+	hierarchy = function() return C4:GetProjectHierarchy() end,
+	devices = function(filter) return C4:GetDevices(filter) end,
+	bound = function() return C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1) end,
+	unbind = function(device_id) C4:Unbind(device_id, 1) end,
+	rename = function(proxy_id, name) C4:RenameDevice(proxy_id, name) end,
+	display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+}
+
+-- "k=v k=v" of a message's params, rid left out, for debug lines.
+local function params_text(params)
+	local parts = {}
+	for k, v in pairs(params or {}) do
+		if k ~= "rid" then parts[#parts + 1] = k .. "=" .. tostring(v) end
+	end
+	table.sort(parts)
+	return table.concat(parts, " ")
+end
+
 local function new_lights()
 	return lights_mod.new({
 		http = bridge_request,
 		send = function(id, command, params)
 			if command == "HUE_STATE" then
-				local parts = {}
-				for k, v in pairs(params) do
-					if k ~= "rid" then parts[#parts + 1] = k .. "=" .. tostring(v) end
-				end
-				table.sort(parts)
-				log.debug("HUE_STATE %s -> %d: %s", tostring(params.rid):sub(1, 8), id, table.concat(parts, " "))
+				log.debug("HUE_STATE %s -> %d: %s", tostring(params.rid):sub(1, 8), id, params_text(params))
 			end
 			C4:SendToDevice(id, command, params)
 		end,
@@ -119,35 +140,79 @@ local function new_lights()
 		room_id = C4:RoomGetId(),
 		log = log,
 		now = os.time,
-		-- The project calls (docs/import-design.md §13), wrapped so lights.lua
-		-- stays free of C4. Shapes verified on hardware (design.md "Project
-		-- APIs"): GetDevices wants comma-separated strings; GetBoundConsumerDevices
-		-- values are driver names, not Composer names.
-		project = {
-			rooms = function() return C4:GetDevicesByC4iName("roomdevice.c4i") end,
-			hierarchy = function() return C4:GetProjectHierarchy() end,
-			devices = function(filter) return C4:GetDevices(filter) end,
-			bound = function() return C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1) end,
-			unbind = function(device_id) C4:Unbind(device_id, 1) end,
-			rename = function(proxy_id, name) C4:RenameDevice(proxy_id, name) end,
-			display_name = function(id) return C4:GetDeviceDisplayName(id) end,
-		},
+		project = project_calls,
+	})
+end
+
+-- The scenes module (docs/scenes-design.md §4) is optional while the feature
+-- lands in pieces: without it the driver still loads and the scene actions
+-- say so.
+local scenes_ok, scenes_mod = pcall(require, "bridge.scenes")
+if not scenes_ok then
+	log.warn("bridge.scenes not loadable: %s", tostring(scenes_mod))
+	scenes_mod = nil
+end
+
+local function new_scenes()
+	if not scenes_mod then
+		return nil
+	end
+	return scenes_mod.new({
+		http = bridge_request,
+		send = function(id, command, params)
+			log.debug("%s %s -> %d: %s", command, tostring(params and params.rid):sub(1, 8), id, params_text(params))
+			C4:SendToDevice(id, command, params)
+		end,
+		bridge_id = C4:GetDeviceID(),
+		log = log,
+		now = os.time,
+		project = project_calls,
+		lights = state.lights,
+		-- Scene OFF turns the scene's group off through its own coalescing
+		-- queue, so a "room off" reaching several switches sends one PUT.
+		group_off = function(grouped_light_rid)
+			if state.group_queue then
+				state.group_queue:set(grouped_light_rid, { on = false })
+			end
+		end,
+		persist_get = function(name) return C4:PersistGetValue(name) end,
+		persist_set = function(name, value) C4:PersistSetValue(name, value) end,
 	})
 end
 
 -- The owner-facing counts and lists (docs/import-design.md §6). Methods the
 -- running lights.lua does not have yet are skipped: the integration lands
 -- in pieces and the driver must keep loading in between.
+-- The lights' Attention text followed by the scenes' items.
+local function attention_text()
+	local items = {}
+	if state.lights and state.lights.attention then
+		local text = state.lights:attention()
+		if text and text ~= "" and text ~= "None" then
+			items[#items + 1] = text
+		end
+	end
+	if state.scenes and state.scenes.attention_items then
+		for _, item in ipairs(state.scenes:attention_items() or {}) do
+			items[#items + 1] = item
+		end
+	end
+	return #items > 0 and table.concat(items, "; ") or "None"
+end
+
 local function refresh_lights_props()
 	if not state.lights then
 		return
 	end
 	prop("Lights", state.lights:summary())
 	if state.lights.attention then
-		prop("Attention", state.lights:attention())
+		prop("Attention", attention_text())
 	end
 	if state.lights.room_mappings_text then
 		prop("Room Mappings", state.lights:room_mappings_text())
+	end
+	if state.scenes and state.scenes.summary then
+		prop("Scenes", state.scenes:summary())
 	end
 end
 
@@ -155,6 +220,17 @@ local function new_queue()
 	return commands.new({
 		send = function(rid, body, done)
 			bridge_request({ method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }, done)
+		end,
+	})
+end
+
+-- Grouped-light PUTs (scene OFF) have their own queue and bucket: the
+-- bridge's group budget is about one request a second [verified: Core
+-- Concepts], separate from the lights'.
+local function new_group_queue()
+	return commands.new({
+		send = function(rid, body, done)
+			bridge_request({ method = "PUT", path = "/clip/v2/resource/grouped_light/" .. rid, body = body }, done)
 		end,
 	})
 end
@@ -176,12 +252,28 @@ local function new_stream()
 					log.warn("resync failed: %s", tostring(err))
 				end
 				refresh_lights_props()
+				-- The scenes follow the lights: their catalogue GET is the
+				-- large one (351 KB on the house bridge) and their groups and
+				-- room mappings come from the lights' resync.
+				if state.scenes and state.scenes.resync then
+					state.scenes:resync(function(sok, serr, ssent)
+						if sok then
+							log.info("scene resync done: %d state messages", tonumber(ssent) or 0)
+						else
+							log.warn("scene resync failed: %s", tostring(serr))
+						end
+						refresh_lights_props()
+					end)
+				end
 			end)
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
 			-- callback; nothing here starts a transfer.
 			state.lights:on_container(container)
+			if state.scenes and state.scenes.on_container then
+				state.scenes:on_container(container)
+			end
 			prop("Events Received", state.stream.stats.containers)
 			prop("Last Event", state.stream.stats.last_event)
 		end,
@@ -586,6 +678,59 @@ function ForgetDeviceList() return picker("picker_forget_devices") end
 function HueRoomList() return picker("picker_hue_rooms") end
 function MappingTargetList() return picker("picker_rooms", "mapping") end
 
+-- Scenes (docs/scenes-design.md §5): the same shapes against state.scenes.
+local function can_scene(method)
+	if not connection() then
+		last_action("Not paired")
+		return false
+	end
+	if not state.scenes or type(state.scenes[method]) ~= "function" then
+		last_action("Not available in this build (scenes." .. method .. ")")
+		return false
+	end
+	return true
+end
+
+local function scene_picker(method, ...)
+	if state.scenes and type(state.scenes[method]) == "function" then
+		local ok, list = pcall(state.scenes[method], state.scenes, ...)
+		if ok and type(list) == "table" then
+			return list
+		end
+		log.warn("%s: %s", method, tostring(list))
+		return { { text = "(error building the list; see Lua output)", value = "" } }
+	end
+	return { { text = "(not available in this build)", value = "" } }
+end
+
+function SceneList() return scene_picker("picker_scenes") end
+function SceneGroupList() return scene_picker("picker_groups") end
+function RelinkSceneList() return scene_picker("picker_relink_devices") end
+function ForgetSceneList() return scene_picker("picker_forget_devices") end
+
+-- The scenes' half of an action both kinds share, or nil without scenes.
+local function scene_text(method, ...)
+	if state.scenes and type(state.scenes[method]) == "function" then
+		return state.scenes[method](state.scenes, ...)
+	end
+	return nil
+end
+
+local function join_texts(lights_text, scenes_text)
+	if scenes_text == nil or scenes_text == "" then
+		return lights_text
+	end
+	return tostring(lights_text) .. " | Scenes: " .. tostring(scenes_text)
+end
+
+-- A message from a scene device, routed when the module is present.
+local function scene_message(method, params)
+	if state.scenes and type(state.scenes[method]) == "function" then
+		return state.scenes[method](state.scenes, params or {})
+	end
+	log.warn("%s ignored: scenes not available in this build", method)
+end
+
 dispatch.commands["Add_Light"] = function(params)
 	if not can("add_light") then return end
 	local rid = selection(params, "Light")
@@ -619,7 +764,9 @@ dispatch.commands["Re-link_Device_To_Light"] = function(params)
 end
 
 dispatch.commands["Link_Devices"] = function()
-	if can("link_devices") then last_action(state.lights:link_devices()) end
+	if can("link_devices") then
+		last_action(join_texts(state.lights:link_devices(), scene_text("link_devices")))
+	end
 end
 
 dispatch.commands["Forget_Light"] = function(params)
@@ -657,12 +804,14 @@ end
 dispatch.commands["Adopt_Hue_Names"] = function()
 	if can("adopt_hue_names") then
 		fill_proxy_ids()
-		last_action(state.lights:adopt_hue_names())
+		last_action(join_texts(state.lights:adopt_hue_names(), scene_text("adopt_hue_names")))
 	end
 end
 
 dispatch.commands["Accept_Names_As_They_Are"] = function()
-	if can("accept_names") then last_action(state.lights:accept_names()) end
+	if can("accept_names") then
+		last_action(join_texts(state.lights:accept_names(), scene_text("accept_names")))
+	end
 end
 
 dispatch.commands["Set_Room_Mapping"] = function(params)
@@ -704,6 +853,86 @@ end
 dispatch.commands["HUE_FORGET"] = function(params)
 	if can("forget_request") then
 		local _, text = state.lights:forget_request(params or {})
+		last_action(text)
+	end
+end
+
+-- Scene actions (docs/scenes-design.md §5) ----------------------------------
+
+dispatch.commands["Add_Scene"] = function(params)
+	if not can_scene("add_scene") then return end
+	local rid = selection(params, "Scene")
+	if not rid then
+		return last_action("Not added: pick a scene first")
+	end
+	state.scenes:add_scene(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
+end
+
+dispatch.commands["Add_All_Scenes_Of_Room"] = function(params)
+	if not can_scene("add_all_of_group") then return end
+	local group = selection(params, "Hue Room")
+	if not group then
+		return last_action("Not added: pick a Hue room first")
+	end
+	state.scenes:add_all_of_group(group, function(_, text) last_action(text) end)
+end
+
+dispatch.commands["Re-link_Scene"] = function(params)
+	if not can_scene("relink") then return end
+	local device, rid = tonumber(selection(params, "Device")), selection(params, "Scene")
+	if not device or not rid then
+		return last_action("Not re-linked: pick a device and a scene")
+	end
+	local _, text = state.scenes:relink(device, rid)
+	last_action(text)
+end
+
+dispatch.commands["Forget_Scene"] = function(params)
+	if not can_scene("forget") then return end
+	local device = tonumber(selection(params, "Device"))
+	if not device then
+		return last_action("Not forgotten: pick a device first")
+	end
+	local _, text = state.scenes:forget(device)
+	last_action(text)
+end
+
+dispatch.commands["Refresh_Scenes"] = function()
+	if not can_scene("resync") then return end
+	state.scenes:resync(function(ok, err)
+		if ok then
+			last_action("Scenes refreshed: " .. tostring(state.scenes:summary()))
+		else
+			last_action("Scene refresh failed: " .. tostring(err))
+		end
+	end)
+end
+
+-- Messages from scene devices (docs/scenes-design.md §2).
+dispatch.commands["HUE_SCENE_HELLO"] = function(params)
+	params = params or {}
+	if not scene_message("hello", params) and state.scenes then
+		log.debug("HUE_SCENE_HELLO from unregistered scene %q (device %s)", tostring(params.rid),
+			tostring(params.device_id))
+	end
+end
+
+dispatch.commands["HUE_SCENE_RECALL"] = function(params)
+	scene_message("recall", params)
+end
+
+dispatch.commands["HUE_SCENE_OFF"] = function(params)
+	scene_message("off", params)
+end
+
+dispatch.commands["HUE_SCENE_GOODBYE"] = function(params)
+	scene_message("goodbye", params)
+	refresh_lights_props()
+end
+
+dispatch.commands["HUE_SCENE_FORGET"] = function(params)
+	if can_scene("forget_request") then
+		local _, text = state.scenes:forget_request(params or {})
 		last_action(text)
 	end
 end
@@ -935,6 +1164,9 @@ end
 function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBindingID)
 	log.always("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
 		tostring(otherDeviceID), tostring(otherBindingID))
+	if state.scenes and state.scenes.on_binding_changed then
+		state.scenes:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
+	end
 	if state.lights and state.lights.on_binding_changed then
 		state.lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
 		refresh_lights_props()
@@ -1003,6 +1235,11 @@ function OnDriverLateInit()
 	-- GET: a light that restarted with us gets its capabilities at once.
 	state.lights:configure_all()
 	state.queue = new_queue()
+	state.group_queue = new_group_queue()
+	state.scenes = new_scenes()
+	if state.scenes then
+		state.scenes:load()
+	end
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).
 	if state.lights.reconcile then
@@ -1038,5 +1275,8 @@ function OnDriverDestroyed()
 	end
 	if state.queue then
 		state.queue:stop()
+	end
+	if state.group_queue then
+		state.group_queue:stop()
 	end
 end
