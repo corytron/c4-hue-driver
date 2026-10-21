@@ -2,14 +2,21 @@
 -- actions against it without Composer (docs/dev-loop.md). Dev builds only;
 -- release builds do not contain this file.
 --
--- One repeating timer polls a plain-HTTP server. Each tick is a chain of
--- C4:url transfers, each started from the previous one's OnDone:
+-- Bridge side: one repeating timer polls a plain-HTTP server. Each tick is a
+-- chain of C4:url transfers, each started from the previous one's OnDone:
 --   GET /manifest -> (GET /bundle, reload, POST /report) ->
+--   GET /manifest?tree=light -> (GET /bundle?tree=light, DEV_RELOAD to lights) ->
 --   GET /commands -> (run each, POST /report command_done) ->
 --   POST /log -> (POST /report heartbeat)
 -- so no transfer ever starts inside OnHeaders or OnBodyChunk, which Director
 -- fails with curl error 2. A tick that fires while the previous chain is
 -- still in flight is skipped.
+--
+-- Light side: a light driver never talks to the server. The bridge hands it
+-- the light tree's bundle as a DEV_RELOAD command, and the light's
+-- dispatch.commands["DEV_RELOAD"] = devloop.apply_forwarded reloads it with
+-- the same sequence the bridge uses on itself. devloop.start() is never
+-- called on a light.
 --
 -- State lives in _G.__DEVLOOP so a reload of the rest of the driver cannot
 -- lose the timer or the log buffer; package.loaded["common.devloop"] is the
@@ -22,6 +29,8 @@
 --   devloop.running()         -> bool
 --   devloop.version()         -> version of the code last loaded, or nil
 --                                while the .c4z's own code is running
+--   devloop.light_version()   -> light-tree version last forwarded (bridge)
+--   devloop.apply_forwarded(params)  the light's DEV_RELOAD handler -> bool
 
 local devloop = {}
 
@@ -30,7 +39,8 @@ devloop.HEARTBEAT_MS = 30000
 devloop.MAX_LOG_LINES = 500
 devloop.STUCK_TICKS = 10      -- ticks before an unfinished chain is abandoned
 
--- Shared state, created once per Lua state and reused across reloads.
+-- Shared state, created once per Lua state and reused across reloads. Created
+-- at load time, so apply_forwarded works on a light where start() never runs.
 local S = rawget(_G, "__DEVLOOP")
 if not S then
 	S = {
@@ -42,6 +52,8 @@ if not S then
 		unreachable = false,     -- server down; said once per transition
 		version = nil,           -- version last loaded, or attempted and failed
 		bundle = nil,            -- files of the last bundle fetched
+		light_version = nil,     -- light-tree version last forwarded to the lights
+		no_light_tree = false,   -- server predates trees; said once
 		last_command_id = 0,
 		last_report_ms = 0,
 		log = {},                -- { t = ms, line = string }, oldest first
@@ -200,8 +212,10 @@ local function request(method, path, body, callback)
 	if not ok then finish({ ok = false, err = "could not start transfer: " .. tostring(err) }) end
 end
 
+-- Every report carries both versions: the bridge's own and the light tree's
+-- last forwarded one (absent until the first forward), so /status shows both.
 local function report(event, extra, callback)
-	local body = { version = S.version, event = event, properties = snapshot() }
+	local body = { version = S.version, light_version = S.light_version, event = event, properties = snapshot() }
 	for k, v in pairs(extra or {}) do body[k] = v end
 	S.last_report_ms = now_ms()
 	request("POST", "/report", body, function(r)
@@ -233,6 +247,13 @@ local function install_loader(files)
 	S.loader = loader
 end
 
+-- The driver's own modules, cleared on reload so the bundle's copies load:
+-- bridge.* (bridge driver), light.* (light driver), common.* except this one.
+local function is_driver_module(name)
+	return name ~= "common.devloop"
+		and (name:match("^bridge%.") or name:match("^light%.") or name:match("^common%.")) ~= nil
+end
+
 -- Tear the running driver down and bring `files` up in its place. Returns
 -- nil on success or the error text; the second value is a warning when
 -- OnDriverDestroyed failed but the new code is running anyway (stopping
@@ -249,9 +270,7 @@ local function reload(files, version)
 		end
 	end
 	for name in pairs(package.loaded) do
-		if name ~= "common.devloop" and (name:match("^bridge%.") or name:match("^common%.")) then
-			package.loaded[name] = nil
-		end
+		if is_driver_module(name) then package.loaded[name] = nil end
 	end
 	-- Recorded before anything can fail: a failed version is not retried
 	-- until the server has a different one.
@@ -273,11 +292,15 @@ local function reload(files, version)
 	return nil, warning
 end
 
--- Reload, report the outcome, then `done(err)`.
-local function apply_bundle(files, version, done)
+local function count_files(files)
 	local count = 0
 	for _ in pairs(files) do count = count + 1 end
-	say("reloading to version %s (%d files)", tostring(version), count)
+	return count
+end
+
+-- Reload, report the outcome, then `done(err)`.
+local function apply_bundle(files, version, done)
+	say("reloading to version %s (%d files)", tostring(version), count_files(files))
 	local err, warning = reload(files, version)
 	if err then
 		say("reload failed: %s", err)
@@ -288,15 +311,55 @@ local function apply_bundle(files, version, done)
 	end
 end
 
--- `callback(files, version, err)`
-local function fetch_bundle(callback)
-	request("GET", "/bundle", nil, function(r)
+-- `callback(files, version, err)`; `tree` is nil for the bridge's own tree.
+local function fetch_bundle(tree, callback)
+	local path = tree and ("/bundle?tree=" .. tree) or "/bundle"
+	request("GET", path, nil, function(r)
 		local j = r.json
 		if not r.ok or type(j) ~= "table" or type(j.files) ~= "table" then
 			return callback(nil, nil, "bundle: " .. tostring(r.err or "malformed response"))
 		end
 		callback(j.files, tostring(j.version))
 	end)
+end
+
+-- Light tree ---------------------------------------------------------------------
+
+-- Hand the light tree's bundle to every bound light as one DEV_RELOAD command
+-- { version, files = JSON text }; each light reloads itself through
+-- devloop.apply_forwarded. The version is recorded first, so a forward that
+-- fails is not retried until the server has a different one.
+local function forward_light(files, version)
+	S.light_version = version
+	local ok, err = pcall(function()
+		-- An object of strings, so Director's array quirk cannot bite.
+		local text = C4:JsonEncode(files, false, true)
+		local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)
+		local sent, failed = 0, 0
+		for id in pairs(type(bound) == "table" and bound or {}) do
+			-- Trailing args: allowEmptyValues = false, logCommand = false, so
+			-- Director does not write the whole bundle to its log every reload.
+			local ok_send, serr = pcall(function()
+				C4:SendToDevice(id, "DEV_RELOAD", { version = version, files = text }, false, false)
+			end)
+			if ok_send then
+				sent = sent + 1
+			else
+				failed = failed + 1
+				say("DEV_RELOAD to device %s failed: %s", tostring(id), tostring(serr))
+			end
+		end
+		if sent + failed == 0 then
+			say("light version %s: no bound lights", tostring(version))
+		else
+			say("light version %s forwarded to %d light(s)%s", tostring(version), sent,
+				failed > 0 and string.format(", %d failed", failed) or "")
+		end
+	end)
+	if not ok then say("light forward failed: %s", tostring(err)) end
+	-- A heartbeat is due at the end of this tick, so /status sees the new
+	-- light version at once instead of up to HEARTBEAT_MS later.
+	S.last_report_ms = 0
 end
 
 -- Tick chain ------------------------------------------------------------------
@@ -353,7 +416,7 @@ local function run_command(cmd, done)
 		complete(not ok and tostring(err) or nil)
 	elseif cmd.type == "reload" then
 		if S.bundle then return apply_bundle(S.bundle, S.version, complete) end
-		fetch_bundle(function(files, version, err)
+		fetch_bundle(nil, function(files, version, err)
 			if not files then return complete(err) end
 			apply_bundle(files, version, complete)
 		end)
@@ -376,6 +439,36 @@ local function step_commands()
 	end)
 end
 
+-- The light tree: forward a changed version to the bound lights. A server
+-- without trees answers with the bridge manifest (no "tree" field), which
+-- must never reach the lights; said once, then ignored.
+local function step_light()
+	request("GET", "/manifest?tree=light", nil, function(r)
+		local j = r.json
+		if not r.ok or type(j) ~= "table" or j.version == nil then
+			say("light manifest: %s", tostring(r.err or "malformed manifest"))
+			return step_commands()
+		end
+		if j.tree ~= "light" then
+			if not S.no_light_tree then
+				say("server has no light tree; lights are not updated")
+				S.no_light_tree = true
+			end
+			return step_commands()
+		end
+		S.no_light_tree = false
+		if tostring(j.version) == S.light_version then return step_commands() end
+		fetch_bundle("light", function(files, version, err)
+			if not files then
+				say("light %s", err)
+				return step_commands()
+			end
+			forward_light(files, version)
+			step_commands()
+		end)
+	end)
+end
+
 local function step_manifest()
 	request("GET", "/manifest", nil, function(r)
 		local j = r.json
@@ -391,13 +484,13 @@ local function step_manifest()
 			say("server %s reachable again", S.host)
 			S.unreachable = false
 		end
-		if tostring(j.version) == S.version then return step_commands() end
-		fetch_bundle(function(files, version, err)
+		if tostring(j.version) == S.version then return step_light() end
+		fetch_bundle(nil, function(files, version, err)
 			if not files then
 				say("%s", err)
-				return step_commands()
+				return step_light()
 			end
-			apply_bundle(files, version, step_commands)
+			apply_bundle(files, version, step_light)
 		end)
 	end)
 end
@@ -458,6 +551,32 @@ end
 
 function devloop.version()
 	return S.version
+end
+
+function devloop.light_version()
+	return S.light_version
+end
+
+-- The light's DEV_RELOAD handler: `params` are the strings the bridge sent,
+-- { version = "...", files = "<JSON object path -> source>" }. Decodes the
+-- bundle and runs the reload sequence; the outcome goes through print (the
+-- light has no server to report to). Returns true on success.
+function devloop.apply_forwarded(params)
+	params = type(params) == "table" and params or {}
+	local version = tostring(params.version or "?")
+	local ok, files = pcall(function() return C4:JsonDecode(params.files) end)
+	if not ok or type(files) ~= "table" then
+		say("light reload failed: files param does not decode%s", ok and "" or (": " .. tostring(files)))
+		return false
+	end
+	say("light reloading to version %s (%d files)", version, count_files(files))
+	local err = reload(files, version)
+	if err then
+		say("light reload failed: %s", err)
+		return false
+	end
+	say("light reload complete: version %s", version)
+	return true
 end
 
 return devloop
