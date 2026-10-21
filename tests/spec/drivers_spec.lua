@@ -290,6 +290,29 @@ describe("Hue Bridge driver", function()
 		assert.is_false(t.options.ssl_verify_peer, "diagnostic server is self-signed")
 	end)
 
+	it("Hue Request sends an authenticated request and summarises resource lists", function()
+		local lines = {}
+		log.sink = function(line) table.insert(lines, line) end
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_check(c4)
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Hue Request", Method = "put",
+			Path = "/clip/v2/resource/light/abc", Body = '{"metadata":{"name":"Desk"}}', Host = "192.00.002.10" })
+		local t = c4.last_transfer()
+		assert.equal("PUT", t.method)
+		assert.equal("https://192.00.002.10/clip/v2/resource/light/abc", t.url)
+		assert.equal("abc123", t.headers["hue-application-key"])
+		assert.same({ metadata = { name = "Desk" } }, c4:JsonDecode(t.data))
+		t:respond(200, '{"data":[{"rid":"abc","rtype":"light"}],"errors":[]}')
+		assert.truthy(lines[#lines]:find("Hue Request PUT /clip/v2/resource/light/abc via 192.00.002.10: HTTP 200", 1, true))
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Hue Request", Path = "/clip/v2/resource/light" })
+		c4.last_transfer():respond(200, '{"data":[{"id":"l1","type":"light","metadata":{"name":"Desk"}},'
+			.. '{"id":"l2","type":"light","metadata":{"name":"Hall"}}],"errors":[]}')
+		assert.truthy(lines[#lines]:find("2 items: l1=Desk; l2=Hall", 1, true))
+	end)
+
 	it("Forget Pairing stops the stream and clears the key", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
