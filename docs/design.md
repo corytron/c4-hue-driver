@@ -143,6 +143,67 @@ The two drivers talk through `C4:SendToDevice` in both directions.
   .c4z, the convention `ssl_cabundle` turned out to follow **[assumed until
   tested]**.
 
+### `C4:url` transfer scheduling on OS 3.4.2 (measured through the dev loop)
+
+All **[verified]** on the controller, with millisecond timings shipped by
+the dev loop (`build/dev/driver.log` of 2026-10-20, 20:08–20:26):
+
+- **One active transfer per host at a time, strictly serialized.** A GET to
+  the bridge issued while the event stream was open completed at the exact
+  moment the stream transfer ended (6929 ms later, 26 ms after the stream's
+  timeout); two GETs issued after that took 27 and 38 ms. Against the test
+  server on this VM the same GET never reached the server at all. So it is
+  not a connection limit but a per-host queue: a transfer waits for the
+  previous one to the same host to finish.
+- **The queue key is the host text as parsed from the URL.** Sharing a queue
+  with `10.0.2.143`: `10.0.2.143:443`, `hue@10.0.2.143`, `@10.0.2.143`
+  (all timed out behind the stream). Rejected by curl with error 6
+  "Couldn't resolve host name": decimal (`167772559`), hex octets
+  (`10.0.2.0x8f`, `0x0a.0x00.0x02.0x8f`), the short form `10.0.655`, and the
+  IPv6-mapped `[::ffff:10.0.2.143]`. **Getting their own queue and still
+  reaching the bridge: zero-padded octets, `10.0.2.143` and
+  `10.0.2.143`** (GET OK in under a second with the stream connected).
+  Leading zeros are octal to curl's resolver, so only octets with a value
+  below 8 can be padded (`010` means 8: `010.0.2.143` connected to the
+  wrong address and hit the 5 s connect timeout). Most home subnets have such
+  an octet (`192.168.1.x`, `10.0.x.x`); not all do.
+- **`Cancel()` does not end an active transfer.** An abandoned stream only
+  dies when its next callback returns `true` (so: on the next event from the
+  bridge) or at its total timeout. The driver's reconnect after a reload
+  therefore sat in "Connecting" until a `zigbee_connectivity` event arrived.
+  The Bridge Pro emits those every so often, which hides the problem most of
+  the time, but a quiet bridge would leave a reconnect pending for the whole
+  stream timeout.
+- A transfer started inside another transfer's `OnHeaders`/`OnBodyChunk`
+  fails at once with curl error 2 (timers and `OnDone` are safe).
+- `C4:JsonEncode` writes Lua arrays as objects with string keys even with
+  `encodeArrays = true` (observed on the `/log` bodies); the dev server
+  accepts both shapes. Any Hue request body that needs a real JSON array
+  will need a small encoder of our own.
+
+### Two ways to keep commands flowing while the stream is open
+
+**A. Two spellings, one transport.** Keep both on `C4:url`: the stream on a
+zero-padded spelling of the bridge address, commands on the dotted one.
+Separate queues, so commands never wait for the stream. Same TLS setup (the
+bundle pins the chain; hostname checking is already off; the bridge ignored
+the odd `Host` header and answered 200). Costs: it relies on an undocumented
+scheduler detail and on curl's octal parsing, so the driver must check at
+startup that a GET via the padded spelling works and otherwise degrade
+(single queue with a short stream timeout); addresses with no octet below 8
+cannot use it; and reconnects still queue behind the abandoned stream until
+the next event or the stream timeout, which argues for a moderate stream
+timeout (minutes, not an hour) plus a resync GET after every reconnect.
+
+**B. Raw SSL network connection for the stream** (`docs/raw-stream-design.md`).
+Documented transport, no scheduler interaction with `C4:url`, true
+persistent socket with TCP keepalive, no total-transfer timeout. Costs:
+~400 lines of new HTTP/chunked plumbing and a fake-runtime extension, plus
+its own hardware unknowns, chiefly whether `VERIFY_MODE=peer` tolerates the
+certificate's CN being the bridge id.
+
+Decision pending (owner's call); the dev loop can test either in minutes.
+
 ## Discovery
 
 Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.
