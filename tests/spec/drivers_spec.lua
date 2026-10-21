@@ -320,10 +320,11 @@ describe("Hue Bridge driver", function()
 			lines = {}
 			log.sink = function(line) table.insert(lines, line) end
 			env, c4 = paired_driver()
-			-- A registered light with its proxy bound on 5001, as Director does.
+			-- A registered light whose light_v2 proxy (2005) consumes the protocol
+			-- driver's (2004) binding 5001, as Director wires a proxy driver.
 			c4.persist.hue_lights = { ["rid-1"] = { device_id = 2004, name = "Desk Lamp", model = "Hue color lamp",
 				caps = { has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 0.2 } } }
-			c4:Bind(2005, 5001, 2004, 5001, "LIGHT_V2")
+			c4:Bind(2004, 5001, 2005, 5001, "LIGHT_V2")
 			env.OnDriverLateInit("DIT_STARTUP")
 			answer_check(c4)
 		end)
@@ -340,6 +341,7 @@ describe("Hue Bridge driver", function()
 			assert.equal(2005, m.id)
 			assert.equal("SET_BRIGHTNESS_TARGET", m.command)
 			assert.same({ LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" }, m.params)
+			assert.equal(2005, c4.persist.hue_lights["rid-1"].proxy_id, "proxy id cached in the registry")
 		end)
 
 		it("Proxy Command reports an unknown light", function()

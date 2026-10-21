@@ -82,6 +82,18 @@ describe("bridge.lights", function()
 		answer_gets()
 	end
 
+	-- The AddDevice callback's info table exactly as OS 3.4.2 passed it for a
+	-- hue_light device (deviceId was 1036, the protocol id).
+	local function os342_info()
+		return {
+			Name = "devices", Value = "", Attributes = {},
+			ChildNodes = {
+				{ Name = "protocol", Value = "1036", Attributes = {}, ChildNodes = {} },
+				{ Name = "proxy", Value = "1037", Attributes = {}, ChildNodes = {} },
+			},
+		}
+	end
+
 	before_each(function()
 		logged = {}
 		log.sink = function(line) table.insert(logged, line) end
@@ -98,6 +110,35 @@ describe("bridge.lights", function()
 
 	after_each(function()
 		log.set_debug(false)
+	end)
+
+	describe("ids_from", function()
+		it("reads the protocol and proxy ids from the OS 3.4.2 parsed-XML node tree", function()
+			assert.same({ protocol = 1036, proxy = 1037 }, lights.ids_from(os342_info()))
+			assert.equal(1036, lights.protocol_id_from(os342_info()))
+		end)
+
+		it("matches node names case-insensitively and accepts numeric Values", function()
+			local info = { Name = "Devices", ChildNodes = {
+				{ Name = "Protocol", Value = 42 },
+				{ Name = "PROXY", Value = "43", ChildNodes = {} },
+			} }
+			assert.same({ protocol = 42, proxy = 43 }, lights.ids_from(info))
+		end)
+
+		it("falls back to a key naming the protocol for the old flat shape", function()
+			assert.same({ protocol = 3002 }, lights.ids_from({ protocolId = 3002, proxyIds = { 3001 } }))
+			assert.equal(3002, lights.protocol_id_from({ protocolId = 3002, proxyIds = { 3001 } }))
+			assert.same({ protocol = 5, proxy = 6 }, lights.ids_from({ ids = { protocol_id = "5", proxy_id = "6" } }))
+		end)
+
+		it("returns nothing for an empty table, nil or a non-table", function()
+			assert.same({}, lights.ids_from({}))
+			assert.same({}, lights.ids_from(nil))
+			assert.same({}, lights.ids_from("1036"))
+			assert.same({}, lights.ids_from({ Name = "protocol", Value = "0" }), "ids must be positive")
+			assert.is_nil(lights.protocol_id_from(nil))
+		end)
 	end)
 
 	describe("import", function()
@@ -296,6 +337,50 @@ describe("bridge.lights", function()
 			assert.same({ { 15, 1, 3002, 1, "HUE_BRIDGE" } }, c4.calls_to("Bind"))
 			assert.is_true(saw_log("binding protocol id 3002 rather than deviceId 3001"))
 			assert.equal(3002, L:device_for(F.rids.living))
+			assert.is_nil(L:proxy_for(F.rids.living))
+		end)
+
+		it("binds the protocol id and keeps the proxy id from the OS 3.4.2 callback shape", function()
+			L = new_lights({
+				add_device = function(_, _, _, cb)
+					cb(1036, os342_info())
+				end,
+			})
+			L:import(report)
+			answer_gets({ light = lights_json({ "living" }) })
+			assert.same({ { 15, 1, 1036, 1, "HUE_BRIDGE" } }, c4.calls_to("Bind"))
+			assert.is_false(saw_log("rather than deviceId"), "deviceId already is the protocol id")
+			assert.equal(1036, L:device_for(F.rids.living))
+			assert.equal(F.rids.living, L:rid_for(1036))
+			assert.equal(1037, L:proxy_for(F.rids.living))
+			assert.same({ "HUE_CONFIGURE@1036", "HUE_STATE@1036" }, commands_sent())
+
+			-- Persisted, and back after a reload from the store.
+			assert.equal(1037, c4.persist.hue_lights[F.rids.living].proxy_id)
+			L = new_lights()
+			L:load()
+			assert.equal(1036, L:device_for(F.rids.living))
+			assert.equal(1037, L:proxy_for(F.rids.living))
+			assert.is_nil(L:proxy_for("nope"))
+			assert.is_nil(L:proxy_for(nil))
+		end)
+
+		it("gives a copy of the registry entry", function()
+			L = new_lights({
+				add_device = function(_, _, _, cb)
+					cb(1036, os342_info())
+				end,
+			})
+			L:import(report)
+			answer_gets({ light = lights_json({ "living" }) })
+			local entry = L:entry(F.rids.living)
+			assert.same({ device_id = 1036, proxy_id = 1037, name = "Living Room Lamp", model = "Hue color lamp",
+				caps = { has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 0.2 } }, entry)
+			entry.device_id, entry.caps.min_dim = 1, 99
+			assert.equal(1036, L:device_for(F.rids.living))
+			assert.equal(0.2, L.registry[F.rids.living].caps.min_dim)
+			assert.is_nil(L:entry("nope"))
+			assert.is_nil(L:entry(nil))
 		end)
 
 		it("logs registered lights that are gone from the bridge and leaves them alone", function()
@@ -365,6 +450,43 @@ describe("bridge.lights", function()
 			assert.equal(2001, c4.sent[1].id)
 			assert.same({ rid = F.rids.garage, online = "true", reason = "event" }, c4.sent[1].params)
 			assert.is_true(L.models[F.rids.garage].online)
+		end)
+
+		it("refreshes and persists the registry name on a Hue rename event", function()
+			local function rename(rid, name, extra)
+				local item = { id = rid, type = "light", metadata = { name = name } }
+				for k, v in pairs(extra or {}) do item[k] = v end
+				return { type = "update", data = { item } }
+			end
+			local saves = #c4.calls_to("PersistSetValue")
+
+			-- A rename alone: nothing to send, registry and store updated at once.
+			assert.equal(0, L:on_container(rename(F.rids.garage, "Garage Lamp")))
+			assert.equal(0, #c4.sent)
+			assert.equal("Garage Lamp", L.registry[F.rids.garage].name)
+			assert.equal("Garage Lamp", c4.persist.hue_lights[F.rids.garage].name)
+			assert.equal(2001, L:device_for(F.rids.garage), "the device id is untouched")
+			assert.equal(saves + 1, #c4.calls_to("PersistSetValue"))
+			assert.is_true(saw_log("Garage White was renamed to Garage Lamp in Hue"))
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+
+			-- A rename alongside state: the state is sent, the name is taken.
+			assert.equal(1, L:on_container(rename(F.rids.living, "Lounge Lamp", { on = { on = false } })))
+			assert.same({ rid = F.rids.living, on = "false", reason = "event" }, c4.sent[1].params)
+			assert.equal("Lounge Lamp", c4.persist.hue_lights[F.rids.living].name)
+			assert.equal(saves + 2, #c4.calls_to("PersistSetValue"))
+
+			-- The same name again, and a rename of an unregistered light: no save.
+			assert.equal(0, L:on_container(rename(F.rids.living, "Lounge Lamp")))
+			assert.equal(0, L:on_container(rename("unknown", "Whatever")))
+			assert.equal(saves + 2, #c4.calls_to("PersistSetValue"))
+
+			-- The next resync sees the same name and does not log a rename again.
+			logged = {}
+			L:resync()
+			answer_gets({ light = F.light:gsub("Garage White", "Garage Lamp"):gsub("Living Room Lamp", "Lounge Lamp") })
+			assert.is_false(saw_log("was renamed"))
+			assert.equal(saves + 2, #c4.calls_to("PersistSetValue"))
 		end)
 	end)
 
@@ -494,6 +616,21 @@ describe("bridge.lights", function()
 			assert.is_true(L.registry[F.rids.living].caps.has_color)
 			assert.is_nil(L.registry.bad)
 			assert.equal(1, L:count())
+		end)
+
+		it("loads entries with or without a proxy id", function()
+			c4.persist.hue_lights = {
+				[F.rids.living] = { device_id = 2004, name = "L" },                         -- imported before proxy_id
+				[F.rids.garage] = { device_id = 2001, proxy_id = "2005", name = "G" },      -- string from the store
+				[F.rids.kitchen] = { device_id = 2003, proxy_id = "none", name = "K" },     -- junk is dropped
+			}
+			L:load()
+			assert.equal(3, L:count())
+			assert.is_nil(L:proxy_for(F.rids.living))
+			assert.same({ device_id = 2004, name = "L" }, L:entry(F.rids.living))
+			assert.equal(2005, L:proxy_for(F.rids.garage))
+			assert.is_nil(L:proxy_for(F.rids.kitchen))
+			assert.equal(2003, L:device_for(F.rids.kitchen))
 		end)
 
 		it("uses the real C4 calls when ctx leaves them out", function()
