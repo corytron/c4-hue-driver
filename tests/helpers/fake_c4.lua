@@ -183,7 +183,104 @@ local function new_c4(env)
 	function c4:GetSandboxDir() return c4.sandbox_dir end
 	function c4:GetC4zDir() return "/opt/control4/var/drivers/c4z" end
 	function c4:GetDriverFileName() return "hue_bridge.c4z" end
-	function c4:GetDeviceID() return 15 end
+
+	-- Devices, bindings and inter-driver messages. Bindings live in a table
+	-- that fake.pair() shares between two loaded drivers; SendToDevice queues
+	-- into an outbox that fake.pump() delivers (Director delivers
+	-- asynchronously too).
+	c4.device_id = 15
+	c4.room_id = 7
+	c4.next_device_id = 2001
+	c4.added = {}       -- { id, driver, room, name } per AddDevice
+	c4.bindings = {}    -- { provider, provider_binding, consumer, consumer_binding, class }
+	c4.sent = {}        -- every SendToDevice { id, command, params }
+	c4.outbox = {}      -- not yet delivered by fake.pump()
+
+	function c4:GetDeviceID() return c4.device_id end
+	function c4:RoomGetId() return c4.room_id end
+
+	-- C4:AddDevice(driver [, room [, name]], callback); the callback gets the
+	-- new device id at once (Director calls it later; specs see no difference).
+	function c4:AddDevice(driver, a, b, cb)
+		local room, name, callback
+		if type(a) == "function" then
+			callback = a
+		elseif type(b) == "function" then
+			room, callback = a, b
+		else
+			room, name, callback = a, b, cb
+		end
+		local id = c4.next_device_id
+		c4.next_device_id = id + 1
+		table.insert(c4.added, { id = id, driver = driver, room = room, name = name })
+		record("AddDevice", driver, room, name)
+		callback(id, {})
+	end
+
+	function c4:Bind(provider, provider_binding, consumer, consumer_binding, class)
+		record("Bind", provider, provider_binding, consumer, consumer_binding, class)
+		table.insert(c4.bindings, { provider = provider, provider_binding = provider_binding,
+			consumer = consumer, consumer_binding = consumer_binding, class = class })
+	end
+
+	-- Returns deviceId -> name, or nil when nothing is bound (as documented).
+	function c4:GetBoundConsumerDevices(device, binding)
+		local out, any = {}, false
+		for _, b in ipairs(c4.bindings) do
+			if b.provider == device and b.provider_binding == binding then
+				out[b.consumer] = "Device " .. tostring(b.consumer)
+				any = true
+			end
+		end
+		return any and out or nil
+	end
+
+	function c4:GetBoundProviderDevice(device, binding)
+		for _, b in ipairs(c4.bindings) do
+			if b.consumer == device and b.consumer_binding == binding then
+				return b.provider
+			end
+		end
+		return nil
+	end
+
+	function c4:RenameDevice(id, name)
+		record("RenameDevice", id, name)
+	end
+
+	function c4:SendToDevice(id, command, params)
+		record("SendToDevice", id, command, params)
+		local message = { id = id, command = command, params = params }
+		table.insert(c4.sent, message)
+		table.insert(c4.outbox, message)
+	end
+
+	-- Colour conversions, approximations of the controller's: Kim et al.
+	-- for CCT -> xy (1667-25000 K), McCamy for xy -> CCT. Good to a few
+	-- percent, which is what specs should assert.
+	function c4:ColorCCTtoXY(k)
+		k = math.max(1667, math.min(25000, k))
+		local x
+		if k <= 4000 then
+			x = -0.2661239e9 / k ^ 3 - 0.2343589e6 / k ^ 2 + 0.8776956e3 / k + 0.179910
+		else
+			x = -3.0258469e9 / k ^ 3 + 2.1070379e6 / k ^ 2 + 0.2226347e3 / k + 0.240390
+		end
+		local y
+		if k <= 2222 then
+			y = -1.1063814 * x ^ 3 - 1.34811020 * x ^ 2 + 2.18555832 * x - 0.20219683
+		elseif k <= 4000 then
+			y = -0.9549476 * x ^ 3 - 1.37418593 * x ^ 2 + 2.09137015 * x - 0.16748867
+		else
+			y = 3.0817580 * x ^ 3 - 5.87338670 * x ^ 2 + 3.75112997 * x - 0.37001483
+		end
+		return x, y
+	end
+
+	function c4:ColorXYtoCCT(x, y)
+		local n = (x - 0.3320) / (0.1858 - y)
+		return 449 * n ^ 3 + 3525 * n ^ 2 + 6823.3 * n + 5520.33
+	end
 
 	function c4:FileSetDir(alias)
 		record("FileSetDir", alias)
@@ -337,12 +434,79 @@ function fake.install_c4(properties)
 	return env.C4, env
 end
 
+-- Run `fn` with the globals C4 and Properties pointing at `env`, as they
+-- are whenever Director calls into that driver. Needed when a spec holds
+-- two loaded drivers: fire a driver's timers or answer its transfers inside
+-- fake.as(env, ...), or use the wrapped c4.fire_timers that fake.pair installs.
+function fake.as(env, fn, ...)
+	local saved_c4, saved_props = rawget(_G, "C4"), rawget(_G, "Properties")
+	rawset(_G, "C4", env.C4)
+	rawset(_G, "Properties", env.Properties)
+	local results = { pcall(fn, ...) }
+	rawset(_G, "C4", saved_c4)
+	rawset(_G, "Properties", saved_props)
+	if not results[1] then
+		error(results[2], 0)
+	end
+	return select(2, unpack(results))
+end
+
+local routes = {}   -- device id -> env, for fake.pump()
+
+-- Make two loaded drivers see each other: shared bindings, routed
+-- SendToDevice, and c4.fire_timers that runs with the right globals. With
+-- opts.bind (default true) the light's binding 1 is bound to the bridge's
+-- binding 1, class HUE_BRIDGE, as Composer or C4:Bind would.
+function fake.pair(bridge_env, light_env, opts)
+	opts = opts or {}
+	local b, l = bridge_env.C4, light_env.C4
+	l.device_id = opts.light_id or b.next_device_id
+	if not opts.light_id then b.next_device_id = b.next_device_id + 1 end
+	l.bindings = b.bindings
+	if opts.bind ~= false then
+		b:Bind(b.device_id, 1, l.device_id, 1, "HUE_BRIDGE")
+	end
+	for _, env in ipairs({ bridge_env, light_env }) do
+		routes[env.C4.device_id] = env
+		local orig = env.C4.fire_timers
+		env.C4.fire_timers = function() return fake.as(env, orig) end
+	end
+	return l.device_id
+end
+
+-- Deliver queued SendToDevice messages between paired drivers through the
+-- receiver's ExecuteCommand, with every param value stringified as Director
+-- hands them over. Repeats until nothing is queued. Returns the count.
+function fake.pump()
+	local delivered = 0
+	local progress = true
+	while progress do
+		progress = false
+		for _, env in pairs(routes) do
+			local outbox = env.C4.outbox
+			while #outbox > 0 do
+				local m = table.remove(outbox, 1)
+				local target = routes[m.id]
+				if target and type(target.ExecuteCommand) == "function" then
+					local params = {}
+					for k, v in pairs(m.params or {}) do params[k] = tostring(v) end
+					fake.as(target, target.ExecuteCommand, m.command, params)
+					delivered = delivered + 1
+					progress = true
+				end
+			end
+		end
+	end
+	return delivered
+end
+
 -- Load a driver.lua into a fresh environment, the way Director would.
 -- `driver` is "hue_bridge" or "hue_light"; `properties` overrides the
--- defaults from driver.xml. Returns the environment (driver globals) and
--- the fake C4.
-function fake.load_driver(driver, properties)
+-- defaults from driver.xml; opts.device_id sets C4:GetDeviceID(). Returns
+-- the environment (driver globals) and the fake C4.
+function fake.load_driver(driver, properties, opts)
 	forget_driver_modules()
+	routes = {}
 
 	local env = setmetatable({}, { __index = _G })
 	env.Properties = fake.declared_properties(driver)
@@ -351,6 +515,7 @@ function fake.load_driver(driver, properties)
 		env.Properties[k] = v
 	end
 	env.C4 = new_c4(env)
+	if opts and opts.device_id then env.C4.device_id = opts.device_id end
 	env._G = env
 
 	-- Modules loaded with require() resolve globals through the real _G, so
