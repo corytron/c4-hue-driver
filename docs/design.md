@@ -202,7 +202,24 @@ persistent socket with TCP keepalive, no total-transfer timeout. Costs:
 its own hardware unknowns, chiefly whether `VERIFY_MODE=peer` tolerates the
 certificate's CN being the bridge id.
 
-Decision pending (owner's call); the dev loop can test either in minutes.
+**Decision (2026-10-21): A**, built and verified through the dev loop.
+`bridge/altaddr.lua` derives the spellings; the driver self-checks via the
+2-digit padding (`10.0.2.143`), streams on the 3-digit one
+(`10.0.2.143`) and keeps commands on the dotted address. Result on the
+controller: with the stream connected, `GET /clip/v2/resource/bridge` on the
+dotted address returned in 0 s where it had timed out at 15 s before, and
+a 47-light listing came back in under a second **[verified]**. Fallback
+(self-check fails or no octet below 8): shared queue with the stream
+timeout capped at 60 s, shown in the `Stream Address` property. B stays
+documented as the alternative if a future OS changes the scheduler.
+
+Operational notes from the same session: every stream reconnect leaves the
+previous transfer alive until its next callback or its timeout, now on the
+stream's own spelling, so only the stream itself waits; the abandoned
+transfer's last chunk is still parsed and delivered. A dev-loop reload is a
+reconnect too, so a day of reloads can queue several zombies; bridge
+events drain them one per event (the `Hue Request` dev action can generate
+harmless events by renaming a light back and forth).
 
 ## Discovery
 
