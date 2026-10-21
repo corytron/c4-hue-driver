@@ -169,7 +169,9 @@ local function request(method, path, body, callback)
 	end
 	local ok, err = pcall(function()
 		local url = "http://" .. S.host .. path
-		local data = body and C4:JsonEncode(body) or nil
+		-- encodeArrays: Director's JsonEncode writes Lua arrays as objects
+		-- unless told otherwise, and the server wants a JSON list of lines.
+		local data = body and C4:JsonEncode(body, false, true) or nil
 		local headers = data and { ["Content-Type"] = "application/json" } or {}
 		local transfer = C4:url()
 			:SetOptions({ fail_on_error = false, timeout = 10, connect_timeout = 3 })

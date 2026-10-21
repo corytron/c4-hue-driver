@@ -145,7 +145,9 @@ function http.request(req, callback)
 	end
 
 	local url = http.url(req.ip, req.path)
-	local data = req.body and C4:JsonEncode(req.body) or nil
+	-- encodeArrays = true: Director's JsonEncode writes Lua arrays as objects
+	-- by default; Hue bodies with arrays (e.g. children lists) need real ones.
+	local data = req.body and C4:JsonEncode(req.body, false, true) or nil
 	local headers = headers_for(req.key, data and { ["Content-Type"] = "application/json" } or nil)
 
 	log.debug("%s %s", method, url)
