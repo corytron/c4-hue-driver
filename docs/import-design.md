@@ -497,8 +497,9 @@ lights:picker_lights() -> { { text, value = rid }... }        -- unimported + to
 lights:picker_relink_devices() -> { { text, value = device_id }... }   -- gone + unbound entries
 lights:picker_forget_devices() -> { { text, value = device_id }... }   -- every entry
 lights:picker_hue_rooms() -> { { text, value = group_rid }... }        -- rooms then zones, each with its mapping
-lights:picker_rooms(with_mapped) -> { { text, value = room_id }... }   -- "Floor / Room"; with_mapped adds
-                                           -- "(mapped room)" value "" first; the mapping picker adds "(no mapping)" value "none"
+lights:picker_rooms(mode) -> { { text, value = room_id }... }   -- "Floor / Room" from ctx.project.rooms/hierarchy;
+                                           -- mode "add" puts "(mapped room)" value "" first, mode "mapping" puts
+                                           -- "(no mapping)" value "none" first
 lights:hello(rid, params)                  -- params.device_id/name/model: auto-adopt per §4; returns true when answered
 lights:goodbye(params)                     -- HUE_GOODBYE: tombstone
 lights:forget_request(params)              -- HUE_FORGET from a light: same as forget(device_id)
