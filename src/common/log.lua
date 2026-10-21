@@ -35,6 +35,12 @@ local function emit(level, fmt, ...)
 	log.sink(string.format("[%s] %s%s", level:upper(), prefix, msg))
 end
 
+-- For diagnostics the user asked for: shown whatever the level.
+function log.always(fmt, ...)
+	local ok, msg = pcall(string.format, fmt, ...)
+	log.sink(prefix .. (ok and msg or tostring(fmt)))
+end
+
 function log.error(fmt, ...) emit("error", fmt, ...) end
 function log.warn(fmt, ...) emit("warn", fmt, ...) end
 function log.info(fmt, ...) emit("info", fmt, ...) end
