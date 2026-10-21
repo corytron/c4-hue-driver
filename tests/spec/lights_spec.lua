@@ -1255,6 +1255,41 @@ describe("bridge.lights", function()
 			assert.same({ true, "Mapped Office (deleted in Hue) → Garage" }, { L:set_room_mapping("old-office", GARAGE_ROOM) })
 		end)
 
+		it("judges a mapping's Hue group missing only once this run has fetched the groups", function()
+			c4.persist.hue_rooms = {
+				[F.group_rids.garage] = { c4_room_id = GARAGE_ROOM, c4_room_name = "Garage", hue_name = "Garage", type = "room" },
+				[F.group_rids.living_room] = { c4_room_id = LIVING_ROOM, c4_room_name = "Living Room", hue_name = "Living Room",
+					type = "room" },
+				[F.group_rids.downstairs] = { c4_room_id = 99, c4_room_name = "Cellar", hue_name = "Downstairs", type = "zone" },
+			}
+			L:load()
+			-- Right after a reload, before any resync: the cached names, no suffix.
+			assert.is_false(L.groups_loaded)
+			assert.equal("Downstairs (zone) → (Control4 room gone); Garage → Garage; Living Room → Living Room",
+				L:room_mappings_text())
+			assert.equal("1 room mapping points at a Control4 room that no longer exists: Downstairs (zone) (Set Room Mapping)",
+				L:attention())
+			assert.same({ "Downstairs (zone) → (Control4 room gone)", "Garage → Garage", "Living Room → Living Room" },
+				texts(L:picker_hue_rooms()))
+			-- An event before the first resync cannot blank a light's room either.
+			assert.same({}, L:reconcile_rooms())
+
+			-- A resync whose /room lacks the Garage: now that one is deleted in Hue.
+			local doc = json.decode(F.room)
+			for i = #doc.data, 1, -1 do
+				if doc.data[i].id == F.group_rids.garage then table.remove(doc.data, i) end
+			end
+			resync({ room = json.encode(doc) })
+			assert.is_true(L.groups_loaded)
+			assert.equal("Living Room → Living Room; Attic (zone) → (unmapped); Downstairs (zone) → (Control4 room gone); "
+				.. "Garage (deleted in Hue) → Garage", L:room_mappings_text())
+			assert.equal("Garage (deleted in Hue) → Garage", texts(L:picker_hue_rooms())[4])
+			-- And a full fetch that has the Garage again drops the suffix.
+			resync()
+			assert.equal("Garage → Garage; Living Room → Living Room; Attic (zone) → (unmapped); "
+				.. "Downstairs (zone) → (Control4 room gone)", L:room_mappings_text())
+		end)
+
 		it("room_audit lists devices whose Control4 room differs from their Hue room's mapping [Q 12]", function()
 			assert.equal("No room mappings; use Map Rooms By Name or Set Room Mapping first", L:room_audit())
 			import_all()
