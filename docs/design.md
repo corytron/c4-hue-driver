@@ -326,6 +326,34 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   bridge and reports through its own `print`, which only its Lua output in
   Composer shows.
 
+### Lights: verified on hardware (2026-10-21, through the dev loop)
+
+- Import Lights created 47 devices one at a time, bound and registered
+  them with real capabilities; `Lights` ended at "47 lights on bridge, 47
+  imported, 47 new". The `AddDevice` callback is `(protocolId,
+  parsed-XML info)` with child nodes `protocol`/`proxy`; proxy id =
+  protocol id + 1 on this controller.
+- Resync after a reconnect: 47 `HUE_STATE` messages in 270 ms.
+- Command path end to end: `SET_LEVEL 30` into a light's `light_v2` proxy
+  → the light driver's `HUE_SET` at the bridge → one PUT 82 ms later (the
+  debounce) → the bridge's own event 110 ms after that → lamp at 30.04 %.
+  `RAMP_TO_LEVEL 60 TIME 1000` and `OFF` behaved the same.
+  `SET_BRIGHTNESS_TARGET` sent to the proxy with `SendToDevice` did nothing
+  while `ON`/`OFF`/`SET_LEVEL`/`RAMP_TO_LEVEL` worked **[verified]**; the
+  Navigator slider path is still to be observed by hand.
+- The light's `light_v2` proxy is a bound *consumer* of the protocol
+  driver's binding 5001: `GetBoundConsumerDevices(protocolId, 5001)` finds
+  it; `GetBoundProviderDevice` returns the protocol driver itself.
+- `DEV_RELOAD` with a ~40 KB `files` param reached all 47 lights three
+  times; each push produced 47 fresh `HUE_HELLO` greetings, so every light
+  applied the bundle and re-ran its startup.
+- Director decodes JSON `null` as an empty table (a light's
+  `color_temperature.mirek` while in xy mode arrives as `{}`); the model only
+  accepts numbers, so this is harmless, but any code that tests `~= nil`
+  on decoded JSON must remember it.
+- Most of the house's lights were unpowered during these tests; only the
+  Desk Lamp was exercised.
+
 ## Discovery
 
 Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.
