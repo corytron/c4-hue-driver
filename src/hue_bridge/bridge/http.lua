@@ -150,7 +150,7 @@ function http.request(req, callback)
 	local data = req.body and C4:JsonEncode(req.body, false, true) or nil
 	local headers = headers_for(req.key, data and { ["Content-Type"] = "application/json" } or nil)
 
-	log.debug("%s %s", method, url)
+	log.debug("%s %s%s", method, url, data and (" " .. data) or "")
 
 	local transfer = C4:url()
 		:SetOptions(http.options({ timeout = req.timeout }, ca))
