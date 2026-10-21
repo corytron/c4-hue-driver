@@ -403,6 +403,8 @@ dispatch.commands["HUE_SET"] = function(params)
 		rate = tonumber(params.rate),
 	}
 	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
+	log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s", rid:sub(1, 8), tostring(fields.on),
+		tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek), tostring(fields.rate))
 	state.queue:limits(rid, state.lights:limits(rid))
 	state.queue:set(rid, fields)
 end
