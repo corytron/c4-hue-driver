@@ -25,6 +25,11 @@ function state.new()
 		rid = nil,            -- Hue light resource id; the key in every message
 		name = nil,
 		model = nil,
+		hue_room = nil,       -- Hue room name, nil while unknown or in no room
+		id_v1 = nil,          -- Hue's v1 id ("/lights/12" or "12"), nil while unknown
+		gone = false,         -- the bridge reports the rid is no longer on it
+		gone_since = nil,     -- unix time the bridge entered that state, when it said
+		forgotten = nil,      -- { name } after HUE_FORGOTTEN, until the next HUE_CONFIGURE
 		has_color = false,
 		has_cct = false,
 		mirek_min = DEFAULT_MIREK_MIN,
@@ -82,7 +87,21 @@ end
 
 -- Bridge -> cache ----------------------------------------------------------
 
--- Merge a HUE_CONFIGURE message: identity and capabilities.
+-- A string param, or nil when absent or empty (SendToDevice drops empty
+-- values, so "" never arrives; an absent key is the same thing).
+local function text(v)
+	if v == nil or v == "" then
+		return nil
+	end
+	return tostring(v)
+end
+
+-- Merge a HUE_CONFIGURE message: identity, lifecycle and capabilities. The
+-- bridge builds every configure from its whole registry entry, so the
+-- lifecycle fields (hue_room, id_v1, state, gone_since) are taken as sent
+-- and reset when absent: a light that left its room, or a bridge build that
+-- does not send them yet, both read as "none". A configure also ends a
+-- forgotten state: the bridge knows the light again.
 function state.configure(st, params)
 	params = params or {}
 	if params.rid and params.rid ~= "" then
@@ -90,6 +109,11 @@ function state.configure(st, params)
 	end
 	st.name = params.name or st.name
 	st.model = params.model or st.model
+	st.hue_room = text(params.hue_room)
+	st.id_v1 = text(params.id_v1)
+	st.gone = params.state == "gone"
+	st.gone_since = st.gone and to_num(params.gone_since) or nil
+	st.forgotten = nil
 	local b = to_bool(params.has_color)
 	if b ~= nil then st.has_color = b end
 	b = to_bool(params.has_cct)

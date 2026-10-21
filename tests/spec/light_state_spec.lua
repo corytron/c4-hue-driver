@@ -43,6 +43,37 @@ describe("light.state", function()
 			state.configure(st, { rid = "" })
 			assert.equal("l1", st.rid)
 		end)
+
+		it("takes the lifecycle fields as sent and resets them when absent", function()
+			local st = color_bulb()
+			assert.is_nil(st.hue_room)
+			assert.is_nil(st.id_v1)
+			assert.is_false(st.gone)
+
+			state.configure(st, { hue_room = "Office", id_v1 = "/lights/12", state = "gone", gone_since = "1761000000" })
+			assert.equal("Office", st.hue_room)
+			assert.equal("/lights/12", st.id_v1)
+			assert.is_true(st.gone)
+			assert.equal(1761000000, st.gone_since)
+
+			state.configure(st, { state = "linked" })
+			assert.is_nil(st.hue_room, "an empty room is dropped by SendToDevice, so absent means none")
+			assert.is_nil(st.id_v1)
+			assert.is_false(st.gone)
+			assert.is_nil(st.gone_since)
+
+			state.configure(st, { hue_room = "", state = "gone" })
+			assert.is_nil(st.hue_room)
+			assert.is_true(st.gone)
+			assert.is_nil(st.gone_since, "gone without a date")
+		end)
+
+		it("ends a forgotten state", function()
+			local st = color_bulb()
+			st.forgotten = { name = "Desk" }
+			state.configure(st, { rid = "l1" })
+			assert.is_nil(st.forgotten)
+		end)
 	end)
 
 	describe("apply_hue and the proxy view", function()
