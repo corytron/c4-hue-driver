@@ -5,7 +5,8 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 ## How I want you to work
 
 - **Plan first, then wait.** For any new feature or fix, explore, then present the approach and the files you'll touch, and wait for my approval before writing code. Small mechanical edits I've already asked for are fine without a separate plan.
-- Commit in small, working steps with clear messages. Never push directly to `main` once the first scaffold is merged; use a branch and open a PR with `gh`.
+- Commit in small, working steps with clear messages. Never push directly to `main`; use a branch and open a PR with `gh`.
+- **One branch and one PR per feature.** Create the branch from `main` when the feature's contract is written, before any agent starts, so every commit lands somewhere reviewable under the right title; open the PR with `gh` as soon as the first integrated commit is on it. When a branch has done its job, merge it rather than letting the next feature pile onto it.
 - When something about the Control4 or Hue APIs is uncertain, check the docs (paths below) and tell me what you verified versus what you're assuming. Do not invent DriverWorks API calls.
 - Never commit secrets: Hue application keys, bridge IPs from my LAN, or certificates. Use placeholders in tests and examples.
 
