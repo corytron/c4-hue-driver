@@ -401,6 +401,29 @@ loop on OS 3.4.2:
   three more serial GETs (18 KB together); the scenes feature decides how
   to handle its 351 KB separately, and nothing fetches everything at once.
 
+### import-ui: verified on hardware (2026-10-21, dev loop)
+
+- Resync = six serial GETs (`light`, `device`, `zigbee_connectivity`,
+  `room`, `zone`, `bridge_home`) in about 350 ms, then "16 rooms, 7 zones,
+  1 bridge_home cached" and the per-light room derivation (47 info lines
+  the first time, none after).
+- The one-time Map Rooms By Name at the first resync of the build mapped
+  9 Hue rooms to Control4 rooms of the same name (Dining, Foyer, Kitchen,
+  Living Room, Master Bathroom, Master Bedroom, Office, Patio, Study) and
+  listed the 7 Hue rooms and 7 zones with no Control4 twin; a second run
+  reports "Nothing new to map; 9 already mapped (kept)".
+- Startup reconcile against `GetBoundConsumerDevices` and `GetDevices`:
+  `Lights` = "47 on bridge, 47 imported, 0 new, 0 missing, 0 unbound,
+  0 deleted"; proxy ids that the first import never recorded were filled
+  from binding 5001 (1036 → 1037 and so on); every entry carries id_v1, Hue
+  room and MAC.
+- Room Audit issued one `GetDevices` with all 47 ids and reported "26 of
+  26 are not in the room their Hue room maps to" (every light still sits
+  in the placeholder room the import used).
+- Log lines written before `devloop.start()` runs at the end of late init
+  (credentials summary, startup reconcile counts) do not reach the shipped
+  log; they are only in Director's own output.
+
 ## Discovery
 
 Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.

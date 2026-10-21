@@ -138,6 +138,76 @@ waiting on you:
     light in the Navigator still follows the Hue app. The developer checks
     the shipped log for reconnects and errors.
 
+## G. Selective import, rooms and lifecycle (the `import-ui` build)
+
+Both drivers changed their `driver.xml`, so this starts with an in-place
+**Update Driver** of the bridge and of the light driver (A.2). The dev
+loop has already verified on this controller: six resource GETs per
+resync, the one-time room auto-map (9 Hue rooms matched Control4 rooms by
+name), Lights Report, Room Audit and Map Rooms By Name. What only Composer
+shows is below.
+
+16. After the update, the bridge's Properties page should show three new
+    read-only lines: `Attention` ("None" when nothing needs you),
+    `Last Action` (the result of your last click) and `Room Mappings`
+    ("Dining → Dining; Foyer → Foyer; …; Basement Hallway → (unmapped); …").
+    `Lights` reads "47 on bridge, 47 imported, 0 new, 0 missing, 0 unbound,
+    0 deleted". Paste all four. If the arrows render as garbage, say so.
+17. Open one light's Properties: new `Hue Room` (its Hue room name),
+    `Hue Light ID` now "#46 (e0e51794…)", `Last Action`. The Actions tab has
+    `Adopt Hue Name` and `Forget This Light`. Paste `Hue Room` and
+    `Hue Light ID` for one light.
+18. Bridge Actions tab: the list should read Pair Bridge, Add Light, Import
+    All New Lights, Re-link Device To Light, Link Devices, Forget Light,
+    Adopt Hue Names, Accept Names As They Are, Set Room Mapping, Map Rooms
+    By Name, Room Audit, then the diagnostics. Click **Add Light**: a dialog
+    with two pickers should open, `Light` saying "(every light on the bridge
+    is imported)" and `Room` listing "(mapped room)" then your rooms as
+    "Floor / Room". Cancel. Say whether the dialog opened and what the two
+    lists showed (this is the CUSTOM_SELECT rendering check for Composer 3.x).
+19. **Set Room Mapping**: pick a Hue room without a Control4 twin (e.g.
+    `Upstairs Hallway → (unmapped)`) and the Control4 room you want it to
+    default to (e.g. `Second / Hallway`), OK. Expect `Last Action` "Mapped
+    Upstairs Hallway → Hallway" and `Room Mappings` updated. Repeat for the
+    Hue rooms you care about (the basement ones have no Control4 rooms yet;
+    leave them, or create rooms first).
+20. **Room Audit** → `Last Action` lists every light sitting in a room other
+    than the one its Hue room maps to, as "Bar Left is in Room; Hue says
+    Kitchen → drag it to Kitchen …". Drag a few in Composer, run it again:
+    they should disappear from the list. Nothing is moved for you.
+21. **Delete and re-add** (the tombstone flow). Delete one unpowered light
+    in Composer. Expect the bridge's `Attention` to say nothing about it but
+    `Lights` to end "…, 1 deleted" within a few seconds (if it does not, run
+    Lights Report and paste the first lines: the bridge should have heard
+    `HUE_GOODBYE` or seen the binding go). Then **Add Light**: the `Light`
+    picker lists it as "<name> [<Hue room>] #<n> (deleted from Composer
+    <date>)" and `Room` pre-selects "(mapped room)". OK. Expect "Added <name>
+    #<n> to <room> (device <id>)", the device in that Control4 room with the
+    Hue name, and the tile working. **Import All New Lights** before the
+    re-add must report "No new lights on the bridge" and skip the deleted
+    one by name.
+22. **Rename** one light in Composer (e.g. "Downlight 4" → "Downlight Four").
+    Expect `Attention` to read "1 Hue names differ from the Composer names:
+    Downlight Four is Downlight 4 in Hue (Adopt Hue Names or Accept Names As
+    They Are)" after the next resync or within a minute. Click **Adopt Hue
+    Names**: the device is renamed back in the tree (`Last Action` "Renamed
+    1 devices: Downlight Four → Downlight 4 (device N)"). Rename it again and
+    click **Accept Names As They Are** instead: `Attention` drops the item.
+23. **The bare "Hue Light" device** (the one added by hand before the first
+    import). In Connections, bind it to the Hue Bridge. Expect its `Status`
+    "Bound; the bridge does not know this device. Use Link Devices on the
+    bridge", bridge `Attention` "1 unbound device …" or the link hint, and
+    **Link Devices** to answer "not linked 1: Hue Light (device 1034): no
+    unimported Hue light has that name; rename …". Then **Forget Light** on
+    one unpowered imported light (say "Vanity 3"), rename the bare device to
+    "Vanity 3" in Composer, run **Link Devices** again: "Linked 1 devices:
+    Vanity 3 (device 1034) to Vanity 3 [Master Bathroom] #n by name". The old
+    Vanity 3 device now says "Forgotten by the bridge …" and can be deleted.
+24. **Re-link**: Forget Light on another unpowered light, then **Re-link
+    Device To Light** with its device (listed "… (device N, unbound since
+    …)") and the light it was ("… #n"). Expect "Re-linked device N …" and the
+    light working again with its old name, room and programming.
+
 ## What to paste back
 
 For each step: the property text as shown, what the Navigator did, the
