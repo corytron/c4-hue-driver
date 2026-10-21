@@ -2,7 +2,9 @@
 # Build build/hue_bridge.c4z and build/hue_light.c4z with Control4's dp3 packager.
 #
 # Usage: tools/build.sh [--dev]
-#   --dev   allow the Lua command window in Composer (dp3 --allowexecute)
+#   --dev   developer build: ships common/devloop.lua (the self-reloading dev
+#           loop, see docs/dev-loop.md) and allows the Lua command window in
+#           Composer (dp3 --allowexecute). Release builds contain neither.
 #
 # Each driver is staged into build/stage/<driver>/ with src/common copied in
 # as common/, so `require("common.log")` resolves inside the .c4z the same way
@@ -15,9 +17,10 @@ DP3="${DP3:-$HOME/c4-tools/drivers-driverpackager/dp3/driverpackager.py}"
 DRIVERS=(hue_bridge hue_light)
 
 extra_args=()
+dev_build=no
 for arg in "$@"; do
 	case "$arg" in
-		--dev) extra_args+=(--allowexecute) ;;
+		--dev) extra_args+=(--allowexecute); dev_build=yes ;;
 		*) echo "unknown argument: $arg" >&2; exit 2 ;;
 	esac
 done
@@ -40,6 +43,9 @@ for driver in "${DRIVERS[@]}"; do
 	stage="$stage_root/$driver"
 	cp -R "$ROOT/src/$driver" "$stage"
 	cp -R "$ROOT/src/common" "$stage/common"
+	if [[ "$dev_build" != yes ]]; then
+		rm -f "$stage/common/devloop.lua"
+	fi
 
 	# dp3 only stamps <version>/<modified> when building from a manifest, so
 	# generate one listing everything staged (directories recursively).
@@ -68,5 +74,9 @@ for driver in "${DRIVERS[@]}"; do
 		echo "dp3 did not produce build/$driver.c4z" >&2
 		exit 1
 	fi
-	echo "built build/$driver.c4z (version $version)"
+	if [[ "$dev_build" == yes ]]; then
+		echo "built build/$driver.c4z (version $version, DEV build)"
+	else
+		echo "built build/$driver.c4z (version $version)"
+	fi
 done
