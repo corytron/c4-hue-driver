@@ -510,4 +510,342 @@ describe("bridge.hue_model", function()
 				min_dim = "5" }, plain)
 		end)
 	end)
+
+	describe("scene()", function()
+		local scene_items
+
+		before_each(function()
+			scene_items = by_rid(items(F.scene))
+		end)
+
+		-- The one scene recorded whole from the house bridge: a static zone scene.
+		it("parses the recorded static zone scene: group, status, last_recall, speed", function()
+			local s = hue_model.scene(scene_items[F.scene_rids.nightlight])
+			assert.same({
+				rid = F.scene_rids.nightlight,
+				name = "Nightlight",
+				group_rid = F.group_rids.downstairs,
+				group_type = "zone",
+				id_v1 = F.scene_id_v1.nightlight,
+				active = "static",
+				last_recall = F.scene_last_recall,
+				auto_dynamic = false,
+				speed = 0.603,
+			}, s)
+		end)
+
+		it("parses a room scene that was never recalled", function()
+			local s = hue_model.scene(scene_items[F.scene_rids.relax])
+			assert.equal("Relax", s.name)
+			assert.equal(F.group_rids.living_room, s.group_rid)
+			assert.equal("room", s.group_type)
+			assert.equal("inactive", s.active)
+			assert.is_nil(s.last_recall)
+			assert.is_false(s.auto_dynamic)
+			assert.equal(0.603, s.speed)
+		end)
+
+		it("keeps an inactive scene's earlier last_recall and reads auto_dynamic", function()
+			local bright = hue_model.scene(scene_items[F.scene_rids.bright])
+			assert.equal("inactive", bright.active)
+			assert.equal("2026-10-20T07:12:03.110Z", bright.last_recall)
+			local savanna = hue_model.scene(scene_items[F.scene_rids.savanna])
+			assert.is_true(savanna.auto_dynamic)
+			assert.equal(0.6031746, savanna.speed)
+			assert.equal("Savanna sunset", savanna.name)
+		end)
+
+		it("has exactly the fields of the contract and drops actions, palette and image", function()
+			local expected = { rid = 1, name = 1, group_rid = 1, group_type = 1, id_v1 = 1, active = 1,
+				last_recall = 1, auto_dynamic = 1, speed = 1 }
+			for _, rid in pairs(F.scene_rids) do
+				local raw = scene_items[rid]
+				assert.is_table(raw.actions, "the fixture does carry actions")
+				assert.is_table(raw.palette)
+				assert.is_table(raw.metadata.image)
+				local s = hue_model.scene(raw)
+				for k in pairs(s) do
+					assert.truthy(expected[k], "unexpected field " .. k)
+				end
+				assert.is_nil(s.actions)
+				assert.is_nil(s.palette)
+				assert.is_nil(s.image)
+			end
+		end)
+
+		it("parses every scene of the GET body into its group", function()
+			local per_group = {}
+			for _, raw in ipairs(items(F.scene)) do
+				local s = hue_model.scene(raw)
+				per_group[s.group_rid] = (per_group[s.group_rid] or 0) + 1
+			end
+			assert.same({
+				[F.group_rids.living_room] = 2,
+				[F.group_rids.downstairs] = 2,
+				[F.group_rids.garage] = 1,
+			}, per_group)
+		end)
+
+		it("parses a complete add item from the stream", function()
+			local s = hue_model.scene(decode(F.events.scene_added)[1].data[1])
+			assert.equal(F.new_scene_rid, s.rid)
+			assert.equal("Read", s.name)
+			assert.equal(F.new_scene_id_v1, s.id_v1)
+			assert.equal(F.group_rids.living_room, s.group_rid)
+			assert.equal("room", s.group_type)
+			assert.equal("inactive", s.active)
+			assert.is_nil(s.last_recall)
+			assert.is_false(s.auto_dynamic)
+			assert.equal(0.6269841, s.speed)
+		end)
+
+		it("is nil for anything that is not a scene", function()
+			assert.is_nil(hue_model.scene(light_items[F.rids.living]))
+			assert.is_nil(hue_model.scene(by_rid(items(F.room))[F.group_rids.living_room]))
+			assert.is_nil(hue_model.scene(items(F.smart_scene)[1]), "a smart_scene")
+			assert.is_nil(hue_model.scene(decode(F.events.scene_recalled)[1].data[1]), "a grouped_light")
+			assert.is_nil(hue_model.scene({ id = "x", metadata = { name = "Relax" } }), "no type")
+			assert.is_nil(hue_model.scene({ type = "scene", metadata = { name = "Relax" } }), "no id")
+			assert.is_nil(hue_model.scene("junk"))
+			assert.is_nil(hue_model.scene(nil))
+		end)
+
+		it("gives a nameless scene a fallback name and ignores an empty id_v1", function()
+			assert.equal("Hue scene /scenes/AbCdEfGhIjKlMnOp",
+				hue_model.scene({ id = "s", type = "scene", id_v1 = "/scenes/AbCdEfGhIjKlMnOp" }).name)
+			local bare = hue_model.scene({ id = "s", type = "scene", id_v1 = "" })
+			assert.equal("Hue scene s", bare.name)
+			assert.is_nil(bare.id_v1)
+			assert.is_nil(bare.group_rid)
+			assert.is_nil(bare.active)
+			assert.is_false(bare.auto_dynamic)
+		end)
+
+		it("treats nulls decoded as empty tables like absent fields", function()
+			local s = hue_model.scene({ id = "s", type = "scene", id_v1 = {}, metadata = { name = {}, image = {} },
+				group = {}, status = { active = {}, last_recall = {} }, speed = {}, auto_dynamic = {} })
+			assert.equal("Hue scene s", s.name)
+			assert.is_nil(s.id_v1)
+			assert.is_nil(s.group_rid)
+			assert.is_nil(s.group_type)
+			assert.is_nil(s.active)
+			assert.is_nil(s.last_recall)
+			assert.is_false(s.auto_dynamic)
+			assert.is_nil(s.speed)
+			local halves = hue_model.scene({ id = "s", type = "scene", metadata = {}, group = { rtype = "zone" },
+				status = {} })
+			assert.is_nil(halves.group_rid, "a group without a rid is no group")
+			assert.is_nil(halves.group_type)
+		end)
+
+		it("keeps the group rid of a scene under an rtype the contract does not name", function()
+			local s = hue_model.scene({ id = "s", type = "scene", metadata = { name = "Private" },
+				group = { rid = "pg", rtype = "private_group" } })
+			assert.equal("pg", s.group_rid)
+			assert.is_nil(s.group_type)
+			local home = hue_model.scene({ id = "s", type = "scene",
+				group = { rid = F.group_rids.home, rtype = "bridge_home" } })
+			assert.equal("bridge_home", home.group_type)
+		end)
+	end)
+
+	describe("update_scene()", function()
+		local relax, savanna
+
+		local function scene_in(container)
+			for _, item in ipairs(container.data) do
+				if item.type == "scene" then
+					return item
+				end
+			end
+		end
+
+		before_each(function()
+			local scene_items = by_rid(items(F.scene))
+			relax = hue_model.scene(scene_items[F.scene_rids.relax])
+			savanna = hue_model.scene(scene_items[F.scene_rids.savanna])
+		end)
+
+		it("goes static with a last_recall from a recall event that shares its container with grouped_lights", function()
+			local container = decode(F.events.scene_recalled)[1]
+			assert.equal(4, #container.data)
+			local item = scene_in(container)
+			assert.equal(F.scene_rids.relax, item.id)
+			assert.same({ "active" }, hue_model.update_scene(relax, item))
+			assert.equal("static", relax.active)
+			assert.equal(F.scene_recall_time, relax.last_recall)
+			assert.equal("Relax", relax.name)
+			assert.equal(F.group_rids.living_room, relax.group_rid)
+			assert.equal("room", relax.group_type)
+			assert.equal(0.603, relax.speed)
+		end)
+
+		it("goes inactive and keeps the last_recall when a status item carries only active", function()
+			hue_model.update_scene(relax, scene_in(decode(F.events.scene_recalled)[1]))
+			local item = scene_in(decode(F.events.scene_inactive)[1])
+			assert.same({ "active" }, hue_model.update_scene(relax, item))
+			assert.equal("inactive", relax.active)
+			assert.equal(F.scene_recall_time, relax.last_recall)
+		end)
+
+		it("goes dynamic_palette on an auto_dynamic scene's recall", function()
+			local item = decode(F.events.scene_dynamic)[1].data[1]
+			assert.equal(F.scene_rids.savanna, item.id)
+			assert.same({ "active" }, hue_model.update_scene(savanna, item))
+			assert.equal("dynamic_palette", savanna.active)
+			assert.equal("2026-10-21T18:17:00.219Z", savanna.last_recall)
+			assert.is_true(savanna.auto_dynamic)
+		end)
+
+		it("renames without touching the status", function()
+			local item = decode(F.events.scene_renamed)[1].data[1]
+			assert.same({ "name" }, hue_model.update_scene(relax, item))
+			assert.equal("Chill", relax.name)
+			assert.equal("inactive", relax.active)
+			assert.equal(F.scene_id_v1.relax, relax.id_v1)
+		end)
+
+		it("moves the scene to another group and follows the group's rtype", function()
+			assert.same({ "group_rid" },
+				hue_model.update_scene(relax, { group = { rid = F.group_rids.downstairs, rtype = "zone" } }))
+			assert.equal(F.group_rids.downstairs, relax.group_rid)
+			assert.equal("zone", relax.group_type)
+			assert.same({ "group_rid" }, hue_model.update_scene(relax, { group = { rid = "pg", rtype = "private_group" } }))
+			assert.is_nil(relax.group_type)
+		end)
+
+		it("reports every carried field in a stable order", function()
+			local changed = hue_model.update_scene(relax, {
+				group = { rid = F.group_rids.garage, rtype = "room" },
+				speed = 0.75,
+				auto_dynamic = true,
+				status = { active = "static", last_recall = "2026-10-21T18:20:00.000Z" },
+				metadata = { name = "Evening" },
+			})
+			assert.same({ "name", "active", "auto_dynamic", "speed", "group_rid" }, changed)
+			assert.equal("Evening", relax.name)
+			assert.equal("static", relax.active)
+			assert.is_true(relax.auto_dynamic)
+			assert.equal(0.75, relax.speed)
+			assert.equal(F.group_rids.garage, relax.group_rid)
+			assert.same({ "auto_dynamic" }, hue_model.update_scene(relax, { auto_dynamic = false }))
+			assert.is_false(relax.auto_dynamic)
+		end)
+
+		it("reports nothing for an autogrow edit of the actions, junk, or no item", function()
+			local before = {}
+			for k, v in pairs(relax) do before[k] = v end
+			assert.same({}, hue_model.update_scene(relax, {
+				id = F.scene_rids.relax, id_v1 = F.scene_id_v1.relax, type = "scene",
+				actions = { { target = { rid = F.rids.living, rtype = "light" }, action = { on = { on = true } } } },
+				palette = { color = {} },
+				last_actions_update = { source = "autogrow" },
+			}))
+			assert.same({}, hue_model.update_scene(relax, { metadata = { image = { rid = "i", rtype = "public_image" } } }))
+			assert.same({}, hue_model.update_scene(relax, { status = { last_recall = "2026-10-21T18:21:00Z" } }),
+				"last_recall alone is not a status change")
+			assert.equal("2026-10-21T18:21:00Z", relax.last_recall, "but it is kept")
+			relax.last_recall = nil
+			assert.same({}, hue_model.update_scene(relax, { metadata = "junk", status = 3, group = "g", speed = "0.5",
+				auto_dynamic = "true" }))
+			assert.same({}, hue_model.update_scene(relax, nil))
+			assert.same({}, hue_model.update_scene(relax, "junk"))
+			for k, v in pairs(before) do
+				assert.equal(v, relax[k], k)
+			end
+		end)
+
+		it("treats nulls decoded as empty tables like absent fields", function()
+			assert.same({}, hue_model.update_scene(relax, { metadata = { name = {} }, status = { active = {} },
+				group = { rid = {}, rtype = "room" }, speed = {}, auto_dynamic = {} }))
+			assert.equal("Relax", relax.name)
+			assert.equal("inactive", relax.active)
+			assert.equal(F.group_rids.living_room, relax.group_rid)
+			assert.is_false(relax.auto_dynamic)
+			assert.equal(0.603, relax.speed)
+		end)
+
+		it("never reports id_v1 as changed and leaves a delete item's bare fields alone", function()
+			assert.same({}, hue_model.update_scene(relax, { id = F.scene_rids.relax, id_v1 = "/scenes/other", type = "scene" }))
+			assert.equal(F.scene_id_v1.relax, relax.id_v1)
+			local deleted = decode(F.events.scene_deleted)[1]
+			assert.equal("delete", deleted.type)
+			assert.same({ id = F.scene_rids.relax, type = "scene" }, deleted.data[1])
+			assert.same({}, hue_model.update_scene(relax, deleted.data[1]))
+		end)
+	end)
+
+	describe("scene_state_params() and scene_configure_params()", function()
+		local function assert_all_strings(params)
+			for k, v in pairs(params) do
+				assert.equal("string", type(v), k .. " must be a string")
+			end
+		end
+
+		it("carries rid, active and the reason as strings", function()
+			local s = hue_model.scene(by_rid(items(F.scene))[F.scene_rids.nightlight])
+			local p = hue_model.scene_state_params(s, "resync")
+			assert_all_strings(p)
+			assert.same({ rid = F.scene_rids.nightlight, active = "static", reason = "resync" }, p)
+			assert.same({ rid = F.scene_rids.nightlight, active = "static", reason = "event" },
+				hue_model.scene_state_params(s, nil), "the reason defaults to event")
+		end)
+
+		it("leaves active out while the status is unknown", function()
+			assert.same({ rid = "s", reason = "hello" }, hue_model.scene_state_params({ rid = "s" }, "hello"))
+			assert.same({ rid = "s", active = "inactive", reason = "recall" },
+				hue_model.scene_state_params({ rid = "s", active = "inactive" }, "recall"))
+		end)
+
+		it("builds string-valued HUE_SCENE_CONFIGURE params from a scene", function()
+			local s = hue_model.scene(by_rid(items(F.scene))[F.scene_rids.savanna])
+			local p = hue_model.scene_configure_params(s)
+			assert_all_strings(p)
+			assert.same({ rid = F.scene_rids.savanna, name = "Savanna sunset", id_v1 = F.scene_id_v1.savanna,
+				auto_dynamic = "true" }, p)
+			local relax = hue_model.scene_configure_params(hue_model.scene(by_rid(items(F.scene))[F.scene_rids.relax]))
+			assert.equal("false", relax.auto_dynamic)
+			assert.equal("Relax", relax.name)
+		end)
+
+		it("merges the string fields of extra, skipping nil and empty values", function()
+			local s = hue_model.scene(by_rid(items(F.scene))[F.scene_rids.relax])
+			local p = hue_model.scene_configure_params(s, { group_name = "Living Room", group_type = "room",
+				state = "linked", gone_since = nil })
+			assert_all_strings(p)
+			assert.same({ rid = F.scene_rids.relax, name = "Relax", id_v1 = F.scene_id_v1.relax, auto_dynamic = "false",
+				group_name = "Living Room", group_type = "room", state = "linked" }, p)
+			local gone = hue_model.scene_configure_params(s, { group_name = "", state = "gone",
+				gone_since = "2026-10-21T18:19:00Z", caps = { nested = true }, [1] = "positional" })
+			assert.same({ rid = F.scene_rids.relax, name = "Relax", id_v1 = F.scene_id_v1.relax, auto_dynamic = "false",
+				state = "gone", gone_since = "2026-10-21T18:19:00Z" }, gone)
+		end)
+
+		it("builds the same params from a registry-shaped record and omits what it lacks", function()
+			local p = hue_model.scene_configure_params({ rid = "s", name = "Relax" })
+			assert.same({ rid = "s", name = "Relax", auto_dynamic = "false" }, p)
+			assert.same({ rid = "s", auto_dynamic = "true" },
+				hue_model.scene_configure_params({ rid = "s", id_v1 = "", auto_dynamic = true }, "junk"))
+			assert.same(hue_model.scene_configure_params({ rid = "s" }), hue_model.scene_configure_params({ rid = "s" }, {}))
+		end)
+	end)
+
+	describe("smart_scene_count()", function()
+		it("counts the smart_scene items of a GET body", function()
+			assert.equal(1, hue_model.smart_scene_count(items(F.smart_scene)))
+			assert.equal(0, hue_model.smart_scene_count(items(F.scene)))
+		end)
+
+		it("counts only smart scenes in a mixed list and tolerates junk", function()
+			local mixed = items(F.scene)
+			mixed[#mixed + 1] = items(F.smart_scene)[1]
+			mixed[#mixed + 1] = { id = "x", type = "smart_scene" }
+			mixed[#mixed + 1] = "junk"
+			mixed[#mixed + 1] = { type = "scene" }
+			assert.equal(2, hue_model.smart_scene_count(mixed))
+			assert.equal(0, hue_model.smart_scene_count({}))
+			assert.equal(0, hue_model.smart_scene_count(nil))
+			assert.equal(0, hue_model.smart_scene_count("junk"))
+		end)
+	end)
 end)
