@@ -43,6 +43,24 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<property>
+				<name>Hue Name</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Model</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Online</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
 		</properties>
 		<actions/>
 		<commands/>
