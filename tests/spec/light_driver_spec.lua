@@ -102,7 +102,7 @@ describe("Hue Light driver", function()
 	describe("startup and binding", function()
 		it("greets the bridge with its persisted rid on late init", function()
 			local env, c4 = load_light({ rid = "l1" })
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1" } } }, c4.sent)
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
 			assert.equal("l1", env.Properties["Hue Light ID"])
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 			assert.equal("", env.Properties["Online"], "not known until the bridge says")
@@ -111,7 +111,18 @@ describe("Hue Light driver", function()
 
 		it("greets without a rid key when it has none (SendToDevice drops empty values)", function()
 			local _, c4 = load_light()
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = {} } }, c4.sent)
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { device_id = "2001" } } }, c4.sent)
+		end)
+
+		it("greets with its persisted name and model too, and shows them before the bridge answers", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid, c4.persist.hue_name, c4.persist.hue_model = "l1", "Desk", "Hue color lamp"
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
+				params = { rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" } } }, c4.sent)
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("", env.Properties["Online"], "still not known until the bridge says")
 		end)
 
 		it("accepts GetBoundProviderDevice answering with a table of id/name pairs", function()
@@ -133,7 +144,7 @@ describe("Hue Light driver", function()
 			local env, c4 = load_light({ bind = false, rid = "l1" })
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1" } } }, c4.sent)
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 
 			c4.calls = {}
@@ -147,7 +158,7 @@ describe("Hue Light driver", function()
 		it("trusts the device id in the binding notification when the lookup lags behind", function()
 			local env, c4 = load_light({ bind = false, rid = "l1" })
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1" } } }, c4.sent)
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
 		end)
 
 		it("ignores binding changes other than the bridge's", function()
@@ -191,6 +202,356 @@ describe("Hue Light driver", function()
 			assert.equal(1, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"))
+		end)
+
+		it("persists the Hue name and model next to the rid, refreshed by every configure", function()
+			local env, c4 = load_light()
+			configure(env)
+			assert.same({ hue_rid = "l1", hue_name = "Desk", hue_model = "Hue color lamp" }, c4.persist)
+			configure(env, { name = "Desk Lamp" })
+			assert.equal("Desk Lamp", c4.persist.hue_name)
+		end)
+
+		it("shows the Hue room and the v1 id in front of the rid", function()
+			local env = load_light()
+			configure(env, { rid = "e0e51794-1234-5678-9abc-def012345678", hue_room = "Office", id_v1 = "/lights/12" })
+			assert.equal("#12 (e0e51794…)", env.Properties["Hue Light ID"])
+			assert.equal("Office", env.Properties["Hue Room"])
+			configure(env, { rid = "l1", id_v1 = "7" })
+			assert.equal("#7 (l1)", env.Properties["Hue Light ID"], "a rid without dashes is shown whole")
+		end)
+
+		it("falls back to the rid and an empty room when a configure carries neither", function()
+			local env = load_light()
+			configure(env, { hue_room = "Office", id_v1 = "/lights/12" })
+			configure(env)
+			assert.equal("l1", env.Properties["Hue Light ID"])
+			assert.equal("", env.Properties["Hue Room"], "SendToDevice drops an empty room, so absent means none")
+		end)
+
+		it("takes a light offline while the bridge says it is gone, and back when it is linked again", function()
+			local env, c4 = lit_light()
+			configure(env, { state = "gone", gone_since = "1761000000" })
+			local expected = "Gone from the Hue bridge since " .. os.date("%Y-%m-%d %H:%M", 1761000000)
+				.. "; re-link or Forget"
+			assert.equal(expected, env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
+
+			c4.sent = {}
+			c4.calls = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(0, #c4.sent, "dropped")
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.equal(expected, env.Properties["Status"])
+
+			configure(env, { state = "linked" })
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("Online", env.Properties["Online"])
+			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(1, #messages(c4, "HUE_SET"))
+		end)
+
+		it("says gone without a date when the bridge sends none", function()
+			local env = lit_light()
+			configure(env, { state = "gone" })
+			assert.equal("Gone from the Hue bridge; re-link or Forget", env.Properties["Status"])
+		end)
+	end)
+
+	describe("HUE_FORGOTTEN", function()
+		-- A lit light whose v1 id is known, so the forgotten text can name it.
+		local function known_light()
+			local env, c4 = lit_light()
+			configure(env, { id_v1 = "/lights/12" })
+			c4.calls = {}
+			c4.sent = {}
+			return env, c4
+		end
+
+		local FORGOTTEN = "Forgotten by the bridge (was Hue light Desk #12). "
+			.. "Delete this device in Composer, or bind it again and use Link Devices"
+
+		it("explains in Status, goes offline and drops proxy commands", function()
+			local env, c4 = known_light()
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
+			assert.equal(FORGOTTEN, env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+			assert.equal("Forgotten by the bridge", env.Properties["Last Action"])
+			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
+
+			c4.calls = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35" })
+			assert.equal(0, #messages(c4, "HUE_SET"))
+			assert.equal(0, #c4.calls_to("SendToProxy"), "not even CHANGING")
+			assert.equal(0, #c4.active_timers())
+			assert.equal(FORGOTTEN, env.Properties["Status"])
+			assert.same({ hue_rid = "l1", hue_name = "Desk", hue_model = "Hue color lamp" }, c4.persist,
+				"the identity stays, so binding the device again lets the bridge adopt it")
+		end)
+
+		it("names the light from its own state when the message carries no name", function()
+			local env = known_light()
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1" })
+			assert.equal(FORGOTTEN, env.Properties["Status"])
+		end)
+
+		it("keeps the forgotten text when the bridge then unbinds it", function()
+			local env, c4 = known_light()
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
+			c4.bindings = {}
+			env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+			assert.equal(FORGOTTEN, env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+		end)
+
+		it("is cleared by the next HUE_CONFIGURE", function()
+			local env, c4 = known_light()
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
+			c4.calls = {}
+			configure(env)
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("Online", env.Properties["Online"])
+			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(1, #messages(c4, "HUE_SET"))
+		end)
+
+		it("settles pending targets so no fallback fires afterwards", function()
+			local env, c4 = known_light()
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(1, #c4.active_timers())
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("ignores a forgotten for another rid", function()
+			local env, c4 = known_light()
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "other", name = "Lamp" })
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal(0, #c4.calls_to("SendToProxy"))
+		end)
+	end)
+
+	describe("before late init", function()
+		it("buffers HUE_CONFIGURE, HUE_STATE and HUE_FORGOTTEN and applies them in order from OnDriverLateInit", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40", reason = "resync" })
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "55" })
+			assert.equal(0, #c4.calls_to("UpdateProperty"), "nothing touches Director before late init")
+			assert.equal(0, #c4.calls_to("SendToProxy"))
+			assert.equal(0, #c4.calls_to("PersistSetValue"))
+			assert.equal(0, #c4.sent)
+
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("l1", c4.persist.hue_rid)
+			assert.equal(1, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 }, { LIGHT_BRIGHTNESS_CURRENT = 55 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "both states, in arrival order")
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
+				params = { rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" } } }, c4.sent,
+				"the hello carries the identity the buffered configure delivered")
+			local online = notifies(c4, "ONLINE_CHANGED")
+			assert.same({ STATE = true }, online[#online])
+		end)
+
+		it("applies a buffered HUE_FORGOTTEN after the configure that preceded it", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			configure(env)
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.truthy(env.Properties["Status"]:find("^Forgotten by the bridge %(was Hue light Desk%)"))
+			assert.equal("Offline", env.Properties["Online"])
+		end)
+
+		it("handles messages at once after late init, and again after a dev reload's late init", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env)
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			env.OnDriverLateInit("DIT_STARTUP") -- the dev loop re-runs the entry points after a reload
+			c4.calls = {}
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "20" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 20 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+	end)
+
+	describe("OnDriverRemovedFromProject", function()
+		it("says goodbye to the bound bridge with its rid and device id", function()
+			local env, c4 = lit_light()
+			env.OnDriverRemovedFromProject()
+			assert.same({ { id = BRIDGE_ID, command = "HUE_GOODBYE", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			env.OnDriverDestroyed("DIT_LOADED")
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("sends only the device id when it never had a rid", function()
+			local env, c4 = load_light()
+			c4.sent = {}
+			env.OnDriverRemovedFromProject()
+			assert.same({ { id = BRIDGE_ID, command = "HUE_GOODBYE", params = { device_id = "2001" } } }, c4.sent)
+		end)
+
+		it("runs through the fake's Composer delete: goodbye, then destroyed with its timers killed", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			fake.delete_device(LIGHT_ID)
+			assert.equal(1, #messages(c4, "HUE_GOODBYE"))
+			assert.equal(0, #c4.active_timers())
+			assert.is_nil(fake.project.devices[LIGHT_ID])
+		end)
+
+		it("stays quiet when no bridge is bound", function()
+			local env, c4 = load_light({ bind = false, rid = "l1" })
+			assert.has_no.errors(function() env.OnDriverRemovedFromProject() end)
+			assert.equal(0, #c4.sent)
+		end)
+
+		it("survives a failing SendToDevice", function()
+			local env, c4 = lit_light()
+			local original = c4.SendToDevice
+			c4.SendToDevice = function(self, id, command, ...)
+				if command == "HUE_GOODBYE" then error("Director says no") end
+				return original(self, id, command, ...)
+			end
+			assert.has_no.errors(function() env.OnDriverRemovedFromProject() end)
+			assert.equal(0, #messages(c4, "HUE_GOODBYE"))
+		end)
+	end)
+
+	describe("actions", function()
+		-- The light_v2 proxy the fake's project gave this light: the consumer of
+		-- the protocol driver's binding 5001, as on the controller.
+		local function proxy_of(light_id)
+			return assert(fake.project.devices[light_id].proxy_id, "the fake registers a proxy per loaded light")
+		end
+
+		it("Adopt Hue Name renames the proxy device, not the protocol driver", function()
+			local env, c4 = lit_light()
+			local proxy_id = proxy_of(LIGHT_ID)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.same({ { proxy_id, "Desk" } }, c4.calls_to("RenameDevice"))
+			assert.equal("Desk", fake.project.devices[proxy_id].name)
+			assert.equal("Hue Light", fake.project.devices[LIGHT_ID].name, "the protocol driver keeps its name")
+			assert.equal(string.format("Renamed device %d to Desk", proxy_id), env.Properties["Last Action"])
+		end)
+
+		it("Adopt Hue Name refuses without a Hue name or without a proxy", function()
+			local env, c4 = load_light({ rid = "l1" })
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+			assert.truthy(env.Properties["Last Action"]:find("^Not renamed: no Hue name known yet"))
+
+			env, c4 = lit_light()
+			c4.GetBoundConsumerDevices = function() return nil end -- nothing bound, as documented
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+			assert.equal("Not renamed: no light_v2 proxy is bound to binding 5001", env.Properties["Last Action"])
+		end)
+
+		it("Forget This Light asks the bridge with HUE_FORGET", function()
+			local env, c4 = lit_light()
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
+			assert.same({ { id = BRIDGE_ID, command = "HUE_FORGET", params = { rid = "l1", device_id = "2001" } } },
+				messages(c4, "HUE_FORGET"))
+			assert.equal("Asked the bridge to forget this light; its answer sets Status", env.Properties["Last Action"])
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"], "Status waits for HUE_FORGOTTEN")
+		end)
+
+		it("Forget This Light refuses when no bridge is bound", function()
+			local env, c4 = load_light({ bind = false, rid = "l1" })
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
+			assert.equal(0, #c4.sent)
+			assert.equal("Not sent: not bound to a Hue Bridge", env.Properties["Last Action"])
+		end)
+	end)
+
+	describe("SET_BRIGHTNESS_STOP and SET_COLOR_STOP", function()
+		it("settles a pending brightness target by reporting the cached level, and cancels the fallback", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "5000" })
+			assert.equal(1, #c4.active_timers())
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #c4.active_timers())
+			assert.equal(0, c4.fire_timers())
+			assert.equal(1, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "no second CHANGED")
+			assert.equal(1, #messages(c4, "HUE_SET"), "nothing more goes to the bridge")
+		end)
+
+		it("assumes the target when nothing is cached yet, so the proxy never waits on a CHANGING", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env)
+			c4.calls = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 75 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("settles a pending colour target the same way", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35",
+				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "3000" })
+			assert.equal(1, #c4.active_timers())
+			env.ReceivedFromProxy(5001, "SET_COLOR_STOP", {})
+			local changed = notifies(c4, "LIGHT_COLOR_CHANGED")
+			assert.equal(1, #changed)
+			assert.equal(1, changed[1].LIGHT_COLOR_CURRENT_COLOR_MODE, "the cached CCT, not the xy target")
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("reports the cached value even with no ramp in progress", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+			env.ReceivedFromProxy(5001, "SET_COLOR_STOP", {})
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"))
+			assert.equal(0, #c4.sent)
+		end)
+
+		it("accepts STOP_SCENE_RAMP as a brightness stop", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "5000" })
+			env.ReceivedFromProxy(5001, "STOP_SCENE_RAMP", {})
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #c4.active_timers())
+		end)
+	end)
+
+	describe("driver.xml", function()
+		local xml
+
+		setup(function()
+			local file = assert(io.open("src/hue_light/driver.xml"))
+			xml = file:read("*a")
+			file:close()
+		end)
+
+		local function capability(name)
+			return xml:match("<" .. name .. ">%s*(%w+)%s*</" .. name .. ">")
+		end
+
+		it("joins Advanced Lighting Scenes as a reduced-ALS light with brightness and colour stop", function()
+			assert.equal("True", capability("reduced_als_support"))
+			assert.equal("False", capability("advanced_scene_support"))
+			assert.equal("True", capability("supports_brightness_stop"))
+			assert.equal("True", capability("supports_color_stop"))
+			assert.equal("True", capability("supports_target"))
+		end)
+
+		it("declares the lifecycle properties and both actions", function()
+			local props = fake.declared_properties("hue_light")
+			assert.equal("", props["Hue Room"])
+			assert.equal("", props["Last Action"])
+			for _, name in ipairs({ "Adopt Hue Name", "Forget This Light" }) do
+				assert.truthy(xml:find("<action>%s*<name>" .. name .. "</name>%s*<command>" .. name .. "</command>"), name)
+			end
 		end)
 	end)
 
