@@ -71,6 +71,11 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
 11. Unplug the bridge's Ethernet cable for 30 s. Expect "Disconnected: …"
     with growing "Reconnecting in N s" values (1, 2, 4 …), then
     "Connected since" within a minute of plugging it back in.
+11a. (added with stream address rotation) After step 10's watchdog
+    reconnect, and after any dev-loop reload, "Connected since" must appear
+    within seconds and `Stream Address` must show a different spelling than
+    before; each connection takes the next spelling of its family so it never
+    queues behind the transfer it replaced.
 
 ## D. Restart and soak
 
