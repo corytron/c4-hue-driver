@@ -423,6 +423,24 @@ loop on OS 3.4.2:
 - Log lines written before `devloop.start()` runs at the end of late init
   (credentials summary, startup reconcile counts) do not reach the shipped
   log; they are only in Director's own output.
+- Composer "Update Driver" to the v69 dev build (16:18): the installed Lua
+  started, the dev loop saw the pinned version and reloaded to it within
+  3 s, the lights were forwarded, and the new properties appeared with the
+  expected texts (`Attention` "None"; `Room Mappings` listing 9 mapped
+  rooms, 7 unmapped rooms and 7 unmapped zones; `Last Action` holding the
+  full Room Audit text, about 3 KB, displayed without truncation).
+- Actions driven through the dev loop (`devctl run`): `Set Room Mapping`
+  "Mapped Mini Bar (zone) → Kitchen" then "Removed the mapping for Mini Bar
+  (zone)"; `Link Devices` "All 47 bound devices are registered";
+  `Import All New Lights` "No new lights on the bridge (47 on bridge, 47
+  imported)"; `Adopt Hue Names` "No Composer names differ from the Hue
+  names"; `Add Light` without a light "Not added: pick a light first" and
+  with an imported one "Not added: Vanity 4 #93 is already imported (device
+  1122)"; a click during the import's fetch is refused with "Busy:
+  importing; try again in a moment". Before the first room GET of a run,
+  `Set Room Mapping` says "Not mapped: Hue room … is not on the bridge
+  (connect the event stream and try again)" — the groups come with the
+  first resync or import.
 
 ## Discovery
 

@@ -467,6 +467,53 @@ dispatch.commands["Probe_Errors"] = function()
 	probe("SendToDevice 99999", function() return C4:SendToDevice(99999, "HUE_STATE", { rid = "probe" }) end)
 end
 
+-- Probe Scenes (dev-only, groundwork for the scenes feature): every scene
+-- and smart scene on the bridge with its group, status and dynamics.
+dispatch.commands["Probe_Scenes"] = function()
+	if not connection() then
+		return log.always("Probe Scenes: not paired")
+	end
+	local groups = state.lights and state.lights.groups
+	local function str(v)
+		if v == nil or type(v) == "table" then return "-" end -- JSON null decodes to {}
+		return tostring(v)
+	end
+	local function label(ref)
+		local rid = type(ref) == "table" and ref.rid or nil
+		local text = (groups and groups.label) and groups:label(rid) or "?"
+		return text .. " " .. tostring(rid or ""):sub(1, 8)
+	end
+	bridge_request({ method = "GET", path = "/clip/v2/resource/scene" }, function(r)
+		local items = r.json and type(r.json.data) == "table" and r.json.data or {}
+		log.always("Probe Scenes: %s, %d scenes, %d bytes", r.ok and ("HTTP " .. tostring(r.code)) or tostring(r.err),
+			#items, #tostring(r.body or ""))
+		local per_group, lines = {}, {}
+		for _, s in ipairs(items) do
+			local g = label(s.group)
+			per_group[g] = (per_group[g] or 0) + 1
+			lines[#lines + 1] = string.format("%s %q [%s] %s%s%s", tostring(s.id):sub(1, 8),
+				str(s.metadata and s.metadata.name), g, str(type(s.status) == "table" and s.status.active),
+				s.auto_dynamic == true and " dynamic" or "", type(s.speed) == "number" and (" speed " .. s.speed) or "")
+		end
+		table.sort(lines)
+		for i = 1, #lines, 3 do
+			log.always("  %s", table.concat(lines, " | ", i, math.min(i + 2, #lines)))
+		end
+		local summary = {}
+		for g, n in pairs(per_group) do summary[#summary + 1] = g .. "=" .. n end
+		table.sort(summary)
+		log.always("  scenes per group: %s", table.concat(summary, "; "))
+		bridge_request({ method = "GET", path = "/clip/v2/resource/smart_scene" }, function(r2)
+			local smart = r2.json and type(r2.json.data) == "table" and r2.json.data or {}
+			log.always("Probe Scenes: %d smart scenes, %d bytes", #smart, #tostring(r2.body or ""))
+			for _, s in ipairs(smart) do
+				log.always("  %s %q [%s] state=%s slot=%s", tostring(s.id):sub(1, 8), str(s.metadata and s.metadata.name),
+					label(s.group), str(s.state), str(type(s.active_timeslot) == "table" and s.active_timeslot.timeslot_id))
+			end
+		end)
+	end)
+end
+
 -- Probe Call: any C4 method by name, arguments as a JSON array, result dumped.
 -- e.g. Fn=GetDevices Args=[{"DeviceIds":[1080]}]; Fn=GetDeviceDisplayName Args=[1081]
 dispatch.commands["Probe_Call"] = function(params)
