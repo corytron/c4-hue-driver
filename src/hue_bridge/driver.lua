@@ -104,7 +104,17 @@ end
 local function new_lights()
 	return lights_mod.new({
 		http = bridge_request,
-		send = function(id, command, params) C4:SendToDevice(id, command, params) end,
+		send = function(id, command, params)
+			if command == "HUE_STATE" then
+				local parts = {}
+				for k, v in pairs(params) do
+					if k ~= "rid" then parts[#parts + 1] = k .. "=" .. tostring(v) end
+				end
+				table.sort(parts)
+				log.debug("HUE_STATE %s -> %d: %s", tostring(params.rid):sub(1, 8), id, table.concat(parts, " "))
+			end
+			C4:SendToDevice(id, command, params)
+		end,
 		bridge_id = C4:GetDeviceID(),
 		room_id = C4:RoomGetId(),
 		log = log,
@@ -403,6 +413,8 @@ dispatch.commands["HUE_SET"] = function(params)
 		rate = tonumber(params.rate),
 	}
 	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
+	log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s", rid:sub(1, 8), tostring(fields.on),
+		tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek), tostring(fields.rate))
 	state.queue:limits(rid, state.lights:limits(rid))
 	state.queue:set(rid, fields)
 end

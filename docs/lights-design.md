@@ -180,7 +180,11 @@ Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
   (Kelvin = 1000000 / mirek_max and / mirek_min, rounded) [verified: the
   docs require both supports_* in a single notify]; properties updated.
 - `HUE_STATE`: `on=false` → `LIGHT_BRIGHTNESS_CHANGED` 0; `on=true` with
-  `brightness` → that value. Colour: mode "ct" → `C4:ColorCCTtoXY(1000000 /
+  `brightness` → that value rounded to a whole percent, at least 1. Hue
+  reports its Zigbee level as a decimal percent (a requested 20 comes back
+  as 20.16) and the proxy showed such a value as 0 %/off on OS 3.4.2 even
+  though the proxy-protocol reference types `LIGHT_BRIGHTNESS_CURRENT` as a
+  double [verified on hardware]. Colour: mode "ct" → `C4:ColorCCTtoXY(1000000 /
   mirek)` and `LIGHT_COLOR_CHANGED` { `LIGHT_COLOR_CURRENT_X`,
   `LIGHT_COLOR_CURRENT_Y`, `LIGHT_COLOR_CURRENT_COLOR_MODE = 1` }; mode "xy"
   → the xy with mode 0. `online` → `ONLINE_CHANGED` { `STATE` }.
