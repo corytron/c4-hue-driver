@@ -61,7 +61,8 @@ hue_lights[rid] = {
   name, device_name, model, caps, -- today + the Hue device's name (what the Hue app shows)
   device_rid, mac_address,        -- owner device; zigbee_connectivity.mac_address (recovery key)
   service_id, id_v1,              -- multi-light devices; "#12" for list labels
-  hue_room_rid,                   -- derived at every resync/room event, cached for display
+  hue_room_rid, hue_room,         -- derived at every resync/room event; the label is kept so the
+                                  -- startup HUE_CONFIGURE can carry it before any GET
   state,                          -- "linked" | "gone" | "unbound" | "tombstone"
   gone_since, unbound_since,      -- os.time() when the state was entered
   created_room_id, created_at,    -- where and when AddDevice put it
@@ -69,6 +70,7 @@ hue_lights[rid] = {
 }
 hue_rooms[group_rid] = { c4_room_id, c4_room_name, hue_name, type = "room"|"zone" }
 hue_tombstones[rid] = { name, device_name, deleted_at }   -- see "tombstone" below
+hue_rooms_automapped = "done"     -- the one-time Map Rooms By Name of [Q 5] has run
 ```
 
 States and what moves an entry between them:
