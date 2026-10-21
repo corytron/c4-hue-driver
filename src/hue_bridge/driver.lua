@@ -381,8 +381,8 @@ dispatch.commands["Hue_Request"] = function(params)
 		else
 			summary = tostring(r.body or ""):sub(1, 300)
 		end
-		log.always("Hue Request %s %s via %s: %s in %d s: %s", method, path, host,
-			r.ok and ("HTTP " .. tostring(r.code)) or tostring(r.err), os.time() - t0, summary)
+		log.always("Hue Request %s %s via %s: %s in %d s, %d bytes: %s", method, path, host,
+			r.ok and ("HTTP " .. tostring(r.code)) or tostring(r.err), os.time() - t0, #tostring(r.body or ""), summary)
 		if params.Raw == "true" and r.body then
 			-- The whole body, in pieces a log line can carry: for recording
 			-- fixtures of resources the driver does not summarise.
@@ -434,6 +434,26 @@ end
 dispatch.commands["Probe_Errors"] = function()
 	probe("UpdateProperty Nonexistent", function() return C4:UpdateProperty("Nonexistent", "x") end)
 	probe("SendToDevice 99999", function() return C4:SendToDevice(99999, "HUE_STATE", { rid = "probe" }) end)
+end
+
+-- Probe Call: any C4 method by name, arguments as a JSON array, result dumped.
+-- e.g. Fn=GetDevices Args=[{"DeviceIds":[1080]}]; Fn=GetDeviceDisplayName Args=[1081]
+dispatch.commands["Probe_Call"] = function(params)
+	params = params or {}
+	local fn = tostring(params.Fn or "")
+	local args = {}
+	if params.Args and params.Args ~= "" then
+		args = C4:JsonDecode(params.Args)
+		if type(args) ~= "table" then
+			return log.always("Probe Call: Args is not a JSON array")
+		end
+	end
+	if type(C4[fn]) ~= "function" then
+		return log.always("Probe Call: C4.%s is not a function", fn)
+	end
+	probe("C4:" .. fn .. "(" .. tostring(params.Args or "") .. ")", function()
+		return C4[fn](C4, unpack(args))
+	end)
 end
 
 -- Import Lights: one Control4 light per Hue light, idempotent; see
