@@ -451,6 +451,66 @@ project updated), `C4:GetDeviceDisplayName(id)`. `fake.custom_select(env,
 fn_name, ...)` calls the named global list function of a driver env and
 returns its list, for CUSTOM_SELECT specs.
 
+### `bridge/lights.lua` integration interface (what `driver.lua` calls)
+
+`driver.lua` (coordinator) and `lights.lua` (integration agent) are written
+at the same time against this. Existing methods stay (`new`, `load`,
+`configure_all`, `resync`, `on_container`, `limits`, `proxy_for`, `entry`,
+`ids_from`, `summary`, `send_state`, `push`); `import` becomes `import_new`.
+Every result text is what `driver.lua` writes to `Last Action` and logs.
+
+`ctx` gains the project calls, wrapped by `driver.lua` so `lights.lua`
+stays free of C4 (the fake has the same calls for specs):
+
+```lua
+ctx.now = os.time
+ctx.project = {
+  rooms = function() return C4:GetDevicesByC4iName("roomdevice.c4i") end,   -- { [room_id] = name }
+  hierarchy = function() return C4:GetProjectHierarchy() end,               -- floors for labels (numeric types: 4 floor, 8 room)
+  devices = function(filter) return C4:GetDevices(filter) end,              -- filter { DeviceIds = "1,2" } or { C4iNames = "hue_light.c4z" }
+  bound = function() return C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1) end,  -- { [device_id] = driver name }
+  unbind = function(device_id) C4:Unbind(device_id, 1) end,
+  rename = function(proxy_id, name) C4:RenameDevice(proxy_id, name) end,
+  display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+}
+```
+
+```lua
+lights:reconcile() -> { unbound = {rid...}, relinked = {rid...}, tombstoned = {rid...} }
+    -- §5 step 1 against ctx.project.bound() and ctx.project.devices{ C4iNames = "hue_light.c4z" };
+    -- called by driver.lua at late init after load(), and by lights.lua itself after every resync and import
+lights:add_light(rid, room_id, done)       -- one AddDevice into room_id, or into the light's mapped room when nil;
+                                           -- refuses (done(false, text)) when neither exists [Q 9]; clears a tombstone
+lights:import_new(done)                    -- every unimported, non-tombstoned rid with a mapped room; done(ok, text) lists skips
+lights:relink(device_id, new_rid) -> ok, text      -- registry relink + HUE_CONFIGURE/HUE_STATE to the device
+lights:link_devices() -> text              -- adopt bound hue_light devices the registry lacks (by announced rid, else exact name)
+lights:forget(device_id) -> ok, text       -- registry forget + ctx.project.unbind + HUE_FORGOTTEN
+lights:adopt_hue_names() -> text           -- ctx.project.rename(proxy_id, hue name) where the Composer name differs
+lights:accept_names() -> text              -- records name_dismissed for every current difference
+lights:set_room_mapping(group_rid, room_id) -> ok, text    -- room_id nil removes the mapping
+lights:map_rooms_by_name() -> text         -- exact, case-insensitive, trimmed; never overrides
+lights:room_audit() -> text                -- devices whose Control4 room differs from their Hue room's mapping
+lights:attention() -> text                 -- "None" when nothing
+lights:room_mappings_text() -> text
+lights:summary() -> text                   -- "47 on bridge, 47 imported, 2 new, 1 missing, 0 unbound, 1 deleted"
+lights:picker_lights() -> { { text, value = rid }... }        -- unimported + tombstoned, re-link suggestions first
+lights:picker_relink_devices() -> { { text, value = device_id }... }   -- gone + unbound entries
+lights:picker_forget_devices() -> { { text, value = device_id }... }   -- every entry
+lights:picker_hue_rooms() -> { { text, value = group_rid }... }        -- rooms then zones, each with its mapping
+lights:picker_rooms(with_mapped) -> { { text, value = room_id }... }   -- "Floor / Room"; with_mapped adds
+                                           -- "(mapped room)" value "" first; the mapping picker adds "(no mapping)" value "none"
+lights:hello(rid, params)                  -- params.device_id/name/model: auto-adopt per §4; returns true when answered
+lights:goodbye(params)                     -- HUE_GOODBYE: tombstone
+lights:forget_request(params)              -- HUE_FORGET from a light: same as forget(device_id)
+lights:on_binding_changed(binding, class, bound, other_id)   -- binding 1 false → "unbound" (then reconcile 1 s later)
+```
+
+Picker values arrive as strings in the action params (`tonumber` room and
+device ids); an empty list holds one entry whose value is "" and every
+action refuses "" with a `Last Action` text. `driver.lua` refreshes
+`Lights`, `Attention` and `Room Mappings` after every action, resync and
+import; `lights.lua` saves the registry once per such batch.
+
 ### Light driver (`src/hue_light/*`)
 
 `HUE_HELLO` carries `rid`, `device_id` (`C4:GetDeviceID()`), `name`, `model`
