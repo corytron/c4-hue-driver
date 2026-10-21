@@ -398,6 +398,79 @@ dispatch.commands["HUE_SET"] = function(params)
 	state.queue:set(rid, fields)
 end
 
+-- A light driver's own log line (dev builds forward info and above), so it
+-- shows up in this driver's output and in the dev loop's shipped log.
+dispatch.commands["HUE_LOG"] = function(params)
+	params = params or {}
+	local who = "light"
+	if params.rid and params.rid ~= "" then
+		local entry = state.lights and state.lights.registry and state.lights.registry[params.rid]
+		who = (entry and entry.name) or params.rid:sub(1, 8)
+	end
+	log.always("[%s] %s", who, tostring(params.line))
+end
+
+-- Find a registered light by rid, Hue name or protocol device id.
+local function find_light(key)
+	local registry = state.lights and state.lights.registry or {}
+	if registry[key] then return key, registry[key] end
+	local wanted = tostring(key):lower()
+	for rid, entry in pairs(registry) do
+		if tostring(entry.device_id) == wanted or (entry.name or ""):lower() == wanted then
+			return rid, entry
+		end
+	end
+	return nil
+end
+
+-- Dev-only (not in driver.xml): a light_v2 proxy command to one light, the
+-- way a Navigator or programming would send it, so the whole command path
+-- can be exercised from the dev loop. Params: Light (rid, Hue name or
+-- protocol device id), Command (e.g. SET_BRIGHTNESS_TARGET), and the
+-- command's own params (e.g. LIGHT_BRIGHTNESS_TARGET=50 RATE=0).
+dispatch.commands["Proxy_Command"] = function(params)
+	params = params or {}
+	local rid, entry = find_light(params.Light or "")
+	if not rid then
+		return log.always("Proxy Command: no registered light matches %q", tostring(params.Light))
+	end
+	local proxy = state.lights.proxy_for and state.lights:proxy_for(rid)
+	if not proxy then
+		-- The proxy is the provider on the protocol driver's binding 5001.
+		proxy = C4:GetBoundProviderDevice(entry.device_id, 5001)
+		if type(proxy) == "table" then proxy = next(proxy) end
+	end
+	if not proxy then
+		return log.always("Proxy Command: no proxy found for %s (device %s)", entry.name, tostring(entry.device_id))
+	end
+	local command = params.Command or "SET_BRIGHTNESS_TARGET"
+	local forwarded = {}
+	for k, v in pairs(params) do
+		if k ~= "Light" and k ~= "Command" then forwarded[k] = v end
+	end
+	C4:SendToDevice(proxy, command, forwarded)
+	log.always("Proxy Command: %s -> %s (proxy %s): %s", command, entry.name, tostring(proxy),
+		C4:JsonEncode(forwarded))
+end
+
+-- Dev-only: a summary of the light registry. Param Limit (default 5).
+dispatch.commands["Lights_Report"] = function(params)
+	params = params or {}
+	local limit = tonumber(params.Limit) or 5
+	local registry = state.lights and state.lights.registry or {}
+	local names = {}
+	for rid, entry in pairs(registry) do names[#names + 1] = { rid = rid, entry = entry } end
+	table.sort(names, function(a, b) return (a.entry.name or "") < (b.entry.name or "") end)
+	log.always("Lights Report: %d registered, queue %s", #names, C4:JsonEncode(state.queue:stats()))
+	for i = 1, math.min(limit, #names) do
+		local e = names[i].entry
+		local caps = e.caps or {}
+		log.always("  %s: device %s proxy %s rid %s color=%s cct=%s mirek %s-%s",
+			tostring(e.name), tostring(e.device_id), tostring(e.proxy_id), names[i].rid,
+			tostring(caps.has_color), tostring(caps.has_cct), tostring(caps.mirek_min), tostring(caps.mirek_max))
+	end
+end
+
 -- From a light driver at its startup or binding: resend its configuration
 -- and state.
 dispatch.commands["HUE_HELLO"] = function(params)
