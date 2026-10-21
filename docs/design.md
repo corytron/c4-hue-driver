@@ -499,6 +499,17 @@ project:
   but no patterns: reading works through UIA, clicking through `SendInput`
   at the reported rectangles; pickers and the System Design tree are
   `SysListView32` controls read cross-process (`LVM_GETITEMTEXT`).
+- **Renaming a device in Composer fires `OnItemNameChanged`** to a driver
+  registered for it (probe 3): the `data` is a c4soap XML string,
+  `<c4soap async="1" name="OnItemNameChanged" result="0"><param name="iditem"
+  type="ulong">1073</param><param name="name" type="string">…</param><param
+  name="itemtype" type="ulong">7</param><param name="idroom"
+  type="ulong">1019</param></c4soap>` — `iditem` is the **proxy** id
+  (Downlight 4 is protocol 1072, proxy 1073), `itemtype` 7, and the room id
+  rides along **[verified on hardware 2026-10-21 17:10]**. Three seconds
+  later the bridge's `Attention` read "1 Hue name differs from the Composer
+  names: Downlight 4Downlight 4x is Downlight 4 in Hue (…)" after its next
+  refresh. No `OnBindingChanged` for a rename.
 
 ## Discovery
 
