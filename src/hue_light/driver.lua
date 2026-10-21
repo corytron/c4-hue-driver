@@ -121,6 +121,10 @@ local function prop(name, value)
 end
 
 local function notify(command, params)
+	local parts = {}
+	for k, v in pairs(params or {}) do parts[#parts + 1] = k .. "=" .. tostring(v) end
+	table.sort(parts)
+	log.debug("-> proxy %s %s", command, table.concat(parts, " "))
 	C4:SendToProxy(PROXY_BINDING, command, params)
 end
 
