@@ -100,6 +100,7 @@ keep everything else) and `Forget` are the exits.
 | --- | --- | --- | --- |
 | `HUE_HELLO` | light → bridge | `rid`, **`device_id`** (new), `name`, `model` (the light's persisted copies) | as today; `device_id` lets the bridge adopt a bound light whose rid the registry lacks |
 | `HUE_GOODBYE` | light → bridge | `rid`, `device_id` | from the light's `OnDriverRemovedFromProject` [verified: API 22/_26; assumed `SendToDevice` works there — probe 2] |
+| `HUE_FORGET` | light → bridge | `rid`, `device_id` | from the light's `Forget This Light` action; the bridge runs Forget for that entry and answers `HUE_FORGOTTEN` |
 | `HUE_FORGOTTEN` | bridge → light | `rid`, `name` | after `Forget`; the light shows "Forgotten by the bridge (was Hue light Desk Lamp #12). Delete this device in Composer, or bind it again and use Link Devices" and drops proxy commands |
 | `HUE_CONFIGURE` | bridge → light | as today **plus `hue_room`** (Hue room name or ""), **`id_v1`**, **`state`** ("linked"/"gone") | as today, and after every room or state change |
 | `HUE_STATE`, `HUE_SET`, `DEV_RELOAD` | — | unchanged | — |
@@ -348,9 +349,121 @@ Run before or alongside the build; results go into `docs/design.md`.
 | Fake runtime | `tests/helpers/fake_c4.lua` (`GetDevices`, `GetDevicesByC4iName`, `GetProjectHierarchy`, `Unbind`, `RenameDevice`, `OnBindingChanged` delivery, CUSTOM_SELECT param plumbing), `fake_harness_spec.lua` | the other agents' specs run against it |
 | Coordinator | `src/hue_bridge/driver.lua`, `src/hue_bridge/driver.xml` (properties, actions, CUSTOM_SELECT params), `docs/`, `CLAUDE.md`, probes through the dev loop, integration, Composer instructions | lint, tests, `tools/build.sh`, hardware probes 1–9 recorded |
 
-Dependencies: the fake runtime's new calls are specified here (names and
-return shapes from the API docs cited above) so every agent can stub against
-them from the start; the registry and groups modules are pure Lua and need
-nothing from the others; the lights integration consumes both and starts
-from their interface sections in this document, which the coordinator fixes
-before spawning.
+Dependencies: the registry and groups modules are pure Lua and need nothing
+from the others; the light driver and the fake runtime are independent of
+them; the lights integration consumes registry, groups and the fake's new
+calls, so it starts once those three have landed. The coordinator does the
+bridge `driver.lua`/`driver.xml` work and the probes in the meantime. The
+interfaces every agent builds against are §13.
+
+## 13. Module interfaces
+
+Signatures are the contract; bodies are the agent's. Every module stays
+pure Lua 5.1 (no C4 calls) except where a C4 call is the module's purpose.
+
+### `bridge/registry.lua`
+
+Persistence through injected functions, as `lights.lua` does today
+(`persist_get(name)`, `persist_set(name, value)`); `now` injected for tests.
+
+```lua
+local registry = require("bridge.registry")
+local reg = registry.new({ persist_get = fn, persist_set = fn, now = os.time, log = log })
+reg:load() -> counts            -- reads "hue_lights", "hue_rooms", "hue_tombstones";
+                                -- upgrades v1 entries in place (state = "linked", other new fields nil)
+reg:save()                      -- writes the three keys; callers save after a batch of changes
+reg:get(rid) -> entry | nil
+reg:by_device(device_id) -> rid, entry | nil
+reg:add(rid, fields) -> entry   -- new "linked" entry, created_at = now(); clears a tombstone for rid;
+                                -- returns nil, "exists" when rid already has an entry
+reg:update(rid, fields) -> entry | nil        -- shallow merge; nil for an unknown rid
+reg:set_state(rid, state) -> changed          -- stamps gone_since / unbound_since when entering, clears when leaving
+reg:relink(old_rid, new_rid) -> entry | nil, err   -- moves the entry under new_rid, state "linked"; refuses when
+                                                   -- new_rid has an entry; clears a tombstone for new_rid
+reg:forget(rid) -> entry | nil                -- removes the entry, no tombstone
+reg:tombstone(rid) -> tomb | nil              -- removes the entry; hue_tombstones[rid] = { name, device_name, deleted_at }
+reg:tombstones() -> table rid -> tomb
+reg:clear_tombstone(rid)
+reg:rids(state?) -> array of rids sorted by name (every state when nil)
+reg:entries() -> the table rid -> entry (read-only use)
+reg:counts() -> { linked = n, gone = n, unbound = n, tombstones = n }
+reg:reconcile({ bound = { [device_id] = true }, present = { [device_id] = true } | nil })
+    -> { unbound = { rid... }, relinked = { rid... }, tombstoned = { rid... } }
+    -- bound: devices bound to the bridge now; present: hue_light devices in the project, nil = unknown.
+    -- linked and not bound but present → "unbound"; unbound and bound again → "linked" (relinked);
+    -- not bound and not present (present known) → tombstone. With present nil nothing is tombstoned.
+reg:room_mapping(group_rid) -> mapping | nil
+reg:set_room_mapping(group_rid, { c4_room_id, c4_room_name, hue_name, type })
+reg:remove_room_mapping(group_rid)
+reg:room_mappings() -> table group_rid -> mapping
+```
+
+Entry fields are §3's. `state` is one of `"linked"`, `"gone"`, `"unbound"`;
+tombstones live in their own table.
+
+### `bridge/groups.lua` and `hue_model.lua` additions
+
+```lua
+local groups = require("bridge.groups")
+local g = groups.new()
+g:absorb(items)          -- array of raw CLIP items of type room / zone / bridge_home (a full GET);
+                         -- replaces every cached group of each type that appears in items
+g:apply(item, kind)      -- one stream item, kind "update" | "add" | "delete"; returns true when something changed
+g:group(rid) -> { rid, type = "room"|"zone"|"bridge_home", name, children = { rid... },
+                  child_rtype = "device"|"light"|"room", grouped_light_rid, id_v1 } | nil
+g:groups(type?) -> array sorted by name; nil = rooms then zones
+g:room_of_device(device_rid) -> group_rid | nil
+g:zones_of_light(light_rid) -> array of zone rids (sorted by name)
+g:label(rid) -> "Kitchen" | "Downstairs (zone)" | "(no room)" for nil or unknown
+```
+
+`hue_model.group(item)` parses one raw room/zone/bridge_home item into the
+shape above (children as `{ rid, rtype }` pairs reduced to rids plus one
+`child_rtype`; `services` give `grouped_light_rid`); `hue_model.update_group(group,
+item)` merges a partial update (a `children` array replaces the whole list).
+`hue_model.light(item)` gains `id_v1` and `service_id`;
+`hue_model.connectivity(item)` gains `mac_address`;
+`hue_model.configure_params(light, device, extra)` and
+`hue_model.registry_configure_params(rid, entry, extra)` merge the string
+fields of `extra` (`hue_room`, `id_v1`, `state`) into the result.
+
+### `tests/helpers/fake_c4.lua` additions
+
+A project model shared by every env of one harness run:
+`fake.project = { rooms = { [id] = { name, floor_id, floor_name } }, devices = { [id] = { name, room_id, c4i, proxy_id } } }`,
+with `fake.add_room(id, name, floor_id, floor_name)`, `fake.move_device(id, room_id)`,
+`fake.rename_room(id, name)`, `fake.delete_room(id)` and
+`fake.delete_device(id)` (runs that driver env's `OnDriverRemovedFromProject`
+then `OnDriverDestroyed("DIT_LOADED")`, removes its bindings and delivers
+`OnBindingChanged(…, false, …)` to the other side, removes it from the
+project). `C4:AddDevice` registers the new device (and its proxy) in the
+project under the room it was given.
+
+New C4 methods, shapes from the API docs named in `docs/edge-cases-control4.md` §0:
+`C4:GetDevices(filter, locationFilter)` (filter `{ DeviceIds = {…} }` or
+`{ C4iNames = "hue_light.c4z" }`; returns `{ [id] = { deviceName, roomId,
+roomName, driverFileName, proxies, protocol } }`), `C4:GetDevicesByC4iName(c4i)`
+(`{ [id] = name }`; `"roomdevice.c4i"` lists the rooms),
+`C4:GetProjectHierarchy(location?)`, `C4:Unbind(consumerId, consumerBinding)`
+(delivers `OnBindingChanged(…, false, …)` to both envs of a pair, as `C4:Bind`
+delivers `true`), `C4:RenameDevice(id, name)` (recorded in `c4.renamed`,
+project updated), `C4:GetDeviceDisplayName(id)`. `fake.custom_select(env,
+fn_name, ...)` calls the named global list function of a driver env and
+returns its list, for CUSTOM_SELECT specs.
+
+### Light driver (`src/hue_light/*`)
+
+`HUE_HELLO` carries `rid`, `device_id` (`C4:GetDeviceID()`), `name`, `model`
+(persisted as `hue_name`, `hue_model` next to `hue_rid`, refreshed from each
+`HUE_CONFIGURE`). `OnDriverRemovedFromProject` sends `HUE_GOODBYE { rid,
+device_id }`. `HUE_FORGOTTEN` sets the forgotten `Status` text, `Online`
+"Offline", `ONLINE_CHANGED false`, and drops proxy commands with that
+reason. `HUE_CONFIGURE`/`HUE_STATE` received before `OnDriverLateInit` are
+buffered and applied after it. New property `Hue Room` (read-only); `Hue
+Light ID` shows "#12 (e0e51794…)" when `id_v1` is known. `Status` for state
+"gone": "Gone from the Hue bridge since <date>; re-link or Forget". Actions:
+`Adopt Hue Name` (`C4:RenameDevice(proxy_id, hue name)`; the proxy id is the
+first key of `C4:GetBoundConsumerDevices(C4:GetDeviceID(), 5001)` [verified:
+hardware]) and `Forget This Light` (sends `HUE_FORGET`). `driver.xml`:
+`reduced_als_support` True; `SET_BRIGHTNESS_STOP` and `SET_COLOR_STOP` settle
+the pending target by reporting the cached value as CHANGED.

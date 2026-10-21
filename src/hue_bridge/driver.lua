@@ -339,9 +339,9 @@ end
 -- Dev-only (not in driver.xml, reachable through the dev loop): an arbitrary
 -- authenticated request to the bridge. Params: Method (GET/PUT/POST/DELETE),
 -- Path (/clip/v2/...), Body (JSON text, optional), Host (address spelling,
--- optional; default the dotted address). Logs the status, elapsed time and
--- a summary of the response: ids and names for resource lists, otherwise
--- the first 300 characters of the body.
+-- optional; default the dotted address), Raw ("true" logs the whole body).
+-- Logs the status, elapsed time and a summary of the response: ids and
+-- names for resource lists, otherwise the first 300 characters of the body.
 dispatch.commands["Hue_Request"] = function(params)
 	params = params or {}
 	if not connection() then
@@ -383,7 +383,57 @@ dispatch.commands["Hue_Request"] = function(params)
 		end
 		log.always("Hue Request %s %s via %s: %s in %d s: %s", method, path, host,
 			r.ok and ("HTTP " .. tostring(r.code)) or tostring(r.err), os.time() - t0, summary)
+		if params.Raw == "true" and r.body then
+			-- The whole body, in pieces a log line can carry: for recording
+			-- fixtures of resources the driver does not summarise.
+			local text = tostring(r.body)
+			local pieces = math.ceil(#text / 800)
+			for i = 1, #text, 800 do
+				log.always("Hue Request body %d/%d: %s", math.ceil(i / 800), pieces, text:sub(i, i + 799))
+			end
+		end
 	end)
+end
+
+-- Dev-only probes for docs/import-design.md §11: what the project APIs
+-- return on this controller, and whether misuse errors or stays silent.
+local function log_dump(label, value)
+	local text = lights_mod.dump(value)
+	local pieces = math.ceil(#text / 800)
+	for i = 1, #text, 800 do
+		log.always("%s %d/%d: %s", label, math.ceil(i / 800), pieces, text:sub(i, i + 799))
+	end
+end
+
+local function probe(label, fn)
+	local ok, result = pcall(fn)
+	if ok then
+		log_dump(label, result)
+	else
+		log.always("%s: error %s", label, tostring(result))
+	end
+end
+
+dispatch.commands["Probe_Project"] = function()
+	probe("GetProjectHierarchy", function() return C4:GetProjectHierarchy() end)
+	probe("GetDevicesByC4iName roomdevice.c4i", function() return C4:GetDevicesByC4iName("roomdevice.c4i") end)
+	probe("GetDevices hue_light.c4z", function()
+		local devices = C4:GetDevices({ C4iNames = "hue_light.c4z" })
+		local count, first = 0, nil
+		for id, info in pairs(devices or {}) do
+			count = count + 1
+			if not first or tostring(id) < tostring(first.id) then
+				first = { id = id, info = info }
+			end
+		end
+		return { count = count, first = first }
+	end)
+	probe("GetBoundConsumerDevices binding 1", function() return C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1) end)
+end
+
+dispatch.commands["Probe_Errors"] = function()
+	probe("UpdateProperty Nonexistent", function() return C4:UpdateProperty("Nonexistent", "x") end)
+	probe("SendToDevice 99999", function() return C4:SendToDevice(99999, "HUE_STATE", { rid = "probe" }) end)
 end
 
 -- Import Lights: one Control4 light per Hue light, idempotent; see
@@ -601,6 +651,53 @@ dispatch.commands["Forget_Pairing"] = function()
 	refresh_status()
 end
 
+-- Bindings and system events --------------------------------------------------
+
+-- Director reports changes to the HUE_BRIDGE control binding here [verified:
+-- API 9/_12]. Logged in full while docs/import-design.md §11 probe 1 is open;
+-- the registry reconciliation hooks in here next.
+function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBindingID)
+	log.always("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
+		tostring(otherDeviceID), tostring(otherBindingID))
+end
+
+-- Called before Director adds a binding [verified: API 32/_26]; only the
+-- HUE_BRIDGE class belongs here [assumed: returning false rejects].
+function OnBindingValidate(idBinding, strClass)
+	local ok = strClass == "HUE_BRIDGE"
+	log.always("OnBindingValidate(%s, %s) -> %s", tostring(idBinding), tostring(strClass), tostring(ok))
+	return ok
+end
+
+-- Probe 3: which project events reach a driver when lights and rooms are
+-- added, renamed, moved or deleted, and what their data carries. The
+-- registration call is documented [verified: API 7/_1, 7/_5.5]; the event
+-- names come from Control4's own handlers.lua; the payloads are not
+-- documented, hence the raw log.
+local PROBE_EVENTS = { "OnItemAdded", "OnItemRemoved", "OnItemNameChanged", "OnItemMoved",
+	"OnDeviceUserInitiatedRemove", "OnPIP" }
+
+local function register_probe_events()
+	if type(C4SystemEvents) ~= "table" or type(C4.RegisterSystemEvent) ~= "function" then
+		return log.debug("system events unavailable in this runtime")
+	end
+	for _, name in ipairs(PROBE_EVENTS) do
+		local id = C4SystemEvents[name]
+		if id then
+			local ok, err = pcall(C4.RegisterSystemEvent, C4, id, 0)
+			if not ok then
+				log.warn("RegisterSystemEvent %s: %s", name, tostring(err))
+			end
+		else
+			log.debug("no system event named %s", name)
+		end
+	end
+end
+
+function OnSystemEvent(data)
+	log.always("OnSystemEvent: %s", tostring(data):sub(1, 600))
+end
+
 -- Lifecycle ----------------------------------------------------------------
 
 log.set_prefix("Hue Bridge")
@@ -622,6 +719,7 @@ function OnDriverLateInit()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
 	state.late_init_done = true
+	register_probe_events()
 	refresh_status()
 	if connection() then
 		choose_stream_address(function() restart_stream(true) end)

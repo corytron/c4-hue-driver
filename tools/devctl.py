@@ -138,6 +138,11 @@ def cmd_status(args):
                                                    version_note(running_light, local_light, "forward",
                                                                 "bridge has not forwarded yet")))
         row("local_light_version", short(local_light))
+    pinned = st.get("pinned") or {}
+    if any(pinned.values()):
+        trees = ", ".join("%s at %s" % (name, short(pinned[name])) for name in sorted(pinned) if pinned[name])
+        row("pinned", "%s  (live tree: %s / %s)" % (trees, short(st.get("live_version")),
+                                                        short(st.get("live_light_version"))))
     row("last_seen", ago(st.get("last_seen"), st.get("server_time")))
     row("last_event", st.get("last_event") or "-")
     if st.get("last_error"):
@@ -173,6 +178,28 @@ def cmd_set(args):
 
 def cmd_reload(args):
     print(enqueue(args, {"type": "reload"}))
+    return EXIT_OK
+
+
+def cmd_pin(args):
+    """Serve src/ as it is right now until `unpin` or the next `pin`; the
+    controller reloads to this snapshot and ignores later edits. For stretches
+    when several agents edit src/ at once."""
+    query = "?tree=%s" % args.tree if args.tree else ""
+    reply = api(args.server, "POST", "/admin/pin" + query)
+    for name in sorted(reply.get("pinned", {})):
+        row("pinned " + name, short(reply["pinned"][name]))
+    return EXIT_OK
+
+
+def cmd_unpin(args):
+    query = "?tree=%s" % args.tree if args.tree else ""
+    reply = api(args.server, "POST", "/admin/unpin" + query)
+    if not any((reply.get("pinned") or {}).values()):
+        print("serving the live tree")
+    else:
+        for name in sorted(reply["pinned"]):
+            row("pinned " + name, short(reply["pinned"][name]))
     return EXIT_OK
 
 
@@ -261,6 +288,13 @@ def main():
     p.set_defaults(func=cmd_set)
 
     sub.add_parser("reload", help="queue a reload of the running code").set_defaults(func=cmd_reload)
+
+    p = sub.add_parser("pin", help="serve src/ as it is now until unpin or the next pin (controller ignores later edits)")
+    p.add_argument("--tree", choices=["bridge", "light"], help="pin one tree only (default both)")
+    p.set_defaults(func=cmd_pin)
+    p = sub.add_parser("unpin", help="serve the live tree again")
+    p.add_argument("--tree", choices=["bridge", "light"], help="unpin one tree only (default both)")
+    p.set_defaults(func=cmd_unpin)
 
     p = sub.add_parser("wait", help="wait for a queued command to finish")
     p.add_argument("id", type=int, help="command id as printed by run/set/reload")
