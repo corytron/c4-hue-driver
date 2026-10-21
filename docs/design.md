@@ -420,6 +420,16 @@ loop on OS 3.4.2:
 - `GET /scene/<rid>` after the recall: `"status":{"active":"static",
   "last_recall":"…Z"}`, `"auto_dynamic":false`, `"speed":0.603`.
 
+### Stream address rotation: verified on hardware (2026-10-21, branch `stream-rotate`)
+
+With the stream rotating over 7 spellings of the bridge address (PR #6):
+a fresh load on spelling 1, the one the previous instance's cancelled
+transfer still occupied, waited more than 40 s as before; the next two
+reloads picked spellings 2 and 3 and connected **200 ms and 160 ms** after
+the attempt, resync included within a second. The rotation index survives
+a reload, so reconnects after a driver update or a watchdog restart no
+longer queue behind the zombie.
+
 ### import-ui: verified on hardware (2026-10-21, dev loop)
 
 - Resync = six serial GETs (`light`, `device`, `zigbee_connectivity`,
