@@ -1,5 +1,12 @@
 # Design notes
 
+How the work gets done (process, not architecture): every change that can
+be split into parts touching disjoint files is built by parallel agents
+against a contract written first, with one coordinator integrating,
+testing and committing; see "Working with agents" in `CLAUDE.md`. Testing
+on the controller goes through the dev loop (`docs/dev-loop.md`), so a
+change can be pushed, reloaded and exercised on hardware without Composer.
+
 Status key: **[verified]** = checked in the DriverWorks docs, Control4's sample
 drivers, Signify's Hue developer docs (Core Concepts, Using HTTPS, Hue Bridge
 Discovery and the CLIP v2 API reference, as of 2025), or independent sources;
