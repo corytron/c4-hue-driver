@@ -364,6 +364,43 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
 - Most of the house's lights were unpowered during these tests; only the
   Desk Lamp was exercised.
 
+### Project APIs: verified on hardware (2026-10-21, `Probe Project` / `Probe Call`)
+
+For the import-ui design (`docs/import-design.md`), probed through the dev
+loop on OS 3.4.2:
+
+- `C4:GetProjectHierarchy()` returns one nested table keyed by location id;
+  every node has `name` and a **numeric** `type` (2 site, 3 building,
+  4 floor, 8 room) and its children as further numeric keys; rooms have
+  none. The house: site → building → 4 floors → 16 rooms.
+- `C4:GetDevicesByC4iName("roomdevice.c4i")` → `{ [roomId] = roomName }`
+  for all 16 rooms: the cheap room list (undocumented, used by Control4's
+  own `lib.lua`).
+- `C4:GetDevices(filter)`: `DeviceIds` and `C4iNames` are comma-separated
+  **strings** (a table raises "DeviceIds should be a string"). Returns
+  `{ [id] = { deviceName, driverFileName, roomId, roomName, proxies =
+  { [proxyId] = { deviceName, driverFileName = "light_v2.c4i" } } } }`;
+  no `proxies` key for a driver without proxies (the bridge). The protocol
+  device carries the display name AddDevice gave ("Left Bedside Light" on
+  both 1080 and its proxy 1081); a hand-added, never-linked `hue_light` shows
+  the driver name "Hue Light" — there is one such device (1034) in the
+  project today, the manual install that preceded the first import.
+- `C4:GetBoundConsumerDevices(bridge, 1)` → `{ [protocolId] = "Hue Light" }`:
+  the value is the driver's `<name>`, not the Composer name; 47 entries,
+  ids 1036–1128 step 2.
+- `C4:GetDeviceDisplayName(id)` returns the Composer name for a protocol id
+  and for a proxy id alike.
+- `C4:UpdateProperty` on an undeclared name and `C4:SendToDevice` to a
+  non-existent id both return nil silently; nothing is logged.
+- Hue side: 16 rooms (9.9 KB), 7 zones (6.6 KB), 1 bridge_home (1.3 KB),
+  125 scenes (351 KB). The single `GET /clip/v2/resource` returns 497
+  items, 588 KB, in 1 s. Room `children` are devices, zone `children`
+  lights, bridge_home's are rooms plus the room-less devices and it has no
+  `metadata`; rooms carry an extra `geometry` block we ignore. Decision:
+  the import feature's resync adds `/room`, `/zone` and `/bridge_home` as
+  three more serial GETs (18 KB together); the scenes feature decides how
+  to handle its 351 KB separately, and nothing fetches everything at once.
+
 ## Discovery
 
 Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.
