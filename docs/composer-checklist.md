@@ -203,10 +203,15 @@ shows is below.
     "Vanity 3" in Composer, run **Link Devices** again: "Linked 1 devices:
     Vanity 3 (device 1034) to Vanity 3 [Master Bathroom] #n by name". The old
     Vanity 3 device now says "Forgotten by the bridge …" and can be deleted.
-24. **Re-link**: Forget Light on another unpowered light, then **Re-link
-    Device To Light** with its device (listed "… (device N, unbound since
-    …)") and the light it was ("… #n"). Expect "Re-linked device N …" and the
-    light working again with its old name, room and programming.
+24. **Re-link** is for a bulb replaced or deleted on the Hue side: its device
+    reads "Gone from the Hue bridge since …; re-link or Forget" and appears
+    in the `Re-link Device To Light` Device picker as "… (device N, gone since
+    …)"; pick the replacement light in the Light picker and expect "Re-linked
+    device N (was <old>) to <new> [<room>] #n" with the device keeping its
+    name, room and programming. Without a spare bulb this step is skipped. (A
+    device you ran `Forget Light` on has no registry entry any more, so it is
+    not offered here; its way back is binding it again in Connections and
+    `Link Devices`, which adopts the rid it announces.)
 
 ## What to paste back
 
