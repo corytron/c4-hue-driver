@@ -104,7 +104,17 @@ end
 local function new_lights()
 	return lights_mod.new({
 		http = bridge_request,
-		send = function(id, command, params) C4:SendToDevice(id, command, params) end,
+		send = function(id, command, params)
+			if command == "HUE_STATE" then
+				local parts = {}
+				for k, v in pairs(params) do
+					if k ~= "rid" then parts[#parts + 1] = k .. "=" .. tostring(v) end
+				end
+				table.sort(parts)
+				log.debug("HUE_STATE %s -> %d: %s", tostring(params.rid):sub(1, 8), id, table.concat(parts, " "))
+			end
+			C4:SendToDevice(id, command, params)
+		end,
 		bridge_id = C4:GetDeviceID(),
 		room_id = C4:RoomGetId(),
 		log = log,
