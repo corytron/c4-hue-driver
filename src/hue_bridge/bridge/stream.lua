@@ -37,7 +37,12 @@ stream.BACKOFF_MAX = 60
 -- opts:
 --   connection()    returns { ip, key, stream_ip } or nil when not paired;
 --                   stream_ip (optional) is the address spelling the stream
---                   uses so that it has its own C4:url queue (bridge/altaddr)
+--                   uses so that it has its own C4:url queue (bridge/altaddr).
+--                   Called again for every connection attempt, so the owner
+--                   may return a different stream_ip each time: the driver
+--                   rotates over altaddr.stream_family so a new transfer never
+--                   queues behind the abandoned one (docs/design.md, Stream
+--                   address rotation)
 --   timeout         seconds, see DEFAULT_TIMEOUT
 --   watchdog        seconds, see DEFAULT_WATCHDOG
 --   on_container(container, event)  one Hue event container (type, data, ...)
@@ -55,7 +60,8 @@ function stream.new(opts)
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
 		stats = { containers = 0, events = 0, keepalives = 0, reconnects = 0,
-			last_event = nil, connected_since = nil, last_error = nil },
+			last_event = nil, connected_since = nil, last_error = nil,
+			address = nil },        -- the address spelling the current/last transfer used
 	}, stream)
 end
 
@@ -141,10 +147,16 @@ function stream:connect()
 	self.parser = sse.new()
 	local parser = self.parser -- this connection's own parser, for its late chunks
 	self:status("Connecting")
-	log.info("event stream: connecting to %s", conn.ip)
+	local host = conn.stream_ip or conn.ip -- a second spelling keeps commands unblocked
+	self.stats.address = host
+	if host ~= conn.ip then
+		log.info("event stream: connecting to %s via %s", conn.ip, host)
+	else
+		log.info("event stream: connecting to %s", conn.ip)
+	end
 
 	self.transfer = http.stream({
-		ip = conn.stream_ip or conn.ip, -- a second spelling keeps commands unblocked
+		ip = host,
 		key = conn.key,
 		path = stream.PATH,
 		headers = { Accept = "text/event-stream" },
