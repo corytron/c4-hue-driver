@@ -2,12 +2,118 @@
 -- the drivers actually make, and records them so specs can assert on them.
 -- Add a method here when a driver starts using a new documented API.
 
+local json = require("dkjson")
+
 local fake = {}
+
+-- A C4LuaUrl look-alike: records the request, and lets a spec drive the
+-- response through respond_headers()/chunk()/done(), or respond() for the
+-- common one-shot case.
+local function new_transfer(c4)
+	local t = {
+		options = {},
+		callbacks = {},
+		cancelled = false,
+		started = false,
+	}
+
+	local function setter(name)
+		return function(self, fn)
+			self.callbacks[name] = fn
+			return self
+		end
+	end
+	t.OnDone = setter("done")
+	t.OnHeaders = setter("headers")
+	t.OnBody = setter("body")
+	t.OnBodyChunk = setter("chunk")
+
+	function t:SetOption(name, value)
+		self.options[name] = value
+		return self
+	end
+
+	function t:SetOptions(opts)
+		for k, v in pairs(opts) do
+			self.options[k] = v
+		end
+		return self
+	end
+
+	local function start(self, method, url, data, headers)
+		assert(not self.started, "transfer already started")
+		self.started = true
+		self.method, self.url, self.data, self.headers = method, url, data, headers or {}
+		table.insert(c4.transfers, self)
+		return self
+	end
+	function t:Get(url, headers) return start(self, "GET", url, nil, headers) end
+	function t:Post(url, data, headers) return start(self, "POST", url, data, headers) end
+	function t:Put(url, data, headers) return start(self, "PUT", url, data, headers) end
+	function t:Delete(url, headers) return start(self, "DELETE", url, nil, headers) end
+	function t:Custom(url, method, data, headers) return start(self, method, url, data, headers) end
+
+	function t:Cancel()
+		self.cancelled = true
+		return self
+	end
+
+	function t:TicketId()
+		return self.started and 1 or 0
+	end
+
+	-- Spec-side drivers of the response.
+	t.responses = {}
+
+	function t:respond_headers(code, headers)
+		local response = { code = code, headers = headers or {} }
+		table.insert(self.responses, response)
+		if self.callbacks.headers then
+			local abort = self.callbacks.headers(self, response)
+			if abort then self.cancelled = true end
+		end
+		return response
+	end
+
+	function t:chunk(data)
+		assert(#self.responses > 0, "respond_headers() before chunk()")
+		if self.callbacks.chunk and not self.cancelled then
+			local abort = self.callbacks.chunk(self, self.responses[#self.responses], data)
+			if abort then self.cancelled = true end
+		end
+	end
+
+	function t:done(err_code, err_msg)
+		if self.callbacks.done then
+			self.callbacks.done(self, self.responses, err_code or 0, err_msg)
+		end
+	end
+
+	-- Complete the transfer with one response. Mirrors the controller: with no
+	-- OnBodyChunk callback the body is aggregated into response.body.
+	function t:respond(code, body, headers)
+		local response = self:respond_headers(code, headers)
+		if self.callbacks.chunk then
+			self:chunk(body or "")
+		else
+			response.body = body or ""
+			if self.callbacks.body then
+				self.callbacks.body(self, response)
+			end
+		end
+		self:done(0, nil)
+	end
+
+	return t
+end
 
 local function new_c4(env)
 	local c4 = {
 		calls = {},
 		config_info = { version = "1" },
+		transfers = {},
+		timers = {},
+		persist = {},
 	}
 
 	local function record(name, ...)
@@ -28,6 +134,227 @@ local function new_c4(env)
 		record("SendToProxy", binding, command, params)
 	end
 
+	function c4:url()
+		return new_transfer(c4)
+	end
+
+	function c4:SetTimer(delay_ms, callback, repeating)
+		assert(delay_ms > 0, "timer delay must be > 0")
+		local timer = { delay = delay_ms, callback = callback, repeating = repeating or false, active = true }
+		function timer:Cancel()
+			self.active = false
+		end
+		table.insert(c4.timers, timer)
+		record("SetTimer", delay_ms, repeating or false)
+		return timer
+	end
+
+	function c4:PersistSetValue(name, value, encrypted)
+		record("PersistSetValue", name, value, encrypted or false)
+		c4.persist[name] = value
+	end
+
+	function c4:PersistGetValue(name, encrypted)
+		record("PersistGetValue", name, encrypted or false)
+		return c4.persist[name]
+	end
+
+	function c4:PersistDeleteValue(name)
+		record("PersistDeleteValue", name)
+		c4.persist[name] = nil
+	end
+
+	-- File API: one name -> contents table per alias directory, with the
+	-- File API's current directory selectable through FileSetDir, as on the
+	-- controller. c4.files is the SANDBOX directory for convenience. Handles
+	-- mirror the controller: FileOpen positions at end-of-file.
+	c4.sandbox_dir = "/control4/drivers/lua/sandbox/15"
+	c4.dirs = { SANDBOX = {}, C4Z = {} }
+	c4.files = c4.dirs.SANDBOX
+	c4.cwd = "SANDBOX"
+	c4.handles = {}
+
+	local function cwd() return c4.dirs[c4.cwd] end
+
+	-- Millisecond clock; specs advance c4.now_ms to simulate elapsed time.
+	c4.now_ms = 1000000
+	function c4:GetTime() return c4.now_ms end
+
+	function c4:GetSandboxDir() return c4.sandbox_dir end
+	function c4:GetC4zDir() return "/opt/control4/var/drivers/c4z" end
+	function c4:GetDriverFileName() return "hue_bridge.c4z" end
+
+	-- Devices, bindings and inter-driver messages. Bindings live in a table
+	-- that fake.pair() shares between two loaded drivers; SendToDevice queues
+	-- into an outbox that fake.pump() delivers (Director delivers
+	-- asynchronously too).
+	c4.device_id = 15
+	c4.room_id = 7
+	c4.next_device_id = 2001
+	c4.added = {}       -- { id, driver, room, name } per AddDevice
+	c4.bindings = {}    -- { provider, provider_binding, consumer, consumer_binding, class }
+	c4.sent = {}        -- every SendToDevice { id, command, params }
+	c4.outbox = {}      -- not yet delivered by fake.pump()
+
+	function c4:GetDeviceID() return c4.device_id end
+	function c4:RoomGetId() return c4.room_id end
+
+	-- C4:AddDevice(driver [, room [, name]], callback); the callback gets the
+	-- new device id at once (Director calls it later; specs see no difference).
+	function c4:AddDevice(driver, a, b, cb)
+		local room, name, callback
+		if type(a) == "function" then
+			callback = a
+		elseif type(b) == "function" then
+			room, callback = a, b
+		else
+			room, name, callback = a, b, cb
+		end
+		local id = c4.next_device_id
+		c4.next_device_id = id + 1
+		table.insert(c4.added, { id = id, driver = driver, room = room, name = name })
+		record("AddDevice", driver, room, name)
+		callback(id, {})
+	end
+
+	function c4:Bind(provider, provider_binding, consumer, consumer_binding, class)
+		record("Bind", provider, provider_binding, consumer, consumer_binding, class)
+		table.insert(c4.bindings, { provider = provider, provider_binding = provider_binding,
+			consumer = consumer, consumer_binding = consumer_binding, class = class })
+	end
+
+	-- Returns deviceId -> name, or nil when nothing is bound (as documented).
+	function c4:GetBoundConsumerDevices(device, binding)
+		local out, any = {}, false
+		for _, b in ipairs(c4.bindings) do
+			if b.provider == device and b.provider_binding == binding then
+				out[b.consumer] = "Device " .. tostring(b.consumer)
+				any = true
+			end
+		end
+		return any and out or nil
+	end
+
+	function c4:GetBoundProviderDevice(device, binding)
+		for _, b in ipairs(c4.bindings) do
+			if b.consumer == device and b.consumer_binding == binding then
+				return b.provider
+			end
+		end
+		return nil
+	end
+
+	function c4:RenameDevice(id, name)
+		record("RenameDevice", id, name)
+	end
+
+	function c4:SendToDevice(id, command, params)
+		record("SendToDevice", id, command, params)
+		local message = { id = id, command = command, params = params }
+		table.insert(c4.sent, message)
+		table.insert(c4.outbox, message)
+	end
+
+	-- Colour conversions, approximations of the controller's: Kim et al.
+	-- for CCT -> xy (1667-25000 K), McCamy for xy -> CCT. Good to a few
+	-- percent, which is what specs should assert.
+	function c4:ColorCCTtoXY(k)
+		k = math.max(1667, math.min(25000, k))
+		local x
+		if k <= 4000 then
+			x = -0.2661239e9 / k ^ 3 - 0.2343589e6 / k ^ 2 + 0.8776956e3 / k + 0.179910
+		else
+			x = -3.0258469e9 / k ^ 3 + 2.1070379e6 / k ^ 2 + 0.2226347e3 / k + 0.240390
+		end
+		local y
+		if k <= 2222 then
+			y = -1.1063814 * x ^ 3 - 1.34811020 * x ^ 2 + 2.18555832 * x - 0.20219683
+		elseif k <= 4000 then
+			y = -0.9549476 * x ^ 3 - 1.37418593 * x ^ 2 + 2.09137015 * x - 0.16748867
+		else
+			y = 3.0817580 * x ^ 3 - 5.87338670 * x ^ 2 + 3.75112997 * x - 0.37001483
+		end
+		return x, y
+	end
+
+	function c4:ColorXYtoCCT(x, y)
+		local n = (x - 0.3320) / (0.1858 - y)
+		return 449 * n ^ 3 + 3525 * n ^ 2 + 6823.3 * n + 5520.33
+	end
+
+	function c4:FileSetDir(alias)
+		record("FileSetDir", alias)
+		assert(c4.dirs[alias], "unknown path alias " .. tostring(alias))
+		c4.cwd = alias
+		return true
+	end
+
+	function c4:FileExists(name)
+		return cwd()[name] ~= nil
+	end
+
+	function c4:FileOpen(name)
+		record("FileOpen", name)
+		local dir = cwd()
+		if dir[name] == nil then
+			dir[name] = ""
+		end
+		local fh = #c4.handles + 1
+		c4.handles[fh] = { dir = dir, name = name, pos = #dir[name] }
+		return fh
+	end
+
+	function c4:FileSetPos(fh, pos)
+		c4.handles[fh].pos = pos
+	end
+
+	function c4:FileGetSize(fh)
+		local h = c4.handles[fh]
+		return #h.dir[h.name]
+	end
+
+	function c4:FileRead(fh, count)
+		local h = c4.handles[fh]
+		local data = h.dir[h.name]:sub(h.pos + 1, h.pos + count)
+		h.pos = h.pos + #data
+		return data
+	end
+
+	function c4:FileWriteString(fh, text)
+		local h = c4.handles[fh]
+		h.dir[h.name] = h.dir[h.name] .. text
+		h.pos = #h.dir[h.name]
+		record("FileWriteString", h.name, #text)
+		return #text
+	end
+
+	function c4:FileClose(fh)
+		c4.handles[fh] = nil
+	end
+
+	function c4:FileDelete(name)
+		record("FileDelete", name)
+		cwd()[name] = nil
+	end
+
+	function c4:FileList()
+		local names = {}
+		for name in pairs(cwd()) do names[#names + 1] = name end
+		return names
+	end
+
+	function c4:JsonEncode(value)
+		return json.encode(value)
+	end
+
+	function c4:JsonDecode(text)
+		local value, _, err = json.decode(text)
+		if err then
+			return nil, err
+		end
+		return value
+	end
+
 	-- Every recorded call with the given name, in order.
 	function c4.calls_to(name)
 		local out = {}
@@ -35,6 +362,33 @@ local function new_c4(env)
 			if call.name == name then
 				table.insert(out, call.args)
 			end
+		end
+		return out
+	end
+
+	-- The most recent transfer started, or nil.
+	function c4.last_transfer()
+		return c4.transfers[#c4.transfers]
+	end
+
+	-- Fire every active timer once, as if its delay had elapsed. Non-repeating
+	-- timers are retired; repeating ones stay armed.
+	function c4.fire_timers()
+		local due = {}
+		for _, timer in ipairs(c4.timers) do
+			if timer.active then table.insert(due, timer) end
+		end
+		for _, timer in ipairs(due) do
+			if not timer.repeating then timer.active = false end
+			timer.callback(timer, 0)
+		end
+		return #due
+	end
+
+	function c4.active_timers()
+		local out = {}
+		for _, timer in ipairs(c4.timers) do
+			if timer.active then table.insert(out, timer) end
 		end
 		return out
 	end
@@ -70,12 +424,89 @@ function fake.declared_properties(driver)
 	return props
 end
 
+-- A fake C4 for module-level specs that don't load a whole driver. Also
+-- installs it as the global C4 so the module under test can see it.
+function fake.install_c4(properties)
+	local env = { Properties = properties or {} }
+	env.C4 = new_c4(env)
+	rawset(_G, "C4", env.C4)
+	rawset(_G, "Properties", env.Properties)
+	return env.C4, env
+end
+
+-- Run `fn` with the globals C4 and Properties pointing at `env`, as they
+-- are whenever Director calls into that driver. Needed when a spec holds
+-- two loaded drivers: fire a driver's timers or answer its transfers inside
+-- fake.as(env, ...), or use the wrapped c4.fire_timers that fake.pair installs.
+function fake.as(env, fn, ...)
+	local saved_c4, saved_props = rawget(_G, "C4"), rawget(_G, "Properties")
+	rawset(_G, "C4", env.C4)
+	rawset(_G, "Properties", env.Properties)
+	local results = { pcall(fn, ...) }
+	rawset(_G, "C4", saved_c4)
+	rawset(_G, "Properties", saved_props)
+	if not results[1] then
+		error(results[2], 0)
+	end
+	return select(2, unpack(results))
+end
+
+local routes = {}   -- device id -> env, for fake.pump()
+
+-- Make two loaded drivers see each other: shared bindings, routed
+-- SendToDevice, and c4.fire_timers that runs with the right globals. With
+-- opts.bind (default true) the light's binding 1 is bound to the bridge's
+-- binding 1, class HUE_BRIDGE, as Composer or C4:Bind would.
+function fake.pair(bridge_env, light_env, opts)
+	opts = opts or {}
+	local b, l = bridge_env.C4, light_env.C4
+	l.device_id = opts.light_id or b.next_device_id
+	if not opts.light_id then b.next_device_id = b.next_device_id + 1 end
+	l.bindings = b.bindings
+	if opts.bind ~= false then
+		b:Bind(b.device_id, 1, l.device_id, 1, "HUE_BRIDGE")
+	end
+	for _, env in ipairs({ bridge_env, light_env }) do
+		routes[env.C4.device_id] = env
+		local orig = env.C4.fire_timers
+		env.C4.fire_timers = function() return fake.as(env, orig) end
+	end
+	return l.device_id
+end
+
+-- Deliver queued SendToDevice messages between paired drivers through the
+-- receiver's ExecuteCommand, with every param value stringified as Director
+-- hands them over. Repeats until nothing is queued. Returns the count.
+function fake.pump()
+	local delivered = 0
+	local progress = true
+	while progress do
+		progress = false
+		for _, env in pairs(routes) do
+			local outbox = env.C4.outbox
+			while #outbox > 0 do
+				local m = table.remove(outbox, 1)
+				local target = routes[m.id]
+				if target and type(target.ExecuteCommand) == "function" then
+					local params = {}
+					for k, v in pairs(m.params or {}) do params[k] = tostring(v) end
+					fake.as(target, target.ExecuteCommand, m.command, params)
+					delivered = delivered + 1
+					progress = true
+				end
+			end
+		end
+	end
+	return delivered
+end
+
 -- Load a driver.lua into a fresh environment, the way Director would.
 -- `driver` is "hue_bridge" or "hue_light"; `properties` overrides the
--- defaults from driver.xml. Returns the environment (driver globals) and
--- the fake C4.
-function fake.load_driver(driver, properties)
+-- defaults from driver.xml; opts.device_id sets C4:GetDeviceID(). Returns
+-- the environment (driver globals) and the fake C4.
+function fake.load_driver(driver, properties, opts)
 	forget_driver_modules()
+	routes = {}
 
 	local env = setmetatable({}, { __index = _G })
 	env.Properties = fake.declared_properties(driver)
@@ -84,6 +515,7 @@ function fake.load_driver(driver, properties)
 		env.Properties[k] = v
 	end
 	env.C4 = new_c4(env)
+	if opts and opts.device_id then env.C4.device_id = opts.device_id end
 	env._G = env
 
 	-- Modules loaded with require() resolve globals through the real _G, so

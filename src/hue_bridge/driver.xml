@@ -49,8 +49,127 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<property>
+				<name>Bridge Model</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Event Stream</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Lights</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Stream Address</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Events Received</name>
+				<default>0</default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Event</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Diagnostic Server</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+			</property>
+			<property>
+				<name>Dev Server</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+			</property>
+			<property>
+				<name>Stream Timeout (s)</name>
+				<type>RANGED_INTEGER</type>
+				<minimum>30</minimum>
+				<maximum>86400</maximum>
+				<default>600</default>
+				<readonly>false</readonly>
+			</property>
+			<property>
+				<name>Stream Watchdog (s)</name>
+				<type>RANGED_INTEGER</type>
+				<minimum>0</minimum>
+				<maximum>3600</maximum>
+				<default>300</default>
+				<readonly>false</readonly>
+			</property>
 		</properties>
-		<actions/>
+		<actions>
+			<action>
+				<name>Pair Bridge</name>
+				<command>Pair Bridge</command>
+				<params/>
+			</action>
+			<action>
+				<name>Import Lights</name>
+				<command>Import Lights</command>
+				<params/>
+			</action>
+			<action>
+				<name>Test Connection</name>
+				<command>Test Connection</command>
+				<params/>
+			</action>
+			<action>
+				<name>Connect Event Stream</name>
+				<command>Connect Event Stream</command>
+				<params/>
+			</action>
+			<action>
+				<name>Disconnect Event Stream</name>
+				<command>Disconnect Event Stream</command>
+				<params/>
+			</action>
+			<action>
+				<name>Connection Test</name>
+				<command>Connection Test</command>
+				<params>
+					<param>
+						<name>Target</name>
+						<type>LIST</type>
+						<items>
+							<item>Bridge</item>
+							<item>Diagnostic Server</item>
+						</items>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Reload Credentials</name>
+				<command>Reload Credentials</command>
+				<params/>
+			</action>
+			<action>
+				<name>Check CA Pinning</name>
+				<command>Check CA Pinning</command>
+				<params/>
+			</action>
+			<action>
+				<name>Forget Pairing</name>
+				<command>Forget Pairing</command>
+				<params/>
+			</action>
+		</actions>
 		<commands/>
 	</config>
 	<proxies>
