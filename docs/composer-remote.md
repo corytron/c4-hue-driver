@@ -56,6 +56,20 @@ behalf, not the owner.
    round with a report, not a guess.
 4. **Report exact texts** (UIA Names, property values) and keep screenshots
    under `C:\c4-hue\shots\`.
+5. **Keystrokes only into a verified target.** Before any key is sent, the
+   focused control must have been checked (the tree's in-place editor, a
+   dialog button, a text field) and no menu may be active; never tap ALT to
+   gain foreground rights (use `AttachThreadInput` + `SetForegroundWindow`
+   or a click). Prefer window messages (`WM_SETTEXT`) and rectangle clicks
+   over typing; re-check `Get-ComposerDialog` before every Enter and Cancel
+   anything unexpected. Learned the hard way on 2026-10-21: an ALT tap left
+   Composer's File menu in keyboard mode and the Enter meant for the rename
+   editor opened **File ▸ Clear Project**'s confirmation; the session
+   cancelled it and nothing was lost, but the project must be backed up
+   before any round that changes it.
+6. **After every step** confirm the window title (project name) and the
+   System Design row count are unchanged unless the step meant to change
+   them.
 
 ## The helper module
 
