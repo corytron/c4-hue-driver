@@ -348,8 +348,9 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   integer fallback or the decimal event reported first made it look
   intermittent. The proxy-protocol reference types the parameter as a
   double, so this is observed behaviour, not documented. The light driver
-  now reports whole percents **[verified on hardware; see the Composer
-  checklist for the confirming test]**.
+  now reports whole percents (never 0 while on); with that, the lamp Hue
+  reported at 20.16 read 20 % and slider moves to 25, 60, 100 and off all
+  stuck **[verified on hardware, 2026-10-21]**.
 - The light's `light_v2` proxy is a bound *consumer* of the protocol
   driver's binding 5001: `GetBoundConsumerDevices(protocolId, 5001)` finds
   it; `GetBoundProviderDevice` returns the protocol driver itself.
