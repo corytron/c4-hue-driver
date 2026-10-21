@@ -160,6 +160,7 @@ end
 local function report_brightness()
 	local brightness = state.to_proxy_brightness(st)
 	if brightness then
+		log.info("reporting brightness %s (on=%s hue brightness=%s)", tostring(brightness), tostring(st.on), tostring(st.brightness))
 		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = brightness })
 	end
 end
@@ -379,7 +380,17 @@ dispatch.proxy["SYNCHRONIZE"] = function()
 	report_color()
 end
 
+local logged_brightness_params = false
 dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
+	if not logged_brightness_params then
+		-- Diagnostic for the Navigator slider path, which cannot be driven
+		-- from the dev loop: show exactly what the proxy sends, once.
+		logged_brightness_params = true
+		local parts = {}
+		for k, v in pairs(params or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+		table.sort(parts)
+		log.always("first SET_BRIGHTNESS_TARGET params: %s", table.concat(parts, " "))
+	end
 	set_brightness(params.LIGHT_BRIGHTNESS_TARGET, params.RATE)
 end
 
