@@ -87,9 +87,12 @@ action, serially:
    47 at once is the risk). The callback is `(deviceId, tDeviceInfo)`;
    `deviceId` is 0 on failure (log and continue), and for a driver with a
    proxy `tDeviceInfo` carries the proxy and protocol ids [verified: API
-   9/_0.1] in a shape the docs don't spell out, so the first callback's
-   `tDeviceInfo` is logged in full and the protocol id is taken from it when
-   present [assumed until seen on hardware]. Then `C4:Bind(bridgeId, 1,
+   9/_0.1]. On OS 3.4.2 the shape is the parsed-XML table style
+   `{ Name = "devices", ChildNodes = { { Name = "protocol", Value = "1036" },
+   { Name = "proxy", Value = "1037" } } }` and `deviceId` equals the
+   protocol id [verified on hardware, Import Lights 2026-10-21]. The
+   protocol id is bound; the proxy id is kept in the registry (`proxy_id`)
+   so the bridge can address the light's `light_v2` proxy directly. Then `C4:Bind(bridgeId, 1,
    protocolId, 1, "HUE_BRIDGE")`, registry entry, `HUE_CONFIGURE`, full
    `HUE_STATE` (reason "resync").
 3. Lights already registered: send `HUE_CONFIGURE` + state again (cheap,

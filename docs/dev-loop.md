@@ -66,7 +66,8 @@ The server appends `HH:MM:SS.mmm <line>` to `driver.log` and echoes to stdout.
 
 `POST /report` body
 `{"version": "...", "light_version": "<or absent>", "event": "<see below>", "command_id": <id or absent>, "properties": {...}, "error": "<text or absent>", "sandbox": {...or absent}, "elapsed_ms": <or absent>}` → 204.
-`light_version` is the light-tree version the bridge last forwarded; absent
+`light_version` is the light-tree version the bridge last fetched and
+forwarded (recorded even when no light was bound to receive it); absent
 until the first forward. Events: `startup` (loop started; includes `sandbox`
 facts: `_VERSION`, `jit.version` if any, and the `type()` of `loadstring`,
 `load`, `setfenv`, `package.loaders`, `C4`, plus the driver version from
@@ -95,27 +96,41 @@ Used by `devctl`; the driver never calls it.
 - A repeating `C4:SetTimer` (3000 ms) drives everything. Each tick: at most
   one chain in flight; `GET /manifest` and, if the version differs from the
   running one, `GET /bundle` and reload; then `GET /manifest?tree=light`
-  and, if that version differs from the last forwarded one,
-  `GET /bundle?tree=light` and forward it (below); then
+  and, if that version differs from the one the bridge holds,
+  `GET /bundle?tree=light` once; then forward the held bundle to every
+  bound light that has not received that version (below); then
   `GET /commands?after=<last id>` and run each command in order, reporting
   `command_done` after each with a properties snapshot; then flush the log
   buffer with `POST /log`; then a heartbeat if one is due. Never start a
   `C4:url` transfer from inside another transfer's `OnHeaders` or
   `OnBodyChunk` callback (Director fails it with curl error 2); timers and
   `OnDone` callbacks are safe.
-- Forwarding the light tree: the bundle's `files` object is encoded once
-  with `C4:JsonEncode(files, false, true)` (an object of strings, so
-  Director's array quirk cannot bite) and sent to every device in
-  `C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)` as
+- Forwarding the light tree: the bridge keeps the light bundle it last
+  fetched (`light_version` plus its files) and, per bound light device id,
+  the version that light last received (`__DEVLOOP.light_forwarded`). Every
+  tick with a light tree it reads
+  `C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)`, drops ids no longer
+  bound from that table, and sends the bundle to each bound id whose
+  recorded version is not the held one, as
   `C4:SendToDevice(id, "DEV_RELOAD", { version = ..., files = <JSON text> }, false, false)`.
-  The two trailing `false`s are `allowEmptyValues` and `logCommand`: with
-  the default `logCommand = true` Director would write the ~40 KB bundle to
-  its log on every forward. The forwarded version is recorded before
-  sending, so a forward that fails is not retried until the server has a
-  different version. The loop says how many lights got it (or, once per
-  version, that no lights are bound) and makes a heartbeat due at once so
-  `/status` shows the new `running_light_version`. A manifest without
-  `"tree": "light"` (a server without trees) is said once and ignored.
+  The `files` object is encoded once per forward with
+  `C4:JsonEncode(files, false, true)` (an object of strings, so Director's
+  array quirk cannot bite). The two trailing `false`s are `allowEmptyValues`
+  and `logCommand`: with the default `logCommand = true` Director would
+  write the ~40 KB bundle to its log on every forward. So a new version
+  reaches every bound light once (`light version X forwarded to N
+  light(s)`), and a light bound afterwards, for example one Import Lights
+  just created, gets the current version on the next tick from the held
+  bundle, without a refetch and without the version changing (`light
+  version X forwarded to N newly bound light(s)`). A version first seen with
+  nothing bound is said once (`light version X: no bound lights`) and still
+  held for the lights to come. The version is recorded per device before
+  the send, so a light whose `SendToDevice` fails is not retried until the
+  server has a different version; a light that is unbound and bound again
+  is treated as new. A new version makes a heartbeat due at once so
+  `/status` shows the new `running_light_version`; a catch-up does not. A
+  manifest without `"tree": "light"` (a server without trees) is said once
+  and ignored.
 - Reload sequence: `pcall(OnDriverDestroyed)`; clear every
   `package.loaded` entry matching `^bridge%.`, `^light%.` or `^common%.`
   except `common.devloop`; install (or replace) a loader at
@@ -159,6 +174,7 @@ tools/build.sh --dev               # dev .c4z files for the one-time Composer in
 tools/devctl.py status             # are the drivers talking to us, which versions
 # edit src/hue_bridge or src/common, then wait ~3 s: the bridge reloads itself
 # edit src/hue_light or src/common, then wait ~3 s: the bridge forwards, every bound light reloads
+# run Import Lights at any time: each new light gets the current light version on the next tick
 tools/devctl.py run "Connection Test" Target=Bridge   # prints the command id
 tools/devctl.py wait 7 --timeout 120                  # until command_done, then properties
 tools/devctl.py set "Stream Timeout (s)" 60
@@ -204,7 +220,15 @@ every bound light. Never install a dev build as the production driver.
 - `common/devloop.lua` is the one module a reload never replaces, so an edit
   to it reaches the controller only through a Director restart or a fresh
   `.c4z` install; the bundle carries the new file, but the running copy is
-  the one that was `require`d first.
+  the one that was `require`d first. This bit on hardware: an earlier loop
+  recorded the light version while nothing was bound (`light version X: no
+  bound lights`), and the 47 lights Import Lights then created never got a
+  `DEV_RELOAD`, because the version had not changed. The per-light tracking
+  described above fixes that, but a bridge still running the older
+  `devloop.lua` keeps the old behaviour until the next Director restart or
+  dev `.c4z` install; until then, touch a file under `src/hue_light` or
+  `src/common` after importing lights so the version changes and the
+  forward happens.
 - Director's `C4:JsonEncode` writes Lua arrays as objects with string keys
   even with `encodeArrays = true`; the server accepts both shapes.
 - Every reload restarts the event stream, and the abandoned transfer lives
