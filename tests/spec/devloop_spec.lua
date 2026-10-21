@@ -13,17 +13,21 @@ function OnDriverLateInit(reason) table.insert(DEVLOOP_TEST_CALLS, "late:" .. to
 function OnDriverDestroyed() table.insert(DEVLOOP_TEST_CALLS, "destroyed") end
 ]]
 
--- The light tree's driver.lua, distinguishable from the bridge's.
+-- The light and scene trees' driver.lua, distinguishable from the bridge's and each other.
 local LIGHT_SRC = "DEVLOOP_TEST_MARK = 'light loaded'"
+local SCENE_SRC = "DEVLOOP_TEST_MARK = 'scene loaded'"
 
 -- Modules a reload clears; the other specs' instances are saved around each test.
 local function is_driver_module(name)
-	return name:match("^bridge%.") or name:match("^common%.") or name:match("^light%.")
+	return name:match("^bridge%.") or name:match("^common%.") or name:match("^light%.") or name:match("^scene%.")
 end
 
 describe("common.devloop", function()
 	local devloop, c4, server, printed, real_print, saved_modules, sent
 	local HOST = "devvm:8080"
+
+	-- An idle tick's requests: every manifest, then the commands.
+	local POLL = { "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene", "GET /commands?after=0" }
 
 	local function state()
 		return rawget(_G, "__DEVLOOP")
@@ -37,6 +41,14 @@ describe("common.devloop", function()
 		return c4:JsonEncode(value)
 	end
 
+	-- `list` followed by the extra items.
+	local function plus(list, ...)
+		local out = {}
+		for _, item in ipairs(list) do out[#out + 1] = item end
+		for i = 1, select("#", ...) do out[#out + 1] = (select(i, ...)) end
+		return out
+	end
+
 	-- The scripted dev server: what it serves and what it received.
 	local function new_server()
 		return {
@@ -44,33 +56,45 @@ describe("common.devloop", function()
 			files = { ["driver.lua"] = DRIVER_SRC },
 			light_version = "L1",
 			light_files = { ["driver.lua"] = LIGHT_SRC, ["light/state.lua"] = "return {}" },
-			trees = true,    -- false: an older server that knows no ?tree=
+			scene_version = "S1",
+			scene_files = { ["driver.lua"] = SCENE_SRC },
+			trees = true,        -- false: an older server that knows no ?tree=
+			scene_tree = true,   -- false: a server with a light tree only (HTTP 400 for ?tree=scene)
 			commands = {},
-			requests = {},   -- "METHOD /path" in order
-			reports = {},    -- decoded POST /report bodies
-			logs = {},       -- decoded POST /log bodies
+			requests = {},       -- "METHOD /path" in order
+			reports = {},        -- decoded POST /report bodies
+			logs = {},           -- decoded POST /log bodies
 			manifest_error = nil,
 			log_error = nil,
 		}
+	end
+
+	-- The tree a request names, as the server sees it: nil before trees
+	-- existed (the query is ignored), "bridge" when none is named.
+	local function tree_of(path)
+		if not server.trees then return nil end
+		return path:match("tree=(%w+)") or "bridge"
 	end
 
 	local function route(t)
 		local path = t.url:match("^http://[^/]+(/.*)$")
 		table.insert(server.requests, t.method .. " " .. path)
 		local base = path:match("^[^?]+")
-		local light = server.trees and path:match("tree=(%w+)") == "light"
-		local tree = server.trees and (light and "light" or "bridge") or nil
-		if base == "/manifest" then
-			if server.manifest_error then
+		if base == "/manifest" or base == "/bundle" then
+			if base == "/manifest" and server.manifest_error then
 				return t:done(server.manifest_error, "Failed to connect")
 			end
-			local version = light and server.light_version or server.version
-			return t:respond(200, json({ version = version, tree = tree, files = {}, server_time = 1 }))
-		elseif base == "/bundle" then
-			if light then
-				return t:respond(200, json({ version = server.light_version, tree = tree, files = server.light_files }))
+			local tree = tree_of(path)
+			if tree == "scene" and not server.scene_tree then
+				return t:respond(400, json({ error = "unknown tree 'scene' (bridge or light)" }))
 			end
-			return t:respond(200, json({ version = server.version, tree = tree, files = server.files }))
+			local forwarded = tree ~= nil and tree ~= "bridge"
+			local version = forwarded and server[tree .. "_version"] or server.version
+			if base == "/manifest" then
+				return t:respond(200, json({ version = version, tree = tree, files = {}, server_time = 1 }))
+			end
+			local files = forwarded and server[tree .. "_files"] or server.files
+			return t:respond(200, json({ version = version, tree = tree, files = files }))
 		elseif base == "/commands" then
 			local after = tonumber(path:match("after=(%d+)"))
 			local pending = {}
@@ -139,6 +163,54 @@ describe("common.devloop", function()
 		end
 	end
 
+	-- What C4:GetDevices reports for a bound device: the driver file it runs.
+	-- A bound device the project does not know is one GetDevices omits.
+	local function project_device(id, driver_file)
+		fake.project.devices[id] = { name = "Device " .. tostring(id), room_id = 7, c4i = driver_file,
+			driver_name = driver_file }
+	end
+
+	-- The ids DEV_RELOAD went to for `tree`, sorted.
+	local function sent_to(tree)
+		local ids = {}
+		for _, msg in ipairs(sent) do
+			if msg.command == "DEV_RELOAD" and msg.params.tree == tree then ids[#ids + 1] = msg.device_id end
+		end
+		table.sort(ids)
+		return ids
+	end
+
+	-- A comma-separated DeviceIds filter as a sorted list.
+	local function csv_sorted(text)
+		local out = {}
+		for id in tostring(text):gmatch("[^,]+") do out[#out + 1] = id end
+		table.sort(out)
+		return out
+	end
+
+	-- How many printed lines are exactly this devloop message.
+	local function times_said(msg)
+		local n = 0
+		for _, line in ipairs(printed) do
+			if line == "devloop: " .. msg then n = n + 1 end
+		end
+		return n
+	end
+
+	-- The message was printed exactly once; the order among a tick's lines is incidental.
+	local function assert_said(msg)
+		assert.equal(1, times_said(msg), "printed once: devloop: " .. msg)
+	end
+
+	-- How many printed lines contain `text`.
+	local function printed_count(text)
+		local n = 0
+		for _, line in ipairs(printed) do
+			if line:find(text, 1, true) then n = n + 1 end
+		end
+		return n
+	end
+
 	before_each(function()
 		c4 = fake.install_c4({ ["Status"] = "Idle", ["Debug Mode"] = "Off" })
 		-- Stubbed here rather than in the fake: SendToDevice is recorded with all
@@ -195,6 +267,7 @@ describe("common.devloop", function()
 			assert.equal("startup", r.event)
 			assert.is_nil(r.version)
 			assert.is_nil(r.light_version)
+			assert.is_nil(r.scene_version)
 			assert.equal("Idle", r.properties.Status)
 			assert.equal("Lua 5.1", r.sandbox._VERSION)
 			assert.equal("function", r.sandbox.loadstring)
@@ -239,13 +312,14 @@ describe("common.devloop", function()
 	end)
 
 	describe("tick", function()
-		it("fetches both manifests and, at new versions, both bundles, then commands and the log", function()
+		it("fetches every manifest and, at new versions, every bundle, then commands and the log", function()
 			devloop.start(HOST)
 			serve()
 			tick()
 			assert.equal("http://devvm:8080/manifest", c4.transfers[2].url)
 			assert.same({ "POST /report", "GET /manifest", "GET /bundle", "POST /report",
 				"GET /manifest?tree=light", "GET /bundle?tree=light",
+				"GET /manifest?tree=scene", "GET /bundle?tree=scene",
 				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
 			assert.same({ "startup", "reload", "heartbeat" }, events())
 		end)
@@ -253,7 +327,7 @@ describe("common.devloop", function()
 		it("at unchanged versions only polls the manifests and commands", function()
 			start_synced()
 			tick()
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests)
+			assert.same(POLL, server.requests)
 		end)
 
 		it("skips a tick while the previous chain is still in flight", function()
@@ -381,7 +455,7 @@ describe("common.devloop", function()
 		end)
 	end)
 
-	describe("light tree (bridge side)", function()
+	describe("forwarded trees (bridge side)", function()
 		it("forwards a new light version to every bound light as DEV_RELOAD", function()
 			bind_lights({ [2001] = "A", [2002] = "B" })
 			devloop.start(HOST)
@@ -393,6 +467,7 @@ describe("common.devloop", function()
 			assert.equal(2002, sent[2].device_id)
 			for _, msg in ipairs(sent) do
 				assert.equal("DEV_RELOAD", msg.command)
+				assert.equal("light", msg.params.tree)
 				assert.equal("L1", msg.params.version)
 				assert.is_string(msg.params.files, "the bundle travels as JSON text")
 				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
@@ -400,9 +475,12 @@ describe("common.devloop", function()
 				assert.is_false(msg.log_command, "logCommand: the bundle must not land in Director's log")
 			end
 			assert.equal("L1", devloop.light_version())
+			assert.equal("L1", devloop.tree_version("light"))
+			assert.equal("S1", devloop.tree_version("scene"), "the scene tree was fetched too")
 			assert.equal("v1", devloop.version(), "the bridge's own version is untouched")
 			assert.same({ "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls(), "the bridge did not reload again")
-			assert.equal("devloop: light version L1 forwarded to 2 light(s)", printed[#printed])
+			assert_said("light version L1 forwarded to 2 light device(s)")
+			assert_said("scene version S1: no bound scene devices")
 		end)
 
 		it("does not re-forward an unchanged version and forwards again when it changes", function()
@@ -410,7 +488,7 @@ describe("common.devloop", function()
 			start_synced()
 			tick()
 			assert.same({}, sent)
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests)
+			assert.same(POLL, server.requests)
 
 			server.light_version, server.light_files["driver.lua"] = "L2", LIGHT_SRC .. " .. ' 2'"
 			server.requests = {}
@@ -421,7 +499,7 @@ describe("common.devloop", function()
 			assert.is_false(sent[1].log_command)
 			assert.equal("L2", devloop.light_version())
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
-				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+				"GET /manifest?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
 		end)
 
 		it("reports light_version in the heartbeat right after a forward, and in later reports", function()
@@ -432,6 +510,7 @@ describe("common.devloop", function()
 			tick()
 			assert.same({ "heartbeat" }, events(), "a forward makes a heartbeat due at once")
 			assert.equal("L2", last_report().light_version)
+			assert.equal("S1", last_report().scene_version)
 			assert.equal("v1", last_report().version)
 
 			server.reports = {}
@@ -448,7 +527,8 @@ describe("common.devloop", function()
 			tick()
 			assert.same({}, sent)
 			assert.equal("L1", devloop.light_version())
-			assert.equal("devloop: light version L1: no bound lights", printed[#printed])
+			assert_said("light version L1: no bound light devices")
+			assert_said("scene version S1: no bound scene devices")
 			local said = #printed
 			tick()
 			tick()
@@ -463,12 +543,12 @@ describe("common.devloop", function()
 			assert.equal(2, #sent)
 			for _, msg in ipairs(sent) do
 				assert.equal("DEV_RELOAD", msg.command)
+				assert.equal("light", msg.params.tree)
 				assert.equal("L1", msg.params.version)
 				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
 			end
-			assert.equal("devloop: light version L1 forwarded to 2 newly bound light(s)", printed[#printed])
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0", "POST /log" },
-				server.requests, "the cached bundle is used; no second fetch")
+			assert_said("light version L1 forwarded to 2 newly bound light device(s)")
+			assert.same(plus(POLL, "POST /log"), server.requests, "the cached bundles are used; no second fetch")
 		end)
 
 		it("forwards the current version to a light bound after the first forward, without a refetch", function()
@@ -483,9 +563,9 @@ describe("common.devloop", function()
 			assert.same(server.light_files, c4:JsonDecode(sent[1].params.files))
 			assert.is_false(sent[1].allow_empty)
 			assert.is_false(sent[1].log_command)
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0", "POST /log" },
-				server.requests, "no GET /bundle?tree=light and no heartbeat: the version did not change")
-			assert.equal("devloop: light version L1 forwarded to 1 newly bound light(s)", printed[#printed])
+			assert.same(plus(POLL, "POST /log"), server.requests,
+				"no GET /bundle?tree=light and no heartbeat: the version did not change")
+			assert_said("light version L1 forwarded to 1 newly bound light device(s)")
 			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded)
 			assert.equal("L1", devloop.light_version())
 		end)
@@ -498,9 +578,9 @@ describe("common.devloop", function()
 			tick()
 			assert.same({}, sent)
 			assert.equal(said, #printed)
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0",
-				"GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests)
+			assert.same(plus(POLL, unpack(POLL)), server.requests)
 			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded)
+			assert.same({}, state().scene_forwarded)
 		end)
 
 		it("re-forwards a new version to every bound light, caught-up ones included", function()
@@ -520,11 +600,11 @@ describe("common.devloop", function()
 				assert.equal("L2", msg.params.version)
 				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
 			end
-			assert.equal("devloop: light version L2 forwarded to 2 light(s)", printed[#printed])
+			assert_said("light version L2 forwarded to 2 light device(s)")
 			assert.same({ [2001] = "L2", [2002] = "L2" }, state().light_forwarded)
 			assert.equal("L2", devloop.light_version())
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
-				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests,
+				"GET /manifest?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests,
 				"fetched once for the new version; a heartbeat is due at once")
 		end)
 
@@ -549,6 +629,112 @@ describe("common.devloop", function()
 			assert.same({}, state().light_forwarded, "nothing bound: the table empties")
 		end)
 
+		it("tells light and scene devices apart by driverFileName, looked up once per new id", function()
+			project_device(2001, "hue_light.c4z")
+			project_device(2002, "hue_scene.c4z")
+			bind_lights({ [2001] = "Hue Light", [2002] = "Hue Scene", [2003] = "C" })   -- 2003: GetDevices omits it
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.equal(3, #sent)
+			assert.same({ 2001, 2003 }, sent_to("light"), "an unknown driver file counts as a light")
+			assert.same({ 2002 }, sent_to("scene"))
+			for _, msg in ipairs(sent) do
+				assert.equal("DEV_RELOAD", msg.command)
+				if msg.params.tree == "scene" then
+					assert.equal("S1", msg.params.version)
+					assert.same(server.scene_files, c4:JsonDecode(msg.params.files))
+				else
+					assert.equal("L1", msg.params.version)
+					assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+				end
+				assert.is_false(msg.allow_empty)
+				assert.is_false(msg.log_command)
+			end
+			assert_said("light version L1 forwarded to 2 light device(s)")
+			assert_said("scene version S1 forwarded to 1 scene device(s)")
+			assert.same({ [2001] = "L1", [2003] = "L1" }, state().light_forwarded)
+			assert.same({ [2002] = "S1" }, state().scene_forwarded)
+			assert.equal("S1", devloop.tree_version("scene"))
+
+			local lookups = c4.calls_to("GetDevices")
+			assert.equal(1, #lookups, "one GetDevices for both trees")
+			assert.same({ "2001", "2002", "2003" }, csv_sorted(lookups[1][1].DeviceIds))
+			assert.same({ [2001] = "hue_light.c4z", [2002] = "hue_scene.c4z", [2003] = false }, state().driver_files)
+
+			-- Cached: the next tick asks nothing and sends nothing.
+			sent = {}
+			tick()
+			assert.same({}, sent)
+			assert.equal(1, #c4.calls_to("GetDevices"))
+
+			-- A scene device bound later is looked up alone and gets the cached scene bundle.
+			project_device(2004, "hue_scene.c4z")
+			bind_lights({ [2001] = "A", [2002] = "B", [2003] = "C", [2004] = "D" })
+			server.requests = {}
+			tick()
+			assert.equal(1, #sent)
+			assert.equal(2004, sent[1].device_id)
+			assert.equal("scene", sent[1].params.tree)
+			assert.equal("S1", sent[1].params.version)
+			assert.same(server.scene_files, c4:JsonDecode(sent[1].params.files))
+			lookups = c4.calls_to("GetDevices")
+			assert.equal(2, #lookups)
+			assert.equal("2004", lookups[2][1].DeviceIds)
+			assert_said("scene version S1 forwarded to 1 newly bound scene device(s)")
+			assert.same(plus(POLL, "POST /log"), server.requests, "no refetch of either bundle")
+		end)
+
+		it("sends a new scene version only to the scene devices and reports scene_version at once", function()
+			project_device(2002, "hue_scene.c4z")
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			start_synced()
+			assert.equal("S1", devloop.tree_version("scene"))
+			assert.same({ [2001] = "L1" }, state().light_forwarded)
+			assert.same({ [2002] = "S1" }, state().scene_forwarded)
+
+			server.scene_version, server.scene_files["driver.lua"] = "S2", SCENE_SRC .. " .. ' 2'"
+			tick()
+			assert.equal(1, #sent)
+			assert.equal(2002, sent[1].device_id)
+			assert.equal("DEV_RELOAD", sent[1].command)
+			assert.equal("scene", sent[1].params.tree)
+			assert.equal("S2", sent[1].params.version)
+			assert.same(server.scene_files, c4:JsonDecode(sent[1].params.files))
+			assert.is_false(sent[1].log_command)
+			assert.equal("S2", devloop.tree_version("scene"))
+			assert.equal("L1", devloop.light_version(), "the light tree is untouched")
+			assert.same({ [2002] = "S2" }, state().scene_forwarded)
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
+				"GET /bundle?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests,
+				"fetched once for the new version; a heartbeat is due at once")
+			assert.same({ "heartbeat" }, events())
+			assert.equal("S2", last_report().scene_version)
+			assert.equal("L1", last_report().light_version)
+			assert.equal("v1", last_report().version)
+			assert_said("scene version S2 forwarded to 1 scene device(s)")
+
+			server.reports = {}
+			server.commands = { { id = 1, type = "execute", command = "A" } }
+			rawset(_G, "ExecuteCommand", function() end)
+			tick()
+			assert.equal("command_done", last_report().event)
+			assert.equal("S2", last_report().scene_version)
+		end)
+
+		it("treats every bound device as a light when GetDevices fails", function()
+			c4.GetDevices = function() error("not available") end
+			bind_lights({ [2001] = "A" })
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({ 2001 }, sent_to("light"))
+			assert.same({}, sent_to("scene"))
+			assert.same({ [2001] = false }, state().driver_files)
+			assert_said("light version L1 forwarded to 1 light device(s)")
+			assert_said("scene version S1: no bound scene devices")
+		end)
+
 		it("skips a tree-less server instead of forwarding the bridge bundle", function()
 			bind_lights({ [2001] = "A" })
 			server.trees = false
@@ -559,13 +745,41 @@ describe("common.devloop", function()
 			tick()
 			assert.same({}, sent)
 			assert.is_nil(devloop.light_version())
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0" }, server.requests,
-				"the light manifest is still polled, so a restarted server with trees is picked up")
-			local count = 0
-			for _, line in ipairs(printed) do
-				if line:find("no light tree", 1, true) then count = count + 1 end
-			end
-			assert.equal(1, count, "said once")
+			assert.is_nil(devloop.tree_version("scene"))
+			assert.same(POLL, server.requests, "both tree manifests are still polled, so a restarted server is picked up")
+			assert.equal(1, printed_count("no light tree"), "said once")
+			assert.equal(1, printed_count("no scene tree"), "said once")
+		end)
+
+		it("says once when the server lacks the scene tree, keeps polling for it and picks it up later", function()
+			project_device(2002, "hue_scene.c4z")
+			bind_lights({ [2001] = "A", [2002] = "B" })
+			server.scene_tree = false
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({ 2001 }, sent_to("light"))
+			assert.same({}, sent_to("scene"))
+			assert.equal("L1", devloop.tree_version("light"))
+			assert.is_nil(devloop.tree_version("scene"))
+			assert_said("server has no scene tree (HTTP 400); scene devices are not updated")
+
+			server.requests = {}
+			tick()
+			assert.same(POLL, server.requests, "the scene manifest is still polled")
+			assert_said("server has no scene tree (HTTP 400); scene devices are not updated")
+			assert.equal(1, #sent)
+
+			server.scene_tree = true
+			server.requests = {}
+			tick()
+			assert.same({ 2002 }, sent_to("scene"))
+			assert.equal("S1", sent[2].params.version)
+			assert.same(server.scene_files, c4:JsonDecode(sent[2].params.files))
+			assert.equal("S1", devloop.tree_version("scene"))
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
+				"GET /bundle?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+			assert_said("scene version S1 forwarded to 1 scene device(s)")
 		end)
 
 		it("keeps the loop going when SendToDevice raises", function()
@@ -579,8 +793,8 @@ describe("common.devloop", function()
 			tick()
 			assert.equal(1, #sent)
 			assert.equal("L1", devloop.light_version())
-			assert.equal("devloop: light version L1 forwarded to 1 light(s), 1 failed", printed[#printed])
-			assert.equal("GET /commands?after=0", server.requests[7])
+			assert_said("light version L1 forwarded to 1 light device(s), 1 failed")
+			assert.equal("GET /commands?after=0", server.requests[9])
 			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded,
 				"a failed send is recorded too, so it is not retried at this version")
 			tick()
@@ -588,16 +802,32 @@ describe("common.devloop", function()
 		end)
 	end)
 
-	describe("apply_forwarded (light side)", function()
-		local function forwarded(version, files)
-			return devloop.apply_forwarded({ version = version, files = json(files) })
+	describe("own_tree", function()
+		it("reads the forwarded tree off the driver file name", function()
+			assert.equal("bridge", devloop.own_tree())
+			c4.driver_file = "hue_light.c4z"
+			assert.equal("light", devloop.own_tree())
+			c4.driver_file = "hue_scene.c4z"
+			assert.equal("scene", devloop.own_tree())
+			c4.driver_file = "other.c4z"
+			assert.is_nil(devloop.own_tree())
+		end)
+	end)
+
+	describe("apply_forwarded (device side)", function()
+		local function forwarded(version, files, tree)
+			return devloop.apply_forwarded({ tree = tree, version = version, files = json(files) })
 		end
+
+		before_each(function()
+			c4.driver_file = "hue_light.c4z"   -- the receiver is a light unless a spec says otherwise
+		end)
 
 		it("reloads from the forwarded bundle without start() ever being called", function()
 			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "old destroyed") end)
 			package.loaded["light.x"] = { old = true }
 			package.loaded["common.dispatch"] = { old = true }
-			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }))
+			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light"))
 			assert.same({ "old destroyed", "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls())
 			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
 			assert.is_nil(package.loaded["light.x"])
@@ -613,30 +843,68 @@ describe("common.devloop", function()
 			assert.is_true(forwarded("L1", {
 				["driver.lua"] = "DEVLOOP_TEST_MARK = require('light.state')",
 				["light/state.lua"] = "return { from_bundle = true }",
-			}))
+			}, "light"))
 			assert.is_true(rawget(_G, "DEVLOOP_TEST_MARK").from_bundle)
 			assert.equal(state().loader, package.loaders[1])
 		end)
 
+		it("skips a bundle for the other tree and leaves the running code alone", function()
+			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
+			assert.is_false(forwarded("S1", { ["driver.lua"] = SCENE_SRC }, "scene"))
+			assert.equal("devloop: light reload skipped: DEV_RELOAD carries the scene tree", printed[#printed])
+			assert.same({}, calls(), "nothing was torn down")
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.is_nil(devloop.version())
+
+			-- Its own tree is applied, named or not (an older bridge forwards without one).
+			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light"))
+			assert.equal("L1", devloop.version())
+			assert.is_true(forwarded("L2", { ["driver.lua"] = DRIVER_SRC }))
+			assert.equal("L2", devloop.version())
+			assert.equal("devloop: light reload complete: version L2", printed[#printed])
+		end)
+
+		it("on a scene device applies the scene tree and skips the light tree", function()
+			c4.driver_file = "hue_scene.c4z"
+			assert.is_false(forwarded("L1", { ["driver.lua"] = LIGHT_SRC }, "light"))
+			assert.equal("devloop: scene reload skipped: DEV_RELOAD carries the light tree", printed[#printed])
+			assert.is_nil(devloop.version())
+
+			assert.is_true(forwarded("S1", {
+				["driver.lua"] = "DEVLOOP_TEST_MARK = require('scene.x')",
+				["scene/x.lua"] = "return 'scene loaded'",
+			}, "scene"))
+			assert.equal("scene loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.equal("S1", devloop.version())
+			assert.equal("devloop: scene reload complete: version S1", printed[#printed])
+		end)
+
+		it("applies any tree when its own driver file is not a hue_*.c4z", function()
+			c4.driver_file = "other.c4z"
+			assert.is_true(forwarded("S1", { ["driver.lua"] = SCENE_SRC }, "scene"))
+			assert.equal("scene loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.equal("devloop: device reload complete: version S1", printed[#printed])
+		end)
+
 		it("prints the failure for a broken bundle and stays usable", function()
-			assert.is_false(forwarded("L2", { ["driver.lua"] = "function (" }))
+			assert.is_false(forwarded("L2", { ["driver.lua"] = "function (" }, "light"))
 			assert.truthy(printed[#printed]:find("^devloop: light reload failed: "))
 			assert.truthy(printed[#printed]:find("driver.lua", 1, true))
 			assert.equal("L2", devloop.version())
 
-			assert.is_false(forwarded("L3", { ["driver.lua"] = "error('boom')" }))
+			assert.is_false(forwarded("L3", { ["driver.lua"] = "error('boom')" }, "light"))
 			assert.truthy(printed[#printed]:find("boom", 1, true))
 
-			assert.is_true(forwarded("L4", { ["driver.lua"] = DRIVER_SRC }))
+			assert.is_true(forwarded("L4", { ["driver.lua"] = DRIVER_SRC }, "light"))
 			assert.equal("L4", devloop.version())
 			assert.equal("devloop: light reload complete: version L4", printed[#printed])
 		end)
 
 		it("rejects params without a decodable files object", function()
 			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
-			assert.is_false(devloop.apply_forwarded({ version = "L1", files = "not json" }))
+			assert.is_false(devloop.apply_forwarded({ tree = "light", version = "L1", files = "not json" }))
 			assert.truthy(printed[#printed]:find("^devloop: light reload failed: files param"))
-			assert.is_false(devloop.apply_forwarded({ version = "L1" }))
+			assert.is_false(devloop.apply_forwarded({ tree = "light", version = "L1" }))
 			assert.is_false(devloop.apply_forwarded(nil))
 			assert.same({}, calls(), "nothing was torn down")
 			assert.is_nil(devloop.version())
@@ -646,7 +914,8 @@ describe("common.devloop", function()
 			package.loaded["common.dispatch"] = nil
 			local dispatch = require("common.dispatch")
 			dispatch.commands["DEV_RELOAD"] = devloop.apply_forwarded
-			dispatch.execute_command("DEV_RELOAD", { version = "L1", files = json({ ["driver.lua"] = DRIVER_SRC }) })
+			dispatch.execute_command("DEV_RELOAD",
+				{ tree = "light", version = "L1", files = json({ ["driver.lua"] = DRIVER_SRC }) })
 			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
 			assert.equal("L1", devloop.version())
 		end)
@@ -688,8 +957,7 @@ describe("common.devloop", function()
 				"destroyed", "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls())
 			assert.same({ "reload", "command_done" }, events())
 			assert.equal(9, last_report().command_id)
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0",
-				"POST /report", "POST /report", "POST /log" }, server.requests)
+			assert.same(plus(POLL, "POST /report", "POST /report", "POST /log"), server.requests)
 		end)
 
 		it("runs commands in order and advances the after= cursor", function()
@@ -815,8 +1083,7 @@ describe("common.devloop", function()
 			assert.is_false(state().busy)
 			c4.url = real_url
 			tick()
-			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /commands?after=0", "POST /log" },
-				server.requests)
+			assert.same(plus(POLL, "POST /log"), server.requests)
 			assert.truthy(server.logs[1].lines[1].line:find("unreachable", 1, true))
 		end)
 	end)

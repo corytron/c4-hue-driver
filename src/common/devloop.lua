@@ -7,6 +7,7 @@
 --   GET /manifest -> (GET /bundle, reload, POST /report) ->
 --   GET /manifest?tree=light -> (GET /bundle?tree=light at a new version,
 --                                DEV_RELOAD to the lights that lack it) ->
+--   GET /manifest?tree=scene -> (the same for the scene devices) ->
 --   GET /commands -> (run each, POST /report command_done) ->
 --   POST /log -> (POST /report heartbeat)
 -- so no transfer ever starts inside OnHeaders or OnBodyChunk, which Director
@@ -31,7 +32,10 @@
 --   devloop.version()         -> version of the code last loaded, or nil
 --                                while the .c4z's own code is running
 --   devloop.light_version()   -> light-tree version last forwarded (bridge)
---   devloop.apply_forwarded(params)  the light's DEV_RELOAD handler -> bool
+--   devloop.tree_version(t)   -> the same for any forwarded tree ("light", "scene")
+--   devloop.own_tree()        -> "light" / "scene" / "bridge" from the driver file name
+--   devloop.apply_forwarded(params)  the light's or scene's DEV_RELOAD handler -> bool;
+--                                a bundle for another tree is skipped
 
 local devloop = {}
 
@@ -72,6 +76,9 @@ end
 -- Fields added after a state was created elsewhere (a newer module meeting
 -- an older state) start empty instead of nil.
 S.light_forwarded = S.light_forwarded or {}
+S.scene_forwarded = S.scene_forwarded or {}   -- same, for the scene tree
+S.driver_files = S.driver_files or {}         -- bound device id -> driverFileName (false = unknown)
+S.no_tree = S.no_tree or {}                   -- tree name -> true once "server has no such tree" was said
 
 local compile = rawget(_G, "loadstring") or rawget(_G, "load")
 
@@ -221,7 +228,8 @@ end
 -- Every report carries both versions: the bridge's own and the light tree's
 -- last forwarded one (absent until the first forward), so /status shows both.
 local function report(event, extra, callback)
-	local body = { version = S.version, light_version = S.light_version, event = event, properties = snapshot() }
+	local body = { version = S.version, light_version = S.light_version, scene_version = S.scene_version,
+		event = event, properties = snapshot() }
 	for k, v in pairs(extra or {}) do body[k] = v end
 	S.last_report_ms = now_ms()
 	request("POST", "/report", body, function(r)
@@ -257,7 +265,8 @@ end
 -- bridge.* (bridge driver), light.* (light driver), common.* except this one.
 local function is_driver_module(name)
 	return name ~= "common.devloop"
-		and (name:match("^bridge%.") or name:match("^light%.") or name:match("^common%.")) ~= nil
+		and (name:match("^bridge%.") or name:match("^light%.") or name:match("^scene%.")
+			or name:match("^common%.")) ~= nil
 end
 
 -- Tear the running driver down and bring `files` up in its place. Returns
@@ -329,35 +338,72 @@ local function fetch_bundle(tree, callback)
 	end)
 end
 
--- Light tree ---------------------------------------------------------------------
+-- Forwarded trees -------------------------------------------------------------
 
--- Hand the light tree's bundle to every bound light that has not received
--- this version, as one DEV_RELOAD command { version, files = JSON text }
--- each; a light reloads itself through devloop.apply_forwarded. Runs every
--- tick the server has a light tree, from the cached bundle when the version
--- is unchanged: S.light_forwarded remembers, per bound device, the version
--- it was last sent, so a light bound after the version was first forwarded
--- (Import Lights creates lights while the loop runs; the first forward may
--- have found none bound) catches up on the next tick. A device that leaves
--- the bound set is forgotten. The version is recorded per device before the
--- send, so a light whose send fails is not retried until the server has a
--- different version.
-local function forward_light(files, version)
-	local changed = S.light_version ~= version
-	S.light_version, S.light_bundle = version, files
+-- The light and scene drivers share binding 1, so each tree goes only to
+-- the devices running its driver, told apart by driverFileName as
+-- C4:GetDevices reports it [verified: hardware].
+local TREE_DRIVERS = { light = "hue_light.c4z", scene = "hue_scene.c4z" }
+devloop.TREES = { "light", "scene" }
+
+-- driverFileName per bound device, cached in S.driver_files; the ids not seen
+-- yet are looked up with one C4:GetDevices (DeviceIds is a comma-separated
+-- string [verified: hardware]). false = could not be read.
+local function driver_files(bound)
+	local missing = {}
+	for id in pairs(bound) do
+		if S.driver_files[id] == nil then missing[#missing + 1] = tostring(id) end
+	end
+	if #missing > 0 then
+		local ok, devices = pcall(function() return C4:GetDevices({ DeviceIds = table.concat(missing, ",") }) end)
+		if ok and type(devices) == "table" then
+			for id, info in pairs(devices) do
+				S.driver_files[tonumber(id) or id] = type(info) == "table" and info.driverFileName or false
+			end
+		end
+		for _, id in ipairs(missing) do
+			local key = tonumber(id) or id
+			if S.driver_files[key] == nil then S.driver_files[key] = false end
+		end
+	end
+	return S.driver_files
+end
+
+-- Hand a tree's bundle to every bound device of its kind that has not
+-- received this version, as one DEV_RELOAD command { tree, version, files =
+-- JSON text } each; the device reloads itself through devloop.apply_forwarded.
+-- Runs every tick the server has the tree, from the cached bundle when the
+-- version is unchanged: S.<tree>_forwarded remembers, per bound device, the
+-- version it was last sent, so a device bound after the version was first
+-- forwarded (an import creates devices while the loop runs; the first
+-- forward may have found none bound) catches up on the next tick. A device
+-- that leaves the bound set is forgotten. The version is recorded per device
+-- before the send, so a device whose send fails is not retried until the
+-- server has a different version.
+local function forward_tree(tree, files, version)
+	local vkey, bkey, fkey = tree .. "_version", tree .. "_bundle", tree .. "_forwarded"
+	local changed = S[vkey] ~= version
+	S[vkey], S[bkey] = version, files
 	local ok, err = pcall(function()
 		local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)
 		if type(bound) ~= "table" then bound = {} end
-		local forwarded = S.light_forwarded
+		local forwarded = S[fkey]
 		for id in pairs(forwarded) do
 			if bound[id] == nil then forwarded[id] = nil end
 		end
-		local due = {}
+		local kinds, wanted = driver_files(bound), TREE_DRIVERS[tree]
+		local due, members = {}, 0
 		for id in pairs(bound) do
-			if forwarded[id] ~= version then due[#due + 1] = id end
+			local file = kinds[id]
+			-- A device whose driver file could not be read counts as a light,
+			-- the only receiver before scene devices existed.
+			if file == wanted or (file == false and tree == "light") then
+				members = members + 1
+				if forwarded[id] ~= version then due[#due + 1] = id end
+			end
 		end
-		if changed and next(bound) == nil then
-			say("light version %s: no bound lights", tostring(version))
+		if changed and members == 0 then
+			say("%s version %s: no bound %s devices", tree, tostring(version), tree)
 			return
 		end
 		if #due == 0 then return end
@@ -369,7 +415,7 @@ local function forward_light(files, version)
 			-- Trailing args: allowEmptyValues = false, logCommand = false, so
 			-- Director does not write the whole bundle to its log every reload.
 			local ok_send, serr = pcall(function()
-				C4:SendToDevice(id, "DEV_RELOAD", { version = version, files = text }, false, false)
+				C4:SendToDevice(id, "DEV_RELOAD", { tree = tree, version = version, files = text }, false, false)
 			end)
 			if ok_send then
 				sent = sent + 1
@@ -378,11 +424,11 @@ local function forward_light(files, version)
 				say("DEV_RELOAD to device %s failed: %s", tostring(id), tostring(serr))
 			end
 		end
-		say("light version %s forwarded to %d %slight(s)%s", tostring(version), sent,
-			changed and "" or "newly bound ",
+		say("%s version %s forwarded to %d %s%s device(s)%s", tree, tostring(version), sent,
+			changed and "" or "newly bound ", tree,
 			failed > 0 and string.format(", %d failed", failed) or "")
 	end)
-	if not ok then say("light forward failed: %s", tostring(err)) end
+	if not ok then say("%s forward failed: %s", tree, tostring(err)) end
 	-- At a new version a heartbeat is due at the end of this tick, so /status
 	-- sees it at once instead of up to HEARTBEAT_MS later.
 	if changed then S.last_report_ms = 0 end
@@ -465,38 +511,43 @@ local function step_commands()
 	end)
 end
 
--- The light tree: fetch a changed version once, then forward it (from the
--- cache while the version stays the same) to the bound lights that lack it.
--- A server without trees answers with the bridge manifest (no "tree" field),
--- which must never reach the lights; said once, then ignored.
-local function step_light()
-	request("GET", "/manifest?tree=light", nil, function(r)
+-- One forwarded tree: fetch a changed version once, then forward it (from
+-- the cache while the version stays the same) to the bound devices of its
+-- kind that lack it. A server without the tree answers with an error or the
+-- bridge manifest (no "tree" field), which must never reach the devices;
+-- said once, then ignored until the server has it.
+local function step_tree(tree, next_step)
+	request("GET", "/manifest?tree=" .. tree, nil, function(r)
 		local j = r.json
-		if not r.ok or type(j) ~= "table" or j.version == nil then
-			say("light manifest: %s", tostring(r.err or "malformed manifest"))
-			return step_commands()
-		end
-		if j.tree ~= "light" then
-			if not S.no_light_tree then
-				say("server has no light tree; lights are not updated")
-				S.no_light_tree = true
+		local served = r.ok and type(j) == "table" and j.version ~= nil and j.tree == tree
+		if not served then
+			if not S.no_tree[tree] then
+				say("server has no %s tree (%s); %s devices are not updated", tree,
+					tostring(r.err or (type(j) == "table" and j.tree) or "malformed manifest"), tree)
+				S.no_tree[tree] = true
 			end
-			return step_commands()
+			return next_step()
 		end
-		S.no_light_tree = false
-		if S.light_bundle and tostring(j.version) == S.light_version then
-			forward_light(S.light_bundle, S.light_version)
-			return step_commands()
+		S.no_tree[tree] = false
+		local vkey, bkey = tree .. "_version", tree .. "_bundle"
+		if S[bkey] and tostring(j.version) == S[vkey] then
+			forward_tree(tree, S[bkey], S[vkey])
+			return next_step()
 		end
-		fetch_bundle("light", function(files, version, err)
+		fetch_bundle(tree, function(files, version, err)
 			if not files then
-				say("light %s", err)
-				return step_commands()
+				say("%s %s", tree, err)
+				return next_step()
 			end
-			forward_light(files, version)
-			step_commands()
+			forward_tree(tree, files, version)
+			next_step()
 		end)
 	end)
+end
+
+-- The forwarded trees in turn, then the commands.
+local function step_light()
+	step_tree("light", function() step_tree("scene", step_commands) end)
 end
 
 local function step_manifest()
@@ -587,6 +638,21 @@ function devloop.light_version()
 	return S.light_version
 end
 
+-- Version last forwarded for `tree` ("light" or "scene").
+function devloop.tree_version(tree)
+	return S[tostring(tree) .. "_version"]
+end
+
+-- Which forwarded tree this driver is: "light" for hue_light.c4z, "scene"
+-- for hue_scene.c4z ("bridge" for the bridge); nil when unknown.
+function devloop.own_tree()
+	local ok, file = pcall(function() return C4:GetDriverFileName() end)
+	if ok and type(file) == "string" then
+		return file:match("^hue_(%w+)%.c4z$")
+	end
+	return nil
+end
+
 -- The light's DEV_RELOAD handler: `params` are the strings the bridge sent,
 -- { version = "...", files = "<JSON object path -> source>" }. Decodes the
 -- bundle and runs the reload sequence; the outcome goes through print (the
@@ -594,18 +660,26 @@ end
 function devloop.apply_forwarded(params)
 	params = type(params) == "table" and params or {}
 	local version = tostring(params.version or "?")
+	local own = devloop.own_tree()
+	local kind = own or "device"
+	-- Lights and scene devices share the bridge's binding; a bundle for the
+	-- other kind (an older bridge forwards without filtering) is not ours.
+	if params.tree and own and params.tree ~= own then
+		say("%s reload skipped: DEV_RELOAD carries the %s tree", kind, tostring(params.tree))
+		return false
+	end
 	local ok, files = pcall(function() return C4:JsonDecode(params.files) end)
 	if not ok or type(files) ~= "table" then
-		say("light reload failed: files param does not decode%s", ok and "" or (": " .. tostring(files)))
+		say("%s reload failed: files param does not decode%s", kind, ok and "" or (": " .. tostring(files)))
 		return false
 	end
-	say("light reloading to version %s (%d files)", version, count_files(files))
+	say("%s reloading to version %s (%d files)", kind, version, count_files(files))
 	local err = reload(files, version)
 	if err then
-		say("light reload failed: %s", err)
+		say("%s reload failed: %s", kind, err)
 		return false
 	end
-	say("light reload complete: version %s", version)
+	say("%s reload complete: version %s", kind, version)
 	return true
 end
 
