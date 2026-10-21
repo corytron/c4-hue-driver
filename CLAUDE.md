@@ -11,14 +11,15 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 
 ## Working with agents
 
-Use parallel agents whenever a task splits into pieces that touch disjoint files; a single long serial pass is the slow path.
+**Parallel by default.** For every piece of work, split it into parts that touch disjoint files and run them as background agents at the same time: module and its spec, VM-side tooling, changes to existing modules and their specs, docs and design notes. A single serial pass is only acceptable when the work truly cannot be split (one file, a handful of edits). Before starting any task, say in one line how it is being split and which agent owns which files; if it is not being split, say why.
 
 - **Coordinator first.** Before spawning, write the contract the pieces share (an interface, a wire protocol, a file layout) into `docs/` so every agent builds against the same text. Then spawn them in one go, in the background.
 - **One writer per file.** Each brief names the exact files the agent may create or edit and says that others are editing the rest of the checkout concurrently. No agent runs `git`; the coordinator integrates, runs `luacheck src tests`, `busted` and `tools/build.sh`, and commits.
 - **Briefs are self-contained.** Agents start cold: include the doc paths to read, the conventions (Lua 5.1, tabs, `.luacheckrc`, busted style, the fake C4 runtime), the hardware facts that matter, and what "done" looks like, including the verification commands to run.
 - **Research agents are read-only** and write one new file under `docs/` (for example a design for a new transport), citing the SDK doc file for every API claim.
 - Typical split for a feature: VM-side tooling (Python) / driver-side Lua module plus its spec / changes to existing modules plus their specs / a design or research document. Integration into `driver.lua`, `driver.xml`, `tools/build.sh` and `CLAUDE.md` stays with the coordinator.
-- Don't spawn for quick things (one file, a handful of edits); do it inline.
+- Don't spawn for quick things (one file, a handful of edits); do it inline. Everything larger is split.
+- While agents run, the coordinator does the integration pieces nobody else owns (`driver.lua`, `driver.xml`, `tools/build.sh`, `CLAUDE.md`) and verifies through the dev loop, rather than waiting idle.
 
 ## Environment
 
