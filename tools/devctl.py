@@ -138,11 +138,18 @@ def cmd_status(args):
                                                    version_note(running_light, local_light, "forward",
                                                                 "bridge has not forwarded yet")))
         row("local_light_version", short(local_light))
+    if "local_scene_version" in st:
+        running_scene, local_scene = st.get("running_scene_version"), st.get("local_scene_version")
+        row("running_scene_version", "%s  (%s)" % (short(running_scene),
+                                                   version_note(running_scene, local_scene, "forward",
+                                                                "bridge has not forwarded yet")))
+        row("local_scene_version", short(local_scene))
     pinned = st.get("pinned") or {}
     if any(pinned.values()):
         trees = ", ".join("%s at %s" % (name, short(pinned[name])) for name in sorted(pinned) if pinned[name])
-        row("pinned", "%s  (live tree: %s / %s)" % (trees, short(st.get("live_version")),
-                                                        short(st.get("live_light_version"))))
+        live = [short(st.get(key)) for key in ("live_version", "live_light_version", "live_scene_version")
+                if key in st]
+        row("pinned", "%s  (live tree: %s)" % (trees, " / ".join(live)))
     row("last_seen", ago(st.get("last_seen"), st.get("server_time")))
     row("last_event", st.get("last_event") or "-")
     if st.get("last_error"):
