@@ -121,3 +121,20 @@ files.
 Dev builds only; LAN only; plain HTTP. Anyone on the LAN who can impersonate
 the VM's address can push code into a dev driver. Never install a dev build
 as the production driver.
+
+## Gotchas learned on hardware
+
+- Director's `C4:JsonEncode` writes Lua arrays as objects with string keys
+  even with `encodeArrays = true`; the server accepts both shapes.
+- Every reload restarts the event stream, and the abandoned transfer lives
+  on until the next bridge event or its timeout (`Cancel()` does nothing).
+  After several reloads the stream's queue holds several zombies; they
+  drain one per bridge event. `devctl.py run "Hue Request" Method=PUT
+  Path=/clip/v2/resource/light/<id> Body='{"metadata":{"name":"X"}}'
+  Host=10.00.001.143` (a spelling nothing else uses) generates one event per
+  call without touching the light itself; rename back afterwards.
+- Edits to `tools/devserver.py` need a server restart. Kill it with a pattern
+  that does not appear in your own command line (`pkill -f "devserver[.]p[y]"`)
+  and start it in a separate command, or the shell kills itself.
+- `build/dev/reports.jsonl` gets a heartbeat every 30 s; prune it when it
+  grows.

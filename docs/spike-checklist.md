@@ -98,3 +98,10 @@ connection limit from a bridge limit:
 
 For each step, the property text and any Lua output lines. For steps 3, 6,
 8 and 9, the result decides the design, so exact wording matters there.
+
+## Status (2026-10-21)
+
+Steps 1–9 and 15 are answered, most of them through the dev loop rather
+than by hand; see `docs/design.md` for the findings and the chosen stream
+design (option A). Still open: the hour-long soak (13) and the Director
+restart (12), which also checks that the encrypted key survives a reboot.
