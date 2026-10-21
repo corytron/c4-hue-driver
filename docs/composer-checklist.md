@@ -86,7 +86,10 @@ them to their real rooms afterwards (moving does not touch the binding).
    few levels and let go. Expect the bulb to respond within about a second
    and the slider to settle on the level Hue reports back, never stuck at an
    intermediate value. 0% turns the bulb off; from off, a level turns it on
-   at that level.
+   at that level. Levels below 100% are the real test: Hue reports a
+   requested 20 back as 20.16, and the proxy showed that decimal as 0%/off
+   until the light driver started rounding (`slider-fix`). Expect the slider
+   to stay at 25%, 60% and 100% and the tile to read "on" for each.
 10. On a colour bulb, open the colour controls. Expect both a colour wheel
     and a colour-temperature control; pick a colour, then a temperature, and
     confirm the bulb follows each. On a white-ambiance bulb only the
