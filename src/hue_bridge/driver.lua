@@ -1239,6 +1239,8 @@ function OnDriverLateInit()
 	state.scenes = new_scenes()
 	if state.scenes then
 		state.scenes:load()
+		if state.scenes.configure_all then state.scenes:configure_all() end
+		if state.scenes.reconcile then state.scenes:reconcile() end
 	end
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).

@@ -16,6 +16,12 @@
 --   "hue_rooms"       Hue room/zone rid → { c4_room_id, c4_room_name, hue_name, type }
 --   "hue_tombstones"  rid → { name, device_name, deleted_at }: devices deleted
 --                     in Composer; bulk import skips them, Add Light clears them.
+-- The `keys` option of new() renames them so a second instance (the scenes
+-- of docs/scenes-design.md §4) persists under its own keys: `{ lights =
+-- "hue_scenes", tombstones = "hue_scene_tombstones", rooms = false }`. With
+-- `rooms = false` no room key is read or written and set_room_mapping()
+-- refuses, so nothing can sit in memory that a save() would not keep. The
+-- entries table is still called `lights` here whatever it holds.
 --
 -- Persistence rules: mutators change memory only and callers save() after a
 -- batch (one click, one resync), as the contract says. load() refills the
@@ -60,16 +66,34 @@ local STAMP = { gone = "gone_since", unbound = "unbound_since" }
 registry.CLEAR = setmetatable({}, { __tostring = function() return "registry.CLEAR" end })
 
 -- opts: persist_get(name), persist_set(name, value) required; now() defaults
--- to os.time; log to common.log.
+-- to os.time; log to common.log; keys = { lights, tombstones, rooms } renames
+-- the persisted keys (each defaults to the constant above; rooms = false
+-- disables room mappings altogether).
 function registry.new(opts)
 	opts = opts or {}
 	assert(type(opts.persist_get) == "function", "registry.new: persist_get is required")
 	assert(type(opts.persist_set) == "function", "registry.new: persist_set is required")
+	local keys = type(opts.keys) == "table" and opts.keys or {}
+	local rooms_key
+	if keys.rooms == false then
+		rooms_key = false
+	else
+		rooms_key = keys.rooms or registry.ROOMS_KEY
+	end
+	for name, key in pairs({ lights = keys.lights, tombstones = keys.tombstones, rooms = rooms_key }) do
+		local ok = (type(key) == "string" and key ~= "") or (key == false and name == "rooms")
+		assert(ok, "registry.new: keys." .. name .. " must be a name")
+	end
 	return setmetatable({
 		persist_get = opts.persist_get,
 		persist_set = opts.persist_set,
 		now = opts.now or os.time,
 		log = opts.log or default_log,
+		keys = {
+			lights = keys.lights or registry.LIGHTS_KEY,
+			tombstones = keys.tombstones or registry.TOMBSTONES_KEY,
+			rooms = rooms_key,
+		},
 		lights = {},
 		rooms = {},
 		tombs = {},
@@ -201,20 +225,22 @@ function registry:load()
 	clear(self.rooms)
 	clear(self.tombs)
 
-	for rid, raw in pairs(self:read(registry.LIGHTS_KEY)) do
+	for rid, raw in pairs(self:read(self.keys.lights)) do
 		local entry = valid_rid(rid) and self:normalise_entry(rid, raw) or nil
 		if entry then
 			self.lights[rid] = entry
 		else
-			self.log.warn("registry: dropped a malformed %s entry for %s", registry.LIGHTS_KEY, tostring(rid))
+			self.log.warn("registry: dropped a malformed %s entry for %s", self.keys.lights, tostring(rid))
 		end
 	end
-	for group_rid, raw in pairs(self:read(registry.ROOMS_KEY)) do
-		if valid_rid(group_rid) and type(raw) == "table" then
-			self.rooms[group_rid] = normalise_mapping(raw)
+	if self.keys.rooms then
+		for group_rid, raw in pairs(self:read(self.keys.rooms)) do
+			if valid_rid(group_rid) and type(raw) == "table" then
+				self.rooms[group_rid] = normalise_mapping(raw)
+			end
 		end
 	end
-	for rid, raw in pairs(self:read(registry.TOMBSTONES_KEY)) do
+	for rid, raw in pairs(self:read(self.keys.tombstones)) do
 		if valid_rid(rid) and type(raw) == "table" then
 			local tomb = shallow_copy(raw)
 			tomb.deleted_at = tonumber(raw.deleted_at)
@@ -228,13 +254,15 @@ function registry:load()
 	return counts
 end
 
--- Write the three keys. The live tables go out as they are; the persistence
--- layer serialises them [verified on hardware: lights.lua stores its registry
--- table the same way].
+-- Write the three keys (two when rooms are disabled). The live tables go out
+-- as they are; the persistence layer serialises them [verified on hardware:
+-- lights.lua stores its registry table the same way].
 function registry:save()
-	self.persist_set(registry.LIGHTS_KEY, self.lights)
-	self.persist_set(registry.ROOMS_KEY, self.rooms)
-	self.persist_set(registry.TOMBSTONES_KEY, self.tombs)
+	self.persist_set(self.keys.lights, self.lights)
+	if self.keys.rooms then
+		self.persist_set(self.keys.rooms, self.rooms)
+	end
+	self.persist_set(self.keys.tombstones, self.tombs)
 end
 
 -- Lookup ---------------------------------------------------------------------
@@ -506,8 +534,11 @@ end
 
 -- Store { c4_room_id, c4_room_name, hue_name, type } for a Hue room/zone rid;
 -- c4_room_id becomes a number, type is "zone" or (default) "room". Returns
--- the stored copy, or nil, "bad rid".
+-- the stored copy, or nil, "bad rid" / "no room mappings" (keys.rooms false).
 function registry:set_room_mapping(group_rid, mapping)
+	if not self.keys.rooms then
+		return nil, "no room mappings"
+	end
 	if not valid_rid(group_rid) then
 		return nil, "bad rid"
 	end
