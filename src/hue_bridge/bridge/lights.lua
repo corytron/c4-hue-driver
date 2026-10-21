@@ -136,6 +136,7 @@ function lights.new(ctx)
 		early_hellos = {},         -- HUE_HELLOs received before load(), answered after configure_all()
 		loaded = false,
 		synced = false,            -- a full GET has succeeded (new/missing counts mean something)
+		groups_loaded = false,     -- /room, /zone, /bridge_home fetched in this run (a missing group means deleted)
 		dirty = false,
 		configured_once = false,
 		importing = false,
@@ -805,6 +806,7 @@ function lights:absorb(res)
 		end
 		self.groups = groups.new()
 		local counts = self.groups:absorb(items)
+		self.groups_loaded = true
 		self.ctx.log.debug("lights: %d rooms, %d zones, %d bridge_home cached", counts.room, counts.zone, counts.bridge_home)
 	end
 	self:refresh_registry()
@@ -1201,9 +1203,13 @@ end
 
 -- Step 3, the rooms: every modelled entry's hue_room_rid and label from the
 -- group cache, and every mapping's hue_name. Returns the rids whose label
--- changed (their HUE_CONFIGURE changes with it).
+-- changed (their HUE_CONFIGURE changes with it). Nothing is judged from a
+-- cache the run has not filled yet (an event before the first resync).
 function lights:reconcile_rooms()
 	local changed = {}
+	if not self.groups_loaded then
+		return changed
+	end
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry, model = self.registry[rid], self.models[rid]
 		if model then
@@ -2080,14 +2086,19 @@ function lights:accept_names()
 end
 
 -- The label of a Hue group for mapping texts: the cached group's, or the
--- mapping's remembered name marked deleted in Hue.
+-- mapping's remembered name, marked deleted in Hue only once this run has
+-- fetched the groups (right after a reload the cache is simply empty
+-- [verified: hardware 2026-10-21, every mapping read "(deleted in Hue)"]).
 function lights:group_label(group_rid, mapping)
 	if self.groups:group(group_rid) then
 		return self.groups:label(group_rid)
 	end
 	if mapping then
-		return string.format("%s%s (deleted in Hue)", tostring(mapping.hue_name or group_rid),
-			mapping.type == "zone" and " (zone)" or "")
+		local label = tostring(mapping.hue_name or group_rid) .. (mapping.type == "zone" and " (zone)" or "")
+		if self.groups_loaded then
+			label = label .. " (deleted in Hue)"
+		end
+		return label
 	end
 	return tostring(group_rid)
 end
