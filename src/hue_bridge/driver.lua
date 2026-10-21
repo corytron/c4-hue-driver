@@ -1038,6 +1038,7 @@ dispatch.commands["Lights_Report"] = function(params)
 	log.always("  Lights: %s", state.lights:summary())
 	if state.lights.attention then log.always("  Attention: %s", state.lights:attention()) end
 	if state.lights.room_mappings_text then log.always("  Room Mappings: %s", state.lights:room_mappings_text()) end
+	if state.scenes and state.scenes.summary then log.always("  Scenes: %s", state.scenes:summary()) end
 	for i = 1, math.min(limit, #names) do
 		local e = names[i].entry
 		local caps = e.caps or {}
