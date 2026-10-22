@@ -434,11 +434,12 @@ function scenes:group_info(group_rid, fallback)
 	return nil, nil, false
 end
 
--- The plain label ("Kitchen", "Downstairs (zone)"): what HUE_SCENE_CONFIGURE
--- carries as group_name and what the scene device shows as Hue Room.
+-- The group's plain name ("Kitchen", "Downstairs"): what HUE_SCENE_CONFIGURE
+-- carries as group_name next to group_type; the scene device adds the
+-- "(zone)" itself [verified: a label here showed as "… (zone) (zone)"].
 function scenes:group_name(group_rid, fallback)
-	local name, gtype = self:group_info(group_rid, fallback)
-	return label_of(name, gtype)
+	local name = self:group_info(group_rid, fallback)
+	return name
 end
 
 -- The label for owner-facing texts: marked "(deleted in Hue)" once this run
