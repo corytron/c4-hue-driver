@@ -143,6 +143,15 @@ describe("Hue Scene driver", function()
 			assert.equal(BRIDGE_ID, c4.sent[1].id)
 		end)
 
+		it("treats GetBoundProviderDevice answering 0 as unbound (OS 3.4.2 with nothing bound)", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			c4.GetBoundProviderDevice = function() return 0 end
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal(0, #c4.sent)
+			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+		end)
+
 		it("stays quiet and says so when no bridge is bound", function()
 			local env, c4 = load_scene({ bind = false })
 			assert.equal(0, #c4.sent)
@@ -777,6 +786,16 @@ describe("Hue Scene driver", function()
 			assert.equal("Relax", fake.project.devices[proxy_id].name)
 			assert.equal("Hue Scene", fake.project.devices[SCENE_ID].name, "the protocol driver keeps its name")
 			assert.equal(string.format("Renamed device %d to Relax", proxy_id), env.Properties["Last Action"])
+		end)
+
+		it("Adopt Hue Name gives a zone scene the zone's name in front, as the bridge does at creation", function()
+			local env, c4 = known_scene()
+			configure(env, { group_name = "Downstairs", group_type = "zone" })
+			c4.calls = {}
+			local proxy_id = proxy_of(SCENE_ID)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.same({ { proxy_id, "Downstairs Relax" } }, c4.calls_to("RenameDevice"))
+			assert.equal(string.format("Renamed device %d to Downstairs Relax", proxy_id), env.Properties["Last Action"])
 		end)
 
 		it("Adopt Hue Name refuses without a Hue name or without a proxy", function()

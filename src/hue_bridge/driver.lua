@@ -328,6 +328,11 @@ local function new_stream()
 			if state.scenes and state.scenes.on_container then
 				state.scenes:on_container(container)
 			end
+			-- A resource appearing or disappearing changes the counts and the
+			-- Attention list; plain updates (state, names) do not.
+			if container.type == "add" or container.type == "delete" then
+				refresh_lights_props()
+			end
 			prop("Events Received", state.stream.stats.containers)
 			prop("Last Event", state.stream.stats.last_event)
 		end,

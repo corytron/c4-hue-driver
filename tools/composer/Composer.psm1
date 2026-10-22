@@ -1,19 +1,15 @@
 # Composer.psm1 - drive Control4 Composer Pro 3.4.2 (WinForms) via UI Automation + SendInput.
 # Tested on Windows 11 Pro, Windows PowerShell 5.1.  Import with:  Import-Module C:\c4-hue\Composer.psm1 -Force
+# NOTE: a property edit reaches Director ONLY when the row's "Set" button is clicked (see Set-ComposerProperty);
+#       Enter/blur just change the grid. Never tap ALT to foreground Composer (it arms the menu bar).
 #
 # Written and exercised by the Claude Code session on the Windows VM (docs/composer-remote.md); the
-# coordinator keeps this copy in the repo. Proven 2026-10-21: Get-ComposerProcess, Get-ComposerWindow,
-# Get-ComposerTopWindows, Get-ComposerDialog (incl. a Select picker nested under Action Parameter List),
-# Wait-ComposerDialog, Show-Composer, Save-ComposerShot -FromScreen, Save-ScreenShot, Find-ComposerElements,
-# Get-ComposerElementInfo, Get-ComposerTree, Invoke-MouseClick, Invoke-ElementClick, Send-Keys ({ESC}),
-# Get-ComposerProperties, Get-ComposerProperty, Get-ComposerTabControl, Select-ComposerTab (Properties/Actions),
-# Get-ComposerActions, Invoke-ComposerAction, Close-ComposerDialog, C4.ListView, Get-ListViewItems,
-# Get-ListViewItemScreenPoint, Get-ComposerPickerItems, Open-ComposerPicker, Get-ComposerParameterValues,
-# Get-ComposerTreeHandle, Get-ComposerDevices, Select-ComposerDevice, Get-ComposerSelectedDevice.
-# Untested: Save-ComposerShot without -FromScreen (PrintWindow), Select-ComposerPickerItem, Rename-ComposerDevice,
-# Set-ComposerTabOffset, Select-ComposerTab 'Lua', right/double click, Show-Composer when minimised.
-# Known limits: tab offsets are pixel constants measured at 96 DPI; Select-ComposerDevice only sees expanded
-# tree rows; Composer must be on the System Design view.
+# coordinator keeps this copy in the repo. Proven on 2026-10-21 through eight rounds: everything except
+# Save-ComposerShot without -FromScreen (PrintWindow), Set-ComposerTabOffset, Select-ComposerTab 'Lua',
+# right/double click, Show-Composer when minimised, and Set-ComposerProperty as a whole (its steps were run
+# inline; its focus guard refused correctly when the VM session was locked). Known limits: tab offsets are
+# pixel constants measured at 96 DPI; Select-ComposerDevice only sees expanded tree rows; Composer must be on
+# the System Design view; nothing works while the VM's interactive session is disconnected or locked.
 #
 # Composer exposes every control to UIA as ControlType.Pane with NO patterns (no Invoke/Value/Selection),
 # so this module READS through UIA (Name / ClassName / BoundingRectangle) and ACTS through real mouse and
@@ -34,6 +30,10 @@ Add-Type -Namespace C4 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 '@
 }
@@ -50,10 +50,20 @@ function Get-ComposerProcess {
     $p
 }
 
+function Get-ComposerMainHandle {
+    # hwnd of Composer's real main window (title 'Composer Pro ...'). Process.MainWindowHandle is NOT reliable: while a
+    # tooltip is showing, .NET reports the (topmost, unowned) tooltip window instead, and every UIA lookup then comes back empty.
+    $p = Get-ComposerProcess
+    $cond = New-Object System.Windows.Automation.PropertyCondition($script:A::ProcessIdProperty, [int]$p.Id)
+    foreach ($w in $script:A::RootElement.FindAll($script:Scope::Children, $cond)) {
+        if ($w.Current.Name -like 'Composer Pro*') { return [IntPtr]$w.Current.NativeWindowHandle }
+    }
+    [IntPtr]$p.MainWindowHandle
+}
+
 function Get-ComposerWindow {
     # AutomationElement of Composer's main window.
-    $p = Get-ComposerProcess
-    $el = $script:A::FromHandle($p.MainWindowHandle)
+    $el = $script:A::FromHandle((Get-ComposerMainHandle))
     if (-not $el) { throw "Could not get UIA element for Composer main window" }
     $el
 }
@@ -68,18 +78,19 @@ function Get-ComposerTopWindows {
 function Get-ComposerDialog {
     # The most recently opened Composer dialog, or $null. Owned (modal) dialogs appear in UIA as ControlType.Window
     # CHILDREN of the main window, so look there first, then at other top-level windows of the process.
-    $p = Get-ComposerProcess
-    $main = [int]$p.MainWindowHandle
+    $mainH = Get-ComposerMainHandle
+    $main = [int]$mainH
     $winCond = New-Object System.Windows.Automation.PropertyCondition($script:A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Window)
-    $mainEl = $script:A::FromHandle($p.MainWindowHandle)
-    $owned = @($mainEl.FindAll($script:Scope::Children, $winCond))
+    $mainEl = $script:A::FromHandle($mainH)
+    # ignore unnamed windows (tooltips) - real dialogs have a title
+    $owned = @($mainEl.FindAll($script:Scope::Children, $winCond) | Where-Object { $_.Current.Name })
     if ($owned.Count -gt 0) {
         # nested: a dialog opened from a dialog is a child of that dialog; descend to the deepest one
         $d = $owned[-1]
         while ($true) { $sub = @($d.FindAll($script:Scope::Children, $winCond)); if ($sub.Count -eq 0) { break }; $d = $sub[-1] }
         return $d
     }
-    Get-ComposerTopWindows | Where-Object { $_.Current.NativeWindowHandle -ne $main } | Select-Object -First 1
+    Get-ComposerTopWindows | Where-Object { $_.Current.NativeWindowHandle -ne $main -and $_.Current.Name } | Select-Object -First 1
 }
 
 function Wait-ComposerDialog {
@@ -90,12 +101,19 @@ function Wait-ComposerDialog {
 }
 
 function Show-Composer {
-    # Bring Composer's main window to the foreground (tap ALT first so SetForegroundWindow is honoured).
-    $p = Get-ComposerProcess
-    $h = $p.MainWindowHandle
+    # Bring Composer's main window to the foreground.
+    # NEVER tap ALT here: a bare ALT press/release puts Composer's menu bar into keyboard mode, so the next ENTER sent to
+    # the window activates a File-menu item (this once triggered "Clear Project"). Use AttachThreadInput instead.
+    $h = Get-ComposerMainHandle
     if ([C4.Native]::IsIconic($h)) { [void][C4.Native]::ShowWindow($h, 9) }   # SW_RESTORE
-    [C4.Native]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero); [C4.Native]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-    [void][C4.Native]::SetForegroundWindow($h)
+    if ([C4.Native]::GetForegroundWindow() -eq $h) { return $true }
+    $fg = [C4.Native]::GetForegroundWindow()
+    $pidOut = [uint32]0
+    $fgTid = [C4.Native]::GetWindowThreadProcessId($fg, [ref]$pidOut)
+    $myTid = [C4.Native]::GetCurrentThreadId()
+    [void][C4.Native]::AttachThreadInput($myTid, $fgTid, $true)
+    try { [void][C4.Native]::SetForegroundWindow($h); [void][C4.Native]::BringWindowToTop($h) }
+    finally { [void][C4.Native]::AttachThreadInput($myTid, $fgTid, $false) }
     Start-Sleep -Milliseconds 400
     ([C4.Native]::GetForegroundWindow() -eq $h)
 }
@@ -104,7 +122,7 @@ function Save-ComposerShot {
     # Save a PNG of Composer's main window (or -Hwnd) to -Path. PrintWindow(PW_RENDERFULLCONTENT) works even when occluded;
     # -FromScreen copies the window rect from the screen instead (window must be in front; captures overlapping dialogs too).
     param([Parameter(Mandatory)][string]$Path, [IntPtr]$Hwnd = 0, [switch]$FromScreen)
-    if ($Hwnd -eq 0) { $Hwnd = (Get-ComposerProcess).MainWindowHandle }
+    if ($Hwnd -eq 0) { $Hwnd = Get-ComposerMainHandle }
     $r = New-Object C4.Native+RECT
     [void][C4.Native]::GetWindowRect($Hwnd, [ref]$r)
     $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
@@ -152,9 +170,10 @@ function Get-ComposerElementInfo {
     param([Parameter(ValueFromPipeline)]$Element)
     process {
         $c = $Element.Current; $r = $c.BoundingRectangle
+        $ri = { param($v) if ([double]::IsInfinity($v) -or [double]::IsNaN($v)) { -1 } else { [int]$v } }   # hidden shell elements report an infinite rect
         [pscustomobject]@{ Type = ($c.ControlType.ProgrammaticName -replace 'ControlType\.',''); Name = $c.Name
             Class = ($c.ClassName -replace 'WindowsForms10\.','' -replace '\.app\.0\.\S+',''); Id = $c.AutomationId
-            X = [int]$r.X; Y = [int]$r.Y; W = [int]$r.Width; H = [int]$r.Height; Offscreen = $c.IsOffscreen }
+            X = (& $ri $r.X); Y = (& $ri $r.Y); W = (& $ri $r.Width); H = (& $ri $r.Height); Offscreen = $c.IsOffscreen }
     }
 }
 
@@ -182,6 +201,13 @@ function Invoke-MouseClick {
     [C4.Native]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero); [C4.Native]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
     if ($Double) { Start-Sleep -Milliseconds 80; [C4.Native]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero); [C4.Native]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero) }
     Start-Sleep -Milliseconds 150
+}
+
+function Move-MouseAway {
+    # Park the cursor on Composer's status bar so no tooltip stays open over whatever was just clicked.
+    $r = New-Object C4.Native+RECT; [void][C4.Native]::GetWindowRect((Get-ComposerMainHandle), [ref]$r)
+    [void][C4.Native]::SetCursorPos([int](($r.Left + $r.Right) / 2), $r.Bottom - 12)
+    Start-Sleep -Milliseconds 200
 }
 
 function Invoke-ElementClick {
@@ -314,6 +340,15 @@ public static class ListView {
             string s = Encoding.Unicode.GetString(buf); int z = s.IndexOf('\0'); return z >= 0 ? s.Substring(0, z) : s;
         } finally { VirtualFreeEx(p, mem, 0, 0x8000); CloseHandle(p); }
     }
+    const uint LVM_EDITLABELW = LVM_FIRST+118, LVM_GETEDITCONTROL = LVM_FIRST+24, WM_SETTEXT = 0x000C, WM_GETTEXT = 0x000D, WM_GETTEXTLENGTH = 0x000E;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, string l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, StringBuilder l);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    // Begin in-place label editing of an item; returns the editor's hwnd (0 if the control refused, e.g. it lacks focus).
+    public static IntPtr EditLabel(IntPtr h, int item) { return SendMessage(h, LVM_EDITLABELW, (IntPtr)item, IntPtr.Zero); }
+    public static IntPtr GetEditControl(IntPtr h) { return SendMessage(h, LVM_GETEDITCONTROL, IntPtr.Zero, IntPtr.Zero); }
+    public static void SetWindowText(IntPtr h, string text) { SendMessage(h, WM_SETTEXT, IntPtr.Zero, text); }
+    public static string GetWindowText(IntPtr h) { int n = (int)SendMessage(h, WM_GETTEXTLENGTH, IntPtr.Zero, IntPtr.Zero); var sb = new StringBuilder(n + 1); SendMessage(h, WM_GETTEXT, (IntPtr)(n + 1), sb); return sb.ToString(); }
     public static int[] GetItemRect(IntPtr h, int item) { // left,top,right,bottom in client coords (LVIR_BOUNDS)
         IntPtr p = Open(h); IntPtr mem = VirtualAllocEx(p, IntPtr.Zero, 16, 0x3000, 0x04);
         try {
@@ -425,7 +460,9 @@ function Get-ComposerDevices {
 function Select-ComposerDevice {
     # Click a device row in the System Design tree by -Name (exact) or -DeviceId. Returns the row object once selected.
     # Note: only EXPANDED rows exist in the list view; collapse/expand is not handled here.
-    param([string]$Name, [string]$DeviceId, [int]$TextOffsetX = 125)
+    # A click on an ALREADY selected row starts the in-place rename editor (slow second click), so by default an
+    # already-selected row is not clicked again; -Force clicks anyway.
+    param([string]$Name, [string]$DeviceId, [int]$TextOffsetX = 125, [switch]$Force)
     $h = Get-ComposerTreeHandle
     $rows = Get-ComposerDevices
     $row = if ($DeviceId) { $rows | Where-Object { $_.DeviceId -eq $DeviceId } } else { $rows | Where-Object { $_.Name -eq $Name } }
@@ -433,8 +470,10 @@ function Select-ComposerDevice {
     if ($row.Count -eq 0) { throw "Device '$Name$DeviceId' not found in tree" }
     if ($row.Count -gt 1) { throw "Device name '$Name' is ambiguous (ids: $(($row | % DeviceId) -join ', ')); use -DeviceId" }
     $row = $row[0]
+    if ($row.Selected -and -not $Force) { return $row }
     $pt = Get-ListViewItemScreenPoint -Hwnd $h -Index $row.Index
     Invoke-MouseClick -X ($pt.Left + $TextOffsetX) -Y $pt.Y
+    Move-MouseAway   # otherwise a hover tooltip pops up over the tree and confuses window lookups
     Start-Sleep -Milliseconds 700
     $sel = ([C4.ListView]::GetState($h, $row.Index) -band 2) -ne 0
     if (-not $sel) { throw "Clicked row $($row.Index) ('$($row.Name)') but it is not selected" }
@@ -446,25 +485,202 @@ function Get-ComposerSelectedDevice { Get-ComposerDevices | Where-Object Selecte
 function Rename-ComposerDevice {
     # Rename a device in the System Design tree: select it, F2 (in-place label edit), type the new name, Enter.
     # Returns an object with Before/After names and whether any dialog appeared. Checks the tree row text afterwards.
-    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$NewName, [string]$DeviceId, [int]$SettleMs = 1500)
-    $row = if ($DeviceId) { Select-ComposerDevice -DeviceId $DeviceId } else { Select-ComposerDevice -Name $Name }
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$NewName, [string]$DeviceId, [int]$SettleMs = 1500, [int]$TextOffsetX = 125)
+    # How Composer's tree rename really works (learned 2026-10-21): the editor is a WinForms TextBox (class
+    # WindowsForms10.EDIT) that Composer itself places over the row as a CHILD of the SysListView32. It is NOT the
+    # native label editor, so LVM_EDITLABEL / LVM_GETEDITCONTROL return 0 and Ctrl+A does nothing in it. It opens on F2
+    # (tree focused) or on a slow second click of the already-selected row. Commit = Enter with focus in the editor.
+    $edit = Get-ComposerTreeEditor
+    $method = 'already-open'
+    if (-not $edit) {
+        # click the row (selects it and gives the tree keyboard focus; on an already-selected row this is the "slow second click")
+        $row = if ($DeviceId) { Select-ComposerDevice -DeviceId $DeviceId -Force } else { Select-ComposerDevice -Name $Name -Force }
+        Start-Sleep -Milliseconds 900
+        $edit = Get-ComposerTreeEditor; $method = 'click'
+    } else { $row = if ($DeviceId) { Select-ComposerDevice -DeviceId $DeviceId } else { Select-ComposerDevice -Name $Name } }
     $h = Get-ComposerTreeHandle
-    Send-Keys '{F2}' 600
-    $dlg = Get-ComposerDialog
-    $editing = $false
-    # the in-place editor is an 'Edit' child of the list view
-    $edit = $script:A::FromHandle($h).FindFirst($script:Scope::Children, (New-Object System.Windows.Automation.PropertyCondition($script:A::ClassNameProperty, 'Edit')))
-    if ($edit) { $editing = $true }
-    if ($dlg -and $dlg.Current.Name -notlike 'Composer Pro*') { # some other dialog appeared; report it and bail out
-        return [pscustomobject]@{ Before = $row.Name; After = $row.Name; DeviceId = $row.DeviceId; InPlaceEdit = $editing; Dialog = $dlg.Current.Name; DialogTree = (Get-ComposerTree -Root $dlg) }
+    if (-not $edit) { Send-KeysTo -ExpectedHwnd $h -Keys '{F2}' -DelayMs 600; $edit = Get-ComposerTreeEditor; $method = 'F2' }
+    if (-not $edit) {   # slow second click on the selected row's label
+        $pt = Get-ListViewItemScreenPoint -Hwnd $h -Index $row.Index
+        Invoke-MouseClick -X ($pt.Left + $TextOffsetX) -Y $pt.Y; Move-MouseAway; Start-Sleep -Milliseconds 900
+        $edit = Get-ComposerTreeEditor; $method = 'second-click'
     }
-    $escaped = $NewName -replace '([+^%~(){}\[\]])', '{$1}'
-    Send-Keys '^a' 100
-    Send-Keys $escaped 200
-    Send-Keys '{ENTER}' $SettleMs
+    if (-not $edit) {
+        $dlg = Get-ComposerDialog
+        return [pscustomobject]@{ Before = $row.Name; After = $row.Name; DeviceId = $row.DeviceId; Method = 'none'; Dialog = $(if ($dlg) { $dlg.Current.Name } else { $null }); DialogTree = $(if ($dlg) { Get-ComposerTree -Root $dlg } else { $null }) }
+    }
+    $eh = [IntPtr]$edit.Current.NativeWindowHandle
+    [C4.ListView]::SetWindowText($eh, $NewName); Start-Sleep -Milliseconds 150
+    $typed = [C4.ListView]::GetWindowText($eh)
+    $r = $edit.Current.BoundingRectangle
+    Invoke-MouseClick -X ([int]($r.X + $r.Width - 15)) -Y ([int]($r.Y + $r.Height / 2))   # make sure keyboard focus is in the editor
+    Send-KeysTo -ExpectedHwnd $eh -Keys '{ENTER}' -DelayMs $SettleMs   # refuses if focus/menu/dialog state is not as expected
+    Move-MouseAway
     $dlg2 = Get-ComposerDialog
     $after = [C4.ListView]::GetText($h, $row.Index, 0)
-    [pscustomobject]@{ Before = $row.Name; After = $after; DeviceId = $row.DeviceId; InPlaceEdit = $editing; Dialog = $(if ($dlg2) { $dlg2.Current.Name } else { $null }); DialogTree = $(if ($dlg2) { Get-ComposerTree -Root $dlg2 } else { $null }) }
+    [pscustomobject]@{ Before = $row.Name; After = $after; DeviceId = $row.DeviceId; Method = $method; EditorText = $typed; Dialog = $(if ($dlg2) { $dlg2.Current.Name } else { $null }); DialogTree = $(if ($dlg2) { Get-ComposerTree -Root $dlg2 } else { $null }) }
+}
+
+function Get-ComposerTreeEditor {
+    # The in-place rename TextBox over the System Design tree, if one is open (UIA element), else $null.
+    $h = Get-ComposerTreeHandle
+    $lv = $script:A::FromHandle($h)
+    $cond = New-Object System.Windows.Automation.PropertyCondition($script:A::ClassNameProperty, 'WindowsForms10.EDIT.app.0.3309ded_r7_ad1')
+    $e = $lv.FindFirst($script:Scope::Children, $cond)
+    if (-not $e) { $e = Find-ComposerElements -Class 'EDIT' -Root $lv | Select-Object -First 1 }
+    $e
+}
+
+# ---- Keyboard-focus guard (standing rule: never send a keystroke unless the intended control has focus and no menu is active) ----
+if (-not ('C4.Focus' -as [type])) {
+Add-Type -Namespace C4 -Name Focus -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public int cbSize; public int flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture; public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public int l,t,r,b; }
+[DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint id, ref GUITHREADINFO g);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+'@
+}
+
+function Get-ComposerFocus {
+    # Focus state of Composer's UI thread: FocusHwnd, FocusClass, MenuActive (GUI_INMENUMODE or a menu owner), ActiveHwnd.
+    $h = Get-ComposerMainHandle
+    $pid2 = [uint32]0; $tid = [C4.Focus]::GetWindowThreadProcessId($h, [ref]$pid2)
+    $g = New-Object C4.Focus+GUITHREADINFO; $g.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($g)
+    [void][C4.Focus]::GetGUIThreadInfo($tid, [ref]$g)
+    $sb = New-Object Text.StringBuilder 256; [void][C4.Focus]::GetClassName($g.hwndFocus, $sb, 256)
+    [pscustomobject]@{ FocusHwnd = $g.hwndFocus; FocusClass = $sb.ToString(); MenuActive = (($g.flags -band 0x4) -ne 0 -or $g.hwndMenuOwner -ne [IntPtr]::Zero); ActiveHwnd = $g.hwndActive; Flags = $g.flags }
+}
+
+function Send-KeysTo {
+    # Send keystrokes ONLY if Composer's focused control is $ExpectedHwnd and no menu is active; otherwise throw without sending.
+    param([Parameter(Mandatory)][IntPtr]$ExpectedHwnd, [Parameter(Mandatory)][string]$Keys, [int]$DelayMs = 150, [switch]$NoDialogCheck)
+    $f = Get-ComposerFocus
+    if ($f.MenuActive) { throw "Refusing to send '$Keys': a menu is active (flags=$($f.Flags))" }
+    if ($f.FocusHwnd -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), expected $ExpectedHwnd" }
+    if (-not $NoDialogCheck -and $Keys -match 'ENTER|~') {
+        $d = Get-ComposerDialog
+        if ($d -and $d.Current.NativeWindowHandle -ne $ExpectedHwnd) {
+            $own = $script:A::FromHandle($ExpectedHwnd); $inside = $false
+            try { $p = $script:Raw.GetParent($own); while ($p) { if ($p.Current.NativeWindowHandle -eq $d.Current.NativeWindowHandle) { $inside = $true; break }; $p = $script:Raw.GetParent($p) } } catch {}
+            if (-not $inside) { throw "Refusing to send Enter: unexpected dialog '$($d.Current.Name)' is open" }
+        }
+    }
+    Send-Keys -Keys $Keys -DelayMs $DelayMs
+}
+
+function Assert-ComposerUnchanged {
+    # Verify window title and tree row count against a baseline (from Get-ComposerBaseline).
+    param([Parameter(Mandatory)]$Baseline)
+    $title = (Get-ComposerWindow).Current.Name
+    $rows = [C4.ListView]::GetCount((Get-ComposerTreeHandle))
+    $ok = ($title -eq $Baseline.Title -and $rows -eq $Baseline.Rows)
+    [pscustomobject]@{ Ok = $ok; Title = $title; Rows = $rows; ExpectedTitle = $Baseline.Title; ExpectedRows = $Baseline.Rows }
+}
+
+function Get-ComposerBaseline { [pscustomobject]@{ Title = (Get-ComposerWindow).Current.Name; Rows = [C4.ListView]::GetCount((Get-ComposerTreeHandle)) } }
+
+
+# ---- Round-3 helpers ----
+function Get-ComposerBridgeStatus {
+    # Select the 'Hue Bridge' device, show its Properties tab and return the full property table.
+    param([string]$BridgeName = 'Hue Bridge')
+    [void](Select-ComposerDevice -Name $BridgeName)
+    Start-Sleep -Milliseconds 500
+    $page = $script:Raw.GetFirstChild((Get-ComposerTabControl))
+    if ($page.Current.Name -ne 'Properties') { Select-ComposerTab -Name 'Properties'; Start-Sleep -Milliseconds 600 }
+    Get-ComposerProperties
+}
+
+function Format-BridgeStatus {
+    param($Props, [string[]]$Keys = @('Last Action', 'Attention', 'Lights', 'Room Mappings'))
+    foreach ($k in $Keys) { "  $k = $($Props[$k])" }
+}
+
+function Set-ComposerActionParameter {
+    # In the open 'Action Parameter List' dialog: open the picker beside -Label and choose -Item (exact text).
+    param([Parameter(Mandatory)][string]$Label, [Parameter(Mandatory)][string]$Item)
+    $s = Open-ComposerPicker -Label $Label
+    if (-not $s) { throw "Picker for '$Label' did not open" }
+    $ok = Select-ComposerPickerItem -Text $Item
+    if (-not $ok) { throw "Picker for '$Label' did not close after choosing '$Item'" }
+    Start-Sleep -Milliseconds 300
+    (Get-ComposerParameterValues)[$Label]
+}
+
+function Confirm-ComposerDialog {
+    # Click a named button (OK / Yes) on the current dialog. Returns $true when that dialog closed.
+    param([string]$Button = 'OK')
+    $d = Get-ComposerDialog
+    if (-not $d) { throw "No dialog open" }
+    $h = $d.Current.NativeWindowHandle
+    $b = Find-ComposerElements -Class 'BUTTON' -Name $Button -Root $d | Select-Object -First 1
+    if (-not $b) { $b = Find-ComposerElements -Class 'Button' -Name $Button -Root $d | Select-Object -First 1 }
+    if (-not $b) { throw "Button '$Button' not found on dialog '$($d.Current.Name)'" }
+    Invoke-ElementClick -Element $b; Start-Sleep -Milliseconds 600
+    $now = Get-ComposerDialog
+    (-not $now -or $now.Current.NativeWindowHandle -ne $h)
+}
+
+function Get-ComposerDialogText {
+    # All non-empty Static/label texts of the current dialog (for quoting prompts).
+    $d = Get-ComposerDialog
+    if (-not $d) { return $null }
+    (Find-ComposerElements -Root $d | Get-ComposerElementInfo | Where-Object { $_.Name -and $_.Class -notlike '*Button*' -and $_.Class -notlike '*BUTTON*' } | ForEach-Object Name) -join ' | '
+}
+
+function Request-ComposerDeviceDelete {
+    # Select a device in the tree and press Delete. Does NOT confirm: returns the dialog (title + text + buttons) that appears.
+    param([string]$Name, [string]$DeviceId)
+    $row = if ($DeviceId) { Select-ComposerDevice -DeviceId $DeviceId } else { Select-ComposerDevice -Name $Name }
+    if (-not $row.Selected) { throw "Device not selected" }
+    $h = Get-ComposerTreeHandle
+    if ((Get-ComposerFocus).FocusHwnd -ne $h) {   # give the tree keyboard focus without re-clicking the selected row (that would open the editor)
+        [void](Select-ComposerDevice -DeviceId $row.DeviceId -Force -TextOffsetX 300); Start-Sleep -Milliseconds 300
+        if (Get-ComposerTreeEditor) { throw "Rename editor opened unexpectedly; aborting delete" }
+    }
+    Send-KeysTo -ExpectedHwnd $h -Keys '{DELETE}' -DelayMs 800
+    $d = Wait-ComposerDialog -TimeoutMs 5000
+    [pscustomobject]@{ Device = $row; Dialog = $(if ($d) { $d.Current.Name } else { $null }); Text = (Get-ComposerDialogText); Buttons = $(if ($d) { (Find-ComposerElements -Root $d | Get-ComposerElementInfo | Where-Object { $_.Class -like '*utton*' } | ForEach-Object Name) -join ' | ' } else { $null }) }
+}
+
+function Set-ComposerProperty {
+    # Change a property on the current Properties page AND commit it. Composer only sends a changed value to Director
+    # when the row's "Set" button (which appears beside the value, with "Cancel", once the value differs) is clicked;
+    # Enter / blur alone leave the grid showing the new value while Director keeps the old one.
+    # -List: a LIST property (combo box) is stepped with Down/Up until -Value shows; otherwise the text field is retyped.
+    param([Parameter(Mandatory)][string]$Label, [Parameter(Mandatory)][string]$Value, [switch]$List, [int]$SettleMs = 3000)
+    $pg = Find-ComposerElements -Name 'Properties' -Class 'Window.8' | Where-Object { $_.Current.BoundingRectangle.Height -gt 100 } | Select-Object -First 1
+    if (-not $pg) { throw "Properties page not shown" }
+    $lbl = Find-ComposerElements -Class 'EDIT' -Name $Label -Root $pg | Select-Object -First 1
+    if (-not $lbl) { throw "Property '$Label' not found" }
+    $ly = [int]$lbl.Current.BoundingRectangle.Y
+    $cls = if ($List) { 'COMBOBOX' } else { 'EDIT' }
+    $ctl = Find-ComposerElements -Class $cls -Root $pg | Where-Object { [int]$_.Current.BoundingRectangle.X -gt ([int]$pg.Current.BoundingRectangle.X + 180) -and [math]::Abs([int]$_.Current.BoundingRectangle.Y - $ly) -le 8 } | Select-Object -First 1
+    if (-not $ctl) { throw "Value control for '$Label' not found" }
+    $h = [IntPtr]$ctl.Current.NativeWindowHandle; $r = $ctl.Current.BoundingRectangle
+    $before = [C4.ListView]::GetWindowText($h)
+    Invoke-MouseClick -X ([int]($r.X + $r.Width - 10)) -Y ([int]($r.Y + $r.Height / 2)); Start-Sleep -Milliseconds 500
+    $f = $null
+    for ($try = 0; $try -lt 6; $try++) { $f = Get-ComposerFocus; if ($f.FocusHwnd -eq $h) { break }; Start-Sleep -Milliseconds 300 }   # focus can read 0 for a moment while the list drops
+    if ($f.FocusHwnd -ne $h -or $f.MenuActive) { throw "Value control for '$Label' did not take focus (focus=$($f.FocusHwnd) menu=$($f.MenuActive))" }
+    if ($List) {
+        for ($i = 0; $i -lt 8; $i++) {
+            $cur = [C4.ListView]::GetWindowText($h); if ($cur -eq $Value) { break }
+            Send-KeysTo -ExpectedHwnd $h -Keys '{DOWN}' -DelayMs 250
+            if ([C4.ListView]::GetWindowText($h) -eq $cur) { Send-KeysTo -ExpectedHwnd $h -Keys '{HOME}' -DelayMs 250 }   # wrapped: start over from the top
+        }
+        if ([C4.ListView]::GetWindowText($h) -ne $Value) { Send-KeysTo -ExpectedHwnd $h -Keys '{ESC}' -DelayMs 200; throw "List item '$Value' not reachable for '$Label'" }
+    } else {
+        Send-KeysTo -ExpectedHwnd $h -Keys '{HOME}+{END}' -DelayMs 150
+        Send-KeysTo -ExpectedHwnd $h -Keys ($Value -replace '([+^%~(){}\[\]])', '{$1}') -DelayMs 250
+    }
+    Send-KeysTo -ExpectedHwnd $h -Keys '{ENTER}' -DelayMs 500
+    Move-MouseAway
+    $set = Find-ComposerElements -Class 'BUTTON' -Name 'Set' -Root $pg | Select-Object -First 1
+    $committed = $false
+    if ($set) { Invoke-ElementClick -Element $set; Move-MouseAway; $committed = $true }
+    Start-Sleep -Milliseconds $SettleMs
+    [pscustomobject]@{ Label = $Label; Before = $before; Requested = $Value; After = (Get-ComposerProperty -Name $Label); SetButtonSeen = ($set -ne $null); Committed = $committed; SetButtonLeft = ((Find-ComposerElements -Class 'BUTTON' -Name 'Set' -Root $pg | Measure-Object).Count -gt 0) }
 }
 
 Export-ModuleMember -Function *

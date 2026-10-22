@@ -187,7 +187,8 @@ shows is below.
     Lights Report and paste the first lines: the bridge should have heard
     `HUE_GOODBYE` or seen the binding go). Then **Add Light**: the `Light`
     picker lists it as "<name> [<Hue room>] #<n> (deleted from Composer
-    <date>)" and `Room` pre-selects "(mapped room)". OK. Expect "Added <name>
+    <date>)"; pick "(mapped room)" in `Room` explicitly (the dialog remembers
+    the values of your last click). OK. Expect "Added <name>
     #<n> to <room> (device <id>)", the device in that Control4 room with the
     Hue name, and the tile working. **Import All New Lights** before the
     re-add must report "No new lights on the bridge" and skip the deleted
@@ -201,12 +202,15 @@ shows is below.
     click **Accept Names As They Are** instead: `Attention` drops the item.
 23. **The bare "Hue Light" device** (the one added by hand before the first
     import). In Connections, bind it to the Hue Bridge. Expect its `Status`
-    "Bound; the bridge does not know this device. Use Link Devices on the
-    bridge", bridge `Attention` "1 unbound device …" or the link hint, and
+    "Bound; waiting for the bridge" (a bare device has no Hue identity to
+    show yet), the bridge's `Attention` and `Lights` unchanged (a bound but
+    never-linked device is not an "unbound" one; the bridge's log says
+    "device 1034 bound but not registered; its hello or Link Devices adopts
+    it"), and
     **Link Devices** to answer "not linked 1: Hue Light (device 1034): no
     unimported Hue light has that name; rename …". Then **Forget Light** on
     one unpowered imported light (say "Vanity 3"), rename the bare device to
-    "Vanity 3" in Composer, run **Link Devices** again: "Linked 1 devices:
+    "Vanity 3" in Composer, run **Link Devices** again: "Linked 1 device:
     Vanity 3 (device 1034) to Vanity 3 [Master Bathroom] #n by name". The old
     Vanity 3 device now says "Forgotten by the bridge …" and can be deleted.
 24. **Re-link** is for a bulb replaced or deleted on the Hue side: its device
@@ -236,9 +240,10 @@ and the bridge actions through `devctl`. What only Composer shows:
     "<Room>: <Scene>" (zones as "<Zone> (zone): <Scene>", dynamic ones with
     " (dynamic)"), grouped by room; `Room` offers "(mapped room)" first.
     Pick a Bedside Lights scene (e.g. "Bedside Lights (zone): Nightlight")
-    with "(mapped room)": expect `Last Action` "Not added: Nightlight: Hue
-    room Bedside Lights (zone) not mapped; pick a room, or Set Room Mapping
-    first". Pick the Master Bedroom as `Room` instead: "Added Nightlight to
+    with "(mapped room)" picked explicitly (the dialog remembers the last
+    values): expect `Last Action` "Not added: Nightlight: Hue room Bedside
+    Lights (zone) not mapped; pick a room, or Set Room Mapping first". Pick
+    the Master Bedroom as `Room` instead: "Added Nightlight to
     Master Bedroom (device N)" and a device **"Bedside Lights Nightlight"**
     appears in the Master Bedroom as a switch tile (zone scenes carry the
     zone's name; room scenes are named like the scene alone).
@@ -249,8 +254,9 @@ and the bridge actions through `devctl`. What only Composer shows:
     by hand (Hue app or its own tile): the scene tile drops to OFF.
 28. The scene device's Properties: `Status` "Hue scene Nightlight in Bedside
     Lights (zone)", `Hue Scene`, `Hue Room`, `Hue Scene ID` "#<id> (<rid…>)",
-    `Recall As` = "As set in Hue" (change it to "Static" and tap ON again:
-    the recall is sent as `static`), `Online` "Online". Actions: `Adopt Hue
+    `Recall As` = "As set in Hue" (change it to "Static", click the row's
+    **Set** button, and tap ON again: the recall is sent as `static`),
+    `Online` "Online". Actions: `Adopt Hue
     Name`, `Forget This Scene`.
 29. **Add All Scenes Of Room** with a mapped room that has scenes (Kitchen,
     7 scenes): expect "Added 7 scenes of Kitchen to Kitchen: …" and seven
