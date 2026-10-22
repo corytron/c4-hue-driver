@@ -377,13 +377,19 @@ end
 -- Bridge binding -----------------------------------------------------------
 
 -- The bound bridge's device id. The API documents a table of id/name pairs,
--- the idc_client sample uses the result as a number: accept both.
+-- the idc_client sample uses the result as a number: accept both. With
+-- nothing bound the docs say nil but OS 3.4.2 answers the number 0 [hardware
+-- 2026-10-22, design.md "Project APIs"], which Lua would take for a bridge.
 local function bound_bridge()
 	local found = C4:GetBoundProviderDevice(C4:GetDeviceID(), BRIDGE_BINDING)
 	if type(found) == "table" then
 		found = next(found)
 	end
-	return tonumber(found)
+	found = tonumber(found)
+	if found and found > 0 then
+		return found
+	end
+	return nil
 end
 
 -- Our light_v2 proxy: the consumer bound to binding 5001, the device Composer
