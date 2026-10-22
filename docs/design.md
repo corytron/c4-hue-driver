@@ -445,6 +445,19 @@ loop on OS 3.4.2:
   and for a proxy id alike.
 - `C4:UpdateProperty` on an undeclared name and `C4:SendToDevice` to a
   non-existent id both return nil silently; nothing is logged.
+- `C4:GetBoundProviderDevice(1034, 1)` on a device with **nothing bound**
+  returns the **number 0**, not the nil the API doc promises (2026-10-22).
+  Lua takes 0 for true, so until that day both the light and the scene
+  driver showed "Bound; waiting for the bridge" on a never-bound device
+  and sent their hello to device 0; `bound_bridge()` now treats 0 as nil.
+- `C4:Bind(1033, 1, 1034, 1, "HUE_BRIDGE")` (provider bridge, consumer
+  light, run from the bridge through `Probe Call`) made the binding at
+  once: Director raised `OnBindingChanged(1, HUE_BRIDGE, true, 1034, 1)` on
+  the bridge in the same millisecond, the light answered with `HUE_HELLO`
+  5 ms later and the call returned the class string. The Windows session
+  could not start Composer's Connections drag with synthesized mouse input
+  (two attempts, nothing happened), so this is the way to bind a device
+  from here when the owner is not at Composer (2026-10-22).
 - Hue side: 16 rooms (9.9 KB), 7 zones (6.6 KB), 1 bridge_home (1.3 KB),
   125 scenes (351 KB). The single `GET /clip/v2/resource` returns 497
   items, 588 KB, in 1 s. Room `children` are devices, zone `children`

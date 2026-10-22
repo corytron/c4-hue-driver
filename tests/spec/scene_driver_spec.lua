@@ -143,6 +143,15 @@ describe("Hue Scene driver", function()
 			assert.equal(BRIDGE_ID, c4.sent[1].id)
 		end)
 
+		it("treats GetBoundProviderDevice answering 0 as unbound (OS 3.4.2 with nothing bound)", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			c4.GetBoundProviderDevice = function() return 0 end
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal(0, #c4.sent)
+			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+		end)
+
 		it("stays quiet and says so when no bridge is bound", function()
 			local env, c4 = load_scene({ bind = false })
 			assert.equal(0, #c4.sent)
