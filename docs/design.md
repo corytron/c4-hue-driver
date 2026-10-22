@@ -511,11 +511,14 @@ loop on OS 3.4.2:
   1140 (was C4 Test Scene) to Bedside Lights (zone): Read"), `Attention`
   then flagged the name difference and the device's `Adopt Hue Name`
   renamed it to "Bedside Lights Read" **[all verified on hardware]**.
-- **Open**: the `Recall As` property. A value set in Composer (both by a
-  mouse pick, which Composer itself did not keep, and by a keyboard commit,
-  which it did) has not changed the action the device sends — recalls still
-  go out as `active`. Under investigation with the device logging its
-  `OnPropertyChanged` path.
+- **`Recall As` works; Composer's Set button was the missing step.** A
+  property edited in Composer's grid (combo or text) is only sent to Director
+  when the row's **Set** button — which appears beside the value, with
+  Cancel, the moment it differs — is clicked; Enter or leaving the field
+  keeps the new value in the grid only, and the grid later reverts to
+  Director's value. Director's `Properties` table for the device confirmed
+  it (`HUE_DUMP`); after Set, the device recalled as
+  `{"recall":{"action":"static"}}` **[verified 22:03–22:04]**.
 - Two bugs found by reading the device's page from the Windows session: the
   bridge sent the group *label* ("Bedside Lights (zone)") as `group_name`
   while the device appends "(zone)" itself, and the bridge's
@@ -635,6 +638,9 @@ project:
   `Room` empty rather than pre-selecting "(mapped room)"; an empty value
   means the mapping and was accepted. So `itemtype` 6 = protocol device,
   7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
+- **Property edits commit only through the row's Set button** (see the
+  scenes section): automation must click it; a human usually does without
+  noticing.
 - **The "Action Parameter List" dialog remembers the last values per
   action** (seen 2026-10-21 21:30: a later `Add Scene` opened pre-filled
   with the previous Scene and Room). An empty `Room` therefore cannot be
