@@ -779,6 +779,16 @@ describe("Hue Scene driver", function()
 			assert.equal(string.format("Renamed device %d to Relax", proxy_id), env.Properties["Last Action"])
 		end)
 
+		it("Adopt Hue Name gives a zone scene the zone's name in front, as the bridge does at creation", function()
+			local env, c4 = known_scene()
+			configure(env, { group_name = "Downstairs", group_type = "zone" })
+			c4.calls = {}
+			local proxy_id = proxy_of(SCENE_ID)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.same({ { proxy_id, "Downstairs Relax" } }, c4.calls_to("RenameDevice"))
+			assert.equal(string.format("Renamed device %d to Downstairs Relax", proxy_id), env.Properties["Last Action"])
+		end)
+
 		it("Adopt Hue Name refuses without a Hue name or without a proxy", function()
 			local env, c4 = load_scene({ rid = "s1" })
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })

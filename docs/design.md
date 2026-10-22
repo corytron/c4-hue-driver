@@ -613,6 +613,11 @@ project:
   `Room` empty rather than pre-selecting "(mapped room)"; an empty value
   means the mapping and was accepted. So `itemtype` 6 = protocol device,
   7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
+- **The "Action Parameter List" dialog remembers the last values per
+  action** (seen 2026-10-21 21:30: a later `Add Scene` opened pre-filled
+  with the previous Scene and Room). An empty `Room` therefore cannot be
+  relied on after the first use; "(mapped room)" (value "") must be picked
+  explicitly when the mapping is wanted, and every picker re-chosen.
 - **Installing a new build**: Driver ▸ "Add or Update Driver or Agent…"
   accepts several `.c4z` files at once ("Select Driver or Agent…" dialog)
   and answers "Update Succeeded … successfully added: hue_scene.c4z" then
