@@ -884,7 +884,10 @@ describe("Hue Scene driver", function()
 			assert.equal("False", capability("advanced_scene_support"))
 			assert.equal("True", capability("buttons_are_virtual"))
 			assert.equal("True", capability("hide_proxy_properties"))
-			assert.truthy(xml:find('<proxy proxybindingid="5001" name="Hue Scene">light_v2</proxy>', 1, true))
+			assert.truthy(xml:find('<proxy proxybindingid="5001" name="Hue Scene" image_source="c4z" '
+				.. 'small_image="images/devices_sm/hue_scene_16.png" large_image="images/devices_lg/hue_scene_32.png">'
+				.. 'light_v2</proxy>', 1, true))
+			assert.truthy(xml:find('<documentation file="www/documentation.html"/>', 1, true))
 		end)
 
 		it("names the driver and its minimum OS", function()

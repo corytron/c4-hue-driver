@@ -1,0 +1,64 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<title>Hue Light device - documentation</title>
+<style type="text/css">
+body { font-family: "Segoe UI", Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45; color: #222; background: #fff; margin: 16px 24px; max-width: 900px; }
+h1 { font-size: 22px; margin: 0 0 4px 0; }
+h2 { font-size: 17px; margin: 26px 0 8px 0; padding-bottom: 3px; border-bottom: 1px solid #c8c8c8; }
+p { margin: 8px 0; }
+ul { margin: 6px 0 10px 0; }
+li { margin: 3px 0; }
+table { border-collapse: collapse; margin: 10px 0 16px 0; }
+th, td { border: 1px solid #b8b8b8; padding: 4px 8px; vertical-align: top; text-align: left; }
+th { background: #ececec; }
+code { font-family: Consolas, "Courier New", monospace; font-size: 13px; background: #f2f2f2; padding: 0 3px; }
+.note { background: #f6f6ea; border: 1px solid #d8d8c0; padding: 6px 10px; margin: 10px 0; }
+</style>
+</head>
+<body>
+
+<h1>Hue Light device</h1>
+
+<p>A <b>Hue Light</b> is one Philips Hue light shown as an ordinary Control4 light: on, off, dimming, and colour or colour temperature when the bulb supports them. It is created by the <b>Hue Bridge</b> device's <b>Add Light</b> or <b>Import All New Lights</b> action, never added by hand, and it is driven entirely by the bridge: the bridge tells it what its bulb can do and what state it is in, and passes your commands on to the bulb. Changes made in the Hue app or with Hue switches show on this device within a second or two.</p>
+
+<div class="note">The full manual, with pictures, is on the <b>Hue Bridge</b> device: select the bridge in System Design and open its <b>Documentation</b> tab. It covers installing, pairing, room mapping, importing, renames, replacements, deletions, scenes and troubleshooting.</div>
+
+<h2>Properties</h2>
+<p>All of them are written by the bridge; the only one you change is Debug Mode, and only when asked.</p>
+<table>
+<tr><th>Property</th><th>What it shows</th></tr>
+<tr><td><b>Driver Version</b></td><td>The build number of the installed driver, for example <code>116</code>. It matches the bridge's after an update.</td></tr>
+<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>. On writes many more lines to this device's Lua output; developer use only. Remember that a changed property reaches the driver only when you click the row's <b>Set</b> button.</td></tr>
+<tr><td><b>Status</b></td><td>In normal use the Hue name and the bulb's model, for example <code>Left Bedside Light (Hue color lamp)</code>. Other texts are explained below.</td></tr>
+<tr><td><b>Hue Light ID</b></td><td><code>#46 (e0e51794&hellip;)</code>: the light's number on the bridge (the same number the bridge's lists show after the name) and the start of its long identifier. Blank until the bridge has linked the device.</td></tr>
+<tr><td><b>Hue Name</b></td><td>The light's name in the Hue app. The device's name in Composer starts out the same and is then yours to change.</td></tr>
+<tr><td><b>Model</b></td><td>The bulb's model as Hue reports it, for example <code>Hue color lamp</code> or <code>Hue white lamp</code>.</td></tr>
+<tr><td><b>Online</b></td><td><code>Online</code> when the bridge can reach the bulb; <code>Offline</code> when the bulb has no power, or the device is not bound, gone or forgotten; blank while the bridge has not said either way yet.</td></tr>
+<tr><td><b>Hue Room</b></td><td>The Hue room the light belongs to, for example <code>Master Bedroom</code>; blank for a light in no Hue room. Moving the device to another Control4 room does not change it.</td></tr>
+<tr><td><b>Last Action</b></td><td>The result of the last click on this device's Actions tab, or <code>Forgotten by the bridge</code> after the bridge released it.</td></tr>
+</table>
+
+<h2>Actions</h2>
+<table>
+<tr><th>Action</th><th>What it does</th></tr>
+<tr><td><b>Adopt Hue Name</b></td><td>Renames this device in Composer to its Hue name. Last Action reads <code>Renamed device 1073 to Downlight 4</code>; while the bridge has not linked the device yet it reads <code>Not renamed: no Hue name known yet (the bridge has not configured this light)</code>. Names are never changed without this click (or the bridge's <b>Adopt Hue Names</b>); the driver never renames anything in Hue.</td></tr>
+<tr><td><b>Forget This Light</b></td><td>Asks the bridge to release this device from its Hue light. Last Action reads <code>Asked the bridge to forget this light; its answer sets Status</code>, and a moment later Status reads the forgotten text below. The device stays in the project for you to delete; the Hue light becomes available again under the bridge's <b>Add Light</b>. When no bridge is connected it reads <code>Not sent: not bound to a Hue Bridge</code>.</td></tr>
+</table>
+
+<h2>Status texts and what to do</h2>
+<table>
+<tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
+<tr><td><code>Left Bedside Light (Hue color lamp)</code></td><td>Linked and working.</td><td>Nothing.</td></tr>
+<tr><td><code>Not bound to a Hue Bridge</code></td><td>The device has no connection to a Hue Bridge: it was added by hand, its connection was removed, or the bridge device was deleted and re-added.</td><td>Open the device's <b>Connections</b> view and connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Lights</b> output, then click <b>Link Devices</b> on the bridge. The bridge matches the device by the identity it remembers, or else by its exact name.</td></tr>
+<tr><td><code>Bound; waiting for the bridge</code></td><td>Connected to the bridge, but the bridge has not linked it to a Hue light yet.</td><td>Wait a few seconds if the bridge is starting; otherwise click <b>Link Devices</b> on the bridge. For a device that was never linked, make sure its Composer name is exactly the Hue light's name first.</td></tr>
+<tr><td><code>Gone from the Hue bridge since 2026-10-22 09:15; re-link or Forget</code></td><td>The Hue light this device stood for was deleted or replaced on the Hue side. The device, its room and its programming are kept.</td><td>On the bridge, <b>Re-link Device To Light</b> to point the device at the replacement bulb; or <b>Forget Light</b> (or this device's <b>Forget This Light</b>) and delete the device.</td></tr>
+<tr><td><code>Forgotten by the bridge (was Hue light Vanity 3 #92). Delete this device in Composer, or bind it again and use Link Devices</code></td><td>You or the bridge released this device. Its connection to the bridge is gone and its tile does nothing.</td><td>Delete the device in Composer; or, to take it back, connect it to the bridge in Connections and click <b>Link Devices</b> on the bridge.</td></tr>
+</table>
+
+<p>When this device cannot act (not bound, waiting, gone or forgotten) it drops the commands it receives, and Status says why. Colour and colour temperature controls appear on Navigators only when the bulb has them; brightness is shown in whole percents, and a colour set while the bulb is off is applied at the next turn-on.</p>
+
+</body>
+</html>

@@ -1593,7 +1593,7 @@ describe("bridge.lights", function()
 		it("picker_rooms lists Floor / Room, disambiguates by id, and starts with the mode's entry", function()
 			fake.add_room(9, "Garage", 4, "Upstairs")
 			assert.same({
-				{ text = "(mapped room)", value = "" },
+				{ text = "(mapped room)", value = "mapped" },
 				{ text = "Main / Garage (8)", value = "8" },
 				{ text = "Main / Living Room", value = "7" },
 				{ text = "Upstairs / Garage (9)", value = "9" },
@@ -1604,7 +1604,8 @@ describe("bridge.lights", function()
 			assert.same({ "Main / Garage (8)", "Main / Living Room", "Upstairs / Garage (9)" }, texts(L:picker_rooms()))
 
 			L = new_lights({ project = { rooms = function() return {} end } })
-			assert.same({ { text = "(mapped room)", value = "" }, { text = "(no rooms found in the project)", value = "" } },
+			assert.same({ { text = "(mapped room)", value = "mapped" },
+				{ text = "(no rooms found in the project)", value = "" } },
 				L:picker_rooms("add"))
 			L = new_lights({ project = { hierarchy = function() return {} end } })
 			assert.same({ "Garage (8)", "Garage (9)", "Living Room" }, texts(L:picker_rooms()),
