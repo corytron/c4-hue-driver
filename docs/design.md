@@ -428,6 +428,26 @@ loop on OS 3.4.2:
   scenes (not listed in v1)", "125 scenes on the bridge not imported",
   "scene resync done: 0 state messages" — all within 1.4 s of the connect.
   No errors; the lights' resync and state fan-out unchanged.
+- **First scene device on hardware** (21:10–21:15): `Add Scene` from
+  Composer created "Bedside Lights Nightlight" (protocol 1132, proxy 1133)
+  in the Master Bedroom in 900 ms (`OnItemAdded` × 2, AddDevice callback,
+  `OnBindingValidate`, `OnBindingChanged`, the device's rid-less hello, then
+  `HUE_SCENE_CONFIGURE` + `HUE_SCENE_STATE inactive`). A Navigator tap ON
+  sent `HUE_SCENE_RECALL action=active duration=750` → one `PUT
+  /scene/<rid> {"recall":{"action":"active","duration":750}}` → the bridge
+  answered `STATE static` (reason recall) after 240 ms and the stream's
+  `scene` item confirmed it 15 ms later; the two bedside lights' events
+  followed within a second. OFF sent `HUE_SCENE_OFF` → one `PUT
+  /grouped_light/<zone's grouped_light> {"on":{"on":false}}`, both lights
+  reported off 360 ms later and the `scene` item went inactive in the same
+  container as the grouped_light updates **[verified]**.
+- Two bugs found by reading the device's page from the Windows session: the
+  bridge sent the group *label* ("Bedside Lights (zone)") as `group_name`
+  while the device appends "(zone)" itself, and the bridge's
+  `HUE_SCENE_HELLO` handler passed the params in the rid's place, so a
+  registered scene's hello was never answered — after the dev loop's reload
+  of the new device it stayed on Status "Nightlight" with an empty `Online`.
+  Both fixed the same hour.
 - Scene devices themselves need `hue_scene.c4z` installed through Composer
   before `Add Scene` can create one; that and the switch round trip are the
   Composer checklist's section H.
