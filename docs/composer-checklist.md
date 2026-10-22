@@ -202,12 +202,15 @@ shows is below.
     click **Accept Names As They Are** instead: `Attention` drops the item.
 23. **The bare "Hue Light" device** (the one added by hand before the first
     import). In Connections, bind it to the Hue Bridge. Expect its `Status`
-    "Bound; the bridge does not know this device. Use Link Devices on the
-    bridge", bridge `Attention` "1 unbound device …" or the link hint, and
+    "Bound; waiting for the bridge" (a bare device has no Hue identity to
+    show yet), the bridge's `Attention` and `Lights` unchanged (a bound but
+    never-linked device is not an "unbound" one; the bridge's log says
+    "device 1034 bound but not registered; its hello or Link Devices adopts
+    it"), and
     **Link Devices** to answer "not linked 1: Hue Light (device 1034): no
     unimported Hue light has that name; rename …". Then **Forget Light** on
     one unpowered imported light (say "Vanity 3"), rename the bare device to
-    "Vanity 3" in Composer, run **Link Devices** again: "Linked 1 devices:
+    "Vanity 3" in Composer, run **Link Devices** again: "Linked 1 device:
     Vanity 3 (device 1034) to Vanity 3 [Master Bathroom] #n by name". The old
     Vanity 3 device now says "Forgotten by the bridge …" and can be deleted.
 24. **Re-link** is for a bulb replaced or deleted on the Hue side: its device
