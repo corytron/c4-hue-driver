@@ -89,11 +89,13 @@
 				<name>Adopt Hue Name</name>
 				<command>Adopt Hue Name</command>
 				<params/>
+				<sort_order>1</sort_order>
 			</action>
 			<action>
 				<name>Forget This Scene</name>
 				<command>Forget This Scene</command>
 				<params/>
+				<sort_order>2</sort_order>
 			</action>
 		</actions>
 		<commands/>
