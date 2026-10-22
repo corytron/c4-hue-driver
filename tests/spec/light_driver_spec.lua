@@ -1031,4 +1031,49 @@ describe("Hue Light driver", function()
 			assert.is_nil(ramp.params.on == "false" or nil)
 		end)
 	end)
+
+	describe("keypad buttons on the Button Link bindings (DO_PUSH / DO_RELEASE / DO_CLICK)", function()
+		it("declares the three Button Link connections", function()
+			local xml = io.open("src/hue_light/driver.xml"):read("*a")
+			for _, name in ipairs({ "Top Button Link", "Bottom Button Link", "Toggle Button Link" }) do
+				assert.truthy(xml:find(name, 1, true), name)
+			end
+		end)
+
+		it("a click on binding 200 turns on to the preset, on 201 off, with no proxy echo", function()
+			local env, c4 = lit_light()
+			c4.sent = {}
+			c4.calls = {}
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.equal(1, #messages(c4, "HUE_SET"))
+			assert.equal("100", tostring(messages(c4, "HUE_SET")[1].params.brightness))
+			assert.equal(0, #notifies(c4, "BUTTON_ACTION"))
+			c4.sent = {}
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.equal("false", tostring(messages(c4, "HUE_SET")[1].params.on))
+		end)
+
+		it("a push held on binding 201 dims toward 1 and the release stops at the reached level", function()
+			local env, c4 = lit_light() -- on at 40 %
+			c4.sent = {}
+			env.ReceivedFromProxy(201, "DO_PUSH", {})
+			c4.fire_timers()
+			assert.equal("1", tostring(messages(c4, "HUE_SET")[1].params.brightness))
+			for _ = 1, 5 do c4.fire_timers() end
+			c4.sent = {}
+			env.ReceivedFromProxy(201, "DO_RELEASE", {})
+			local stop = messages(c4, "HUE_SET")[1]
+			assert.equal("0", tostring(stop.params.rate))
+			assert.is_true(tonumber(stop.params.brightness) < 40 and tonumber(stop.params.brightness) > 1)
+		end)
+
+		it("ignores the commands on an unknown binding", function()
+			local env, c4 = lit_light()
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "DO_CLICK", {})
+			assert.equal(0, #messages(c4, "HUE_SET"), "only a log line, no command")
+		end)
+	end)
 end)
