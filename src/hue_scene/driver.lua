@@ -642,8 +642,14 @@ dispatch.commands["Adopt_Hue_Name"] = function()
 	if not id then
 		return result("Not renamed: no light_v2 proxy is bound to binding 5001")
 	end
-	C4:RenameDevice(id, st.name) -- [verified: API 22/_32]
-	result(string.format("Renamed device %d to %s", id, st.name))
+	-- The name the bridge gives a scene device at creation (docs/scenes-design.md
+	-- §1): the scene's own name in a room, the zone's name in front for a zone.
+	local name = st.name
+	if st.group_type == "zone" and st.group_name then
+		name = st.group_name .. " " .. st.name
+	end
+	C4:RenameDevice(id, name) -- [verified: API 22/_32]
+	result(string.format("Renamed device %d to %s", id, name))
 end
 
 -- Ask the bridge to Forget this scene; it answers HUE_SCENE_FORGOTTEN, which
