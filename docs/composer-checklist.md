@@ -251,8 +251,9 @@ and the bridge actions through `devctl`. What only Composer shows:
     by hand (Hue app or its own tile): the scene tile drops to OFF.
 28. The scene device's Properties: `Status` "Hue scene Nightlight in Bedside
     Lights (zone)", `Hue Scene`, `Hue Room`, `Hue Scene ID` "#<id> (<rid…>)",
-    `Recall As` = "As set in Hue" (change it to "Static" and tap ON again:
-    the recall is sent as `static`), `Online` "Online". Actions: `Adopt Hue
+    `Recall As` = "As set in Hue" (change it to "Static", click the row's
+    **Set** button, and tap ON again: the recall is sent as `static`),
+    `Online` "Online". Actions: `Adopt Hue
     Name`, `Forget This Scene`.
 29. **Add All Scenes Of Room** with a mapped room that has scenes (Kitchen,
     7 scenes): expect "Added 7 scenes of Kitchen to Kitchen: …" and seven
