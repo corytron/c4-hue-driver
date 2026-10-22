@@ -379,6 +379,20 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   bridge and reports through its own `print`, which only its Lua output in
   Composer shows.
 
+### Keypad buttons (2026-10-22, `docs/keypad-design.md`)
+
+A Control4 switch run as a 2-button keypad reaches a light through the
+light_v2 proxy's Button Link inputs as `BUTTON_ACTION` (button 0/1/2,
+action 1 press, 2 click, 0 release after hold), which the proxy forwards to
+the protocol driver and expects echoed back **[verified: Light V2 proxy
+protocol reference, cloned to `~/c4-tools/reference/`]**. Both device
+drivers answer it: the light taps to the On preset or off over the click
+rates and ramps on a hold (timed Hue target to the end of the range, a
+100 ms estimate tick, the release writes the reached level); the scene
+recalls, turns off or toggles. `SET_PRESET_LEVEL` and the rate commands
+persist per device; `supports_default_on` is declared to receive the
+preset **[assumed until a switch is bound on hardware]**.
+
 ### Lights: verified on hardware (2026-10-21, through the dev loop)
 
 - Import Lights created 47 devices one at a time, bound and registered
