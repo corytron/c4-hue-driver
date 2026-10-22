@@ -581,6 +581,37 @@ longer queue behind the zombie.
   expected texts (`Attention` "None"; `Room Mappings` listing 9 mapped
   rooms, 7 unmapped rooms and 7 unmapped zones; `Last Action` holding the
   full Room Audit text, about 3 KB, displayed without truncation).
+- **G23, the bare device (2026-10-22, Windows session + dev loop).** The
+  hand-added "Hue Light" (device 1034, room "Room") was bound with
+  `C4:Bind` (above); the bridge logged "device 1034 bound but not
+  registered; its hello or Link Devices adopts it" and the light's hello
+  came with an empty name. `Attention` stayed "None" and `Lights` unchanged:
+  a bound, never-linked device is not an "unbound" entry. **Link Devices**
+  → "not linked 1: Hue Light (device 1034): no unimported Hue light has
+  that name; rename the device in Composer to the Hue light's exact name
+  and run Link Devices again". **Forget Light** on Vanity 3 (device 1130)
+  → registry entry dropped, `OnBindingChanged(…, false, 1130, 1)` 30 ms
+  later, "Forgot Vanity 3 #92 (device 1130): unbound and left in the
+  project for you to delete; the Hue light is listed under Add Light
+  again", `Attention` "1 new light on the bridge: Vanity 3 [Master
+  Bathroom] #92 (Add Light or Import All New Lights)", `Lights` "46
+  imported, 1 new". The Windows session renamed 1034 to "Vanity 3" in the
+  tree; **Link Devices** → "adopted Vanity 3 (device 1034) by its name",
+  the light's state delivered to 1034 80 ms later (reason=hello), `Last
+  Action` "Linked 1 device: Vanity 3 (device 1034) to Vanity 3 [Master
+  Bathroom] #92 by name | Scenes: All 2 bound scene devices are
+  registered", `Attention` back to "None", `Lights` "47 imported". Composer
+  showed the programmatic binding in Connections as `Connected To` "Hue
+  Bridge->Hue Lights"; the bare device's Properties read `Status` "Bound;
+  waiting for the bridge" with every Hue field empty, and after the link
+  `Status` "Vanity 3 (Hue color lamp)", `Hue Light ID` "#92 (6adf99eb…)",
+  `Hue Room` "Master Bathroom", `Online` "Offline" (the bulb is unpowered).
+  The Forget Light picker lists "[42] Vanity 3 #92 (device 1130)"; the
+  forgotten device reads "Forgotten by the bridge (was Hue light Vanity 3
+  #92). Delete this device in Composer, or bind it again and use Link
+  Devices", `Online` "Offline", `Last Action` "Forgotten by the bridge".
+  Device 1034 keeps its own room ("Room"): linking never moves a device.
+  The old device 1130 is left for the owner to delete.
 - Actions driven through the dev loop (`devctl run`): `Set Room Mapping`
   "Mapped Mini Bar (zone) → Kitchen" then "Removed the mapping for Mini Bar
   (zone)"; `Link Devices` "All 47 bound devices are registered";
@@ -653,7 +684,19 @@ project:
   7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
 - **Property edits commit only through the row's Set button** (see the
   scenes section): automation must click it; a human usually does without
-  noticing.
+  noticing. `Set-ComposerProperty` did the whole sequence on 2026-10-22
+  (combo arrow, focus check, stepping the list, Enter, the row's Set,
+  3 s, re-read) for `Debug Mode` On → Off and `Recall As` Static → "As set
+  in Hue" on a scene device, about 6 s each, Director confirming both.
+- **Connections cannot be made with synthesized mouse input.** The
+  Connections view reads fine through UIA (upper pane "Control & Audio
+  Video Connections" with the device's `Hue Bridge` input row, lower pane
+  "HUE_BRIDGE Output Devices" listing the bridge with its 47 existing
+  connections), but two drag attempts from the bridge row onto the input
+  row (stepped `SetCursorPos` with button down/up, and `mouse_event` with a
+  held jiggle) started no OLE drag. Binding a device without the owner's
+  hands is done from the bridge with `C4:Bind` through `Probe Call`
+  (Project APIs section).
 - **The "Action Parameter List" dialog remembers the last values per
   action** (seen 2026-10-21 21:30: a later `Add Scene` opened pre-filled
   with the previous Scene and Room). An empty `Room` therefore cannot be
