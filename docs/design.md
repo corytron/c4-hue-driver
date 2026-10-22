@@ -746,6 +746,21 @@ project:
   the bridge's **Lua tab** for the release build (whether it executes is
   untested); the dev-only `Dev Server` and `Diagnostic Server` rows remain
   with their last values, ignored by the release code.
+- **Build 125: Documentation tab and icons (2026-10-22 13:27, Windows
+  session)**: installed the same way over 116; every device read 125 a
+  minute later with state intact. The tab strip became "Properties |
+  Actions | Documentation | Lua" on all three drivers (so the Lua tab's
+  x offset moved from 144 to 239 px; Documentation is at 173). The
+  Documentation tab is a WebBrowser control with back/forward and a "View
+  External Documentation" button; a plain static HTML file named by
+  `<documentation file="www/documentation.html"/>` renders in it with its
+  `img/` pictures and raised no prompt. The bridge's `<small>`/`<large
+  image_source="c4z">` icons showed in the tree and the List View at once;
+  the light and scene devices created under build 116 kept the light_v2
+  proxy's standard bulb icon although their `<proxy>` carries the documented
+  c4z attributes, and the Items pane's search results show the generic
+  placeholder for all three drivers. The "(mapped room)" entry with value
+  "mapped" enables the Select dialog's OK button.
 
 ## Discovery
 
