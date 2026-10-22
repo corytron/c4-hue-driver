@@ -735,15 +735,7 @@ dispatch.proxy["OFF"] = function() turn_off(0) end
 -- bottom button turns the group off, of the toggle button toggles; holds do
 -- nothing. Every action is echoed as the proxy requires [verified:
 -- proxy-protocol reference, light_v2 BUTTON_ACTION]; docs/keypad-design.md.
-dispatch.proxy["BUTTON_ACTION"] = function(_, params)
-	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
-	if not button or not action then
-		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
-	end
-	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
-	if action == 1 then
-		return
-	end
+local function button_click(button)
 	if button == 0 then
 		turn_on(0)
 	elseif button == 1 then
@@ -752,6 +744,33 @@ dispatch.proxy["BUTTON_ACTION"] = function(_, params)
 		dispatch.proxy["TOGGLE"]()
 	end
 end
+
+dispatch.proxy["BUTTON_ACTION"] = function(_, params)
+	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
+	if not button or not action then
+		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
+	end
+	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+	if action == 2 then
+		button_click(button)
+	end
+end
+
+-- Keypad buttons bound to the driver's Button Link connections (200 top,
+-- 201 bottom, 202 toggle) deliver DO_PUSH / DO_RELEASE / DO_CLICK on the
+-- binding; only the click acts [verified: public light_v2 drivers].
+local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
+
+dispatch.proxy["DO_CLICK"] = function(binding)
+	local button = LINK_BUTTON[tonumber(binding)]
+	if button then
+		button_click(button)
+	else
+		log.warn("DO_CLICK on binding %s: not a Button Link", tostring(binding))
+	end
+end
+dispatch.proxy["DO_PUSH"] = function() end
+dispatch.proxy["DO_RELEASE"] = function() end
 
 -- Legacy commands that old programming may still send.
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
