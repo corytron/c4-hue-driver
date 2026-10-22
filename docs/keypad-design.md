@@ -61,7 +61,7 @@ Hardware: bind a switch's buttons to a light's Button Links in Composer's
 Connections (a drag; by hand), tap and hold; the manual's chapter "Using
 the lights from Control4" describes the setup.
 
-## Hardware finding (2026-10-22, build 144 installed)
+## Hardware findings (2026-10-22, builds 144 and 146 installed)
 
 The proxy creates only the "Brightness Stop" and "Color Stop" Button Links
 from the capabilities; the Top, Bottom and Toggle Button Links are
@@ -72,8 +72,28 @@ and `DO_CLICK` on that binding id rather than `BUTTON_ACTION` [verified:
 public light_v2 drivers on GitHub; the SDK's jumpstart template calls the
 base id "ButtonLinkBindingIDBase"]. Both drivers now declare the three
 connections and route the binding commands into the same button logic;
-`BUTTON_ACTION` on the proxy binding stays as the proxy's own route. A
-device gets its connection set when it is created, so devices made before
-this build must be re-created (Forget Light, delete, Add Light) to show
-the links. Composer asks for a Director restart when a driver's
-connections or capabilities change.
+`BUTTON_ACTION` on the proxy binding stays as the proxy's own route.
+
+Install behaviour seen on the house (build 141 → 144 → 146):
+
+- 144 changed the light's **capabilities** (`click_rates`, `hold_rates`,
+  `supports_default_on`): Composer asked "Restart Director?" for
+  `hue_light.c4z`. After the restart the bridge ran 144, but the existing
+  light device still reported 141 and read "Not bound to a Hue Bridge"
+  although Composer showed it bound; a right-click Update Driver ("Versions
+  are equal", overwrite) did not change it. A device re-created under 144
+  reported a blank Driver Version until a second per-device overwrite
+  brought it to 144.
+- 146 added the three Button Link **connections**: no restart prompt; the
+  existing device showed Top, Bottom and Toggle Button Link under Control
+  Outputs at once and read 146. **Existing devices pick up new connections
+  on an ordinary "Add or Update Driver or Agent…"; nothing has to be
+  re-created.**
+- The links are outputs of the light (provider side); a keypad button's
+  output is bound to them in Connections by hand.
+
+Open: the light reading "Not bound" while bound after a Director restart
+suggests the binding is not yet visible to `GetBoundProviderDevice` at late
+init after a restart, and the light never looks again until a binding
+event. A delayed re-check (a few seconds after late init when unbound) is
+the proposed fix; not yet built.
