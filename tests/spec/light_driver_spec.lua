@@ -803,7 +803,9 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35" })
 			assert.equal(0, #c4.sent)
 			assert.equal(0, #c4.calls_to("SendToProxy"), "not even CHANGING")
-			assert.equal(0, #c4.active_timers())
+			local timers = c4.active_timers()
+			assert.equal(1, #timers, "only the binding re-check, no fallback")
+			assert.equal(5000, timers[1].delay)
 			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
 		end)
 
@@ -1074,6 +1076,38 @@ describe("Hue Light driver", function()
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "DO_CLICK", {})
 			assert.equal(0, #messages(c4, "HUE_SET"), "only a log line, no command")
+		end)
+	end)
+
+	describe("binding re-check after start (Director restart)", function()
+		it("greets the bridge once a binding that was invisible at late init shows up, with no binding event", function()
+			local env, c4 = load_light({ bind = false, rid = "x1" })
+			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+			c4.fire_timers() -- 5 s: still nothing bound
+			assert.equal(0, #messages(c4, "HUE_HELLO"))
+			c4.bindings[#c4.bindings + 1] = { provider = BRIDGE_ID, provider_binding = 1, consumer = LIGHT_ID,
+				consumer_binding = 1, class = "HUE_BRIDGE" }
+			c4.fire_timers() -- 15 s: the binding is visible now
+			assert.equal(1, #messages(c4, "HUE_HELLO"))
+			assert.equal(BRIDGE_ID, messages(c4, "HUE_HELLO")[1].id)
+			assert.equal(0, #c4.active_timers(), "no further re-checks")
+		end)
+
+		it("stops after the check at 60 s", function()
+			local _, c4 = load_light({ bind = false, rid = "x1" })
+			for _ = 1, 4 do c4.fire_timers() end
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("ends the re-checks on a binding event and on destroy, and never starts them when bound", function()
+			local env, c4 = load_light({ bind = false, rid = "x1" })
+			env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+			assert.equal(0, #c4.active_timers())
+			env, c4 = load_light({ bind = false, rid = "x1" })
+			env.OnDriverDestroyed()
+			assert.equal(0, #c4.active_timers())
+			local _, bound_c4 = load_light({ rid = "x1" })
+			assert.equal(0, #bound_c4.active_timers())
 		end)
 	end)
 end)
