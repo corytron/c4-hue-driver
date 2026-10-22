@@ -88,7 +88,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 			hue_name = "Living Room", type = "room" })
 		offs = {}
 		S = scenes.new({ http = http_ctx, now = function() return now end, lights = L,
-			group_off = function(rid) offs[#offs + 1] = rid end })
+			group_off = function(rid) offs[#offs + 1] = rid; return true end })
 		S:load()
 
 		-- What driver.lua does with the scene messages (docs/scenes-design.md §5).

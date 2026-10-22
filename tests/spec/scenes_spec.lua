@@ -58,7 +58,7 @@ describe("bridge.scenes", function()
 
 	local function new_scenes(extra)
 		local ctx = { http = http_ctx, now = function() return now end, lights = L,
-			group_off = function(rid) offs[#offs + 1] = rid end }
+			group_off = function(rid) offs[#offs + 1] = rid; return true end }
 		for k, v in pairs(extra or {}) do ctx[k] = v end
 		return scenes.new(ctx)
 	end
@@ -717,6 +717,31 @@ describe("bridge.scenes", function()
 				params = { rid = F.scene_rids.relax, active = "static", reason = "recall" } } }, c4.sent)
 			assert.equal("static", S:scene(F.scene_rids.relax).active)
 			assert.is_true(saw_log("recall Relax as active (device 2001)"))
+		end)
+
+		it("lets an OFF issued before the recall's PUT answers win: the late callback reports nothing", function()
+			add_relax()
+			S:recall({ rid = F.scene_rids.relax, action = "active" })
+			local put = c4.last_transfer()
+			assert.is_true(S:off({ rid = F.scene_rids.relax }))
+			assert.equal("inactive", S:scene(F.scene_rids.relax).active)
+			c4.sent = {}
+			respond_ok(put)
+			assert.same({}, c4.sent, "the superseded recall stays silent")
+			assert.equal("inactive", S:scene(F.scene_rids.relax).active)
+		end)
+
+		it("reports the unchanged state when OFF could queue nothing", function()
+			add_relax()
+			S:recall({ rid = F.scene_rids.relax, action = "active" })
+			respond_ok(c4.last_transfer())
+			local real = S.ctx.group_off
+			S.ctx.group_off = function() return false end
+			c4.sent = {}
+			assert.is_false(S:off({ rid = F.scene_rids.relax }))
+			S.ctx.group_off = real
+			assert.equal("static", S:scene(F.scene_rids.relax).active)
+			assert.equal("static", c4.sent[1].params.active)
 		end)
 
 		it("maps active to dynamic_palette for an auto_dynamic scene, static and dynamic_palette as asked", function()
