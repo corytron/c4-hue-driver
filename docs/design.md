@@ -399,6 +399,12 @@ a Director restart and left an existing light on the old version until a
 per-device overwrite, while the connection change in 146 reached the
 existing device at once with no restart. Details and the open "Not bound
 after a Director restart" item in `docs/keypad-design.md`.
+Composer Pro 3.4.2 offers no "Restart Director" command in any menu or
+on the controller's context menu; System Manager (Tools > System Manager,
+`Sysman.exe`) requires administrator rights, so input from the unelevated
+Windows session is dropped and only the owner can reboot from it. A full
+controller reboot took Director about seven and a half minutes to come
+back to Idle in Composer.
 
 ### Lights: verified on hardware (2026-10-21, through the dev loop)
 
