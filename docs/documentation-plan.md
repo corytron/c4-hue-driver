@@ -15,8 +15,9 @@ documentation and icon inside.
   and the file ships under `www/` in the `.c4z` [verified: Fundamentals 26,
   "Markdown Driver Documentation": the tag points at an HTML file under www;
   the SDK's own route renders Markdown to HTML with bundled React assets we
-  do not have]. **Assumed until the install shows it**: plain static HTML in
-  that file renders in Composer 3.4.2's tab. Composer's tab is a WinForms
+  do not have]. **Verified on the 2026-10-22 install of build 125**: plain static HTML
+  in that file renders in Composer 3.4.2's tab, pictures included, with no
+  prompt from the embedded browser. Composer's tab is a WinForms
   WebBrowser control (Internet Explorer engine), so the HTML must be
   conservative; see §4.
 - Icons: a `.c4z` provides its own Composer icons with
