@@ -784,6 +784,44 @@ dispatch.install(_G)
 function OnDriverInit()
 end
 
+-- After a Director restart the binding to the bridge can be invisible to
+-- GetBoundProviderDevice at late init although Composer shows it, and no
+-- OnBindingChanged follows, so the device read "Not bound to a Hue Bridge"
+-- until something else woke it [hardware 2026-10-22, docs/keypad-design.md].
+-- While unbound it looks again a few times, then gives up quietly; a binding
+-- event or a bridge found ends the retries.
+local RECHECK_MS = { 5000, 10000, 15000, 30000 }  -- gaps: checks at 5, 15, 30 and 60 s
+local recheck_timer = nil
+
+local function cancel_recheck()
+	if recheck_timer then
+		recheck_timer:Cancel()
+		recheck_timer = nil
+	end
+end
+
+local function schedule_recheck(attempt)
+	cancel_recheck()
+	local delay = RECHECK_MS[attempt]
+	if not delay then
+		return log.info("still not bound to a Hue Bridge %d s after start; waiting for a binding", 60)
+	end
+	recheck_timer = C4:SetTimer(delay, function()
+		recheck_timer = nil
+		if bridge then
+			return
+		end
+		local found = bound_bridge()
+		if found then
+			log.info("bridge binding visible after %d checks; greeting device %d", attempt, found)
+			hello()
+			report_online()
+		else
+			schedule_recheck(attempt + 1)
+		end
+	end)
+end
+
 function OnDriverLateInit()
 	late_init_done = true
 	load_identity()
@@ -797,6 +835,9 @@ function OnDriverLateInit()
 	drain_early()
 	hello()
 	report_online()
+	if not bridge then
+		schedule_recheck(1)
+	end
 end
 
 -- Control bindings only; the bridge binding is one, the proxy's is not.
@@ -804,6 +845,7 @@ function OnBindingChanged(idBinding, _, bound, otherDevice)
 	if idBinding ~= BRIDGE_BINDING then
 		return
 	end
+	cancel_recheck()
 	if bound then
 		hello(otherDevice)
 	else
@@ -835,4 +877,5 @@ end
 
 function OnDriverDestroyed()
 	settle()
+	cancel_recheck()
 end
