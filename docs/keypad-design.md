@@ -60,3 +60,20 @@ Specs in `tests/spec/light_driver_spec.lua` and `scene_driver_spec.lua`
 Hardware: bind a switch's buttons to a light's Button Links in Composer's
 Connections (a drag; by hand), tap and hold; the manual's chapter "Using
 the lights from Control4" describes the setup.
+
+## Hardware finding (2026-10-22, build 144 installed)
+
+The proxy creates only the "Brightness Stop" and "Color Stop" Button Links
+from the capabilities; the Top, Bottom and Toggle Button Links are
+connections the **protocol driver declares itself** (ids 200, 201, 202,
+class BUTTON_LINK, provider side, shown under the light's Control Outputs
+in Composer), and a bound keypad button delivers `DO_PUSH`, `DO_RELEASE`
+and `DO_CLICK` on that binding id rather than `BUTTON_ACTION` [verified:
+public light_v2 drivers on GitHub; the SDK's jumpstart template calls the
+base id "ButtonLinkBindingIDBase"]. Both drivers now declare the three
+connections and route the binding commands into the same button logic;
+`BUTTON_ACTION` on the proxy binding stays as the proxy's own route. A
+device gets its connection set when it is created, so devices made before
+this build must be re-created (Forget Light, delete, Add Light) to show
+the links. Composer asks for a Director restart when a driver's
+connections or capabilities change.
