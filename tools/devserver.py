@@ -80,7 +80,7 @@ def now():
 # The served tree
 # ---------------------------------------------------------------------------
 
-TREES = ("bridge", "light")
+TREES = ("bridge", "light", "scene")
 
 
 class Tree:
@@ -173,6 +173,7 @@ class State:
         self.done = []            # ids the driver reported command_done for, oldest first
         self.running_version = None
         self.running_light_version = None   # what the bridge last forwarded to its lights
+        self.running_scene_version = None   # ... and to its scene devices
         self.last_seen = None
         self.last_event = None
         self.last_error = None    # text of the most recent report that carried "error"
@@ -204,7 +205,7 @@ class State:
             json.dump({"next_id": self.next_id, "commands": self.commands, "done": self.done}, f, indent=1)
         os.replace(tmp, self.commands_path)
 
-    def touch(self, version=None, light_version=None):
+    def touch(self, version=None, light_version=None, scene_version=None):
         """The driver talked to us."""
         with self.lock:
             self.last_seen = now()
@@ -212,6 +213,8 @@ class State:
                 self.running_version = version
             if isinstance(light_version, str) and light_version:
                 self.running_light_version = light_version
+            if isinstance(scene_version, str) and scene_version:
+                self.running_scene_version = scene_version
 
     def enqueue(self, command):
         with self.lock:
@@ -273,6 +276,8 @@ class State:
             summary += " v=%s" % report["version"][:12]
         if isinstance(report.get("light_version"), str):
             summary += " lv=%s" % report["light_version"][:12]
+        if isinstance(report.get("scene_version"), str):
+            summary += " sv=%s" % report["scene_version"][:12]
         if isinstance(report.get("elapsed_ms"), (int, float)):
             summary += " %dms" % report["elapsed_ms"]
         if isinstance(report.get("properties"), dict):
@@ -283,7 +288,7 @@ class State:
             summary += " error=%s" % report["error"].replace("\n", " ")[:300]
         return summary
 
-    def status(self, local_version, local_light_version):
+    def status(self, local_version, local_light_version, local_scene_version=None):
         """/status. Beyond the fields in docs/dev-loop.md this adds:
           done_commands  ids the driver has reported command_done for (last
                          DONE_KEEP, oldest first); `devctl wait` polls this
@@ -296,6 +301,8 @@ class State:
                 "local_version": local_version,
                 "running_light_version": self.running_light_version,
                 "local_light_version": local_light_version,
+                "running_scene_version": self.running_scene_version,
+                "local_scene_version": local_scene_version,
                 "last_seen": self.last_seen,
                 "last_event": self.last_event,
                 "last_error": self.last_error,
@@ -530,14 +537,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"commands": self.server.state.commands_after(after)})
 
     def get_status(self, query):
-        version, _ = self.server.trees["bridge"].snapshot()
-        light_version, _ = self.server.trees["light"].snapshot()
-        status = self.server.state.status(version, light_version)
+        trees = self.server.trees
+        status = self.server.state.status(trees["bridge"].snapshot()[0], trees["light"].snapshot()[0],
+                                          trees["scene"].snapshot()[0])
         # While pinned, local_* are the served (pinned) versions; live_* say
         # what the working tree has become in the meantime.
         status["pinned"] = self.pinned_versions()
-        status["live_version"] = self.server.trees["bridge"].read()[0]
-        status["live_light_version"] = self.server.trees["light"].read()[0]
+        status["live_version"] = trees["bridge"].read()[0]
+        status["live_light_version"] = trees["light"].read()[0]
+        status["live_scene_version"] = trees["scene"].read()[0]
         self.send_json(status)
 
     def post_log(self, query):
@@ -560,7 +568,7 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             self.send_bad_request(err)
             return
-        self.server.state.touch(body.get("version"), body.get("light_version"))
+        self.server.state.touch(body.get("version"), body.get("light_version"), body.get("scene_version"))
         summary = self.server.state.add_report(body)
         if body["event"] != "heartbeat" or not self.server.quiet:
             log(summary)
