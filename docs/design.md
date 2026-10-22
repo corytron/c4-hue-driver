@@ -531,6 +531,48 @@ project:
   but no patterns: reading works through UIA, clicking through `SendInput`
   at the reported rectangles; pickers and the System Design tree are
   `SysListView32` controls read cross-process (`LVM_GETITEMTEXT`).
+- **Renaming a device in Composer fires `OnItemNameChanged`** to a driver
+  registered for it (probe 3): the `data` is a c4soap XML string,
+  `<c4soap async="1" name="OnItemNameChanged" result="0"><param name="iditem"
+  type="ulong">1073</param><param name="name" type="string">…</param><param
+  name="itemtype" type="ulong">7</param><param name="idroom"
+  type="ulong">1019</param></c4soap>` — `iditem` is the **proxy** id
+  (Downlight 4 is protocol 1072, proxy 1073), `itemtype` 7, and the room id
+  rides along **[verified on hardware 2026-10-21 17:10]**. Three seconds
+  later the bridge's `Attention` read "1 Hue name differs from the Composer
+  names: Downlight 4Downlight 4x is Downlight 4 in Hue (…)" after its next
+  refresh. No `OnBindingChanged` for a rename.
+- **Deleting a light device in Composer** (Vanity 3, protocol 1120, proxy
+  1121, 17:22:09): the light's `OnDriverRemovedFromProject` ran first and
+  its `HUE_GOODBYE` reached the bridge (tombstone written) **before**
+  Director's own notices: `OnItemRemoved` for the proxy (`iditem` 1121,
+  `idparent` 1120, `itemtype` 7), then `OnBindingChanged(1, HUE_BRIDGE,
+  false, 1120, 1)`, then `OnItemRemoved` for the protocol device (`iditem`
+  1120, `idparent` 1019 = its room, `itemtype` 6) — about a second after
+  the goodbye. `Lights` read "47 on bridge, 46 imported, 0 new, 0 missing,
+  0 unbound, 1 deleted" **[verified on hardware]**.
+- **`Add Light` re-creating it** (17:23:05): `OnItemAdded` for the protocol
+  (1130, parent = the room 756, `itemtype` 6) and the proxy (1131, parent
+  1130, `itemtype` 7) arrive before the `AddDevice` callback; then
+  `OnBindingValidate(1, HUE_BRIDGE)`, `OnBindingChanged(…, true, 1130, 1)`,
+  the new light's rid-less `HUE_HELLO`, and the registry entry re-created
+  with the tombstone cleared, all within 400 ms. The Composer dialog left
+  `Room` empty rather than pre-selecting "(mapped room)"; an empty value
+  means the mapping and was accepted. So `itemtype` 6 = protocol device,
+  7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
+- **Installing a new build**: Driver ▸ "Add or Update Driver or Agent…"
+  accepts several `.c4z` files at once ("Select Driver or Agent…" dialog)
+  and answers "Update Succeeded … successfully added: hue_scene.c4z" then
+  "… successfully updated: hue_bridge.c4z, hue_light.c4z, hue_scene.c4z";
+  it **also pushes the new version to every existing device** — the bridge
+  and the 47 lights read `Driver Version` 84 straight away, the bridge
+  restarted and its stream reconnected within seconds. A right-click
+  "Update Driver" afterwards opens "Select c4i file to add…", warns
+  "Versions are equal. Do you want to overwrite…?" and, on Yes, reports
+  "successfully updated" without saying which devices it touched — so the
+  menu route is the one to use, and "Update Driver" is only for forcing a
+  same-version reload **[verified 2026-10-21]**. `sort_order` put the 23
+  bridge actions in exactly the intended order.
 
 ## Discovery
 
