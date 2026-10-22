@@ -652,6 +652,120 @@ dispatch.proxy["OFF"] = function() set_brightness(0, 0) end
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
 dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
 
+-- Keypad buttons ----------------------------------------------------------
+-- A keypad bound to the proxy's Top / Bottom / Toggle Button Link inputs
+-- reaches the driver as BUTTON_ACTION { BUTTON_ID 0 top 1 bottom 2 toggle,
+-- ACTION 1 press, 2 release as a click, 0 release after a hold }; the proxy
+-- expects a BUTTON_ACTION notification echoing every press and release
+-- [verified: proxy-protocol reference, light_v2 BUTTON_ACTION command and
+-- notification]. Behaviour and defaults: docs/keypad-design.md.
+local BUTTON_TOP, BUTTON_BOTTOM = 0, 1
+local ACT_RELEASE, ACT_PRESS, ACT_CLICK = 0, 1, 2
+local HOLD_AFTER_MS = 400   -- a press still down after this starts a ramp
+local HOLD_TICK_MS = 100    -- the level estimate advances this often during a ramp
+local SETTING_KEYS = { preset = "preset_level", click_up = "click_rate_up", click_down = "click_rate_down",
+	hold_up = "hold_rate_up", hold_down = "hold_rate_down" }
+local SETTING_DEFAULTS = { preset = 100, click_up = 250, click_down = 250, hold_up = 5000, hold_down = 5000 }
+local settings = {}
+local hold = nil            -- { button, timer, ramping, level, step, to } while a button is down
+
+local function setting(name)
+	return tonumber(settings[name]) or SETTING_DEFAULTS[name]
+end
+
+local function load_settings()
+	for name, key in pairs(SETTING_KEYS) do
+		settings[name] = tonumber(C4:PersistGetValue(key))
+	end
+end
+
+local function save_setting(name, value)
+	value = tonumber(value)
+	if not value then
+		return log.warn("%s without a number", SETTING_KEYS[name])
+	end
+	settings[name] = value
+	C4:PersistSetValue(SETTING_KEYS[name], value)
+end
+
+local function end_hold()
+	if hold and hold.timer then
+		hold.timer:Cancel()
+	end
+	hold = nil
+end
+
+local function click(button)
+	if button == BUTTON_TOP then
+		set_brightness(setting("preset"), setting("click_up"))
+	elseif button == BUTTON_BOTTOM then
+		set_brightness(0, setting("click_down"))
+	elseif st.on then
+		set_brightness(0, setting("click_down"))
+	else
+		set_brightness(setting("preset"), setting("click_up"))
+	end
+end
+
+-- Hue has no "ramp until told to stop": the ramp is a timed target to the
+-- end of the range, and the release writes the level the ramp had reached.
+local function start_ramp()
+	local dimming = hold.button == BUTTON_BOTTOM or (hold.button ~= BUTTON_TOP and st.on)
+	local from = state.to_proxy_brightness(st) or 0
+	local to = dimming and 1 or 100
+	local full = setting(dimming and "hold_down" or "hold_up")
+	local duration = math.floor(full * math.abs(to - from) / 100)
+	hold.ramping, hold.level, hold.to = true, from, to
+	hold.step = (to - from) / math.max(1, duration / HOLD_TICK_MS)
+	hold.timer = C4:SetTimer(HOLD_TICK_MS, function()
+		if not hold or not hold.ramping then
+			return
+		end
+		hold.level = hold.level + hold.step
+		if (hold.step >= 0 and hold.level >= hold.to) or (hold.step < 0 and hold.level <= hold.to) then
+			hold.level = hold.to
+			hold.timer:Cancel()
+		end
+	end, true)
+	set_brightness(to, duration)
+end
+
+local function stop_ramp()
+	local level = math.floor(hold.level + 0.5)
+	end_hold()
+	set_brightness(level, 0)
+end
+
+dispatch.proxy["BUTTON_ACTION"] = function(_, params)
+	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
+	if not button or not action then
+		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
+	end
+	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+	if action == ACT_PRESS then
+		end_hold()
+		hold = { button = button }
+		hold.timer = C4:SetTimer(HOLD_AFTER_MS, function()
+			if hold and hold.button == button and not hold.ramping then
+				start_ramp()
+			end
+		end)
+	elseif action == ACT_CLICK or action == ACT_RELEASE then
+		if hold and hold.ramping then
+			stop_ramp()
+		else
+			end_hold()
+			click(button)
+		end
+	end
+end
+
+dispatch.proxy["SET_PRESET_LEVEL"] = function(_, params) save_setting("preset", params.LEVEL) end
+dispatch.proxy["SET_CLICK_RATE_UP"] = function(_, params) save_setting("click_up", params.RATE) end
+dispatch.proxy["SET_CLICK_RATE_DOWN"] = function(_, params) save_setting("click_down", params.RATE) end
+dispatch.proxy["SET_HOLD_RATE_UP"] = function(_, params) save_setting("hold_up", params.RATE) end
+dispatch.proxy["SET_HOLD_RATE_DOWN"] = function(_, params) save_setting("hold_down", params.RATE) end
+
 -- Lifecycle ----------------------------------------------------------------
 
 log.set_prefix(LOG_PREFIX)
@@ -663,6 +777,7 @@ end
 function OnDriverLateInit()
 	late_init_done = true
 	load_identity()
+	load_settings()
 	dispatch.replay_properties(Properties)
 	prop("Hue Light ID", light_id_label())
 	-- The bridge first, so messages it sent before this point are applied
@@ -712,4 +827,5 @@ end
 function OnDriverDestroyed()
 	settle("brightness")
 	settle("color")
+	end_hold()
 end
