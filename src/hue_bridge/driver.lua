@@ -35,6 +35,8 @@ local state = {
 	creds = nil,         -- what pairing produced; loaded from the store at startup
 	stream = nil,        -- bridge.stream instance, created in OnDriverLateInit
 	stream_ip = nil,     -- spelling of the bridge address the stream uses, see choose_stream_address
+	stream_family = nil, -- spellings the stream rotates over (altaddr.stream_family); nil in single-queue mode
+	last_stream_ip = nil, -- spelling of the previous stream transfer, so the next one differs
 	lights = nil,        -- bridge.lights registry, created in OnDriverLateInit
 	scenes = nil,        -- bridge.scenes (docs/scenes-design.md), created in OnDriverLateInit when the module exists
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
@@ -45,6 +47,10 @@ local state = {
 -- Stream timeout in single-queue mode: commands wait for the stream to
 -- end, so it must end often.
 local SINGLE_QUEUE_TIMEOUT = 60
+
+-- Persisted spelling of the last stream transfer, so a reloaded driver does
+-- not reuse the one its predecessor's abandoned transfer still holds.
+local STREAM_SPELLING_KEY = "hue_stream_spelling"
 
 local function prop(name, value)
 	C4:UpdateProperty(name, tostring(value == nil and "" or value))
@@ -68,7 +74,7 @@ end
 -- What the stream needs to connect, or nil when it can't.
 local function connection()
 	if state.ip and paired() then
-		return { ip = state.ip, key = state.creds.key, stream_ip = state.stream_ip or state.ip }
+		return { ip = state.ip, key = state.creds.key }
 	end
 	return nil
 end
@@ -77,10 +83,58 @@ local function number_property(name, default)
 	return tonumber(Properties[name]) or default
 end
 
--- True when the stream has its own C4:url queue (a padded address spelling
+-- True when the stream has its own C4:url queues (padded address spellings
 -- that the startup self-check confirmed), so commands never wait for it.
 local function dual_queue()
-	return state.stream_ip ~= nil and state.stream_ip ~= state.ip
+	return state.stream_family ~= nil
+end
+
+-- The spelling the next stream transfer uses: the family entry after the one
+-- the previous transfer used (in memory, or persisted by the driver instance
+-- a reload replaced), wrapping around, so a new transfer never queues behind
+-- the abandoned one (docs/design.md, "Stream address rotation"). With
+-- `commit` the pick is recorded and persisted as used.
+local function next_stream_address(commit)
+	local family = state.stream_family
+	if not family then
+		return state.ip
+	end
+	local last = state.last_stream_ip or C4:PersistGetValue(STREAM_SPELLING_KEY)
+	local index = 0
+	for i, spelling in ipairs(family) do
+		if spelling == last then
+			index = i
+		end
+	end
+	index = index % #family + 1
+	local pick = family[index]
+	if commit then
+		state.last_stream_ip = pick
+		C4:PersistSetValue(STREAM_SPELLING_KEY, pick)
+		log.debug("stream spelling %s (%d of %d)", pick, index, #family)
+	end
+	return pick
+end
+
+-- The `Stream Address` text in dual-queue mode.
+local function stream_address_text(spelling)
+	local n = #state.stream_family
+	return string.format("%s (own queue, %s; commands use %s)", spelling,
+		n > 1 and string.format("rotating over %d spellings", n) or "no second spelling to rotate", state.ip)
+end
+
+-- What the stream connects with. The stream calls this for every attempt,
+-- so each connection gets the next spelling.
+local function stream_connection()
+	local conn = connection()
+	if conn then
+		state.stream_ip = next_stream_address(true)
+		conn.stream_ip = state.stream_ip
+		if dual_queue() then
+			prop("Stream Address", stream_address_text(state.stream_ip))
+		end
+	end
+	return conn
 end
 
 local function stream_timeout()
@@ -237,7 +291,7 @@ end
 
 local function new_stream()
 	return stream.new({
-		connection = connection,
+		connection = stream_connection,
 		timeout = stream_timeout(),
 		watchdog = number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG),
 		on_status = function(text) prop("Event Stream", text) end,
@@ -294,30 +348,34 @@ local function restart_stream(force)
 	end
 end
 
--- Decide which spelling of the bridge address the stream uses (docs/design.md,
--- "Two ways to keep commands flowing"). Director queues C4:url transfers per
--- host text, so a zero-padded spelling gives the stream its own queue. The
--- self-check uses a third spelling, so it can never queue behind a stream,
--- or an abandoned stream, on the stream's spelling. Calls back when done;
--- until then the stream must not be started.
+-- Decide which spellings of the bridge address the stream uses (docs/design.md,
+-- "Two ways to keep commands flowing" and "Stream address rotation"). Director
+-- queues C4:url transfers per host text, so zero-padded spellings give the
+-- stream its own queues, one per connection, rotating so a reconnect never
+-- waits for the transfer it replaced. The self-check uses a spelling no
+-- stream ever takes, so it can never queue behind a stream or an abandoned
+-- one. Calls back when done; until then the stream must not be started.
 local function choose_stream_address(callback)
 	local check_ip = altaddr.for_check(state.ip)
-	local padded = altaddr.for_stream(state.ip)
+	local family = altaddr.stream_family(state.ip)
 	local function single(reason)
+		state.stream_family = nil
 		state.stream_ip = state.ip
 		prop("Stream Address", string.format("%s (shared queue with commands: %s; stream timeout capped at %d s)",
 			state.ip, reason, SINGLE_QUEUE_TIMEOUT))
 		log.warn("stream shares the command queue: %s", reason)
 		callback()
 	end
-	if not padded or not check_ip or not paired() then
+	if not family or not check_ip or not paired() then
 		return single(paired() and "no octet below 8 to pad" or "not paired")
 	end
 	http.request({ ip = check_ip, key = state.creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
 		if r.ok then
-			state.stream_ip = padded
-			prop("Stream Address", padded .. " (own queue; commands use " .. state.ip .. ")")
-			log.info("stream will use %s; self-check via %s OK", padded, check_ip)
+			state.stream_family = family
+			state.stream_ip = next_stream_address(false)
+			prop("Stream Address", stream_address_text(state.stream_ip))
+			log.info("stream will use %s, rotating over %d spelling(s); self-check via %s OK",
+				state.stream_ip, #family, check_ip)
 			callback()
 		else
 			single("self-check via " .. check_ip .. " failed: " .. tostring(r.err))
@@ -345,6 +403,7 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 	refresh_status()
 	if changed and state.late_init_done then
 		state.stream_ip = nil
+		state.stream_family = nil
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
@@ -1153,6 +1212,7 @@ dispatch.commands["Forget_Pairing"] = function()
 	credentials.clear()
 	state.creds = nil
 	state.stream_ip = nil
+	state.stream_family = nil
 	prop("Stream Address", "")
 	prop("Bridge Model", "")
 	prop("Events Received", 0)

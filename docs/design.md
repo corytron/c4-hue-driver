@@ -228,6 +228,59 @@ reconnect too, so a day of reloads can queue several zombies; bridge
 events drain them one per event (the `Hue Request` dev action can generate
 harmless events by renaming a light back and forth).
 
+### Stream address rotation (2026-10-21)
+
+The zombie problem above bit on every dev-loop reload and every watchdog
+reconnect: the new stream transfer went to the same padded spelling as the
+abandoned one and queued behind it, so `Event Stream` sat in "Connecting"
+until the next bridge event or the old transfer's timeout (600 s by
+default). Fix: the stream never reuses the spelling of the transfer it
+replaces, so the two are on different Director queues.
+
+- **Family.** `altaddr.stream_family(ip)` returns an ordered list of
+  spellings: every combination of 1-, 2- and 3-digit widths over the octets
+  below 8, minus the dotted spelling (commands) and the all-2-digit one
+  (`for_check`), capped at `altaddr.FAMILY_MAX` (8). The first entry is
+  `for_stream(ip)` (all 3-digit), then the widths count down octet by octet:
+  for `10.0.2.143` that is `10.0.2.143`, `10.0.2.143`, `10.0.2.143`,
+  `10.0.2.143`, `10.0.2.143`, `10.0.2.143`, `10.0.2.143` (7). An
+  address with one paddable octet (`192.168.1.50`) has a one-entry family,
+  `192.168.001.50`: no rotation, today's behaviour, and the property says so.
+  No paddable octet: nil, single-queue fallback as before. Only forms
+  measured on hardware are generated (2- and 3-digit padding, mixed per
+  octet, see the scheduling notes); 4-digit padding would give one-octet
+  addresses a second spelling but is unmeasured, so it is left out.
+- **Pick.** The self-check is unchanged (one GET via `for_check`, which no
+  stream ever uses, so it can never queue behind a zombie). Once it passes
+  the driver keeps the family; every time the stream connects it takes the
+  entry after the one the previous transfer used, wrapping around. "Previous"
+  is the in-memory last pick, or after a reload the value persisted under
+  `hue_stream_spelling` (`C4:PersistSetValue`), or none, which gives the
+  first entry. The pick is persisted before the transfer starts, so a
+  reloaded driver skips the spelling its predecessor's zombie holds.
+  Rotating on every connect, not only after an abandoned transfer, is
+  deliberate: a clean end (server close, timeout, failed connect) leaves no
+  zombie, and moving on anyway keeps the rule simple and the zombie-free
+  spelling the least recently used one.
+- **Property.** `Stream Address` shows the spelling in use and the mode:
+  `10.0.2.143 (own queue, rotating over 7 spellings; commands use
+  10.0.2.143)`, or `… (own queue, no second spelling to rotate; …)` for a
+  one-entry family. The single-queue text is unchanged.
+- **Stream module.** `bridge/stream.lua` already asks `opts.connection()`
+  afresh on every connect; it now records the spelling it used in
+  `stats.address` and logs it.
+
+Verified vs assumed: that distinct host texts get distinct queues is
+**[verified]** for the dotted, 2-digit and 3-digit spellings (the self-check
+on the 2-digit spelling goes through while a zombie sits on the 3-digit
+one); that every pair of family members is likewise separate is
+**[assumed]** from the host-text key; mixed widths per octet resolving is
+**[verified]** (`10.0.2.143`). That the persisted pick is readable by the
+next reload is **[assumed]**: the store can lag by moments
+(`bridge/credentials.lua`), a reload is seconds or more later. Hardware
+check (`docs/composer-checklist.md` E): two reloads a minute apart must each
+show "Connected since" within seconds and a different `Stream Address`.
+
 ## Lights
 
 How Hue lights become light_v2 devices and how state and commands move
