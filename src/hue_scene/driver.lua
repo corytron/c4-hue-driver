@@ -605,6 +605,18 @@ dispatch.commands["HUE_SCENE_FORGOTTEN"] = after_late_init("HUE_SCENE_FORGOTTEN"
 	report_online()
 end)
 
+-- Dev-only: dump what Director's Properties table holds and what this
+-- driver believes, for the dev loop (the bridge sends it with SendToDevice).
+dispatch.commands["HUE_DUMP"] = function()
+	local parts = {}
+	for k, v in pairs(Properties or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+	table.sort(parts)
+	log.always("Properties: %s", table.concat(parts, " | "))
+	log.always("state: rid=%s name=%s configured=%s active=%s recall_action=%s debug=%s", tostring(st.rid),
+		tostring(st.name), tostring(st.configured), tostring(st.active), tostring(recall_action),
+		tostring(log.enabled("debug")))
+end
+
 dispatch.commands["DEV_RELOAD"] = function(params)
 	params = params or {}
 	if not (devloop and devloop.apply_forwarded) then
