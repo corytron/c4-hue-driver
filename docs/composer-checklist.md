@@ -187,7 +187,8 @@ shows is below.
     Lights Report and paste the first lines: the bridge should have heard
     `HUE_GOODBYE` or seen the binding go). Then **Add Light**: the `Light`
     picker lists it as "<name> [<Hue room>] #<n> (deleted from Composer
-    <date>)" and `Room` pre-selects "(mapped room)". OK. Expect "Added <name>
+    <date>)"; pick "(mapped room)" in `Room` explicitly (the dialog remembers
+    the values of your last click). OK. Expect "Added <name>
     #<n> to <room> (device <id>)", the device in that Control4 room with the
     Hue name, and the tile working. **Import All New Lights** before the
     re-add must report "No new lights on the bridge" and skip the deleted
@@ -236,9 +237,10 @@ and the bridge actions through `devctl`. What only Composer shows:
     "<Room>: <Scene>" (zones as "<Zone> (zone): <Scene>", dynamic ones with
     " (dynamic)"), grouped by room; `Room` offers "(mapped room)" first.
     Pick a Bedside Lights scene (e.g. "Bedside Lights (zone): Nightlight")
-    with "(mapped room)": expect `Last Action` "Not added: Nightlight: Hue
-    room Bedside Lights (zone) not mapped; pick a room, or Set Room Mapping
-    first". Pick the Master Bedroom as `Room` instead: "Added Nightlight to
+    with "(mapped room)" picked explicitly (the dialog remembers the last
+    values): expect `Last Action` "Not added: Nightlight: Hue room Bedside
+    Lights (zone) not mapped; pick a room, or Set Room Mapping first". Pick
+    the Master Bedroom as `Room` instead: "Added Nightlight to
     Master Bedroom (device N)" and a device **"Bedside Lights Nightlight"**
     appears in the Master Bedroom as a switch tile (zone scenes carry the
     zone's name; room scenes are named like the scene alone).
