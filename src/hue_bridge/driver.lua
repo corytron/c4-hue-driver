@@ -911,9 +911,12 @@ end
 -- Messages from scene devices (docs/scenes-design.md §2).
 dispatch.commands["HUE_SCENE_HELLO"] = function(params)
 	params = params or {}
-	if not scene_message("hello", params) and state.scenes then
-		log.debug("HUE_SCENE_HELLO from unregistered scene %q (device %s)", tostring(params.rid),
-			tostring(params.device_id))
+	if not (state.scenes and state.scenes.hello) then
+		return log.warn("HUE_SCENE_HELLO ignored: scenes not available in this build")
+	end
+	-- hello(rid, params): the rid is a separate argument, as for lights.
+	if not state.scenes:hello(params.rid or "", params) then
+		log.debug("HUE_SCENE_HELLO not answered for %q (device %s)", tostring(params.rid), tostring(params.device_id))
 	end
 end
 
