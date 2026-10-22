@@ -74,7 +74,7 @@ docs/           design notes and the testing checklist I run in Composer
 - Lint: `luacheck src tests`
 - Test: `busted tests`
 - Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z` (`<version>` = git commit count). `tools/build.sh --dev` adds the dev loop and the Lua command window; never install a dev build as the production driver.
-- Dev loop: `tools/devserver.py` (background, once), `tools/devctl.py status|run|set|reload|wait|log`; details in `docs/dev-loop.md`
+- Dev loop: `tools/devserver.py` (background, once), `tools/devctl.py status|run|set|reload|wait|log|pin|unpin`; details in `docs/dev-loop.md`. While agents edit `src/`, keep the loop **pinned** and re-pin only states that pass lint and tests.
 - Design notes: `docs/design.md`; Composer checklist: `docs/composer-checklist.md`
 - Deploy: TBD — copy the `.c4z` to a folder the Windows VM can see; I'll import it in Composer Pro.
 
