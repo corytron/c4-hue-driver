@@ -181,13 +181,31 @@ Upload: `python3 -I tools/collect.py --dir build/collect` runs on this VM
 `Invoke-WebRequest -Method Put -InFile <file> http://<this VM>:8090/img/<name>.png`.
 The coordinator copies `build/collect/img/*` to `src/hue_bridge/www/img/`.
 
-## 6. Icon
+## 6. Icons
 
-A Hue Bridge Pro: a flat, dark (near-black) rounded rectangle seen from
-above, a small lit indicator (the bridge's status LEDs) and a lighter edge,
-drawn by `tools/make_icons.py` with Pillow at 16×16 and 32×32, 96 DPI
-metadata, transparent corners, saved as PNG. No logos or trademarks are
-drawn; the shape is the hint.
+All drawn by `tools/make_icons.py` with Pillow at 16×16 and 32×32, 96 DPI
+metadata, transparent corners, PNG; no logos or trademarks, the shape is
+the hint. The owner's addition of 2026-10-22: the light and scene devices
+get icons too (they replace the light_v2 proxy's standard ones in
+Composer only; Navigator is unaffected).
+
+- **Hue Bridge** (`src/hue_bridge/www/images/devices_{sm,lg}/hue_bridge_pro_{16,32}.png`):
+  a Hue Bridge Pro, a flat near-black rounded rectangle seen from above
+  with a small row of status LEDs and a lighter edge.
+- **Hue Light** (`src/hue_light/www/images/devices_{sm,lg}/hue_light_{16,32}.png`):
+  the Hue Tap dial remote from the owner's photo: a light-grey portrait
+  rounded-rectangle plate with a centred circular dial, a thin ring, a
+  cross dividing it into four quadrants and one to four tiny dots in them.
+- **Hue Scene** (`src/hue_scene/www/images/devices_{sm,lg}/hue_scene_{16,32}.png`):
+  the same remote with a colour flair: a rainbow ring around the dial and
+  coloured quadrant dots.
+
+Wiring: each driver's header gets `<small image_source="c4z">` and
+`<large image_source="c4z">`; the light and scene drivers also set
+`image_source="c4z"`, `small_image` and `large_image` on their `<proxy>`
+element so the List View uses them **[assumed: the attribute form for c4z
+proxies, by analogy with the url form in Fundamentals 19; verified on the
+install]**.
 
 ## 7. Verification
 
