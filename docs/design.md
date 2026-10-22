@@ -768,6 +768,20 @@ project:
   32 px tile stayed the light_v2 standard bulb for both, so the `<proxy
   large_image>` did not take there (cause unknown; not pursued). The Items
   pane shows the generic placeholder for Control4's own Hue drivers too.
+- **Build 135: manual second edition and second-generation icons
+  (2026-10-22 14:21, Windows session)**: same install route, every device
+  at 135 a minute later. The Documentation tab shows the 13 chapters plus
+  Glossary, in-page links scroll, pictures render; the scene device's
+  Actions tab lists Adopt Hue Name before Forget This Scene now that it
+  has `sort_order`. Icons: the bridge changed at once (tree and List
+  View); the light created under build 125 (which already had a custom
+  proxy icon) **changed to the new icon with the update**, while the light
+  created under 116 and the scene devices created before any custom icon
+  still show Composer's standard bulb. So a proxy device follows the
+  driver's icon once it was created under a build that declared one, and
+  a device created without one keeps the default for good. Composer keeps
+  the Documentation tab's scroll position until another device is
+  selected.
 
 ## Discovery
 
