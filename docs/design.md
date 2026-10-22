@@ -392,6 +392,13 @@ rates and ramps on a hold (timed Hue target to the end of the range, a
 recalls, turns off or toggles. `SET_PRESET_LEVEL` and the rate commands
 persist per device; `supports_default_on` is declared to receive the
 preset **[assumed until a switch is bound on hardware]**.
+On hardware (builds 144 and 146): the Top, Bottom and Toggle Button Links
+are connections the driver declares (ids 200–202, BUTTON_LINK outputs),
+not something the proxy creates; a capability change made Composer ask for
+a Director restart and left an existing light on the old version until a
+per-device overwrite, while the connection change in 146 reached the
+existing device at once with no restart. Details and the open "Not bound
+after a Director restart" item in `docs/keypad-design.md`.
 
 ### Lights: verified on hardware (2026-10-21, through the dev loop)
 
