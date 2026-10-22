@@ -445,6 +445,19 @@ loop on OS 3.4.2:
   and for a proxy id alike.
 - `C4:UpdateProperty` on an undeclared name and `C4:SendToDevice` to a
   non-existent id both return nil silently; nothing is logged.
+- `C4:GetBoundProviderDevice(1034, 1)` on a device with **nothing bound**
+  returns the **number 0**, not the nil the API doc promises (2026-10-22).
+  Lua takes 0 for true, so until that day both the light and the scene
+  driver showed "Bound; waiting for the bridge" on a never-bound device
+  and sent their hello to device 0; `bound_bridge()` now treats 0 as nil.
+- `C4:Bind(1033, 1, 1034, 1, "HUE_BRIDGE")` (provider bridge, consumer
+  light, run from the bridge through `Probe Call`) made the binding at
+  once: Director raised `OnBindingChanged(1, HUE_BRIDGE, true, 1034, 1)` on
+  the bridge in the same millisecond, the light answered with `HUE_HELLO`
+  5 ms later and the call returned the class string. The Windows session
+  could not start Composer's Connections drag with synthesized mouse input
+  (two attempts, nothing happened), so this is the way to bind a device
+  from here when the owner is not at Composer (2026-10-22).
 - Hue side: 16 rooms (9.9 KB), 7 zones (6.6 KB), 1 bridge_home (1.3 KB),
   125 scenes (351 KB). The single `GET /clip/v2/resource` returns 497
   items, 588 KB, in 1 s. Room `children` are devices, zone `children`
@@ -494,6 +507,31 @@ loop on OS 3.4.2:
   /grouped_light/<zone's grouped_light> {"on":{"on":false}}`, both lights
   reported off 360 ms later and the `scene` item went inactive in the same
   container as the grouped_light updates **[verified]**.
+- **Scene lifecycle through Composer (rounds 5–6, 21:28–21:54)**: `Add All
+  Scenes Of Room` on Patio created "Ibiza" and "Lily" in the Patio room
+  (room scenes carry no prefix; zone scenes carry the zone's name) and
+  refused a second run with "No new scenes in Patio (2 on bridge, 2
+  imported)"; deleting a scene device in Composer produced "…, 1 deleted"
+  and the tombstone entry "Patio: Ibiza (deleted from Composer 2026-10-21)"
+  at the end of the `Add Scene` picker, and re-adding worked; `Forget Scene`
+  gave "Forgot Ibiza (device 1138): unbound and left in the project for you
+  to delete; …" and the device's "Forgotten by the bridge (was Hue scene
+  Ibiza). …". A scene created through the API appeared in the picker from
+  its `add` event; deleting it on the Hue side marked its device gone within
+  60 ms ("Scene deleted in Hue since 2026-10-21 21:35; ON does nothing;
+  re-link or Forget", `Attention` "1 scene missing from the bridge: …");
+  `Re-link Scene` moved the device to the "Read" scene ("Re-linked device
+  1140 (was C4 Test Scene) to Bedside Lights (zone): Read"), `Attention`
+  then flagged the name difference and the device's `Adopt Hue Name`
+  renamed it to "Bedside Lights Read" **[all verified on hardware]**.
+- **`Recall As` works; Composer's Set button was the missing step.** A
+  property edited in Composer's grid (combo or text) is only sent to Director
+  when the row's **Set** button — which appears beside the value, with
+  Cancel, the moment it differs — is clicked; Enter or leaving the field
+  keeps the new value in the grid only, and the grid later reverts to
+  Director's value. Director's `Properties` table for the device confirmed
+  it (`HUE_DUMP`); after Set, the device recalled as
+  `{"recall":{"action":"static"}}` **[verified 22:03–22:04]**.
 - Two bugs found by reading the device's page from the Windows session: the
   bridge sent the group *label* ("Bedside Lights (zone)") as `group_name`
   while the device appends "(zone)" itself, and the bridge's
@@ -543,6 +581,37 @@ longer queue behind the zombie.
   expected texts (`Attention` "None"; `Room Mappings` listing 9 mapped
   rooms, 7 unmapped rooms and 7 unmapped zones; `Last Action` holding the
   full Room Audit text, about 3 KB, displayed without truncation).
+- **G23, the bare device (2026-10-22, Windows session + dev loop).** The
+  hand-added "Hue Light" (device 1034, room "Room") was bound with
+  `C4:Bind` (above); the bridge logged "device 1034 bound but not
+  registered; its hello or Link Devices adopts it" and the light's hello
+  came with an empty name. `Attention` stayed "None" and `Lights` unchanged:
+  a bound, never-linked device is not an "unbound" entry. **Link Devices**
+  → "not linked 1: Hue Light (device 1034): no unimported Hue light has
+  that name; rename the device in Composer to the Hue light's exact name
+  and run Link Devices again". **Forget Light** on Vanity 3 (device 1130)
+  → registry entry dropped, `OnBindingChanged(…, false, 1130, 1)` 30 ms
+  later, "Forgot Vanity 3 #92 (device 1130): unbound and left in the
+  project for you to delete; the Hue light is listed under Add Light
+  again", `Attention` "1 new light on the bridge: Vanity 3 [Master
+  Bathroom] #92 (Add Light or Import All New Lights)", `Lights` "46
+  imported, 1 new". The Windows session renamed 1034 to "Vanity 3" in the
+  tree; **Link Devices** → "adopted Vanity 3 (device 1034) by its name",
+  the light's state delivered to 1034 80 ms later (reason=hello), `Last
+  Action` "Linked 1 device: Vanity 3 (device 1034) to Vanity 3 [Master
+  Bathroom] #92 by name | Scenes: All 2 bound scene devices are
+  registered", `Attention` back to "None", `Lights` "47 imported". Composer
+  showed the programmatic binding in Connections as `Connected To` "Hue
+  Bridge->Hue Lights"; the bare device's Properties read `Status` "Bound;
+  waiting for the bridge" with every Hue field empty, and after the link
+  `Status` "Vanity 3 (Hue color lamp)", `Hue Light ID` "#92 (6adf99eb…)",
+  `Hue Room` "Master Bathroom", `Online` "Offline" (the bulb is unpowered).
+  The Forget Light picker lists "[42] Vanity 3 #92 (device 1130)"; the
+  forgotten device reads "Forgotten by the bridge (was Hue light Vanity 3
+  #92). Delete this device in Composer, or bind it again and use Link
+  Devices", `Online` "Offline", `Last Action` "Forgotten by the bridge".
+  Device 1034 keeps its own room ("Room"): linking never moves a device.
+  The old device 1130 is left for the owner to delete.
 - Actions driven through the dev loop (`devctl run`): `Set Room Mapping`
   "Mapped Mini Bar (zone) → Kitchen" then "Removed the mapping for Mini Bar
   (zone)"; `Link Devices` "All 47 bound devices are registered";
@@ -613,6 +682,26 @@ project:
   `Room` empty rather than pre-selecting "(mapped room)"; an empty value
   means the mapping and was accepted. So `itemtype` 6 = protocol device,
   7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
+- **Property edits commit only through the row's Set button** (see the
+  scenes section): automation must click it; a human usually does without
+  noticing. `Set-ComposerProperty` did the whole sequence on 2026-10-22
+  (combo arrow, focus check, stepping the list, Enter, the row's Set,
+  3 s, re-read) for `Debug Mode` On → Off and `Recall As` Static → "As set
+  in Hue" on a scene device, about 6 s each, Director confirming both.
+- **Connections cannot be made with synthesized mouse input.** The
+  Connections view reads fine through UIA (upper pane "Control & Audio
+  Video Connections" with the device's `Hue Bridge` input row, lower pane
+  "HUE_BRIDGE Output Devices" listing the bridge with its 47 existing
+  connections), but two drag attempts from the bridge row onto the input
+  row (stepped `SetCursorPos` with button down/up, and `mouse_event` with a
+  held jiggle) started no OLE drag. Binding a device without the owner's
+  hands is done from the bridge with `C4:Bind` through `Probe Call`
+  (Project APIs section).
+- **The "Action Parameter List" dialog remembers the last values per
+  action** (seen 2026-10-21 21:30: a later `Add Scene` opened pre-filled
+  with the previous Scene and Room). An empty `Room` therefore cannot be
+  relied on after the first use; "(mapped room)" (value "") must be picked
+  explicitly when the mapping is wanted, and every picker re-chosen.
 - **Installing a new build**: Driver ▸ "Add or Update Driver or Agent…"
   accepts several `.c4z` files at once ("Select Driver or Agent…" dialog)
   and answers "Update Succeeded … successfully added: hue_scene.c4z" then

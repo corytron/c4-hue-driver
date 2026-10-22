@@ -70,6 +70,10 @@ behalf, not the owner.
 6. **After every step** confirm the window title (project name) and the
    System Design row count are unchanged unless the step meant to change
    them.
+7. **A property edit is not done until the row's Set button is clicked.**
+   Composer shows the new value at once but sends nothing to Director until
+   Set (which appears with Cancel beside the changed value); every earlier
+   "the driver ignored my change" was this. `Set-ComposerProperty` does it.
 
 ## The helper module
 

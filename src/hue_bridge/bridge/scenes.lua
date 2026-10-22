@@ -2033,7 +2033,9 @@ function scenes:picker_relink_devices()
 	for _, state in ipairs({ "gone", "unbound" }) do
 		for _, rid in ipairs(self.reg:rids(state)) do
 			local entry = self.registry[rid]
-			list[#list + 1] = { text = string.format("%s (device %d, %s since %s)", self:entry_label(rid, entry),
+			-- Labelled like Forget Scene's picker, group first, so the two read alike.
+			list[#list + 1] = { text = string.format("%s: %s (device %d, %s since %s)",
+				sanitise(self:group_label(entry.group_rid, entry)), self:entry_label(rid, entry),
 				entry.device_id, state, short_date_of(entry[state .. "_since"])), value = tostring(entry.device_id) }
 		end
 	end
