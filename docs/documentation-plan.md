@@ -218,3 +218,132 @@ word: "Go ahead and rev a new driver with the document when you are
 done"); then read the Hue Bridge's **Documentation** tab: the page renders,
 images show, the icon in the tree and list view changed. Results go into
 `docs/design.md` (Composer UI section).
+
+## 8. Review round (2026-10-22): five graded readers, one revision
+
+Five read-only reviewers (a child, a novice owner, a hobbyist, an
+integrator, and a maximum-depth engineer-editor) compared the shipped
+manual with every design document, the checklist, the three `driver.xml`
+and the code. Their reports are kept outside the repo; what they agreed on
+and what the coordinator accepted is this list. The revision keeps the
+chapter structure of §3 and the HTML rules of §4; the code stays the truth.
+
+**Errors to correct (must)**
+
+1. 8.2 renames: a device renamed in Composer is reported in `Attention`
+   within seconds (the bridge listens for Composer's rename event); a
+   light renamed in the Hue app is reported at the next full read or any
+   bridge action. `Accept Names As They Are` remembers the Hue name it
+   accepted, so a later Composer rename is not re-reported; only a Hue-side
+   name change re-arms it.
+2. 8.6 a Forgotten device bound again announces its remembered Hue light
+   and the bridge adopts it on the spot; its Status returns to the normal
+   text and `Link Devices` then answers "All N bound devices are
+   registered", which is success. `Bound; waiting for the bridge` is the
+   bare hand-added device only. Mention the conflict answer when that
+   light was re-imported meanwhile.
+3. 4 step 2: while paired, an invalid `Bridge IP Address` (letters,
+   leading zeros, octets above 255) drops the stored address, `Status`
+   returns to "Enter the bridge IP address" and the event feed stops until
+   a valid one is set.
+4. Delete the troubleshooting item "Room Mappings says (deleted in Hue)
+   for every room right after a restart" (fixed in code).
+5. 5 `Stream Address` example: 192.168.1.50 has one paddable octet, so the
+   text is "(own queue, no second spelling to rotate; …)"; an address with
+   no octet below 8 reads "(shared queue with commands: no octet below 8
+   to pad; stream timeout capped at 60 s)".
+6. "HTTP 401" everywhere becomes "HTTP 401 or 403" (the code prints the
+   code it gets; Hue documents 403 for a revoked key).
+7. Import skip label carries the tag: "Vanity 3 #92 (deleted 2026-10-22)".
+8. `Forget Pairing` before pairing a different bridge is optional, not
+   required (the bridge id is not checked); say devices go "Gone".
+9. Chapter 1's "never … on its own" names the two exceptions up front:
+   the one-time Map Rooms By Name at first contact, and re-adoption of a
+   device that announces a light the bridge already knows.
+10. `Attention` lists at most six items, then "… and N more".
+
+**Gaps to add (must)**
+
+11. A chapter "Using the lights from Control4" after the Hue Light device
+    chapter: a Hue Light is an ordinary Control4 dimmer in Programming,
+    keypads and Navigators; `Turn On` and a tap mean 100 %, not Hue's
+    power-on level; events fire for changes made in the Hue app too; a Hue
+    Scene is a switch (0 or 100) and an Advanced Lighting Scenes member;
+    a whole-room command sends one request per light at ten per second,
+    so a room of 47 lights takes about five seconds; "stop ramp" settles at
+    the last reported level; Refresh Navigators after adding devices.
+12. Network prerequisite (chapter 3 and 11): the live feed gets its own
+    connection only when the bridge address has an octet below 8;
+    otherwise it shares the command connection, `Stream Timeout (s)` is
+    capped at 60 and commands can wait behind the feed. Recommend such an
+    address; IPv4 only.
+13. Offline behaviour (chapter 4 and 10): an unreachable light's tile is
+    disabled on Navigators; a tap during an outage shows the requested
+    level after a second although the bulb did nothing, and the command is
+    retried until the bridge is back, even hours later; a scene recall is
+    one request and is not retried.
+14. 8.8 adds project restore from a Composer backup and controller
+    replacement: what lives on the bridge device (key, registry,
+    tombstones, mappings), what each device remembers, the expected steps
+    (Pair Bridge, then Link Devices which adopts by remembered identity),
+    and that the store surviving a project restore is unverified.
+15. Chapter 3 adds update and rollback (same "Add or Update" route with an
+    older build; untested), and how to tell a release from a development
+    build (`Dev Server` is ignored by a release).
+16. `Set Room Mapping` gets the same "the dialog remembers the last values;
+    check both rows" warning as Add Light.
+17. Chapter 9 lists the scene device's `Driver Version` and `Debug Mode`.
+18. One sentence under `Last Action`: "(device N)" in bridge texts is the
+    device's protocol id; Composer's tree shows the proxy id, one higher.
+19. `Connection Test` can hold the command connection for up to five
+    minutes; say so.
+20. Troubleshooting rows for: "Busy: resyncing scenes; try again in a
+    moment", "Import failed: …", "Scene refresh failed: …", "Not added:
+    pick a Hue room first", "Not re-linked: pick a device and a scene", the
+    "no Hue room" and "mapped to a Control4 room that no longer exists"
+    variants of "Not added", "Pairing failed: Pairing request failed: …",
+    "Pinning check FAILED …", "Stored credentials readable but differ from
+    memory …", "Set the Diagnostic Server property first (host:port)", the
+    other "Not re-linked" texts, "Not mapped: Control4 room N does not
+    exist", "No mapping for X to remove", Room Audit's "; N not found in the
+    project", `Event Stream` "Stopped" after Connection Test or an invalid
+    address, "Disconnected: server closed the stream (HTTP 200)", "Recall
+    failed: HTTP 404", Add All Scenes refusals ("… has no scenes", "… is not
+    on the bridge"), Link Devices' duplicate-claim and "(not on the bridge:
+    marked gone)" texts, Attention's "unbound scene device" and "2 devices
+    claim Hue scene …", and the scene Status texts (Not bound / Bound;
+    waiting / Forgotten).
+21. Scenes: `Link Devices` matches a scene device by the plain scene name;
+    OFF on a scene of an empty zone reports off without a request;
+    `Recall As` and a programmed ramp (the ramp becomes the recall
+    transition); bridge_home scenes appear as "(all lights): Scene".
+
+**Readability (should)**
+
+22. A short "Finding your way in Composer" section at the start of chapter
+    3: System Design, the tree, selecting a device, the right-hand tabs
+    (Properties, Actions, Documentation, Lua), how an action is run, the
+    Select dialog's inner and outer OK, renaming (F2), deleting, dragging
+    a device to a room, reaching the Connections view, and where "Lua
+    output" is (the Lua tab).
+23. A glossary at the end: bound / linked, mapping, room vs zone, scene,
+    Navigator, full read, event feed, DHCP reservation, Hue identity.
+24. No "rid" (say "its Hue identity"); no GET / HTTP words outside quoted
+    texts; "containers" explained once where the Event Stream text is
+    quoted.
+25. One term each: "event feed" (not live feed / event stream), "full read"
+    (not refresh / re-read / resync), "gone" vs "missing" used as the texts
+    use them, "Hue Light" for the device and "light" for the bulb.
+26. Captions say what to look at; the paired `bridge-properties.png` moves
+    under the paired text; `relink-device-light.png` joins §5; images at
+    their native widths; scene subsections numbered like 8.x; the light
+    paragraphs duplicated between 7 and 10 merged.
+
+**Code nits (fixed in the same pass)**
+
+27. `hue_scene/driver.xml` actions get `<sort_order>` so Composer lists
+    Adopt Hue Name before Forget This Scene; the "Pairing failed: Pairing
+    failed: …" doubled prefix; Room Audit's "All 1 linked lights" plural.
+
+**Not done**: verifying whether a revoked key answers 401 or 403 (needs the
+key revoked on the house bridge).
