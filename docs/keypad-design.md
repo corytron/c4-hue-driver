@@ -95,5 +95,8 @@ Install behaviour seen on the house (build 141 → 144 → 146):
 Open: the light reading "Not bound" while bound after a Director restart
 suggests the binding is not yet visible to `GetBoundProviderDevice` at late
 init after a restart, and the light never looks again until a binding
-event. A delayed re-check (a few seconds after late init when unbound) is
-the proposed fix; not yet built.
+event. Fixed on branch `binding-recheck`: when unbound at late init, the
+light and scene drivers look again at 5, 15, 30 and 60 s, greet the bridge
+as soon as the binding is visible, and stop on a binding event, on destroy,
+or after the last check. Not yet seen on hardware (needs a Director
+restart).
