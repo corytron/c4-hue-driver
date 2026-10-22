@@ -138,6 +138,23 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.same({ "HUE_CONFIGURE", "HUE_STATE" }, messages_to(bc4, LIVING_ID))
 		assert.equal(LIVING_ROOM, fake.project.devices[LIVING_ID].room_id)
 
+		-- A rename in Composer reaches the bridge as the OnItemNameChanged
+		-- system event and Attention follows at once (it stayed stale until the
+		-- next action on hardware, 2026-10-22). The fake's AddDevice reports no
+		-- proxy id, so both project records are renamed here; Adopt Hue Names
+		-- itself is covered in lights_spec.
+		local lamp_records = { fake.project.devices[LIVING_ID] }
+		for _, rec in pairs(fake.project.devices) do
+			if rec.protocol_id == LIVING_ID then lamp_records[#lamp_records + 1] = rec end
+		end
+		for _, rec in ipairs(lamp_records) do rec.name = "Lamp" end
+		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
+		assert.truthy(bridge.Properties["Attention"]:find("Lamp is Living Room Lamp in Hue", 1, true),
+			bridge.Properties["Attention"])
+		for _, rec in ipairs(lamp_records) do rec.name = "Living Room Lamp" end
+		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
+		assert.is_nil(bridge.Properties["Attention"]:find("differ", 1, true), bridge.Properties["Attention"])
+
 		-- Now the Living Room Lamp is a real driver bound to this bridge.
 		fake.pair(bridge, light, { light_id = LIVING_ID, bind = false })
 		assert.equal(15, light.C4:GetBoundProviderDevice(LIVING_ID, 1))
