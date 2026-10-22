@@ -258,11 +258,15 @@ end
 -- as they are; the persistence layer serialises them [verified on hardware:
 -- lights.lua stores its registry table the same way].
 function registry:save()
+	-- Tombstones first: a crash between the two writes right after a
+	-- tombstone() must not lose the deleted light from both tables, or the
+	-- next import re-creates a device the owner deleted [code analysis
+	-- 2026-10-22, R4].
+	self.persist_set(self.keys.tombstones, self.tombs)
 	self.persist_set(self.keys.lights, self.lights)
 	if self.keys.rooms then
 		self.persist_set(self.keys.rooms, self.rooms)
 	end
-	self.persist_set(self.keys.tombstones, self.tombs)
 end
 
 -- Lookup ---------------------------------------------------------------------
