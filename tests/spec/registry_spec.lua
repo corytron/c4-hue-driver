@@ -493,6 +493,103 @@ describe("bridge.registry", function()
 		end)
 	end)
 
+	describe("keys option", function()
+		local SCENE_KEYS = { lights = "hue_scenes", tombstones = "hue_scene_tombstones", rooms = false }
+
+		local function new_scene_reg()
+			return registry.new({ persist_get = persist_get, persist_set = persist_set, now = now, log = log,
+				keys = SCENE_KEYS })
+		end
+
+		it("defaults to the light keys and exposes them", function()
+			assert.same({ lights = "hue_lights", tombstones = "hue_tombstones", rooms = "hue_rooms" }, reg.keys)
+			assert.same(reg.keys, new_reg().keys)
+			local partial = registry.new({ persist_get = persist_get, persist_set = persist_set, keys = { lights = "x" } })
+			assert.same({ lights = "x", tombstones = "hue_tombstones", rooms = "hue_rooms" }, partial.keys)
+		end)
+
+		it("refuses a key that is not a name", function()
+			assert.has_error(function()
+				registry.new({ persist_get = persist_get, persist_set = persist_set, keys = { lights = "" } })
+			end)
+			assert.has_error(function()
+				registry.new({ persist_get = persist_get, persist_set = persist_set, keys = { tombstones = 7 } })
+			end)
+			assert.has_error(function()
+				registry.new({ persist_get = persist_get, persist_set = persist_set, keys = { lights = false } })
+			end)
+		end)
+
+		it("saves under its own two keys and never touches the light keys or a room key", function()
+			local sc = new_scene_reg()
+			clock = 1500
+			sc:add("scene-a", { device_id = 2061, name = "Relax", group_rid = "room-1", group_type = "room" })
+			sc:add("scene-b", { device_id = 2062, name = "Bright" })
+			sc:tombstone("scene-b")
+			sc:save()
+			table.sort(saved)
+			assert.same({ "hue_scene_tombstones", "hue_scenes" }, saved)
+			assert.same({
+				["scene-a"] = { device_id = 2061, name = "Relax", group_rid = "room-1", group_type = "room",
+					state = "linked", created_at = 1500 },
+			}, store.hue_scenes)
+			assert.same({ ["scene-b"] = { name = "Bright", device_name = nil, deleted_at = 1500 } }, store.hue_scene_tombstones)
+			assert.is_nil(store.hue_lights)
+			assert.is_nil(store.hue_tombstones)
+			assert.is_nil(store.hue_rooms)
+		end)
+
+		it("loads from its own keys only, ignoring the light keys and the room key", function()
+			store.hue_lights = { ["rid-a"] = v1(2043, "Desk Lamp") }
+			store.hue_tombstones = { ["rid-x"] = { name = "Old Lamp", deleted_at = 5 } }
+			store.hue_rooms = { ["room-1"] = { c4_room_id = 12, c4_room_name = "Kitchen", hue_name = "Kitchen" } }
+			store.hue_scenes = { ["scene-a"] = { device_id = "2061", name = "Relax", state = "gone", gone_since = "77" } }
+			store.hue_scene_tombstones = { ["scene-b"] = { name = "Bright", deleted_at = "99" } }
+			local sc = new_scene_reg()
+			assert.same({ linked = 0, gone = 1, unbound = 0, tombstones = 1, rooms = 0 }, sc:load())
+			assert.equal(2061, sc:get("scene-a").device_id)
+			assert.equal(77, sc:get("scene-a").gone_since)
+			assert.is_nil(sc:get("rid-a"))
+			assert.same({ name = "Bright", deleted_at = 99 }, sc:tombstones()["scene-b"])
+			assert.same({}, sc:room_mappings())
+			assert.is_nil(sc:room_mapping("room-1"))
+			-- The light registry still reads its own keys next to it.
+			assert.same({ linked = 1, gone = 0, unbound = 0, tombstones = 1, rooms = 1 }, reg:load())
+		end)
+
+		it("refuses room mappings while rooms are disabled, and keeps the rest of the interface", function()
+			local sc = new_scene_reg()
+			assert.same({ nil, "no room mappings" }, { sc:set_room_mapping("room-1", { c4_room_id = 7 }) })
+			assert.is_nil(sc:remove_room_mapping("room-1"))
+			assert.equal(0, sc:counts().rooms)
+			sc:add("scene-a", { device_id = 2061, name = "Relax" })
+			assert.same({ unbound = { "scene-a" }, relinked = {}, tombstoned = {} },
+				sc:reconcile({ bound = {}, present = { [2061] = true } }))
+			assert.truthy(sc:relink("scene-a", "scene-c", { name = "Bright" }))
+			assert.equal("Bright", sc:get("scene-c").name)
+		end)
+
+		it("names a malformed entry's own key in the warning", function()
+			store.hue_scenes = { ["no-device"] = { name = "Orphan" } }
+			new_scene_reg():load()
+			assert.truthy(saw_log("dropped a malformed hue_scenes entry for no-device"))
+		end)
+
+		it("round-trips with a renamed room key too", function()
+			local other = registry.new({ persist_get = persist_get, persist_set = persist_set, now = now, log = log,
+				keys = { lights = "alt_lights", tombstones = "alt_tombs", rooms = "alt_rooms" } })
+			other:add("rid-a", { device_id = 1 })
+			other:set_room_mapping("room-1", { c4_room_id = 7, c4_room_name = "Hall", hue_name = "Hall" })
+			other:save()
+			table.sort(saved)
+			assert.same({ "alt_lights", "alt_rooms", "alt_tombs" }, saved)
+			local again = registry.new({ persist_get = persist_get, persist_set = persist_set, now = now, log = log,
+				keys = { lights = "alt_lights", tombstones = "alt_tombs", rooms = "alt_rooms" } })
+			assert.same({ linked = 1, gone = 0, unbound = 0, tombstones = 0, rooms = 1 }, again:load())
+			assert.equal(7, again:room_mapping("room-1").c4_room_id)
+		end)
+	end)
+
 	describe("save()", function()
 		it("writes exactly the three keys with the current tables; mutators alone persist nothing", function()
 			clock = 1500

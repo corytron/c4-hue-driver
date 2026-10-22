@@ -1,0 +1,166 @@
+<devicedata>
+	<copyright>Copyright 2026 Cory Fair. Private, not for distribution.</copyright>
+	<creator>Cory Fair</creator>
+	<manufacturer>Philips Hue</manufacturer>
+	<name>Hue Scene</name>
+	<model>Hue Scene (CLIP v2)</model>
+	<created>10/21/2026 12:00</created>
+	<modified>10/21/2026 12:00</modified>
+	<version>1</version>
+	<control>lua_gen</control>
+	<controlmethod>IP</controlmethod>
+	<driver>DriverWorks</driver>
+	<!-- 3.3.0: same floor as hue_light (light_v2 brightness-target API); see docs/design.md -->
+	<minimum_os_version>3.3.0</minimum_os_version>
+	<config>
+		<script jit="1" file="driver.lua"/>
+		<properties>
+			<property>
+				<name>Driver Version</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Debug Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Off</item>
+					<item>On</item>
+				</items>
+				<default>Off</default>
+				<readonly>false</readonly>
+			</property>
+			<property>
+				<name>Status</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Hue Scene</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Hue Room</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Hue Scene ID</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<!-- How ON recalls the scene: Hue's own choice (a dynamic scene plays, a
+			     static one is set), always static, or always the dynamic palette. -->
+			<property>
+				<name>Recall As</name>
+				<type>LIST</type>
+				<items>
+					<item>As set in Hue</item>
+					<item>Static</item>
+					<item>Dynamic</item>
+				</items>
+				<default>As set in Hue</default>
+				<readonly>false</readonly>
+			</property>
+			<property>
+				<name>Online</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+		</properties>
+		<actions>
+			<action>
+				<name>Adopt Hue Name</name>
+				<command>Adopt Hue Name</command>
+				<params/>
+			</action>
+			<action>
+				<name>Forget This Scene</name>
+				<command>Forget This Scene</command>
+				<params/>
+			</action>
+		</actions>
+		<commands/>
+	</config>
+	<proxies>
+		<proxy proxybindingid="5001" name="Hue Scene">light_v2</proxy>
+	</proxies>
+	<!-- A switch, not a dimmer: ON recalls the Hue scene, OFF turns its group off,
+	     and the bridge's scene status is mirrored as 100 / 0. supports_target keeps
+	     the brightness-target API (SET_BRIGHTNESS_TARGET / LIGHT_BRIGHTNESS_CHANGING);
+	     reduced_als_support admits the scene to Advanced Lighting Scenes, which then
+	     drive it with SET_BRIGHTNESS_TARGET and end a ramp with SET_BRIGHTNESS_STOP,
+	     so supports_brightness_stop is declared as the proxy reference asks. No colour
+	     capability is ever switched on: the switch declares everything statically. -->
+	<capabilities>
+		<dimmer>False</dimmer>
+		<set_level>False</set_level>
+		<ramp_level>False</ramp_level>
+		<on_off>True</on_off>
+		<min_max>False</min_max>
+		<click_rates>False</click_rates>
+		<hold_rates>False</hold_rates>
+		<cold_start>False</cold_start>
+		<has_leds>False</has_leds>
+		<supports_target>True</supports_target>
+		<supports_brightness_stop>True</supports_brightness_stop>
+		<supports_color_stop>False</supports_color_stop>
+		<supports_color>False</supports_color>
+		<supports_color_correlated_temperature>False</supports_color_correlated_temperature>
+		<supports_broadcast_scenes>False</supports_broadcast_scenes>
+		<supports_multichannel_scenes>False</supports_multichannel_scenes>
+		<hide_proxy_properties>True</hide_proxy_properties>
+		<hide_proxy_events>False</hide_proxy_events>
+		<reduced_als_support>True</reduced_als_support>
+		<advanced_scene_support>False</advanced_scene_support>
+		<load_group_support>False</load_group_support>
+		<buttons_are_virtual>True</buttons_are_virtual>
+	</capabilities>
+	<events/>
+	<connections>
+		<connection>
+			<id>5001</id>
+			<facing>6</facing>
+			<connectionname>LIGHT</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>LIGHT_V2</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>1</id>
+			<facing>6</facing>
+			<connectionname>Hue Bridge</connectionname>
+			<type>1</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>HUE_BRIDGE</classname>
+				</class>
+			</classes>
+			<hidden>False</hidden>
+		</connection>
+	</connections>
+</devicedata>

@@ -1853,6 +1853,19 @@ function lights:link_devices()
 	if not bound then
 		return "Not linked: the bound-device lookup failed (see the Lua output)"
 	end
+	-- Scene devices share binding 1 (docs/scenes-design.md); only hue_light
+	-- devices are candidates here. Without the project lookup every bound
+	-- device is considered, as before scene devices existed.
+	local in_project = self:project_lights()
+	if in_project then
+		local only_lights = {}
+		for id, name in pairs(bound) do
+			if in_project[tonumber(id) or id] then
+				only_lights[id] = name
+			end
+		end
+		bound = only_lights
+	end
 	local ids = {}
 	for id in pairs(bound) do
 		if positive(id) and not self.reg:by_device(id) then

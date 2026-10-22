@@ -219,6 +219,58 @@ shows is below.
     not offered here; its way back is binding it again in Connections and
     `Link Devices`, which adopts the rid it announces.)
 
+## H. Scenes as switch devices (the `scenes` build)
+
+A new driver, `hue_scene.c4z`, plus updated bridge and light drivers. Start
+with Composer's **Add or update drivers** for all three (`hue_scene.c4z`
+must be in the controller's driver store before `Add Scene` can create one);
+update the bridge and the light in place as usual. The dev loop verifies
+beforehand: the scene catalogue GET at resync, recall and status events,
+and the bridge actions through `devctl`. What only Composer shows:
+
+25. Bridge Properties: a new `Scenes` line, "125 on bridge, 0 imported,
+    0 missing, 0 unbound, 0 deleted" once the stream has resynced ("0
+    imported" before). Actions tab gains `Add Scene`, `Add All Scenes Of
+    Room`, `Re-link Scene`, `Forget Scene`, `Refresh Scenes`.
+26. **Add Scene** → the `Scene` picker lists every scene as
+    "<Room>: <Scene>" (zones as "<Zone> (zone): <Scene>", dynamic ones with
+    " (dynamic)"), grouped by room; `Room` offers "(mapped room)" first.
+    Pick a Bedside Lights scene (e.g. "Bedside Lights (zone): Nightlight")
+    with "(mapped room)": expect `Last Action` "Not added: Nightlight: Hue
+    room Bedside Lights (zone) not mapped; pick a room, or Set Room Mapping
+    first". Pick the Master Bedroom as `Room` instead: "Added Nightlight to
+    Master Bedroom (device N)" and a device **"Bedside Lights Nightlight"**
+    appears in the Master Bedroom as a switch tile (zone scenes carry the
+    zone's name; room scenes are named like the scene alone).
+27. Tap the new tile ON in a Navigator: both bedside lights take the
+    Nightlight scene within a second and the tile stays ON (the bridge's
+    scene status event closes the loop). Tap OFF: both lights go off (one
+    grouped_light request) and the tile shows OFF. Change one bedside light
+    by hand (Hue app or its own tile): the scene tile drops to OFF.
+28. The scene device's Properties: `Status` "Hue scene Nightlight in Bedside
+    Lights (zone)", `Hue Scene`, `Hue Room`, `Hue Scene ID` "#<id> (<rid…>)",
+    `Recall As` = "As set in Hue" (change it to "Static" and tap ON again:
+    the recall is sent as `static`), `Online` "Online". Actions: `Adopt Hue
+    Name`, `Forget This Scene`.
+29. **Add All Scenes Of Room** with a mapped room that has scenes (Kitchen,
+    7 scenes): expect "Added 7 scenes of Kitchen to Kitchen: …" and seven
+    switch tiles named after the scenes in the Kitchen. (Or test on a room
+    with fewer scenes; Patio has 2.) Running it again: "No new scenes in
+    Kitchen (7 on bridge, 7 imported)".
+30. Delete one scene device in Composer, then `Add Scene`: the picker lists
+    it last as "<Room>: <Scene> (deleted from Composer <date>)" and re-adding
+    works; `Add All Scenes Of Room` before that skips it ("skipped 1 deleted
+    in Composer (Add Scene re-creates one): …").
+31. `Forget Scene` on one device: "Forgot <Scene> (device N): unbound and
+    left in the project for you to delete; the Hue scene is listed under Add
+    Scene again"; the device's `Status` reads "Forgotten by the bridge (was
+    Hue scene <Scene>) …". Delete it in Composer.
+32. In the Hue app, delete a throw-away scene you created for the test (or
+    rename one): the matching device's `Status` becomes "Scene deleted in
+    Hue since …; ON does nothing; re-link or Forget" and `Attention` lists it
+    as missing; `Re-link Scene` points the device at another scene and the
+    tile works again.
+
 ## What to paste back
 
 For each step: the property text as shown, what the Navigator did, the

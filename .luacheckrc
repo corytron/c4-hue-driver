@@ -17,10 +17,12 @@ files["src/hue_bridge/driver.lua"] = {
 		"OnSystemEvent",
 		-- CUSTOM_SELECT list functions named in the bridge's driver.xml.
 		"HueLightList", "RoomList", "RelinkDeviceList", "ForgetDeviceList", "HueRoomList", "MappingTargetList",
+		"SceneList", "SceneGroupList", "RelinkSceneList", "ForgetSceneList",
 	},
 }
 
 files["src/hue_light/driver.lua"] = files["src/hue_bridge/driver.lua"]
+files["src/hue_scene/driver.lua"] = files["src/hue_bridge/driver.lua"]
 
 files["tests"] = {
 	std = "+busted",
