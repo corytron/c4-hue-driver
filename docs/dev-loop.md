@@ -208,6 +208,20 @@ works. The server takes `--quiet` to drop per-request connection lines on
 the plain listener, and `--state-dir`/`--cert-dir`/`--root` to relocate its
 files.
 
+### Leaving the loop (production)
+
+A release build (`tools/build.sh` without `--dev`) ships no
+`common/devloop.lua`; every driver requires it with `pcall`, so the same
+`driver.lua` starts without it and the bridge simply never contacts this
+VM again. Before installing one: `devctl.py set "Debug Mode" Off` (the
+property survives the update), then follow the Deploy line in `CLAUDE.md`
+(HTTP server on 8090, Windows session downloads and runs "Add or Update
+Driver or Agent…" for all three files). `devctl.py status` then shows
+`last_seen` growing; stop `devserver.py` and the HTTP server. The dev
+build's `Dev Server` and `Diagnostic Server` properties stay declared in
+`driver.xml` and keep their last values; the release code ignores them.
+Done for the first time on 2026-10-22 (version 116 over dev build 84).
+
 ## Security
 
 Dev builds only; LAN only; plain HTTP. Anyone on the LAN who can impersonate
