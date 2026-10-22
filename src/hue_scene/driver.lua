@@ -371,6 +371,7 @@ local function turn_on(rate)
 		RATE = rate,
 	})
 	local action = recall_action
+	log.info("ON: recalling as %s", action)
 	local params = { rid = st.rid, action = action }
 	if rate > 0 then
 		params.duration = string.format("%d", rate)
@@ -506,6 +507,7 @@ dispatch.properties["Recall_As"] = function(value)
 	end
 	recall_action = action
 	C4:PersistSetValue("recall_as", action)
+	log.info("Recall As %q -> recall action %s", tostring(value), action)
 end
 
 -- From the bridge (ExecuteCommand) -------------------------------------------
