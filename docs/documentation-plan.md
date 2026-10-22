@@ -194,12 +194,21 @@ Composer only; Navigator is unaffected).
   a Hue Bridge Pro, a flat near-black rounded rectangle seen from above
   with a small row of status LEDs and a lighter edge.
 - **Hue Light** (`src/hue_light/www/images/devices_{sm,lg}/hue_light_{16,32}.png`):
-  the Hue Tap dial remote from the owner's photo: a light-grey portrait
-  rounded-rectangle plate with a centred circular dial, a thin ring, a
-  cross dividing it into four quadrants and one to four tiny dots in them.
+  the Philips Hue dimmer switch from the owner's second photo: an off-white
+  portrait wall plate with a bevelled edge and a proud rocker remote split
+  by three grooves into four stacked buttons marked I, a large sun, a small
+  sun and O (glyphs at 32 px; plate, remote and grooves at 16 px).
 - **Hue Scene** (`src/hue_scene/www/images/devices_{sm,lg}/hue_scene_{16,32}.png`):
-  the same remote with a colour flair: a rainbow ring around the dial and
-  coloured quadrant dots.
+  the same switch with its four buttons lit from within in a hue sweep
+  (amber, green, azure, violet) and a coloured glow bleeding onto the plate.
+
+The second generation (2026-10-22, after the owner judged the first flat):
+every icon is a 512 px master lit from a height map (bevels, grooves,
+ambient occlusion, specular, grain, drop and contact shadows) and
+downsampled with LANCZOS, geometry hinted to whole target pixels per size,
+then unsharp-masked in premultiplied alpha and contrast/gamma tuned per
+size. `python3 tools/make_icons.py --inspect DIR` also writes the masters
+and an inspection sheet.
 
 Wiring: each driver's header gets `<small image_source="c4z">` and
 `<large image_source="c4z">`; the light and scene drivers also set
