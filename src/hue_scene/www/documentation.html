@@ -16,37 +16,46 @@ th, td { border: 1px solid #b8b8b8; padding: 4px 8px; vertical-align: top; text-
 th { background: #ececec; }
 code { font-family: Consolas, "Courier New", monospace; font-size: 13px; background: #f2f2f2; padding: 0 3px; }
 .note { background: #f6f6ea; border: 1px solid #d8d8c0; padding: 6px 10px; margin: 10px 0; }
+.caption { font-size: 12px; color: #555; margin: 18px 0 0 0; }
 </style>
 </head>
 <body>
 
 <h1>Hue Scene device</h1>
 
-<p>A <b>Hue Scene</b> is one Philips Hue scene shown as a Control4 switch: an on/off light without a slider. Turning it <b>ON</b> recalls the scene on the Hue bridge, so every light in that Hue room or zone takes the scene's look; turning it <b>OFF</b> turns that whole Hue room or zone off, with one request to the bridge. It is created by the <b>Hue Bridge</b> device's <b>Add Scene</b> or <b>Add All Scenes Of Room</b> action, never added by hand. To Control4 it is a light, so programming and Advanced Lighting Scenes can turn it on and off like any other.</p>
+<p>A <b>Hue Scene</b> is one Philips Hue scene (a saved look for a Hue room or zone) shown as a Control4 switch: an on/off light without a slider. Turning it <b>ON</b> plays the scene on the Hue bridge (recalls it, in Hue's word), so every light in that Hue room or zone takes the scene's look; turning it <b>OFF</b> turns that whole Hue room or zone off, with one request to the bridge. It is created by the <b>Hue Bridge</b> device's <b>Add Scene</b> or <b>Add All Scenes Of Room</b> action, never added by hand. To Control4 it is a light, so programming, keypad buttons and Advanced Lighting Scenes can turn it on and off like any other; in an Advanced Lighting Scene it is a member that is either 0 or 100.</p>
 
-<div class="note">The full manual, with pictures, is on the <b>Hue Bridge</b> device: select the bridge in System Design and open its <b>Documentation</b> tab. Chapter 9 there is about scenes.</div>
+<div class="note">The full manual, with pictures, is on the <b>Hue Bridge</b> device: select the bridge in System Design and open its <b>Documentation</b> tab. Chapter 9 there is about scenes, chapter 11 about programming.</div>
 
 <h2>Why the tile drops to OFF</h2>
-<p>The switch mirrors the bridge's own idea of whether the scene is active. After ON, the bridge confirms the scene within about a second and the tile stays ON. As soon as anything changes a member light by hand (its own tile, the Hue app, a Hue dimmer) or another scene is recalled in that room, Hue marks this scene inactive and the tile drops to OFF. Recalling the scene from the Hue app or a dimmer turns the tile ON. An ON tile therefore means "this scene is what the room is showing right now", not "someone pressed this switch".</p>
+<p>The switch mirrors the bridge's own idea of whether the scene is active. After ON, the bridge confirms the scene within about a second and the tile stays ON. As soon as anything changes a member light by hand (its own tile, the Hue app, a Hue dimmer switch) or another scene is played in that room, Hue marks this scene inactive and the tile drops to OFF. Playing the scene from the Hue app or a dimmer turns the tile ON. An ON tile therefore means "this scene is what the room is showing right now", not "someone pressed this switch"; programming that fires when this switch turns off fires whenever anyone touches any member light.</p>
+
+<h2>Good to know</h2>
+<ul>
+<li>A ramp time given by programming or by an Advanced Lighting Scene becomes the fade Hue uses to play the scene; a tap on a Navigator uses a short fade.</li>
+<li>OFF turns off every light of the Hue room or zone, imported into Control4 or not; a zone can span several Control4 rooms. A zone with no lights in it is reported off without any request.</li>
+<li>ON and OFF are one request each and are not retried: if the Hue bridge does not answer within two seconds the tile shows what you asked for, and the bridge's next full read corrects it.</li>
+<li>Editing the scene's colours or brightness in the Hue app needs nothing here; the next ON plays the new look.</li>
+</ul>
 
 <h2>Properties</h2>
 <table>
 <tr><th>Property</th><th>What it shows or does</th></tr>
 <tr><td><b>Driver Version</b></td><td>The build number of the installed driver, for example <code>116</code>; the same as the bridge's after an update.</td></tr>
-<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>; developer use only.</td></tr>
-<tr><td><b>Status</b></td><td>In normal use <code>Hue scene Nightlight in Bedside Lights (zone)</code>: the scene and the Hue room or zone it belongs to. Other texts are explained below.</td></tr>
+<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>; developer use only. A changed property reaches the driver only when you click the row's <b>Set</b> button.</td></tr>
+<tr><td><b>Status</b></td><td>In normal use <code>Hue scene Nightlight in Bedside Lights (zone)</code>: the scene and the Hue room or zone it belongs to (<code>in Home (bridge home)</code> for a scene of the whole home). Other texts are explained below.</td></tr>
 <tr><td><b>Hue Scene</b></td><td>The scene's name in the Hue app, for example <code>Nightlight</code>.</td></tr>
-<tr><td><b>Hue Room</b></td><td>The Hue room or zone the scene belongs to, for example <code>Kitchen</code> or <code>Bedside Lights (zone)</code>.</td></tr>
-<tr><td><b>Hue Scene ID</b></td><td><code>#AbCdEf (0f3a2b1c&hellip;)</code>: the scene's short code on the bridge and the start of its long identifier. Blank until the bridge has linked the device.</td></tr>
-<tr><td><b>Recall As</b></td><td>The one setting you choose: how ON recalls the scene. <code>As set in Hue</code> (default) lets Hue decide, so a scene marked dynamic plays its moving colour palette and any other scene is set once. <code>Static</code> always sets the scene once, for a predictable look. <code>Dynamic</code> always plays the palette. Pick the value, then click the row's <b>Set</b> button; without Set the change never reaches the driver. The next ON uses it.</td></tr>
-<tr><td><b>Online</b></td><td><code>Online</code> while the device is connected to the bridge and its scene exists; <code>Offline</code> while it is not bound, waiting, gone or forgotten; blank for a moment while the bridge has not answered yet.</td></tr>
+<tr><td><b>Hue Room</b></td><td>The Hue room or zone the scene belongs to, for example <code>Kitchen</code>, <code>Bedside Lights (zone)</code> or <code>Home (bridge home)</code>.</td></tr>
+<tr><td><b>Hue Scene ID</b></td><td>The scene's short code on the bridge (a run of letters and digits) and the start of its long identifier, for example <code>#AbCdEfGhIjKlMnOp (0f3a2b1c&hellip;)</code>. Blank until the bridge has linked the device.</td></tr>
+<tr><td><b>Recall As</b></td><td>The one setting you choose: how ON plays the scene. <code>As set in Hue</code> (default) lets Hue decide, so a scene marked dynamic plays its slowly changing colours and any other scene is set once. <code>Static</code> always sets the scene once, for a predictable look. <code>Dynamic</code> always plays the changing colours. Pick the value, then click the row's <b>Set</b> button; without Set the change never reaches the driver. The next ON uses it.</td></tr>
+<tr><td><b>Online</b></td><td><code>Online</code> while the device is connected to the bridge and its scene exists; <code>Offline</code> while it is not bound, waiting, gone or forgotten (the tile is then disabled on Navigators); blank for a moment while the bridge has not answered yet.</td></tr>
 <tr><td><b>Last Action</b></td><td>The result of the last click on this device's Actions tab, or <code>Forgotten by the bridge</code> after the bridge released it.</td></tr>
 </table>
 
 <h2>Actions</h2>
 <table>
 <tr><th>Action</th><th>What it does</th></tr>
-<tr><td><b>Adopt Hue Name</b></td><td>Renames this device in Composer to the name the bridge would give it today: the scene's name for a room scene (<code>Relax</code>), the zone's name in front for a zone scene (<code>Bedside Lights Nightlight</code>). Last Action reads <code>Renamed device 1141 to Bedside Lights Read</code>, or <code>Not renamed: no Hue name known yet (the bridge has not configured this scene)</code> while unlinked. Useful after a <b>Re-link Scene</b>, when the device still carries its old name.</td></tr>
+<tr><td><b>Adopt Hue Name</b></td><td>Renames this device in Composer to the name the bridge would give it today: the scene's name for a room scene (<code>Relax</code>), the zone's name in front for a zone scene (<code>Bedside Lights Nightlight</code>). Last Action reads <code>Renamed device 1141 to Bedside Lights Read</code>, or <code>Not renamed: no Hue name known yet (the bridge has not configured this scene)</code> while unlinked. Useful after a <b>Re-link Scene</b>, or after <b>Link Devices</b> matched a device by the scene's plain name, when the device still carries its old name.</td></tr>
 <tr><td><b>Forget This Scene</b></td><td>Asks the bridge to release this device from its scene. Last Action reads <code>Asked the bridge to forget this scene; its answer sets Status</code>; the device stays in the project for you to delete, and the scene becomes available again under the bridge's <b>Add Scene</b>. When no bridge is connected it reads <code>Not sent: not bound to a Hue Bridge</code>.</td></tr>
 </table>
 
@@ -54,11 +63,13 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <table>
 <tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
 <tr><td><code>Hue scene Nightlight in Bedside Lights (zone)</code></td><td>Linked and working.</td><td>Nothing.</td></tr>
-<tr><td><code>Not bound to a Hue Bridge</code></td><td>No connection to a Hue Bridge: the connection was removed, or the bridge device was deleted and re-added.</td><td>In the device's <b>Connections</b> view connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Lights</b> output, then click <b>Link Devices</b> on the bridge.</td></tr>
-<tr><td><code>Bound; waiting for the bridge</code></td><td>Connected, but the bridge has not linked it to a scene yet. (A device that remembers its scene shows the scene's name alone for a moment instead.)</td><td>Wait a few seconds if the bridge is starting; otherwise <b>Link Devices</b> on the bridge, with the device named exactly like the scene.</td></tr>
+<tr><td><code>Not bound to a Hue Bridge</code></td><td>No connection to a Hue Bridge: the connection was removed, or the bridge device was deleted and re-added.</td><td>Open Composer's <b>Connections</b> view (the button below the System Design tree), select this device and connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Lights</b> output (scenes use the same output as lights) by dragging the bridge from the lower pane onto that row. A device that remembers its scene is linked by the bridge the moment it is connected; a bare one then reads <code>Bound; waiting for the bridge</code>.</td></tr>
+<tr><td><code>Bound; waiting for the bridge</code></td><td>Connected, but the bridge has not linked it to a scene yet. (A device that remembers its scene shows the scene's name alone, <code>Nightlight</code>, for a moment instead.)</td><td>Wait a few seconds if the bridge is starting; otherwise click <b>Link Devices</b> on the bridge, with the device named exactly like the scene's <i>plain</i> name (<code>Nightlight</code>, not <code>Bedside Lights Nightlight</code>); <b>Adopt Hue Name</b> afterwards adds the zone's name.</td></tr>
 <tr><td><code>Scene deleted in Hue since 2026-10-21 21:35; ON does nothing; re-link or Forget</code></td><td>The scene was deleted in the Hue app. The device, its room and its programming are kept; ON leaves the tile off.</td><td>On the bridge, <b>Re-link Scene</b> to point the device at another scene (then <b>Adopt Hue Name</b> here to take that scene's name), or <b>Forget Scene</b> and delete the device.</td></tr>
-<tr><td><code>Forgotten by the bridge (was Hue scene Ibiza). Delete this device in Composer, or bind it again and use Link Devices</code></td><td>You or the bridge released this device; its tile does nothing.</td><td>Delete the device in Composer; or connect it to the bridge again and click <b>Link Devices</b>.</td></tr>
+<tr><td><code>Forgotten by the bridge (was Hue scene Ibiza). Delete this device in Composer, or bind it again and use Link Devices</code></td><td>You or the bridge released this device; its tile is disabled.</td><td>Delete the device in Composer; or connect it to the bridge again as above: the bridge adopts it on the spot, and <b>Link Devices</b> then only confirms it.</td></tr>
 </table>
+
+<p class="caption">Hue Bridge, Hue Light and Hue Scene drivers. Private, not for distribution.</p>
 
 </body>
 </html>

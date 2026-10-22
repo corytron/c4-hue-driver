@@ -260,7 +260,10 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
 9. Chapter 1's "never … on its own" names the two exceptions up front:
    the one-time Map Rooms By Name at first contact, and re-adoption of a
    device that announces a light the bridge already knows.
-10. `Attention` lists at most six items, then "… and N more".
+10. `Attention` lists one item per kind of thing (new, missing, unbound,
+    names, conflicts, scenes…), each naming at most three devices and then
+    "+N more". (The review called this a six-item cap; six is the number
+    of kinds, so the manual states the real rule.)
 
 **Gaps to add (must)**
 
