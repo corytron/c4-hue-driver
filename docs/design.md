@@ -760,7 +760,14 @@ project:
   proxy's standard bulb icon although their `<proxy>` carries the documented
   c4z attributes, and the Items pane's search results show the generic
   placeholder for all three drivers. The "(mapped room)" entry with value
-  "mapped" enables the Select dialog's OK button.
+  "mapped" enables the Select dialog's OK button. A light added under 125
+  (Right Bedside Light, device 1144) **does** show the dial-remote icon in
+  the tree next to the 116-made device's bulb: **a proxy device's small
+  icon is stamped at creation** from the driver's `<proxy small_image>`,
+  so existing devices keep theirs until re-created. The room List View's
+  32 px tile stayed the light_v2 standard bulb for both, so the `<proxy
+  large_image>` did not take there (cause unknown; not pursued). The Items
+  pane shows the generic placeholder for Control4's own Hue drivers too.
 
 ## Discovery
 
