@@ -528,6 +528,19 @@ project:
   `Room` empty rather than pre-selecting "(mapped room)"; an empty value
   means the mapping and was accepted. So `itemtype` 6 = protocol device,
   7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
+- **Installing a new build**: Driver ▸ "Add or Update Driver or Agent…"
+  accepts several `.c4z` files at once ("Select Driver or Agent…" dialog)
+  and answers "Update Succeeded … successfully added: hue_scene.c4z" then
+  "… successfully updated: hue_bridge.c4z, hue_light.c4z, hue_scene.c4z";
+  it **also pushes the new version to every existing device** — the bridge
+  and the 47 lights read `Driver Version` 84 straight away, the bridge
+  restarted and its stream reconnected within seconds. A right-click
+  "Update Driver" afterwards opens "Select c4i file to add…", warns
+  "Versions are equal. Do you want to overwrite…?" and, on Yes, reports
+  "successfully updated" without saying which devices it touched — so the
+  menu route is the one to use, and "Update Driver" is only for forcing a
+  same-version reload **[verified 2026-10-21]**. `sort_order` put the 23
+  bridge actions in exactly the intended order.
 
 ## Discovery
 
