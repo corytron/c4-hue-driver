@@ -494,6 +494,28 @@ loop on OS 3.4.2:
   /grouped_light/<zone's grouped_light> {"on":{"on":false}}`, both lights
   reported off 360 ms later and the `scene` item went inactive in the same
   container as the grouped_light updates **[verified]**.
+- **Scene lifecycle through Composer (rounds 5–6, 21:28–21:54)**: `Add All
+  Scenes Of Room` on Patio created "Ibiza" and "Lily" in the Patio room
+  (room scenes carry no prefix; zone scenes carry the zone's name) and
+  refused a second run with "No new scenes in Patio (2 on bridge, 2
+  imported)"; deleting a scene device in Composer produced "…, 1 deleted"
+  and the tombstone entry "Patio: Ibiza (deleted from Composer 2026-10-21)"
+  at the end of the `Add Scene` picker, and re-adding worked; `Forget Scene`
+  gave "Forgot Ibiza (device 1138): unbound and left in the project for you
+  to delete; …" and the device's "Forgotten by the bridge (was Hue scene
+  Ibiza). …". A scene created through the API appeared in the picker from
+  its `add` event; deleting it on the Hue side marked its device gone within
+  60 ms ("Scene deleted in Hue since 2026-10-21 21:35; ON does nothing;
+  re-link or Forget", `Attention` "1 scene missing from the bridge: …");
+  `Re-link Scene` moved the device to the "Read" scene ("Re-linked device
+  1140 (was C4 Test Scene) to Bedside Lights (zone): Read"), `Attention`
+  then flagged the name difference and the device's `Adopt Hue Name`
+  renamed it to "Bedside Lights Read" **[all verified on hardware]**.
+- **Open**: the `Recall As` property. A value set in Composer (both by a
+  mouse pick, which Composer itself did not keep, and by a keyboard commit,
+  which it did) has not changed the action the device sends — recalls still
+  go out as `active`. Under investigation with the device logging its
+  `OnPropertyChanged` path.
 - Two bugs found by reading the device's page from the Windows session: the
   bridge sent the group *label* ("Bedside Lights (zone)") as `group_name`
   while the device appends "(zone)" itself, and the bridge's
