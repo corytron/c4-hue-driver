@@ -270,7 +270,7 @@ function Get-ComposerProperty { param([Parameter(Mandatory)][string]$Name) (Get-
 function Get-ComposerTabControl { Find-ComposerElements -Class 'SysTabControl32' | Select-Object -First 1 }
 
 # Tab headers are not exposed to UIA; offsets (px from the tab control's left edge) are measured from a screenshot.
-$script:TabOffsets = @{ 'Properties' = 36; 'Actions' = 97; 'Lua' = 144 }   # measured 2026-10-21 on Composer Pro 3.4.2 @ 96 DPI
+$script:TabOffsets = @{ 'Properties' = 36; 'Actions' = 97; 'Documentation' = 173; 'Lua' = 239 }   # measured 2026-10-22 on Composer Pro 3.4.2 @ 96 DPI with the Documentation tab present (Lua was 144 without it)
 
 function Select-ComposerTab {
     # Click a tab header by name using $script:TabOffsets.

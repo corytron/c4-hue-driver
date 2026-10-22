@@ -2492,7 +2492,9 @@ function lights:picker_lights()
 end
 
 -- Control4 rooms as "Floor / Room" (the id appended when two rooms share a
--- name), sorted; mode "add" starts with "(mapped room)" (value ""), mode
+-- name), sorted; mode "add" starts with "(mapped room)" (value "mapped": an
+-- empty value leaves Composer's Select dialog with OK disabled [hardware
+-- 2026-10-22]; tonumber() makes it nil, the mapping, like an empty Room), mode
 -- "mapping" with "(no mapping)" (value "none").
 function lights:picker_rooms(mode)
 	local rooms = self:project_rooms()
@@ -2522,7 +2524,7 @@ function lights:picker_rooms(mode)
 		list = empty_list("(no rooms found in the project)")
 	end
 	if mode == "add" then
-		table.insert(list, 1, { text = "(mapped room)", value = "" })
+		table.insert(list, 1, { text = "(mapped room)", value = "mapped" })
 	elseif mode == "mapping" then
 		table.insert(list, 1, { text = "(no mapping)", value = "none" })
 	end

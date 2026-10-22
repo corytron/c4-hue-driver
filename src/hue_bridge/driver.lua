@@ -1285,6 +1285,11 @@ end
 
 function OnSystemEvent(data)
 	log.always("OnSystemEvent: %s", tostring(data):sub(1, 600))
+	-- A rename in Composer changes what Attention compares; without this it
+	-- stayed stale until the next action or resync [hardware 2026-10-22].
+	if state.late_init_done and type(data) == "string" and data:find("OnItemNameChanged", 1, true) then
+		refresh_lights_props()
+	end
 end
 
 -- Lifecycle ----------------------------------------------------------------

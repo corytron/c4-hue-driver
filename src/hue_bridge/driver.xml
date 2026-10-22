@@ -7,6 +7,8 @@
 	<created>10/19/2026 12:00</created>
 	<modified>10/19/2026 12:00</modified>
 	<version>1</version>
+	<small image_source="c4z">images/devices_sm/hue_bridge_pro_16.png</small>
+	<large image_source="c4z">images/devices_lg/hue_bridge_pro_32.png</large>
 	<control>lua_gen</control>
 	<controlmethod>IP</controlmethod>
 	<driver>DriverWorks</driver>
@@ -14,6 +16,7 @@
 	<minimum_os_version>3.3.0</minimum_os_version>
 	<config>
 		<script jit="1" file="driver.lua"/>
+		<documentation file="www/documentation.html"/>
 		<properties>
 			<property>
 				<name>Driver Version</name>
