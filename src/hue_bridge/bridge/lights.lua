@@ -2294,7 +2294,11 @@ function lights:room_audit()
 	end
 	local text
 	if #lines == 0 then
-		text = string.format("All %d linked lights in mapped Hue rooms are in the rooms their Hue rooms map to", #checks)
+		if #checks == 1 then
+			text = "All 1 linked light in a mapped Hue room is in the room its Hue room maps to"
+		else
+			text = string.format("All %d linked lights in mapped Hue rooms are in the rooms their Hue rooms map to", #checks)
+		end
 	else
 		text = string.format("%d of %d are not in the room their Hue room maps to: %s", #lines, #checks,
 			table.concat(lines, "; "))
