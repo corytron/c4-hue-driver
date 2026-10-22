@@ -73,10 +73,10 @@ docs/           design notes and the testing checklist I run in Composer
 
 - Lint: `luacheck src tests`
 - Test: `busted tests`
-- Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z` (`<version>` = git commit count). `tools/build.sh --dev` adds the dev loop and the Lua command window; never install a dev build as the production driver.
+- Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z`, `build/hue_scene.c4z` (`<version>` = git commit count). `tools/build.sh --dev` adds the dev loop and the Lua command window; never install a dev build as the production driver.
 - Dev loop: `tools/devserver.py` (background, once), `tools/devctl.py status|run|set|reload|wait|log|pin|unpin`; details in `docs/dev-loop.md`. While agents edit `src/`, keep the loop **pinned** and re-pin only states that pass lint and tests.
 - Design notes: `docs/design.md`; Composer checklist: `docs/composer-checklist.md`
-- Deploy: TBD — copy the `.c4z` to a folder the Windows VM can see; I'll import it in Composer Pro.
+- Deploy: build from `main`, copy the three `.c4z` to `build/release/`, serve that folder for the duration with `python3 -I -m http.server 8090 --bind 0.0.0.0 --directory build/release`, and brief the Windows session (sha256 of each file in the brief) to `Invoke-WebRequest` them into `C:\c4-hue\drivers\` and install all three at once through Driver ▸ "Add or Update Driver or Agent…", which updates every existing device in place. Installing a production build ends the dev loop (the bridge stops polling this VM); a `--dev` build through the same route starts it again. Stop the HTTP server afterwards.
 
 ## Hue references
 
