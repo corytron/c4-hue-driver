@@ -351,10 +351,13 @@ describe("Hue Bridge driver", function()
 			assert.truthy(lines[#lines]:find("no registered light matches", 1, true))
 		end)
 
-		it("Lights Report lists the registry", function()
+		it("Lights Report lists the registry and the owner-facing texts", function()
+			local before = #lines
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Lights Report" })
-			assert.truthy(lines[#lines - 1]:find("Lights Report: 1 registered", 1, true))
-			assert.truthy(lines[#lines]:find("Desk Lamp: device 2004", 1, true))
+			local text = table.concat(lines, "\n", before + 1)
+			assert.truthy(text:find("Lights Report: 1 registered", 1, true))
+			assert.truthy(text:find("Attention: ", 1, true))
+			assert.truthy(text:find("Desk Lamp: device 2004", 1, true))
 		end)
 	end)
 

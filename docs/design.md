@@ -364,6 +364,184 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
 - Most of the house's lights were unpowered during these tests; only the
   Desk Lamp was exercised.
 
+### Project APIs: verified on hardware (2026-10-21, `Probe Project` / `Probe Call`)
+
+For the import-ui design (`docs/import-design.md`), probed through the dev
+loop on OS 3.4.2:
+
+- `C4:GetProjectHierarchy()` returns one nested table keyed by location id;
+  every node has `name` and a **numeric** `type` (2 site, 3 building,
+  4 floor, 8 room) and its children as further numeric keys; rooms have
+  none. The house: site → building → 4 floors → 16 rooms.
+- `C4:GetDevicesByC4iName("roomdevice.c4i")` → `{ [roomId] = roomName }`
+  for all 16 rooms: the cheap room list (undocumented, used by Control4's
+  own `lib.lua`).
+- `C4:GetDevices(filter)`: `DeviceIds` and `C4iNames` are comma-separated
+  **strings** (a table raises "DeviceIds should be a string"). Returns
+  `{ [id] = { deviceName, driverFileName, roomId, roomName, proxies =
+  { [proxyId] = { deviceName, driverFileName = "light_v2.c4i" } } } }`;
+  no `proxies` key for a driver without proxies (the bridge). The protocol
+  device carries the display name AddDevice gave ("Left Bedside Light" on
+  both 1080 and its proxy 1081); a hand-added, never-linked `hue_light` shows
+  the driver name "Hue Light" — there is one such device (1034) in the
+  project today, the manual install that preceded the first import.
+- `C4:GetBoundConsumerDevices(bridge, 1)` → `{ [protocolId] = "Hue Light" }`:
+  the value is the driver's `<name>`, not the Composer name; 47 entries,
+  ids 1036–1128 step 2.
+- `C4:GetDeviceDisplayName(id)` returns the Composer name for a protocol id
+  and for a proxy id alike.
+- `C4:UpdateProperty` on an undeclared name and `C4:SendToDevice` to a
+  non-existent id both return nil silently; nothing is logged.
+- Hue side: 16 rooms (9.9 KB), 7 zones (6.6 KB), 1 bridge_home (1.3 KB),
+  125 scenes (351 KB). The single `GET /clip/v2/resource` returns 497
+  items, 588 KB, in 1 s. Room `children` are devices, zone `children`
+  lights, bridge_home's are rooms plus the room-less devices and it has no
+  `metadata`; rooms carry an extra `geometry` block we ignore. Decision:
+  the import feature's resync adds `/room`, `/zone` and `/bridge_home` as
+  three more serial GETs (18 KB together); the scenes feature decides how
+  to handle its 351 KB separately, and nothing fetches everything at once.
+
+### Scenes: verified on hardware (2026-10-21, `Probe Scenes` and `Hue Request`)
+
+- The house bridge holds 125 scenes in 13 groups (zones carry most:
+  Basement 27, Downstairs 16, Whole House 14, Bedside Lights 12; rooms
+  2–11 each; Study none) and 15 smart scenes ("Golden hours …"); `GET
+  /scene` is 351 KB, `/smart_scene` 20 KB. Every scene carries
+  `status.active` ("inactive"/"static"/"dynamic_palette"),
+  `status.last_recall`, `auto_dynamic` and `speed`.
+- Recall `PUT /scene/<rid> {"recall":{"action":"active"}}` → HTTP 200 with
+  the scene's ResourceIdentifier; the bridge streamed a `scene` item **9 ms
+  later in its own container** (status → "static"), then `light × 6` and
+  `grouped_light × 5` in the next second.
+- Switching one member light off by hand → `light` item, then one container
+  with `grouped_light × 3, scene`: the scene's status is pushed when any
+  member changes, as the research assumed from openHAB **[verified]**. Scene
+  status mirroring onto a switch device therefore needs no polling.
+- `GET /scene/<rid>` after the recall: `"status":{"active":"static",
+  "last_recall":"…Z"}`, `"auto_dynamic":false`, `"speed":0.603`.
+
+### Stream address rotation: verified on hardware (2026-10-21, branch `stream-rotate`)
+
+With the stream rotating over 7 spellings of the bridge address (PR #6):
+a fresh load on spelling 1, the one the previous instance's cancelled
+transfer still occupied, waited more than 40 s as before; the next two
+reloads picked spellings 2 and 3 and connected **200 ms and 160 ms** after
+the attempt, resync included within a second. The rotation index survives
+a reload, so reconnects after a driver update or a watchdog restart no
+longer queue behind the zombie.
+
+### import-ui: verified on hardware (2026-10-21, dev loop)
+
+- Resync = six serial GETs (`light`, `device`, `zigbee_connectivity`,
+  `room`, `zone`, `bridge_home`) in about 350 ms, then "16 rooms, 7 zones,
+  1 bridge_home cached" and the per-light room derivation (47 info lines
+  the first time, none after).
+- The one-time Map Rooms By Name at the first resync of the build mapped
+  9 Hue rooms to Control4 rooms of the same name (Dining, Foyer, Kitchen,
+  Living Room, Master Bathroom, Master Bedroom, Office, Patio, Study) and
+  listed the 7 Hue rooms and 7 zones with no Control4 twin; a second run
+  reports "Nothing new to map; 9 already mapped (kept)".
+- Startup reconcile against `GetBoundConsumerDevices` and `GetDevices`:
+  `Lights` = "47 on bridge, 47 imported, 0 new, 0 missing, 0 unbound,
+  0 deleted"; proxy ids that the first import never recorded were filled
+  from binding 5001 (1036 → 1037 and so on); every entry carries id_v1, Hue
+  room and MAC.
+- Room Audit issued one `GetDevices` with all 47 ids and reported "26 of
+  26 are not in the room their Hue room maps to" (every light still sits
+  in the placeholder room the import used).
+- Log lines written before `devloop.start()` runs at the end of late init
+  (credentials summary, startup reconcile counts) do not reach the shipped
+  log; they are only in Director's own output.
+- Composer "Update Driver" to the v69 dev build (16:18): the installed Lua
+  started, the dev loop saw the pinned version and reloaded to it within
+  3 s, the lights were forwarded, and the new properties appeared with the
+  expected texts (`Attention` "None"; `Room Mappings` listing 9 mapped
+  rooms, 7 unmapped rooms and 7 unmapped zones; `Last Action` holding the
+  full Room Audit text, about 3 KB, displayed without truncation).
+- Actions driven through the dev loop (`devctl run`): `Set Room Mapping`
+  "Mapped Mini Bar (zone) → Kitchen" then "Removed the mapping for Mini Bar
+  (zone)"; `Link Devices` "All 47 bound devices are registered";
+  `Import All New Lights` "No new lights on the bridge (47 on bridge, 47
+  imported)"; `Adopt Hue Names` "No Composer names differ from the Hue
+  names"; `Add Light` without a light "Not added: pick a light first" and
+  with an imported one "Not added: Vanity 4 #93 is already imported (device
+  1122)"; a click during the import's fetch is refused with "Busy:
+  importing; try again in a moment". Before the first room GET of a run,
+  `Set Room Mapping` says "Not mapped: Hue room … is not on the bridge
+  (connect the event stream and try again)" — the groups come with the
+  first resync or import.
+
+### Composer Pro 3.4.2 UI: verified through the Windows session (2026-10-21)
+
+Observed by the Claude Code session on the Windows VM (`docs/composer-remote.md`
+on branch `composer-remote`) with UI Automation, nothing changed in the
+project:
+
+- **CUSTOM_SELECT action parameters render.** An action with params opens
+  a modal "Action Parameter List" dialog: one row per parameter (label,
+  read-only value, a "…" button) plus OK/Cancel; "…" opens a "Select"
+  dialog holding a plain list (SysListView32) of exactly the strings the
+  driver's list function returned — arrows (→), parentheses and the "…" in
+  "#46 (e0e51794…)" all intact. OK stays disabled until an item is chosen.
+  `Add Light` showed "(every light on the bridge is imported)" and the 16
+  rooms as "First Floor / Kitchen", "Second / Office", "Attic / Room" …;
+  `Set Room Mapping` listed the 23 Hue rooms and zones with their mappings;
+  `Forget Light` the 47 devices as "Bar Bottom #80 (device 1036)".
+- **The Actions tab lists actions in the reverse of their `driver.xml`
+  order** (Forget Pairing at the top, Pair Bridge at the bottom), so every
+  action now carries `<sort_order>` (3.3.0+).
+- Properties pages read verbatim: the light's `Status` "Left Bedside Light
+  (Hue color lamp)", `Hue Light ID` "#46 (e0e51794…)", `Hue Room` "Master
+  Bedroom", `Online` "Online"; the bridge's 2.7 KB `Last Action` text in
+  full. A `Room Audit` click from Composer reached the driver (log 17:02:36)
+  and rewrote the same text.
+- Composer's controls are UIA `Pane`s with meaningful `Name`/`ClassName`
+  but no patterns: reading works through UIA, clicking through `SendInput`
+  at the reported rectangles; pickers and the System Design tree are
+  `SysListView32` controls read cross-process (`LVM_GETITEMTEXT`).
+- **Renaming a device in Composer fires `OnItemNameChanged`** to a driver
+  registered for it (probe 3): the `data` is a c4soap XML string,
+  `<c4soap async="1" name="OnItemNameChanged" result="0"><param name="iditem"
+  type="ulong">1073</param><param name="name" type="string">…</param><param
+  name="itemtype" type="ulong">7</param><param name="idroom"
+  type="ulong">1019</param></c4soap>` — `iditem` is the **proxy** id
+  (Downlight 4 is protocol 1072, proxy 1073), `itemtype` 7, and the room id
+  rides along **[verified on hardware 2026-10-21 17:10]**. Three seconds
+  later the bridge's `Attention` read "1 Hue name differs from the Composer
+  names: Downlight 4Downlight 4x is Downlight 4 in Hue (…)" after its next
+  refresh. No `OnBindingChanged` for a rename.
+- **Deleting a light device in Composer** (Vanity 3, protocol 1120, proxy
+  1121, 17:22:09): the light's `OnDriverRemovedFromProject` ran first and
+  its `HUE_GOODBYE` reached the bridge (tombstone written) **before**
+  Director's own notices: `OnItemRemoved` for the proxy (`iditem` 1121,
+  `idparent` 1120, `itemtype` 7), then `OnBindingChanged(1, HUE_BRIDGE,
+  false, 1120, 1)`, then `OnItemRemoved` for the protocol device (`iditem`
+  1120, `idparent` 1019 = its room, `itemtype` 6) — about a second after
+  the goodbye. `Lights` read "47 on bridge, 46 imported, 0 new, 0 missing,
+  0 unbound, 1 deleted" **[verified on hardware]**.
+- **`Add Light` re-creating it** (17:23:05): `OnItemAdded` for the protocol
+  (1130, parent = the room 756, `itemtype` 6) and the proxy (1131, parent
+  1130, `itemtype` 7) arrive before the `AddDevice` callback; then
+  `OnBindingValidate(1, HUE_BRIDGE)`, `OnBindingChanged(…, true, 1130, 1)`,
+  the new light's rid-less `HUE_HELLO`, and the registry entry re-created
+  with the tombstone cleared, all within 400 ms. The Composer dialog left
+  `Room` empty rather than pre-selecting "(mapped room)"; an empty value
+  means the mapping and was accepted. So `itemtype` 6 = protocol device,
+  7 = proxy; `OnItemAdded`/`OnItemRemoved` carry the room id.
+- **Installing a new build**: Driver ▸ "Add or Update Driver or Agent…"
+  accepts several `.c4z` files at once ("Select Driver or Agent…" dialog)
+  and answers "Update Succeeded … successfully added: hue_scene.c4z" then
+  "… successfully updated: hue_bridge.c4z, hue_light.c4z, hue_scene.c4z";
+  it **also pushes the new version to every existing device** — the bridge
+  and the 47 lights read `Driver Version` 84 straight away, the bridge
+  restarted and its stream reconnected within seconds. A right-click
+  "Update Driver" afterwards opens "Select c4i file to add…", warns
+  "Versions are equal. Do you want to overwrite…?" and, on Yes, reports
+  "successfully updated" without saying which devices it touched — so the
+  menu route is the one to use, and "Update Driver" is only for forcing a
+  same-version reload **[verified 2026-10-21]**. `sort_order` put the 23
+  bridge actions in exactly the intended order.
+
 ## Discovery
 
 Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.

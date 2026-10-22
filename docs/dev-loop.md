@@ -179,7 +179,14 @@ tools/devctl.py run "Connection Test" Target=Bridge   # prints the command id
 tools/devctl.py wait 7 --timeout 120                  # until command_done, then properties
 tools/devctl.py set "Stream Timeout (s)" 60
 tools/devctl.py log -f
+tools/devctl.py pin                  # serve src/ as it is now; later edits wait for the next pin or unpin
+tools/devctl.py unpin                # back to live reloads
 ```
+
+Pin while several agents edit `src/` at once: the controller then only
+reloads to states the coordinator has checked (`luacheck src tests` and
+`busted tests` green), each pushed by a fresh `pin`. `status` shows a
+`pinned` line with both pinned versions and what the live tree has become.
 
 `devctl.py status` shows both trees, running against local:
 

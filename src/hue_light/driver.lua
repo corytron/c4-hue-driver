@@ -2,7 +2,8 @@
 -- bridge itself: commands go to the Hue Bridge driver it is bound to
 -- (consumer binding 1, class HUE_BRIDGE) with C4:SendToDevice, and the bridge
 -- pushes configuration and state back through ExecuteCommand. The message
--- contract is in docs/lights-design.md; the light_v2 facts in docs/design.md.
+-- contract is in docs/lights-design.md and docs/import-design.md §4/§13; the
+-- light_v2 facts in docs/design.md.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -47,10 +48,17 @@ local COLOR_KEYS = {
 	rate = { "LIGHT_COLOR_TARGET_RATE", "LIGHT_COLOR_TARGET_COLOR_RATE", "RATE" },
 }
 
+-- The light's own copy of its identity (PersistSetValue key per state field),
+-- so a bridge that lost its registry can rebuild it from the lights instead
+-- of importing them a second time (docs/import-design.md §1, rule 3).
+local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model" }
+
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
-local fallback = {}          -- "brightness" / "color" -> armed C4LuaTimer
+local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaTimer, assume = fn }
 local color_params_logged = false
+local late_init_done = false -- UpdateProperty and SendToProxy are unsafe before OnDriverLateInit
+local early = {}             -- bridge messages received before late init, in arrival order
 
 -- Dev log forwarding -------------------------------------------------------
 
@@ -128,12 +136,68 @@ local function notify(command, params)
 	C4:SendToProxy(PROXY_BINDING, command, params)
 end
 
--- Why a command cannot reach the light right now, or nil when it can.
+-- Identity and status texts ------------------------------------------------
+
+-- Every inter-driver param is a string.
+local function device_id()
+	return tostring(C4:GetDeviceID())
+end
+
+-- "#12" from Hue's v1 id (the bridge sends "/lights/12" or "12"), or nil.
+local function v1_label()
+	local num = st.id_v1 and st.id_v1:match("(%d+)%s*$")
+	return num and ("#" .. num) or nil
+end
+
+-- What Hue Light ID shows: "#12 (e0e51794…)" once the v1 id is known, the
+-- rid alone until then. A rid without dashes (not a UUID) is shown whole.
+local function light_id_label()
+	if not st.rid then
+		return ""
+	end
+	local v1 = v1_label()
+	if not v1 then
+		return st.rid
+	end
+	local head = st.rid:match("^([^-]+)-")
+	return string.format("%s (%s)", v1, head and (head .. "…") or st.rid)
+end
+
+-- "Desk Lamp #12", or whatever part of that is known, for the forgotten text.
+local function light_label(name)
+	local parts = {}
+	name = name or st.name
+	if name then parts[#parts + 1] = name end
+	local v1 = v1_label()
+	if v1 then parts[#parts + 1] = v1 end
+	if #parts == 0 then
+		return st.rid or "unknown"
+	end
+	return table.concat(parts, " ")
+end
+
+local function forgotten_status()
+	return string.format("Forgotten by the bridge (was Hue light %s). "
+		.. "Delete this device in Composer, or bind it again and use Link Devices", light_label(st.forgotten.name))
+end
+
+local function gone_status()
+	local since = st.gone_since and (" since " .. os.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
+	return "Gone from the Hue bridge" .. since .. "; re-link or Forget"
+end
+
+-- Why a command cannot reach the light right now, or nil when it can. The
+-- order is the order Status explains things in: a forgotten light is told
+-- what to do even while its binding is already gone.
 local function blocker()
-	if not bridge then
+	if st.forgotten then
+		return "forgotten by the bridge; delete this device or bind it again and use Link Devices"
+	elseif not bridge then
 		return "not bound to a Hue Bridge"
 	elseif not st.rid then
-		return "waiting for the bridge to assign a Hue light (run Import Lights on it)"
+		return "waiting for the bridge to assign a Hue light (use Add Light or Link Devices on it)"
+	elseif st.gone then
+		return "gone from the Hue bridge; re-link or Forget"
 	end
 	return nil
 end
@@ -145,14 +209,19 @@ local function is_online()
 end
 
 local function refresh_status()
-	if not bridge then
+	if st.forgotten then
+		prop("Status", forgotten_status())
+	elseif not bridge then
 		prop("Status", "Not bound to a Hue Bridge")
+	elseif st.gone then
+		prop("Status", gone_status())
 	elseif not st.rid or not st.name then
 		prop("Status", "Bound; waiting for the bridge")
 	else
 		prop("Status", string.format("%s (%s)", st.name, st.model or "unknown model"))
 	end
-	if not bridge or st.online == false then
+	-- "" while nothing says either way: bound, but the bridge has not reported.
+	if not bridge or st.forgotten or st.gone or st.online == false then
 		prop("Online", "Offline")
 	else
 		prop("Online", st.online and "Online" or "")
@@ -160,46 +229,70 @@ local function refresh_status()
 end
 
 -- Proxy notifies -----------------------------------------------------------
+-- The report_* functions return true when they had something to report.
 
 local function report_brightness()
 	local brightness = state.to_proxy_brightness(st)
-	if brightness then
-		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = brightness })
+	if not brightness then
+		return false
 	end
+	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = brightness })
+	return true
 end
 
 local function report_color()
 	local x, y, mode = state.to_proxy_color(st)
-	if x then
-		notify("LIGHT_COLOR_CHANGED", {
-			LIGHT_COLOR_CURRENT_X = x,
-			LIGHT_COLOR_CURRENT_Y = y,
-			LIGHT_COLOR_CURRENT_COLOR_MODE = mode,
-		})
+	if not x then
+		return false
 	end
+	notify("LIGHT_COLOR_CHANGED", {
+		LIGHT_COLOR_CURRENT_X = x,
+		LIGHT_COLOR_CURRENT_Y = y,
+		LIGHT_COLOR_CURRENT_COLOR_MODE = mode,
+	})
+	return true
 end
 
 local function report_online()
 	notify("ONLINE_CHANGED", { STATE = is_online() })
+	return true
 end
 
 -- Targets ------------------------------------------------------------------
 
 -- A target sent to the bridge stays pending until a HUE_STATE carrying that
--- field arrives or its fallback fires; either way the proxy gets a CHANGED.
+-- field arrives, its fallback fires, or the proxy says stop; either way the
+-- proxy gets a CHANGED.
 local function settle(kind)
 	if fallback[kind] then
-		fallback[kind]:Cancel()
+		fallback[kind].timer:Cancel()
 		fallback[kind] = nil
 	end
 end
 
-local function arm(kind, rate, on_timeout)
+-- `assume` applies the sent target to the cache and reports it; it runs when
+-- the bridge has not confirmed within the ramp plus FALLBACK_MS.
+local function arm(kind, rate, assume)
 	settle(kind)
-	fallback[kind] = C4:SetTimer(rate + FALLBACK_MS, function()
+	local pending = { assume = assume }
+	pending.timer = C4:SetTimer(rate + FALLBACK_MS, function()
 		fallback[kind] = nil
-		on_timeout()
+		assume()
 	end)
+	fallback[kind] = pending
+end
+
+-- SET_BRIGHTNESS_STOP / SET_COLOR_STOP: the proxy wants the transition closed
+-- now. The cached value goes out as CHANGED (the next real report corrects
+-- it if the bulb went on ramping; Hue has no stop primitive, so it does).
+-- With nothing cached yet the target is assumed, as the fallback would have,
+-- so the proxy never waits on a CHANGING.
+local function stop(kind, report)
+	local pending = fallback[kind]
+	settle(kind)
+	if not report() and pending then
+		pending.assume()
+	end
 end
 
 -- True when a proxy command can be acted on; otherwise it is dropped here,
@@ -293,17 +386,49 @@ local function bound_bridge()
 	return tonumber(found)
 end
 
+-- Our light_v2 proxy: the consumer bound to binding 5001, the device Composer
+-- shows and renames [verified: API 32/_3 usage note; hardware, docs/design.md
+-- "Lights: verified on hardware": first key of the table]. nil when none.
+local function proxy_id()
+	local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), PROXY_BINDING)
+	if type(bound) ~= "table" then
+		return nil
+	end
+	return tonumber((next(bound)))
+end
+
+-- What HUE_HELLO carries: the persisted identity, so the bridge can adopt a
+-- bound light its registry lacks. Absent keys for what is unknown: a rid-less
+-- light sends no rid (SendToDevice drops empty values anyway).
+local function hello_params()
+	return { rid = st.rid, device_id = device_id(), name = st.name, model = st.model }
+end
+
 -- Announce ourselves; the bridge answers with HUE_CONFIGURE and full state
--- when it knows the rid. No rid key when unknown: SendToDevice drops empty
--- values anyway. `hint` is the device id OnBindingChanged named, for when
--- Director's lookup does not reflect the new binding yet.
+-- when it knows the rid. `hint` is the device id OnBindingChanged named, for
+-- when Director's lookup does not reflect the new binding yet.
 local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
-		C4:SendToDevice(bridge, "HUE_HELLO", st.rid and { rid = st.rid } or {})
+		C4:SendToDevice(bridge, "HUE_HELLO", hello_params())
 		flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
+end
+
+local function load_identity()
+	for field, key in pairs(PERSISTED) do
+		local value = C4:PersistGetValue(key)
+		st[field] = (value ~= nil and value ~= "") and tostring(value) or nil
+	end
+end
+
+local function save_identity()
+	for field, key in pairs(PERSISTED) do
+		if st[field] then
+			C4:PersistSetValue(key, st[field])
+		end
+	end
 end
 
 -- Properties ---------------------------------------------------------------
@@ -318,14 +443,42 @@ end
 
 -- From the bridge (ExecuteCommand) -------------------------------------------
 
-dispatch.commands["HUE_CONFIGURE"] = function(params)
-	state.configure(st, params)
-	if st.rid then
-		C4:PersistSetValue("hue_rid", st.rid)
+-- Director late-inits drivers in no particular order, so the bridge's
+-- messages can reach a light before its own OnDriverLateInit, where
+-- UpdateProperty and SendToProxy are not yet safe [verified: API 22/_25.2].
+-- Such messages wait, in order, and OnDriverLateInit applies them.
+local function after_late_init(name, handler)
+	return function(params)
+		if late_init_done then
+			return handler(params)
+		end
+		early[#early + 1] = { name = name, handler = handler, params = params }
+		log.debug("%s before late init; buffered (%d waiting)", name, #early)
 	end
-	prop("Hue Light ID", st.rid)
+end
+
+local function drain_early()
+	local queued = early
+	early = {}
+	for _, m in ipairs(queued) do
+		log.debug("applying buffered %s", m.name)
+		local ok, err = pcall(m.handler, m.params)
+		if not ok then
+			log.error("buffered %s failed: %s", m.name, tostring(err))
+		end
+	end
+end
+
+dispatch.commands["HUE_CONFIGURE"] = after_late_init("HUE_CONFIGURE", function(params)
+	state.configure(st, params)
+	save_identity()
+	prop("Hue Light ID", light_id_label())
 	prop("Hue Name", st.name)
 	prop("Model", st.model)
+	prop("Hue Room", st.hue_room)
+	if st.gone then
+		log.debug("configured as gone from the bridge%s", st.gone_since and (" since " .. st.gone_since) or "")
+	end
 	-- Both supports_* in one notify, then the current colour straight after
 	-- (the proxy docs ask for both), then brightness.
 	notify("DYNAMIC_CAPABILITIES_CHANGED", caps.params(st))
@@ -333,9 +486,9 @@ dispatch.commands["HUE_CONFIGURE"] = function(params)
 	report_brightness()
 	report_online()
 	refresh_status()
-end
+end)
 
-dispatch.commands["HUE_STATE"] = function(params)
+dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
 	end
@@ -356,7 +509,23 @@ dispatch.commands["HUE_STATE"] = function(params)
 		report_online()
 		refresh_status()
 	end
-end
+end)
+
+-- The bridge ran Forget for this light (from its own action or ours): the
+-- device stays, the owner decides. The identity stays persisted too, so
+-- binding the device again lets the bridge adopt it from its own rid.
+dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(params)
+	if st.rid and params.rid and params.rid ~= st.rid then
+		return log.warn("HUE_FORGOTTEN for rid %s ignored (ours is %s)", params.rid, st.rid)
+	end
+	st.forgotten = { name = params.name or st.name }
+	settle("brightness")
+	settle("color")
+	log.warn("forgotten by the bridge (was Hue light %s)", light_label(st.forgotten.name))
+	prop("Last Action", "Forgotten by the bridge")
+	refresh_status()
+	report_online()
+end)
 
 dispatch.commands["DEV_RELOAD"] = function(params)
 	if not (devloop and devloop.apply_forwarded) then
@@ -371,6 +540,39 @@ dispatch.commands["DEV_RELOAD"] = function(params)
 	else
 		log.warn("light reload failed; see this light's Lua output")
 	end
+end
+
+-- Composer actions (LUA_ACTION) ----------------------------------------------
+-- Every click ends in Last Action and a log line, whatever happened.
+
+local function result(text)
+	log.always("%s", text)
+	prop("Last Action", text)
+end
+
+-- Rename our proxy (the device Composer shows) to the Hue name. Only ever
+-- from this click: names belong to the owner (docs/import-design.md §7).
+dispatch.commands["Adopt_Hue_Name"] = function()
+	if not st.name then
+		return result("Not renamed: no Hue name known yet (the bridge has not configured this light)")
+	end
+	local id = proxy_id()
+	if not id then
+		return result("Not renamed: no light_v2 proxy is bound to binding 5001")
+	end
+	C4:RenameDevice(id, st.name) -- [verified: API 22/_32]
+	result(string.format("Renamed device %d to %s", id, st.name))
+end
+
+-- Ask the bridge to Forget this light; it answers HUE_FORGOTTEN, which sets
+-- Status. The bridge finds the entry by rid or, for a rid-less light, by
+-- device id.
+dispatch.commands["Forget_This_Light"] = function()
+	if not bridge then
+		return result("Not sent: not bound to a Hue Bridge")
+	end
+	C4:SendToDevice(bridge, "HUE_FORGET", { rid = st.rid, device_id = device_id() })
+	result("Asked the bridge to forget this light; its answer sets Status")
 end
 
 -- From the proxy (ReceivedFromProxy) ------------------------------------------
@@ -410,6 +612,25 @@ dispatch.proxy["SET_COLOR_TARGET"] = function(_, params)
 		pick(params, COLOR_KEYS.mode), pick(params, COLOR_KEYS.rate))
 end
 
+-- Advanced Lighting Scenes with reduced_als_support drive the light with
+-- SET_BRIGHTNESS_TARGET / SET_COLOR_TARGET and end a scene ramp with these;
+-- both carry no parameters [verified: proxy-protocol reference, light_v2
+-- SET_BRIGHTNESS_STOP, SET_COLOR_STOP, reduced_als_support,
+-- supports_brightness_stop]. Nothing goes to the bridge: Hue cannot stop a
+-- transition, the proxy only needs its CHANGED.
+dispatch.proxy["SET_BRIGHTNESS_STOP"] = function()
+	stop("brightness", report_brightness)
+end
+
+dispatch.proxy["SET_COLOR_STOP"] = function()
+	stop("color", report_color)
+end
+
+-- The ALS section lists STOP_SCENE_RAMP among what a reduced-ALS driver must
+-- support; whether the proxy forwards it under that name is unverified, so it
+-- is accepted as a brightness stop.
+dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
+
 dispatch.proxy["TOGGLE"] = function()
 	set_brightness(st.on and 0 or 100, 0)
 end
@@ -429,10 +650,15 @@ function OnDriverInit()
 end
 
 function OnDriverLateInit()
-	local rid = C4:PersistGetValue("hue_rid")
-	st.rid = (rid ~= nil and rid ~= "") and tostring(rid) or nil
+	late_init_done = true
+	load_identity()
 	dispatch.replay_properties(Properties)
-	prop("Hue Light ID", st.rid)
+	prop("Hue Light ID", light_id_label())
+	-- The bridge first, so messages it sent before this point are applied
+	-- against the right binding state; then the hello carries whatever
+	-- identity they delivered.
+	bridge = bound_bridge()
+	drain_early()
 	hello()
 	report_online()
 end
@@ -450,6 +676,25 @@ function OnBindingChanged(idBinding, _, bound, otherDevice)
 		settle("color")
 		refresh_status()
 		report_online()
+	end
+end
+
+-- Composer is deleting this device: tell the bridge, so it tombstones the
+-- entry instead of fanning state out to a dead id [verified: API 22/_26;
+-- that SendToDevice still works here is assumed, docs/import-design.md
+-- probe 2]. OnDriverDestroyed follows and stops the timers.
+function OnDriverRemovedFromProject()
+	if not bridge then
+		return
+	end
+	local target = bridge
+	local ok, err = pcall(function()
+		C4:SendToDevice(target, "HUE_GOODBYE", { rid = st.rid, device_id = device_id() })
+	end)
+	if ok then
+		log.debug("HUE_GOODBYE sent to bridge %d", target)
+	else
+		log.warn("HUE_GOODBYE failed: %s", tostring(err))
 	end
 end
 

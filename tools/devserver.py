@@ -92,6 +92,7 @@ class Tree:
         self.name = name
         self.driver = os.path.join(root, "src", "hue_" + name)
         self.common = os.path.join(root, "src", "common")
+        self.pinned = None   # (version, contents) served instead of the live tree while pinned
 
     def files(self):
         """Return {published_path: absolute_path}. Published paths are relative
@@ -116,7 +117,24 @@ class Tree:
         return out
 
     def snapshot(self):
-        """Read every served file. Returns (version, {published_path: bytes})."""
+        """What is served right now: the pinned snapshot while pinned, else
+        the live tree. Returns (version, {published_path: bytes})."""
+        if self.pinned is not None:
+            return self.pinned
+        return self.read()
+
+    def pin(self):
+        """Serve the tree as it is at this moment until unpin(); pinning again
+        re-reads it. For stretches when several agents edit src/ at once and
+        the controller must only see states the coordinator has checked."""
+        self.pinned = self.read()
+        return self.pinned[0]
+
+    def unpin(self):
+        self.pinned = None
+
+    def read(self):
+        """Read every served file from disk. Returns (version, {published_path: bytes})."""
         files = self.files()
         contents = {}
         digest = hashlib.sha1()
@@ -347,6 +365,8 @@ class Handler(BaseHTTPRequestHandler):
         "/log": "post_log",
         "/report": "post_report",
         "/admin/enqueue": "post_enqueue",
+        "/admin/pin": "post_pin",
+        "/admin/unpin": "post_unpin",
     }
 
     # -- connection logging ------------------------------------------------
@@ -512,7 +532,13 @@ class Handler(BaseHTTPRequestHandler):
     def get_status(self, query):
         version, _ = self.server.trees["bridge"].snapshot()
         light_version, _ = self.server.trees["light"].snapshot()
-        self.send_json(self.server.state.status(version, light_version))
+        status = self.server.state.status(version, light_version)
+        # While pinned, local_* are the served (pinned) versions; live_* say
+        # what the working tree has become in the meantime.
+        status["pinned"] = self.pinned_versions()
+        status["live_version"] = self.server.trees["bridge"].read()[0]
+        status["live_light_version"] = self.server.trees["light"].read()[0]
+        self.send_json(status)
 
     def post_log(self, query):
         body, err = self.read_json_body()
@@ -550,6 +576,32 @@ class Handler(BaseHTTPRequestHandler):
         command_id = self.server.state.enqueue(command)
         log("QUEUE #%d %s" % (command_id, json.dumps(command, separators=(",", ":"))))
         self.send_json({"id": command_id})
+
+    def pinned_versions(self):
+        return {name: (tree.pinned[0] if tree.pinned else None) for name, tree in self.server.trees.items()}
+
+    def post_pin(self, query):
+        """Pin both trees (or ?tree=bridge|light) to their content right now;
+        the controller keeps that version until unpin or the next pin."""
+        names = query.get("tree") or list(self.server.trees)
+        for name in names:
+            tree = self.server.trees.get(name)
+            if tree is None:
+                self.send_bad_request("unknown tree %r" % name)
+                return
+            log("PIN %s tree at %s" % (name, tree.pin()[:12]))
+        self.send_json({"pinned": self.pinned_versions()})
+
+    def post_unpin(self, query):
+        names = query.get("tree") or list(self.server.trees)
+        for name in names:
+            tree = self.server.trees.get(name)
+            if tree is None:
+                self.send_bad_request("unknown tree %r" % name)
+                return
+            tree.unpin()
+            log("UNPIN %s tree" % name)
+        self.send_json({"pinned": self.pinned_versions()})
 
     # -- connection-experiment endpoints -----------------------------------
 
