@@ -612,6 +612,23 @@ longer queue behind the zombie.
   Devices", `Online` "Offline", `Last Action` "Forgotten by the bridge".
   Device 1034 keeps its own room ("Room"): linking never moves a device.
   The old device 1130 is left for the owner to delete.
+- **Full reset of the light devices (2026-10-22 12:3x–12:47, production
+  build 116).** The owner chose to delete every light device still in the
+  placeholder room rather than drag them: 12 by hand (plus device 1130),
+  then the Windows session deleted the remaining 35 one at a time (prompt
+  "Are you sure you want to delete the item '<name>'?", about 5.5 s per
+  device including the row-count check), 131 → 96 tree rows. The bridge
+  kept up with every `OnItemRemoved`/`OnBindingChanged`: `Lights` went
+  "35 imported, 12 deleted" → "47 on bridge, 0 imported, 0 new, 0 missing,
+  0 unbound, 47 deleted", `Attention` stayed "None" (a Composer delete is
+  deliberate, so it is not raised), and `Add Light` listed all 47 as "<name>
+  [<Hue room>] #<n> (deleted from Composer 2026-10-22)" with no live entry,
+  the dialog opening with empty pickers this time. The two scene devices
+  and the bridge were untouched; the stream's watchdog reconnect during the
+  deletes was harmless. The way back is `Add Light` per light with
+  "(mapped room)" for the 23 lights whose Hue room is mapped, and a room
+  choice (or `Set Room Mapping` first) for the 24 whose Hue rooms have no
+  Control4 twin yet.
 - Actions driven through the dev loop (`devctl run`): `Set Room Mapping`
   "Mapped Mini Bar (zone) → Kitchen" then "Removed the mapping for Mini Bar
   (zone)"; `Link Devices` "All 47 bound devices are registered";
