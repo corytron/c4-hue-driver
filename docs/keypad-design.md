@@ -98,5 +98,16 @@ init after a restart, and the light never looks again until a binding
 event. Fixed on branch `binding-recheck`: when unbound at late init, the
 light and scene drivers look again at 5, 15, 30 and 60 s, greet the bridge
 as soon as the binding is visible, and stop on a binding event, on destroy,
-or after the last check. Not yet seen on hardware (needs a Director
-restart).
+or after the last check.
+
+Tested on the house with build 150 (2026-10-22 19:12–19:23): Composer has
+no Director restart command and System Manager runs elevated, out of the
+Windows session's reach, so the owner rebooted the controller by hand from
+System Manager. Composer lost Director at 19:12:58 and was idle again at
+19:20:35; the bridge's event feed was back at 19:19:28. The light read
+"Right Bedside Light (Hue color lamp)", Online, version 150 at all 19 reads
+between 19:21:03 and 19:22:33 and never "Not bound". Whether the re-check
+ran or the binding was visible at late init cannot be told from Composer
+(its Lua pane does not replay startup lines). Note the original failure
+followed a Director restart forced by a driver update, not a reboot; the
+outcome after a reboot is verified, the re-check path itself is not.
