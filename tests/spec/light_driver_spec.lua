@@ -961,4 +961,74 @@ describe("Hue Light driver", function()
 			assert(ok, err)
 		end)
 	end)
+
+	describe("keypad buttons (BUTTON_ACTION)", function()
+		local function press_and_click(env, button)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "1" })
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "2" })
+		end
+
+		it("echoes every press and release to the proxy", function()
+			local env, c4 = lit_light()
+			c4.calls = {}
+			press_and_click(env, 0)
+			local echoes = notifies(c4, "BUTTON_ACTION")
+			assert.equal(2, #echoes)
+			assert.equal(1, echoes[1].ACTION)
+			assert.equal(2, echoes[2].ACTION)
+			assert.equal(0, echoes[2].BUTTON_ID)
+		end)
+
+		it("tap top goes to the On preset over the click rate; tap bottom turns off", function()
+			local env, c4 = lit_light()
+			c4.sent = {}
+			press_and_click(env, 0)
+			assert.equal(1, #messages(c4, "HUE_SET"))
+			assert.equal("100", tostring(messages(c4, "HUE_SET")[1].params.brightness))
+			assert.equal("250", tostring(messages(c4, "HUE_SET")[1].params.rate))
+			c4.sent = {}
+			press_and_click(env, 1)
+			assert.equal("false", tostring(messages(c4, "HUE_SET")[1].params.on))
+		end)
+
+		it("uses a preset and click rate set through the proxy, and persists them", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_PRESET_LEVEL", { LEVEL = "40" })
+			env.ReceivedFromProxy(5001, "SET_CLICK_RATE_UP", { RATE = "1500" })
+			assert.equal(40, c4.persist.preset_level)
+			assert.equal(1500, c4.persist.click_rate_up)
+			c4.sent = {}
+			press_and_click(env, 0)
+			assert.equal("40", tostring(messages(c4, "HUE_SET")[1].params.brightness))
+			assert.equal("1500", tostring(messages(c4, "HUE_SET")[1].params.rate))
+		end)
+
+		it("a held top button ramps toward 100 over the hold rate and the release writes the reached level", function()
+			local env, c4 = lit_light() -- on at 40 %
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
+			assert.equal(0, #c4.sent, "nothing until the hold timer")
+			c4.fire_timers() -- the 400 ms hold timer: the ramp starts
+			local ramp = messages(c4, "HUE_SET")[1]
+			assert.equal("100", tostring(ramp.params.brightness))
+			assert.equal("3000", tostring(ramp.params.rate), "60 % of the 5000 ms hold rate")
+			for _ = 1, 10 do c4.fire_timers() end -- ten 100 ms ticks: about a third of the way
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "0" })
+			local stop = messages(c4, "HUE_SET")[1]
+			assert.equal("60", tostring(stop.params.brightness))
+			assert.equal("0", tostring(stop.params.rate))
+			assert.equal(0, #c4.active_timers() - 1, "only the brightness fallback remains")
+		end)
+
+		it("a held bottom button dims toward 1, never off", function()
+			local env, c4 = lit_light()
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "1" })
+			c4.fire_timers()
+			local ramp = messages(c4, "HUE_SET")[1]
+			assert.equal("1", tostring(ramp.params.brightness))
+			assert.is_nil(ramp.params.on == "false" or nil)
+		end)
+	end)
 end)

@@ -109,8 +109,11 @@
 		<ramp_level>True</ramp_level>
 		<on_off>True</on_off>
 		<min_max>False</min_max>
-		<click_rates>False</click_rates>
-		<hold_rates>False</hold_rates>
+		<click_rates>True</click_rates>
+		<click_rate_min>0</click_rate_min>
+		<hold_rates>True</hold_rates>
+		<hold_rate_min>1000</hold_rate_min>
+		<supports_default_on>True</supports_default_on>
 		<cold_start>False</cold_start>
 		<has_leds>False</has_leds>
 		<supports_target>True</supports_target>
