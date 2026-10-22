@@ -155,22 +155,31 @@ function http.request(req, callback)
 	local transfer = C4:url()
 		:SetOptions(http.options({ timeout = req.timeout }, ca))
 		:OnDone(function(_, responses, err_code, err_msg)
-			local result = {}
-			local response = responses[#responses]
-			if err_code ~= 0 then
-				result.ok = false
-				result.err = string.format("transfer failed (%d): %s", err_code, tostring(err_msg))
-			elseif not response then
-				result.ok = false
-				result.err = "no response"
-			else
-				result.code = response.code
-				result.body = response.body
-				result.json = http.decode(response.body)
-				result.ok = response.code >= 200 and response.code < 300
-				if not result.ok then
-					result.err = "HTTP " .. tostring(response.code)
+			-- Guarded up to the callback: a raise here would leave the caller
+			-- waiting for ever (a light's queue stays "in flight") [code
+			-- analysis 2026-10-22, H2].
+			local built, result = pcall(function()
+				local result = {}
+				local response = type(responses) == "table" and responses[#responses] or nil
+				if err_code ~= 0 then
+					result.ok = false
+					result.err = string.format("transfer failed (%s): %s", tostring(err_code), tostring(err_msg))
+				elseif type(response) ~= "table" or type(response.code) ~= "number" then
+					result.ok = false
+					result.err = "no response"
+				else
+					result.code = response.code
+					result.body = response.body
+					result.json = http.decode(response.body)
+					result.ok = response.code >= 200 and response.code < 300
+					if not result.ok then
+						result.err = "HTTP " .. tostring(response.code)
+					end
 				end
+				return result
+			end)
+			if not built then
+				result = { ok = false, err = "done handler: " .. tostring(result) }
 			end
 			if not result.ok then
 				log.warn("%s %s: %s", method, req.path, result.err)
