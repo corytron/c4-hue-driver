@@ -736,12 +736,7 @@ local function stop_ramp()
 	set_brightness(level, 0)
 end
 
-dispatch.proxy["BUTTON_ACTION"] = function(_, params)
-	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
-	if not button or not action then
-		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
-	end
-	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+local function button_action(button, action)
 	if action == ACT_PRESS then
 		end_hold()
 		hold = { button = button }
@@ -750,14 +745,62 @@ dispatch.proxy["BUTTON_ACTION"] = function(_, params)
 				start_ramp()
 			end
 		end)
-	elseif action == ACT_CLICK or action == ACT_RELEASE then
+	elseif action == ACT_CLICK then
 		if hold and hold.ramping then
 			stop_ramp()
 		else
 			end_hold()
 			click(button)
 		end
+	elseif action == ACT_RELEASE then
+		-- Release after a hold: stop the ramp; a release that follows a click
+		-- has nothing left to do.
+		if hold and hold.ramping then
+			stop_ramp()
+		else
+			end_hold()
+		end
 	end
+end
+
+-- The proxy's own route (BUTTON_ACTION on the proxy binding) carries the
+-- button in the parameters and wants every action echoed.
+dispatch.proxy["BUTTON_ACTION"] = function(_, params)
+	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
+	if not button or not action then
+		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
+	end
+	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+	button_action(button, action)
+end
+
+-- A keypad button bound to one of the driver's Button Link connections
+-- (driver.xml ids 200 top, 201 bottom, 202 toggle) delivers DO_PUSH,
+-- DO_RELEASE and DO_CLICK on that binding [verified: public light_v2
+-- drivers].
+local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
+
+local function link_button(binding, command)
+	local button = LINK_BUTTON[tonumber(binding)]
+	if not button then
+		log.warn("%s on binding %s: not a Button Link", command, tostring(binding))
+	end
+	return button
+end
+
+dispatch.proxy["DO_PUSH"] = function(binding)
+	local button = link_button(binding, "DO_PUSH")
+	if button then button_action(button, ACT_PRESS) end
+end
+
+dispatch.proxy["DO_RELEASE"] = function(binding)
+	local button = link_button(binding, "DO_RELEASE")
+	if button then button_action(button, ACT_RELEASE) end
+end
+
+dispatch.proxy["DO_CLICK"] = function(binding)
+	local button = link_button(binding, "DO_CLICK")
+	if button then button_action(button, ACT_CLICK) end
 end
 
 dispatch.proxy["SET_PRESET_LEVEL"] = function(_, params) save_setting("preset", params.LEVEL) end
