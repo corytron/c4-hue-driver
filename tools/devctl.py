@@ -297,10 +297,10 @@ def main():
     sub.add_parser("reload", help="queue a reload of the running code").set_defaults(func=cmd_reload)
 
     p = sub.add_parser("pin", help="serve src/ as it is now until unpin or the next pin (controller ignores later edits)")
-    p.add_argument("--tree", choices=["bridge", "light"], help="pin one tree only (default both)")
+    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="pin one tree only (default both)")
     p.set_defaults(func=cmd_pin)
     p = sub.add_parser("unpin", help="serve the live tree again")
-    p.add_argument("--tree", choices=["bridge", "light"], help="unpin one tree only (default both)")
+    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="unpin one tree only (default both)")
     p.set_defaults(func=cmd_unpin)
 
     p = sub.add_parser("wait", help="wait for a queued command to finish")
