@@ -123,6 +123,12 @@ waiting on you:
 - Every later Lua change. Composer is needed again only for a `driver.xml`
   change (a new property or action), a Director restart, and anything only
   Composer or a Navigator shows.
+- Stream address rotation (branch `stream-rotate`): two reloads a minute
+  apart. After each, `Event Stream` must show "Connected since" within
+  seconds, not minutes, and `Stream Address` must show a different spelling
+  than before (for example `10.000.001.143` then `10.000.01.143`, "rotating
+  over 7 spellings"). A reconnect that still sits in "Connecting" until a
+  bridge event means the new transfer queued behind the old one after all.
 
 ## F. Still open from the spike
 
