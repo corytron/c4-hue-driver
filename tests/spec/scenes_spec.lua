@@ -504,7 +504,7 @@ describe("bridge.scenes", function()
 			assert.equal("resync", c4.sent[2].params.reason)
 			assert.is_true(saw_log("Relax (device 2001) is no longer on the bridge; marked gone "
 				.. "(Re-link Scene or Forget Scene)"))
-			assert.same({ "Relax (device 2001, gone since " .. os.date("%m-%d", T0 + 10) .. ")" },
+			assert.same({ "Living Room: Relax (device 2001, gone since " .. os.date("%m-%d", T0 + 10) .. ")" },
 				texts(S:picker_relink_devices()))
 			c4.sent = {}
 			resync()
@@ -1051,8 +1051,8 @@ describe("bridge.scenes", function()
 			S:on_container(container(F.events.scene_deleted))
 			S:on_binding_changed(1, "HUE_BRIDGE", false, 2003)
 			local date = os.date("%m-%d", now)
-			assert.same({ "Relax (device 2001, gone since " .. date .. ")",
-				"Concentrate (device 2003, unbound since " .. date .. ")" }, texts(S:picker_relink_devices()))
+			assert.same({ "Living Room: Relax (device 2001, gone since " .. date .. ")",
+				"Garage: Concentrate (device 2003, unbound since " .. date .. ")" }, texts(S:picker_relink_devices()))
 			assert.same({ "2001", "2003" }, values(S:picker_relink_devices()))
 			assert.same({ "Garage: Concentrate (device 2003) unbound", "Downstairs (zone): Nightlight (device 2002)",
 				"Living Room: Relax (device 2001) gone" }, texts(S:picker_forget_devices()))

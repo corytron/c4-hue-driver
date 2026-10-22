@@ -371,6 +371,7 @@ local function turn_on(rate)
 		RATE = rate,
 	})
 	local action = recall_action
+	log.info("ON: recalling as %s", action)
 	local params = { rid = st.rid, action = action }
 	if rate > 0 then
 		params.duration = string.format("%d", rate)
@@ -435,7 +436,12 @@ local function bound_bridge()
 	if type(found) == "table" then
 		found = next(found)
 	end
-	return tonumber(found)
+	-- Nothing bound: the docs say nil, OS 3.4.2 answers 0 [hardware 2026-10-22].
+	found = tonumber(found)
+	if found and found > 0 then
+		return found
+	end
+	return nil
 end
 
 -- Our light_v2 proxy: the consumer bound to binding 5001, the device Composer
@@ -506,6 +512,7 @@ dispatch.properties["Recall_As"] = function(value)
 	end
 	recall_action = action
 	C4:PersistSetValue("recall_as", action)
+	log.info("Recall As %q -> recall action %s", tostring(value), action)
 end
 
 -- From the bridge (ExecuteCommand) -------------------------------------------
@@ -603,6 +610,18 @@ dispatch.commands["HUE_SCENE_FORGOTTEN"] = after_late_init("HUE_SCENE_FORGOTTEN"
 	report_online()
 end)
 
+-- Dev-only: dump what Director's Properties table holds and what this
+-- driver believes, for the dev loop (the bridge sends it with SendToDevice).
+dispatch.commands["HUE_DUMP"] = function()
+	local parts = {}
+	for k, v in pairs(Properties or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+	table.sort(parts)
+	log.always("Properties: %s", table.concat(parts, " | "))
+	log.always("state: rid=%s name=%s configured=%s active=%s recall_action=%s debug=%s", tostring(st.rid),
+		tostring(st.name), tostring(st.configured), tostring(st.active), tostring(recall_action),
+		tostring(log.enabled("debug")))
+end
+
 dispatch.commands["DEV_RELOAD"] = function(params)
 	params = params or {}
 	if not (devloop and devloop.apply_forwarded) then
@@ -642,8 +661,14 @@ dispatch.commands["Adopt_Hue_Name"] = function()
 	if not id then
 		return result("Not renamed: no light_v2 proxy is bound to binding 5001")
 	end
-	C4:RenameDevice(id, st.name) -- [verified: API 22/_32]
-	result(string.format("Renamed device %d to %s", id, st.name))
+	-- The name the bridge gives a scene device at creation (docs/scenes-design.md
+	-- §1): the scene's own name in a room, the zone's name in front for a zone.
+	local name = st.name
+	if st.group_type == "zone" and st.group_name then
+		name = st.group_name .. " " .. st.name
+	end
+	C4:RenameDevice(id, name) -- [verified: API 22/_32]
+	result(string.format("Renamed device %d to %s", id, name))
 end
 
 -- Ask the bridge to Forget this scene; it answers HUE_SCENE_FORGOTTEN, which
