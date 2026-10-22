@@ -531,6 +531,11 @@ dispatch.commands["DEV_RELOAD"] = function(params)
 	if not (devloop and devloop.apply_forwarded) then
 		return log.warn("DEV_RELOAD ignored: no dev loop in this build")
 	end
+	-- Lights and scene devices share the bridge's binding; a bundle for the
+	-- scene tree is not ours (an older bridge forwards without filtering).
+	if params and params.tree and params.tree ~= "light" then
+		return log.debug("DEV_RELOAD for the %s tree ignored", tostring(params.tree))
+	end
 	-- On success the new code is already running; this handler, its log
 	-- module and its bridge id are the old instance's, still good for one
 	-- more line. The failure detail went through devloop's own print, which
