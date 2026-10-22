@@ -94,7 +94,7 @@ function pairing.pair(ip, handlers)
 			if status == "link_button" then
 				return handlers.on_link_button(info)
 			elseif status ~= "ok" then
-				return handlers.on_error("Pairing failed: " .. value)
+				return handlers.on_error(value)
 			end
 			local creds = { key = value, bridge_id = info.bridge_id, ip = ip, model = info.model }
 			credentials.save(creds)
