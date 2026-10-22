@@ -436,7 +436,12 @@ local function bound_bridge()
 	if type(found) == "table" then
 		found = next(found)
 	end
-	return tonumber(found)
+	-- Nothing bound: the docs say nil, OS 3.4.2 answers 0 [hardware 2026-10-22].
+	found = tonumber(found)
+	if found and found > 0 then
+		return found
+	end
+	return nil
 end
 
 -- Our light_v2 proxy: the consumer bound to binding 5001, the device Composer
