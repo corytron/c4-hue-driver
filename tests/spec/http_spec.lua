@@ -198,4 +198,18 @@ describe("bridge.http", function()
 			assert.is_true(t.cancelled)
 		end)
 	end)
+
+	it("calls back with ok=false when Director's done carries no responses or a response without a code", function()
+		local got
+		http.request({ ip = "192.0.2.10", path = "/x" }, function(r) got = r end)
+		local t = c4.last_transfer()
+		t.callbacks.done(t, nil, 0, nil)
+		assert.is_false(got.ok)
+		assert.equal("no response", got.err)
+		got = nil
+		http.request({ ip = "192.0.2.10", path = "/y" }, function(r) got = r end)
+		t = c4.last_transfer()
+		t.callbacks.done(t, { { body = "x" } }, 0, nil)
+		assert.is_false(got.ok)
+	end)
 end)

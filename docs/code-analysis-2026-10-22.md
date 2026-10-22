@@ -4,8 +4,17 @@ Four read-only agents analysed the release code in four slices (bridge
 networking and credentials; lights and registry; scenes, groups and model;
 light and scene drivers plus common). Their reports, with file:line
 evidence, triggers and one-line fixes, are in `docs/reviews/analysis-*.md`.
-This page is the coordinator's consolidation and priority. Nothing has been
-fixed yet; every item below is a proposal for the next session.
+This page is the coordinator's consolidation and priority.
+
+**Fixed the same day (branch `robustness-fixes`)**: items 1, 2, 3 and 4 in
+full (hellos queued before late init and replayed after it, other early
+commands dropped; Busy flags expire after 90 s; the HTTP done handler builds
+its result under pcall; scene recalls carry a per-scene generation so a
+later recall or OFF silences the earlier callback, OFF reports the unchanged
+state when nothing could be queued), plus 7 (Stream Timeout clamped to
+30–86400 s, watchdog to at least 60 s), 10 (the diagnostic handlers exist
+only when the dev loop module is present) and 12 (tombstones written before
+lights). Specs cover each. The remaining items stay open below.
 
 ## Verdict
 

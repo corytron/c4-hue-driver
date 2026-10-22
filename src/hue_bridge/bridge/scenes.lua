@@ -1048,11 +1048,12 @@ end
 -- the group cache is fresh) and from Refresh Scenes. done(ok, err, sent).
 function scenes:resync(done)
 	done = done or function() end
+	self:expire_stale_busy()
 	if self.resyncing or self.adding then
 		self.resync_pending = done
 		return
 	end
-	self.resyncing = true
+	self.resyncing, self.resyncing_since = true, os.time()
 	self:fetch_all(function(res, err)
 		local sent = 0
 		local ok, e = true, nil
@@ -1228,12 +1229,19 @@ function scenes:recall(params)
 		body.recall.duration = math.floor(duration)   -- [assumed: recall.duration in ms; confirm once on hardware]
 	end
 	local scene = self.catalogue[rid]
+	-- A later recall or OFF of the same scene supersedes this one: its
+	-- callback must not report a state the owner has since changed [code
+	-- analysis 2026-10-22, F3].
+	local gen = self:next_recall_gen(rid)
 	self.ctx.log.info("scenes: recall %s as %s (device %d)", self:entry_label(rid, entry), action, entry.device_id)
 	self.ctx.http({ path = scenes.SCENE_PATH .. "/" .. rid, method = "PUT", body = body }, function(r)
 		self:protect("recall done", function()
 			local current = self.registry[rid]
-			if not current or current.device_id ~= entry.device_id then
-				return  -- re-linked or forgotten while the PUT was in flight
+			if not current or current.device_id ~= entry.device_id or current.state ~= "linked" then
+				return  -- re-linked, forgotten or gone while the PUT was in flight
+			end
+			if self.recall_gen[rid] ~= gen then
+				return  -- superseded; the later command reports the state
 			end
 			if r.ok then
 				local resulting = action
@@ -1271,6 +1279,7 @@ function scenes:off(params)
 	if not rid then
 		return false
 	end
+	self:next_recall_gen(rid)
 	local scene = self.catalogue[rid]
 	local called = false
 	if entry.state == "gone" or not scene then
@@ -1282,7 +1291,14 @@ function scenes:off(params)
 		if grouped then
 			self.ctx.log.info("scenes: off for %s (device %d): grouped_light %s off", self:entry_label(rid, entry),
 				entry.device_id, tostring(grouped):sub(1, 8))
-			self.ctx.group_off(grouped)
+			if not self.ctx.group_off(grouped) then
+				-- Nothing queued (not paired): the scene stays as it is and the
+				-- device hears the truth [code analysis 2026-10-22, F4].
+				self.ctx.log.warn("scenes: off for %s (device %d): nothing queued; state unchanged",
+					self:entry_label(rid, entry), entry.device_id)
+				self:send_state(rid, "recall")
+				return false
+			end
 			called = true
 		else
 			self.ctx.log.info("scenes: off for %s (device %d): its group has no grouped_light; reporting inactive",
@@ -1296,7 +1312,29 @@ end
 
 -- Device creation ---------------------------------------------------------------
 
+-- A guard whose callback never came back would read Busy for ever and park
+-- every resync [code analysis 2026-10-22, F1]: it expires instead.
+local BUSY_MAX = 90
+
+function scenes:expire_stale_busy()
+	for _, flag in ipairs({ "adding", "resyncing" }) do
+		local since = self[flag .. "_since"]
+		if self[flag] and since and os.time() - since > BUSY_MAX then
+			self.ctx.log.warn("scenes: %s stuck for %d s; cleared", flag, os.time() - since)
+			self[flag] = false
+		end
+	end
+end
+
+-- Per-rid generation of the latest recall or off; a callback compares.
+function scenes:next_recall_gen(rid)
+	self.recall_gen = self.recall_gen or {}
+	self.recall_gen[rid] = (self.recall_gen[rid] or 0) + 1
+	return self.recall_gen[rid]
+end
+
 function scenes:busy_text()
+	self:expire_stale_busy()
 	if self.adding then
 		return "Busy: adding scenes; try again in a moment"
 	elseif self.resyncing then
@@ -1431,7 +1469,7 @@ function scenes:add_scene(rid, room_id, done)
 		return false
 	end
 
-	self.adding = true
+	self.adding, self.adding_since = true, os.time()
 	local label = sanitise(scene.name or "?")
 	self:create_scenes({ { scene = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.adding = false
@@ -1529,7 +1567,7 @@ function scenes:add_all_of_group(group_rid, done)
 		return table.concat(parts, "; ")
 	end
 
-	self.adding = true
+	self.adding, self.adding_since = true, os.time()
 	self:create_scenes(jobs, function(created, failed, err)
 		self.adding = false
 		self:reconcile(true)
