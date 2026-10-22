@@ -731,6 +731,28 @@ end
 dispatch.proxy["ON"] = function() turn_on(0) end
 dispatch.proxy["OFF"] = function() turn_off(0) end
 
+-- Keypad buttons: a click or release of the top button recalls, of the
+-- bottom button turns the group off, of the toggle button toggles; holds do
+-- nothing. Every action is echoed as the proxy requires [verified:
+-- proxy-protocol reference, light_v2 BUTTON_ACTION]; docs/keypad-design.md.
+dispatch.proxy["BUTTON_ACTION"] = function(_, params)
+	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
+	if not button or not action then
+		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
+	end
+	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+	if action == 1 then
+		return
+	end
+	if button == 0 then
+		turn_on(0)
+	elseif button == 1 then
+		turn_off(0)
+	else
+		dispatch.proxy["TOGGLE"]()
+	end
+end
+
 -- Legacy commands that old programming may still send.
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
 dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
