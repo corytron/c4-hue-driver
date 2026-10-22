@@ -1283,11 +1283,12 @@ end
 -- (the latest done wins).
 function lights:resync(done)
 	done = done or function() end
+	self:expire_stale_busy()
 	if self.resyncing or self.importing then
 		self.resync_pending = done
 		return
 	end
-	self.resyncing = true
+	self.resyncing, self.resyncing_since = true, os.time()
 	self:fetch_all(function(res, err)
 		local sent = 0
 		local ok, e = true, nil
@@ -1498,7 +1499,22 @@ end
 -- Device creation ---------------------------------------------------------------
 
 -- The text an action gets while another is running (§6).
+-- A guard whose callback never came back would read Busy for ever and park
+-- every resync [code analysis 2026-10-22, R1]: it expires instead.
+local BUSY_MAX = 90
+
+function lights:expire_stale_busy()
+	for _, flag in ipairs({ "importing", "resyncing" }) do
+		local since = self[flag .. "_since"]
+		if self[flag] and since and os.time() - since > BUSY_MAX then
+			self.ctx.log.warn("lights: %s stuck for %d s; cleared", flag, os.time() - since)
+			self[flag] = false
+		end
+	end
+end
+
 function lights:busy_text()
+	self:expire_stale_busy()
 	if self.importing then
 		return "Busy: importing; try again in a moment"
 	elseif self.resyncing then
@@ -1644,7 +1660,7 @@ function lights:add_light(rid, room_id, done)
 		room_name = why
 	end
 
-	self.importing = true
+	self.importing, self.importing_since = true, os.time()
 	local label = self:light_label(model, false)
 	self:create_lights({ { model = model, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.importing = false
@@ -1677,7 +1693,7 @@ function lights:import_new(done)
 		done(false, busy)
 		return false
 	end
-	self.importing = true
+	self.importing, self.importing_since = true, os.time()
 	self.ctx.log.info("lights: import: fetching the bridge's resources")
 
 	local function finish(ok, text)

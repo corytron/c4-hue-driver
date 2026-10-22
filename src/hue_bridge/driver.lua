@@ -137,8 +137,14 @@ local function stream_connection()
 	return conn
 end
 
+-- Bounds [code analysis 2026-10-22, M3]: 0 would make the transfer wait for
+-- ever (and block every command in single-queue mode); a watchdog shorter
+-- than the keepalive interval would reconnect and resync without end.
+local TIMEOUT_MIN, TIMEOUT_MAX, WATCHDOG_MIN = 30, 86400, 60
+
 local function stream_timeout()
 	local configured = number_property("Stream Timeout (s)", stream.DEFAULT_TIMEOUT)
+	configured = math.max(TIMEOUT_MIN, math.min(configured, TIMEOUT_MAX))
 	if dual_queue() then
 		return configured
 	end
@@ -227,7 +233,9 @@ local function new_scenes()
 		group_off = function(grouped_light_rid)
 			if state.group_queue then
 				state.group_queue:set(grouped_light_rid, { on = false })
+				return true
 			end
+			return false
 		end,
 		persist_get = function(name) return C4:PersistGetValue(name) end,
 		persist_set = function(name, value) C4:PersistSetValue(name, value) end,
@@ -293,7 +301,7 @@ local function new_stream()
 	return stream.new({
 		connection = stream_connection,
 		timeout = stream_timeout(),
-		watchdog = number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG),
+		watchdog = math.max(WATCHDOG_MIN, number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG)),
 		on_status = function(text) prop("Event Stream", text) end,
 		on_connected = function()
 			-- Runs from a timer, never inside the stream's callbacks (see
@@ -1294,6 +1302,48 @@ end
 
 -- Lifecycle ----------------------------------------------------------------
 
+-- Messages from light and scene drivers can arrive before this driver's
+-- late init (Director's inter-driver order is not guaranteed) and the
+-- handlers index state that does not exist yet [code analysis 2026-10-22,
+-- H1]: hellos are queued and replayed after late init, anything else dropped.
+local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true }
+local EARLY_MAX = 200
+local early_commands = {}
+local execute_command = dispatch.execute_command
+dispatch.execute_command = function(command, params)
+	if not state.late_init_done then
+		local name = command
+		if command == "LUA_ACTION" and type(params) == "table" and params.ACTION then
+			name = params.ACTION
+		end
+		if EARLY_QUEUED[name] and #early_commands < EARLY_MAX then
+			early_commands[#early_commands + 1] = { command, params }
+			log.debug("%s before late init: queued", tostring(name))
+		else
+			log.warn("%s before late init: dropped", tostring(name))
+		end
+		return
+	end
+	return execute_command(command, params)
+end
+
+local function replay_early_commands()
+	local queued = early_commands
+	early_commands = {}
+	for _, c in ipairs(queued) do
+		execute_command(c[1], c[2])
+	end
+end
+
+-- Diagnostics that send arbitrary requests with the key or dump project
+-- state are for development builds only [code analysis 2026-10-22, M4].
+if not devloop then
+	for _, name in ipairs({ "Hue_Request", "Probe_Project", "Probe_Errors", "Probe_Scenes", "Probe_Call",
+		"Proxy_Command", "Lights_Report" }) do
+		dispatch.commands[name] = nil
+	end
+end
+
 log.set_prefix("Hue Bridge")
 dispatch.install(_G)
 
@@ -1328,6 +1378,7 @@ function OnDriverLateInit()
 	dispatch.replay_properties(Properties)
 	state.stream = new_stream()
 	state.late_init_done = true
+	replay_early_commands()
 	register_probe_events()
 	refresh_status()
 	if connection() then
