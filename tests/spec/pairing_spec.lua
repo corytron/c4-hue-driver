@@ -91,6 +91,8 @@ describe("bridge.pairing", function()
 		c4.transfers[2]:respond(200, '[{"error":{"type":7,"description":"invalid value"}}]')
 		assert.equal("error", events[2][1])
 		assert.truthy(events[2][2]:find("invalid value", 1, true))
+		-- the driver prefixes "Pairing failed: " itself; the module must not
+		assert.is_nil(events[2][2]:find("Pairing failed", 1, true), events[2][2])
 	end)
 
 	it("rejects a config response without a valid bridge ID", function()
