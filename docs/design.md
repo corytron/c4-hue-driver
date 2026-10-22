@@ -715,6 +715,20 @@ project:
   menu route is the one to use, and "Update Driver" is only for forcing a
   same-version reload **[verified 2026-10-21]**. `sort_order` put the 23
   bridge actions in exactly the intended order.
+- **Production build 116 over dev build 84 (2026-10-22 12:30, Windows
+  session)**: the three release `.c4z` (no `common/devloop.lua`, no
+  `--allowexecute`) fetched from this VM over HTTP, hashes checked, installed
+  in one "Add or Update Driver or Agent…" pass; the dialog read "Update
+  Succeeded: Drivers or agents were successfully updated: hue_bridge.c4z,
+  hue_light.c4z, hue_scene.c4z". The bridge stopped polling the dev server
+  within 20 s, its stream was back 8 s after the install, and 55 s later
+  every sampled device (bridge, two lights, one scene) read `Driver Version`
+  116 with its state intact: Paired, 47 of 47 lights, 2 scenes, Attention
+  None, the pairing and registry untouched. The `Debug Mode` set to Off
+  through the dev loop a few minutes earlier survived. Composer still shows
+  the bridge's **Lua tab** for the release build (whether it executes is
+  untested); the dev-only `Dev Server` and `Diagnostic Server` rows remain
+  with their last values, ignored by the release code.
 
 ## Discovery
 

@@ -10,6 +10,9 @@
 # inline; its focus guard refused correctly when the VM session was locked). Known limits: tab offsets are
 # pixel constants measured at 96 DPI; Select-ComposerDevice only sees expanded tree rows; Composer must be on
 # the System Design view; nothing works while the VM's interactive session is disconnected or locked.
+# Rounds 9-10 (2026-10-22): Set-ComposerProperty proven in full (two property changes, Set clicked, re-read);
+# Invoke-MouseDrag did NOT start Composer's Connections drag & drop (kept for reference; bind with C4:Bind
+# from the bridge instead); "Add or Update Driver or Agent..." installed a production build over dev builds.
 #
 # Composer exposes every control to UIA as ControlType.Pane with NO patterns (no Invoke/Value/Selection),
 # so this module READS through UIA (Name / ClassName / BoundingRectangle) and ACTS through real mouse and
@@ -201,6 +204,21 @@ function Invoke-MouseClick {
     [C4.Native]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero); [C4.Native]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
     if ($Double) { Start-Sleep -Milliseconds 80; [C4.Native]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero); [C4.Native]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero) }
     Start-Sleep -Milliseconds 150
+}
+
+function Invoke-MouseDrag {
+    # Physical left-button drag from (X1,Y1) to (X2,Y2) in small steps (Composer's Connections view binds by drag & drop).
+    # Kept for reference: on 2026-10-22 neither this nor an absolute mouse_event variant started Composer's OLE drag.
+    param([Parameter(Mandatory)][int]$X1, [Parameter(Mandatory)][int]$Y1, [Parameter(Mandatory)][int]$X2, [Parameter(Mandatory)][int]$Y2, [int]$Steps = 25, [int]$StepMs = 20)
+    [void][C4.Native]::SetCursorPos($X1, $Y1); Start-Sleep -Milliseconds 150
+    [C4.Native]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 250     # LEFTDOWN
+    for ($i = 1; $i -le $Steps; $i++) {
+        [void][C4.Native]::SetCursorPos([int]($X1 + ($X2 - $X1) * $i / $Steps), [int]($Y1 + ($Y2 - $Y1) * $i / $Steps))
+        Start-Sleep -Milliseconds $StepMs
+    }
+    Start-Sleep -Milliseconds 300
+    [C4.Native]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)                                    # LEFTUP
+    Start-Sleep -Milliseconds 400
 }
 
 function Move-MouseAway {
