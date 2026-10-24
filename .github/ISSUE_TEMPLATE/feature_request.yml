@@ -1,0 +1,44 @@
+name: Feature request
+description: Something the drivers should do, or do differently
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a personal project with no roadmap (README, "What it is not"); a request
+        is welcome and may stay open for a while. Known out-of-scope items: Hue motion
+        sensors, buttons and dimmer switches as Control4 devices, entertainment areas,
+        Hue automations and MotionAware, a second bridge. If your request is one of
+        them, say why it matters to you anyway.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The situation in your home and what you cannot do today (in Composer, on a Navigator, from a keypad, from the Hue side).
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How it could work
+      description: What the driver should do and where it shows up (a property, an action, a tile, programming). If it means the driver acting on its own (creating, renaming, moving or deleting devices, syncing names or rooms), say so; that needs a written contract under docs/ first (CONTRIBUTING.md).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Lights (on/off, dimming, colour)
+        - Rooms, zones and scenes
+        - Keypads and Button Links
+        - Pairing, event stream and bridge connectivity
+        - Composer properties, actions and texts
+        - The manual and the documentation
+        - Build, tests and tooling
+        - Other
+  - type: checkboxes
+    id: hardware
+    attributes:
+      label: Hardware and help
+      options:
+        - label: I can test a build on my own controller and bridge and report back.
+        - label: I would like to implement this myself (we agree the approach first).

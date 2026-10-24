@@ -1,0 +1,83 @@
+# On a version tag (v1.0, v1.1, ...): lint, test, build, then attach the three
+# .c4z files to the GitHub release of that tag, creating the release when it
+# does not exist yet. A tag that is moved and pushed again runs this again and
+# replaces the attached files (--clobber). Naming: docs/release-checklist.md,
+# "Naming": tag vX.Y, release titled "X.Y", the files carry the build number.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    name: Build and attach the packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The build number is the commit count; a shallow checkout would stamp 1.
+          fetch-depth: 0
+
+      - name: Install Lua 5.1, luarocks, luacheck, busted, dkjson and lxml
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1 liblua5.1-0-dev luarocks python3-lxml
+          sudo luarocks --lua-version=5.1 install luacheck
+          sudo luarocks --lua-version=5.1 install busted
+          sudo luarocks --lua-version=5.1 install dkjson
+
+      - name: Lint
+        run: luacheck src tests tools
+
+      - name: Test
+        run: busted tests
+
+      - name: Clone Snap One's driver packager
+        run: git clone --depth 1 https://github.com/snap-one/drivers-driverpackager "$RUNNER_TEMP/drivers-driverpackager"
+
+      - name: Build
+        run: DP3="$RUNNER_TEMP/drivers-driverpackager/dp3/driverpackager.py" tools/build.sh
+
+      # docs/release-checklist.md, section 0: every package carries LICENSE and
+      # NOTICE. The checksums are what the deploy brief quotes per file.
+      - name: Check the packages and write checksums
+        run: |
+          cd build
+          for d in hue_bridge hue_light hue_scene; do
+            test -f "$d.c4z"
+            unzip -Z1 "$d.c4z" | grep -qx LICENSE
+            unzip -Z1 "$d.c4z" | grep -qx NOTICE
+          done
+          sha256sum hue_bridge.c4z hue_light.c4z hue_scene.c4z | tee SHA256SUMS.txt
+
+      - name: Keep the packages as a workflow artifact too
+        uses: actions/upload-artifact@v4
+        with:
+          name: hue-drivers-${{ github.ref_name }}
+          path: |
+            build/*.c4z
+            build/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Create the release if it does not exist, then attach the packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          build="$(git rev-list --count HEAD)"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Title without the v ("1.0" for v1.0). The body can be edited on the
+            # Releases page afterwards; the generated notes are appended to it.
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "${TAG#v}" --generate-notes \
+              --notes "Build ${build}: the integer the three drivers show as **Driver Version** in Composer. Download all three \`.c4z\` files; they must come from the same build. Install or update them in place through Composer's *Add or Update Driver or Agent...* (see the README)."
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            build/hue_bridge.c4z build/hue_light.c4z build/hue_scene.c4z build/SHA256SUMS.txt
