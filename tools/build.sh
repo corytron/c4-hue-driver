@@ -46,6 +46,9 @@ for driver in "${DRIVERS[@]}"; do
 	if [[ "$dev_build" != yes ]]; then
 		rm -f "$stage/common/devloop.lua"
 	fi
+	# The drivers' own copy of the version: Director's answer is empty at the
+	# first init of a device created by AddDevice (docs/status.md, 2026-10-24).
+	printf 'return "%s"\n' "$version" > "$stage/common/build_version.lua"
 
 	# dp3 only stamps <version>/<modified> when building from a manifest, so
 	# generate one listing everything staged (directories recursively).

@@ -1,4 +1,4 @@
-# Status of the Hue driver (2026-10-24, build 185)
+# Status of the Hue driver (2026-10-24, build 199)
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -6,13 +6,17 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 185**, production (no dev loop), on all three drivers (installed
-  2026-10-24 13:15; properties that fit Composer's column, after build 180's
-  time-of-day scenes): Hue Bridge, Hue Light, Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
+- **Build 199**, production (no dev loop), on all three drivers (installed
+  2026-10-24 14:17; zone lights, PR #30, after build 185's readable
+  properties and build 180's time-of-day scenes): Hue Bridge, Hue Light,
+  Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
   1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
-  room's time-of-day scene, created 2026-10-24 12:06). No Hue Light devices: all 47
+  room's time-of-day scene, created 2026-10-24 12:06); two zone lights
+  in the Master Bedroom, created with Add Zone Light on 2026-10-24: "Bedside
+  Lights" (device 1166, the Hue zone of the two bedside lamps) and "Master
+  Bedroom Lights" (device 1168, the whole Hue room). No Hue Light devices: all 47
   lights were deleted in Composer on 2026-10-22 and are remembered as
   deleted (Add Light brings any of them back). 126 scenes on the bridge, 1
   imported.
@@ -87,6 +91,20 @@ this page disagree about the present, this page and the code win.
   change: either a `driver.xml` capability change (needs the reboot) or,
   per the light_v2 reference, switching `hide_proxy_properties` at run time
   with `DYNAMIC_CAPABILITIES_CHANGED` (documented, not tried on the house).
+- **Zone lights** (build 196, contract `docs/zone-light-design.md`): a Hue
+  zone or room added as a Hue Light device of kind "group" with the bridge's
+  `Add Zone Light` (Group, Room) action; `Re-link Zone Light`, `Forget Light`
+  (zone-light devices after the lights), the `Zone Lights` property ("7
+  zones, 16 rooms on bridge; 1 imported"). The device: Status "Hue zone
+  Bedside Lights (2 lights)", Model "Hue zone (2 lights)", Hue Light ID
+  "zone #9 (b90ea7b4…)"; on while any lamp is lit, level = the group's
+  average; ON = every lamp to 100 %, slider absolute on the group, keypad
+  holds relative (`dimming_delta`), colour and colour temperature to the
+  group, capabilities the union of the members'; the tile's colour is the
+  first lit lamp's. The grouped_light queue is paced at one request a
+  second with a burst of three (closes the pacing item below). A group with
+  no lights is offline; a zone deleted in Hue leaves the device gone until
+  Re-link Zone Light or Forget Light.
 - **Binding re-check**: a light or scene that is unbound at start looks again
   at 5, 15, 30 and 60 s (after a Director restart the binding can be late).
 - **Documentation tab** in every driver (the owner's manual on the bridge),
@@ -116,9 +134,25 @@ hold-to-dim and LEDs on a scene (Hue accepts `dimming_delta` with `dynamics`
 and the `stop` action on a grouped_light), the scene dimmer in the iPhone app
 and its LEDs (2026-10-24), the light staying bound through a controller
 reboot, time-of-day scenes activated and deactivated from the bridge and
-listed in Composer (2026-10-24, build 180).
+listed in Composer (2026-10-24, build 180), the readable Room Mappings
+list (build 185), Add Zone Light creating the Bedside Lights zone light and the Master
+Bedroom room light with the right texts, pickers and counts, Forget Light
+and a Composer delete of a zone light (builds 196–199, Composer side only).
 
 ## Open
+
+- Zone lights: the owner's checks from the phone and the keypad (ON = both
+  lamps 100 %, slider, colour and colour temperature reaching both lamps,
+  OFF, Hue-app changes reaching the tile, Shine's tile going off on a zone
+  OFF, the Bedside Lights Switch rebound to device 1166); the grouped_light
+  PUT accepting `color` / `color_temperature` is assumed until then. (Settled on the way, build 199: a device created by AddDevice has an
+  empty property table at its first init, so a property written only by
+  the replay of the property handlers, `Driver Version`, stayed blank until
+  a reload; the three drivers now write it at late init and look again at 5
+  and 15 s. The controller words a missing module "An unknown error
+  occurred", which release builds no longer report as a dev-loop error.) The manual's chapter
+  7 has no screenshot of Add Zone Light yet (shots are in `build/shots/img/`).
+
 
 - Time-of-day scenes: whether a running schedule still advances to its
   next slot after a whole-room dim (a 16:00 check on 2026-10-24 reads the
@@ -134,10 +168,8 @@ listed in Composer (2026-10-24, build 180).
   got there is not visible from Composer); a slider level from off sets all
   of the scene's lights to that level (follows Hue's brightness override).
 - Code: `Stream Watchdog (s)` is declared with a minimum of 0 in
-  `hue_bridge/driver.xml` but the code treats anything below 60 as 60; the
-  group queue (scene OFF, dims) is paced at up to 10 requests a second
-  although Hue's guidance for groups is about one a second (a comment in
-  `driver.lua` now says so). Release builds also keep two diagnostic paths:
+  `hue_bridge/driver.xml` but the code treats anything below 60 as 60.
+  Release builds also keep two diagnostic paths:
   Test Connection's Host override and Connection Test's "Diagnostic Server"
   target (insecure TLS), and the scene driver's `HUE_DUMP` handler is not
   gated on the dev loop.

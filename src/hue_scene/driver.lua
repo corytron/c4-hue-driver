@@ -23,7 +23,10 @@ local devloop_ok, devloop = pcall(require, "common.devloop")
 if not devloop_ok then
 	-- Absent in release builds (expected); anything else is a real error
 	-- that must be visible, since the loop is how the controller gets tested.
-	if not tostring(devloop):find("not found", 1, true) then
+	-- A missing module reads "not found" under busted and "An unknown error
+	-- occurred" on the controller [hardware 2026-10-24].
+	local reason = tostring(devloop):lower()
+	if not (reason:find("not found", 1, true) or reason:find("unknown error", 1, true)) then
 		print("[ERROR] Hue Scene: dev loop failed to load: " .. tostring(devloop))
 	end
 	devloop = nil
@@ -964,8 +967,32 @@ end
 
 -- Properties ---------------------------------------------------------------
 
+-- Director answers the version lookup with nothing at the first init of a
+-- device created by AddDevice [hardware 2026-10-24, device 1166], so the
+-- build's own stamp (common/build_version.lua, tools/build.sh) is the fallback.
+local build_version_ok, build_version = pcall(require, "common.build_version")
+local function driver_version()
+	local v = C4:GetDriverConfigInfo("version")
+	if v == nil or tostring(v) == "" then
+		v = build_version_ok and tostring(build_version) or ""
+	end
+	return v
+end
+
 dispatch.properties["Driver_Version"] = function()
-	prop("Driver Version", C4:GetDriverConfigInfo("version"))
+	prop("Driver Version", driver_version())
+end
+
+-- Director fills a new device's property table late: at the first init of
+-- a device created by AddDevice the replay of the properties reaches no
+-- Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168], so
+-- late init writes the row itself and looks again twice while it is empty.
+local function show_driver_version(attempt)
+	local v = driver_version()
+	prop("Driver Version", v)
+	if v == "" and attempt < 3 then
+		C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+	end
 end
 
 dispatch.properties["Debug_Mode"] = function(value)
@@ -1710,6 +1737,7 @@ function OnDriverLateInit()
 	load_colors()
 	load_held()
 	dispatch.replay_properties(Properties)
+	show_driver_version(1)
 	prop("Hue Scene ID", scene_id_label())
 	prop("Hue Scene", st.name)
 	-- The bridge first, so messages it sent before this point are applied

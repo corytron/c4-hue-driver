@@ -6,9 +6,15 @@
 --    "C4:url transfer scheduling"), so a burst of PUTs queues up and the last
 --    one lands long after the slider stopped moving. Keeping one PUT in flight
 --    per light and sending only the latest state keeps that queue short.
--- 2. Hue asks for about 10 commands per second to /resource/light; the REST
---    API is not for continuous fast streams. A token bucket (RATE_PER_SEC,
---    burst BURST) enforces that across all lights.
+-- 2. Hue asks for about 10 commands per second to /resource/light and about
+--    one per second to /resource/grouped_light; the REST API is not for
+--    continuous fast streams. A token bucket per queue (opts.rate_per_sec
+--    sustained, opts.burst at once; defaults RATE_PER_SEC and BURST) enforces
+--    that across all rids of the queue. A keypad hold's start and its stop
+--    never wait for a token (docs/zone-light-design.md Decision 9): they are
+--    one request each, paced by the owner's thumb, and a late stop overshoots
+--    the ramp; a slider drag is what the bucket is for, and it settles to the
+--    latest level at the sustained rate.
 -- 3. The light_v2 best-practice doc wants back-to-back brightness and colour
 --    commands merged into one request. A short debounce (DEBOUNCE_MS) after
 --    the last change does that.
@@ -70,17 +76,46 @@ end
 --   send(rid, body, done)  issue the PUT; done(result) with http's result
 --                          table { ok, code, json, err }
 --   now()                  millisecond clock (default C4:GetTime)
+--   rate_per_sec           sustained PUTs per second across the queue's rids
+--                          (default commands.RATE_PER_SEC): once the bucket is
+--                          empty, one more PUT every 1/rate_per_sec seconds
+--   burst                  the bucket's capacity (default commands.BURST): how
+--                          many PUTs go out at once after an idle period; the
+--                          bucket refills to it at rate_per_sec and is full
+--                          again after burst/rate_per_sec seconds of quiet
+--   level_of(rid)          current brightness or nil, the start of a refused
+--                          dim stop's fallback estimate
 function commands.new(opts)
+	local rate = tonumber(opts.rate_per_sec) or commands.RATE_PER_SEC
+	local burst = tonumber(opts.burst) or commands.BURST
+	assert(rate > 0, "commands.new: rate_per_sec must be > 0")
+	assert(burst >= 1, "commands.new: burst must be >= 1")
 	return setmetatable({
 		send = assert(opts.send, "commands.new needs opts.send"),
 		now = opts.now or default_now,
 		level_of = opts.level_of,  -- rid -> current brightness or nil (start of a dim's fallback estimate)
+		rate = rate,                -- tokens per second
+		burst = burst,              -- token bucket capacity
 		lights = {},                -- rid -> { pending, timer, timer_kind, inflight, failures, limits }
 		generation = 0,
-		tokens = commands.BURST,
+		tokens = burst,
 		refilled_at = nil,          -- ms of the last refill; nil until the first take
 		counters = { sent = 0, retried = 0, dropped = 0, coalesced = 0 },
 	}, commands)
+end
+
+-- True for a pending state the bucket must not hold back: a dim stop, or a
+-- hold's start (a whole-range dimming_delta: no `delta`, or 100). A scene
+-- slider's relative move (a smaller `delta`) is a drag like any other and
+-- waits its turn, as absolute levels and colours do.
+function commands.urgent(pending)
+	if type(pending) ~= "table" or pending.dim == nil then
+		return false
+	end
+	if pending.dim == "stop" then
+		return true
+	end
+	return pending.delta == nil or pending.delta >= 100
 end
 
 -- Merge one set() call's fields into a pending table, in place. Order inside
@@ -231,8 +266,10 @@ function commands:arm(rid, light, delay_ms, kind)
 end
 
 -- Merge `fields` into the light's pending state and (re)start its debounce.
--- A retry or token wait already armed is left alone: the new state simply
--- replaces what will be sent when it fires.
+-- A retry already armed is left alone, and so is a token wait unless the
+-- merged state became urgent (a hold's start or stop must not sit behind a
+-- drag's wait): the new state simply replaces what will be sent when the
+-- timer fires.
 function commands:set(rid, fields)
 	local light = self:light(rid)
 	if light.pending then
@@ -241,25 +278,32 @@ function commands:set(rid, fields)
 		light.pending = {}
 	end
 	merge(light.pending, fields or {})
-	if light.timer_kind == "retry" or light.timer_kind == "wait" then
+	if light.timer_kind == "retry" or (light.timer_kind == "wait" and not commands.urgent(light.pending)) then
 		return
 	end
 	self:arm(rid, light, commands.DEBOUNCE_MS, "debounce")
 end
 
--- Token bucket. Returns true and takes a token, or false and the ms to wait.
-function commands:take_token()
+-- Token bucket (self.rate tokens per second, self.burst at most). Returns
+-- true and takes a token, or false and the ms to wait. An urgent request
+-- (commands.urgent) neither waits nor takes a token: a hold is two requests
+-- paced by a thumb, and counting them would make the tap that often follows
+-- a hold wait behind the drag that emptied the bucket a moment before.
+function commands:take_token(urgent)
 	local now = self.now()
 	if self.refilled_at then
 		local elapsed = math.max(0, now - self.refilled_at)
-		self.tokens = math.min(commands.BURST, self.tokens + elapsed * commands.RATE_PER_SEC / 1000)
+		self.tokens = math.min(self.burst, self.tokens + elapsed * self.rate / 1000)
 	end
 	self.refilled_at = now
+	if urgent then
+		return true
+	end
 	if self.tokens >= 1 then
 		self.tokens = self.tokens - 1
 		return true
 	end
-	return false, math.ceil((1 - self.tokens) * 1000 / commands.RATE_PER_SEC)
+	return false, math.ceil((1 - self.tokens) * 1000 / self.rate)
 end
 
 -- Send the pending state now if nothing stands in the way: an in-flight PUT
@@ -269,7 +313,7 @@ function commands:flush(rid)
 	if not light or not light.pending or light.inflight then
 		return
 	end
-	local ok, wait = self:take_token()
+	local ok, wait = self:take_token(commands.urgent(light.pending))
 	if not ok then
 		self:arm(rid, light, wait, "wait")
 		return

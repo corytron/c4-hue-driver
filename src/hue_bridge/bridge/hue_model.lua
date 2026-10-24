@@ -880,4 +880,169 @@ function hue_model.smart_scene_count(items)
 	return count
 end
 
+-- Grouped lights and zone lights -----------------------------------------------
+-- docs/zone-light-design.md: a Hue zone or room as a light_v2 light. A
+-- grouped_light item (GET or stream) carries `on.on` (true while any member
+-- is lit) and `dimming.brightness` (the average of the lit members), plus
+-- `owner {rid, rtype}`, `id_v1` and blocks the driver ignores (alert,
+-- signaling, dimming_delta, dynamics) [verified: hardware, docs/smart-scenes-
+-- research.md §7 V4, V12]. No colour has ever appeared in one, so a group's
+-- colour is derived from its member lights (group_color) and its
+-- capabilities are the union of theirs (group_caps), Decisions 7 and 8.
+
+-- Every field update_grouped_light() can report as changed, in a stable order.
+local GROUPED_LIGHT_FIELD_ORDER = { "on", "brightness" }
+
+-- The `model` HUE_CONFIGURE carries for a group device, by group type.
+local GROUP_MODEL = { zone = "Hue zone", room = "Hue room" }
+
+-- Merge a (possibly partial) grouped_light item into `model` in place and
+-- return the field names the item carried, in GROUPED_LIGHT_FIELD_ORDER
+-- (carried counts as changed, as update() does: a device may be waiting for
+-- the echo of what it set). An `owner` is taken when carried but never
+-- reported: a grouped_light never changes hands. Only booleans and numbers
+-- count (the controller decodes a JSON null as an empty table).
+function hue_model.update_grouped_light(model, item)
+	local touched = {}
+	if type(model) ~= "table" or type(item) ~= "table" then
+		return {}
+	end
+	if type(item.owner) == "table" and text(item.owner.rid) then
+		model.owner_rid = item.owner.rid
+		model.owner_type = text(item.owner.rtype)
+	end
+	if type(item.on) == "table" and type(item.on.on) == "boolean" then
+		model.on = item.on.on
+		touched.on = true
+	end
+	if type(item.dimming) == "table" and number(item.dimming.brightness) then
+		model.brightness = item.dimming.brightness
+		touched.brightness = true
+	end
+	local changed = {}
+	for _, name in ipairs(GROUPED_LIGHT_FIELD_ORDER) do
+		if touched[name] then
+			changed[#changed + 1] = name
+		end
+	end
+	return changed
+end
+
+-- One /clip/v2/resource/grouped_light item (a GET's, or a stream item) →
+--   { rid, owner_rid, owner_type ("room"|"zone"|"bridge_home"|nil), on (boolean|nil), brightness (number|nil) }
+-- nil for an item without a string id, or of another type when it names one
+-- (a light sharing the container). A bare update item (no owner block) has
+-- nil owner fields: the caller resolves the owner through the group cache.
+function hue_model.grouped_light(item)
+	if type(item) ~= "table" or text(item.id) == nil or (item.type ~= nil and item.type ~= "grouped_light") then
+		return nil
+	end
+	local model = { rid = item.id, owner_rid = nil, owner_type = nil, on = nil, brightness = nil }
+	hue_model.update_grouped_light(model, item)
+	return model
+end
+
+-- The capabilities of a group from its member lights (a list of light()
+-- tables, members without a model left out by the caller), Decision 7: the
+-- union of the flags (`has_color` if any member has colour, `has_cct` if any
+-- has colour temperature); the mirek range is the intersection of the
+-- CT-capable members' ranges (the largest minimum, the smallest maximum),
+-- or the first ranged member's own range when the intersection is empty;
+-- nil bounds when no member has a range. `min_dim` is 1: Hue clamps per
+-- lamp. The shape is caps()'s, so registry_configure_params() takes it.
+function hue_model.group_caps(lights)
+	local caps = { has_color = false, has_cct = false, mirek_min = nil, mirek_max = nil, min_dim = 1 }
+	local lo, hi, first_lo, first_hi
+	for _, light in ipairs(type(lights) == "table" and lights or {}) do
+		if type(light) == "table" then
+			if light.has_color == true then
+				caps.has_color = true
+			end
+			if light.has_cct == true then
+				caps.has_cct = true
+				if number(light.mirek_min) and number(light.mirek_max) then
+					if first_lo == nil then
+						first_lo, first_hi = light.mirek_min, light.mirek_max
+					end
+					lo = lo and math.max(lo, light.mirek_min) or light.mirek_min
+					hi = hi and math.min(hi, light.mirek_max) or light.mirek_max
+				end
+			end
+		end
+	end
+	if lo and hi then
+		if lo > hi then
+			lo, hi = first_lo, first_hi
+		end
+		caps.mirek_min, caps.mirek_max = lo, hi
+	end
+	return caps
+end
+
+-- The colour a group device shows, Decision 8, from its member lights in
+-- group order: `{ x, y, color_mode = "xy" }` of the first lit colour-capable
+-- member sitting in xy mode; else `{ mirek, color_mode = "ct" }` of the
+-- first lit member with a valid mirek; nil while no member is lit (or none
+-- shows a colour). Never "last commanded": it would lie after a Hue-app change.
+function hue_model.group_color(lights)
+	local ct
+	for _, light in ipairs(type(lights) == "table" and lights or {}) do
+		if type(light) == "table" and light.on == true then
+			if light.has_color == true and light.color_mode == "xy" and number(light.x) and number(light.y) then
+				return { x = light.x, y = light.y, color_mode = "xy" }
+			end
+			if ct == nil and light.mirek_valid == true and number(light.mirek) then
+				ct = { mirek = light.mirek, color_mode = "ct" }
+			end
+		end
+	end
+	return ct
+end
+
+-- A group's owner-facing label from its raw name and type: "Bedside Lights
+-- (zone)", "Master Bedroom", "(all lights)" for the bridge_home, "(no room)"
+-- without a name (the wording of groups:label and scenes.lua).
+function hue_model.group_label(name, gtype)
+	if gtype == "bridge_home" then
+		return "(all lights)"
+	elseif name == nil or name == "" then
+		return "(no room)"
+	elseif gtype == "zone" then
+		return tostring(name) .. " (zone)"
+	end
+	return tostring(name)
+end
+
+-- HUE_CONFIGURE params for a group device (docs/zone-light-design.md §5,
+-- Messages) from a zone-light registry entry { name, group_type, light_count,
+-- no_lights, caps, id_v1 } and its rid: the light fields (rid, name, model,
+-- has_color, has_cct, mirek_min?, mirek_max?, min_dim "1") plus kind
+-- "group", group_type?, light_count?, no_lights ("true" only while the group
+-- has no grouped_light, else "false"), hue_room (the group's own label),
+-- id_v1?, and the string fields of `extra` (state, gone_since; nil and ""
+-- skipped) merged as configure_params() does. Every value is a string; the
+-- model is "Hue zone" / "Hue room" and absent for an unknown type.
+function hue_model.group_configure_params(rid, entry, extra)
+	entry = type(entry) == "table" and entry or {}
+	local caps = type(entry.caps) == "table" and entry.caps or {}
+	local params = hue_model.registry_configure_params(rid, {
+		name = entry.name,
+		model = GROUP_MODEL[entry.group_type],
+		caps = { has_color = caps.has_color == true or caps.has_color == "true",
+			has_cct = caps.has_cct == true or caps.has_cct == "true",
+			mirek_min = tonumber(caps.mirek_min), mirek_max = tonumber(caps.mirek_max), min_dim = 1 },
+	})
+	params.kind = "group"
+	params.group_type = text(entry.group_type)
+	if entry.light_count ~= nil and tonumber(entry.light_count) then
+		params.light_count = string.format("%d", tonumber(entry.light_count))
+	end
+	params.no_lights = (entry.no_lights == true or entry.no_lights == "true") and "true" or "false"
+	if entry.name ~= nil and entry.name ~= "" then
+		params.hue_room = hue_model.group_label(entry.name, entry.group_type)
+	end
+	params.id_v1 = text(entry.id_v1)
+	return merge_extra(params, extra)
+end
+
 return hue_model
