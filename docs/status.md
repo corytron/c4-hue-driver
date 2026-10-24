@@ -1,4 +1,8 @@
-# Status of the Hue driver (2026-10-24, build 199)
+# Status of the Hue driver (2026-10-24)
+
+**Release 1.0 (build 226), tag `v1.0`**, prepared on branch `release-prep` (PR #33);
+the house runs it once the Windows session's install of this build is
+confirmed below.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
