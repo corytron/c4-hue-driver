@@ -114,13 +114,14 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal("4 on bridge, 0 imported, 4 new, 0 missing, 0 unbound, 0 deleted", bridge.Properties["Lights"])
 		-- Room Mappings is a drop-down: the row shows the summary, the list
 		-- one mapping per line, and a pick in Composer snaps back.
-		local summary = "4 Hue rooms and zones, 2 unmapped; open the list to read"
+		local summary = "4 Hue rooms and zones; 2 unmapped (open the list to read)"
 		assert.equal(summary, bridge.Properties["Room Mappings"])
 		assert.equal(summary .. ",Garage → Garage,Living Room → Living Room,Attic (zone) → (unmapped),"
 			.. "Downstairs (zone) → (unmapped)", bc4.property_lists["Room Mappings"])
 		bridge.Properties["Room Mappings"] = "Garage → Garage"
 		bridge.OnPropertyChanged("Room Mappings")
 		assert.equal(summary, bridge.Properties["Room Mappings"])
+		assert.equal("Room Mappings is for reading; the row shows the summary again", bridge.Properties["Last Action"])
 		assert.equal("done", bc4.persist.hue_rooms_automapped)
 		assert.truthy(bridge.Properties["Attention"]:find("^4 new lights on the bridge: "))
 
