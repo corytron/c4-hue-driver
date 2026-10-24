@@ -29,9 +29,13 @@
 --                         last_actions_update{source} }   -- [verified: hardware 2026-10-21,
 --                                                        -- GET /scene/<rid>]; actions, palette
 --                                                        -- and image are dropped at decode time
---   smart_scene         { id, metadata{name, image}, group{rid, rtype}, week_timeslots[],
---                         transition_duration, active_timeslot{timeslot_id, weekday}, state }
---                                                        -- only counted
+--   smart_scene         { id, metadata{name, image}, group{rid, rtype}, week_timeslots[{timeslots[
+--                         {start_time{kind, time{hour, minute, second}}, target{rid, rtype}}],
+--                         recurrence[weekday]}], transition_duration,
+--                         active_timeslot{timeslot_id, weekday}, state }
+--                                                        -- [verified: hardware 2026-10-24,
+--                                                        -- docs/smart-scenes-research.md §7];
+--                                                        -- no id_v1; image dropped at decode
 -- Event-stream items have the same shapes with only the changed fields.
 -- A JSON null (mirek while mirek_valid is false) is treated like an absent
 -- field, whatever the decoder turns it into: only numbers count as numbers.
@@ -594,8 +598,278 @@ function hue_model.scene_configure_params(scene, extra)
 	return merge_extra(params, extra)
 end
 
+-- Smart scenes ---------------------------------------------------------------
+-- docs/smart-scenes-design.md, "Interfaces": Hue's time-based scenes ("Golden
+-- hours", "Natural light"; CLIP v2 `smart_scene`), each a weekly schedule of
+-- ordinary scenes for one room or zone, kept as one compact table. As the
+-- house bridge sends them [verified: hardware 2026-10-24,
+-- docs/smart-scenes-research.md §7]: `start_time.kind` "time" or "sunset" (a
+-- sunset start carries a zero time block too), `active_timeslot` present even
+-- while the scene is inactive, `transition_duration` 60000 on app-made ones,
+-- no id_v1; feed updates carry only what changed ({state, active_timeslot},
+-- {active_timeslot}, {metadata{name}}, {week_timeslots}).
+
+-- The states the contract knows; any other string leaves `state` nil.
+local SMART_SCENE_STATES = { active = true, inactive = true }
+
+-- Every field update_smart_scene() can report as changed, in a stable order.
+local SMART_SCENE_FIELD_ORDER = { "name", "base_name", "state", "slot_id", "slot_weekday", "slots",
+	"transition_duration", "group_rid", "group_type" }
+
+-- A whole number from 0 up (a timeslot_id, an hour, a minute), else nil.
+local function whole(value)
+	if type(value) == "number" and value >= 0 and value == math.floor(value) then
+		return value
+	end
+	return nil
+end
+
+-- A timeslot's start as the devices show it: "07:00" (HH:MM, zero-padded,
+-- seconds dropped) for kind "time"; the kind itself for any other kind
+-- ("sunset", "sunrise" [community: aiohue]), whose time block is ignored; nil
+-- without a kind, or for a "time" without a whole hour and minute in range.
+local function slot_start(start_time)
+	if type(start_time) ~= "table" then
+		return nil
+	end
+	local kind = text(start_time.kind)
+	if kind ~= "time" then
+		return kind
+	end
+	local time = type(start_time.time) == "table" and start_time.time or {}
+	local hour, minute = whole(time.hour), whole(time.minute)
+	if hour and minute and hour < 24 and minute < 60 then
+		return string.format("%02d:%02d", hour, minute)
+	end
+	return nil
+end
+
+-- A week entry's `recurrence` → its weekday names as sent (strings only).
+local function weekdays(recurrence)
+	local days = {}
+	for _, day in ipairs(type(recurrence) == "table" and recurrence or {}) do
+		if text(day) then
+			days[#days + 1] = day
+		end
+	end
+	return days
+end
+
+-- `week_timeslots` → the contract's flat slot list: entry by entry, each
+-- entry's timeslots in order, every slot with its own copy of the entry's
+-- days. A malformed timeslot keeps its place with `start` / `target_rid` nil,
+-- so that a timeslot_id still names the right slot; an entry that is not a
+-- table holds none.
+local function week_slots(week_timeslots)
+	local slots = {}
+	for _, week in ipairs(week_timeslots) do
+		if type(week) == "table" then
+			for _, timeslot in ipairs(type(week.timeslots) == "table" and week.timeslots or {}) do
+				local slot = { days = weekdays(week.recurrence), start = nil, target_rid = nil }
+				if type(timeslot) == "table" then
+					slot.start = slot_start(timeslot.start_time)
+					slot.target_rid = type(timeslot.target) == "table" and text(timeslot.target.rid) or nil
+				end
+				slots[#slots + 1] = slot
+			end
+		end
+	end
+	return slots
+end
+
+local function contains(list, value)
+	for _, entry in ipairs(type(list) == "table" and list or {}) do
+		if entry == value then
+			return true
+		end
+	end
+	return false
+end
+
+local function same_list(a, b)
+	if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		if a[i] ~= b[i] then
+			return false
+		end
+	end
+	return true
+end
+
+-- True when two slot lists hold the same slots (the same table, or nil and
+-- nil, counts as the same).
+local function same_slots(a, b)
+	if a == b then
+		return true
+	end
+	if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then
+		return false
+	end
+	for i = 1, #a do
+		local x, y = a[i], b[i]
+		if type(x) ~= "table" or type(y) ~= "table" or x.start ~= y.start or x.target_rid ~= y.target_rid
+			or not same_list(x.days, y.days) then
+			return false
+		end
+	end
+	return true
+end
+
+-- A name without the number the Hue app gives repeats (owner's answer 4,
+-- docs/smart-scenes-design.md Decision 7): one trailing " <digits>" goes,
+-- "Golden hours 4" → "Golden hours", "Scene 2 3" → "Scene 2". A name without
+-- one, or one that would be left blank (" 4"), comes back unchanged; nil for
+-- anything that is not a string.
+function hue_model.base_name(name)
+	if type(name) ~= "string" then
+		return nil
+	end
+	local base = name:match("^(.*) %d+$")
+	if base ~= nil and base:find("%S") then
+		return base
+	end
+	return name
+end
+
+-- Merge a (possibly partial) smart_scene item into `model` in place:
+-- `metadata.name` (base_name follows it), `state`, each leaf of
+-- `active_timeslot` on its own (timeslot_id → slot_id, weekday →
+-- slot_weekday), `week_timeslots` (replaces the whole slot list),
+-- `transition_duration` and `group`. Unlike update_scene(), values are
+-- compared: the result lists the fields whose value changed, in
+-- SMART_SCENE_FIELD_ORDER, and holds the same names as keys
+-- (`changed.state == true`); it is nil when nothing changed (a state or slot
+-- sent again, a renumbering that leaves base_name as it was, a delete item's
+-- bare id). A `state` string other than "active" / "inactive" makes state
+-- nil; any other value of the wrong type (the controller decodes a JSON null
+-- as an empty table) is ignored like an absent field. Never raises.
+function hue_model.update_smart_scene(model, item)
+	if type(model) ~= "table" or type(item) ~= "table" then
+		return nil
+	end
+	local before = {}
+	for _, name in ipairs(SMART_SCENE_FIELD_ORDER) do
+		before[name] = model[name]
+	end
+
+	if type(item.metadata) == "table" and text(item.metadata.name) then
+		model.name = item.metadata.name
+		model.base_name = hue_model.base_name(model.name)
+	end
+
+	if type(item.state) == "string" then
+		model.state = SMART_SCENE_STATES[item.state] and item.state or nil
+	end
+
+	local active = item.active_timeslot
+	if type(active) == "table" then
+		if whole(active.timeslot_id) then
+			model.slot_id = active.timeslot_id
+		end
+		if text(active.weekday) then
+			model.slot_weekday = active.weekday
+		end
+	end
+
+	if type(item.week_timeslots) == "table" then
+		model.slots = week_slots(item.week_timeslots)
+	end
+
+	if number(item.transition_duration) then
+		model.transition_duration = item.transition_duration
+	end
+
+	if type(item.group) == "table" and text(item.group.rid) then
+		model.group_rid = item.group.rid
+		model.group_type = SCENE_GROUP_TYPES[item.group.rtype] and item.group.rtype or nil
+	end
+
+	local changed = {}
+	for _, name in ipairs(SMART_SCENE_FIELD_ORDER) do
+		local same
+		if name == "slots" then
+			same = same_slots(before.slots, model.slots)
+		else
+			same = before[name] == model[name]
+		end
+		if not same then
+			changed[#changed + 1] = name
+			changed[name] = true
+		end
+	end
+	if #changed == 0 then
+		return nil
+	end
+	return changed
+end
+
+-- One /clip/v2/resource/smart_scene item (a GET's, or a complete `add` stream
+-- item, which arrives already active) → the compact smart scene of the
+-- contract:
+--   { rid, name, base_name, group_rid, group_type ("room"|"zone"|"bridge_home"|nil),
+--     state ("active"|"inactive"|nil), slot_id (from 0), slot_weekday,
+--     slots = { { days = { weekday... }, start ("07:00"|"sunset"|...|nil), target_rid }... },
+--     transition_duration (ms) }
+-- nil for an item of any other type (a scene or grouped_light sharing the
+-- container), without a string id, or not a table. `slots` is always a list
+-- (empty without week_timeslots), `metadata.image` is dropped, and a nameless
+-- smart scene gets a fallback name like scene(); base_name is always
+-- base_name(name).
+function hue_model.smart_scene(item)
+	if type(item) ~= "table" or text(item.id) == nil or item.type ~= "smart_scene" then
+		return nil
+	end
+	local model = {
+		rid = item.id,
+		name = nil,
+		base_name = nil,
+		group_rid = nil,
+		group_type = nil,
+		state = nil,
+		slot_id = nil,
+		slot_weekday = nil,
+		slots = {},
+		transition_duration = nil,
+	}
+	hue_model.update_smart_scene(model, item)
+	if model.name == nil then
+		model.name = "Hue time-based scene " .. item.id
+		model.base_name = hue_model.base_name(model.name)
+	end
+	return model
+end
+
+-- The slot the bridge reports as current (one of `model.slots` itself), or
+-- nil. timeslot_id counts from 0 within the week entry that holds the weekday
+-- [verified: hardware 2026-10-24, V3: slot 0 at 11:19 on a Saturday was the
+-- 07:00 slot], so this is the (slot_id + 1)-th slot whose days include
+-- slot_weekday (Hue keeps each weekday in one entry). The bridge reports a
+-- slot while the scene is inactive too. nil when the slot or the weekday is
+-- unknown, no entry holds the weekday, or slot_id is past that entry's end.
+function hue_model.current_slot(model)
+	if type(model) ~= "table" or type(model.slots) ~= "table" then
+		return nil
+	end
+	local slot_id, weekday = whole(model.slot_id), text(model.slot_weekday)
+	if slot_id == nil or weekday == nil then
+		return nil
+	end
+	local position = 0
+	for _, slot in ipairs(model.slots) do
+		if type(slot) == "table" and contains(slot.days, weekday) then
+			if position == slot_id then
+				return slot
+			end
+			position = position + 1
+		end
+	end
+	return nil
+end
+
 -- The number of smart_scene items in a list (a GET /smart_scene body's data,
--- or any mixed list); v1 only counts them (docs/scenes-design.md §1).
+-- or any mixed list); what v1 did with them, kept for compatibility.
 function hue_model.smart_scene_count(items)
 	local count = 0
 	for _, item in ipairs(type(items) == "table" and items or {}) do
