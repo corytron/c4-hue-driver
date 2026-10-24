@@ -556,7 +556,7 @@ dd { margin: 2px 0 6px 18px; }
 <p>A Hue bulb has to stay powered, so the wall switch that feeds it cannot switch its load. A Control4 Switch V2 or Essential Switch can instead run as a two-button keypad whose buttons drive the Hue Light, the way the stock Philips driver did:</p>
 <ol>
 <li>In the switch's <b>Properties</b> tick <b>Use as 2 Button Keypad</b> and leave <b>Buttons Control Load</b> unticked. The switch's own load is then set by programming only; for a Hue bulb set it to 100 % (a "when the project loads" program, for example) so the bulb keeps power. <b>Hide From Nav</b> hides the switch's own light from Navigators, leaving the Hue Light as the one tile for that lamp.</li>
-<li>In <b>Connections</b>, select the switch and drag its <b>Top</b> button output onto the Hue Light's <b>Top Button Link</b> input, and its <b>Bottom</b> button output onto <b>Bottom Button Link</b>. A single-button keypad goes to the <b>Toggle Button Link</b> instead.</li>
+<li>In <b>Connections</b>, select the Hue Light (or Hue Scene) device: its <b>Top Button Link</b>, <b>Bottom Button Link</b> and <b>Toggle Button Link</b> are listed under its Control Outputs. Bind the switch's <b>Top</b> button to <b>Top Button Link</b> and its <b>Bottom</b> button to <b>Bottom Button Link</b> (a drag between the two lists). A single-button keypad goes to the <b>Toggle Button Link</b> instead.</li>
 <li>Tap and hold the buttons; the Hue Light answers within about a second, like a tap on its tile.</li>
 </ol>
 <p>What the buttons do:</p>
@@ -567,8 +567,15 @@ dd { margin: 2px 0 6px 18px; }
 <tr><td>Toggle</td><td>On if the light is off, off if it is on.</td><td>Ramps up while off, down while on; letting go stops it.</td></tr>
 </table>
 <p>The On preset and the four rates (click up and down, hold up and down) are remembered per light. They change through the light's proxy settings where Composer offers them for a dimmer; where it does not, the defaults apply. The preset is a keypad matter only: "Turn On" in programming and a tap on the tile still mean 100 %.</p>
-<p>A Hue Scene device on a keypad: the top button plays the scene, the bottom turns the room or zone off and a toggle button alternates between the two; holding a button does nothing.</p>
-<p>The keypad's LEDs: with <b>LED Behavior</b> set to Push/Release they light with the colours set on the switch; set to follow the connected light they follow the Hue Light's on and off state, including changes made in the Hue app, because the driver reports every change.</p>
+<p>A <b>Hue Scene</b> device on a keypad is the usual way to run a Hue room or zone from a wall switch:</p>
+<table>
+<tr><th>Button</th><th>Tap</th><th>Hold (longer than about half a second)</th></tr>
+<tr><td>Top</td><td>Plays the scene.</td><td>Brightens the scene's lights while held and stops where you let go. The scene's colours and the differences between its lights are kept, as with Hue's own dimmer switch. Held while the room is off, the scene starts at its dimmest and brightens from there.</td></tr>
+<tr><td>Bottom</td><td>Turns the scene's room or zone off.</td><td>Dims the scene's lights while held and stops where you let go; nothing happens while the room is off.</td></tr>
+<tr><td>Toggle</td><td>Plays the scene if it is off, turns the room or zone off if it is on.</td><td>Brightens while off, dims while on.</td></tr>
+</table>
+<p>A dim from the scene's own buttons keeps its tile and its keypad LEDs on, although Hue itself no longer calls the scene active once its lights have been dimmed. The scene reads off again when its room or zone is turned off (from anywhere, including the Hue app), or when another scene of the same room or zone is played. The hold rates (default 5 seconds for the full range) are remembered per scene device and change through its proxy settings where Composer offers them.</p>
+<p>The keypad's LEDs: the driver tells every connected keypad button whether the light or scene is on, whenever that changes, including changes made in the Hue app. By default a top button is lit blue while it is on and a bottom button is lit blue while it is off; the colours change in the device's button LED settings in Composer. The switch's own <b>LED Behavior</b> decides whether the button follows the device: <b>Push/Release</b> only lights it while pressed, so pick the switch's option that follows the connected device.</p>
 
 <h3>Advanced Lighting Scenes</h3>
 <p>Hue Lights and Hue Scene switches can be members of Control4's own Advanced Lighting Scenes (the <b>Lighting Scenes</b> agent). A lighting scene sets a Hue Light's level, and its colour or colour temperature where the light supports them, with the scene's ramp time; a Hue Scene switch is a member that is either 0 or 100, and a lighting scene can turn it on (playing the Hue scene) or off (turning the Hue room or zone off). A "stop ramp" from a lighting scene cannot stop a Hue light in mid-fade, because Hue has no such command; the driver reports the last level it knew, and the next report from the bridge corrects the tile.</p>

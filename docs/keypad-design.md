@@ -37,9 +37,9 @@ Hue Light (`src/hue_light/driver.lua`):
 | click top | brightness target = On preset over click rate up |
 | click bottom | target 0 over click rate down |
 | click toggle | off → preset over click up; on → 0 over click down |
-| hold (timer fired before the release) | ramp to 100 (top, or toggle while off) or to 1 (bottom, or toggle while on) over the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level |
-| release after hold | stop: a brightness target at the estimated level with rate 0 (Hue has no stop request) |
-| release-as-click after a ramp started | same as stop |
+| hold (timer fired before the release) | `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing (superseded 2026-10-23, see "Light parity") |
+| release after hold | `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop) |
+| release-as-click after a ramp started | same as stop; a click on the same button within 1 s after a hold's release is ignored |
 
 Settings persist per device (`preset_level`, `click_rate_up`,
 `click_rate_down`, `hold_rate_up`, `hold_rate_down`); defaults 100 %,
@@ -111,3 +111,112 @@ ran or the binding was visible at late init cannot be told from Composer
 (its Lua pane does not replay startup lines). Note the original failure
 followed a Director restart forced by a driver update, not a reboot; the
 outcome after a reboot is verified, the re-check path itself is not.
+
+## Scene hold-to-dim and keypad LEDs (owner-approved 2026-10-23)
+
+The owner's use case is a Hue **scene** on two Control4 switches run as
+2-button keypads (top button → the scene device's Top Button Link, bottom →
+Bottom Button Link). Taps work; this section adds holding to dim and LEDs
+that follow the scene. Approved as proposed, including "the scene stays on
+through dims from its own buttons".
+
+### Messages (new or extended)
+
+| Message | Direction | Params (all strings) | Meaning |
+|---|---|---|---|
+| `HUE_SCENE_DIM` | scene → bridge | `rid`, `device_id`, `direction` (`up` / `down` / `stop`), `duration` (ms, up/down only) | Dim the scene's group: one grouped_light PUT `{"dimming_delta":{"action":"up"/"down","brightness_delta":100},"dynamics":{"duration":<ms>}}` to start, `{"dimming_delta":{"action":"stop"}}` to stop. Relative, so the scene's colours and per-light differences are kept. **[assumed: `stop` and `dynamics` on grouped_light; verify on the first hardware test]** |
+| `HUE_SCENE_RECALL` | scene → bridge | adds optional `brightness` (1–100) | Recall with `recall.dimming.brightness` override (used for "hold top while off": recall at 1 %). |
+| `HUE_SCENE_GROUP` | bridge → scene | `rid`, and `on` (`true`/`false`) and/or `other_active` (`true`) | The scene's room/zone grouped_light turned on/off (from the event feed or the resync), or another scene of the same group became active. Sent at resync (current `on`) and on change. |
+
+### Bridge (`src/hue_bridge/bridge/scenes.lua`)
+
+- `scenes:dim(params)` resolves the device's entry like recall/off
+  (`entry_for_command`), finds the scene's group's `grouped_light_rid`
+  and calls `ctx.group_dim(grouped_rid, body)`; returns true when queued.
+  `duration` is clamped to 0–6 000 000. Gone scene or no grouped_light:
+  log and return false.
+- `scenes:recall` passes a valid `brightness` param as
+  `body.recall.dimming = { brightness = n }`.
+- Group on/off: the module keeps `group_on[grouped_rid]` from the resync
+  (one extra GET `/clip/v2/resource/grouped_light` in `fetch_all`) and from
+  `grouped_light` items in `on_container` (`item.on.on`). On a change it
+  sends `HUE_SCENE_GROUP {rid, on}` to every linked scene device whose
+  group owns that grouped_light; after each resync it sends the current
+  value to every linked device.
+- Other scene active: when a scene status event makes scene B `static` or
+  `dynamic_palette`, every other linked scene device of B's group gets
+  `HUE_SCENE_GROUP {rid, other_active = "true"}`.
+
+### Coordinator (`src/hue_bridge/driver.lua`)
+
+`ctx.group_dim(rid, body)` → `state.group_queue:set(rid, body)` (returns
+true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
+`state.scenes:dim(params)`.
+
+### Scene device (`src/hue_scene/driver.lua`)
+
+- **On state**: `effective_on = is_on() or dimmed_on`. `dimmed_on` is set
+  when a hold-dim starts from this device's own buttons (or a hold-recall
+  from off); it keeps the tile and LEDs on when Hue then reports the scene
+  inactive. Cleared by `HUE_SCENE_GROUP on=false`, by `other_active`, by
+  this device's OFF / bottom tap / toggle-off, and replaced by a normal
+  recall. `LIGHT_BRIGHTNESS_CHANGED` is 100/0 from `effective_on`.
+- **Hold** (DO_PUSH on 200/201/202 or BUTTON_ACTION press, still down after
+  400 ms): top (or toggle while off) → if on, `HUE_SCENE_DIM up` with the
+  hold-up rate; if off, `HUE_SCENE_RECALL {brightness=1}` then
+  `HUE_SCENE_DIM up` 600 ms later. Bottom (or toggle while on) → if on,
+  `HUE_SCENE_DIM down` with the hold-down rate; if off, nothing. Release
+  after a hold → `HUE_SCENE_DIM stop`. Hold rates persist
+  (`SET_HOLD_RATE_UP/DOWN`), default 5000 ms; `driver.xml` declares
+  `hold_rates` True, `hold_rate_min` 1000.
+- A click arriving within 1 s after a hold's release on the same button is
+  ignored (some keypads may send it).
+
+### Keypad LEDs (both device drivers) [verified: Snap One's
+`drivers-template-code-public` `c4hook_light_v2.lua`]
+
+- On every on/off change, at late init, and when a keypad binds to a link:
+  `C4:SendToProxy(b, "MATCH_LED_STATE", { STATE = <boolean on> }, "COMMAND")`
+  for b = 200, 201, 202, and `BUTTON_INFO {BUTTON_ID, ON_COLOR, OFF_COLOR,
+  CURRENT_COLOR}` to the proxy binding 5001 as a NOTIFY.
+- Button colours persist per button; defaults top `0000ff`/`000000`, bottom
+  `000000`/`0000ff` (lit when off), toggle `0000ff`/`000000`.
+  `SET_BUTTON_COLOR {BUTTON_ID, ON_COLOR | OFF_COLOR}` from the proxy stores
+  one, then sends `BUTTON_COLORS` on that link and `BUTTON_INFO` to 5001.
+  `REQUEST_BUTTON_COLORS` arriving on a link answers `BUTTON_COLORS` on that
+  link, then `MATCH_LED_STATE`.
+- The light driver gets the same LED and colour handling (on = `st.on`) and
+  the same 1 s click suppression after a hold.
+
+The switch's own "LED Behavior" may need its option that follows the bound
+device instead of "Push/Release" (owner checks on the switch).
+
+Both `driver.xml` declare `has_leds` True so Composer offers the button LED
+colour settings (which arrive as `SET_BUTTON_COLOR`); the scene's also
+declares `hold_rates` True with `hold_rate_min` 1000. Both are capability
+changes, so installing this build is expected to ask for a Director
+restart, as build 144 did.
+
+### Light parity (owner, 2026-10-23: "whatever capabilities we implement for scenes get intelligently carried over to the individual light driver as well")
+
+- Holds on a Hue Light use the same native relative dim as the scene:
+  `HUE_DIM {rid, direction up|down|stop, duration, level}` → the light's
+  queue sends `dimming_delta` up/down with `dynamics.duration`, then a bare
+  `stop`. The device keeps its 100 ms estimate and sends it as `level` with
+  the stop; the proxy's tile settles on the bridge's next report, or on the
+  estimate after the fallback time.
+- Hold top (or toggle) while the light is off: on at 1 %, then dim up
+  600 ms later. Hold bottom while off: nothing (it used to turn the light
+  on dimmed).
+- LED state, button colours, `has_leds`, hold rates and the 1 s click
+  suppression after a hold are the same in both drivers.
+
+### Queue support (`src/hue_bridge/bridge/commands.lua`)
+
+A `dim` field (`up`/`down`/`stop`) builds the `dimming_delta` body; a dim
+replaces a pending brightness or on/off and vice versa. If the bridge
+refuses a stop with a non-retriable error, the queue writes a fallback
+brightness: the stop's `level` (lights), else the group level recorded at
+the ramp's start (`scenes.group_level`, from grouped_light reports) moved by
+the elapsed share of the ramp (scenes). Without either the ramp runs to its
+end and a warning is logged.

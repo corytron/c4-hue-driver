@@ -228,6 +228,95 @@ local function refresh_status()
 	end
 end
 
+-- Keypad LEDs ----------------------------------------------------------------
+-- A keypad bound to a Button Link follows the light: MATCH_LED_STATE on each
+-- link, and BUTTON_INFO per button to the proxy [verified: Snap One's
+-- drivers-template-code-public c4hook_light_v2.lua, docs/keypad-design.md
+-- "Keypad LEDs"; BUTTON_INFO fields: proxy ref, BUTTON_INFO notification].
+
+-- Keypad buttons bound to the driver's Button Link connections (driver.xml
+-- 200 top, 201 bottom, 202 toggle) -> BUTTON_ID.
+local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
+local LINK_BINDINGS = { 200, 201, 202 }
+local BUTTON_LINK = { [0] = 200, [1] = 201, [2] = 202 }
+
+-- Per-button colours: bottom is lit while the light is off.
+local COLOR_DEFAULTS = {
+	[0] = { on = "0000ff", off = "000000" },
+	[1] = { on = "000000", off = "0000ff" },
+	[2] = { on = "0000ff", off = "000000" },
+}
+local colors = { [0] = {}, [1] = {}, [2] = {} } -- persisted overrides, nil = default
+local led_on = nil -- the on state the LEDs were last sent, nil before the first
+
+-- "0000ff" from a 6-digit hex string, nil for anything else.
+local function valid_color(v)
+	v = v ~= nil and tostring(v) or ""
+	if v:match("^%x%x%x%x%x%x$") then
+		return v:lower()
+	end
+	return nil
+end
+
+local function color_key(button, which)
+	return string.format("button_%d_%s_color", button, which)
+end
+
+local function button_color(button, which)
+	return colors[button][which] or COLOR_DEFAULTS[button][which]
+end
+
+local function load_colors()
+	for button in pairs(COLOR_DEFAULTS) do
+		for _, which in ipairs({ "on", "off" }) do
+			colors[button][which] = valid_color(C4:PersistGetValue(color_key(button, which)))
+		end
+	end
+end
+
+local function send_button_info(button, on)
+	C4:SendToProxy(PROXY_BINDING, "BUTTON_INFO", {
+		BUTTON_ID = button,
+		ON_COLOR = button_color(button, "on"),
+		OFF_COLOR = button_color(button, "off"),
+		CURRENT_COLOR = button_color(button, on and "on" or "off"),
+	}, "NOTIFY")
+end
+
+-- BUTTON_COLORS on a link: the colours of the button bound there, with the
+-- same four fields as BUTTON_INFO [verified: Snap One c4hook_light_v2.lua,
+-- NOTIFY.BTN_COLOR_CHANGED].
+local function send_button_colors(binding, button)
+	C4:SendToProxy(binding, "BUTTON_COLORS", {
+		BUTTON_ID = button,
+		ON_COLOR = button_color(button, "on"),
+		OFF_COLOR = button_color(button, "off"),
+		CURRENT_COLOR = button_color(button, (st.on == true) and "on" or "off"),
+	}, "NOTIFY")
+end
+
+local function send_leds(on)
+	led_on = on
+	for _, binding in ipairs(LINK_BINDINGS) do
+		C4:SendToProxy(binding, "MATCH_LED_STATE", { STATE = on }, "COMMAND")
+	end
+	for button = 0, 2 do
+		send_button_info(button, on)
+	end
+end
+
+-- The LEDs follow st.on once it is known; `force` resends an unchanged
+-- state (a keypad was just bound to a link).
+local function update_leds(force)
+	if st.on == nil then
+		return
+	end
+	local on = st.on == true
+	if force or on ~= led_on then
+		send_leds(on)
+	end
+end
+
 -- Proxy notifies -----------------------------------------------------------
 -- The report_* functions return true when they had something to report.
 
@@ -237,6 +326,7 @@ local function report_brightness()
 		return false
 	end
 	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = brightness })
+	update_leds()
 	return true
 end
 
@@ -661,13 +751,16 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVE
 -- notification]. Behaviour and defaults: docs/keypad-design.md.
 local BUTTON_TOP, BUTTON_BOTTOM = 0, 1
 local ACT_RELEASE, ACT_PRESS, ACT_CLICK = 0, 1, 2
-local HOLD_AFTER_MS = 400   -- a press still down after this starts a ramp
-local HOLD_TICK_MS = 100    -- the level estimate advances this often during a ramp
+local HOLD_AFTER_MS = 400       -- a press still down after this starts a ramp
+local HOLD_TICK_MS = 100        -- the level estimate advances this often during a ramp
+local RAMP_AFTER_ON_MS = 600    -- hold from off: the ramp follows the turn-on at 1 % this much later
+local CLICK_GUARD_MS = 1000     -- a click this soon after a hold's release on that button is ignored
 local SETTING_KEYS = { preset = "preset_level", click_up = "click_rate_up", click_down = "click_rate_down",
 	hold_up = "hold_rate_up", hold_down = "hold_rate_down" }
 local SETTING_DEFAULTS = { preset = 100, click_up = 250, click_down = 250, hold_up = 5000, hold_down = 5000 }
 local settings = {}
-local hold = nil            -- { button, timer, ramping, level, step, to } while a button is down
+local hold = nil  -- { button, timer, held, ramping, level, step, to } while a button is down
+local guard = nil -- { button, timer } for CLICK_GUARD_MS after a hold's release
 
 local function setting(name)
 	return tonumber(settings[name]) or SETTING_DEFAULTS[name]
@@ -707,47 +800,123 @@ local function click(button)
 	end
 end
 
--- Hue has no "ramp until told to stop": the ramp is a timed target to the
--- end of the range, and the release writes the level the ramp had reached.
-local function start_ramp()
-	local dimming = hold.button == BUTTON_BOTTOM or (hold.button ~= BUTTON_TOP and st.on)
-	local from = state.to_proxy_brightness(st) or 0
-	local to = dimming and 1 or 100
-	local full = setting(dimming and "hold_down" or "hold_up")
-	local duration = math.floor(full * math.abs(to - from) / 100)
-	hold.ramping, hold.level, hold.to = true, from, to
-	hold.step = (to - from) / math.max(1, duration / HOLD_TICK_MS)
-	hold.timer = C4:SetTimer(HOLD_TICK_MS, function()
-		if not hold or not hold.ramping then
-			return
-		end
-		hold.level = hold.level + hold.step
-		if (hold.step >= 0 and hold.level >= hold.to) or (hold.step < 0 and hold.level <= hold.to) then
-			hold.level = hold.to
-			hold.timer:Cancel()
-		end
-	end, true)
-	set_brightness(to, duration)
+local function disarm_guard()
+	if guard then
+		guard.timer:Cancel()
+		guard = nil
+	end
 end
 
-local function stop_ramp()
-	local level = math.floor(hold.level + 0.5)
+local function arm_guard(button)
+	disarm_guard()
+	local g = { button = button }
+	g.timer = C4:SetTimer(CLICK_GUARD_MS, function()
+		if guard == g then
+			guard = nil
+		end
+	end)
+	guard = g
+end
+
+-- A hold uses Hue's own relative dim (HUE_DIM up / down to the bridge, a
+-- grouped dimming_delta on the light), stopped by the release, as the scene
+-- does; the proxy hears CHANGING toward the end of the range over the hold
+-- rate scaled by the distance, and a 100 ms tick keeps an estimate of the
+-- level for the stop and its fallback (docs/keypad-design.md).
+local function start_ramp(h, up, from)
+	local to = up and 100 or 1
+	local full = setting(up and "hold_up" or "hold_down")
+	local duration = math.floor(full * math.abs(to - from) / 100)
+	h.ramping, h.level, h.to = true, from, to
+	h.step = (to - from) / math.max(1, duration / HOLD_TICK_MS)
+	h.timer = C4:SetTimer(HOLD_TICK_MS, function()
+		if hold ~= h then
+			return
+		end
+		h.level = h.level + h.step
+		if (h.step >= 0 and h.level >= h.to) or (h.step < 0 and h.level <= h.to) then
+			h.level = h.to
+			h.timer:Cancel()
+		end
+	end, true)
+	-- The ramp replaces whatever target was pending (the turn-on at 1 %).
+	settle("brightness")
+	notify("LIGHT_BRIGHTNESS_CHANGING", {
+		LIGHT_BRIGHTNESS_CURRENT = from,
+		LIGHT_BRIGHTNESS_TARGET = to,
+		RATE = duration,
+	})
+	log.debug("hold: dim %s from %d over %d ms", up and "up" or "down", from, duration)
+	C4:SendToDevice(bridge, "HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
+		duration = string.format("%d", duration) })
+end
+
+-- The hold timer fired with the button still down: top (or toggle while
+-- off) dims up, bottom (or toggle while on) down. From off, top turns the
+-- light on at 1 % first and ramps up from there; bottom does nothing.
+local function start_hold(h)
+	h.held = true
+	local on = st.on == true
+	local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
+	if not up and not on then
+		return log.debug("hold: dimming down a light that is off does nothing")
+	end
+	if not ready("hold") then
+		return
+	end
+	if on then
+		return start_ramp(h, up, state.to_proxy_brightness(st) or 1)
+	end
+	set_brightness(1, 0)
+	h.timer = C4:SetTimer(RAMP_AFTER_ON_MS, function()
+		if hold ~= h then
+			return
+		end
+		h.timer = nil
+		if bridge and st.rid then
+			start_ramp(h, true, st.on == true and state.to_proxy_brightness(st) or 1)
+		end
+	end)
+end
+
+-- Release (or release-as-click) after a hold: stop the dim at Hue, which
+-- keeps the level it reached; `level` is the estimate, for the bridge to
+-- write should Hue refuse the stop. The proxy hears the bridge's next
+-- report, or the estimate after the fallback time. The click some keypads
+-- send after a hold is ignored for a moment.
+local function finish_hold()
+	local h = hold
 	end_hold()
-	set_brightness(level, 0)
+	arm_guard(h.button)
+	if not (h.ramping and bridge and st.rid) then
+		return
+	end
+	local level = math.floor(h.level + 0.5)
+	C4:SendToDevice(bridge, "HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
+	arm("brightness", 0, function()
+		log.debug("dim stop unconfirmed after %d ms; assuming %d %%", FALLBACK_MS, level)
+		state.apply_hue(st, { on = "true", brightness = tostring(level) })
+		report_brightness()
+	end)
 end
 
 local function button_action(button, action)
 	if action == ACT_PRESS then
 		end_hold()
-		hold = { button = button }
-		hold.timer = C4:SetTimer(HOLD_AFTER_MS, function()
-			if hold and hold.button == button and not hold.ramping then
-				start_ramp()
+		local h = { button = button }
+		h.timer = C4:SetTimer(HOLD_AFTER_MS, function()
+			if hold == h then
+				h.timer = nil
+				start_hold(h)
 			end
 		end)
+		hold = h
 	elseif action == ACT_CLICK then
-		if hold and hold.ramping then
-			stop_ramp()
+		if hold and hold.held then
+			finish_hold()
+		elseif guard and guard.button == button then
+			end_hold()
+			log.debug("click on button %d right after a hold ignored", button)
 		else
 			end_hold()
 			click(button)
@@ -755,8 +924,8 @@ local function button_action(button, action)
 	elseif action == ACT_RELEASE then
 		-- Release after a hold: stop the ramp; a release that follows a click
 		-- has nothing left to do.
-		if hold and hold.ramping then
-			stop_ramp()
+		if hold and hold.held then
+			finish_hold()
 		else
 			end_hold()
 		end
@@ -777,9 +946,7 @@ end
 -- A keypad button bound to one of the driver's Button Link connections
 -- (driver.xml ids 200 top, 201 bottom, 202 toggle) delivers DO_PUSH,
 -- DO_RELEASE and DO_CLICK on that binding [verified: public light_v2
--- drivers].
-local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
-
+-- drivers]. LINK_BUTTON is with the keypad LEDs above.
 local function link_button(binding, command)
 	local button = LINK_BUTTON[tonumber(binding)]
 	if not button then
@@ -808,6 +975,39 @@ dispatch.proxy["SET_CLICK_RATE_UP"] = function(_, params) save_setting("click_up
 dispatch.proxy["SET_CLICK_RATE_DOWN"] = function(_, params) save_setting("click_down", params.RATE) end
 dispatch.proxy["SET_HOLD_RATE_UP"] = function(_, params) save_setting("hold_up", params.RATE) end
 dispatch.proxy["SET_HOLD_RATE_DOWN"] = function(_, params) save_setting("hold_down", params.RATE) end
+
+-- A keypad on a link asks for its button's colours and the LED state.
+dispatch.proxy["REQUEST_BUTTON_COLORS"] = function(binding)
+	local button = link_button(binding, "REQUEST_BUTTON_COLORS")
+	if not button then
+		return
+	end
+	send_button_colors(tonumber(binding), button)
+	C4:SendToProxy(tonumber(binding), "MATCH_LED_STATE", { STATE = st.on == true }, "COMMAND")
+end
+
+-- The proxy stores a button's on or off colour (the docs print the names
+-- with spaces; both spellings are accepted).
+dispatch.proxy["SET_BUTTON_COLOR"] = function(_, params)
+	local button = tonumber(params.BUTTON_ID or params["BUTTON ID"])
+	if not (button and COLOR_DEFAULTS[button]) then
+		return log.warn("SET_BUTTON_COLOR without a known BUTTON_ID (%s)", tostring(params.BUTTON_ID))
+	end
+	for which, names in pairs({ on = { "ON_COLOR", "ON COLOR" }, off = { "OFF_COLOR", "OFF COLOR" } }) do
+		local raw = params[names[1]] or params[names[2]]
+		if raw ~= nil then
+			local color = valid_color(raw)
+			if color then
+				colors[button][which] = color
+				C4:PersistSetValue(color_key(button, which), color)
+			else
+				log.warn("SET_BUTTON_COLOR: %s %q is not a 6-digit hex colour", names[1], tostring(raw))
+			end
+		end
+	end
+	send_button_colors(BUTTON_LINK[button], button)
+	send_button_info(button, st.on == true)
+end
 
 -- Lifecycle ----------------------------------------------------------------
 
@@ -859,6 +1059,7 @@ function OnDriverLateInit()
 	late_init_done = true
 	load_identity()
 	load_settings()
+	load_colors()
 	dispatch.replay_properties(Properties)
 	prop("Hue Light ID", light_id_label())
 	-- The bridge first, so messages it sent before this point are applied
@@ -868,13 +1069,23 @@ function OnDriverLateInit()
 	drain_early()
 	hello()
 	report_online()
+	-- The LEDs, once, when buffered messages made the state known already
+	-- (otherwise the first report sends them).
+	update_leds()
 	if not bridge then
 		schedule_recheck(1)
 	end
 end
 
--- Control bindings only; the bridge binding is one, the proxy's is not.
+-- Control bindings only: the bridge binding, and the Button Links, where a
+-- newly bound keypad gets the LED state; the proxy's binding is not one.
 function OnBindingChanged(idBinding, _, bound, otherDevice)
+	if LINK_BUTTON[idBinding] then
+		if bound then
+			update_leds(true)
+		end
+		return
+	end
 	if idBinding ~= BRIDGE_BINDING then
 		return
 	end
@@ -913,5 +1124,6 @@ function OnDriverDestroyed()
 	settle("brightness")
 	settle("color")
 	end_hold()
+	disarm_guard()
 	cancel_recheck()
 end
