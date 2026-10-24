@@ -75,6 +75,13 @@ local st = {
 	active = nil,         -- "inactive" / "static" / "dynamic_palette"; nil until reported
 }
 local recall_action = DEFAULT_RECALL
+-- Set when a hold-dim starts from this device's own buttons (or a hold
+-- recalls the scene at 1 % from off): Hue then reports the scene inactive,
+-- but the owner still sees the scene's lights on, so the tile and the keypad
+-- LEDs stay on until the group goes off, another scene of the group becomes
+-- active, or this device turns it off or recalls it (docs/keypad-design.md,
+-- "Scene device").
+local dimmed_on = false
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local pending = nil          -- { timer, assume, on } while a recall/off awaits its STATE
 local late_init_done = false -- UpdateProperty and SendToProxy are unsafe before OnDriverLateInit
@@ -281,13 +288,108 @@ local function is_on()
 	return st.active == "static" or st.active == "dynamic_palette"
 end
 
--- LIGHT_BRIGHTNESS_CURRENT for a switch: 100 while the scene is active, 0
--- while inactive, nil until the bridge has reported.
+-- What the tile and the LEDs show: the scene is active, or it was dimmed
+-- from this device's buttons since (dimmed_on above).
+local function effective_on()
+	return is_on() or dimmed_on
+end
+
+-- LIGHT_BRIGHTNESS_CURRENT for a switch: 100 while the scene is on, 0
+-- while off, nil until the bridge has reported (or a hold turned it on).
 local function brightness()
-	if st.active == nil then
+	if st.active == nil and not dimmed_on then
 		return nil
 	end
-	return is_on() and 100 or 0
+	return effective_on() and 100 or 0
+end
+
+-- Keypad LEDs ----------------------------------------------------------------
+-- A keypad bound to a Button Link follows the scene: MATCH_LED_STATE on each
+-- link, and BUTTON_INFO per button to the proxy [verified: Snap One's
+-- drivers-template-code-public c4hook_light_v2.lua, docs/keypad-design.md
+-- "Keypad LEDs"; BUTTON_INFO fields: proxy ref, BUTTON_INFO notification].
+
+-- Keypad buttons bound to the driver's Button Link connections (driver.xml
+-- 200 top, 201 bottom, 202 toggle) -> BUTTON_ID.
+local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
+local LINK_BINDINGS = { 200, 201, 202 }
+local BUTTON_LINK = { [0] = 200, [1] = 201, [2] = 202 }
+
+-- Per-button colours: bottom is lit while the scene is off.
+local COLOR_DEFAULTS = {
+	[0] = { on = "0000ff", off = "000000" },
+	[1] = { on = "000000", off = "0000ff" },
+	[2] = { on = "0000ff", off = "000000" },
+}
+local colors = { [0] = {}, [1] = {}, [2] = {} } -- persisted overrides, nil = default
+local led_on = nil -- the on state the LEDs were last sent, nil before the first
+
+-- "0000ff" from a 6-digit hex string, nil for anything else.
+local function valid_color(v)
+	v = v ~= nil and tostring(v) or ""
+	if v:match("^%x%x%x%x%x%x$") then
+		return v:lower()
+	end
+	return nil
+end
+
+local function color_key(button, which)
+	return string.format("button_%d_%s_color", button, which)
+end
+
+local function button_color(button, which)
+	return colors[button][which] or COLOR_DEFAULTS[button][which]
+end
+
+local function load_colors()
+	for button in pairs(COLOR_DEFAULTS) do
+		for _, which in ipairs({ "on", "off" }) do
+			colors[button][which] = valid_color(C4:PersistGetValue(color_key(button, which)))
+		end
+	end
+end
+
+local function send_button_info(button, on)
+	C4:SendToProxy(PROXY_BINDING, "BUTTON_INFO", {
+		BUTTON_ID = button,
+		ON_COLOR = button_color(button, "on"),
+		OFF_COLOR = button_color(button, "off"),
+		CURRENT_COLOR = button_color(button, on and "on" or "off"),
+	}, "NOTIFY")
+end
+
+-- BUTTON_COLORS on a link: the colours of the button bound there, with the
+-- same four fields as BUTTON_INFO [verified: Snap One c4hook_light_v2.lua,
+-- NOTIFY.BTN_COLOR_CHANGED].
+local function send_button_colors(binding, button)
+	C4:SendToProxy(binding, "BUTTON_COLORS", {
+		BUTTON_ID = button,
+		ON_COLOR = button_color(button, "on"),
+		OFF_COLOR = button_color(button, "off"),
+		CURRENT_COLOR = button_color(button, (effective_on()) and "on" or "off"),
+	}, "NOTIFY")
+end
+
+local function send_leds(on)
+	led_on = on
+	for _, binding in ipairs(LINK_BINDINGS) do
+		C4:SendToProxy(binding, "MATCH_LED_STATE", { STATE = on }, "COMMAND")
+	end
+	for button = 0, 2 do
+		send_button_info(button, on)
+	end
+end
+
+-- The LEDs follow the on state once it is known; `force` resends an
+-- unchanged state (a keypad was just bound to a link).
+local function update_leds(force)
+	if brightness() == nil then
+		return
+	end
+	local on = effective_on()
+	if force or on ~= led_on then
+		send_leds(on)
+	end
 end
 
 -- The report_* functions return true when they had something to report.
@@ -297,7 +399,15 @@ local function report_brightness()
 		return false
 	end
 	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = level })
+	update_leds()
 	return true
+end
+
+-- Report only when the switch position moved from `before`.
+local function report_if_changed(before)
+	if brightness() ~= before then
+		report_brightness()
+	end
 end
 
 local function report_online()
@@ -353,11 +463,22 @@ local function ready(command)
 	if st.gone then
 		log.warn("%s dropped: %s", command, why)
 		st.active = "inactive"
+		dimmed_on = false
 		report_brightness()
 	else
 		log.info("%s dropped: %s", command, why)
 	end
 	return false
+end
+
+-- What every HUE_SCENE_RECALL carries: the rid, the Recall As action and,
+-- with a ramp, its duration in ms.
+local function recall_params(rate)
+	local params = { rid = st.rid, action = recall_action }
+	if rate > 0 then
+		params.duration = string.format("%d", rate)
+	end
+	return params
 end
 
 local function turn_on(rate)
@@ -370,13 +491,11 @@ local function turn_on(rate)
 		LIGHT_BRIGHTNESS_TARGET = 100,
 		RATE = rate,
 	})
+	-- A normal recall replaces any dimmed state: the scene is active again.
+	dimmed_on = false
 	local action = recall_action
 	log.info("ON: recalling as %s", action)
-	local params = { rid = st.rid, action = action }
-	if rate > 0 then
-		params.duration = string.format("%d", rate)
-	end
-	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", params)
+	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", recall_params(rate))
 	arm(true, function()
 		log.debug("recall (%s) unconfirmed after %d ms; assuming the scene is on", action, FALLBACK_MS)
 		st.active = assumed_active(action)
@@ -394,6 +513,7 @@ local function turn_off(rate)
 		LIGHT_BRIGHTNESS_TARGET = 0,
 		RATE = rate,
 	})
+	dimmed_on = false
 	C4:SendToDevice(bridge, "HUE_SCENE_OFF", { rid = st.rid })
 	arm(false, function()
 		log.debug("off unconfirmed after %d ms; assuming the scene is off", FALLBACK_MS)
@@ -589,9 +709,31 @@ dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", functi
 	if pending then
 		settle()
 		report_brightness()
-	elseif brightness() ~= before then
-		report_brightness()
+	else
+		report_if_changed(before)
 	end
+end)
+
+-- The scene's room/zone: its grouped_light went on or off, or another scene
+-- of the group became active (docs/keypad-design.md, Messages). Either end
+-- of the scene's lights ends a dimmed-on state; on="true" alone changes
+-- nothing (the scene's own status says whether it is active).
+dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", function(params)
+	params = params or {}
+	if st.rid and params.rid and params.rid ~= st.rid then
+		return log.warn("HUE_SCENE_GROUP for rid %s ignored (ours is %s)", params.rid, st.rid)
+	end
+	local group_off = to_bool(params.on) == false
+	local other_active = to_bool(params.other_active) == true
+	if not (group_off or other_active) then
+		return
+	end
+	if dimmed_on then
+		log.debug("dimmed-on state ended: %s", group_off and "the group went off" or "another scene is active")
+	end
+	local before = brightness()
+	dimmed_on = false
+	report_if_changed(before)
 end)
 
 -- The bridge ran Forget for this scene (from its own action or ours): the
@@ -617,9 +759,9 @@ dispatch.commands["HUE_DUMP"] = function()
 	for k, v in pairs(Properties or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
 	table.sort(parts)
 	log.always("Properties: %s", table.concat(parts, " | "))
-	log.always("state: rid=%s name=%s configured=%s active=%s recall_action=%s debug=%s", tostring(st.rid),
-		tostring(st.name), tostring(st.configured), tostring(st.active), tostring(recall_action),
-		tostring(log.enabled("debug")))
+	log.always("state: rid=%s name=%s configured=%s active=%s dimmed_on=%s recall_action=%s debug=%s",
+		tostring(st.rid), tostring(st.name), tostring(st.configured), tostring(st.active), tostring(dimmed_on),
+		tostring(recall_action), tostring(log.enabled("debug")))
 end
 
 dispatch.commands["DEV_RELOAD"] = function(params)
@@ -719,7 +861,7 @@ dispatch.proxy["TOGGLE"] = function()
 	if pending then
 		on = pending.on
 	else
-		on = is_on()
+		on = effective_on()
 	end
 	if on then
 		turn_off(0)
@@ -731,46 +873,238 @@ end
 dispatch.proxy["ON"] = function() turn_on(0) end
 dispatch.proxy["OFF"] = function() turn_off(0) end
 
--- Keypad buttons: a click or release of the top button recalls, of the
--- bottom button turns the group off, of the toggle button toggles; holds do
--- nothing. Every action is echoed as the proxy requires [verified:
--- proxy-protocol reference, light_v2 BUTTON_ACTION]; docs/keypad-design.md.
+-- Keypad buttons -------------------------------------------------------------
+-- A tap of the top button recalls, of the bottom button turns the group off,
+-- of the toggle button toggles. A hold dims the scene's group relatively, so
+-- its colours and per-light differences stay: top (or toggle while off) up,
+-- bottom (or toggle while on) down; holding top while off recalls the scene
+-- at 1 % first. Every BUTTON_ACTION is echoed as the proxy requires
+-- [verified: proxy-protocol reference, light_v2 BUTTON_ACTION]; behaviour:
+-- docs/keypad-design.md, "Scene device".
+local BUTTON_TOP, BUTTON_BOTTOM = 0, 1
+local ACT_RELEASE, ACT_PRESS, ACT_CLICK = 0, 1, 2
+local HOLD_AFTER_MS = 400       -- a press still down after this is a hold
+local RECALL_DIM_AFTER_MS = 600 -- hold from off: the dim follows the 1 % recall this much later
+local CLICK_GUARD_MS = 1000     -- a click this soon after a hold's release on that button is ignored
+local SETTING_KEYS = { hold_up = "hold_rate_up", hold_down = "hold_rate_down" }
+local SETTING_DEFAULTS = { hold_up = 5000, hold_down = 5000 }
+local settings = {}
+local hold = nil  -- { button, timer, held, dim_sent } while a button is down
+local guard = nil -- { button, timer } for CLICK_GUARD_MS after a hold's release
+
+local function setting(name)
+	return tonumber(settings[name]) or SETTING_DEFAULTS[name]
+end
+
+local function load_settings()
+	for name, key in pairs(SETTING_KEYS) do
+		settings[name] = tonumber(C4:PersistGetValue(key))
+	end
+end
+
+local function save_setting(name, value)
+	value = tonumber(value)
+	if not value then
+		return log.warn("%s without a number", SETTING_KEYS[name])
+	end
+	settings[name] = value
+	C4:PersistSetValue(SETTING_KEYS[name], value)
+end
+
+local function end_hold()
+	if hold and hold.timer then
+		hold.timer:Cancel()
+	end
+	hold = nil
+end
+
+local function disarm_guard()
+	if guard then
+		guard.timer:Cancel()
+		guard = nil
+	end
+end
+
+local function arm_guard(button)
+	disarm_guard()
+	local g = { button = button }
+	g.timer = C4:SetTimer(CLICK_GUARD_MS, function()
+		if guard == g then
+			guard = nil
+		end
+	end)
+	guard = g
+end
+
 local function button_click(button)
-	if button == 0 then
+	if button == BUTTON_TOP then
 		turn_on(0)
-	elseif button == 1 then
+	elseif button == BUTTON_BOTTOM then
 		turn_off(0)
 	else
 		dispatch.proxy["TOGGLE"]()
 	end
 end
 
+-- HUE_SCENE_DIM to the bridge: up / down over `duration` ms, or stop.
+local function send_dim(direction, duration)
+	local params = { rid = st.rid, device_id = device_id(), direction = direction }
+	if duration then
+		params.duration = string.format("%d", duration)
+	end
+	log.debug("hold: dim %s%s", direction, duration and (" over " .. params.duration .. " ms") or "")
+	C4:SendToDevice(bridge, "HUE_SCENE_DIM", params)
+end
+
+-- The hold timer fired with the button still down.
+local function start_hold(h)
+	h.held = true
+	local on = effective_on()
+	local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
+	if not up and not on then
+		return log.debug("hold: dimming down a scene that is off does nothing")
+	end
+	if not ready("hold") then
+		return
+	end
+	local before = brightness()
+	dimmed_on = true
+	if on then
+		send_dim(up and "up" or "down", setting(up and "hold_up" or "hold_down"))
+		h.dim_sent = true
+		return
+	end
+	-- Off: recall at 1 %, then ramp up from there once Hue has applied it.
+	local params = recall_params(0)
+	params.brightness = "1"
+	log.info("hold: recalling as %s at 1 %%, then dimming up", recall_action)
+	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", params)
+	h.timer = C4:SetTimer(RECALL_DIM_AFTER_MS, function()
+		if hold ~= h then
+			return
+		end
+		h.timer = nil
+		if bridge and st.rid then
+			send_dim("up", setting("hold_up"))
+			h.dim_sent = true
+		end
+	end)
+	report_if_changed(before)
+end
+
+-- Release (or release-as-click) after a hold: stop a dim that was sent, and
+-- ignore the click some keypads send after it.
+local function finish_hold()
+	local h = hold
+	end_hold()
+	if h.dim_sent and bridge and st.rid then
+		send_dim("stop")
+	end
+	arm_guard(h.button)
+end
+
+local function button_action(button, action)
+	if action == ACT_PRESS then
+		end_hold()
+		local h = { button = button }
+		h.timer = C4:SetTimer(HOLD_AFTER_MS, function()
+			if hold == h then
+				h.timer = nil
+				start_hold(h)
+			end
+		end)
+		hold = h
+	elseif action == ACT_CLICK then
+		if hold and hold.held then
+			finish_hold()
+		elseif guard and guard.button == button then
+			end_hold()
+			log.debug("click on button %d right after a hold ignored", button)
+		else
+			end_hold()
+			button_click(button)
+		end
+	elseif action == ACT_RELEASE then
+		if hold and hold.held then
+			finish_hold()
+		else
+			end_hold()
+		end
+	end
+end
+
+-- The proxy's own route (BUTTON_ACTION on the proxy binding) carries the
+-- button in the parameters and wants every action echoed.
 dispatch.proxy["BUTTON_ACTION"] = function(_, params)
 	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
 	if not button or not action then
 		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
 	end
 	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
-	if action == 2 then
-		button_click(button)
-	end
+	button_action(button, action)
 end
 
 -- Keypad buttons bound to the driver's Button Link connections (200 top,
 -- 201 bottom, 202 toggle) deliver DO_PUSH / DO_RELEASE / DO_CLICK on the
--- binding; only the click acts [verified: public light_v2 drivers].
-local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
+-- binding [verified: public light_v2 drivers].
+local function link_button(binding, command)
+	local button = LINK_BUTTON[tonumber(binding)]
+	if not button then
+		log.warn("%s on binding %s: not a Button Link", command, tostring(binding))
+	end
+	return button
+end
+
+dispatch.proxy["DO_PUSH"] = function(binding)
+	local button = link_button(binding, "DO_PUSH")
+	if button then button_action(button, ACT_PRESS) end
+end
+
+dispatch.proxy["DO_RELEASE"] = function(binding)
+	local button = link_button(binding, "DO_RELEASE")
+	if button then button_action(button, ACT_RELEASE) end
+end
 
 dispatch.proxy["DO_CLICK"] = function(binding)
-	local button = LINK_BUTTON[tonumber(binding)]
-	if button then
-		button_click(button)
-	else
-		log.warn("DO_CLICK on binding %s: not a Button Link", tostring(binding))
-	end
+	local button = link_button(binding, "DO_CLICK")
+	if button then button_action(button, ACT_CLICK) end
 end
-dispatch.proxy["DO_PUSH"] = function() end
-dispatch.proxy["DO_RELEASE"] = function() end
+
+dispatch.proxy["SET_HOLD_RATE_UP"] = function(_, params) save_setting("hold_up", params.RATE) end
+dispatch.proxy["SET_HOLD_RATE_DOWN"] = function(_, params) save_setting("hold_down", params.RATE) end
+
+-- A keypad on a link asks for its button's colours and the LED state.
+dispatch.proxy["REQUEST_BUTTON_COLORS"] = function(binding)
+	local button = link_button(binding, "REQUEST_BUTTON_COLORS")
+	if not button then
+		return
+	end
+	send_button_colors(tonumber(binding), button)
+	C4:SendToProxy(tonumber(binding), "MATCH_LED_STATE", { STATE = effective_on() }, "COMMAND")
+end
+
+-- The proxy stores a button's on or off colour (the docs print the names
+-- with spaces; both spellings are accepted).
+dispatch.proxy["SET_BUTTON_COLOR"] = function(_, params)
+	local button = tonumber(params.BUTTON_ID or params["BUTTON ID"])
+	if not (button and COLOR_DEFAULTS[button]) then
+		return log.warn("SET_BUTTON_COLOR without a known BUTTON_ID (%s)", tostring(params.BUTTON_ID))
+	end
+	for which, names in pairs({ on = { "ON_COLOR", "ON COLOR" }, off = { "OFF_COLOR", "OFF COLOR" } }) do
+		local raw = params[names[1]] or params[names[2]]
+		if raw ~= nil then
+			local color = valid_color(raw)
+			if color then
+				colors[button][which] = color
+				C4:PersistSetValue(color_key(button, which), color)
+			else
+				log.warn("SET_BUTTON_COLOR: %s %q is not a 6-digit hex colour", names[1], tostring(raw))
+			end
+		end
+	end
+	send_button_colors(BUTTON_LINK[button], button)
+	send_button_info(button, effective_on())
+end
 
 -- Legacy commands that old programming may still send.
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
@@ -825,6 +1159,8 @@ end
 function OnDriverLateInit()
 	late_init_done = true
 	load_identity()
+	load_settings()
+	load_colors()
 	dispatch.replay_properties(Properties)
 	prop("Hue Scene ID", scene_id_label())
 	prop("Hue Scene", st.name)
@@ -835,13 +1171,23 @@ function OnDriverLateInit()
 	drain_early()
 	hello()
 	report_online()
+	-- The LEDs, once, when buffered messages made the state known already
+	-- (otherwise the first report sends them).
+	update_leds()
 	if not bridge then
 		schedule_recheck(1)
 	end
 end
 
--- Control bindings only; the bridge binding is one, the proxy's is not.
+-- Control bindings only: the bridge binding, and the Button Links, where a
+-- newly bound keypad gets the LED state; the proxy's binding is not one.
 function OnBindingChanged(idBinding, _, bound, otherDevice)
+	if LINK_BUTTON[idBinding] then
+		if bound then
+			update_leds(true)
+		end
+		return
+	end
 	if idBinding ~= BRIDGE_BINDING then
 		return
 	end
@@ -877,5 +1223,7 @@ end
 
 function OnDriverDestroyed()
 	settle()
+	end_hold()
+	disarm_guard()
 	cancel_recheck()
 end
