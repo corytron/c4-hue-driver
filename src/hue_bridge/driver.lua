@@ -58,9 +58,13 @@ end
 
 -- A list property (driver.xml DYNAMIC_LIST): the drop-down holds `items`,
 -- `value` (default the first item) is what the row shows. Comma-delimited
--- (SDK 24_properties/_6-UpdatePropertyList).
+-- (SDK 24_properties/_6-UpdatePropertyList); the list's default alone did
+-- not move the row after a pick in Composer (build 184), so the value is
+-- set as well.
 local function prop_list(name, items, value)
-	C4:UpdatePropertyList(name, table.concat(items, ","), value or items[1])
+	value = value or items[1]
+	C4:UpdatePropertyList(name, table.concat(items, ","), value)
+	C4:UpdateProperty(name, value)
 end
 
 local function paired()
@@ -314,7 +318,7 @@ local function refresh_room_mappings()
 		prop_list("Room Mappings", { state.room_mappings_summary })
 		return
 	end
-	local summary = string.format("%d Hue rooms and zones, %d unmapped; open the list to read", #items, unmapped)
+	local summary = string.format("%d Hue rooms and zones; %d unmapped (open the list to read)", #items, unmapped)
 	local list = { summary }
 	for _, item in ipairs(items) do
 		list[#list + 1] = (item:gsub(",", "‚"))
@@ -525,6 +529,7 @@ end
 dispatch.properties["Room_Mappings"] = function(value)
 	if state.late_init_done and state.lights and value ~= state.room_mappings_summary then
 		refresh_room_mappings()
+		prop("Last Action", "Room Mappings is for reading; the row shows the summary again")
 	end
 end
 
