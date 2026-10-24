@@ -612,6 +612,18 @@ dispatch.properties["Driver_Version"] = function()
 	prop("Driver Version", driver_version())
 end
 
+-- Director fills a new device's property table late: at the first init of
+-- a device created by AddDevice the replay of the properties reaches no
+-- Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168], so
+-- late init writes the row itself and looks again twice while it is empty.
+local function show_driver_version(attempt)
+	local v = driver_version()
+	prop("Driver Version", v)
+	if v == "" and attempt < 3 then
+		C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+	end
+end
+
 dispatch.properties["Debug_Mode"] = function(value)
 	log.set_debug(value == "On")
 end
@@ -1766,6 +1778,7 @@ function OnDriverLateInit()
 	fill_proxy_ids()
 	refresh_lights_props()
 	dispatch.replay_properties(Properties)
+	show_driver_version(1)
 	state.stream = new_stream()
 	state.late_init_done = true
 	replay_early_commands()
