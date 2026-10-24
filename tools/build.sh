@@ -53,6 +53,10 @@ for driver in "${DRIVERS[@]}"; do
 		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
 			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
 	fi
+	# The device drivers' shared module is of no use to the bridge.
+	if [[ "$driver" == hue_bridge ]]; then
+		rm -f "$stage/common/device.lua"
+	fi
 	# The drivers' own copy of the version: Director's answer is empty at the
 	# first init of a device created by AddDevice (docs/status.md, 2026-10-24).
 	printf 'return "%s"\n' "$version" > "$stage/common/build_version.lua"
