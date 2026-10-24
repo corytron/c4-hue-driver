@@ -204,3 +204,69 @@ All through `tools/devctl.py run "Hue Request" Method=… Path=/clip/v2/resource
    time-based scene on the bridge allowed (created and deleted by the
    checks). Run on a development build of the bridge driver installed for
    the duration; production build back afterwards.
+
+## 7. Check results on the house bridge (2026-10-24 11:17–11:35, dev build 173, Master Bedroom)
+
+All through `Hue Request` on the development bridge build, with a temporary
+dev-only log line printing whole `smart_scene`, `scene` and `grouped_light`
+event items. Bridge time zone `EST5EDT`.
+
+- **V1 shape.** 15 smart scenes. Each: `id`, `type`, `metadata {name,
+  image}`, `group {rid, rtype room|zone}`, `week_timeslots [ { timeslots [
+  { start_time { kind "time"|"sunset", time {hour, minute, second} },
+  target { rid, rtype "scene" } } … ], recurrence [weekday names] } ]`,
+  `transition_duration` (60000 on all app-made ones), `active_timeslot {
+  timeslot_id, weekday }` (present even while inactive: the last/current
+  slot), `state` "active"|"inactive". No `id_v1`. Master Bedroom (room
+  0a41b9f5…) has **Golden hours 4**; the Bedside Lights zone (the two
+  bedside lamps) has **Golden hours 11** and **Natural light 6**; the other
+  Natural lights are in Downstairs, Whole House and Basement.
+- **V2.** Golden hours 4's six slots target ordinary scenes; slot 1 (16:00)
+  is **Shine**, slot 0 (07:00) is "Arise".
+- **V3.** `timeslot_id` indexes the `timeslots` list of the week entry for
+  that `weekday` (slot 0 at 11:19 on a Saturday = the 07:00 slot).
+- **V4/V5 activate.** `PUT /smart_scene/<id> {"recall":{"action":"activate"}}`
+  → HTTP 200 `{"data":[{"rid":…,"rtype":"smart_scene"}],"errors":[]}`.
+  Event order: `smart_scene` update `{state:"active", active_timeslot}`
+  about 50 ms **before** the HTTP answer; about 1 s later the slot scene's
+  `status.active` "static" (with `last_recall`) and the group's
+  `grouped_light` on/brightness. The bridge driver's existing logic sent
+  `HUE_SCENE_GROUP other_active` to Shine (another scene of the room).
+- **V6.** `activate` with `"duration":750` → HTTP 200, no error (whether the
+  fade is used is not visible).
+- **V7 deactivate.** → `state:"inactive"`; the lights stay as they are (on,
+  same level). OFF therefore needs deactivate **and** group off, as the
+  owner chose.
+- **V9 group off.** With the smart scene active, group `on:false` → the slot
+  scene goes `inactive` and the smart scene `inactive` (events within 5 ms);
+  turning the group on again does **not** reactivate it.
+- **V10 another one.** Activating another smart scene over the same lights
+  (room Golden hours 4, then zone Golden hours 11, then zone Natural light 6)
+  makes the previous one `inactive`, each with an event.
+- **V11 recall / dim (the owner's question 5).** A relative group dim
+  (`dimming_delta` down 30 with `dynamics`) leaves the smart scene
+  **active** and its slot scene **still "static"** (no scene event at
+  all). Recalling an ordinary scene of the group makes the smart scene
+  `inactive`. A dynamic scene (Arise recalled `dynamic_palette`) stays
+  **`dynamic_palette`** after a relative group dim and after an absolute
+  group `dimming.brightness`; only a change to one light (seen earlier) ends
+  a scene. So whole-room dims from Control4 keep a scene playing, by status.
+- **Slot advance.** A throwaway schedule (zone with the Left Bedside Light,
+  slots 11:20 warm 40 % and 11:28 cool 80 %, later moved to 11:32) did
+  **not** advance to its second slot in the following minute, neither after
+  a dim nor in a control run without one; state stayed active, slot 0. So
+  the dim was not the cause; API-created schedules may not run their slot
+  changes the way app-made ones do (open). To be checked with the real
+  Golden hours 4 at its 16:00 slot (target Shine): activate before 16:00,
+  dim, read the active slot after 16:00.
+- **V12 create.** `POST /zone` → 201; `POST /scene` → 201; `POST
+  /smart_scene` → 201; the add event shows the new smart scene already
+  **`active`**. An 8-minute slot was accepted. A new `grouped_light`
+  announces `dimming_delta` and `dynamics` support.
+- **V13 edit.** `PUT` with `metadata.name` and `week_timeslots` → 200; one
+  update event carries both.
+- **V14 delete.** Deleting a scene that a slot targets → 200, and **the
+  bridge deletes the whole smart scene** one second later (`delete` event).
+  Deleting the zone deletes its grouped_light. All test resources removed.
+- **V8** (Whole House "Golden hours 3", a dynamic target) not run (it would
+  switch the whole house).
