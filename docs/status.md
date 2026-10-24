@@ -34,6 +34,13 @@ this page disagree about the present, this page and the code win.
   Scene, Add All Scenes Of Room, Re-link Scene, Forget Scene, Refresh
   Scenes), diagnostics. Follows each Hue room/zone's on/off and brightness
   from the event feed and tells scene devices.
+  **Composer properties fit the column** (2026-10-24): Composer shows a value
+  on one line of about 75 characters and clips the rest, so `Room Mappings`
+  is a drop-down list (summary on the row, one mapping per line in the
+  list, a pick snaps back to the summary), `Scenes` reads "126 + 15
+  time-based on bridge, 2 imported, 2 deleted" (missing and unbound only
+  when not zero) and `Stream Address` reads "10.00.002.143 (own queue,
+  spelling 1 of 7)" or "… (shared queue with commands: <reason>)".
 - **Hue Light** (light_v2 proxy, dimmer, colour and colour temperature when
   the bulb supports them): two-way state; keypad Button Links (Top, Bottom,
   Toggle): tap top = On preset (100 %) over the click rate, tap bottom = off,
@@ -131,6 +138,8 @@ listed in Composer (2026-10-24, build 180).
   Test Connection's Host override and Connection Test's "Diagnostic Server"
   target (insecure TLS), and the scene driver's `HUE_DUMP` handler is not
   gated on the dev loop.
+- The manual's `img/room-mappings.png` still shows the old one-line row; to be
+  re-shot by the Windows session once the list is on the house.
 - The Composer project is unsaved.
 - Approvals: the owner approves everything, always (2026-10-24); the
   Windows session asked him once on its side to confirm that standing rule.

@@ -188,6 +188,7 @@ Read-only properties:
 | `Attention` (new) | up to six items joined with "; ": new lights, missing lights, unbound devices, name differences [Q 10], broken mappings, offline > 24 h [Q 8]. As built: one item per kind, plus one per light two devices claim and then the scenes' items, each naming three at most and then "+N more"; a rename in Composer refreshes it within seconds (`OnItemNameChanged`) | "None" |
 | `Last Action` (new) | result of the last click: "Added Porch to Outdoor (device 2051)", "Not added: pick a light first" | "" |
 | `Room Mappings` (new) | "Hall → Hall; Kitchen → Kitchen; Office → (Control4 room gone); Porch → (unmapped); Downstairs (zone) → Living Room" | "None; use Map Rooms By Name" |
+| `Room Mappings` (since 2026-10-24) | A `DYNAMIC_LIST` (Composer clips a value at about 75 characters): the row shows "5 Hue rooms and zones, 1 unmapped; open the list to read", the drop-down one "Hue → Control4" line per group; a pick snaps back to the summary | "None; use Map Rooms By Name" |
 
 Actions (all plain `LUA_ACTION`s; the two with pickers carry
 `CUSTOM_SELECT` params, §8):
