@@ -1,11 +1,13 @@
--- Hue Scene driver: one light_v2 switch per Hue scene. ON recalls the scene,
--- OFF turns the scene's group off, and the bridge's scene status (active /
--- inactive) is mirrored as brightness 100 / 0. It never speaks to the bridge
--- itself: commands go to the Hue Bridge driver it is bound to (consumer
--- binding 1, class HUE_BRIDGE) with C4:SendToDevice, and the bridge pushes
--- configuration and state back through ExecuteCommand. The message contract
--- is docs/scenes-design.md §2, this device §3; the structure is the Hue Light
--- driver's (src/hue_light/driver.lua) with everything colour and dimming
+-- Hue Scene driver: one light_v2 dimmer per Hue scene. ON recalls the scene,
+-- OFF turns the scene's group off, the level shown is the group's brightness
+-- as Hue reports it, and the slider moves the group relative to it, so the
+-- scene's per-light differences stay (docs/scene-dimmer-design.md). It never
+-- speaks to the bridge itself: commands go to the Hue Bridge driver it is
+-- bound to (consumer binding 1, class HUE_BRIDGE) with C4:SendToDevice, and
+-- the bridge pushes configuration and state back through ExecuteCommand. The
+-- message contract is docs/scenes-design.md §2, this device §3, extended by
+-- docs/keypad-design.md and docs/scene-dimmer-design.md; the structure is the
+-- Hue Light driver's (src/hue_light/driver.lua) with everything colour
 -- specific left out.
 
 local log = require("common.log")
@@ -36,6 +38,15 @@ local DEV_TREE = "scene"
 -- bridge normally answers within a few hundred ms (its own STATE right after
 -- the PUT succeeded, then the stream's scene item).
 local FALLBACK_MS = 2000
+
+-- A level move (the slider while on) waits for the bridge's level report this
+-- much beyond its ramp, and a hold's release this long, before the target (or
+-- the cached level) is reported: the light's "rate + 1 s" fallback pattern.
+local LEVEL_FALLBACK_MS = 1000
+
+-- Level reports reach the proxy at most once per this many ms, the latest
+-- value when the window ends, so a ramp does not flood Navigators.
+local LEVEL_REPORT_MS = 1000
 
 -- Prefix of every line this driver logs; the dev-build log forwarding below
 -- recognises its own lines by it.
@@ -73,15 +84,20 @@ local st = {
 	gone_since = nil,     -- unix time the bridge entered that state, when it said
 	forgotten = nil,      -- { name } after HUE_SCENE_FORGOTTEN, until the next configure
 	active = nil,         -- "inactive" / "static" / "dynamic_palette"; nil until reported
+	level = nil,          -- the group's brightness (0-100, decimals) last reported lit; nil until then
 }
 local recall_action = DEFAULT_RECALL
--- Set when a hold-dim starts from this device's own buttons (or a hold
--- recalls the scene at 1 % from off): Hue then reports the scene inactive,
--- but the owner still sees the scene's lights on, so the tile and the keypad
--- LEDs stay on until the group goes off, another scene of the group becomes
--- active, or this device turns it off or recalls it (docs/keypad-design.md,
--- "Scene device").
-local dimmed_on = false
+-- The on rule (docs/scene-dimmer-design.md, Behaviour): set whenever the scene
+-- becomes active by any route (a static / dynamic_palette report from the
+-- bridge, whoever recalled it, or a keypad hold from here); cleared only by
+-- its group going off, another scene of the group becoming active, or this
+-- device turning it off. Hue calling the scene inactive afterwards (something
+-- dimmed or changed its lights) leaves the tile and the keypad LEDs on.
+-- Persisted under "held_on", so it survives a restart.
+local held_on = false
+local level_seq = 0        -- counts lit level reports, to tell whether one arrived since a recall
+local last_reported = nil  -- the LIGHT_BRIGHTNESS_CURRENT last sent to the proxy
+local level_window = nil   -- { timer, dirty } for LEVEL_REPORT_MS after a level report went out
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local pending = nil          -- { timer, assume, on } while a recall/off awaits its STATE
 local late_init_done = false -- UpdateProperty and SendToProxy are unsafe before OnDriverLateInit
@@ -288,19 +304,51 @@ local function is_on()
 	return st.active == "static" or st.active == "dynamic_palette"
 end
 
--- What the tile and the LEDs show: the scene is active, or it was dimmed
--- from this device's buttons since (dimmed_on above).
+-- What the tile and the LEDs show: the scene is active, or held on since it
+-- was (held_on above).
 local function effective_on()
-	return is_on() or dimmed_on
+	return is_on() or held_on
 end
 
--- LIGHT_BRIGHTNESS_CURRENT for a switch: 100 while the scene is on, 0
--- while off, nil until the bridge has reported (or a hold turned it on).
+local function set_held(on)
+	if held_on == on then
+		return
+	end
+	held_on = on
+	log.debug("held on: %s", tostring(on))
+	C4:PersistSetValue("held_on", on) -- a boolean persists [verified: API 26.5/_4]
+end
+
+local function load_held()
+	held_on = to_bool(C4:PersistGetValue("held_on")) == true
+end
+
+-- A status from the bridge: an active one holds the scene on. (A fallback's
+-- assumption sets st.active directly: it is not a report, so it does not.)
+local function take_status(active)
+	st.active = active
+	if is_on() then
+		set_held(true)
+	end
+end
+
+-- A whole percent, 1-100: the proxy mishandles decimals (docs/design.md,
+-- "Navigator slider") and a lit scene never reads 0.
+local function whole_percent(v)
+	return math.max(1, math.min(100, math.floor(v + 0.5)))
+end
+
+-- LIGHT_BRIGHTNESS_CURRENT: the group's level while the scene is on (100
+-- while none is known yet), 0 while off, nil until the bridge has reported
+-- (or a hold turned it on, or held_on came back from a restart).
 local function brightness()
-	if st.active == nil and not dimmed_on then
+	if st.active == nil and not held_on then
 		return nil
 	end
-	return effective_on() and 100 or 0
+	if not effective_on() then
+		return 0
+	end
+	return st.level and whole_percent(st.level) or 100
 end
 
 -- Keypad LEDs ----------------------------------------------------------------
@@ -398,15 +446,52 @@ local function report_brightness()
 	if not level then
 		return false
 	end
+	last_reported = level
 	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = level })
 	update_leds()
 	return true
 end
 
--- Report only when the switch position moved from `before`.
+-- Report only when what the tile shows moved from `before`.
 local function report_if_changed(before)
 	if brightness() ~= before then
 		report_brightness()
+	end
+end
+
+-- Level reports are throttled: one goes to the proxy at once when none went
+-- out in the last LEVEL_REPORT_MS; within that window a report only marks
+-- the window, and when it ends the tile's value then goes out (if it differs
+-- from the last one sent) and a new window begins.
+local function close_level_window()
+	if level_window then
+		level_window.timer:Cancel()
+		level_window = nil
+	end
+end
+
+local function open_level_window()
+	close_level_window()
+	local w = { dirty = false }
+	w.timer = C4:SetTimer(LEVEL_REPORT_MS, function()
+		if level_window ~= w then
+			return
+		end
+		level_window = nil
+		if w.dirty and brightness() ~= last_reported then
+			report_brightness()
+			open_level_window()
+		end
+	end)
+	level_window = w
+end
+
+local function report_level()
+	if level_window then
+		level_window.dirty = true
+	elseif brightness() ~= last_reported then
+		report_brightness()
+		open_level_window()
 	end
 end
 
@@ -428,9 +513,11 @@ end
 
 -- Targets ------------------------------------------------------------------
 
--- A recall or off sent to the bridge stays pending until a HUE_SCENE_STATE
--- arrives, its fallback fires, or the proxy says stop; either way the proxy
--- gets a CHANGED after its CHANGING.
+-- A command sent to the bridge stays pending until the report it waits for
+-- arrives (kind "switch", a recall or off: a HUE_SCENE_STATE; kind "level",
+-- a level move or a hold's release: a level in HUE_SCENE_GROUP), its fallback
+-- fires, or the proxy says stop; either way the proxy gets a CHANGED after
+-- its CHANGING. One at a time: a new command replaces the previous one.
 local function settle()
 	if pending then
 		pending.timer:Cancel()
@@ -438,16 +525,25 @@ local function settle()
 	end
 end
 
--- `assume` applies the sent target to the cache and reports it; it runs when
--- the bridge has not confirmed within FALLBACK_MS.
-local function arm(on, assume)
+-- `p.assume` applies the sent target to the cache and reports it; it runs
+-- when the bridge has not confirmed within `delay` ms. `p.on` is where the
+-- scene is heading (TOGGLE reads it).
+local function arm(p, delay)
 	settle()
-	local p = { on = on, assume = assume }
-	p.timer = C4:SetTimer(FALLBACK_MS, function() -- [verified: API 34/_1]
+	p.timer = C4:SetTimer(delay, function() -- [verified: API 34/_1]
 		pending = nil
-		assume()
+		p.assume()
 	end)
 	pending = p
+end
+
+-- A recall at a brightness (the slider from off) that ended on: Hue set every
+-- light of the scene to it, so it is the group's level until the bridge
+-- reports one, unless a report already arrived since the recall was sent.
+local function take_recalled_level(p)
+	if p.level and effective_on() and level_seq == p.seq then
+		st.level = p.level
+	end
 end
 
 -- True when a proxy command can be acted on; otherwise it is dropped here,
@@ -463,7 +559,7 @@ local function ready(command)
 	if st.gone then
 		log.warn("%s dropped: %s", command, why)
 		st.active = "inactive"
-		dimmed_on = false
+		set_held(false)
 		report_brightness()
 	else
 		log.info("%s dropped: %s", command, why)
@@ -481,58 +577,112 @@ local function recall_params(rate)
 	return params
 end
 
-local function turn_on(rate)
+-- Recall the scene; with `level` (the slider from off) at that brightness.
+-- The bridge's STATE settles it. The fallback's assumption is not a report:
+-- it does not hold the scene on, so a later inactive report still corrects it.
+local function turn_on(rate, level)
 	rate = tonumber(rate) or 0
+	-- 100 % from off is the scene as designed: a brightness override would
+	-- set every light to 100 % and lose its look, and a Navigator's plain
+	-- "on" may arrive as a target of 100.
+	if level and level >= 100 then
+		level = nil
+	end
 	if not ready("ON") then
 		return
 	end
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = 0,
-		LIGHT_BRIGHTNESS_TARGET = 100,
+		LIGHT_BRIGHTNESS_CURRENT = brightness() or 0,
+		LIGHT_BRIGHTNESS_TARGET = level or 100,
 		RATE = rate,
 	})
-	-- A normal recall replaces any dimmed state: the scene is active again.
-	dimmed_on = false
 	local action = recall_action
-	log.info("ON: recalling as %s", action)
-	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", recall_params(rate))
-	arm(true, function()
+	local params = recall_params(rate)
+	if level then
+		params.brightness = string.format("%d", level)
+		log.info("ON: recalling as %s at %d %%", action, level)
+	else
+		log.info("ON: recalling as %s", action)
+	end
+	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", params)
+	local p = { kind = "switch", on = true, level = level, seq = level_seq }
+	p.assume = function()
 		log.debug("recall (%s) unconfirmed after %d ms; assuming the scene is on", action, FALLBACK_MS)
 		st.active = assumed_active(action)
+		take_recalled_level(p)
 		report_brightness()
-	end)
+	end
+	arm(p, FALLBACK_MS)
 end
 
+-- This device turning the scene off ends the held state at once.
 local function turn_off(rate)
 	rate = tonumber(rate) or 0
 	if not ready("OFF") then
 		return
 	end
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = 100,
+		LIGHT_BRIGHTNESS_CURRENT = brightness() or 100,
 		LIGHT_BRIGHTNESS_TARGET = 0,
 		RATE = rate,
 	})
-	dimmed_on = false
+	set_held(false)
 	C4:SendToDevice(bridge, "HUE_SCENE_OFF", { rid = st.rid })
-	arm(false, function()
+	arm({ kind = "switch", on = false, assume = function()
 		log.debug("off unconfirmed after %d ms; assuming the scene is off", FALLBACK_MS)
 		st.active = "inactive"
 		report_brightness()
-	end)
+	end }, FALLBACK_MS)
 end
 
--- A brightness target is a switch position: anything above 0 is ON.
+-- The slider while the scene is on: the bridge moves the group to `level`
+-- relative to its current level, so the scene's per-light differences stay
+-- (HUE_SCENE_LEVEL, docs/scene-dimmer-design.md). The proxy hears CHANGED
+-- with the bridge's next level report, or the target after the ramp plus
+-- LEVEL_FALLBACK_MS.
+local function move_level(level, rate)
+	if not ready("brightness target") then
+		return
+	end
+	notify("LIGHT_BRIGHTNESS_CHANGING", {
+		LIGHT_BRIGHTNESS_CURRENT = brightness() or 100,
+		LIGHT_BRIGHTNESS_TARGET = level,
+		RATE = rate,
+	})
+	log.info("level: %d %% over %d ms", level, rate)
+	C4:SendToDevice(bridge, "HUE_SCENE_LEVEL", {
+		rid = st.rid,
+		device_id = device_id(),
+		level = string.format("%d", level),
+		rate = string.format("%d", rate),
+	})
+	local delay = rate + LEVEL_FALLBACK_MS
+	arm({ kind = "level", on = true, assume = function()
+		log.debug("level %d %% unconfirmed after %d ms; assuming it", level, delay)
+		st.level = level
+		report_brightness()
+	end }, delay)
+end
+
+-- SET_BRIGHTNESS_TARGET (and SET_LEVEL / RAMP_TO_LEVEL): 0 turns the scene off
+-- over the rate; above 0 recalls it at that brightness over the rate while it
+-- is off, or while a recall or off is still on its way (the group's level is
+-- in flux then, so only an absolute target is safe), and moves the group's
+-- level otherwise.
 local function set_target(target, rate)
 	target = tonumber(target)
 	if not target then
 		return log.warn("brightness command without a target")
 	end
-	if target > 0 then
-		turn_on(rate)
-	else
-		turn_off(rate)
+	rate = math.max(0, math.floor((tonumber(rate) or 0) + 0.5))
+	if target <= 0 then
+		return turn_off(rate)
 	end
+	local level = whole_percent(target)
+	if (pending and pending.kind == "switch") or not effective_on() then
+		return turn_on(rate, level)
+	end
+	move_level(level, rate)
 end
 
 -- SET_BRIGHTNESS_STOP: the proxy wants the transition closed now. The cached
@@ -695,7 +845,8 @@ end)
 
 -- Every scene status the bridge learns. A report settles a pending recall or
 -- off whatever the value: the proxy heard CHANGING and must hear CHANGED.
--- Otherwise only a change reaches the proxy.
+-- Otherwise only a change of what the tile shows reaches the proxy. An active
+-- status holds the scene on; an inactive one never turns a held scene off.
 dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
@@ -705,35 +856,55 @@ dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", functi
 		return log.warn("HUE_SCENE_STATE without a known status (%s) ignored", tostring(params.active))
 	end
 	local before = brightness()
-	st.active = params.active
-	if pending then
+	take_status(params.active)
+	if pending and pending.kind == "switch" then
+		local p = pending
 		settle()
+		take_recalled_level(p)
 		report_brightness()
 	else
 		report_if_changed(before)
 	end
 end)
 
--- The scene's room/zone: its grouped_light went on or off, or another scene
--- of the group became active (docs/keypad-design.md, Messages). Either end
--- of the scene's lights ends a dimmed-on state; on="true" alone changes
--- nothing (the scene's own status says whether it is active).
+-- The scene's room/zone (docs/keypad-design.md and docs/scene-dimmer-design.md,
+-- Messages): its grouped_light's level, its on/off, or another scene of the
+-- group became active; every key optional. A level is cached and, while the
+-- scene is on, reported (throttled); it also settles a pending level move or
+-- hold release. The group going off or another scene becoming active ends
+-- the held state; on="true" alone changes nothing (the scene's own status
+-- says whether it is active). A level of 0 means none of the group's lights
+-- is lit, which says nothing about the scene's level: the last lit one stays.
 dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_SCENE_GROUP for rid %s ignored (ours is %s)", params.rid, st.rid)
 	end
-	local group_off = to_bool(params.on) == false
-	local other_active = to_bool(params.other_active) == true
-	if not (group_off or other_active) then
-		return
-	end
-	if dimmed_on then
-		log.debug("dimmed-on state ended: %s", group_off and "the group went off" or "another scene is active")
-	end
 	local before = brightness()
-	dimmed_on = false
-	report_if_changed(before)
+	local level = tonumber(params.level)
+	if level and level > 0 then
+		st.level = math.min(level, 100)
+		level_seq = level_seq + 1
+	end
+	local ended = to_bool(params.on) == false or to_bool(params.other_active) == true
+	if ended then
+		if held_on then
+			log.debug("held-on state ended: %s", to_bool(params.on) == false and "the group went off"
+				or "another scene is active")
+		end
+		set_held(false)
+	end
+	if pending and pending.kind == "level" and (level or ended) then
+		settle()
+		report_brightness()
+		if level then
+			open_level_window()
+		end
+	elseif ended then
+		report_if_changed(before)
+	elseif level and level > 0 and effective_on() then
+		report_level()
+	end
 end)
 
 -- The bridge ran Forget for this scene (from its own action or ours): the
@@ -759,9 +930,9 @@ dispatch.commands["HUE_DUMP"] = function()
 	for k, v in pairs(Properties or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
 	table.sort(parts)
 	log.always("Properties: %s", table.concat(parts, " | "))
-	log.always("state: rid=%s name=%s configured=%s active=%s dimmed_on=%s recall_action=%s debug=%s",
-		tostring(st.rid), tostring(st.name), tostring(st.configured), tostring(st.active), tostring(dimmed_on),
-		tostring(recall_action), tostring(log.enabled("debug")))
+	log.always("state: rid=%s name=%s configured=%s active=%s held_on=%s level=%s recall_action=%s debug=%s",
+		tostring(st.rid), tostring(st.name), tostring(st.configured), tostring(st.active), tostring(held_on),
+		tostring(st.level), tostring(recall_action), tostring(log.enabled("debug")))
 end
 
 dispatch.commands["DEV_RELOAD"] = function(params)
@@ -834,8 +1005,8 @@ dispatch.proxy["SYNCHRONIZE"] = function()
 end
 
 -- With supports_target the proxy sends LIGHT_BRIGHTNESS_TARGET and RATE
--- [verified: proxy ref, SET_BRIGHTNESS_TARGET]; here a target is a switch
--- position, and RATE becomes the recall's transition.
+-- [verified: proxy ref, SET_BRIGHTNESS_TARGET]; the Navigator slider is this
+-- (set_target above).
 dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
 	set_target(params.LIGHT_BRIGHTNESS_TARGET, params.RATE)
 end
@@ -844,7 +1015,8 @@ end
 -- SET_BRIGHTNESS_TARGET and end a scene ramp with these; both carry no
 -- parameters [verified: proxy ref, SET_BRIGHTNESS_STOP, reduced_als_support,
 -- supports_brightness_stop]. Nothing goes to the bridge: a scene recall
--- cannot be stopped, the proxy only needs its CHANGED.
+-- cannot be stopped, the proxy only needs its CHANGED (a level move's
+-- end comes with the bridge's next level report).
 dispatch.proxy["SET_BRIGHTNESS_STOP"] = function()
 	stop()
 end
@@ -956,7 +1128,21 @@ local function send_dim(direction, duration)
 	C4:SendToDevice(bridge, "HUE_SCENE_DIM", params)
 end
 
--- The hold timer fired with the button still down.
+-- The proxy hears a hold as a CHANGING toward the end of the range over the
+-- hold rate when it starts (docs/scene-dimmer-design.md, Keypad holds); the
+-- bridge's level reports settle it. It replaces whatever target was pending.
+local function hold_changing(h, current, up, duration)
+	settle()
+	notify("LIGHT_BRIGHTNESS_CHANGING", {
+		LIGHT_BRIGHTNESS_CURRENT = current,
+		LIGHT_BRIGHTNESS_TARGET = up and 100 or 1,
+		RATE = duration,
+	})
+	h.changing = true
+end
+
+-- The hold timer fired with the button still down. A hold from here makes
+-- the scene held on (a keypad recall or dim, the on rule).
 local function start_hold(h)
 	h.held = true
 	local on = effective_on()
@@ -967,14 +1153,18 @@ local function start_hold(h)
 	if not ready("hold") then
 		return
 	end
-	local before = brightness()
-	dimmed_on = true
+	local duration = setting(up and "hold_up" or "hold_down")
+	set_held(true)
 	if on then
-		send_dim(up and "up" or "down", setting(up and "hold_up" or "hold_down"))
+		hold_changing(h, brightness() or 100, up, duration)
+		send_dim(up and "up" or "down", duration)
 		h.dim_sent = true
 		return
 	end
 	-- Off: recall at 1 %, then ramp up from there once Hue has applied it.
+	-- The LEDs turn on at once; the tile follows the CHANGING.
+	hold_changing(h, 0, true, duration)
+	update_leds()
 	local params = recall_params(0)
 	params.brightness = "1"
 	log.info("hold: recalling as %s at 1 %%, then dimming up", recall_action)
@@ -985,20 +1175,27 @@ local function start_hold(h)
 		end
 		h.timer = nil
 		if bridge and st.rid then
-			send_dim("up", setting("hold_up"))
+			send_dim("up", duration)
 			h.dim_sent = true
 		end
 	end)
-	report_if_changed(before)
 end
 
--- Release (or release-as-click) after a hold: stop a dim that was sent, and
--- ignore the click some keypads send after it.
+-- Release (or release-as-click) after a hold: stop a dim that was sent, close
+-- the hold's CHANGING with the bridge's next level report (or the cached
+-- level after LEVEL_FALLBACK_MS), and ignore the click some keypads send
+-- after it.
 local function finish_hold()
 	local h = hold
 	end_hold()
 	if h.dim_sent and bridge and st.rid then
 		send_dim("stop")
+	end
+	if h.changing then
+		arm({ kind = "level", on = true, assume = function()
+			log.debug("no level report %d ms after the hold; reporting the cached one", LEVEL_FALLBACK_MS)
+			report_brightness()
+		end }, LEVEL_FALLBACK_MS)
 	end
 	arm_guard(h.button)
 end
@@ -1106,7 +1303,7 @@ dispatch.proxy["SET_BUTTON_COLOR"] = function(_, params)
 	send_button_info(button, effective_on())
 end
 
--- Legacy commands that old programming may still send.
+-- Legacy commands that old programming may still send: the slider's path.
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
 dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
 
@@ -1161,6 +1358,7 @@ function OnDriverLateInit()
 	load_identity()
 	load_settings()
 	load_colors()
+	load_held()
 	dispatch.replay_properties(Properties)
 	prop("Hue Scene ID", scene_id_label())
 	prop("Hue Scene", st.name)
@@ -1171,8 +1369,8 @@ function OnDriverLateInit()
 	drain_early()
 	hello()
 	report_online()
-	-- The LEDs, once, when buffered messages made the state known already
-	-- (otherwise the first report sends them).
+	-- The LEDs, once, when buffered messages or a persisted held_on made the
+	-- state known already (otherwise the first report sends them).
 	update_leds()
 	if not bridge then
 		schedule_recheck(1)
@@ -1226,4 +1424,5 @@ function OnDriverDestroyed()
 	end_hold()
 	disarm_guard()
 	cancel_recheck()
+	close_level_window()
 end
