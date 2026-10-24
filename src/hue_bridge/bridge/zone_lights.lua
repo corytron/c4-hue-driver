@@ -2234,4 +2234,86 @@ function zone_lights.join(first, second)
 	return a
 end
 
+-- Lists (the drop-down properties) ----------------------------------------------
+
+-- The state a list line ends in for a registry entry: " → device N" linked,
+-- " (deleted in Hue; device N)" gone, " (unbound; device N)" unbound.
+local function entry_suffix(entry)
+	if entry.state == "gone" then
+		return string.format(" (deleted in Hue; device %d)", entry.device_id)
+	elseif entry.state == "unbound" then
+		return string.format(" (unbound; device %d)", entry.device_id)
+	end
+	return string.format(" → device %d", entry.device_id)
+end
+
+-- "Bedside Lights (zone; 2 lights)", "Attic (zone; no lights)": the Add Zone
+-- Light picker's label with ";" inside the parentheses, so that a list line
+-- holds no comma. `word` and `count` are left out when unknown.
+local function list_label(name, word, count)
+	local inner = {}
+	if word then
+		inner[#inner + 1] = word
+	end
+	if count then
+		inner[#inner + 1] = count
+	end
+	local text = tostring(name or "?")
+	if #inner > 0 then
+		text = text .. " (" .. table.concat(inner, "; ") .. ")"
+	end
+	return text
+end
+
+-- The Zone Lights drop-down (the row shows summary()): every zone then every
+-- room on the bridge in the Add Zone Light picker's order and labels
+-- ("Bedside Lights (zone; 2 lights)", "Attic (zone; no lights)"), with
+-- " → device N" when imported, " (deleted from Composer <date>)" for a
+-- tombstone, " (unbound; device N)"; then the registered groups the cache
+-- lacks, in name order, with the type and light count the entry remembers
+-- and " (deleted in Hue; device N)" when gone. Commas become "‚" (U+201A):
+-- the list is comma-delimited (driver.lua's refresh_room_mappings). Before
+-- the groups are fetched, the registry alone: what is known. Empty when
+-- nothing is.
+function zone_lights:list_items()
+	local cache = self:groups()
+	local tombs = self.reg:tombstones()
+	local out, listed = {}, {}
+	for _, gtype in ipairs({ "zone", "room" }) do
+		for _, group in ipairs(cache:groups(gtype)) do
+			listed[group.rid] = true
+			local count
+			if self:grouped_light_of(group.rid) == nil then
+				count = "no lights"
+			else
+				count = plural(#self:member_lights(group), "light")
+			end
+			local text = list_label(group.name, gtype, count)
+			local entry, tomb = self.registry[group.rid], tombs[group.rid]
+			if entry then
+				text = text .. entry_suffix(entry)
+			elseif tomb then
+				text = text .. string.format(" (deleted from Composer %s)", date_of(tomb.deleted_at))
+			end
+			out[#out + 1] = text
+		end
+	end
+	for _, rid in ipairs(self.reg:rids()) do
+		if not listed[rid] then
+			local entry = self.registry[rid]
+			local count
+			if entry.no_lights then
+				count = "no lights"
+			elseif entry.light_count then
+				count = plural(entry.light_count, "light")
+			end
+			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. entry_suffix(entry)
+		end
+	end
+	for i, text in ipairs(out) do
+		out[i] = (text:gsub(",", "‚"))
+	end
+	return out
+end
+
 return zone_lights

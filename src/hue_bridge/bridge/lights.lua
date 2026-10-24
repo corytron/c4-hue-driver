@@ -2758,4 +2758,66 @@ function lights:picker_hue_rooms()
 	return list
 end
 
+-- Lists (the drop-down properties) ----------------------------------------------
+
+-- The state a list line ends in for a registry entry: " → device N" linked,
+-- " (missing; device N)" gone, " (unbound; device N)" unbound.
+local function entry_suffix(entry)
+	if entry.state == "gone" then
+		return string.format(" (missing; device %d)", entry.device_id)
+	elseif entry.state == "unbound" then
+		return string.format(" (unbound; device %d)", entry.device_id)
+	end
+	return string.format(" → device %d", entry.device_id)
+end
+
+-- The Lights drop-down (the row shows summary()): one line per light on the
+-- bridge, "<Hue room>: <light>" with its state, " (new)" when not imported,
+-- " (deleted from Composer <date>)" for a tombstone; the registered lights
+-- the bridge lacks ("(missing; device N)") under the room they were last
+-- seen in. Sorted by room label then name; a light in no room reads "(no
+-- room)". Commas become "‚" (U+201A): the list is comma-delimited
+-- (driver.lua's refresh_room_mappings). Before the first GET, the registry
+-- alone: what is known. Empty when nothing is.
+function lights:list_items()
+	local tombs = self.reg:tombstones()
+	local rows = {}
+	local function row(room, name, suffix, rid)
+		rows[#rows + 1] = { room = tostring(room or "(no room)"), name = tostring(name or "?"), suffix = suffix,
+			rid = tostring(rid) }
+	end
+	for rid, model in pairs(self.models) do
+		local _, label = self:hue_room_of(model)
+		local entry, tomb = self.registry[rid], tombs[rid]
+		local suffix = " (new)"
+		if entry then
+			suffix = entry_suffix(entry)
+		elseif tomb then
+			suffix = string.format(" (deleted from Composer %s)", date_of(tomb.deleted_at))
+		end
+		row(label, model.name, suffix, rid)
+	end
+	for rid, entry in pairs(self.registry) do
+		if not self.models[rid] then
+			row(entry.hue_room, entry.name, entry_suffix(entry), rid)
+		end
+	end
+	table.sort(rows, function(a, b)
+		local ar, br = a.room:lower(), b.room:lower()
+		if ar ~= br then
+			return ar < br
+		end
+		local an, bn = a.name:lower(), b.name:lower()
+		if an ~= bn then
+			return an < bn
+		end
+		return a.rid < b.rid
+	end)
+	local out = {}
+	for i, r in ipairs(rows) do
+		out[i] = (string.format("%s: %s%s", r.room, r.name, r.suffix):gsub(",", "‚"))
+	end
+	return out
+end
+
 return lights
