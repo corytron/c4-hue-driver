@@ -154,7 +154,9 @@ app, which also confirms that a grouped_light PUT takes `color` and
   `bridge/util.lua` and `bridge/project.lua`. Per event: no watchdog timer
   churn, the three per-container property writes coalesced to one a second,
   no debug strings with debug off, the zone module touches only the groups
-  an item can change, one grouped_light GET per resync
+  an item can change, one grouped_light GET per resync, the owner-facing rows
+  refreshed twice per reconnect (after the lights' resync and after the
+  chain) instead of three times
   (`docs/reviews/efficiency-2026-10-24.md`: nine of fifteen costs gone).
 - **Release builds** carry no dev loop, diagnostics or insecure TLS mode
   (`tools/build.sh` strips them and refuses to package a release that still

@@ -461,7 +461,7 @@ item)` merges a partial update (a `children` array replaces the whole list).
 `hue_model.light(item)` gains `id_v1` and `service_id`;
 `hue_model.connectivity(item)` gains `mac_address`;
 `hue_model.registry_configure_params (configure_params merged into it 2026-10-24)(light, device, extra)` and
-`hue_model.registry_configure_params(rid, entry, extra)` merge the string
+`hue_model.registry_configure_params(rid, entry, extra)` (the only configure-params builder since 2026-10-24) merge the string
 fields of `extra` (`hue_room`, `id_v1`, `state`) into the result.
 
 ### `tests/helpers/fake_c4.lua` additions

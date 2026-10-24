@@ -187,7 +187,7 @@ usually mapped by `Map Rooms By Name`).
 | `HUE_HELLO` | device → bridge | + `kind` = "group" (from persisted `hue_kind`); `model` absent. The bridge routes `kind=group` to the zone-light module, everything else to `lights:hello` as today |
 | `HUE_CONFIGURE` | bridge → device | + `kind` "group", `group_type` ("zone"/"room"), `light_count`, `no_lights` ("true" only while the group has no grouped_light), `model` ("Hue zone"/"Hue room"), `hue_room` (the group's own label: "Bedside Lights (zone)" / "Master Bedroom"), `id_v1` ("/groups/2"), `has_color`, `has_cct`, `mirek_min`, `mirek_max`, `min_dim` "1", `state` "gone" + `gone_since` while gone. Sent at creation, hello, startup (from the registry, before any GET), and whenever name, caps, count, no_lights or state change |
 | `HUE_STATE` | bridge → device | `rid` (group rid), `on`, `brightness` (group average), `x`+`y` or `mirek` with `color_mode` (Decision 8), `online` ("false" while no grouped_light or gone), `reason` (event/resync/hello) |
-| `HUE_SET` | device → bridge | unchanged; the bridge checks `zone_lights:entry(rid).device_id (device_for removed 2026-10-24)(rid)` before `lights:entry(rid).device_id (device_for removed 2026-10-24)(rid)` and queues on the group queue (absolute body, Decision 5) |
+| `HUE_SET` | device → bridge | unchanged; the bridge checks `zone_lights:is_group(rid)` first (the `device_for` accessors were removed 2026-10-24) and queues on the group queue (absolute body, Decision 5) |
 | `HUE_DIM` | device → bridge | unchanged; group queue (`dim`, `rate`, `level`), Decision 6 |
 | `HUE_GOODBYE`, `HUE_FORGET` | device → bridge | unchanged; routed by `device_id` (zone-light registry first, then lights) |
 | `HUE_FORGOTTEN` | bridge → device | unchanged; `name` = the group's name |
@@ -334,7 +334,7 @@ and both scene devices.
   `add(rid, room_id, done)`, `relink`, `forget`, `link_devices(skip)`,
   `adopt_hue_names`, `accept_names`, `summary`, `attention_items`,
   `picker_groups`, `picker_relink_devices`, `picker_forget_devices`,
-  `entry(rid).device_id (device_for removed 2026-10-24)(rid)`, `device_ids()`, `is_group(rid)`.
+  `entry(rid)` (its `.device_id`; `device_for` was removed 2026-10-24), `device_ids()`, `is_group(rid)`.
 - **Model and fixtures** `src/hue_bridge/bridge/hue_model.lua` +
   `tests/spec/hue_model_spec.lua`, `tests/fixtures/hue_resources.lua`:
   `hue_model.grouped_light(item)` → `{ rid, owner_rid, owner_type, on,
