@@ -83,7 +83,7 @@
 			<property>
 				<name>Lights</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>true</readonly>
+				<readonly>false</readonly>
 			</property>
 			<!-- docs/import-design.md §6: what needs the owner's attention, the
 			     result of the last click, and the Hue room → Control4 room map. -->
@@ -141,7 +141,7 @@
 			<property>
 				<name>Room Mappings</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>true</readonly>
+				<readonly>false</readonly>
 				<tooltip>Open the list to read every Hue room and zone with its Control4 room</tooltip>
 			</property>
 			<!-- A list (summary on the row, every item in the drop-down), since
@@ -149,7 +149,7 @@
 			<property>
 				<name>Scenes</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>true</readonly>
+				<readonly>false</readonly>
 			</property>
 			<!-- docs/zone-light-design.md §5: zones and rooms imported as
 				 Hue Light devices of kind "group". -->
@@ -158,7 +158,7 @@
 			<property>
 				<name>Zone Lights</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>true</readonly>
+				<readonly>false</readonly>
 			</property>
 			<property>
 				<name>Stream Address</name>

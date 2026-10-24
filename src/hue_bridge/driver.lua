@@ -820,7 +820,8 @@ end
 -- Action (2)` … `(6)`; rows not in use are hidden (SetPropertyAttribs 1).
 -- Nothing to click, nothing editable (issue #68).
 local LAST_ACTION_ROWS, LAST_ACTION_WIDTH = 6, 72
-local last_action_rows_shown = 0
+local last_action_shown = {}   -- row index → true while the row holds text
+local last_action_timer = nil
 
 local function wrap_text(text, width)
 	local lines, line = {}, ""
@@ -858,6 +859,16 @@ local function last_action_row(i)
 	return string.format("Last Action (%d)", i)
 end
 
+-- Every continuation row's visibility, asserted in full each time: Composer
+-- once showed row (3) without row (2) when both appeared together [hardware
+-- 2026-10-24, build 243], so nothing depends on what was shown before, and
+-- a one-shot timer asserts it once more shortly after.
+local function assert_last_action_rows()
+	for i = 2, LAST_ACTION_ROWS do
+		row_visible(last_action_row(i), last_action_shown[i] == true)
+	end
+end
+
 local function last_action(text)
 	text = tostring(text == nil and "" or text)
 	log.always("%s", text)
@@ -867,31 +878,28 @@ local function last_action(text)
 	end
 	prop("Last Action", lines[1] or "")
 	for i = 2, LAST_ACTION_ROWS do
-		if lines[i] then
-			prop(last_action_row(i), lines[i])
-			if i > last_action_rows_shown then
-				row_visible(last_action_row(i), true)
-			end
-		elseif i <= last_action_rows_shown then
-			prop(last_action_row(i), "")
-			row_visible(last_action_row(i), false)
-		end
+		prop(last_action_row(i), lines[i] or "")
+		last_action_shown[i] = lines[i] ~= nil
 	end
-	last_action_rows_shown = math.min(#lines, LAST_ACTION_ROWS)
+	assert_last_action_rows()
+	if last_action_timer then
+		last_action_timer:Cancel()
+	end
+	last_action_timer = C4:SetTimer(400, function()
+		last_action_timer = nil
+		assert_last_action_rows()
+	end)
 	refresh_lights_props()
 end
 
 -- At late init: continuation rows that still hold text from before the
 -- restart stay shown, the empty ones are hidden.
 local function settle_last_action_rows()
-	last_action_rows_shown = 1
 	for i = 2, LAST_ACTION_ROWS do
 		local value = Properties and Properties[last_action_row(i)] or ""
-		row_visible(last_action_row(i), value ~= "")
-		if value ~= "" then
-			last_action_rows_shown = i
-		end
+		last_action_shown[i] = value ~= ""
 	end
+	assert_last_action_rows()
 end
 
 -- The lists are read-only in Composer; should a pick still arrive, the row
