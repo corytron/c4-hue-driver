@@ -1518,7 +1518,7 @@ end
 -- inside OnBodyChunk: no transfers are started here. Every handler is
 -- idempotent and resolves owners through the cache, since `delete` items
 -- carry only id and type and item order within a container is undocumented.
-function lights:on_container(container)
+local function on_container_body(self, container)
 	if type(container) ~= "table" or type(container.data) ~= "table" then
 		return 0
 	end
@@ -1549,6 +1549,18 @@ function lights:on_container(container)
 	self:flush()
 	self.skip_cache = nil
 	return sent
+end
+
+-- The body under pcall so that an error escaping a container (nothing up
+-- the chain catches it) cannot leave the skip-set cache set for the hellos
+-- and forgets that follow (docs/reviews/diff-review-2026-10-24.md).
+function lights:on_container(container)
+	local ok, result = pcall(on_container_body, self, container)
+	self.skip_cache = nil
+	if not ok then
+		error(result, 0)
+	end
+	return result
 end
 
 -- Device creation ---------------------------------------------------------------
