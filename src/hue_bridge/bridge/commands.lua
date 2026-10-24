@@ -105,9 +105,10 @@ local function merge(pending, fields)
 	if fields.dim == "up" or fields.dim == "down" or fields.dim == "stop" then
 		pending.dim = fields.dim
 		pending.level = tonumber(fields.level)
+		pending.delta = tonumber(fields.delta)
 		pending.brightness, pending.on = nil, nil
 	elseif f.brightness or f.on ~= nil then
-		pending.dim, pending.level = nil, nil
+		pending.dim, pending.level, pending.delta = nil, nil, nil
 	end
 
 	if f.mirek then
@@ -154,7 +155,10 @@ function commands.body(pending, limits)
 		if pending.dim == "stop" then
 			body.dimming_delta = { action = "stop" }
 		else
-			body.dimming_delta = { action = pending.dim, brightness_delta = 100 }
+			-- `delta` moves by that much (a scene slider); a hold moves the
+			-- whole range.
+			local delta = pending.delta and clamp(pending.delta, 0, 100) or 100
+			body.dimming_delta = { action = pending.dim, brightness_delta = round(delta, 2) }
 			if pending.rate and pending.rate > 0 then
 				body.dynamics = { duration = round(pending.rate) }
 			end

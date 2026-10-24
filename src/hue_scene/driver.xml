@@ -103,17 +103,18 @@
 	<proxies>
 		<proxy proxybindingid="5001" name="Hue Scene" image_source="c4z" small_image="images/devices_sm/hue_scene_16.png" large_image="images/devices_lg/hue_scene_32.png">light_v2</proxy>
 	</proxies>
-	<!-- A switch, not a dimmer: ON recalls the Hue scene, OFF turns its group off,
-	     and the bridge's scene status is mirrored as 100 / 0. supports_target keeps
+	<!-- A dimmer since 2026-10-23 (docs/scene-dimmer-design.md): ON recalls the Hue
+	     scene, OFF turns its group off, the level is the group's brightness and the
+	     slider moves the group relative to it. supports_target keeps
 	     the brightness-target API (SET_BRIGHTNESS_TARGET / LIGHT_BRIGHTNESS_CHANGING);
 	     reduced_als_support admits the scene to Advanced Lighting Scenes, which then
 	     drive it with SET_BRIGHTNESS_TARGET and end a ramp with SET_BRIGHTNESS_STOP,
 	     so supports_brightness_stop is declared as the proxy reference asks. No colour
-	     capability is ever switched on: the switch declares everything statically. -->
+	     capability is ever switched on: the scene declares everything statically. -->
 	<capabilities>
-		<dimmer>False</dimmer>
-		<set_level>False</set_level>
-		<ramp_level>False</ramp_level>
+		<dimmer>True</dimmer>
+		<set_level>True</set_level>
+		<ramp_level>True</ramp_level>
 		<on_off>True</on_off>
 		<min_max>False</min_max>
 		<click_rates>False</click_rates>

@@ -1,7 +1,8 @@
 -- Hue Scene driver against the fake runtime, with a bridge driver standing
 -- behind binding 1 as device 15 (bound with C4:Bind, as Composer or the
 -- bridge's Add Scene would), so SendToDevice to it can be asserted on.
--- The contract is docs/scenes-design.md §2 (messages) and §3 (this device).
+-- The contract is docs/scenes-design.md §2 (messages) and §3 (this device),
+-- extended by docs/keypad-design.md and docs/scene-dimmer-design.md.
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -338,15 +339,15 @@ describe("Hue Scene driver", function()
 	end)
 
 	describe("HUE_SCENE_STATE", function()
-		it("maps static and dynamic_palette to 100 and inactive to 0", function()
+		it("maps a first inactive to 0, and static and dynamic_palette to on (100 while no level is known)", function()
 			local env, c4 = load_scene()
 			configure(env)
 			c4.calls = {}
-			state(env, "static")
 			state(env, "inactive")
 			state(env, "dynamic_palette")
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100 }, { LIGHT_BRIGHTNESS_CURRENT = 0 },
-				{ LIGHT_BRIGHTNESS_CURRENT = 100 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			state(env, "static")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 }, { LIGHT_BRIGHTNESS_CURRENT = 100 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.equal(0, #notifies(c4, "ONLINE_CHANGED"))
 		end)
 
@@ -520,19 +521,21 @@ describe("Hue Scene driver", function()
 			assert.equal(1, #c4.active_timers(), "the second target replaced the first's fallback")
 		end)
 
-		it("treats any target above zero as ON and zero as OFF", function()
+		it("maps SET_LEVEL and RAMP_TO_LEVEL onto the slider's path: LEVEL is the target, TIME the rate", function()
 			local env, c4 = known_scene()
-			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "37", RATE = "0" })
-			assert.equal("HUE_SCENE_RECALL", last_sent(c4).command)
-			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "0" })
-			assert.equal("HUE_SCENE_OFF", last_sent(c4).command)
 			env.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "50", TIME = "2000" })
-			assert.same({ rid = "s1", action = "active", duration = "2000" }, last_sent(c4).params)
+			assert.same({ rid = "s1", action = "active", brightness = "50", duration = "2000" }, last_sent(c4).params)
+			state(env, "static", { reason = "recall" })
+			env.ReceivedFromProxy(5001, "RAMP_TO_LEVEL", { LEVEL = "30", TIME = "4000" })
+			assert.same({ id = BRIDGE_ID, command = "HUE_SCENE_LEVEL",
+				params = { rid = "s1", device_id = "2061", level = "30", rate = "4000" } }, last_sent(c4))
 			env.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "0", TIME = "0" })
 			assert.equal("HUE_SCENE_OFF", last_sent(c4).command)
-			env.ReceivedFromProxy(5001, "RAMP_TO_LEVEL", { LEVEL = "100", TIME = "4000" })
-			assert.same({ rid = "s1", action = "active", duration = "4000" }, last_sent(c4).params)
-			assert.equal(5, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({
+				{ LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 50, RATE = 2000 },
+				{ LIGHT_BRIGHTNESS_CURRENT = 50, LIGHT_BRIGHTNESS_TARGET = 30, RATE = 4000 },
+				{ LIGHT_BRIGHTNESS_CURRENT = 50, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 0 },
+			}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
 		end)
 
 		it("ignores a target command without a target", function()
@@ -666,7 +669,7 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.calls_to("SendToProxy"), "not even CHANGING")
 			assert.equal(0, #c4.active_timers())
 			assert.equal(FORGOTTEN, env.Properties["Status"])
-			assert.same({ hue_rid = "s1", hue_name = "Relax", recall_as = "active" }, c4.persist,
+			assert.same({ hue_rid = "s1", hue_name = "Relax", recall_as = "active", held_on = true }, c4.persist,
 				"the identity stays, so binding the device again lets the bridge adopt it")
 		end)
 
@@ -718,8 +721,8 @@ describe("Hue Scene driver", function()
 			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
 			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
 			configure(env)
-			state(env, "static", { reason = "resync" })
-			state(env, "inactive")
+			state(env, "inactive", { reason = "resync" })
+			state(env, "static")
 			assert.equal(0, #c4.calls_to("UpdateProperty"), "nothing touches Director before late init")
 			assert.equal(0, #c4.calls_to("SendToProxy"))
 			assert.equal(0, #c4.calls_to("PersistSetValue"))
@@ -728,7 +731,7 @@ describe("Hue Scene driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			assert.equal(LINKED_STATUS, env.Properties["Status"])
 			assert.equal("s1", c4.persist.hue_rid)
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100 }, { LIGHT_BRIGHTNESS_CURRENT = 0 } },
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 }, { LIGHT_BRIGHTNESS_CURRENT = 100 } },
 				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "both states, in arrival order")
 			assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_HELLO",
 				params = { rid = "s1", device_id = "2061", name = "Relax" } } }, c4.sent,
@@ -904,11 +907,11 @@ describe("Hue Scene driver", function()
 			return xml:match("<" .. name .. ">%s*(%w+)%s*</" .. name .. ">")
 		end
 
-		it("is a switch on the light_v2 proxy with the brightness-target API", function()
-			assert.equal("False", capability("dimmer"))
+		it("is a dimmer on the light_v2 proxy with the brightness-target API", function()
+			assert.equal("True", capability("dimmer"))
 			assert.equal("True", capability("on_off"))
-			assert.equal("False", capability("set_level"))
-			assert.equal("False", capability("ramp_level"))
+			assert.equal("True", capability("set_level"))
+			assert.equal("True", capability("ramp_level"))
 			assert.equal("True", capability("supports_target"))
 			assert.equal("True", capability("supports_brightness_stop"))
 			assert.equal("False", capability("supports_color"))
@@ -1183,7 +1186,9 @@ describe("Hue Scene driver", function()
 			c4.fire_timers() -- the hold time
 			assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_RECALL",
 				params = { rid = "s1", action = "active", brightness = "1" } } }, c4.sent)
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the level reports settle it")
 			local timers = c4.calls_to("SetTimer")
 			assert.same({ 600, false }, timers[#timers])
 			assert.equal(0, #dims(c4))
@@ -1273,7 +1278,7 @@ describe("Hue Scene driver", function()
 		end)
 	end)
 
-	describe("dimmed-on state", function()
+	describe("held-on state after a keypad hold-dim", function()
 		-- Held up and released on an active scene: dimmed from its own buttons.
 		local function dimmed_scene()
 			local env, c4 = known_scene("static")
@@ -1337,13 +1342,14 @@ describe("Hue Scene driver", function()
 			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
 		end)
 
-		it("is replaced by a normal recall, so a later inactive report turns the switch off", function()
+		it("survives a recall from here: a later inactive report still leaves the tile on", function()
 			local env, c4 = dimmed_scene()
 			env.ReceivedFromProxy(5001, "ON", {})
 			state(env, "static")
 			c4.calls = {}
 			state(env, "inactive")
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.is_true(c4.persist.held_on)
 		end)
 
 		it("is buffered before late init like the other bridge messages", function()
@@ -1372,6 +1378,8 @@ describe("Hue Scene driver", function()
 			state(env, "dynamic_palette")
 			assert.equal(3, #with_command(proxy, "MATCH_LED_STATE"), "still on: nothing new")
 			state(env, "inactive")
+			assert.equal(3, #with_command(proxy, "MATCH_LED_STATE"), "held on: an inactive report alone is no flip")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
 			local all = with_command(proxy, "MATCH_LED_STATE")
 			assert.same(leds(false), { all[4], all[5], all[6] })
 			assert.equal("0000ff", with_command(proxy, "BUTTON_INFO")[5][3].CURRENT_COLOR, "bottom lit while off")
@@ -1452,6 +1460,316 @@ describe("Hue Scene driver", function()
 		end)
 	end)
 
+	describe("dimmer (docs/scene-dimmer-design.md)", function()
+		-- An active scene whose group the bridge reported at `level`, with the
+		-- recording cleared and that report's throttle window run out.
+		local function lit_scene(level)
+			local env, c4 = known_scene("static")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = tostring(level or 80) })
+			c4.fire_timers()
+			c4.calls = {}
+			c4.sent = {}
+			return env, c4
+		end
+
+		local function group(env, params)
+			params.rid = params.rid or "s1"
+			env.ExecuteCommand("HUE_SCENE_GROUP", params)
+		end
+
+		local function changed(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		describe("the slider (SET_BRIGHTNESS_TARGET)", function()
+			it("while on sends HUE_SCENE_LEVEL and CHANGING at once; the bridge's level report settles it", function()
+				local env, c4 = lit_scene(80)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "500" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_LEVEL",
+					params = { rid = "s1", device_id = "2061", level = "40", rate = "500" } } }, c4.sent)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 80, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 500 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				assert.same({}, changed(c4))
+				local timers = c4.active_timers()
+				assert.equal(1, #timers)
+				assert.equal(1500, timers[1].delay, "the ramp plus 1 s")
+
+				group(env, { level = "40.39" })
+				assert.same({ 40 }, changed(c4), "a whole percent")
+				c4.fire_timers()
+				assert.same({ 40 }, changed(c4), "settled: no fallback CHANGED follows")
+				assert.equal(0, #c4.active_timers())
+			end)
+
+			it("while on reports the target when no level report comes within the ramp plus 1 s", function()
+				local env, c4 = lit_scene(80)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "25", RATE = "0" })
+				assert.equal(1000, c4.active_timers()[1].delay)
+				c4.fire_timers()
+				assert.same({ 25 }, changed(c4))
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 25, 25 }, changed(c4), "the assumed level is cached")
+			end)
+
+			it("counts a held scene (Hue calls it inactive) as on: it moves the level, it does not recall", function()
+				local env, c4 = lit_scene(80)
+				state(env, "inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
+				assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+			end)
+
+			it("sends a whole percent from 1 to 100", function()
+				local env, c4 = lit_scene(80)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0.3", RATE = "0" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "62.5", RATE = "0" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "150", RATE = "0" })
+				local levels = {}
+				for _, m in ipairs(messages(c4, "HUE_SCENE_LEVEL")) do levels[#levels + 1] = m.params.level end
+				assert.same({ "1", "63", "100" }, levels)
+			end)
+
+			it("from off recalls at the target over the rate, and the recall's STATE reports that level", function()
+				local env, c4 = known_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "1200" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_RECALL",
+					params = { rid = "s1", action = "active", brightness = "35", duration = "1200" } } }, c4.sent)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 35, RATE = 1200 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				state(env, "static", { reason = "recall" })
+				assert.same({ 35 }, changed(c4))
+				assert.equal(0, #c4.active_timers())
+				assert.is_true(c4.persist.held_on)
+			end)
+
+			it("from off takes a level the bridge reported since the recall over the target", function()
+				local env, c4 = known_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				group(env, { on = "true" })
+				group(env, { level = "33.2" })
+				assert.same({}, changed(c4), "not on yet: only cached")
+				state(env, "static", { reason = "recall" })
+				assert.same({ 33 }, changed(c4))
+			end)
+
+			it("from off assumes the target with the recall when the bridge never answers", function()
+				local env, c4 = known_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				assert.equal(2000, c4.active_timers()[1].delay)
+				c4.fire_timers()
+				assert.same({ 35 }, changed(c4))
+			end)
+
+			it("recalls at the target while a recall or off is still on its way (the level is in flux)", function()
+				local env, c4 = lit_scene(80)
+				env.ReceivedFromProxy(5001, "OFF", {})
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+				assert.equal(0, #messages(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ rid = "s1", action = "active", brightness = "50" }, last_sent(c4).params)
+				assert.equal(1, #c4.active_timers(), "the recall replaced the off's fallback")
+			end)
+
+			it("to 0 turns the scene off over the rate and ends the held state", function()
+				local env, c4 = lit_scene(80)
+				state(env, "inactive")
+				assert.is_true(c4.persist.held_on)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "800" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_OFF", params = { rid = "s1" } } }, c4.sent)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 80, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 800 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				assert.is_false(c4.persist.held_on)
+				state(env, "inactive", { reason = "recall" })
+				assert.same({ 0 }, changed(c4))
+			end)
+
+			it("SET_BRIGHTNESS_STOP during a level move reports the cached level and cancels the fallback", function()
+				local env, c4 = lit_scene(80)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "3000" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.same({ 80 }, changed(c4))
+				assert.equal(0, #c4.active_timers())
+			end)
+		end)
+
+		describe("level reports (HUE_SCENE_GROUP level)", function()
+			it("update the tile while on, at most once a second, the latest when the second ends", function()
+				local env, c4 = known_scene("static")
+				group(env, { level = "50" })
+				assert.same({ 50 }, changed(c4), "the first goes at once")
+				local timers = c4.active_timers()
+				assert.equal(1, #timers)
+				assert.equal(1000, timers[1].delay)
+				for _, level in ipairs({ "55.4", "61", "70.2" }) do
+					group(env, { level = level })
+				end
+				assert.same({ 50 }, changed(c4), "within the second: held back")
+				c4.fire_timers()
+				assert.same({ 50, 70 }, changed(c4), "the latest, when the second ends")
+				c4.fire_timers() -- a quiet second: nothing more, and the throttle rests
+				assert.same({ 50, 70 }, changed(c4))
+				assert.equal(0, #c4.active_timers())
+				group(env, { level = "20" })
+				assert.same({ 50, 70, 20 }, changed(c4), "at once again after a quiet second")
+			end)
+
+			it("are only cached while the scene is off, and shown once it is on", function()
+				local env, c4 = known_scene("inactive")
+				group(env, { level = "30" })
+				assert.same({}, changed(c4))
+				state(env, "static", { reason = "event" }) -- recalled in the Hue app
+				assert.same({ 30 }, changed(c4))
+				group(env, { level = "30.3" })
+				assert.same({ 30 }, changed(c4), "the same whole percent is not sent again")
+			end)
+
+			it("ignore a level of 0 (none of the group's lights lit): the last lit level stays", function()
+				local env, c4 = lit_scene(80)
+				group(env, { level = "0" })
+				assert.same({}, changed(c4))
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 80 }, changed(c4))
+			end)
+
+			it("for another rid are ignored", function()
+				local env, c4 = lit_scene(80)
+				group(env, { rid = "other", level = "20" })
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 80 }, changed(c4))
+			end)
+
+			it("stop being throttled on destroy (the timer is cancelled)", function()
+				local env, c4 = known_scene("static")
+				group(env, { level = "50" })
+				assert.equal(1, #c4.active_timers())
+				env.OnDriverDestroyed()
+				assert.equal(0, #c4.active_timers())
+			end)
+		end)
+
+		describe("the on rule (held_on)", function()
+			it("keeps the tile on at the new level when Hue reports the scene inactive after a Hue-app dim", function()
+				local env, c4 = lit_scene(80)
+				local proxy = capture_proxy(c4)
+				group(env, { level = "35" })
+				state(env, "inactive", { reason = "event" })
+				assert.same({ 35 }, changed(c4))
+				assert.equal(0, #with_command(proxy, "MATCH_LED_STATE"), "the LEDs stay on")
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 35, 35 }, changed(c4))
+			end)
+
+			it("holds a scene recalled in the Hue app (a static report) and persists that", function()
+				local env, c4 = known_scene("inactive")
+				assert.is_nil(c4.persist.held_on)
+				state(env, "static", { reason = "event" })
+				assert.is_true(c4.persist.held_on)
+				state(env, "inactive", { reason = "event" })
+				assert.same({ 100 }, changed(c4))
+			end)
+
+			it("ends when the group goes off: CHANGED 0, the LEDs off, the persisted flag cleared", function()
+				local env, c4 = lit_scene(80)
+				state(env, "inactive")
+				local proxy = capture_proxy(c4)
+				group(env, { on = "false", level = "0" })
+				assert.same({ 0 }, changed(c4), "no stray level on the way")
+				assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
+				assert.is_false(c4.persist.held_on)
+			end)
+
+			it("ends when another scene of the group becomes active", function()
+				local env, c4 = lit_scene(80)
+				state(env, "inactive")
+				group(env, { other_active = "true" })
+				assert.same({ 0 }, changed(c4))
+				assert.is_false(c4.persist.held_on)
+			end)
+
+			it("closes a pending level move when the group goes off", function()
+				local env, c4 = lit_scene(80)
+				state(env, "inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				group(env, { on = "false" })
+				assert.same({ 0 }, changed(c4))
+				assert.equal(0, #c4.active_timers(), "no fallback left to fire")
+			end)
+
+			it("survives a restart (persisted) and is dropped by the first group off", function()
+				local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				c4.persist.hue_rid = "s1"
+				c4.persist.held_on = true
+				local proxy = capture_proxy(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"),
+					"on from the persisted flag, before the bridge says anything")
+				configure(env)
+				state(env, "inactive", { reason = "hello" })
+				group(env, { on = "true", level = "45" })
+				assert.same({ 100, 45 }, changed(c4), "on while no level is known, then the group's level")
+				group(env, { on = "false" })
+				assert.same({ 100, 45, 0 }, changed(c4))
+				assert.is_false(c4.persist.held_on)
+				local all = with_command(proxy, "MATCH_LED_STATE")
+				assert.same(leds(false), { all[4], all[5], all[6] })
+			end)
+
+			it("is not set by a fallback's assumption: a later inactive report still turns the tile off", function()
+				local env, c4 = known_scene("inactive")
+				env.ReceivedFromProxy(5001, "ON", {})
+				c4.fire_timers()
+				assert.is_nil(c4.persist.held_on)
+				state(env, "inactive", { reason = "resync" })
+				assert.same({ 100, 0 }, changed(c4))
+			end)
+		end)
+
+		describe("keypad holds", function()
+			it("report CHANGING toward 100 (top) or 1 (bottom) over the hold rate; level reports settle it", function()
+				local env, c4 = lit_scene(60)
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				c4.fire_timers()
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				group(env, { level = "72" })
+				assert.same({ 72 }, changed(c4), "during the ramp")
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				group(env, { level = "78.6" })
+				assert.same({ 72, 79 }, changed(c4), "the report after the release settles it at once")
+
+				c4.fire_timers() -- the click guard and the throttle window run out
+				c4.calls = {}
+				env.ReceivedFromProxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "3000" })
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				c4.fire_timers()
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 79, LIGHT_BRIGHTNESS_TARGET = 1, RATE = 3000 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			end)
+
+			it("close the CHANGING with the cached level 1 s after the release when no level report comes", function()
+				local env, c4 = lit_scene(60)
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				c4.fire_timers()
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				assert.same({}, changed(c4))
+				c4.fire_timers()
+				assert.same({ 60 }, changed(c4))
+			end)
+
+			it("from off hold the scene on: an inactive report after the 1 % recall keeps the tile on", function()
+				local env, c4 = known_scene("inactive")
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				c4.fire_timers()
+				assert.is_true(c4.persist.held_on)
+				state(env, "inactive", { reason = "event" })
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 100 }, changed(c4), "on, no level reported yet")
+			end)
+		end)
+	end)
+
 	describe("binding re-check after start (Director restart)", function()
 		it("greets the bridge once a binding that was invisible at late init shows up, with no binding event", function()
 			local env, c4 = load_scene({ bind = false, rid = "x1" })
@@ -1481,6 +1799,17 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.active_timers())
 			local _, bound_c4 = load_scene({ rid = "x1" })
 			assert.equal(0, #bound_c4.active_timers())
+		end)
+	end)
+
+	describe("slider to 100 from off", function()
+		it("plays the scene as designed, without a brightness override", function()
+			local env, c4 = known_scene("inactive")
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "0" })
+			local recalls = messages(c4, "HUE_SCENE_RECALL")
+			assert.equal(1, #recalls)
+			assert.is_nil(recalls[1].params.brightness)
 		end)
 	end)
 end)

@@ -145,7 +145,8 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
 		bc4.sent = {}
 		assert.is_true(fake.pump() >= 3, "hello, then configure and state back")
-		assert.same({ "HUE_SCENE_CONFIGURE", "HUE_SCENE_STATE" }, messages_to(bc4, SCENE_ID))
+		assert.same({ "HUE_SCENE_CONFIGURE", "HUE_SCENE_STATE", "HUE_SCENE_GROUP" }, messages_to(bc4, SCENE_ID),
+			"the hello answer carries the group's known on/off and level")
 		assert.equal("hello", bc4.sent[2].params.reason)
 		assert.equal("Hue scene Relax in Living Room", scene.Properties["Status"])
 		assert.equal("Relax", scene.Properties["Hue Scene"])
@@ -184,23 +185,37 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		end
 
 		-- The bridge's scene item for that recall (9 ms later on hardware): the
-		-- status is already known, so the proxy hears nothing new.
+		-- status is already known; the event also carries the room's level,
+		-- which reaches the device first and becomes the tile's percentage.
 		scene.C4.calls = {}
 		bc4.sent = {}
 		event(F.events.scene_recalled)
-		assert.same({ rid = F.scene_rids.relax, active = "static", reason = "event" }, bc4.sent[1].params)
-		assert.equal(1, fake.pump())
-		assert.equal(0, #proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED"), "no change, no notify")
+		local function sent_cmd(command)
+			for _, m in ipairs(bc4.sent) do
+				if m.command == command then return m.params end
+			end
+		end
+		assert.same({ rid = F.scene_rids.relax, level = "56.69" }, sent_cmd("HUE_SCENE_GROUP"))
+		assert.same({ rid = F.scene_rids.relax, active = "static", reason = "event" }, sent_cmd("HUE_SCENE_STATE"))
+		assert.equal(2, fake.pump())
+		br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
+		assert.equal(57, br[#br].LIGHT_BRIGHTNESS_CURRENT, "the room's level, rounded")
 
-		-- A member light dimmed by hand: the scene's status goes inactive and the
-		-- switch follows.
+		-- A member light dimmed by hand (Hue app): Hue calls the scene inactive,
+		-- but under the on rule (docs/scene-dimmer-design.md) the tile stays on
+		-- and shows the room's new level.
+		scene.C4.calls = {}
 		bc4.sent = {}
 		event(F.events.scene_inactive)
-		assert.equal("inactive", bc4.sent[1].params.active)
-		assert.equal(1, fake.pump())
+		assert.equal("inactive", sent_cmd("HUE_SCENE_STATE").active)
+		assert.equal(2, fake.pump())
+		scene.C4.fire_timers() -- the one-a-second level throttle
 		br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
-		assert.equal(1, #br)
-		assert.equal(0, br[1].LIGHT_BRIGHTNESS_CURRENT)
+		assert.is_true(#br >= 1)
+		for _, n in ipairs(br) do
+			assert.are_not.equal(0, n.LIGHT_BRIGHTNESS_CURRENT, "the tile does not go off")
+		end
+		assert.equal(48, br[#br].LIGHT_BRIGHTNESS_CURRENT)
 
 		-- ON again (so OFF has something to do), then OFF from the proxy: one
 		-- grouped_light call for the scene's room, no transfer of its own, and
