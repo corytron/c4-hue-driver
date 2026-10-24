@@ -100,6 +100,14 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- docs/zone-light-design.md §5: zones and rooms imported as
+				 Hue Light devices of kind "group". -->
+			<property>
+				<name>Zone Lights</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
 			<property>
 				<name>Stream Address</name>
 				<default></default>
@@ -178,10 +186,27 @@
 				<sort_order>3</sort_order>
 				<params/>
 			</action>
+			<!-- Zone lights (docs/zone-light-design.md §8): a Hue zone or room
+				 as a Hue Light device of kind "group", created only here. -->
+			<action>
+				<name>Add Zone Light</name>
+				<command>Add Zone Light</command>
+				<sort_order>4</sort_order>
+				<params>
+					<param>
+						<name>Group</name>
+						<type>CUSTOM_SELECT:ZoneGroupList</type>
+					</param>
+					<param>
+						<name>Room</name>
+						<type>CUSTOM_SELECT:RoomList</type>
+					</param>
+				</params>
+			</action>
 			<action>
 				<name>Re-link Device To Light</name>
 				<command>Re-link Device To Light</command>
-				<sort_order>4</sort_order>
+				<sort_order>5</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -194,15 +219,30 @@
 				</params>
 			</action>
 			<action>
+				<name>Re-link Zone Light</name>
+				<command>Re-link Zone Light</command>
+				<sort_order>6</sort_order>
+				<params>
+					<param>
+						<name>Device</name>
+						<type>CUSTOM_SELECT:RelinkZoneLightList</type>
+					</param>
+					<param>
+						<name>Group</name>
+						<type>CUSTOM_SELECT:ZoneGroupList</type>
+					</param>
+				</params>
+			</action>
+			<action>
 				<name>Link Devices</name>
 				<command>Link Devices</command>
-				<sort_order>5</sort_order>
+				<sort_order>7</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Forget Light</name>
 				<command>Forget Light</command>
-				<sort_order>6</sort_order>
+				<sort_order>8</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -213,19 +253,19 @@
 			<action>
 				<name>Adopt Hue Names</name>
 				<command>Adopt Hue Names</command>
-				<sort_order>7</sort_order>
+				<sort_order>9</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Accept Names As They Are</name>
 				<command>Accept Names As They Are</command>
-				<sort_order>8</sort_order>
+				<sort_order>10</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Set Room Mapping</name>
 				<command>Set Room Mapping</command>
-				<sort_order>9</sort_order>
+				<sort_order>11</sort_order>
 				<params>
 					<param>
 						<name>Hue Room</name>
@@ -240,13 +280,13 @@
 			<action>
 				<name>Map Rooms By Name</name>
 				<command>Map Rooms By Name</command>
-				<sort_order>10</sort_order>
+				<sort_order>12</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Room Audit</name>
 				<command>Room Audit</command>
-				<sort_order>11</sort_order>
+				<sort_order>13</sort_order>
 				<params/>
 			</action>
 			<!-- Scenes (docs/scenes-design.md §5): one light_v2 device per Hue
@@ -254,7 +294,7 @@
 			<action>
 				<name>Add Scene</name>
 				<command>Add Scene</command>
-				<sort_order>12</sort_order>
+				<sort_order>14</sort_order>
 				<params>
 					<param>
 						<name>Scene</name>
@@ -269,7 +309,7 @@
 			<action>
 				<name>Add All Scenes Of Room</name>
 				<command>Add All Scenes Of Room</command>
-				<sort_order>13</sort_order>
+				<sort_order>15</sort_order>
 				<params>
 					<param>
 						<name>Hue Room</name>
@@ -280,7 +320,7 @@
 			<action>
 				<name>Re-link Scene</name>
 				<command>Re-link Scene</command>
-				<sort_order>14</sort_order>
+				<sort_order>16</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -295,7 +335,7 @@
 			<action>
 				<name>Forget Scene</name>
 				<command>Forget Scene</command>
-				<sort_order>15</sort_order>
+				<sort_order>17</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -306,31 +346,31 @@
 			<action>
 				<name>Refresh Scenes</name>
 				<command>Refresh Scenes</command>
-				<sort_order>16</sort_order>
+				<sort_order>18</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Test Connection</name>
 				<command>Test Connection</command>
-				<sort_order>17</sort_order>
+				<sort_order>19</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Connect Event Stream</name>
 				<command>Connect Event Stream</command>
-				<sort_order>18</sort_order>
+				<sort_order>20</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Disconnect Event Stream</name>
 				<command>Disconnect Event Stream</command>
-				<sort_order>19</sort_order>
+				<sort_order>21</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Connection Test</name>
 				<command>Connection Test</command>
-				<sort_order>20</sort_order>
+				<sort_order>22</sort_order>
 				<params>
 					<param>
 						<name>Target</name>
@@ -345,19 +385,19 @@
 			<action>
 				<name>Reload Credentials</name>
 				<command>Reload Credentials</command>
-				<sort_order>21</sort_order>
+				<sort_order>23</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Check CA Pinning</name>
 				<command>Check CA Pinning</command>
-				<sort_order>22</sort_order>
+				<sort_order>24</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
-				<sort_order>23</sort_order>
+				<sort_order>25</sort_order>
 				<params/>
 			</action>
 		</actions>

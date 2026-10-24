@@ -1,9 +1,13 @@
--- Hue Light driver: one light_v2 proxy per Hue light. It never speaks to the
--- bridge itself: commands go to the Hue Bridge driver it is bound to
--- (consumer binding 1, class HUE_BRIDGE) with C4:SendToDevice, and the bridge
--- pushes configuration and state back through ExecuteCommand. The message
--- contract is in docs/lights-design.md and docs/import-design.md §4/§13; the
--- light_v2 facts in docs/design.md.
+-- Hue Light driver: one light_v2 proxy per Hue light. The same driver, told
+-- kind "group" by its configure, stands for a Hue zone or room through its
+-- grouped_light (docs/zone-light-design.md): the proxy, keypad, LED and
+-- lifecycle behaviour is the same, only the identity texts and the hello
+-- know the difference. It never speaks to the bridge itself: commands go to
+-- the Hue Bridge driver it is bound to (consumer binding 1, class
+-- HUE_BRIDGE) with C4:SendToDevice, and the bridge pushes configuration and
+-- state back through ExecuteCommand. The message contract is in
+-- docs/lights-design.md, docs/import-design.md §4/§13 and
+-- docs/zone-light-design.md §5; the light_v2 facts in docs/design.md.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -17,7 +21,10 @@ local devloop_ok, devloop = pcall(require, "common.devloop")
 if not devloop_ok then
 	-- Absent in release builds (expected); anything else is a real error
 	-- that must be visible, since the loop is how the controller gets tested.
-	if not tostring(devloop):find("not found", 1, true) then
+	-- A missing module reads "not found" under busted and "An unknown error
+	-- occurred" on the controller [hardware 2026-10-24].
+	local reason = tostring(devloop):lower()
+	if not (reason:find("not found", 1, true) or reason:find("unknown error", 1, true)) then
 		print("[ERROR] Hue Light: dev loop failed to load: " .. tostring(devloop))
 	end
 	devloop = nil
@@ -50,8 +57,15 @@ local COLOR_KEYS = {
 
 -- The light's own copy of its identity (PersistSetValue key per state field),
 -- so a bridge that lost its registry can rebuild it from the lights instead
--- of importing them a second time (docs/import-design.md §1, rule 3).
-local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model" }
+-- of importing them a second time (docs/import-design.md §1, rule 3). The
+-- kind is part of it (docs/zone-light-design.md §2): a zone or room device
+-- persists "group" and the bridge routes its hello on it; a light persists
+-- none, as every light did before zone lights existed.
+local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model", kind = "hue_kind" }
+
+-- What a forgotten device's owner can do; a light's Status says it, a group
+-- device's Last Action (its Status names the group instead).
+local FORGOTTEN_INSTRUCTION = "Delete this device in Composer, or bind it again and use Link Devices"
 
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
@@ -143,14 +157,59 @@ local function device_id()
 	return tostring(C4:GetDeviceID())
 end
 
--- "#12" from Hue's v1 id (the bridge sends "/lights/12" or "12"), or nil.
+-- "#12" from Hue's v1 id (the bridge sends "/lights/12" or "12"; "/groups/2"
+-- for a zone or room), or nil.
 local function v1_label()
 	local num = st.id_v1 and st.id_v1:match("(%d+)%s*$")
 	return num and ("#" .. num) or nil
 end
 
+-- Zone and room devices (kind "group", docs/zone-light-design.md §5
+-- "Composer properties"): the texts name what the device stands for. Every
+-- text stays under about 60 characters where the name allows, since
+-- Composer clips a property at about 75.
+
+-- "Hue light"; for a group "Hue zone" / "Hue room" from the configure's
+-- group_type, else the model the bridge sent (which reads the same, and is
+-- persisted, so the text is right before the bridge answers after a start).
+local function kind_label()
+	if not state.is_group(st) then
+		return "Hue light"
+	elseif st.group_type then
+		return "Hue " .. st.group_type
+	end
+	return st.model or "Hue group"
+end
+
+-- "light", "zone light", "room light": what this device is, for the action texts.
+local function what()
+	if not state.is_group(st) then
+		return "light"
+	end
+	return (st.group_type or "group") .. " light"
+end
+
+-- "Zone" / "Room" ("Group" while the type is unknown) for a group device.
+local function group_word()
+	local t = st.group_type or "group"
+	return t:sub(1, 1):upper() .. t:sub(2)
+end
+
+-- " (2 lights)" / " (1 light)" after a group's name or model; "" while the
+-- count is unknown, " (no lights)" when the bridge says so without a count.
+local function count_suffix()
+	if st.light_count then
+		local n = math.floor(st.light_count)
+		return string.format(" (%d light%s)", n, n == 1 and "" or "s")
+	elseif st.no_lights then
+		return " (no lights)"
+	end
+	return ""
+end
+
 -- What Hue Light ID shows: "#12 (e0e51794…)" once the v1 id is known, the
--- rid alone until then. A rid without dashes (not a UUID) is shown whole.
+-- rid alone until then; a group's says what it is: "zone #2 (b90ea7b4…)".
+-- A rid without dashes (not a UUID) is shown whole.
 local function light_id_label()
 	if not st.rid then
 		return ""
@@ -160,15 +219,28 @@ local function light_id_label()
 		return st.rid
 	end
 	local head = st.rid:match("^([^-]+)-")
-	return string.format("%s (%s)", v1, head and (head .. "…") or st.rid)
+	local label = string.format("%s (%s)", v1, head and (head .. "…") or st.rid)
+	if state.is_group(st) then
+		label = (st.group_type or "group") .. " " .. label
+	end
+	return label
 end
 
--- "Desk Lamp #12", or whatever part of that is known, for the forgotten text.
+-- What Model shows: the bulb's model; for a group "Hue zone (2 lights)".
+local function model_label()
+	if not state.is_group(st) then
+		return st.model
+	end
+	return kind_label() .. count_suffix()
+end
+
+-- "Desk Lamp #12" (a group: its name alone), or whatever part of that is
+-- known, for the forgotten text.
 local function light_label(name)
 	local parts = {}
 	name = name or st.name
 	if name then parts[#parts + 1] = name end
-	local v1 = v1_label()
+	local v1 = not state.is_group(st) and v1_label() or nil
 	if v1 then parts[#parts + 1] = v1 end
 	if #parts == 0 then
 		return st.rid or "unknown"
@@ -176,19 +248,41 @@ local function light_label(name)
 	return table.concat(parts, " ")
 end
 
-local function forgotten_status()
-	return string.format("Forgotten by the bridge (was Hue light %s). "
-		.. "Delete this device in Composer, or bind it again and use Link Devices", light_label(st.forgotten.name))
+-- "Hue light Desk #12" / "Hue zone Bedside Lights": what a forgotten device was.
+local function was_label()
+	return kind_label() .. " " .. light_label(st.forgotten.name)
 end
 
+-- A light's Status carries the instruction too; a group's names the group
+-- and leaves the instruction to Last Action, so the text fits the column.
+local function forgotten_status()
+	if state.is_group(st) then
+		return string.format("Forgotten by the bridge (was %s)", was_label())
+	end
+	return string.format("Forgotten by the bridge (was %s). %s", was_label(), FORGOTTEN_INSTRUCTION)
+end
+
+-- "Gone from the Hue bridge since 2026-10-24 12:00; re-link or Forget" for a
+-- light; "Zone deleted in Hue since 2026-10-24; re-link or Forget" for a group
+-- (the day alone keeps it under 60 characters).
 local function gone_status()
+	if state.is_group(st) then
+		local since = st.gone_since and (" since " .. os.date("%Y-%m-%d", st.gone_since)) or ""
+		return group_word() .. " deleted in Hue" .. since .. "; re-link or Forget"
+	end
 	local since = st.gone_since and (" since " .. os.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
 	return "Gone from the Hue bridge" .. since .. "; re-link or Forget"
 end
 
+-- Decision 11: "Hue zone Bedside Lights has no lights; nothing to control".
+local function no_lights_text()
+	return string.format("%s %s has no lights; nothing to control", kind_label(), st.name or st.rid or "?")
+end
+
 -- Why a command cannot reach the light right now, or nil when it can. The
 -- order is the order Status explains things in: a forgotten light is told
--- what to do even while its binding is already gone.
+-- what to do even while its binding is already gone. A group with no lights
+-- has no grouped_light to command (docs/zone-light-design.md Decision 11).
 local function blocker()
 	if st.forgotten then
 		return "forgotten by the bridge; delete this device or bind it again and use Link Devices"
@@ -197,15 +291,28 @@ local function blocker()
 	elseif not st.rid then
 		return "waiting for the bridge to assign a Hue light (use Add Light or Link Devices on it)"
 	elseif st.gone then
+		if state.is_group(st) then
+			return group_word():lower() .. " deleted in Hue; re-link or Forget"
+		end
 		return "gone from the Hue bridge; re-link or Forget"
+	elseif st.no_lights then
+		return no_lights_text()
 	end
 	return nil
 end
 
 -- What ONLINE_CHANGED carries: reachable through a bridge that knows us, and
--- not reported unreachable by Zigbee.
+-- not reported unreachable by Zigbee (a group: not without lights).
 local function is_online()
 	return blocker() == nil and st.online ~= false
+end
+
+-- "Desk (Hue color lamp)"; a group "Hue zone Bedside Lights (2 lights)".
+local function identity_status()
+	if state.is_group(st) then
+		return kind_label() .. " " .. st.name .. count_suffix()
+	end
+	return string.format("%s (%s)", st.name, st.model or "unknown model")
 end
 
 local function refresh_status()
@@ -217,11 +324,13 @@ local function refresh_status()
 		prop("Status", gone_status())
 	elseif not st.rid or not st.name then
 		prop("Status", "Bound; waiting for the bridge")
+	elseif st.no_lights then
+		prop("Status", no_lights_text())
 	else
-		prop("Status", string.format("%s (%s)", st.name, st.model or "unknown model"))
+		prop("Status", identity_status())
 	end
 	-- "" while nothing says either way: bound, but the bridge has not reported.
-	if not bridge or st.forgotten or st.gone or st.online == false then
+	if not bridge or st.forgotten or st.gone or st.no_lights or st.online == false then
 		prop("Online", "Offline")
 	else
 		prop("Online", st.online and "Online" or "")
@@ -495,9 +604,15 @@ end
 
 -- What HUE_HELLO carries: the persisted identity, so the bridge can adopt a
 -- bound light its registry lacks. Absent keys for what is unknown: a rid-less
--- light sends no rid (SendToDevice drops empty values anyway).
+-- light sends no rid, a light never told its kind no kind (SendToDevice drops
+-- empty values anyway). A zone or room device says kind "group", which the
+-- bridge routes on, and no model (docs/zone-light-design.md §5 Messages).
 local function hello_params()
-	return { rid = st.rid, device_id = device_id(), name = st.name, model = st.model }
+	local params = { rid = st.rid, device_id = device_id(), name = st.name, kind = st.kind }
+	if not state.is_group(st) then
+		params.model = st.model
+	end
+	return params
 end
 
 -- Announce ourselves; the bridge answers with HUE_CONFIGURE and full state
@@ -517,6 +632,10 @@ local function load_identity()
 		local value = C4:PersistGetValue(key)
 		st[field] = (value ~= nil and value ~= "") and tostring(value) or nil
 	end
+	if st.kind and not state.KINDS[st.kind] then
+		log.warn("persisted kind %q is not one this build knows; taken as a light", st.kind)
+		st.kind = nil
+	end
 end
 
 local function save_identity()
@@ -529,8 +648,32 @@ end
 
 -- Properties ---------------------------------------------------------------
 
+-- Director answers the version lookup with nothing at the first init of a
+-- device created by AddDevice [hardware 2026-10-24, device 1166], so the
+-- build's own stamp (common/build_version.lua, tools/build.sh) is the fallback.
+local build_version_ok, build_version = pcall(require, "common.build_version")
+local function driver_version()
+	local v = C4:GetDriverConfigInfo("version")
+	if v == nil or tostring(v) == "" then
+		v = build_version_ok and tostring(build_version) or ""
+	end
+	return v
+end
+
 dispatch.properties["Driver_Version"] = function()
-	prop("Driver Version", C4:GetDriverConfigInfo("version"))
+	prop("Driver Version", driver_version())
+end
+
+-- Director fills a new device's property table late: at the first init of
+-- a device created by AddDevice the replay of the properties reaches no
+-- Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168], so
+-- late init writes the row itself and looks again twice while it is empty.
+local function show_driver_version(attempt)
+	local v = driver_version()
+	prop("Driver Version", v)
+	if v == "" and attempt < 3 then
+		C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+	end
 end
 
 dispatch.properties["Debug_Mode"] = function(value)
@@ -565,15 +708,29 @@ local function drain_early()
 	end
 end
 
+-- The kind a configure names ("group" for a zone or room, "light" or none for
+-- a light) is kept by state.configure; this only says what happened. A later
+-- configure also carries changed capabilities (lights added to or removed
+-- from a group, Decision 7), which the notify below re-announces every time.
 dispatch.commands["HUE_CONFIGURE"] = after_late_init("HUE_CONFIGURE", function(params)
+	local before = st.kind
 	state.configure(st, params)
+	local named = params.kind
+	if named ~= nil and named ~= "" and not state.KINDS[named] then
+		log.warn("HUE_CONFIGURE with unknown kind %s ignored; still a %s", tostring(named), what())
+	elseif before and st.kind ~= before then
+		log.info("now a %s (was a %s)", what(), before == state.KIND_GROUP and "group light" or "light")
+	end
 	save_identity()
 	prop("Hue Light ID", light_id_label())
 	prop("Hue Name", st.name)
-	prop("Model", st.model)
+	prop("Model", model_label())
 	prop("Hue Room", st.hue_room)
 	if st.gone then
-		log.debug("configured as gone from the bridge%s", st.gone_since and (" since " .. st.gone_since) or "")
+		log.debug("configured as %s%s", state.is_group(st) and "deleted in Hue" or "gone from the bridge",
+			st.gone_since and (" since " .. st.gone_since) or "")
+	elseif st.no_lights then
+		log.debug("configured without lights; nothing to control until the group is refilled")
 	end
 	-- Both supports_* in one notify, then the current colour straight after
 	-- (the proxy docs ask for both), then brightness.
@@ -617,8 +774,9 @@ dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(p
 	st.forgotten = { name = params.name or st.name }
 	settle("brightness")
 	settle("color")
-	log.warn("forgotten by the bridge (was Hue light %s)", light_label(st.forgotten.name))
-	prop("Last Action", "Forgotten by the bridge")
+	log.warn("forgotten by the bridge (was %s)", was_label())
+	-- A group's Status names the group, so the instruction goes here.
+	prop("Last Action", state.is_group(st) and FORGOTTEN_INSTRUCTION or "Forgotten by the bridge")
 	refresh_status()
 	report_online()
 end)
@@ -651,29 +809,42 @@ local function result(text)
 	prop("Last Action", text)
 end
 
+-- The Composer name the Hue name calls for: the Hue name itself, except that
+-- a room device is "<Room> Lights", so the Lighting page of a Control4 room
+-- does not list a light named like the room (docs/zone-light-design.md §5
+-- Naming; the bridge's Attention and Adopt Hue Names apply the same rule).
+local function expected_name()
+	if state.is_group(st) and st.group_type == "room" then
+		return st.name .. " Lights"
+	end
+	return st.name
+end
+
 -- Rename our proxy (the device Composer shows) to the Hue name. Only ever
 -- from this click: names belong to the owner (docs/import-design.md §7).
 dispatch.commands["Adopt_Hue_Name"] = function()
 	if not st.name then
-		return result("Not renamed: no Hue name known yet (the bridge has not configured this light)")
+		return result(string.format("Not renamed: no Hue name known yet (the bridge has not configured this %s)",
+			what()))
 	end
 	local id = proxy_id()
 	if not id then
 		return result("Not renamed: no light_v2 proxy is bound to binding 5001")
 	end
-	C4:RenameDevice(id, st.name) -- [verified: API 22/_32]
-	result(string.format("Renamed device %d to %s", id, st.name))
+	local name = expected_name()
+	C4:RenameDevice(id, name) -- [verified: API 22/_32]
+	result(string.format("Renamed device %d to %s", id, name))
 end
 
--- Ask the bridge to Forget this light; it answers HUE_FORGOTTEN, which sets
--- Status. The bridge finds the entry by rid or, for a rid-less light, by
--- device id.
+-- Ask the bridge to Forget this light (or zone/room device); it answers
+-- HUE_FORGOTTEN, which sets Status. The bridge finds the entry by rid or,
+-- for a rid-less light, by device id.
 dispatch.commands["Forget_This_Light"] = function()
 	if not bridge then
 		return result("Not sent: not bound to a Hue Bridge")
 	end
 	C4:SendToDevice(bridge, "HUE_FORGET", { rid = st.rid, device_id = device_id() })
-	result("Asked the bridge to forget this light; its answer sets Status")
+	result(string.format("Asked the bridge to forget this %s; its answer sets Status", what()))
 end
 
 -- From the proxy (ReceivedFromProxy) ------------------------------------------
@@ -1061,6 +1232,7 @@ function OnDriverLateInit()
 	load_settings()
 	load_colors()
 	dispatch.replay_properties(Properties)
+	show_driver_version(1)
 	prop("Hue Light ID", light_id_label())
 	-- The bridge first, so messages it sent before this point are applied
 	-- against the right binding state; then the hello carries whatever

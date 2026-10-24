@@ -479,4 +479,212 @@ describe("bridge.commands", function()
 			assert.equal(2, #sends)
 		end)
 	end)
+
+	-- docs/zone-light-design.md Decision 9: the grouped_light queue runs at one
+	-- PUT a second with a burst of three; the light queue keeps the defaults.
+	describe("pacing options", function()
+		local function group_queue()
+			return commands.new({ send = fake_send, rate_per_sec = 1, burst = 3 })
+		end
+
+		-- set(), fire the debounce, and complete the PUT it produced (if any).
+		local function send_and_complete(queue, rid, fields)
+			queue:set(rid, fields)
+			c4.fire_timers()
+			if sends[#sends] and not sends[#sends].completed then
+				sends[#sends].completed = true
+				sends[#sends].done({ ok = true, code = 200 })
+			end
+		end
+
+		-- Three absolute levels on one rid empty a 1/s, burst-3 bucket; the
+		-- fourth is left waiting for a token.
+		local function drain_with_drag(queue, rid)
+			send_and_complete(queue, rid, { brightness = 10 })
+			send_and_complete(queue, rid, { brightness = 20 })
+			send_and_complete(queue, rid, { brightness = 30 })
+			assert.equal(3, #sends)
+			queue:set(rid, { brightness = 40 })
+			c4.fire_timers()
+			assert.equal(3, #sends, "the bucket is empty")
+			assert.same({ 1000 }, timer_delays(), "the fourth level waits a second for a token")
+		end
+
+		it("defaults to the module constants, so the light queue is unchanged", function()
+			assert.equal(commands.RATE_PER_SEC, q.rate)
+			assert.equal(commands.BURST, q.burst)
+			assert.equal(10, q.rate)
+			assert.equal(10, q.burst)
+			assert.equal(10, q.tokens)
+		end)
+
+		it("refuses a rate of zero or a burst below one", function()
+			assert.has_error(function() commands.new({ send = fake_send, rate_per_sec = 0 }) end)
+			assert.has_error(function() commands.new({ send = fake_send, burst = 0 }) end)
+		end)
+
+		it("at 1/s with burst 3 sends three at once and the fourth a second later", function()
+			q = group_queue()
+			for i = 1, 4 do
+				q:set("group" .. i, { on = true })
+			end
+			c4.fire_timers()
+			assert.equal(3, #sends)
+			assert.same({ 1000 }, timer_delays())
+			c4.now_ms = c4.now_ms + 500
+			c4.fire_timers()
+			assert.equal(3, #sends, "half a token after 500 ms")
+			assert.same({ 500 }, timer_delays())
+			c4.now_ms = c4.now_ms + 500
+			c4.fire_timers()
+			assert.equal(4, #sends)
+			assert.same({}, timer_delays())
+		end)
+
+		it("spaces a slider drag to one PUT a second, the latest level winning", function()
+			q = group_queue()
+			drain_with_drag(q, "g")
+			q:set("g", { brightness = 50 })
+			q:set("g", { brightness = 60 })
+			assert.same({ 1000 }, timer_delays(), "levels arriving during the wait do not shorten it")
+			c4.fire_timers()
+			assert.equal(3, #sends, "no time has passed")
+
+			c4.now_ms = c4.now_ms + 1000
+			c4.fire_timers()
+			assert.equal(4, #sends)
+			assert.same({ on = { on = true }, dimming = { brightness = 60 } }, sends[4].body, "the latest level wins")
+			assert.equal(2, q:stats().coalesced)
+			sends[4].done({ ok = true, code = 200 })
+
+			q:set("g", { brightness = 70 })
+			c4.fire_timers()
+			assert.equal(4, #sends, "the token just refilled was spent on the 60")
+			assert.same({ 1000 }, timer_delays())
+			c4.now_ms = c4.now_ms + 1000
+			c4.fire_timers()
+			assert.equal(5, #sends)
+			assert.same({ on = { on = true }, dimming = { brightness = 70 } }, sends[5].body)
+		end)
+
+		it("sends the first request after an idle period at once", function()
+			q = group_queue()
+			drain_with_drag(q, "g")
+			c4.now_ms = c4.now_ms + 1000
+			c4.fire_timers()
+			assert.equal(4, #sends, "the waiting level went out at the refill")
+			sends[4].done({ ok = true, code = 200 })
+			c4.now_ms = c4.now_ms + 1000
+			q:set("g", { brightness = 80 })
+			c4.fire_timers()
+			assert.equal(5, #sends, "a second of quiet earned a token")
+			assert.same({}, timer_delays())
+			sends[5].done({ ok = true, code = 200 })
+			c4.now_ms = c4.now_ms + 60000
+			for i = 1, 3 do
+				q:set("zone" .. i, { on = true })
+			end
+			c4.fire_timers()
+			assert.equal(8, #sends, "a full bucket after a long idle: the whole burst goes at once")
+		end)
+
+		it("lets a hold's start and stop through at once while a drag waits, and a tap after the hold", function()
+			q = group_queue()
+			drain_with_drag(q, "a")
+			-- 200 ms later a keypad hold starts on another group.
+			c4.now_ms = c4.now_ms + 200
+			q:set("g", { dim = "up", rate = 3000 })
+			c4.fire_timers()
+			assert.equal(4, #sends, "the hold's start did not wait for a token")
+			assert.equal("g", sends[4].rid)
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 3000 } },
+				sends[4].body)
+			assert.same({ 800 }, timer_delays(), "the drag's level still waits for the token it was promised")
+			sends[4].done({ ok = true, code = 200 })
+
+			-- The drag's last level goes out at the refill, a second after its previous PUT.
+			c4.now_ms = c4.now_ms + 800
+			c4.fire_timers()
+			assert.equal(5, #sends)
+			assert.equal("a", sends[5].rid)
+			assert.same({ on = { on = true }, dimming = { brightness = 40 } }, sends[5].body)
+			sends[5].done({ ok = true, code = 200 })
+
+			-- The hold is released 2 s after it started: the stop goes at once.
+			c4.now_ms = c4.now_ms + 1200
+			q:set("g", { dim = "stop", level = 55 })
+			c4.fire_timers()
+			assert.equal(6, #sends)
+			assert.same({ dimming_delta = { action = "stop" } }, sends[6].body)
+			sends[6].done({ ok = true, code = 200 })
+
+			-- A tap right after the hold: the hold took no tokens, so the one
+			-- the bucket earned since the drag's last PUT is there for the tap.
+			c4.now_ms = c4.now_ms + 200
+			q:set("g", { on = true, brightness = 100 })
+			c4.fire_timers()
+			assert.equal(7, #sends, "the tap did not queue behind the drag")
+			assert.same({ on = { on = true }, dimming = { brightness = 100 } }, sends[7].body)
+			assert.same({}, timer_delays())
+		end)
+
+		it("lets a hold on the dragged group itself replace the waiting level and go out at once", function()
+			q = group_queue()
+			drain_with_drag(q, "g")
+			q:set("g", { dim = "down", rate = 2500 })
+			assert.same({ commands.DEBOUNCE_MS }, timer_delays(), "the token wait gave way to the debounce")
+			c4.fire_timers()
+			assert.equal(4, #sends)
+			assert.same({ dimming_delta = { action = "down", brightness_delta = 100 }, dynamics = { duration = 2500 } },
+				sends[4].body)
+			assert.is_nil(q:pending("g"), "the hold superseded the drag's last level")
+			sends[4].done({ ok = true, code = 200 })
+			q:set("g", { dim = "stop" })
+			c4.fire_timers()
+			assert.equal(5, #sends)
+			assert.same({ dimming_delta = { action = "stop" } }, sends[5].body)
+		end)
+
+		it("paces a scene slider's relative moves like a drag, but never its hold or stop", function()
+			q = group_queue()
+			send_and_complete(q, "s", { dim = "up", delta = 10, rate = 400 })
+			send_and_complete(q, "s", { dim = "up", delta = 10, rate = 400 })
+			send_and_complete(q, "s", { dim = "down", delta = 5, rate = 400 })
+			assert.equal(3, #sends)
+			q:set("s", { dim = "down", delta = 7, rate = 400 })
+			c4.fire_timers()
+			assert.equal(3, #sends, "a fourth relative move waits like any drag")
+			assert.same({ 1000 }, timer_delays())
+			q:set("s", { dim = "up", delta = 100, rate = 3000 })
+			c4.fire_timers()
+			assert.equal(4, #sends, "a whole-range dim is a hold: at once")
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 3000 } },
+				sends[4].body)
+			sends[4].done({ ok = true, code = 200 })
+			q:set("s", { dim = "stop" })
+			c4.fire_timers()
+			assert.equal(5, #sends, "a stop is at once")
+		end)
+
+		it("keeps a retry's backoff even for a stop (the bridge was refusing)", function()
+			q = group_queue()
+			set_now("g", { brightness = 50 })
+			sends[1].done({ ok = false, code = 429, err = "HTTP 429" })
+			assert.same({ 500 }, timer_delays())
+			q:set("g", { dim = "stop", level = 50 })
+			assert.same({ 500 }, timer_delays(), "the retry timer is not shortened")
+			c4.fire_timers()
+			assert.equal(2, #sends)
+			assert.same({ dimming_delta = { action = "stop" } }, sends[2].body, "the stop replaced the failed level")
+		end)
+
+		it("urgent() names a hold's start and stop, not a scene slider's move or a level", function()
+			assert.is_true(commands.urgent({ dim = "stop" }))
+			assert.is_true(commands.urgent({ dim = "up" }))
+			assert.is_true(commands.urgent({ dim = "down", delta = 100 }))
+			assert.is_false(commands.urgent({ dim = "up", delta = 12.5 }))
+			assert.is_false(commands.urgent({ brightness = 100, on = true }))
+			assert.is_false(commands.urgent(nil))
+		end)
+	end)
 end)
