@@ -98,7 +98,7 @@ driver is relied on daily (priority 1); the rest are hardening.
     "Diagnostic Server", an unverified TLS connection (`mode = "insecure"`,
     no key) to whatever the `Diagnostic Server` property holds
     (`hue_bridge/driver.lua:1244-1253`; the action is in `driver.xml`); and
-    the scene driver's `HUE_DUMP`, which logs its Properties and state and
+    the scene driver's `HUE_DUMP` (removed 2026-10-24), which logged its Properties and state and
     is not gated on the dev loop (`hue_scene/driver.lua:926-936`).
 11. Scene rid not validated before use in a request path; table-typed ids
     grow the catalogue (scenes F6, F7, F13): `^[%w%-]+$`, `text()` on names.
