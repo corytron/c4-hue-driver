@@ -65,7 +65,9 @@ Install the three release files; no "Restart Director?" unless a
 capability changed (then the owner reboots the controller). Read:
 
 1. `Driver Version` on the bridge, Shine, Golden hours, Bedside Lights and
-   Master Bedroom Lights = the build.
+   Master Bedroom Lights = the build; `Debug Mode` reads Off on every device
+   (a development build leaves it On, and Director keeps the value through
+   the release install).
 2. The bridge's Properties page: no `Dev Server` / `Diagnostic Server` rows;
    `Lights`, `Scenes`, `Zone Lights`, `Room Mappings`, `Last Action` are
    drop-downs whose lists hold every item (47 lights; 141 scenes; 23 groups;
