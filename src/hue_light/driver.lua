@@ -664,6 +664,18 @@ dispatch.properties["Driver_Version"] = function()
 	prop("Driver Version", driver_version())
 end
 
+-- Director fills a new device's property table late: at the first init of
+-- a device created by AddDevice the replay of the properties reaches no
+-- Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168], so
+-- late init writes the row itself and looks again twice while it is empty.
+local function show_driver_version(attempt)
+	local v = driver_version()
+	prop("Driver Version", v)
+	if v == "" and attempt < 3 then
+		C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+	end
+end
+
 dispatch.properties["Debug_Mode"] = function(value)
 	log.set_debug(value == "On")
 end
@@ -1220,6 +1232,7 @@ function OnDriverLateInit()
 	load_settings()
 	load_colors()
 	dispatch.replay_properties(Properties)
+	show_driver_version(1)
 	prop("Hue Light ID", light_id_label())
 	-- The bridge first, so messages it sent before this point are applied
 	-- against the right binding state; then the hello carries whatever
