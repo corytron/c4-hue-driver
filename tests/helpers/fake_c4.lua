@@ -285,6 +285,7 @@ local function new_c4(env)
 		transfers = {},
 		timers = {},
 		persist = {},
+		property_lists = {},
 	}
 
 	local function record(name, ...)
@@ -293,6 +294,14 @@ local function new_c4(env)
 
 	function c4:UpdateProperty(name, value)
 		record("UpdateProperty", name, value)
+		env.Properties[name] = value
+	end
+
+	-- C4:UpdatePropertyList(name, "a,b,c", value): the drop-down of a
+	-- DYNAMIC_LIST property (kept in c4.property_lists) and what its row shows.
+	function c4:UpdatePropertyList(name, list, value)
+		record("UpdatePropertyList", name, list, value)
+		c4.property_lists[name] = list
 		env.Properties[name] = value
 	end
 

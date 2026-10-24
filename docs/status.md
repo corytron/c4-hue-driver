@@ -1,4 +1,4 @@
-# Status of the Hue driver (2026-10-24, build 180)
+# Status of the Hue driver (2026-10-24, build 185)
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -6,9 +6,9 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 180**, production (no dev loop), on all three drivers (installed
-  2026-10-24 12:09; time-of-day scenes, the first build with them): Hue Bridge,
-  Hue Light, Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
+- **Build 185**, production (no dev loop), on all three drivers (installed
+  2026-10-24 13:15; properties that fit Composer's column, after build 180's
+  time-of-day scenes): Hue Bridge, Hue Light, Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
   1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
@@ -34,6 +34,16 @@ this page disagree about the present, this page and the code win.
   Scene, Add All Scenes Of Room, Re-link Scene, Forget Scene, Refresh
   Scenes), diagnostics. Follows each Hue room/zone's on/off and brightness
   from the event feed and tells scene devices.
+  **Composer properties fit the column** (2026-10-24): Composer shows a value
+  on one line of about 75 characters and clips the rest, so `Room Mappings`
+  is a drop-down list (summary on the row, one mapping per line in the
+  list, a pick snaps back to the summary), `Scenes` reads "126 + 15
+  time-based on bridge, 2 imported, 2 deleted" (missing and unbound only
+  when not zero) and `Stream Address` reads "10.00.002.143 (own queue,
+  spelling 1 of 7)" or "… (shared queue with commands: <reason>)". Verified in
+  Composer (build 185): a property-type change installs without a reboot;
+  the list needs `UpdateProperty` beside `UpdatePropertyList` to move the
+  row; the list is comma-delimited, so no summary or item may hold a comma.
 - **Hue Light** (light_v2 proxy, dimmer, colour and colour temperature when
   the bulb supports them): two-way state; keypad Button Links (Top, Bottom,
   Toggle): tap top = On preset (100 %) over the click rate, tap bottom = off,

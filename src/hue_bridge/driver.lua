@@ -56,6 +56,17 @@ local function prop(name, value)
 	C4:UpdateProperty(name, tostring(value == nil and "" or value))
 end
 
+-- A list property (driver.xml DYNAMIC_LIST): the drop-down holds `items`,
+-- `value` (default the first item) is what the row shows. Comma-delimited
+-- (SDK 24_properties/_6-UpdatePropertyList); the list's default alone did
+-- not move the row after a pick in Composer (build 184), so the value is
+-- set as well.
+local function prop_list(name, items, value)
+	value = value or items[1]
+	C4:UpdatePropertyList(name, table.concat(items, ","), value)
+	C4:UpdateProperty(name, value)
+end
+
 local function paired()
 	return credentials.paired(state.creds)
 end
@@ -116,11 +127,21 @@ local function next_stream_address(commit)
 	return pick
 end
 
--- The `Stream Address` text in dual-queue mode.
+-- The `Stream Address` text in dual-queue mode. Composer's value column
+-- shows about 75 characters and does not wrap, so this stays short; the
+-- commands' address is the `Bridge IP Address` row.
 local function stream_address_text(spelling)
-	local n = #state.stream_family
-	return string.format("%s (own queue, %s; commands use %s)", spelling,
-		n > 1 and string.format("rotating over %d spellings", n) or "no second spelling to rotate", state.ip)
+	local family = state.stream_family or {}
+	local index = 0
+	for i, s in ipairs(family) do
+		if s == spelling then
+			index = i
+		end
+	end
+	if #family > 1 then
+		return string.format("%s (own queue, spelling %d of %d)", spelling, index, #family)
+	end
+	return string.format("%s (own queue, the only spelling)", spelling)
 end
 
 -- What the stream connects with. The stream calls this for every attempt,
@@ -286,6 +307,26 @@ local function attention_text()
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
 
+-- `Room Mappings` is a dynamic list: the row shows a summary and the
+-- drop-down one mapping per line, readable in full where a string would be
+-- clipped at Composer's column width. The list is comma-delimited, so a
+-- comma in a name becomes "‚".
+local function refresh_room_mappings()
+	local items, unmapped = state.lights:room_mapping_items()
+	if #items == 0 then
+		state.room_mappings_summary = "None; use Map Rooms By Name"
+		prop_list("Room Mappings", { state.room_mappings_summary })
+		return
+	end
+	local summary = string.format("%d Hue rooms and zones; %d unmapped (open the list to read)", #items, unmapped)
+	local list = { summary }
+	for _, item in ipairs(items) do
+		list[#list + 1] = (item:gsub(",", "‚"))
+	end
+	state.room_mappings_summary = summary
+	prop_list("Room Mappings", list, summary)
+end
+
 local function refresh_lights_props()
 	if not state.lights then
 		return
@@ -294,8 +335,8 @@ local function refresh_lights_props()
 	if state.lights.attention then
 		prop("Attention", attention_text())
 	end
-	if state.lights.room_mappings_text then
-		prop("Room Mappings", state.lights:room_mappings_text())
+	if state.lights.room_mapping_items then
+		refresh_room_mappings()
 	end
 	if state.scenes and state.scenes.summary then
 		prop("Scenes", state.scenes:summary())
@@ -400,12 +441,12 @@ end
 local function choose_stream_address(callback)
 	local check_ip = altaddr.for_check(state.ip)
 	local family = altaddr.stream_family(state.ip)
-	local function single(reason)
+	local function single(reason, detail)
 		state.stream_family = nil
 		state.stream_ip = state.ip
-		prop("Stream Address", string.format("%s (shared queue with commands: %s; stream timeout capped at %d s)",
-			state.ip, reason, SINGLE_QUEUE_TIMEOUT))
-		log.warn("stream shares the command queue: %s", reason)
+		prop("Stream Address", string.format("%s (shared queue with commands: %s)", state.ip, reason))
+		log.warn("stream shares the command queue: %s%s; stream timeout capped at %d s", reason,
+			detail and (" (" .. detail .. ")") or "", SINGLE_QUEUE_TIMEOUT)
 		callback()
 	end
 	if not family or not check_ip or not paired() then
@@ -420,7 +461,7 @@ local function choose_stream_address(callback)
 				state.stream_ip, #family, check_ip)
 			callback()
 		else
-			single("self-check via " .. check_ip .. " failed: " .. tostring(r.err))
+			single("self-check failed", "via " .. check_ip .. ": " .. tostring(r.err))
 		end
 	end)
 end
@@ -481,6 +522,15 @@ end
 
 dispatch.properties["Stream_Watchdog_(s)"] = function()
 	if state.late_init_done then restart_stream() end
+end
+
+-- The list is for reading: a pick in Composer changes nothing and the row
+-- goes back to its summary (only when it left it, so this cannot loop).
+dispatch.properties["Room_Mappings"] = function(value)
+	if state.late_init_done and state.lights and value ~= state.room_mappings_summary then
+		refresh_room_mappings()
+		prop("Last Action", "Room Mappings is for reading; the row shows the summary again")
+	end
 end
 
 -- Actions ------------------------------------------------------------------

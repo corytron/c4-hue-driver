@@ -2444,15 +2444,22 @@ end
 -- The Room Mappings property: every Hue room and zone with its Control4
 -- room, "(unmapped)" or "(Control4 room gone)", then mappings whose Hue
 -- group was deleted; "None; use Map Rooms By Name" while nothing is mapped.
-function lights:room_mappings_text()
+-- One "Hue room → Control4 room" line per Hue room and zone, then the
+-- mappings whose group is gone from Hue, plus how many groups have no
+-- mapping; an empty list while no mapping exists at all. The bridge shows
+-- them as the `Room Mappings` drop-down.
+function lights:room_mapping_items()
 	local mappings = self.reg:room_mappings()
 	if next(mappings) == nil then
-		return "None; use Map Rooms By Name"
+		return {}, 0
 	end
 	local rooms = self:project_rooms()
-	local parts, seen = {}, {}
+	local parts, seen, unmapped = {}, {}, 0
 	for _, group in ipairs(self.groups:groups()) do
 		seen[group.rid] = true
+		if not mappings[group.rid] then
+			unmapped = unmapped + 1
+		end
 		parts[#parts + 1] = string.format("%s → %s", self.groups:label(group.rid),
 			self:mapping_target(mappings[group.rid], rooms))
 	end
@@ -2466,6 +2473,15 @@ function lights:room_mappings_text()
 	for _, s in ipairs(stale) do
 		parts[#parts + 1] = string.format("%s → %s", self:group_label(s.rid, s.mapping),
 			self:mapping_target(s.mapping, rooms))
+	end
+	return parts, unmapped
+end
+
+-- The same mappings as one "; "-joined line.
+function lights:room_mappings_text()
+	local parts = self:room_mapping_items()
+	if #parts == 0 then
+		return "None; use Map Rooms By Name"
 	end
 	return table.concat(parts, "; ")
 end
