@@ -8,7 +8,22 @@ Control4 dimmer, and the stock Philips driver did this. Source for every
 proxy claim: `~/c4-tools/reference/docs-driverworks-proxyprotocol-lightv2`
 (cloned from Snap One's repository on 2026-10-22).
 
+**Current (2026-10-24):** built in both drivers; the Button Links on a
+light, and the holds and LEDs on a scene, are verified on the house
+(`docs/status.md`). Later sections correct earlier ones, so read in this
+order: keypads reach the driver through its own Button Link connections
+("Hardware findings"); the light's hold is Hue's relative dim ("Light
+parity"); a scene device is a dimmer whose on state follows the on rule
+(`held_on`) of `docs/scene-dimmer-design.md`. Both drivers declare
+`hide_proxy_properties`, so Composer shows none of the proxy's preset,
+rate or button colour settings and the defaults below apply.
+
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
+
+Superseded in part (2026-10-22, hardware): the Top, Bottom and Toggle
+links are connections the driver declares, and a bound keypad button
+delivers `DO_PUSH` / `DO_RELEASE` / `DO_CLICK` on them; see "Hardware
+findings".
 
 - The light_v2 proxy creates the Top, Bottom and Toggle Button Link consumer
   connections itself and forwards every `BUTTON_ACTION` it receives on them
@@ -26,6 +41,10 @@ proxy claim: `~/c4-tools/reference/docs-driverworks-proxyprotocol-lightv2`
 - Rates: `SET_CLICK_RATE_UP/DOWN` and `SET_HOLD_RATE_UP/DOWN {RATE ms}`
   arrive when the dealer edits them in Composer; the properties appear only
   for drivers declaring `click_rates` and `hold_rates`.
+- Current (2026-10-24): `hide_proxy_properties` True hides the preset and
+  the rates in Composer, so nobody can change them there and the defaults
+  apply (whether the proxy sends values of its own has not been checked);
+  the handlers stay, and exposing the settings is open (`docs/status.md`).
 
 ## Driver behaviour
 
@@ -37,8 +56,8 @@ Hue Light (`src/hue_light/driver.lua`):
 | click top | brightness target = On preset over click rate up |
 | click bottom | target 0 over click rate down |
 | click toggle | off → preset over click up; on → 0 over click down |
-| hold (timer fired before the release) | `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing (superseded 2026-10-23, see "Light parity") |
-| release after hold | `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop) |
+| hold (timer fired before the release) | Current (since 2026-10-23, "Light parity"): `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing. Originally (2026-10-22): a timed brightness target to the end of the range, and held bottom while off turned the light on dimmed |
+| release after hold | Current: `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop). Originally: the estimate written as the brightness |
 | release-as-click after a ramp started | same as stop; a click on the same button within 1 s after a hold's release is ignored |
 
 Settings persist per device (`preset_level`, `click_rate_up`,
@@ -49,9 +68,14 @@ preset API is adopted).
 
 Hue Scene (`src/hue_scene/driver.lua`): echo every action; click or release
 of top = recall (ON), bottom = OFF, toggle = toggle; holds do nothing.
+Superseded (2026-10-23): holds dim the scene's room or zone, see "Scene
+hold-to-dim and keypad LEDs" below.
 
 `driver.xml` (light): `click_rates`, `hold_rates`, `supports_default_on`
 true; `click_rate_min` 0, `hold_rate_min` 1000. Scene: unchanged.
+Superseded (2026-10-23): the scene declares `hold_rates` (min 1000) and
+`has_leds` (below) and, since build 160, `dimmer`, `set_level` and
+`ramp_level` (`docs/scene-dimmer-design.md`).
 
 ## Verification
 
@@ -83,7 +107,8 @@ Install behaviour seen on the house (build 141 → 144 → 146):
   although Composer showed it bound; a right-click Update Driver ("Versions
   are equal", overwrite) did not change it. A device re-created under 144
   reported a blank Driver Version until a second per-device overwrite
-  brought it to 144.
+  brought it to 144. (Explained since: "Restart Director?" does not restart
+  Director; see "Install findings" below.)
 - 146 added the three Button Link **connections**: no restart prompt; the
   existing device showed Top, Bottom and Toggle Button Link under Control
   Outputs at once and read 146. **Existing devices pick up new connections
@@ -95,7 +120,8 @@ Install behaviour seen on the house (build 141 → 144 → 146):
 Open: the light reading "Not bound" while bound after a Director restart
 suggests the binding is not yet visible to `GetBoundProviderDevice` at late
 init after a restart, and the light never looks again until a binding
-event. Fixed on branch `binding-recheck`: when unbound at late init, the
+event. Fixed (branch `binding-recheck`, merged; in every build since):
+when unbound at late init, the
 light and scene drivers look again at 5, 15, 30 and 60 s, greet the bridge
 as soon as the binding is visible, and stop on a binding event, on destroy,
 or after the last check.
@@ -124,9 +150,9 @@ through dims from its own buttons".
 
 | Message | Direction | Params (all strings) | Meaning |
 |---|---|---|---|
-| `HUE_SCENE_DIM` | scene → bridge | `rid`, `device_id`, `direction` (`up` / `down` / `stop`), `duration` (ms, up/down only) | Dim the scene's group: one grouped_light PUT `{"dimming_delta":{"action":"up"/"down","brightness_delta":100},"dynamics":{"duration":<ms>}}` to start, `{"dimming_delta":{"action":"stop"}}` to stop. Relative, so the scene's colours and per-light differences are kept. **[assumed: `stop` and `dynamics` on grouped_light; verify on the first hardware test]** |
-| `HUE_SCENE_RECALL` | scene → bridge | adds optional `brightness` (1–100) | Recall with `recall.dimming.brightness` override (used for "hold top while off": recall at 1 %). |
-| `HUE_SCENE_GROUP` | bridge → scene | `rid`, and `on` (`true`/`false`) and/or `other_active` (`true`) | The scene's room/zone grouped_light turned on/off (from the event feed or the resync), or another scene of the same group became active. Sent at resync (current `on`) and on change. |
+| `HUE_SCENE_DIM` | scene → bridge | `rid`, `device_id`, `direction` (`up` / `down` / `stop`), `duration` (ms, up/down only) | Dim the scene's group: one grouped_light PUT `{"dimming_delta":{"action":"up"/"down","brightness_delta":100},"dynamics":{"duration":<ms>}}` to start, `{"dimming_delta":{"action":"stop"}}` to stop. Relative, so the scene's colours and per-light differences are kept. `stop` and `dynamics` on a grouped_light were assumed; **verified on the house with build 154 (2026-10-23)**. |
+| `HUE_SCENE_RECALL` | scene → bridge | adds optional `brightness` (1–100) | Recall with `recall.dimming.brightness` override (used for "hold top while off": recall at 1 %; since the dimmer also for a slider target from off). |
+| `HUE_SCENE_GROUP` | bridge → scene | `rid`, and `on` (`true`/`false`) and/or `other_active` (`true`) | The scene's room/zone grouped_light turned on/off (from the event feed or the resync), or another scene of the same group became active. Sent at resync (current `on`) and on change. Since 2026-10-23 also `level`, the group's brightness, and sent in a hello answer (`docs/scene-dimmer-design.md`). |
 
 ### Bridge (`src/hue_bridge/bridge/scenes.lua`)
 
@@ -161,6 +187,11 @@ true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
   inactive. Cleared by `HUE_SCENE_GROUP on=false`, by `other_active`, by
   this device's OFF / bottom tap / toggle-off, and replaced by a normal
   recall. `LIGHT_BRIGHTNESS_CHANGED` is 100/0 from `effective_on`.
+  Superseded (2026-10-23): `dimmed_on` became `held_on`, set by any
+  activation (Control4, keypad or Hue app), persisted, and ended only by
+  the group going off, another scene of the group, or this device's OFF;
+  the level reported is the group's brightness. See
+  `docs/scene-dimmer-design.md`, Behaviour.
 - **Hold** (DO_PUSH on 200/201/202 or BUTTON_ACTION press, still down after
   400 ms): top (or toggle while off) → if on, `HUE_SCENE_DIM up` with the
   hold-up rate; if off, `HUE_SCENE_RECALL {brightness=1}` then
@@ -168,7 +199,9 @@ true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
   `HUE_SCENE_DIM down` with the hold-down rate; if off, nothing. Release
   after a hold → `HUE_SCENE_DIM stop`. Hold rates persist
   (`SET_HOLD_RATE_UP/DOWN`), default 5000 ms; `driver.xml` declares
-  `hold_rates` True, `hold_rate_min` 1000.
+  `hold_rates` True, `hold_rate_min` 1000. Since the dimmer a hold also
+  sends the proxy `LIGHT_BRIGHTNESS_CHANGING` toward 100 or 1 at its start
+  and settles on the group's level reports after the release.
 - A click arriving within 1 s after a hold's release on the same button is
   ignored (some keypads may send it).
 
@@ -197,6 +230,21 @@ declares `hold_rates` True with `hold_rate_min` 1000. Both are capability
 changes, so installing this build is expected to ask for a Director
 restart, as build 144 did.
 
+Current (2026-10-24): `hide_proxy_properties` True hides the colour
+settings too, so they cannot be changed in Composer and the default
+colours apply.
+
+Install findings (2026-10-23/24): the capability changes of this section
+and of the scene dimmer made Composer ask "Restart Director?"; Yes did
+**not** restart Director, and the devices kept the old capabilities until
+the owner rebooted the controller from System Manager (the Windows session
+cannot operate it); Composer has no Director restart command of its own.
+Builds that change only Lua or connections take effect at once, as build
+146 showed (`docs/status.md`, "How builds reach the house";
+`docs/composer-remote.md` rule 10). With the reboot, the scene holds, the
+LEDs following Shine and the dimmer were verified
+(`docs/scene-dimmer-design.md`, "Verified on hardware").
+
 ### Light parity (owner, 2026-10-23: "whatever capabilities we implement for scenes get intelligently carried over to the individual light driver as well")
 
 - Holds on a Hue Light use the same native relative dim as the scene:
@@ -210,10 +258,15 @@ restart, as build 144 did.
   on dimmed).
 - LED state, button colours, `has_leds`, hold rates and the 1 s click
   suppression after a hold are the same in both drivers.
+- Not verified on hardware: the light's `HUE_DIM` hold and LEDs (the house
+  has no Hue Light device now, and `docs/status.md` lists holds and LEDs as
+  verified on a scene only).
 
 ### Queue support (`src/hue_bridge/bridge/commands.lua`)
 
-A `dim` field (`up`/`down`/`stop`) builds the `dimming_delta` body; a dim
+A `dim` field (`up`/`down`/`stop`) builds the `dimming_delta` body (with an
+optional `delta` for `brightness_delta`, default 100, added for the scene
+slider in `docs/scene-dimmer-design.md`); a dim
 replaces a pending brightness or on/off and vice versa. If the bridge
 refuses a stop with a non-retriable error, the queue writes a fallback
 brightness: the stop's `level` (lights), else the group level recorded at
