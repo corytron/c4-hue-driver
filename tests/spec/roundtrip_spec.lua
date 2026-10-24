@@ -36,11 +36,17 @@ end
 
 -- The registry fetches light, device, zigbee_connectivity, room, zone and
 -- bridge_home one after the other (each GET starts from the previous one's
--- OnDone), so keep answering until no unanswered resource GET is left.
+-- OnDone), so keep answering until no unanswered resource GET is left. After
+-- a connect the scenes (scene, smart_scene, grouped_light) and the zone
+-- lights (grouped_light) follow the lights; they get empty catalogues here,
+-- since this is the lights' loop (scene_roundtrip_spec and
+-- zone_light_roundtrip_spec have theirs).
+local EMPTY = '{"errors":[],"data":[]}'
 local function answer_resource_gets(bridge, from_index)
 	local c4 = bridge.C4
 	local bodies = { light = F.light, device = F.device, zigbee_connectivity = F.zigbee_connectivity,
-		room = F.room, zone = F.zone, bridge_home = F.bridge_home }
+		room = F.room, zone = F.zone, bridge_home = F.bridge_home,
+		scene = EMPTY, smart_scene = EMPTY, grouped_light = EMPTY }
 	local answered, progress = 0, true
 	while progress do
 		progress = false
@@ -101,15 +107,17 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal("None; use Map Rooms By Name", bridge.Properties["Room Mappings"])
 
 		-- Self-check, then the stream connects and the deferred resync runs
-		-- against an empty registry: six GETs, nothing to send, and the one-time
-		-- Map Rooms By Name pairs the Hue rooms with the Control4 rooms.
+		-- against an empty registry: the lights' six GETs, the scenes' three
+		-- and the zone lights' one, nothing to send, and the one-time Map
+		-- Rooms By Name pairs the Hue rooms with the Control4 rooms. The rows
+		-- are refreshed once, after the last of the three resyncs.
 		assert.equal(CHECK_URL, bc4.last_transfer().url)
 		bc4.last_transfer():respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
 		local stream_t = bc4.last_transfer()
 		assert.equal(STREAM_URL, stream_t.url)
 		stream_t:respond_headers(200, {})
 		assert.equal(1, fire_fast_timers(bridge, 1), "on_connected deferral")
-		assert.equal(6, answer_resource_gets(bridge, 1))
+		assert.equal(10, answer_resource_gets(bridge, 1))
 		assert.equal(0, #bc4.sent, "nothing registered yet")
 		-- List rows carry "‚" for "," (Composer splits a list at commas).
 		assert.equal("4 on bridge‚ 0 imported‚ 4 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])

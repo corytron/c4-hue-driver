@@ -3,7 +3,7 @@ local log = require("common.log")
 
 describe("bridge.pinning", function()
 	local pinning, c4
-	local ca = { mode = "cabundle", path = "certs/hue_ca_bundle.pem" }
+	local ca = { path = "certs/hue_ca_bundle.pem" }
 
 	before_each(function()
 		log.sink = function() end

@@ -22,7 +22,7 @@ describe("bridge.http", function()
 	end)
 
 	it("fails fast when no CA configuration is set", function()
-		http.set_ca_bundle(nil)
+		http.ca = nil
 		local got
 		local t = http.request({ ip = "192.0.2.10", path = "/x" }, function(r) got = r end)
 		assert.is_nil(t)
@@ -31,45 +31,20 @@ describe("bridge.http", function()
 		assert.equal(0, #c4.transfers)
 	end)
 
-	it("supports ssl_cacerts and insecure CA descriptions", function()
-		http.request({ ip = "192.0.2.10", path = "/x", ca = { mode = "cacerts", paths = { "a.pem", "b.pem" } } },
-			function() end)
-		local t = c4.last_transfer()
-		assert.same({ "a.pem", "b.pem" }, t.options.ssl_cacerts)
-		assert.is_nil(t.options.ssl_cabundle)
-		assert.is_true(t.options.ssl_verify_peer)
-
-		http.request({ ip = "192.0.2.10", path = "/x", ca = { mode = "insecure" } }, function() end)
-		t = c4.last_transfer()
-		assert.is_false(t.options.ssl_verify_peer)
-		assert.is_nil(t.options.ssl_cabundle)
-		assert.is_nil(t.options.ssl_cacerts)
-	end)
-
-	it("system mode uses the platform CAs with hostname checking on", function()
-		http.request({ ip = "example.com", path = "/", ca = { mode = "system" } }, function() end)
+	it("knows no other TLS configuration than the bundle; req.tls is the dev diagnostics' seam", function()
+		-- Release code never passes req.tls (bridge/conntest.lua and
+		-- bridge/pinning.lua, dev builds only, do); given, it replaces the
+		-- ssl_* options as a whole and nothing else.
+		http.request({ ip = "example.com", path = "/", timeout = 7,
+			tls = { ssl_verify_peer = true, ssl_verify_host = true } }, function() end)
 		local t = c4.last_transfer()
 		assert.is_true(t.options.ssl_verify_peer)
 		assert.is_true(t.options.ssl_verify_host)
 		assert.is_nil(t.options.ssl_cabundle)
-		assert.is_nil(t.options.ssl_cacerts)
-	end)
-
-	it("verify_host can be switched on for any description", function()
-		http.request({ ip = "example.com", path = "/", ca = { mode = "cabundle", path = "b.pem", verify_host = true } },
-			function() end)
-		local t = c4.last_transfer()
-		assert.is_true(t.options.ssl_verify_host)
-		assert.equal("b.pem", t.options.ssl_cabundle)
-	end)
-
-	it("describes CA configurations for logging", function()
-		assert.equal("ssl_cabundle=/x/b.pem", http.describe_ca({ mode = "cabundle", path = "/x/b.pem" }))
-		assert.equal("ssl_cacerts={a,b}", http.describe_ca({ mode = "cacerts", paths = { "a", "b" } }))
-		assert.equal("INSECURE (no verification)", http.describe_ca({ mode = "insecure" }))
-		assert.equal("system CAs", http.describe_ca({ mode = "system" }))
-		http.set_ca(nil)
-		assert.equal("none", http.describe_ca())
+		assert.equal(7, t.options.timeout)
+		assert.is_false(t.options.fail_on_error)
+		assert.is_nil(http.set_ca, "the CA modes of earlier builds are gone")
+		assert.is_nil(http.describe_ca)
 	end)
 
 	it("turns a Lua error raised at transfer start into a failed result", function()
@@ -181,7 +156,7 @@ describe("bridge.http", function()
 		end)
 
 		it("fails through on_done when no CA configuration is set", function()
-			http.set_ca(nil)
+			http.ca = nil
 			local done
 			assert.is_nil(http.stream({ ip = "192.0.2.10", path = "/e" }, {
 				on_done = function(code, msg) done = { code, msg } end,
