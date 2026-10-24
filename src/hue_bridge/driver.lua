@@ -229,7 +229,7 @@ local function new_scenes()
 		project = project_calls,
 		lights = state.lights,
 		-- Scene OFF turns the scene's group off through its own coalescing
-		-- queue, so a "room off" reaching several switches sends one PUT.
+		-- queue, so a "room off" reaching several scene devices sends one PUT.
 		group_off = function(grouped_light_rid)
 			if state.group_queue then
 				state.group_queue:set(grouped_light_rid, { on = false })
@@ -310,9 +310,10 @@ local function new_queue()
 	})
 end
 
--- Grouped-light PUTs (scene OFF) have their own queue and bucket: the
--- bridge's group budget is about one request a second [verified: Core
--- Concepts], separate from the lights'.
+-- Grouped-light PUTs (scene OFF, dims, levels) have their own queue and
+-- bucket, separate from the lights'. Hue's guidance for groups is about one
+-- request a second [verified: Core Concepts], but this bucket uses the
+-- module-wide rate (commands.RATE_PER_SEC, 10/s); open item in docs/status.md.
 local function new_group_queue()
 	return commands.new({
 		send = function(rid, body, done)

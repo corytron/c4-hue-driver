@@ -15,6 +15,14 @@ Status markers as in the research documents: [verified: …], [assumed],
 the decisions. `docs/lights-design.md` stays the contract for what already
 exists (messages, coalescer, light driver mapping); this document extends it.
 
+**Current (2026-10-24):** both features are built and verified on the
+house (2026-10-21/22; `docs/design.md`, "import-ui" and "Scenes build"),
+with every §10 default as written. §9 was finalised by
+`docs/scenes-design.md`, and on 2026-10-23 the scene device became a dimmer
+with a broader on rule (`docs/scene-dimmer-design.md`); those spots, the
+"(mapped room)" value and the development-only `Lights Report` are marked
+below. The present is in `docs/status.md`.
+
 ## 1. Three rules
 
 1. **The project is the owner's.** The driver creates, renames, binds,
@@ -40,13 +48,15 @@ exists (messages, coalescer, light driver mapping); this document extends it.
 | Feature | Branch | Contents |
 | --- | --- | --- |
 | **import-ui** | `import-ui` from `main` | Registry v2 and its states (§3); messages (§4); resync growth and reconciliation (§5); bridge properties and actions incl. `Add Light`, `Import All New Lights`, room mapping, Re-link, Forget, Link Devices, Adopt Hue Names (§6); light-side changes (§7); picker mechanics (§8); the ALS flag [Q 13]. |
-| **scenes** | `scenes` from `main`, after import-ui merges | `hue_scene.c4z` switch per Hue scene; scene registry; `Add Scene` / `Add All Scenes Of Room`; `status.active` mirroring; recall options (§9). Its contract is §9 here; it reuses everything in §3–§8. |
-| Later, not now | — | Bridge replacement adoption (`replacesbridgeid`, Re-link By Name/MAC — detection and a clear message are in import-ui, automation is not); smart scenes (24 h scenes); `Push Names To Hue`; room devices (grouped_light); Composer-tree nesting (3.4.2+ only). |
+| **scenes** | `scenes` from `main`, after import-ui merges | `hue_scene.c4z` switch per Hue scene; scene registry; `Add Scene` / `Add All Scenes Of Room`; `status.active` mirroring; recall options (§9). Its contract is §9 here; it reuses everything in §3–§8. (Superseded 2026-10-21: the contract became `docs/scenes-design.md`; the device is a dimmer since build 160, `docs/scene-dimmer-design.md`.) |
+| Later, not now | — | Bridge replacement adoption (`replacesbridgeid`, Re-link By Name/MAC — detection and a clear message are in import-ui, automation is not); smart scenes (24 h scenes; research and a draft awaiting the owner in `docs/smart-scenes-research.md`); `Push Names To Hue`; room devices (grouped_light); Composer-tree nesting (3.4.2+ only). |
 
 Both features change `driver.xml` (new properties, actions, a new driver),
 so each ends with a Composer "Update Driver" of the bridge and the light,
 and scenes adds a new `hue_scene.c4z`. Lua-only steps in between go through
-the dev loop as usual.
+the dev loop as usual. (As done: Driver ▸ "Add or Update Driver or Agent…"
+for all three files updates every device in place; since 2026-10-22 the
+house runs release builds without the dev loop, `docs/status.md`.)
 
 ## 3. Registry v2
 
@@ -104,7 +114,7 @@ keep everything else) and `Forget` are the exits.
 | `HUE_GOODBYE` | light → bridge | `rid`, `device_id` | from the light's `OnDriverRemovedFromProject` [verified: API 22/_26; assumed `SendToDevice` works there — probe 2] |
 | `HUE_FORGET` | light → bridge | `rid`, `device_id` | from the light's `Forget This Light` action; the bridge runs Forget for that entry and answers `HUE_FORGOTTEN` |
 | `HUE_FORGOTTEN` | bridge → light | `rid`, `name` | after `Forget`; the light shows "Forgotten by the bridge (was Hue light Desk Lamp #12). Delete this device in Composer, or bind it again and use Link Devices" and drops proxy commands |
-| `HUE_CONFIGURE` | bridge → light | as today **plus `hue_room`** (Hue room name or ""), **`id_v1`**, **`state`** ("linked"/"gone") | as today, and after every room or state change |
+| `HUE_CONFIGURE` | bridge → light | as today **plus `hue_room`** (Hue room name or ""), **`id_v1`**, **`state`** ("linked"/"gone") | as today, and after every room or state change. As built: `state` goes only as "gone" (with `gone_since`), absent while linked |
 | `HUE_STATE`, `HUE_SET`, `DEV_RELOAD` | — | unchanged | — |
 
 Early messages: a `HUE_HELLO` that reaches the bridge before its registry is
@@ -129,7 +139,10 @@ The resync after every stream (re)connect grows from `/light`, `/device`,
 `/zigbee_connectivity` to also `/room`, `/zone`, `/bridge_home` and (for
 scenes) `/scene`. Probe 8 measures the single `GET /clip/v2/resource`
 [verified: CLIP API list] against seven serial GETs; the coordinator picks
-whichever stays under about two seconds on the house bridge.
+whichever stays under about two seconds on the house bridge. Decided
+2026-10-21: serial GETs, never the single one (588 KB); the lights' six,
+then the scenes' `/scene`, `/smart_scene` and, since the keypad feature,
+`/grouped_light` (`docs/design.md`, "Project APIs").
 
 Reconciliation runs after every resync, before the per-light `HUE_STATE`
 fan-out, in this order:
@@ -172,7 +185,7 @@ Read-only properties:
 | Property | Contents | Empty |
 | --- | --- | --- |
 | `Lights` (exists) | "47 on bridge, 47 imported, 2 new, 1 missing, 0 unbound, 1 deleted" | "0 imported" |
-| `Attention` (new) | up to six items joined with "; ": new lights, missing lights, unbound devices, name differences [Q 10], broken mappings, offline > 24 h [Q 8] | "None" |
+| `Attention` (new) | up to six items joined with "; ": new lights, missing lights, unbound devices, name differences [Q 10], broken mappings, offline > 24 h [Q 8]. As built: one item per kind, plus one per light two devices claim and then the scenes' items, each naming three at most and then "+N more"; a rename in Composer refreshes it within seconds (`OnItemNameChanged`) | "None" |
 | `Last Action` (new) | result of the last click: "Added Porch to Outdoor (device 2051)", "Not added: pick a light first" | "" |
 | `Room Mappings` (new) | "Hall → Hall; Kitchen → Kitchen; Office → (Control4 room gone); Porch → (unmapped); Downstairs (zone) → Living Room" | "None; use Map Rooms By Name" |
 
@@ -191,7 +204,7 @@ Actions (all plain `LUA_ACTION`s; the two with pickers carry
 | `Set Room Mapping` | `Hue Room` (rooms, then zones), `Room` (Control4 rooms + "(no mapping)") | writes `hue_rooms` |
 | `Map Rooms By Name` | — | exact, case-insensitive, trimmed matches only; never overrides; reports [Q 5] |
 | `Room Audit` | — | lists every linked device whose Control4 room differs from its Hue room's mapping: "Desk Lamp is in Hall; Hue says Office → drag it to Office in Composer if you want it there" [Q 12] |
-| `Lights Report` (exists) | — | now also prints state, Hue room, MAC and tombstones |
+| `Lights Report` (exists) | — | now also prints state, Hue room, MAC and tombstones. Superseded (2026-10-22): development builds only; it is not in `driver.xml` and release builds drop the handler with the other diagnostics (`docs/code-analysis-2026-10-22.md`, item 10) |
 
 Everything a click does is also a log line; a click during an import or a
 resync is refused with "Busy: importing; try again in a moment"; empty
@@ -217,8 +230,9 @@ room id appended when two rooms share a name.
 - **ALS** [Q 13]: `reduced_als_support = True` in `driver.xml` plus
   `SET_BRIGHTNESS_STOP` / `SET_COLOR_STOP` handlers (stop = settle the pending
   target at the light's current reported value) [verified: PP 63/22]. Both
-  flags are False today, which keeps every Hue light out of Advanced Lighting
-  Scenes.
+  flags were False before this feature, which kept every Hue light out of
+  Advanced Lighting Scenes; `reduced_als_support` is True since, in the
+  light and the scene driver.
 - Names: the Control4 name is set once at creation and then belongs to the
   owner; no rename ever happens from an event. The creation name is the Hue
   **device** name for single-light devices (the Hue app shows the device
@@ -241,18 +255,25 @@ built on demand by the named Lua function from the last resync (no
 persistence problem, no comma problem); entries are `{text, value}` pairs
 where `value` is the rid or room id and `text` is "Porch [Outdoor] #53" /
 "Ground / Kitchen". Composer 3.x rendering is confirmed once on the first
-dev build with the new `driver.xml` (probe 7); the fallback, if it renders
+dev build with the new `driver.xml` (probe 7; confirmed 2026-10-21,
+`docs/design.md`, "Composer Pro 3.4.2 UI"); the fallback, if it renders
 badly, is the `DYNAMIC_LIST` scheme from `docs/edge-cases-ux.md` §6, which
 the same list-building functions can feed.
 
 ## 9. Scenes (feature `scenes`, contract to be finalised after import-ui)
+
+Superseded (2026-10-21): finalised as `docs/scenes-design.md` (`Add Scene`
+has a Scene picker and a Room picker); the device and its state changed
+again on 2026-10-23 (`docs/scene-dimmer-design.md`). The bullets below are
+the original plan.
 
 - One **`hue_scene.c4z`** per scene: a `light_v2` switch (`<dimmer>False`),
   consumer binding 1 `HUE_BRIDGE` like a light, never a flipped `hue_light`
   (a driver must not change its proxy type across updates [verified: FUND
   14/_2]). Registry `hue_scenes[rid] = {device_id, proxy_id, name,
   group_rid, group_name, group_type, recall_as, state, …}` with the same
-  states as lights.
+  states as lights. Superseded (2026-10-23): a dimmer since build 160; see
+  `docs/scene-dimmer-design.md`, Behaviour.
 - Created only by `Add Scene` (`Hue Room` picker then `Scene` picker) or
   `Add All Scenes Of Room`; placed in the mapped room unless `Room` is
   chosen. Hue creates about seven default scenes per room, so nothing is
@@ -262,19 +283,28 @@ the same list-building functions can feed.
   (`active` honours `auto_dynamic`; per-device `Recall As` chooses
   `active`/`static`/`dynamic_palette`) [community: openhue/aiohue; PUT exists
   verified: CLIP API list] [Q 7]. OFF = the scene's group `grouped_light`
-  off, coalesced per group (1/s limit) [Q 6].
+  off, coalesced per group (1/s limit) [Q 6]. (As built, the group queue
+  enforces no 1/s limit; `docs/scenes-design.md` §1, OFF.)
 - State: ON while `status.active` is `static`/`dynamic_palette`, OFF when
   `inactive`, from `scene` stream items (seen on hardware inside a
   grouped_light container [verified: hardware 2026-10-21]) and from `/scene`
   in every resync; one forum post claims no event for app recalls, so probe 10
-  tests app, Hue-dimmer and API triggers.
+  tests app, Hue-dimmer and API triggers. Superseded (2026-10-23): on from
+  any activation until the group turns off, another scene of the group
+  becomes active or the device turns it off (the on rule); the level is the
+  group's brightness; see `docs/scene-dimmer-design.md`, Behaviour.
 - A scene deleted in Hue keeps its device: `Status` explains, ON logs and
   reports OFF at once, `Re-link Scene` and `Forget` are offered. Smart scenes
   are not in v1 (listed in the log only).
 
 ## 10. Open questions for the owner
 
-Defaults in **bold** are what the text above assumes.
+Defaults in **bold** are what the text above assumes. Status (2026-10-24):
+every default was built as written and stands; Q6 and Q7 carry over to the
+scene dimmer (OFF turns the room or zone off; `Recall As` "As set in Hue").
+For Q12 the owner then took the other road: on 2026-10-22 he deleted the
+47 light devices instead of dragging them (`docs/design.md`, "Full reset of
+the light devices"); none has been re-added (`docs/status.md`).
 
 1. Bulk import, unmapped Hue rooms: **skip and list them** (never a
    surprise) or put them in the bridge's room as the scaffold did?
@@ -312,6 +342,11 @@ Defaults in **bold** are what the text above assumes.
 ## 11. Hardware probes (dev loop unless marked Composer)
 
 Run before or alongside the build; results go into `docs/design.md`.
+Status (2026-10-24): the results are in `docs/design.md` ("Project APIs",
+"import-ui", "Composer Pro 3.4.2 UI", "Scenes"); none is recorded for 9
+and 11, and 10 only for API recalls. The probe actions (`Probe Project`,
+`Probe Errors`, `Probe Scenes`, `Probe Call`, `Hue Request`) exist only in
+development builds.
 
 1. Log all five `OnBindingChanged` params in both drivers across a Director
    restart and a bind/unbind in Composer (Composer for the bind).
@@ -502,6 +537,9 @@ lights:picker_hue_rooms() -> { { text, value = group_rid }... }        -- rooms 
 lights:picker_rooms(mode) -> { { text, value = room_id }... }   -- "Floor / Room" from ctx.project.rooms/hierarchy;
                                            -- mode "add" puts "(mapped room)" value "" first, mode "mapping" puts
                                            -- "(no mapping)" value "none" first
+                                           -- Superseded (2026-10-22, build 125): "(mapped room)" has the value
+                                           -- "mapped" (an empty value left Composer's Select dialog with OK
+                                           -- disabled); tonumber() makes it nil, the mapping
 lights:hello(rid, params)                  -- params.device_id/name/model: auto-adopt per §4; returns true when answered
 lights:goodbye(params)                     -- HUE_GOODBYE: tombstone
 lights:forget_request(params)              -- HUE_FORGET from a light: same as forget(device_id)

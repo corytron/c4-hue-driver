@@ -3,20 +3,13 @@
 # NOTE: a property edit reaches Director ONLY when the row's "Set" button is clicked (see Set-ComposerProperty);
 #       Enter/blur just change the grid. Never tap ALT to foreground Composer (it arms the menu bar).
 #
-# Written and exercised by the Claude Code session on the Windows VM (docs/composer-remote.md); the
-# coordinator keeps this copy in the repo. Proven on 2026-10-21 through eight rounds: everything except
-# Save-ComposerShot without -FromScreen (PrintWindow), Set-ComposerTabOffset, Select-ComposerTab 'Lua',
-# right/double click, Show-Composer when minimised, and Set-ComposerProperty as a whole (its steps were run
-# inline; its focus guard refused correctly when the VM session was locked). Known limits: tab offsets are
-# pixel constants measured at 96 DPI; Select-ComposerDevice only sees expanded tree rows; Composer must be on
-# the System Design view; nothing works while the VM's interactive session is disconnected or locked.
-# Rounds 9-10 (2026-10-22): Set-ComposerProperty proven in full (two property changes, Set clicked, re-read);
-# Invoke-MouseDrag did NOT start Composer's Connections drag & drop (kept for reference; bind with C4:Bind
-# from the bridge instead); "Add or Update Driver or Agent..." installed a production build over dev builds.
-#
 # Composer exposes every control to UIA as ControlType.Pane with NO patterns (no Invoke/Value/Selection),
 # so this module READS through UIA (Name / ClassName / BoundingRectangle) and ACTS through real mouse and
 # keyboard input at UIA-reported screen coordinates.
+#
+# Repo copy: updated 2026-10-24 from the Windows session's C:\c4-hue\Composer.psm1 (49,370 bytes, sha256
+# b3dc42a491ae2471f00970d468e831fcd708e629b3b6766656e289eb5e0bbe31), which writes and exercises it through
+# Composer rounds 1-20; the rules it follows are in docs/composer-remote.md. Not run on this VM.
 
 Set-StrictMode -Off
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
@@ -86,14 +79,14 @@ function Get-ComposerDialog {
     $winCond = New-Object System.Windows.Automation.PropertyCondition($script:A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Window)
     $mainEl = $script:A::FromHandle($mainH)
     # ignore unnamed windows (tooltips) - real dialogs have a title
-    $owned = @($mainEl.FindAll($script:Scope::Children, $winCond) | Where-Object { $_.Current.Name })
+    $owned = @($mainEl.FindAll($script:Scope::Children, $winCond) | Where-Object { $_.Current.Name -and $_.Current.Name -ne 'GlassPanelForm' })
     if ($owned.Count -gt 0) {
         # nested: a dialog opened from a dialog is a child of that dialog; descend to the deepest one
         $d = $owned[-1]
         while ($true) { $sub = @($d.FindAll($script:Scope::Children, $winCond)); if ($sub.Count -eq 0) { break }; $d = $sub[-1] }
         return $d
     }
-    Get-ComposerTopWindows | Where-Object { $_.Current.NativeWindowHandle -ne $main -and $_.Current.Name } | Select-Object -First 1
+    Get-ComposerTopWindows | Where-Object { $_.Current.NativeWindowHandle -ne $main -and $_.Current.Name -and $_.Current.Name -ne 'GlassPanelForm' } | Select-Object -First 1
 }
 
 function Wait-ComposerDialog {
@@ -208,7 +201,6 @@ function Invoke-MouseClick {
 
 function Invoke-MouseDrag {
     # Physical left-button drag from (X1,Y1) to (X2,Y2) in small steps (Composer's Connections view binds by drag & drop).
-    # Kept for reference: on 2026-10-22 neither this nor an absolute mouse_event variant started Composer's OLE drag.
     param([Parameter(Mandatory)][int]$X1, [Parameter(Mandatory)][int]$Y1, [Parameter(Mandatory)][int]$X2, [Parameter(Mandatory)][int]$Y2, [int]$Steps = 25, [int]$StepMs = 20)
     [void][C4.Native]::SetCursorPos($X1, $Y1); Start-Sleep -Milliseconds 150
     [C4.Native]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 250     # LEFTDOWN
@@ -270,7 +262,7 @@ function Get-ComposerProperty { param([Parameter(Mandatory)][string]$Name) (Get-
 function Get-ComposerTabControl { Find-ComposerElements -Class 'SysTabControl32' | Select-Object -First 1 }
 
 # Tab headers are not exposed to UIA; offsets (px from the tab control's left edge) are measured from a screenshot.
-$script:TabOffsets = @{ 'Properties' = 36; 'Actions' = 97; 'Documentation' = 173; 'Lua' = 239 }   # measured 2026-10-22 on Composer Pro 3.4.2 @ 96 DPI with the Documentation tab present (Lua was 144 without it)
+$script:TabOffsets = @{ 'Properties' = 36; 'Actions' = 97; 'Documentation' = 173; 'Lua' = 239 }   # measured on Composer Pro 3.4.2 @ 96 DPI; Documentation tab exists from driver build 125 (without it Lua sits at 144)
 
 function Select-ComposerTab {
     # Click a tab header by name using $script:TabOffsets.
@@ -699,6 +691,76 @@ function Set-ComposerProperty {
     if ($set) { Invoke-ElementClick -Element $set; Move-MouseAway; $committed = $true }
     Start-Sleep -Milliseconds $SettleMs
     [pscustomobject]@{ Label = $Label; Before = $before; Requested = $Value; After = (Get-ComposerProperty -Name $Label); SetButtonSeen = ($set -ne $null); Committed = $committed; SetButtonLeft = ((Find-ComposerElements -Class 'BUTTON' -Name 'Set' -Root $pg | Measure-Object).Count -gt 0) }
+}
+
+# ---- Documentation screenshots (round 12): unscaled PNG crops of a screen rectangle / UIA element / property row ----
+function Save-RegionShot {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y, [Parameter(Mandatory)][int]$W, [Parameter(Mandatory)][int]$H)
+    $bmp = New-Object System.Drawing.Bitmap $W, $H
+    $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($X, $Y, 0, 0, (New-Object System.Drawing.Size $W, $H)); $g.Dispose()
+    $dir = Split-Path $Path; if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+    $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+    Get-Item $Path
+}
+
+function Save-ElementShot {
+    # Crop to a UIA element's BoundingRectangle (+ -Margin px on each side), or to the union of several elements.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Element, [int]$Margin = 0)
+    $els = @($Element); $x1 = 1e9; $y1 = 1e9; $x2 = -1e9; $y2 = -1e9
+    foreach ($e in $els) { $r = $e.Current.BoundingRectangle; if ($r.X -lt $x1) { $x1 = $r.X }; if ($r.Y -lt $y1) { $y1 = $r.Y }; if (($r.X + $r.Width) -gt $x2) { $x2 = $r.X + $r.Width }; if (($r.Y + $r.Height) -gt $y2) { $y2 = $r.Y + $r.Height } }
+    Save-RegionShot -Path $Path -X ([int]($x1 - $Margin)) -Y ([int]($y1 - $Margin)) -W ([int]($x2 - $x1 + 2 * $Margin)) -H ([int]($y2 - $y1 + 2 * $Margin))
+}
+
+function Save-PropertyRowShot {
+    # Crop one Properties row (label + value + any Set/Cancel buttons on that row) with a small margin.
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Label, [int]$Margin = 6)
+    $pg = Find-ComposerElements -Name 'Properties' -Class 'Window.8' | Where-Object { $_.Current.BoundingRectangle.Height -gt 100 } | Select-Object -First 1
+    $lbl = Find-ComposerElements -Class 'EDIT' -Name $Label -Root $pg | Select-Object -First 1
+    if (-not $lbl) { throw "Property '$Label' not found" }
+    $ly = [int]$lbl.Current.BoundingRectangle.Y
+    $row = @($lbl) + @(Find-ComposerElements -Root $pg | Where-Object { $c = $_.Current; ($c.ClassName -like '*EDIT*' -or $c.ClassName -like '*COMBOBOX*' -or $c.ClassName -like '*BUTTON*') -and [math]::Abs([int]$c.BoundingRectangle.Y - $ly) -le 10 })
+    Save-ElementShot -Path $Path -Element $row -Margin $Margin
+}
+
+function Send-DocShot {
+    # Upload a PNG from C:\c4-hue\shots\doc\ to the Ubuntu dev server (PUT http://<dev VM>:8090/img/<name>); returns the server's reply.
+    param([Parameter(Mandatory)][string]$Name, [string]$Server = 'http://192.0.2.7:8090'  # placeholder: the dev VM's address)
+    $p = "C:\c4-hue\shots\doc\$Name"
+    $r = Invoke-WebRequest -Method Put -InFile $p -Uri "$Server/img/$Name" -UseBasicParsing -TimeoutSec 60
+    [pscustomobject]@{ Name = $Name; Bytes = (Get-Item $p).Length; Status = $r.StatusCode; Reply = ($r.Content -as [string]).Trim() }
+}
+
+# ---- Foreground-checked clicks (rule from round 18c: never click unless the intended window is foreground and contains the point) ----
+if (-not ('C4.Win' -as [type])) {
+Add-Type -Namespace C4 -Name Win -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+'@
+}
+
+function Show-AnyWindow {
+    # Bring a top-level window to the foreground without ALT (AttachThreadInput + SetForegroundWindow). Returns $true when it is foreground.
+    param([Parameter(Mandatory)][IntPtr]$Hwnd)
+    if ([C4.Native]::IsIconic($Hwnd)) { [void][C4.Native]::ShowWindow($Hwnd, 9) }
+    if ([C4.Native]::GetForegroundWindow() -eq $Hwnd) { return $true }
+    $fg = [C4.Native]::GetForegroundWindow(); $pidOut = [uint32]0
+    $fgTid = [C4.Native]::GetWindowThreadProcessId($fg, [ref]$pidOut); $myTid = [C4.Native]::GetCurrentThreadId()
+    [void][C4.Native]::AttachThreadInput($myTid, $fgTid, $true)
+    try { [void][C4.Native]::SetForegroundWindow($Hwnd); [void][C4.Native]::BringWindowToTop($Hwnd) } finally { [void][C4.Native]::AttachThreadInput($myTid, $fgTid, $false) }
+    Start-Sleep -Milliseconds 400
+    ([C4.Native]::GetForegroundWindow() -eq $Hwnd)
+}
+
+function Invoke-SafeClick {
+    # Click (X,Y) only if top-level window -Hwnd is the foreground window and the point lies inside its rectangle.
+    # Tries once to bring it forward; throws (without clicking) otherwise.
+    param([Parameter(Mandatory)][IntPtr]$Hwnd, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y, [switch]$Right, [switch]$Double)
+    $r = New-Object C4.Native+RECT; [void][C4.Native]::GetWindowRect($Hwnd, [ref]$r)
+    if ($X -lt $r.Left -or $X -ge $r.Right -or $Y -lt $r.Top -or $Y -ge $r.Bottom) { throw "Refusing click at ($X,$Y): outside window $Hwnd rect $($r.Left),$($r.Top),$($r.Right),$($r.Bottom)" }
+    $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2)   # GA_ROOT
+    if ($fgRoot -ne $Hwnd) { [void](Show-AnyWindow -Hwnd $Hwnd); $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2) }
+    if ($fgRoot -ne $Hwnd) { throw "Refusing click at ($X,$Y): window $Hwnd is not in the foreground (foreground root = $fgRoot)" }
+    Invoke-MouseClick -X $X -Y $Y -Right:$Right -Double:$Double
 }
 
 Export-ModuleMember -Function *
