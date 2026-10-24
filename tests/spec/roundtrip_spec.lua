@@ -111,7 +111,8 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(1, fire_fast_timers(bridge, 1), "on_connected deferral")
 		assert.equal(6, answer_resource_gets(bridge, 1))
 		assert.equal(0, #bc4.sent, "nothing registered yet")
-		assert.equal("4 on bridge, 0 imported, 4 new, 0 missing, 0 unbound, 0 deleted", bridge.Properties["Lights"])
+		-- List rows carry "‚" for "," (Composer splits a list at commas).
+		assert.equal("4 on bridge‚ 0 imported‚ 4 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
 		-- Room Mappings is a drop-down: the row shows the summary, the list
 		-- one mapping per line, and a pick in Composer snaps back.
 		local summary = "4 Hue rooms and zones; 2 unmapped (open the list to read)"
@@ -137,10 +138,14 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(LIVING_ROOM, bc4.added[3].room)
 		assert.equal(LIVING_ID, bc4.added[3].id)
 		assert.equal(3, #bc4.bindings)
-		assert.equal("4 on bridge, 3 imported, 1 new, 0 missing, 0 unbound, 0 deleted", bridge.Properties["Lights"])
-		assert.equal("Added 3 new lights: Garage White #4 to Garage (device 2001), Hallway Ambiance #3 to Living Room "
-			.. "(device 2002), Living Room Lamp #1 to Living Room (device 2003); skipped 1 with no mapped room "
-			.. "(Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)", bridge.Properties["Last Action"])
+		assert.equal("4 on bridge‚ 3 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
+		-- A long Last Action is a drop-down too: the text on the row ("‚" for
+		-- ","), its "; "-separated parts in the list.
+		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001)‚ Hallway Ambiance #3 to Living Room "
+			.. "(device 2002)‚ Living Room Lamp #1 to Living Room (device 2003)"
+		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)"
+		assert.equal(added .. "; " .. skipped, bridge.Properties["Last Action"])
+		assert.equal(added .. "; " .. skipped .. "," .. added .. "," .. skipped, bc4.property_lists["Last Action"])
 		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Add Light or Import All New Lights)",
 			bridge.Properties["Attention"])
 		assert.same({ "HUE_CONFIGURE", "HUE_STATE" }, messages_to(bc4, LIVING_ID))
@@ -252,7 +257,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		fake.delete_device(LIVING_ID)
 		assert.is_nil(bc4.persist.hue_lights[F.rids.living])
 		assert.equal("Living Room Lamp", bc4.persist.hue_tombstones[F.rids.living].name)
-		assert.equal("4 on bridge, 2 imported, 1 new, 0 missing, 0 unbound, 1 deleted", bridge.Properties["Lights"])
+		assert.equal("4 on bridge‚ 2 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 1 deleted", bridge.Properties["Lights"])
 		local list = fake.custom_select(bridge, "HueLightList")
 		assert.equal(2, #list)
 		assert.equal(F.rids.kitchen, list[1].value)
@@ -265,6 +270,6 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(GARAGE_ROOM, bc4.added[4].room, "the mapped room of its new Hue room")
 		assert.is_nil(bc4.persist.hue_tombstones[F.rids.living])
 		assert.equal(2004, bc4.persist.hue_lights[F.rids.living].device_id)
-		assert.equal("4 on bridge, 3 imported, 1 new, 0 missing, 0 unbound, 0 deleted", bridge.Properties["Lights"])
+		assert.equal("4 on bridge‚ 3 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
 	end)
 end)

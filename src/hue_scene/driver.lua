@@ -1269,6 +1269,7 @@ end)
 
 -- Dev-only: dump what Director's Properties table holds and what this
 -- driver believes, for the dev loop (the bridge sends it with SendToDevice).
+-- Release builds (no devloop module) drop the handler below.
 dispatch.commands["HUE_DUMP"] = function()
 	local parts = {}
 	for k, v in pairs(Properties or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
@@ -1686,6 +1687,11 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_target(params.LEVEL, p
 -- Lifecycle ----------------------------------------------------------------
 
 log.set_prefix(LOG_PREFIX)
+-- Release builds (no dev loop) carry no dump handler.
+if not devloop then
+	dispatch.commands["HUE_DUMP"] = nil
+end
+
 dispatch.install(_G)
 
 function OnDriverInit()
