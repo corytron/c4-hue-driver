@@ -539,6 +539,17 @@ describe("Hue Bridge driver", function()
 		assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true))
 	end)
 
+	it("offers the parts of a three-part Last Action in its drop-down", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_check(c4)
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Link Devices" })
+		local text = env.Properties["Last Action"]
+		assert.truthy(text:find(" | Scenes: ", 1, true), text)
+		local list = c4.property_lists["Last Action"]
+		assert.equal(text .. "," .. text:gsub(" | ", ",", 2), list, "the full text, then its three parts")
+	end)
+
 	it("Hue Request sends an authenticated request and summarises resource lists", function()
 		local lines = {}
 		log.sink = function(line) table.insert(lines, line) end
