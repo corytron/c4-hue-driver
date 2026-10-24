@@ -150,8 +150,8 @@ function commands.body(pending, limits)
 	local body = {}
 	if pending.dim then
 		-- Hue ramps the whole range over `rate` and keeps the lights' relative
-		-- levels; "stop" ends a ramp where it is [assumed: dimming_delta
-		-- "stop" and dynamics on light and grouped_light; docs/keypad-design.md].
+		-- levels; "stop" ends a ramp where it is [verified on a grouped_light
+		-- 2026-10-23; assumed for a single light; docs/keypad-design.md].
 		if pending.dim == "stop" then
 			body.dimming_delta = { action = "stop" }
 		else
