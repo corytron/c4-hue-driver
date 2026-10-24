@@ -111,3 +111,82 @@ ran or the binding was visible at late init cannot be told from Composer
 (its Lua pane does not replay startup lines). Note the original failure
 followed a Director restart forced by a driver update, not a reboot; the
 outcome after a reboot is verified, the re-check path itself is not.
+
+## Scene hold-to-dim and keypad LEDs (owner-approved 2026-10-23)
+
+The owner's use case is a Hue **scene** on two Control4 switches run as
+2-button keypads (top button → the scene device's Top Button Link, bottom →
+Bottom Button Link). Taps work; this section adds holding to dim and LEDs
+that follow the scene. Approved as proposed, including "the scene stays on
+through dims from its own buttons".
+
+### Messages (new or extended)
+
+| Message | Direction | Params (all strings) | Meaning |
+|---|---|---|---|
+| `HUE_SCENE_DIM` | scene → bridge | `rid`, `device_id`, `direction` (`up` / `down` / `stop`), `duration` (ms, up/down only) | Dim the scene's group: one grouped_light PUT `{"dimming_delta":{"action":"up"/"down","brightness_delta":100},"dynamics":{"duration":<ms>}}` to start, `{"dimming_delta":{"action":"stop"}}` to stop. Relative, so the scene's colours and per-light differences are kept. **[assumed: `stop` and `dynamics` on grouped_light; verify on the first hardware test]** |
+| `HUE_SCENE_RECALL` | scene → bridge | adds optional `brightness` (1–100) | Recall with `recall.dimming.brightness` override (used for "hold top while off": recall at 1 %). |
+| `HUE_SCENE_GROUP` | bridge → scene | `rid`, and `on` (`true`/`false`) and/or `other_active` (`true`) | The scene's room/zone grouped_light turned on/off (from the event feed or the resync), or another scene of the same group became active. Sent at resync (current `on`) and on change. |
+
+### Bridge (`src/hue_bridge/bridge/scenes.lua`)
+
+- `scenes:dim(params)` resolves the device's entry like recall/off
+  (`entry_for_command`), finds the scene's group's `grouped_light_rid`
+  and calls `ctx.group_dim(grouped_rid, body)`; returns true when queued.
+  `duration` is clamped to 0–6 000 000. Gone scene or no grouped_light:
+  log and return false.
+- `scenes:recall` passes a valid `brightness` param as
+  `body.recall.dimming = { brightness = n }`.
+- Group on/off: the module keeps `group_on[grouped_rid]` from the resync
+  (one extra GET `/clip/v2/resource/grouped_light` in `fetch_all`) and from
+  `grouped_light` items in `on_container` (`item.on.on`). On a change it
+  sends `HUE_SCENE_GROUP {rid, on}` to every linked scene device whose
+  group owns that grouped_light; after each resync it sends the current
+  value to every linked device.
+- Other scene active: when a scene status event makes scene B `static` or
+  `dynamic_palette`, every other linked scene device of B's group gets
+  `HUE_SCENE_GROUP {rid, other_active = "true"}`.
+
+### Coordinator (`src/hue_bridge/driver.lua`)
+
+`ctx.group_dim(rid, body)` → `state.group_queue:set(rid, body)` (returns
+true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
+`state.scenes:dim(params)`.
+
+### Scene device (`src/hue_scene/driver.lua`)
+
+- **On state**: `effective_on = is_on() or dimmed_on`. `dimmed_on` is set
+  when a hold-dim starts from this device's own buttons (or a hold-recall
+  from off); it keeps the tile and LEDs on when Hue then reports the scene
+  inactive. Cleared by `HUE_SCENE_GROUP on=false`, by `other_active`, by
+  this device's OFF / bottom tap / toggle-off, and replaced by a normal
+  recall. `LIGHT_BRIGHTNESS_CHANGED` is 100/0 from `effective_on`.
+- **Hold** (DO_PUSH on 200/201/202 or BUTTON_ACTION press, still down after
+  400 ms): top (or toggle while off) → if on, `HUE_SCENE_DIM up` with the
+  hold-up rate; if off, `HUE_SCENE_RECALL {brightness=1}` then
+  `HUE_SCENE_DIM up` 600 ms later. Bottom (or toggle while on) → if on,
+  `HUE_SCENE_DIM down` with the hold-down rate; if off, nothing. Release
+  after a hold → `HUE_SCENE_DIM stop`. Hold rates persist
+  (`SET_HOLD_RATE_UP/DOWN`), default 5000 ms; `driver.xml` declares
+  `hold_rates` True, `hold_rate_min` 1000.
+- A click arriving within 1 s after a hold's release on the same button is
+  ignored (some keypads may send it).
+
+### Keypad LEDs (both device drivers) [verified: Snap One's
+`drivers-template-code-public` `c4hook_light_v2.lua`]
+
+- On every on/off change, at late init, and when a keypad binds to a link:
+  `C4:SendToProxy(b, "MATCH_LED_STATE", { STATE = <boolean on> }, "COMMAND")`
+  for b = 200, 201, 202, and `BUTTON_INFO {BUTTON_ID, ON_COLOR, OFF_COLOR,
+  CURRENT_COLOR}` to the proxy binding 5001 as a NOTIFY.
+- Button colours persist per button; defaults top `0000ff`/`000000`, bottom
+  `000000`/`0000ff` (lit when off), toggle `0000ff`/`000000`.
+  `SET_BUTTON_COLOR {BUTTON_ID, ON_COLOR | OFF_COLOR}` from the proxy stores
+  one, then sends `BUTTON_COLORS` on that link and `BUTTON_INFO` to 5001.
+  `REQUEST_BUTTON_COLORS` arriving on a link answers `BUTTON_COLORS` on that
+  link, then `MATCH_LED_STATE`.
+- The light driver gets the same LED and colour handling (on = `st.on`) and
+  the same 1 s click suppression after a hold.
+
+The switch's own "LED Behavior" may need its option that follows the bound
+device instead of "Push/Release" (owner checks on the switch).
