@@ -122,7 +122,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		-- The bridge's resync brings the catalogue; nothing is created from it.
 		S:resync()
 		answer_scene_gets()
-		assert.equal("5 on bridge, 0 imported, 0 missing, 0 unbound, 0 deleted", S:summary())
+		assert.equal("5 scenes and 1 time-based on bridge, 0 imported, 0 missing, 0 unbound, 0 deleted", S:summary())
 		assert.equal(0, #bc4.added)
 
 		-- Add Scene for Relax: one AddDevice into the mapped Living Room, bound,
@@ -133,7 +133,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.same({ { id = SCENE_ID, driver = "hue_scene.c4z", room = LIVING_ROOM, name = "Relax" } }, bc4.added)
 		assert.equal(1, #bc4.bindings)
 		assert.same({ "HUE_SCENE_CONFIGURE", "HUE_SCENE_STATE" }, messages_to(bc4, SCENE_ID))
-		assert.equal("5 on bridge, 1 imported, 0 missing, 0 unbound, 0 deleted", S:summary())
+		assert.equal("5 scenes and 1 time-based on bridge, 1 imported, 0 missing, 0 unbound, 0 deleted", S:summary())
 		assert.equal(LIVING_ROOM, fake.project.devices[SCENE_ID].room_id)
 		assert.equal("Relax", fake.project.devices[SCENE_ID].name)
 
@@ -258,7 +258,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("Scene deleted in Hue since " .. os.date("%Y-%m-%d %H:%M", now)
 			.. "; ON does nothing; re-link or Forget", scene.Properties["Status"])
 		assert.equal("Offline", scene.Properties["Online"])
-		assert.equal("4 on bridge, 1 imported, 1 missing, 0 unbound, 0 deleted", S:summary())
+		assert.equal("4 scenes and 1 time-based on bridge, 1 imported, 1 missing, 0 unbound, 0 deleted", S:summary())
 		assert.equal("1 scene missing from the bridge: Relax (device 2001, since " .. os.date("%Y-%m-%d", now)
 			.. ") (Re-link Scene or Forget Scene)", S:attention())
 		bc4.sent = {}
@@ -288,7 +288,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		fake.delete_device(SCENE_ID)
 		assert.is_nil(bc4.persist.hue_scenes[F.scene_rids.savanna])
 		assert.equal("Savanna sunset", bc4.persist.hue_scene_tombstones[F.scene_rids.savanna].name)
-		assert.equal("4 on bridge, 0 imported, 0 missing, 0 unbound, 1 deleted", S:summary())
+		assert.equal("4 scenes and 1 time-based on bridge, 0 imported, 0 missing, 0 unbound, 1 deleted", S:summary())
 		local list = S:picker_scenes()
 		assert.truthy(list[#list].text:find("^Living Room: Savanna sunset %(dynamic%) %(deleted from Composer "))
 		results = {}
@@ -299,7 +299,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("Added Savanna sunset to Living Room (device 2002)", results[2])
 		assert.is_nil(bc4.persist.hue_scene_tombstones[F.scene_rids.savanna])
 		assert.equal(2002, bc4.persist.hue_scenes[F.scene_rids.savanna].device_id)
-		assert.equal("4 on bridge, 1 imported, 0 missing, 0 unbound, 0 deleted", S:summary())
+		assert.equal("4 scenes and 1 time-based on bridge, 1 imported, 0 missing, 0 unbound, 0 deleted", S:summary())
 	end)
 
 	it("a dynamic scene recalled from the proxy ends up dynamic_palette, and Recall As Static makes it static", function()

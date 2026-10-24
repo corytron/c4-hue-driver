@@ -1,4 +1,4 @@
-# Status of the Hue driver (2026-10-24, build 169)
+# Status of the Hue driver (2026-10-24, build 180)
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -6,12 +6,13 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 169**, production (no dev loop), on all three drivers (installed
-  2026-10-24 00:46; same code as build 160 plus the updated manual): Hue Bridge,
+- **Build 180**, production (no dev loop), on all three drivers (installed
+  2026-10-24 12:09; time-of-day scenes, the first build with them): Hue Bridge,
   Hue Light, Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
-- **Devices.** One Hue Scene device, "Shine" (device 1162, Master Bedroom,
-  Hue scene Shine of the Master Bedroom room). No Hue Light devices: all 47
+- **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
+  1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
+  room's time-of-day scene, created 2026-10-24 12:06). No Hue Light devices: all 47
   lights were deleted in Composer on 2026-10-22 and are remembered as
   deleted (Add Light brings any of them back). 126 scenes on the bridge, 1
   imported.
@@ -40,6 +41,20 @@ this page disagree about the present, this page and the code win.
   hold top while off = on at 1 % then brighten, hold bottom while off =
   nothing; keypad LEDs follow on/off; button colours default to blue (top lit
   when on, bottom lit when off).
+- **Time-of-day scenes** (Hue "Golden hours" / "Natural light", CLIP
+  `smart_scene`; build 180): the same Hue Scene device with a kind. Listed
+  in Add Scene as "<Room>: <name> (time-based)" first in each room or zone,
+  the Hue app's number dropped from the name, zone ones named "<Zone>
+  <name>"; ordinary scenes a schedule uses are marked "(in <schedule>)";
+  Add All Scenes Of Room includes them. ON starts the schedule at its
+  current slot, OFF stops it and turns the room off, slider and holds dim
+  the room while it runs (a whole-room dim keeps it running, verified);
+  from off a level or a held top button starts it and then moves or
+  brightens; on exactly while Hue's state is active (ends on room off,
+  another scene of the room, another schedule on its lights, or its own
+  OFF); Recall As hidden; Status "Hue time-based scene Golden hours in
+  Master Bedroom; now Arise (from 07:00)" / "…; not running". Contract
+  `docs/smart-scenes-design.md`, checks `docs/smart-scenes-research.md` §7.
 - **Hue Scene** (light_v2 proxy, **dimmer** since build 160): ON plays the
   scene (Recall As: As set in Hue / Static / Dynamic), OFF turns its room or
   zone off (a zone with no lights, which has no group light, only reports
@@ -90,13 +105,17 @@ the Documentation tab and icons, keypad Button Links on a light, keypad
 hold-to-dim and LEDs on a scene (Hue accepts `dimming_delta` with `dynamics`
 and the `stop` action on a grouped_light), the scene dimmer in the iPhone app
 and its LEDs (2026-10-24), the light staying bound through a controller
-reboot.
+reboot, time-of-day scenes activated and deactivated from the bridge and
+listed in Composer (2026-10-24, build 180).
 
 ## Open
 
-- **Time-of-day scenes** (Hue smart scenes such as "Golden hours" and
-  "Natural light"): not listed yet; research and a contract draft in
-  `docs/smart-scenes-research.md`, seven questions for the owner.
+- Time-of-day scenes: whether a running schedule still advances to its
+  next slot after a whole-room dim (a 16:00 check on 2026-10-24 reads the
+  Golden hours device's Status after its 16:00 slot); whether `Recall As`
+  reappears on an ordinary device after a re-link from a time-based one
+  (`SetPropertyAttribs(…, 0)`, assumed); the keypad on a time-of-day scene
+  not yet tried by the owner.
 - Second-priority hardening items in `docs/code-analysis-2026-10-22.md`.
 - Proxy settings hidden on light and scene devices (above).
 - List View 32 px icons for lights and scenes.

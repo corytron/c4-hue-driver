@@ -2,7 +2,8 @@
 -- behind binding 1 as device 15 (bound with C4:Bind, as Composer or the
 -- bridge's Add Scene would), so SendToDevice to it can be asserted on.
 -- The contract is docs/scenes-design.md §2 (messages) and §3 (this device),
--- extended by docs/keypad-design.md and docs/scene-dimmer-design.md.
+-- extended by docs/keypad-design.md, docs/scene-dimmer-design.md and
+-- docs/smart-scenes-design.md (time-based scenes, at the end).
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -12,18 +13,35 @@ local SCENE_ID = 2061
 
 -- The scene HUE_SCENE_CONFIGURE describes, every value a string as Director hands it over.
 local CONFIGURE = { rid = "s1", name = "Relax", group_name = "Kitchen", group_type = "room",
-	id_v1 = "/scenes/AbCdEf", auto_dynamic = "false", state = "linked" }
+	id_v1 = "/scenes/AbCdEf", auto_dynamic = "false", state = "linked", kind = "scene" }
 
 local LINKED_STATUS = "Hue scene Relax in Kitchen"
+
+-- A time-based scene's configure (over CONFIGURE): "Golden hours 4" in the
+-- Downstairs zone, its current slot playing Shine from sunset; no v1 id.
+local SMART = { kind = "smart_scene", name = "Golden hours 4", group_name = "Downstairs", group_type = "zone",
+	id_v1 = "", slot_name = "Shine", slot_start = "sunset" }
+
+local SMART_STATUS = "Hue time-based scene Golden hours in Downstairs (zone)"
 
 local function quiet()
 	log.sink = function() end
 end
 
--- opts.bind=false leaves the device unbound; opts.rid persists a rid first.
+-- The fake has no C4:SetPropertyAttribs; this one records its calls with the
+-- others, so c4.calls_to("SetPropertyAttribs") lists them.
+local function stub_attribs(c4)
+	c4.SetPropertyAttribs = function(_, name, value)
+		table.insert(c4.calls, { name = "SetPropertyAttribs", args = { name, value } })
+	end
+end
+
+-- opts.bind=false leaves the device unbound; opts.rid persists a rid first,
+-- opts.name a name and opts.kind a kind.
 local function load_scene(opts)
 	opts = opts or {}
 	local env, c4 = fake.load_driver("hue_scene", opts.props or {}, { device_id = SCENE_ID })
+	stub_attribs(c4)
 	if opts.bind ~= false then
 		c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
 	end
@@ -32,6 +50,9 @@ local function load_scene(opts)
 	end
 	if opts.name then
 		c4.persist.hue_name = opts.name
+	end
+	if opts.kind then
+		c4.persist.hue_kind = opts.kind
 	end
 	env.OnDriverLateInit("DIT_STARTUP")
 	return env, c4
@@ -59,6 +80,40 @@ local function known_scene(active, opts)
 	c4.calls = {}
 	c4.sent = {}
 	return env, c4
+end
+
+-- The same for a time-based scene (SMART): Hue says active or inactive.
+local function smart_scene(active)
+	local env, c4 = load_scene({ rid = "s1" })
+	configure(env, SMART)
+	state(env, active or "inactive", { reason = "hello" })
+	c4.calls = {}
+	c4.sent = {}
+	return env, c4
+end
+
+-- Fire only the active timers with that delay, as if just that much time had
+-- passed for them (c4.fire_timers fires every timer at once). Returns the count.
+local function fire(c4, delay)
+	local due = {}
+	for _, timer in ipairs(c4.active_timers()) do
+		if timer.delay == delay then due[#due + 1] = timer end
+	end
+	for _, timer in ipairs(due) do
+		if timer.active then
+			timer.active = false
+			timer.callback(timer, 0)
+		end
+	end
+	return #due
+end
+
+-- The delays of the active timers, smallest first.
+local function delays(c4)
+	local out = {}
+	for _, timer in ipairs(c4.active_timers()) do out[#out + 1] = timer.delay end
+	table.sort(out)
+	return out
 end
 
 -- Params of every SendToProxy to the proxy binding (5001) with that
@@ -240,7 +295,7 @@ describe("Hue Scene driver", function()
 			c4.calls = {}
 			configure(env)
 
-			assert.same({ hue_rid = "s1", hue_name = "Relax", recall_as = "active" }, c4.persist)
+			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active" }, c4.persist)
 			assert.equal("#AbCdEf (s1)", env.Properties["Hue Scene ID"], "a rid without dashes is shown whole")
 			assert.equal("Relax", env.Properties["Hue Scene"])
 			assert.equal("Kitchen", env.Properties["Hue Room"])
@@ -669,8 +724,8 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.calls_to("SendToProxy"), "not even CHANGING")
 			assert.equal(0, #c4.active_timers())
 			assert.equal(FORGOTTEN, env.Properties["Status"])
-			assert.same({ hue_rid = "s1", hue_name = "Relax", recall_as = "active", held_on = true }, c4.persist,
-				"the identity stays, so binding the device again lets the bridge adopt it")
+			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active", held_on = true },
+				c4.persist, "the identity stays, so binding the device again lets the bridge adopt it")
 		end)
 
 		it("names the scene from its own state when the message carries no name", function()
@@ -734,7 +789,7 @@ describe("Hue Scene driver", function()
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 }, { LIGHT_BRIGHTNESS_CURRENT = 100 } },
 				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "both states, in arrival order")
 			assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_HELLO",
-				params = { rid = "s1", device_id = "2061", name = "Relax" } } }, c4.sent,
+				params = { rid = "s1", device_id = "2061", name = "Relax", kind = "scene" } } }, c4.sent,
 				"the hello carries the identity the buffered configure delivered")
 			local online = notifies(c4, "ONLINE_CHANGED")
 			assert.same({ STATE = true }, online[#online])
@@ -1810,6 +1865,541 @@ describe("Hue Scene driver", function()
 			local recalls = messages(c4, "HUE_SCENE_RECALL")
 			assert.equal(1, #recalls)
 			assert.is_nil(recalls[1].params.brightness)
+		end)
+	end)
+
+	describe("time-based scenes (docs/smart-scenes-design.md)", function()
+		-- What a time-based device sends to start: the bridge activates a smart
+		-- entry whatever the action, so the device sends Hue's own choice.
+		local START = { rid = "s1", action = "active" }
+
+		local function changed(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		-- { current, target, rate } of every CHANGING, in order.
+		local function changing(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")) do
+				out[#out + 1] = { p.LIGHT_BRIGHTNESS_CURRENT, p.LIGHT_BRIGHTNESS_TARGET, p.RATE }
+			end
+			return out
+		end
+
+		local function group(env, params)
+			params.rid = params.rid or "s1"
+			env.ExecuteCommand("HUE_SCENE_GROUP", params)
+		end
+
+		local function params_of(c4, command)
+			local out = {}
+			for _, m in ipairs(messages(c4, command)) do out[#out + 1] = m.params end
+			return out
+		end
+
+		-- SMART with some fields replaced ("" drops one, as Director would).
+		local function smart_with(extra)
+			local params = {}
+			for k, v in pairs(SMART) do params[k] = v end
+			for k, v in pairs(extra or {}) do params[k] = v end
+			return params
+		end
+
+		describe("the kind (Decision 1)", function()
+			it("is persisted from HUE_SCENE_CONFIGURE and named in the hello after a restart", function()
+				local env, c4 = load_scene({ rid = "s1" })
+				configure(env, SMART)
+				assert.equal("smart_scene", c4.persist.hue_kind)
+
+				local _, again = load_scene({ rid = "s1", name = "Golden hours 4", kind = "smart_scene" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_HELLO",
+					params = { rid = "s1", device_id = "2061", name = "Golden hours 4", kind = "smart_scene" } } },
+					again.sent)
+			end)
+
+			it("is an ordinary scene when a configure names none (a bridge from before time-based scenes)", function()
+				local env, c4 = load_scene({ rid = "s1", kind = "smart_scene" })
+				local params = {}
+				for k, v in pairs(CONFIGURE) do params[k] = v end
+				params.kind = nil
+				env.ExecuteCommand("HUE_SCENE_CONFIGURE", params)
+				assert.equal("scene", c4.persist.hue_kind)
+				assert.equal(LINKED_STATUS, env.Properties["Status"])
+			end)
+
+			it("takes a kind it does not know as an ordinary scene, with a warning", function()
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = line end
+				local env, c4 = load_scene({ rid = "s1" })
+				configure(env, { kind = "entertainment" })
+				assert.equal("scene", c4.persist.hue_kind)
+				local warned = false
+				for _, line in ipairs(lines) do
+					if line:find("^%[WARN%] Hue Scene: HUE_SCENE_CONFIGURE with unknown kind entertainment") then
+						warned = true
+					end
+				end
+				assert.is_true(warned)
+			end)
+
+			it("ignores a persisted kind it does not know: the hello names none", function()
+				local _, c4 = load_scene({ rid = "s1", kind = "sparkly" })
+				assert.same({ rid = "s1", device_id = "2061" }, messages(c4, "HUE_SCENE_HELLO")[1].params)
+			end)
+		end)
+
+		describe("on state (Decision 2)", function()
+			it("follows Hue's active and inactive, without the on rule's held_on", function()
+				local env, c4 = smart_scene("inactive")
+				local proxy = capture_proxy(c4)
+				state(env, "active", { reason = "event" })
+				assert.same({ 100 }, changed(c4))
+				assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+				assert.is_nil(c4.persist.held_on, "never held on")
+				state(env, "inactive", { reason = "event" })
+				assert.same({ 100, 0 }, changed(c4))
+				local all = with_command(proxy, "MATCH_LED_STATE")
+				assert.same(leds(false), { all[4], all[5], all[6] })
+			end)
+
+			it("turns off with Hue's inactive even after a dim from its own keypad", function()
+				local env, c4 = smart_scene("active")
+				group(env, { on = "true", level = "60" })
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				fire(c4, 400)
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				group(env, { level = "75" })
+				assert.equal(2, #messages(c4, "HUE_SCENE_DIM"), "up, then stop")
+				assert.is_nil(c4.persist.held_on, "a hold does not hold it on")
+				state(env, "inactive", { reason = "event" })
+				assert.same({ 60, 75, 0 }, changed(c4))
+			end)
+
+			it("is not turned off by its group going off or another scene alone: its STATE does that", function()
+				local env, c4 = smart_scene("active")
+				group(env, { on = "false" })
+				group(env, { other_active = "true" })
+				assert.same({}, changed(c4))
+				state(env, "inactive", { reason = "event" })
+				assert.same({ 0 }, changed(c4))
+			end)
+
+			it("leaves the on rule to ordinary scenes: one stays on when Hue calls it inactive", function()
+				local env, c4 = known_scene("static")
+				state(env, "inactive", { reason = "event" })
+				assert.same({}, changed(c4))
+				assert.is_true(c4.persist.held_on)
+			end)
+
+			it("drops a held-on state when Re-link makes an ordinary scene's device time-based", function()
+				local env, c4 = known_scene("static")
+				assert.is_true(c4.persist.held_on)
+				configure(env, SMART)
+				assert.is_false(c4.persist.held_on)
+				state(env, "inactive", { reason = "hello" })
+				assert.same({ 100, 0 }, changed(c4), "the configure re-reports, then Hue's inactive turns it off")
+			end)
+		end)
+
+		describe("ON, OFF, TOGGLE and taps (Decisions 3 and 5)", function()
+			it("ON from off starts the scene without a ramp or a level; the fallback assumes it runs", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "400" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_RECALL", params = START } }, c4.sent,
+					"no duration, no brightness")
+				assert.same({ { 0, 100, 400 } }, changing(c4))
+				assert.same({ 2000 }, delays(c4), "the 2 s fallback, and nothing to follow")
+				fire(c4, 2000)
+				assert.same({ 100 }, changed(c4))
+				assert.equal(SMART_STATUS .. "; now Shine (from sunset)", env.Properties["Status"])
+				state(env, "inactive", { reason = "resync" })
+				assert.same({ 100, 0 }, changed(c4), "an assumption, not a report: a later inactive corrects it")
+			end)
+
+			it("ON settles with the bridge's STATE active", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "ON", {})
+				state(env, "active", { reason = "event" })
+				assert.same({ 100 }, changed(c4))
+				assert.same({}, delays(c4))
+				state(env, "active", { reason = "recall" })
+				assert.same({ 100 }, changed(c4), "the recall's own STATE changes nothing more")
+			end)
+
+			it("OFF asks the bridge to stop it and turn the group off; the inactive STATE settles it", function()
+				local env, c4 = smart_scene("active")
+				env.ReceivedFromProxy(5001, "OFF", {})
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_OFF", params = { rid = "s1" } } }, c4.sent)
+				assert.same({ { 100, 0, 0 } }, changing(c4))
+				state(env, "inactive", { reason = "recall" })
+				assert.same({ 0 }, changed(c4))
+				assert.equal(SMART_STATUS .. "; not running", env.Properties["Status"])
+				assert.same({}, delays(c4))
+			end)
+
+			it("OFF (the slider to 0) assumes the scene stopped when the bridge never answers", function()
+				local env, c4 = smart_scene("active")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "0" })
+				assert.equal("HUE_SCENE_OFF", last_sent(c4).command)
+				fire(c4, 2000)
+				assert.same({ 0 }, changed(c4))
+				assert.equal(SMART_STATUS .. "; not running", env.Properties["Status"])
+			end)
+
+			it("TOGGLE and keypad taps go by Hue's status", function()
+				local env, c4 = smart_scene("active")
+				env.ReceivedFromProxy(5001, "TOGGLE", {})
+				assert.equal("HUE_SCENE_OFF", last_sent(c4).command)
+				state(env, "inactive", { reason = "recall" })
+				env.ReceivedFromProxy(5001, "TOGGLE", {})
+				assert.same({ id = BRIDGE_ID, command = "HUE_SCENE_RECALL", params = START }, last_sent(c4))
+				state(env, "active", { reason = "recall" })
+				env.ReceivedFromProxy(201, "DO_CLICK", {})
+				assert.equal("HUE_SCENE_OFF", last_sent(c4).command)
+				state(env, "inactive", { reason = "recall" })
+				env.ReceivedFromProxy(200, "DO_CLICK", {})
+				assert.same({ id = BRIDGE_ID, command = "HUE_SCENE_RECALL", params = START }, last_sent(c4))
+			end)
+		end)
+
+		describe("the slider from off below 100 (Decision 4)", function()
+			it("starts the scene, then moves the room once the bridge reports the group on with a level", function()
+				local env, c4 = smart_scene("inactive")
+				local proxy = capture_proxy(c4)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "800" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_RECALL", params = START } }, c4.sent)
+				assert.same({ { 0, 40, 800 } }, changing(c4))
+				assert.same({ 1500, 2000 }, delays(c4), "what follows, and the start's fallback")
+
+				state(env, "active", { reason = "event" })
+				state(env, "active", { reason = "recall" })
+				assert.same({}, changed(c4), "the move closes the proxy's transaction, not the start")
+				assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"), "the LEDs follow the start")
+				assert.same({}, params_of(c4, "HUE_SCENE_LEVEL"), "not before the slot's look is on")
+
+				group(env, { on = "true", level = "100" })
+				assert.same({ { rid = "s1", device_id = "2061", level = "40", rate = "800" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+				assert.same({}, changed(c4), "the slot's level is not shown on the way to 40")
+				assert.equal(1, #changing(c4), "no second CHANGING")
+				assert.same({ 1800 }, delays(c4), "the move's fallback: the ramp plus 1 s")
+
+				group(env, { level = "40.2" })
+				assert.same({ 40 }, changed(c4))
+				assert.is_nil(c4.persist.held_on)
+			end)
+
+			it("moves the room 1.5 s after the start when no group report comes; the move's fallback reports it", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				state(env, "active", { reason = "event" })
+				assert.same({ 1500 }, delays(c4))
+				fire(c4, 1500)
+				assert.same({ { rid = "s1", device_id = "2061", level = "35", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 1000 }, delays(c4))
+				fire(c4, 1000)
+				assert.same({ 35 }, changed(c4))
+			end)
+
+			it("follows a report of the group on alone when its level is known (unchanged, so not sent again)", function()
+				local env, c4 = smart_scene("inactive")
+				group(env, { level = "60" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30", RATE = "0" })
+				state(env, "active", { reason = "event" })
+				group(env, { on = "true" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("moves the room before any STATE confirmed the start, and that move's fallback assumes the start", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				fire(c4, 1500)
+				assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 1000 }, delays(c4), "the move replaced the start's fallback")
+				fire(c4, 1000)
+				assert.same({ 35 }, changed(c4))
+				assert.equal(SMART_STATUS .. "; now Shine (from sunset)", env.Properties["Status"])
+			end)
+
+			it("lets a late STATE active only confirm the start; the move's own report closes the transaction", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				fire(c4, 1500)
+				state(env, "active", { reason = "recall" })
+				assert.same({}, changed(c4))
+				group(env, { level = "35.4" })
+				assert.same({ 35 }, changed(c4))
+				assert.same({ 1000 }, delays(c4), "only the throttle window is left")
+			end)
+
+			it("drops what follows when the start fails (STATE inactive) and closes at 0", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				state(env, "inactive", { reason = "recall" })
+				assert.same({ 0 }, changed(c4))
+				assert.same({}, delays(c4))
+				c4.fire_timers()
+				assert.same({}, params_of(c4, "HUE_SCENE_LEVEL"))
+
+				env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				fire(c4, 1500) -- the move went out before any STATE
+				state(env, "inactive", { reason = "recall" })
+				assert.same({ 0 }, changed(c4))
+				assert.same({}, delays(c4), "the move's fallback cannot assume the start any more")
+			end)
+
+			it("drops what follows when the group goes off first, and closes with what is known", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				state(env, "active", { reason = "event" })
+				group(env, { on = "false" })
+				assert.same({ 100 }, changed(c4), "running as far as Hue has said")
+				assert.same({}, delays(c4))
+				state(env, "inactive", { reason = "event" })
+				assert.same({ 100, 0 }, changed(c4))
+				assert.same({}, params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("takes a second target before the slot's look is on as the level that follows, with no second start", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "500" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				assert.same({ { 0, 35, 0 }, { 0, 60, 500 } }, changing(c4))
+				state(env, "active", { reason = "event" })
+				group(env, { on = "true", level = "90" })
+				assert.same({ { rid = "s1", device_id = "2061", level = "60", rate = "500" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("takes a target that arrives while a plain start is on its way as a level to follow", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "ON", {})
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30", RATE = "0" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				assert.same({ 1500, 2000 }, delays(c4))
+				state(env, "active", { reason = "event" })
+				assert.same({}, changed(c4), "the move closes the transaction")
+				fire(c4, 1500)
+				assert.same({ { rid = "s1", device_id = "2061", level = "30", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("plays the scene as its slot has it at 100: nothing follows the start", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "0" })
+				assert.same({ 2000 }, delays(c4))
+				state(env, "active", { reason = "event" })
+				group(env, { on = "true", level = "85" })
+				assert.same({}, params_of(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 100, 85 }, changed(c4))
+			end)
+
+			it("SET_BRIGHTNESS_STOP before the level follows drops it and reports what is known", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				state(env, "active", { reason = "event" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.same({ 100 }, changed(c4))
+				assert.same({}, delays(c4))
+				group(env, { on = "true", level = "90" })
+				assert.same({}, params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("drops what follows when the bridge is unbound", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "35", RATE = "0" })
+				c4.bindings = {}
+				env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+				assert.same({}, delays(c4))
+			end)
+		end)
+
+		describe("holds (Decisions 4 and 6)", function()
+			local function dims(c4)
+				return params_of(c4, "HUE_SCENE_DIM")
+			end
+
+			it("holding top while off starts the scene, then dims up while held once the group report comes", function()
+				local env, c4 = smart_scene("inactive")
+				local proxy = capture_proxy(c4)
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				fire(c4, 400)
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_RECALL", params = START } }, c4.sent,
+					"no 1 % start: an activate has no brightness")
+				assert.same({ { 0, 100, 5000 } }, changing(c4))
+				assert.equal(0, #with_command(proxy, "MATCH_LED_STATE"), "the LEDs wait for Hue's status")
+				state(env, "active", { reason = "event" })
+				assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+				assert.same({}, changed(c4))
+				assert.same({}, dims(c4))
+
+				group(env, { on = "true", level = "70" })
+				assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } }, dims(c4))
+				assert.same({ 70 }, changed(c4), "the tile starts from the slot's level")
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				assert.same({ rid = "s1", device_id = "2061", direction = "stop" }, dims(c4)[2])
+				assert.is_nil(c4.persist.held_on)
+			end)
+
+			it("holding top while off dims up 1.5 s after the start when no group report comes", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				fire(c4, 400)
+				state(env, "active", { reason = "event" })
+				assert.same({ 1500 }, delays(c4))
+				fire(c4, 1500)
+				assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } }, dims(c4))
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				assert.equal("stop", dims(c4)[2].direction)
+			end)
+
+			it("a release before the dim follows leaves the scene started, with no dim and no stop", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				fire(c4, 400)
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				assert.equal(0, fire(c4, 1500), "nothing follows any more")
+				state(env, "active", { reason = "event" })
+				group(env, { on = "true", level = "70" })
+				assert.same({}, dims(c4))
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				assert.equal(0, #messages(c4, "HUE_SCENE_OFF"))
+				assert.same({ 100, 70 }, changed(c4), "the tile follows the scene once Hue says it runs")
+			end)
+
+			it("holding bottom while off does nothing, as for scenes", function()
+				local env, c4 = smart_scene("inactive")
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				fire(c4, 400)
+				env.ReceivedFromProxy(201, "DO_RELEASE", {})
+				assert.same({}, c4.sent)
+			end)
+
+			it("while it runs, holds dim the room and the slider moves it, as for scenes", function()
+				local env, c4 = smart_scene("active")
+				group(env, { on = "true", level = "50" })
+				fire(c4, 1000) -- the level report's throttle window
+				c4.sent = {}
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30", RATE = "0" })
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_LEVEL",
+					params = { rid = "s1", device_id = "2061", level = "30", rate = "0" } } }, c4.sent)
+				group(env, { level = "30" })
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				fire(c4, 400)
+				env.ReceivedFromProxy(201, "DO_RELEASE", {})
+				assert.same({
+					{ rid = "s1", device_id = "2061", direction = "down", duration = "5000" },
+					{ rid = "s1", device_id = "2061", direction = "stop" },
+				}, dims(c4))
+				assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+			end)
+		end)
+
+		describe("Recall As (Decision 12)", function()
+			it("is hidden after late init on a time-based device and shown on an ordinary one", function()
+				local _, smart = load_scene({ rid = "s1", kind = "smart_scene" })
+				assert.same({ { "Recall As", 1 } }, smart.calls_to("SetPropertyAttribs"))
+				local _, plain = load_scene({ rid = "s1" })
+				assert.same({ { "Recall As", 0 } }, plain.calls_to("SetPropertyAttribs"))
+			end)
+
+			it("is shown or hidden again whenever a configure changes the kind, and only then", function()
+				local env, c4 = load_scene({ rid = "s1" })
+				c4.calls = {}
+				configure(env)
+				configure(env, SMART)
+				configure(env, SMART)
+				configure(env)
+				assert.same({ { "Recall As", 1 }, { "Recall As", 0 } }, c4.calls_to("SetPropertyAttribs"))
+			end)
+
+			it("is applied once, at late init, when a configure that came before it names the kind", function()
+				local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+				stub_attribs(c4)
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				configure(env, SMART)
+				assert.same({}, c4.calls_to("SetPropertyAttribs"), "never before late init")
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.same({ { "Recall As", 1 } }, c4.calls_to("SetPropertyAttribs"))
+			end)
+
+			it("never stops late init: on a runtime without SetPropertyAttribs, or when it fails", function()
+				local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				c4.persist.hue_rid = "s1"
+				c4.persist.hue_kind = "smart_scene"
+				assert.has_no.errors(function() env.OnDriverLateInit("DIT_STARTUP") end)
+				assert.equal(1, #messages(c4, "HUE_SCENE_HELLO"))
+
+				env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+				c4.SetPropertyAttribs = function() error("Director says no") end
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				c4.persist.hue_rid = "s1"
+				c4.persist.hue_kind = "smart_scene"
+				assert.has_no.errors(function() env.OnDriverLateInit("DIT_STARTUP") end)
+				assert.equal(1, #messages(c4, "HUE_SCENE_HELLO"))
+			end)
+		end)
+
+		describe("Status (Decision 13)", function()
+			it("names the slot it plays while it runs, and says when it does not", function()
+				local env = smart_scene("inactive")
+				assert.equal(SMART_STATUS .. "; not running", env.Properties["Status"])
+				state(env, "active", { reason = "event" })
+				assert.equal(SMART_STATUS .. "; now Shine (from sunset)", env.Properties["Status"])
+				state(env, "active", { reason = "event", slot_name = "Relax", slot_start = "16:00" })
+				assert.equal(SMART_STATUS .. "; now Relax (from 16:00)", env.Properties["Status"])
+				state(env, "active", { reason = "recall" })
+				assert.equal(SMART_STATUS .. "; now Relax (from 16:00)", env.Properties["Status"],
+					"a STATE without a slot keeps the one known")
+				state(env, "inactive", { reason = "event" })
+				assert.equal(SMART_STATUS .. "; not running", env.Properties["Status"])
+			end)
+
+			it("says running while the slot is unknown, and names only the scene before any status", function()
+				local env = load_scene({ rid = "s1" })
+				configure(env, smart_with({ name = "Natural light", group_name = "Living Room", group_type = "room",
+					slot_name = "", slot_start = "" }))
+				assert.equal("Hue time-based scene Natural light in Living Room", env.Properties["Status"])
+				state(env, "active", { reason = "event" })
+				assert.equal("Hue time-based scene Natural light in Living Room; running", env.Properties["Status"])
+			end)
+
+			it("takes the slot as each configure sends it", function()
+				local env = smart_scene("active")
+				configure(env, smart_with({ slot_name = "Arise", slot_start = "07:00" }))
+				assert.equal(SMART_STATUS .. "; now Arise (from 07:00)", env.Properties["Status"])
+				configure(env, smart_with({ slot_name = "", slot_start = "" }))
+				assert.equal(SMART_STATUS .. "; running", env.Properties["Status"])
+			end)
+
+			it("gives way to the deleted-in-Hue text", function()
+				local env = smart_scene("active")
+				configure(env, smart_with({ state = "gone" }))
+				assert.equal("Scene deleted in Hue; ON does nothing; re-link or Forget", env.Properties["Status"])
+			end)
+		end)
+
+		describe("Adopt Hue Name (Decision 7)", function()
+			it("names a zone's time-based scene after the zone and the scene without the app's number", function()
+				local env, c4 = smart_scene()
+				local proxy_id = fake.project.devices[SCENE_ID].proxy_id
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+				assert.same({ { proxy_id, "Downstairs Golden hours" } }, c4.calls_to("RenameDevice"))
+			end)
+
+			it("names a room's after the scene alone, and leaves a name without a number as it is", function()
+				local env, c4 = smart_scene()
+				configure(env, smart_with({ name = "Natural light", group_name = "Living Room", group_type = "room" }))
+				local proxy_id = fake.project.devices[SCENE_ID].proxy_id
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+				assert.same({ { proxy_id, "Natural light" } }, c4.calls_to("RenameDevice"))
+			end)
 		end)
 	end)
 end)
