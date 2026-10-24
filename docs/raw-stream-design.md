@@ -1,5 +1,7 @@
 # Event stream over a raw SSL network connection
 
+> **Historical design (2026-10-21), never built.** The stream stayed on `C4:url` on padded address spellings (decision A of 2026-10-21, `docs/design.md`, "Two ways to keep commands flowing while the stream is open" and "Stream address rotation"); this design remains the documented alternative. The present is in `docs/status.md`.
+
 Design for moving `GET /eventstream/clip/v2` off `C4:url()` onto Director's
 network-connection API, so `C4:url()` stays free for light commands. Follows
 on from the spike result in `docs/design.md` ("Event stream"): while a

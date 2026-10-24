@@ -7,6 +7,11 @@ device shows only an on/off toggle in the iPhone app; the owner wants a
 slider with the current percentage, and the app, the keypad LEDs and the
 Hue app all in sync.
 
+**Current (2026-10-24):** built as below, in build 160 on the house and
+verified (last section); `docs/status.md` summarises the present. This
+contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
+`dimmed_on` of `docs/keypad-design.md` ("Scene device").
+
 ## Behaviour
 
 - **Dimmer.** `hue_scene/driver.xml` declares `dimmer` True and `set_level`
@@ -48,7 +53,7 @@ Hue app all in sync.
 | Message | Direction | Params (strings) | Meaning |
 |---|---|---|---|
 | `HUE_SCENE_GROUP` | bridge → scene | adds `level` (number 0–100, may carry decimals) | The group's `dimming.brightness`, sent with `on` at every resync and whenever an event changes it. Every key optional; a device uses what is there. |
-| `HUE_SCENE_LEVEL` | scene → bridge | `rid`, `device_id`, `level` (1–100), `rate` (ms) | Move the scene's group to `level` while keeping its lights' differences: `dimming_delta` up/down with `brightness_delta = |level − current|` and `dynamics.duration = rate`, where current is the bridge's last known group level; nothing if the difference is under 0.5; when no level is known, an absolute grouped_light `dimming.brightness = level` with the rate instead. |
+| `HUE_SCENE_LEVEL` | scene → bridge | `rid`, `device_id`, `level` (1–100), `rate` (ms) | Move the scene's group to `level` while keeping its lights' differences: `dimming_delta` up/down with `brightness_delta = \|level − current\|` and `dynamics.duration = rate`, where current is the bridge's last known group level; nothing if the difference is under 0.5; when no level is known, an absolute grouped_light `dimming.brightness = level` with the rate instead. |
 | `HUE_SCENE_RECALL` | scene → bridge | `brightness`, `duration` (existing) | Used by the slider from off. |
 
 ## Bridge (`src/hue_bridge/bridge/scenes.lua`, bridge agent)
@@ -95,6 +100,15 @@ sends `MATCH_LED_STATE` false on the three links.
   added or restarted between resyncs shows the right percentage at once.
 - A group level of 0 (no light lit) is not cached or shown; the last lit
   level stays. A fallback's assumed recall does not set `held_on`.
+- `driver.xml` also declares `ramp_level` True; `SET_LEVEL` and
+  `RAMP_TO_LEVEL` take the slider's path with `TIME` as the rate.
+- A slider target while a recall or OFF is still on its way recalls at that
+  level instead of moving the group (its level is in flux then); a recall
+  from the slider settles on the bridge's `HUE_SCENE_STATE` or the recall's
+  2 s fallback, not on RATE + 1 s.
+- The `HUE_SCENE_LEVEL` PUT carries `dynamics` only when the rate is above
+  0, and a level report that arrives while a level move is pending settles
+  it at once.
 
 ## Verified on hardware (2026-10-24, build 160)
 

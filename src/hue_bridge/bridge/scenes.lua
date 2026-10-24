@@ -1,5 +1,5 @@
--- The Hue scenes a bridge represents as Control4 switches (hue_scene.c4z, one
--- light_v2 switch per scene): the catalogue of the bridge's scenes, the scene
+-- The Hue scenes a bridge represents as Control4 devices (hue_scene.c4z, one
+-- light_v2 dimmer per scene since build 160, a switch before): the catalogue of the bridge's scenes, the scene
 -- registry (bridge.registry under its own keys), the flows that keep the scene
 -- drivers current (resync, stream items, hello), the recall and off commands,
 -- and the owner-facing actions, texts and pickers of docs/scenes-design.md §4.
@@ -928,7 +928,7 @@ end
 
 -- CONFIGURE (when asked for, or when it changed) then STATE. The state is
 -- sent only once a GET has told us something (or the catalogue has the
--- scene): before that a guessed "inactive" would flip a lit scene's switch.
+-- scene): before that a guessed "inactive" would turn a lit scene's tile off.
 function scenes:push(rid, reason, with_configure)
 	if not self.registry[rid] then
 		return false
@@ -1420,7 +1420,7 @@ end
 
 -- HUE_SCENE_RECALL { rid, action?, duration?, brightness? }: PUT the recall
 -- (a brightness 1-100 overrides the scene's as recall.dimming); on success
--- STATE with the state the action produces (reason "recall") so the switch
+-- STATE with the state the action produces (reason "recall") so the device
 -- settles even if the stream item is missed; on failure a warning and STATE
 -- with the cached status. Returns true when a PUT was started.
 function scenes:recall(params)
@@ -1543,8 +1543,8 @@ end
 -- ctx.group_dim (coalesced per group by the driver), so the scene's colours
 -- and per-light differences are kept. up/down run 0 -> 100 % over `duration`
 -- ms (clamped to 0..DIM_MAX_DURATION, default DIM_DEFAULT_DURATION), stop
--- ends it [assumed: `stop` and `dynamics` on grouped_light; verify on the
--- first hardware test]. No STATE is sent. Returns true when queued.
+-- ends it [verified on hardware 2026-10-23: Hue accepts `dimming_delta` with
+-- `dynamics` and the `stop` action on a grouped_light]. No STATE is sent. Returns true when queued.
 function scenes:dim(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_DIM")

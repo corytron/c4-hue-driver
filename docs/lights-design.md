@@ -9,6 +9,14 @@ best practices).
 Status markers: [verified] = from the SDK docs or hardware; [assumed] = to be
 confirmed on the controller through the dev loop.
 
+**Current (2026-10-24):** built and verified on the house on 2026-10-21
+(`docs/design.md`, "Lights: verified on hardware"), then extended by
+`docs/import-design.md` (registry v2, more messages, the import actions,
+light-side lifecycle), `docs/keypad-design.md` (Button Links, `HUE_DIM`,
+keypad LEDs) and `docs/scenes-design.md` §6 (a third dev-loop tree). The
+parts those changed are marked "Superseded" below; `docs/status.md`
+describes the present (the house has no Hue Light device at the moment).
+
 ## Roles
 
 - **Bridge driver** (`src/hue_bridge`): the only HTTPS speaker. Imports
@@ -40,6 +48,13 @@ Light → bridge:
 | --- | --- | --- |
 | `HUE_HELLO` | `rid` ("" if unknown yet) | light late init and `OnBindingChanged` bound; bridge answers `HUE_CONFIGURE` + full `HUE_STATE` (reason "hello") when it knows the rid |
 | `HUE_SET` | `rid`, any of `on`, `brightness`, `x`+`y`, `mirek`, and `rate` (ms) | every proxy command, after mapping |
+
+Superseded in part (2026-10-21/23): `HUE_HELLO` also carries `device_id`,
+`name` and `model`, `HUE_CONFIGURE` also `hue_room`, `id_v1` and the gone
+state, and `HUE_GOODBYE`, `HUE_FORGET` and `HUE_FORGOTTEN` were added
+(`docs/import-design.md` §4); `HUE_DIM` carries keypad holds
+(`docs/keypad-design.md`, "Light parity"); dev builds add `HUE_LOG`, a
+light's log lines to the bridge.
 
 `ExecuteCommand` does not tell the receiver who sent a message, so `rid` is
 in every message and the bridge maps rid → deviceId through its registry.
@@ -73,13 +88,17 @@ light_rids, zigbee_rid } from `/clip/v2/resource/device`;
 Registry, persisted with `C4:PersistSetValue("hue_lights", table)` (tables
 allowed) [verified: API 26.5]: `{ [rid] = { device_id = N, name = "...",
 model = "...", caps = { has_color, has_cct, mirek_min, mirek_max, min_dim }
-} }`, loaded at late init, written on every change. `caps` is what
+} }`, loaded at late init, written on every change (superseded 2026-10-21
+by registry v2 with states and tombstones, `docs/import-design.md` §3). `caps` is what
 `HUE_CONFIGURE` and the command queue's limits need, so both work at bridge
 startup before any GET has completed; the resync refreshes it.
 `model` is `product_data.product_name` (falling back to `model_id`).
 
 Import (`lights.import(http_ctx, report)`), run from the **Import Lights**
-action, serially:
+action, serially (superseded 2026-10-21: `Import All New Lights` into each
+light's mapped room, skipping unmapped and deleted ones, and `Add Light`
+one at a time into a chosen room; a gone light becomes "gone"; results go
+to `Last Action`; `docs/import-design.md` §3, §6, §13):
 1. GET `/clip/v2/resource/light`, `/device`, `/zigbee_connectivity`.
 2. For each light whose rid is not in the registry: `C4:AddDevice(
    "hue_light.c4z", roomId, name, callback)` with the bridge's room
@@ -109,9 +128,10 @@ State fan-out (`lights.on_container(container)`): for each item of type
 `light` with a registered rid, `HUE_STATE` with the changed fields;
 `zigbee_connectivity` items map device_rid → light rids → `HUE_STATE`
 with `online`. `lights.resync(http_ctx)` after every stream connect: the
-three GETs, then full `HUE_STATE` (reason "resync") to every registered
-light, and `HUE_CONFIGURE` first at startup. `lights.hello(rid)` answers a
-light.
+three GETs (six since import-ui, with reconciliation before the fan-out,
+`docs/import-design.md` §5), then full `HUE_STATE` (reason "resync") to
+every registered light, and `HUE_CONFIGURE` first at startup.
+`lights.hello(rid)` answers a light.
 
 ## Bridge: command path (`bridge/commands.lua`)
 
@@ -136,6 +156,11 @@ light.
 - `send` is `http.request` with method PUT to `/clip/v2/resource/light/<rid>`
   on the dotted address; `done(result)`. On 429 or 5xx: retry after
   `BACKOFF_MS = 500` doubling to 8 s; on 4xx other than 429: drop and log.
+  (As built, a transport error without an HTTP code is retried the same
+  way.) Added later: a `dim` field for Hue's relative dim, with an optional
+  `delta`, and a second instance for grouped_light PUTs with the same
+  constants (`docs/keypad-design.md`, "Queue support";
+  `docs/scenes-design.md` §5).
 - The light's limits (`min_dim`, `mirek_min/max`) come from the registry's
   cached model; `q:limits(rid, {...})` sets them.
 
@@ -145,7 +170,8 @@ Modules under `src/hue_light/light/`: `state.lua` (cached Hue state, the
 mapping both ways), `caps.lua` (capability notify), plus `driver.lua`.
 Properties in `driver.xml`: `Hue Light ID`, `Hue Name`, `Model`, `Online`
 ("Online"/"Offline"/"" when unknown; read-only) alongside the existing
-ones. `Status` reads "Not bound to a Hue Bridge", then "Bound; waiting for
+ones (`Hue Room` and `Last Action` added by `docs/import-design.md` §7).
+`Status` reads "Not bound to a Hue Bridge", then "Bound; waiting for
 the bridge", then "<Hue name> (<model>)" once configured. Persist `rid`
 with `C4:PersistSetValue("hue_rid", rid)`. `C4:GetBoundProviderDevice` is
 documented once as returning a table and once as a number [verified: API
@@ -170,7 +196,8 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   then `LIGHT_COLOR_CHANGED` on the matching state.
 - Legacy, defensively: `ON` → target 100 (or the last on level),
   `OFF` → 0, `SET_LEVEL`/`RAMP_TO_LEVEL` { `LEVEL`, `TIME` } → the same path
-  [assumed these may still arrive from old programming].
+  [assumed these may still arrive from old programming]. As built, `ON`
+  always means 100 % (never the last level) and `TOGGLE` goes to 100 or 0.
 - `SYNCHRONIZE` → report cached state (brightness, colour, online).
 
 Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
@@ -194,13 +221,20 @@ Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
 
 ## Dev loop for lights (`common/devloop.lua`, `tools/devserver.py`)
 
+Superseded in part (2026-10-21/22): a third tree for the scene driver was
+added (`docs/scenes-design.md` §6), a dev build's light forwards its log
+lines to the bridge as `HUE_LOG`, and the house has run release builds
+without the dev loop since 2026-10-22 (`docs/dev-loop.md`).
+
 - The server serves two trees: `?tree=bridge` (default, `src/hue_bridge` +
   `common/`) and `?tree=light` (`src/hue_light` + `common/`), each with its
   own version in `/manifest`, `/bundle` and `/status`.
 - The bridge's loop also polls the light tree. When its version changes, it
   fetches that bundle and sends `DEV_RELOAD` { `version`, `files` = JSON
   text } to every bound light (`GetBoundConsumerDevices`). [assumed: a
-  40 KB string param survives `SendToDevice`; if not, chunk it.]
+  40 KB string param survives `SendToDevice`; if not, chunk it. Verified
+  2026-10-21: it reached all 47 lights, `docs/design.md`, "Lights: verified
+  on hardware".]
 - A light driver that contains `common/devloop.lua` (dev build) registers
   `dispatch.commands["DEV_RELOAD"] = devloop.apply_forwarded` and reloads
   itself with the same sequence as the bridge, reporting through its own

@@ -1,5 +1,7 @@
 # Edge cases and owner-facing policy: lights, rooms, scenes
 
+> **Historical research (2026-10-21)**, written before the import-ui and scenes features; "today" means that day's code. The decisions are `docs/import-design.md` (§1–§10, which resolves where this document and the other two disagreed) and `docs/scenes-design.md`; the present is in `docs/status.md`.
+
 What the bridge driver does on its own, what it only offers, and what it
 never does without a click, for every lifecycle event around lights, rooms
 and scenes. Written for one home whose owner drives Composer himself, has
