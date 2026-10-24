@@ -265,7 +265,7 @@ replaces, so the two are on different Director queues.
   spellings: every combination of 1-, 2- and 3-digit widths over the octets
   below 8, minus the dotted spelling (commands) and the all-2-digit one
   (`for_check`), capped at `altaddr.FAMILY_MAX` (8). The first entry is
-  `for_stream(ip)` (all 3-digit), then the widths count down octet by octet:
+  `padded(ip, 3)` (all 3-digit; `for_stream` was folded into it 2026-10-24), then the widths count down octet by octet:
   for `10.0.2.143` that is `10.000.002.143`, `10.000.02.143`, `10.000.2.143`,
   `10.00.002.143`, `10.00.2.143`, `10.0.002.143`, `10.0.02.143` (7). An
   address with one paddable octet (`192.168.1.50`) has a one-entry family,
@@ -928,7 +928,7 @@ project:
   with their last values, ignored by the release code.
   Correction (2026-10-24): `Dev Server` is ignored, but release builds keep
   the `Connection Test` action, whose "Diagnostic Server" target reads that
-  property (`Connection_Test` in `src/hue_bridge/driver.lua`).
+  property (`Connection_Test`, since 2026-10-24 in `src/hue_bridge/bridge/devtools.lua`, dev builds only).
 - **Build 125: Documentation tab and icons (2026-10-22 13:27, Windows
   session)**: installed the same way over 116; every device read 125 a
   minute later with state intact. The tab strip became "Properties |

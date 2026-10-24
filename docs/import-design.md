@@ -451,7 +451,6 @@ g:group(rid) -> { rid, type = "room"|"zone"|"bridge_home", name, children = { ri
                   child_rtype = "device"|"light"|"room", grouped_light_rid, id_v1 } | nil
 g:groups(type?) -> array sorted by name; nil = rooms then zones
 g:room_of_device(device_rid) -> group_rid | nil
-g:zones_of_light(light_rid) -> array of zone rids (sorted by name)
 g:label(rid) -> "Kitchen" | "Downstairs (zone)" | "(no room)" for nil or unknown
 ```
 
@@ -461,8 +460,8 @@ shape above (children as `{ rid, rtype }` pairs reduced to rids plus one
 item)` merges a partial update (a `children` array replaces the whole list).
 `hue_model.light(item)` gains `id_v1` and `service_id`;
 `hue_model.connectivity(item)` gains `mac_address`;
-`hue_model.configure_params(light, device, extra)` and
-`hue_model.registry_configure_params(rid, entry, extra)` merge the string
+`hue_model.registry_configure_params (configure_params merged into it 2026-10-24)(light, device, extra)` and
+`hue_model.registry_configure_params(rid, entry, extra)` (the only configure-params builder since 2026-10-24) merge the string
 fields of `extra` (`hue_room`, `id_v1`, `state`) into the result.
 
 ### `tests/helpers/fake_c4.lua` additions

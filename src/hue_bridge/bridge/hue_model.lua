@@ -360,16 +360,6 @@ function hue_model.registry_configure_params(rid, entry, extra)
 	return merge_extra(params, extra)
 end
 
--- HUE_CONFIGURE params from a live normalised light and (optionally) its
--- device record from devices(); `extra` as above.
-function hue_model.configure_params(light, device, extra)
-	return hue_model.registry_configure_params(light.rid, {
-		name = light.name,
-		model = device and device.model or nil,
-		caps = hue_model.caps(light),
-	}, extra)
-end
-
 -- Groups ---------------------------------------------------------------------
 
 -- The rtype a group's children nominally have [verified: Core Concepts, and
@@ -587,7 +577,7 @@ end
 -- auto_dynamic } (a catalogue scene, or a registry entry given its rid):
 -- { rid, name, id_v1?, auto_dynamic ("true"/"false") }, plus the string
 -- fields of `extra` (group_name, group_type, state, gone_since; nil and ""
--- skipped) merged as configure_params() does. Every value is a string.
+-- skipped) merged as registry_configure_params() does. Every value is a string.
 function hue_model.scene_configure_params(scene, extra)
 	local params = {
 		rid = tostring(scene.rid),
@@ -868,18 +858,6 @@ function hue_model.current_slot(model)
 	return nil
 end
 
--- The number of smart_scene items in a list (a GET /smart_scene body's data,
--- or any mixed list); what v1 did with them, kept for compatibility.
-function hue_model.smart_scene_count(items)
-	local count = 0
-	for _, item in ipairs(type(items) == "table" and items or {}) do
-		if type(item) == "table" and item.type == "smart_scene" then
-			count = count + 1
-		end
-	end
-	return count
-end
-
 -- Grouped lights and zone lights -----------------------------------------------
 -- docs/zone-light-design.md: a Hue zone or room as a light_v2 light. A
 -- grouped_light item (GET or stream) carries `on.on` (true while any member
@@ -1020,7 +998,7 @@ end
 -- "group", group_type?, light_count?, no_lights ("true" only while the group
 -- has no grouped_light, else "false"), hue_room (the group's own label),
 -- id_v1?, and the string fields of `extra` (state, gone_since; nil and ""
--- skipped) merged as configure_params() does. Every value is a string; the
+-- skipped) merged as registry_configure_params() does. Every value is a string; the
 -- model is "Hue zone" / "Hue room" and absent for an unknown type.
 function hue_model.group_configure_params(rid, entry, extra)
 	entry = type(entry) == "table" and entry or {}

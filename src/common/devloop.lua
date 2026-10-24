@@ -14,11 +14,12 @@
 -- fails with curl error 2. A tick that fires while the previous chain is
 -- still in flight is skipped.
 --
--- Light side: a light driver never talks to the server. The bridge hands it
--- the light tree's bundle as a DEV_RELOAD command, and the light's
--- dispatch.commands["DEV_RELOAD"] = devloop.apply_forwarded reloads it with
--- the same sequence the bridge uses on itself. devloop.start() is never
--- called on a light.
+-- Device side: a light or scene driver never talks to the server. The bridge
+-- hands it its tree's bundle as a DEV_RELOAD command, which the handler from
+-- devloop.reload_handler applies with the same sequence the bridge uses on
+-- itself, and every non-debug line the device logs goes to the bridge as
+-- HUE_LOG through the sink devloop.forward_logs installs. devloop.start() is
+-- never called on a device.
 --
 -- State lives in _G.__DEVLOOP so a reload of the rest of the driver cannot
 -- lose the timer or the log buffer; package.loaded["common.devloop"] is the
@@ -36,6 +37,8 @@
 --   devloop.own_tree()        -> "light" / "scene" / "bridge" from the driver file name
 --   devloop.apply_forwarded(params)  the light's or scene's DEV_RELOAD handler -> bool;
 --                                a bundle for another tree is skipped
+--   devloop.reload_handler(log, tree)  the dispatch handler a device registers for DEV_RELOAD
+--   devloop.forward_logs(log, prefix, get_bridge, get_rid)  a device's HUE_LOG sink -> flush function
 
 local devloop = {}
 
@@ -43,6 +46,7 @@ devloop.INTERVAL_MS = 3000
 devloop.HEARTBEAT_MS = 30000
 devloop.MAX_LOG_LINES = 500
 devloop.STUCK_TICKS = 10      -- ticks before an unfinished chain is abandoned
+devloop.LOG_BUFFER = 30       -- lines a device keeps for its bridge while the bridge is unknown
 
 -- Shared state, created once per Lua state and reused across reloads. Created
 -- at load time, so apply_forwarded works on a light where start() never runs.
@@ -681,6 +685,101 @@ function devloop.apply_forwarded(params)
 	end
 	say("%s reload complete: version %s", kind, version)
 	return true
+end
+
+-- The device's DEV_RELOAD handler (dispatch.commands["DEV_RELOAD"]) for the
+-- driver whose source tree is `tree` ("light" / "scene"); `log` is the
+-- driver's common.log. Release builds register none, since they have no
+-- devloop module.
+function devloop.reload_handler(log, tree)
+	return function(params)
+		params = params or {}
+		-- Lights and scene devices share the bridge's binding; a bundle for
+		-- another tree is not ours (an older bridge forwards without
+		-- filtering; docs/scenes-design.md §6).
+		if params.tree and params.tree ~= tree then
+			return log.debug("DEV_RELOAD for the %s tree ignored", tostring(params.tree))
+		end
+		-- On success the new code is already running; this handler, its log
+		-- module and its bridge id are the old instance's, still good for one
+		-- more line. The failure detail went through devloop's own print,
+		-- which is not forwarded.
+		if devloop.apply_forwarded(params) then
+			log.always("%s reloaded to version %s", tree, tostring(params.version))
+		else
+			log.warn("%s reload failed; see this %s's Lua output", tree, tree)
+		end
+	end
+end
+
+-- Device-side log forwarding ---------------------------------------------
+
+-- Dev builds: every line a device driver logs, debug excepted, also goes to
+-- its bridge as HUE_LOG { rid, line }, so the loop shows the devices' output
+-- next to the bridge's own (docs/dev-loop.md). `log` is the driver's
+-- common.log and `prefix` its log prefix; `get_bridge` and `get_rid` answer
+-- the bound bridge's device id and the device's rid, nil while unknown.
+-- Lines logged before the bridge is known wait, newest LOG_BUFFER kept, and
+-- go out when the returned flush function runs (the driver's hello). Release
+-- builds have no devloop module and leave log.sink alone.
+function devloop.forward_logs(log, prefix, get_bridge, get_rid)
+	local previous_sink = log.sink
+	local original_print = print -- the driver's print as it is now, for a failure the sink must not see
+	-- The driver's runtime as it is now: the one C4 for the life of the Lua
+	-- state on the controller; in the test harness, where drivers loaded one
+	-- after another share common.log, the sink an earlier driver installed
+	-- keeps sending through that driver's runtime, as its upvalues did.
+	local c4 = C4
+	local pending = {}
+	local send_failed = false
+
+	-- Only lines our own logger produced: "[LEVEL] <prefix>: ..." or, from
+	-- log.always, "<prefix>: ...". On the controller that is every line; the
+	-- test harness shares one common.log between drivers, where forwarding
+	-- another driver's output would echo back and forth.
+	local OWN_PLAIN = "^" .. prefix .. ": "
+	local OWN_LEVELED = "^%[%u+%] " .. prefix .. ": "
+	local function own_line(line)
+		return line:find(OWN_PLAIN) ~= nil or line:find(OWN_LEVELED) ~= nil
+	end
+
+	-- A failing send is said once per failure streak, through print alone,
+	-- so it cannot feed back into the forwarding.
+	local function send_log(line)
+		local ok, err = pcall(function()
+			c4:SendToDevice(get_bridge(), "HUE_LOG", { rid = get_rid(), line = line }, false, false)
+		end)
+		if ok then
+			send_failed = false
+		elseif not send_failed then
+			send_failed = true
+			original_print("[WARN] " .. prefix .. ": log forwarding to the bridge failed: " .. tostring(err))
+		end
+	end
+
+	log.sink = function(line)
+		previous_sink(line)
+		line = tostring(line)
+		if line:sub(1, 7) == "[DEBUG]" or not own_line(line) then
+			return
+		end
+		if get_bridge() then
+			send_log(line)
+		else
+			pending[#pending + 1] = line
+			if #pending > devloop.LOG_BUFFER then
+				table.remove(pending, 1)
+			end
+		end
+	end
+
+	return function()
+		local lines = pending
+		pending = {}
+		for _, line in ipairs(lines) do
+			send_log(line)
+		end
+	end
 end
 
 return devloop

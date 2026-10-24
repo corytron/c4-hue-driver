@@ -6,7 +6,7 @@ describe("bridge.conntest", function()
 
 	local target = {
 		name = "diagnostic server", ip = "192.0.2.7:8443",
-		stream_path = "/stream", ping_path = "/ping", ca = { mode = "insecure" },
+		stream_path = "/stream", ping_path = "/ping", tls = { ssl_verify_peer = false, ssl_verify_host = false },
 	}
 
 	before_each(function()
@@ -20,7 +20,7 @@ describe("bridge.conntest", function()
 		conntest.run(target, function(line) table.insert(lines, line) end, function(s) summary = s end)
 	end)
 
-	it("opens the stream with the target's CA mode and waits for headers before pinging", function()
+	it("opens the stream with the target's TLS options and waits for headers before pinging", function()
 		local s = c4.transfers[1]
 		assert.equal("https://192.0.2.7:8443/stream", s.url)
 		assert.is_false(s.options.ssl_verify_peer)
@@ -100,15 +100,15 @@ describe("bridge.conntest", function()
 		assert.truthy(lines[2]:find("failed before headers: 7 Failed to connect", 1, true))
 	end)
 
-	it("sends the bridge's key and Accept header when the target has them", function()
+	it("sends the bridge's key and Accept header when the target has them, on the driver's bundle", function()
 		c4 = fake.install_c4()
 		conntest.run({ name = "bridge", ip = "192.0.2.10", key = "k", stream_path = "/eventstream/clip/v2",
-			ping_path = "/clip/v2/resource/bridge", headers = { Accept = "text/event-stream" },
-			ca = { mode = "cabundle", path = "certs/hue_ca_bundle.pem" } }, nil, function() end)
+			ping_path = "/clip/v2/resource/bridge", headers = { Accept = "text/event-stream" } }, nil, function() end)
 		local s = c4.transfers[1]
 		assert.equal("k", s.headers["hue-application-key"])
 		assert.equal("text/event-stream", s.headers.Accept)
 		assert.equal("certs/hue_ca_bundle.pem", s.options.ssl_cabundle)
+		assert.is_true(s.options.ssl_verify_peer)
 		s:respond_headers(200, {})
 		c4.fire_timers()
 		assert.equal("k", c4.transfers[2].headers["hue-application-key"])

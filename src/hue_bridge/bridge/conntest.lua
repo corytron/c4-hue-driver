@@ -14,7 +14,7 @@
 --      does abort it.
 -- Run it against the diagnostic server on the LAN (which logs every
 -- connection it sees) and against the bridge; the two together attribute a
--- timeout to Director or to the bridge.
+-- timeout to Director or to the bridge. Dev builds only (bridge/devtools.lua).
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -24,8 +24,19 @@ local conntest = {}
 conntest.PING_TIMEOUT = 15
 conntest.CONTROL_HOST = "example.com"
 
+-- TLS options for the targets that are not the bridge (the bridge uses the
+-- driver's bundle, bridge/http.lua): the diagnostic server's self-signed
+-- certificate goes unverified, the control host is checked against the
+-- platform's CAs.
+conntest.TLS_INSECURE = { ssl_verify_peer = false, ssl_verify_host = false }
+conntest.TLS_SYSTEM = { ssl_verify_peer = true, ssl_verify_host = true }
+
+local function c4_time()
+	return C4:GetTime()
+end
+
 local function now_ms()
-	local ok, t = pcall(function() return C4:GetTime() end)
+	local ok, t = pcall(c4_time)
 	if ok and type(t) == "number" then
 		return t
 	end
@@ -33,7 +44,8 @@ local function now_ms()
 end
 
 -- target = { name, ip (host or host:port), stream_path, ping_path,
---            headers (optional), key (optional), ca }
+--            headers (optional), key (optional), tls (optional ssl_* options
+--            in place of the bundle's) }
 -- report(line) receives one line per step; done(summary) at the end, where
 -- summary = { stream_ok, ping_ok, concurrent_ok (count), control_ok, lines }.
 function conntest.run(target, report, done)
@@ -69,7 +81,7 @@ function conntest.run(target, report, done)
 	local function get(path, timeout, callback)
 		local t0 = now_ms()
 		return http.request({
-			ip = target.ip, path = path, key = target.key, ca = target.ca, timeout = timeout,
+			ip = target.ip, path = path, key = target.key, tls = target.tls, timeout = timeout,
 		}, function(r)
 			callback(r, now_ms() - t0)
 		end)
@@ -82,7 +94,7 @@ function conntest.run(target, report, done)
 
 	local function step4()
 		local t0 = now_ms()
-		http.request({ ip = conntest.CONTROL_HOST, path = "/", ca = { mode = "system" },
+		http.request({ ip = conntest.CONTROL_HOST, path = "/", tls = conntest.TLS_SYSTEM,
 			timeout = conntest.PING_TIMEOUT }, function(r)
 			summary.control_ok = r.ok or (r.code ~= nil)
 			say("step 4 control GET %s: %s in %d ms", conntest.CONTROL_HOST, describe(r), now_ms() - t0)
@@ -121,7 +133,7 @@ function conntest.run(target, report, done)
 	local t0 = now_ms()
 	local headers_seen = false
 	stream_transfer = http.stream({
-		ip = target.ip, key = target.key, path = target.stream_path, ca = target.ca,
+		ip = target.ip, key = target.key, path = target.stream_path, tls = target.tls,
 		headers = target.headers, timeout = 300,
 	}, {
 		on_headers = function(code)

@@ -16,8 +16,8 @@ describe("bridge.altaddr", function()
 
 	it("gives distinct strings for the stream and the self-check", function()
 		local ip = "10.0.2.143"
-		assert.are_not.equal(altaddr.for_stream(ip), altaddr.for_check(ip))
-		assert.are_not.equal(altaddr.for_stream(ip), ip)
+		assert.are_not.equal(altaddr.padded(ip, 3), altaddr.for_check(ip))
+		assert.are_not.equal(altaddr.padded(ip, 3), ip)
 		assert.are_not.equal(altaddr.for_check(ip), ip)
 	end)
 
@@ -39,10 +39,10 @@ describe("bridge.altaddr", function()
 		}, altaddr.stream_family("192.0.2.10"))
 	end)
 
-	it("starts the family at for_stream and keeps the command and self-check spellings out of it", function()
+	it("starts the family at the all-3-digit spelling and keeps the command and self-check spellings out of it", function()
 		for _, ip in ipairs({ "192.0.2.10", "1.2.3.4" }) do
 			local family = altaddr.stream_family(ip)
-			assert.equal(altaddr.for_stream(ip), family[1])
+			assert.equal(altaddr.padded(ip, 3), family[1])
 			for _, spelling in ipairs(family) do
 				assert.are_not.equal(ip, spelling)
 				assert.are_not.equal(altaddr.for_check(ip), spelling)

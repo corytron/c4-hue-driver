@@ -278,6 +278,19 @@ describe("bridge.scenes", function()
 			assert.equal(5, S:bridge_count())
 		end)
 
+		it("hands the grouped_light items to its done callback, nil when that GET failed", function()
+			local got = "unset"
+			S:resync(function(_, _, _, grouped) got = grouped end)
+			answer_gets({ grouped = grouped_lights({ living_room = true, garage = false }) })
+			assert.equal("table", type(got))
+			assert.equal(2, #got)
+			assert.equal(F.grouped_light_rids.garage, got[1].id)
+			assert.is_true(got[2].on.on)
+			S:resync(function(_, _, _, grouped) got = grouped end)
+			answer_gets({ grouped_code = 503 })
+			assert.is_nil(got)
+		end)
+
 		it("runs a resync requested during a resync once more afterwards, latest done wins", function()
 			S:resync(function() done(true, "first") end)
 			S:resync(function() done(true, "second") end)
@@ -338,8 +351,7 @@ describe("bridge.scenes", function()
 			assert.same({ rid = F.scene_rids.relax, active = "inactive", reason = "resync" }, c4.sent[2].params)
 			assert.is_nil(entry.kind, "an ordinary scene's entry has no kind")
 			assert.equal("5 + 1 time-based on bridge, 1 imported, 0 deleted", S:summary())
-			assert.equal(2001, S:device_for(F.scene_rids.relax))
-			assert.equal(F.scene_rids.relax, S:rid_for(2001))
+			assert.equal(F.scene_rids.relax, (S.reg:by_device(2001)))
 			assert.is_true(saw_log("scenes: Added Relax to Living Room (device 2001)"))
 		end)
 
@@ -393,7 +405,7 @@ describe("bridge.scenes", function()
 			resync()
 			S:add_scene(F.scene_rids.relax, nil, done)
 			assert.equal(2001, S:entry(F.scene_rids.relax).device_id)
-			assert.equal(3001, S:proxy_for(F.scene_rids.relax))
+			assert.equal(3001, S:entry(F.scene_rids.relax).proxy_id)
 			assert.is_true(saw_log("AddDevice callback for scene Relax"))
 		end)
 	end)
@@ -1348,9 +1360,9 @@ describe("bridge.scenes", function()
 				.. "Bright (device 2095): 2 bound devices share that name; rename one in Composer and run Link Devices again; "
 				.. "Bright (device 2096): 2 bound devices share that name; rename one in Composer and run Link Devices again",
 				text)
-			assert.equal(2091, S:device_for(F.scene_rids.relax))
-			assert.equal(2092, S:device_for(F.scene_rids.savanna))
-			assert.equal(2093, S:device_for(F.scene_rids.nightlight))
+			assert.equal(2091, S:entry(F.scene_rids.relax).device_id)
+			assert.equal(2092, S:entry(F.scene_rids.savanna).device_id)
+			assert.equal(2093, S:entry(F.scene_rids.nightlight).device_id)
 			assert.same({ "HUE_SCENE_CONFIGURE@2091", "HUE_SCENE_STATE@2091", "HUE_SCENE_CONFIGURE@2092", "HUE_SCENE_STATE@2092",
 				"HUE_SCENE_CONFIGURE@2093", "HUE_SCENE_STATE@2093" }, commands_sent())
 		end)
@@ -1715,8 +1727,8 @@ describe("bridge.scenes", function()
 				c4.sent = {}
 				assert.equal(4, S:on_container(container(smart_event(SMART.golden, '"state":"active"'))))
 				for _, id in ipairs({ 2001, 2002, 2004 }) do
-					assert.same({ { id = id, command = "HUE_SCENE_GROUP", params = { rid = S:rid_for(id), other_active = "true" } } },
-						sent_to(id), "device " .. id)
+					assert.same({ { id = id, command = "HUE_SCENE_GROUP", params = { rid = (S.reg:by_device(id)),
+						other_active = "true" } } }, sent_to(id), "device " .. id)
 				end
 				assert.equal("active", sent_to(2003, "HUE_SCENE_STATE")[1].params.active)
 				assert.same({}, sent_to(2005), "another group")
@@ -2100,6 +2112,85 @@ describe("bridge.scenes", function()
 					name = "Golden hours" } } }, c4.sent)
 				assert.equal("Living Room: Golden hours (time-based)", text_of(S:picker_scenes(), SMART.living))
 			end)
+		end)
+	end)
+
+	describe("list_items", function()
+		local function deleted(ts)
+			return " (deleted from Composer " .. os.date("%Y-%m-%d", ts) .. ")"
+		end
+
+		local function no_commas(items)
+			for _, item in ipairs(items) do
+				assert.is_nil(item:find(",", 1, true), "comma in " .. item)
+			end
+		end
+
+		it("is empty before the first GET with nothing registered, and for a bridge without scenes", function()
+			assert.same({}, S:list_items())
+			resync({ body = '{"errors":[],"data":[]}', smart = '{"errors":[],"data":[]}' })
+			assert.same({}, S:list_items())
+		end)
+
+		it("lists every scene by group as the Add Scene picker does, time-based first, with its device", function()
+			resync()
+			assert.same({
+				"Downstairs (zone): Golden hours (time-based)",
+				"Downstairs (zone): Bright (in Golden hours)",
+				"Downstairs (zone): Nightlight (in Golden hours)",
+				"Garage: Concentrate",
+				"Living Room: Relax",
+				"Living Room: Savanna sunset",
+			}, S:list_items())
+			S:add_scene(F.scene_rids.relax, nil, done)
+			S:add_scene(F.smart_scene_rid, GARAGE_ROOM, done)
+			local items = S:list_items()
+			assert.equal("Downstairs (zone): Golden hours (time-based) → device 2002", items[1])
+			assert.equal("Living Room: Relax → device 2001", items[5])
+			assert.equal(6, #items)
+		end)
+
+		it("marks tombstones, missing scenes and unbound devices", function()
+			add_relax()                                             -- device 2001
+			S:add_scene(F.scene_rids.nightlight, GARAGE_ROOM, done) -- device 2002
+			S:add_scene(F.scene_rids.concentrate, nil, done)        -- device 2003
+			now = T0 + 100
+			S:goodbye({ device_id = "2002" })
+			S:on_container(container(F.events.scene_deleted))       -- Relax, deleted in the Hue app
+			S:on_binding_changed(1, "HUE_BRIDGE", false, 2003)
+			assert.same({
+				"Downstairs (zone): Golden hours (time-based)",
+				"Downstairs (zone): Bright (in Golden hours)",
+				"Downstairs (zone): Nightlight (in Golden hours)" .. deleted(T0 + 100),
+				"Garage: Concentrate (unbound; device 2003)",
+				"Living Room: Relax (missing; device 2001)",
+				"Living Room: Savanna sunset",
+			}, S:list_items())
+			assert.equal("4 + 1 time-based on bridge, 2 imported, 1 missing, 1 unbound, 1 deleted", S:summary())
+		end)
+
+		it("reads the registry alone before the first GET", function()
+			add_relax()
+			S = new_scenes()
+			S:load()
+			assert.is_false(S.synced)
+			assert.same({ "Living Room: Relax → device 2001" }, S:list_items())
+		end)
+
+		it("turns commas into U+201A, in names and in the schedules a scene is in", function()
+			resync({ body = F.scene:gsub('"name":"Relax"', '"name":"Relax, please"'), smart = F.smart_scenes })
+			local items = S:list_items()
+			assert.same({
+				"Downstairs (zone): Golden hours (time-based)",
+				"Downstairs (zone): Natural light (time-based)",
+				"Downstairs (zone): Bright (in Golden hours‚ Natural light)",
+				"Downstairs (zone): Nightlight (in Golden hours‚ Natural light)",
+				"Garage: Concentrate",
+				"Living Room: Golden hours (time-based)",
+				"Living Room: Relax‚ please (in Golden hours)",
+				"Living Room: Savanna sunset (in Golden hours)",
+			}, items)
+			no_commas(items)
 		end)
 	end)
 end)

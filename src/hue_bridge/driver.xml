@@ -1,5 +1,5 @@
 <devicedata>
-	<copyright>Copyright 2026 Cory Fair. Private, not for distribution.</copyright>
+	<copyright>Copyright 2026 Cory Fair. Licensed under the Apache License, Version 2.0 (see LICENSE). Not affiliated with Signify or Snap One.</copyright>
 	<creator>Cory Fair</creator>
 	<manufacturer>Philips Hue</manufacturer>
 	<name>Hue Bridge</name>
@@ -64,11 +64,12 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- A list (summary on the row, every item in the drop-down), since
+				 Composer clips a value at about 75 characters; a pick changes nothing. -->
 			<property>
 				<name>Lights</name>
-				<default></default>
-				<type>STRING</type>
-				<readonly>true</readonly>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
 			</property>
 			<!-- docs/import-design.md §6: what needs the owner's attention, the
 			     result of the last click, and the Hue room → Control4 room map. -->
@@ -78,11 +79,12 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- A list (summary on the row, every item in the drop-down), since
+				 Composer clips a value at about 75 characters; a pick changes nothing. -->
 			<property>
 				<name>Last Action</name>
-				<default></default>
-				<type>STRING</type>
-				<readonly>true</readonly>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
 			</property>
 			<!-- A list, not a string: Composer's value column shows about 75
 				 characters and does not wrap, so the row carries a summary and
@@ -94,19 +96,21 @@
 				<readonly>false</readonly>
 				<tooltip>Open the list to read every Hue room and zone with its Control4 room</tooltip>
 			</property>
+			<!-- A list (summary on the row, every item in the drop-down), since
+				 Composer clips a value at about 75 characters; a pick changes nothing. -->
 			<property>
 				<name>Scenes</name>
-				<default></default>
-				<type>STRING</type>
-				<readonly>true</readonly>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
 			</property>
 			<!-- docs/zone-light-design.md §5: zones and rooms imported as
 				 Hue Light devices of kind "group". -->
+			<!-- A list (summary on the row, every item in the drop-down), since
+				 Composer clips a value at about 75 characters; a pick changes nothing. -->
 			<property>
 				<name>Zone Lights</name>
-				<default></default>
-				<type>STRING</type>
-				<readonly>true</readonly>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
 			</property>
 			<property>
 				<name>Stream Address</name>
@@ -126,6 +130,8 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- DEV-ONLY BEGIN: tools/build.sh strips this block from release
+				 builds (docs/dev-loop.md); development builds keep it. -->
 			<property>
 				<name>Diagnostic Server</name>
 				<default></default>
@@ -138,12 +144,13 @@
 				<type>STRING</type>
 				<readonly>false</readonly>
 			</property>
+			<!-- DEV-ONLY END -->
 			<property>
 				<name>Stream Timeout (s)</name>
 				<type>RANGED_INTEGER</type>
 				<minimum>30</minimum>
 				<maximum>86400</maximum>
-				<default>600</default>
+				<default>3600</default>
 				<readonly>false</readonly>
 			</property>
 			<property>
@@ -151,7 +158,7 @@
 				<type>RANGED_INTEGER</type>
 				<minimum>0</minimum>
 				<maximum>3600</maximum>
-				<default>300</default>
+				<default>600</default>
 				<readonly>false</readonly>
 			</property>
 		</properties>
@@ -367,6 +374,8 @@
 				<sort_order>21</sort_order>
 				<params/>
 			</action>
+			<!-- DEV-ONLY BEGIN: diagnostics for development builds only;
+				 tools/build.sh strips this block from release builds. -->
 			<action>
 				<name>Connection Test</name>
 				<command>Connection Test</command>
@@ -394,6 +403,7 @@
 				<sort_order>24</sort_order>
 				<params/>
 			</action>
+			<!-- DEV-ONLY END -->
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>

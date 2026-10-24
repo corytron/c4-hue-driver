@@ -93,7 +93,7 @@ Scenes Of Room, playable from tiles, keypads, programming and the slider.
   and returns a table of changed field names (or nil);
   `hue_model.base_name(name)` strips one trailing " <digits>";
   `hue_model.current_slot(model)` → the slot table for (slot_weekday,
-  slot_id) or nil. `smart_scene_count` stays for compatibility.
+  slot_id) or nil. `smart_scene_count` was removed on 2026-10-24 (unused).
 - `bridge/scenes.lua` (scenes agent): everything in Decisions 2–14 on the
   bridge side, using the model functions above; tests use the fixtures
   `F.smart_scenes`, `F.smart_scene_rids`, `F.smart_scene_items` and
