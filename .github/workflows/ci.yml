@@ -21,7 +21,7 @@ jobs:
     name: Lint and test (Lua 5.1)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The controller runs Lua 5.1 semantics (LuaJIT), so the specs run on
       # Lua 5.1 too. dkjson is what the fake runtime and the specs decode with.
@@ -47,7 +47,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # tools/build.sh stamps the build number from `git rev-list --count HEAD`;
           # a shallow checkout would stamp every package as build 1.
@@ -78,7 +78,7 @@ jobs:
           done
           ls -l build/*.c4z
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hue-drivers-build-${{ github.run_number }}
           path: build/*.c4z
