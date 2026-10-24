@@ -1,6 +1,6 @@
 # Control4 ⇄ Philips Hue driver
 
-Custom Control4 DriverWorks driver that controls Philips Hue lighting through the Hue bridge's local API. Personal project for one home; the repo is private and must stay private (see "Licensing" below).
+Custom Control4 DriverWorks driver that controls Philips Hue lighting through the Hue bridge's local API. Personal project for one home, public on GitHub under the Apache License 2.0 since 2026-10-24 (see "Licensing" below).
 
 ## How I want you to work
 
@@ -86,4 +86,4 @@ docs/           design notes and the testing checklist I run in Composer
 
 ## Licensing
 
-The DriverWorks documentation and libraries are Snap One property and carry restrictive terms. Keep this repo private, don't copy large passages of the docs into the repo, and don't publish the driver without me deciding that explicitly.
+The DriverWorks documentation and libraries are Snap One property and carry restrictive terms, and the repository is public: never copy passages of the Snap One docs or of Signify's login-walled docs into it, never vendor Snap One code, keep every LAN address, key, bridge id and project name out of it (placeholders only: 10.0.2.143 bridge, 192.0.2.7 VM, 001788fffe123abc bridge id), and keep the trademark and non-affiliation lines of NOTICE and the manuals. Releases are GitHub releases with the three .c4z files attached (docs/release-checklist.md).

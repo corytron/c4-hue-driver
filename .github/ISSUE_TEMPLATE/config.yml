@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and help
+    url: https://github.com/corytron/c4-hue-driver/discussions
+    about: How-to questions, pairing and Composer troubles that are not clearly a bug, and anything you want to talk through. Chapter 12 of the manual (the Documentation tab of the Hue Bridge device) answers the common ones.
+  - name: Security problem
+    url: https://github.com/corytron/c4-hue-driver/security/advisories/new
+    about: Report a vulnerability privately (see SECURITY.md); do not open a public issue for it.
