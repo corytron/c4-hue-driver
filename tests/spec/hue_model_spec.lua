@@ -830,9 +830,575 @@ describe("bridge.hue_model", function()
 		end)
 	end)
 
+	describe("base_name()", function()
+		it("drops the number the Hue app gives repeats", function()
+			assert.equal("Golden hours", hue_model.base_name("Golden hours 4"))
+			assert.equal("Golden hours", hue_model.base_name("Golden hours 11"))
+			assert.equal("Natural light", hue_model.base_name("Natural light 6"))
+		end)
+
+		it("strips exactly one trailing number", function()
+			assert.equal("Scene 2", hue_model.base_name("Scene 2 3"))
+			assert.equal("Scene", hue_model.base_name(hue_model.base_name("Scene 2 3")))
+		end)
+
+		it("leaves a name without a trailing space and digits as it is", function()
+			for _, name in ipairs({ "Natural light", "Golden hours", "Room4", "Golden hours 4a", "Golden hours\t4",
+				"Golden hours 4 ", "4", "", "Scene 2 three" }) do
+				assert.equal(name, hue_model.base_name(name))
+			end
+		end)
+
+		it("keeps a name that would be left blank", function()
+			assert.equal(" 4", hue_model.base_name(" 4"))
+			assert.equal("   12", hue_model.base_name("   12"))
+		end)
+
+		it("is nil for anything that is not a string", function()
+			assert.is_nil(hue_model.base_name(nil))
+			assert.is_nil(hue_model.base_name(4))
+			assert.is_nil(hue_model.base_name({}))
+			assert.is_nil(hue_model.base_name(true))
+		end)
+	end)
+
+	-- Every fixture schedule runs every day, in the order the house bridge
+	-- lists the days.
+	local EVERY_DAY = { "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday" }
+
+	-- A week_timeslots entry for `days`; each slot is { start_time, target rid }.
+	local function schedule(days, slots)
+		local timeslots = {}
+		for i, slot in ipairs(slots) do
+			timeslots[i] = { start_time = slot[1], target = { rid = slot[2], rtype = "scene" } }
+		end
+		return { recurrence = days, timeslots = timeslots }
+	end
+
+	-- A start_time of kind "time".
+	local function at(hour, minute)
+		return { kind = "time", time = { hour = hour, minute = minute, second = 0 } }
+	end
+
+	describe("smart_scene()", function()
+		local smart_items
+
+		before_each(function()
+			smart_items = by_rid(items(F.smart_scenes))
+		end)
+
+		it("parses a room's smart scene: names, group, state, slot, slots and transition", function()
+			local s = hue_model.smart_scene(decode(F.smart_scene_items.living))
+			assert.same({
+				rid = F.smart_scene_rids.living,
+				name = "Golden hours 4",
+				base_name = "Golden hours",
+				group_rid = F.group_rids.living_room,
+				group_type = "room",
+				state = "inactive",
+				slot_id = 0,
+				slot_weekday = "saturday",
+				slots = {
+					{ days = EVERY_DAY, start = "07:00", target_rid = F.scene_rids.savanna },
+					{ days = EVERY_DAY, start = "16:00", target_rid = F.scene_rids.relax },
+				},
+				transition_duration = 60000,
+			}, s)
+			assert.same(s, hue_model.smart_scene(smart_items[F.smart_scene_rids.living]), "the same from the GET body")
+		end)
+
+		it("parses every smart scene of the GET body, two of them in one zone", function()
+			local seen, per_group = {}, {}
+			for _, raw in ipairs(items(F.smart_scenes)) do
+				local s = hue_model.smart_scene(raw)
+				seen[#seen + 1] = s.name .. " / " .. s.base_name .. " / " .. s.group_type
+				per_group[s.group_rid] = (per_group[s.group_rid] or 0) + 1
+				assert.equal("inactive", s.state)
+				assert.equal(60000, s.transition_duration)
+				assert.equal(2, #s.slots)
+			end
+			assert.same({
+				"Golden hours / Golden hours / zone",
+				"Natural light 6 / Natural light / zone",
+				"Golden hours 4 / Golden hours / room",
+			}, seen)
+			assert.same({ [F.group_rids.downstairs] = 2, [F.group_rids.living_room] = 1 }, per_group)
+		end)
+
+		it("reads a sunset start as sunset, with or without its time block", function()
+			local raw = smart_items[F.smart_scene_rids.golden]
+			assert.is_table(raw.week_timeslots[1].timeslots[2].start_time.time, "the house bridge sends one")
+			local golden = hue_model.smart_scene(raw)
+			assert.same({ "07:00", "sunset" }, { golden.slots[1].start, golden.slots[2].start })
+			assert.same({ F.scene_rids.bright, F.scene_rids.nightlight },
+				{ golden.slots[1].target_rid, golden.slots[2].target_rid })
+			local older = items(F.smart_scene)[1]
+			assert.is_nil(older.week_timeslots[1].timeslots[2].start_time.time)
+			assert.equal("sunset", hue_model.smart_scene(older).slots[2].start)
+		end)
+
+		it("writes a time start as zero-padded HH:MM without seconds, slots in their order", function()
+			local natural = hue_model.smart_scene(smart_items[F.smart_scene_rids.natural])
+			assert.same({ "06:30", "21:00" }, { natural.slots[1].start, natural.slots[2].start })
+			local s = hue_model.smart_scene({ id = "ss", type = "smart_scene", week_timeslots = {
+				schedule({ "monday" }, {
+					{ { kind = "time", time = { hour = 23, minute = 59, second = 30 } }, "a" },
+					{ { kind = "time", time = { hour = 0, minute = 5 } }, "b" },
+					{ at(9, 0), "c" },
+				}),
+			} })
+			assert.same({ "23:59", "00:05", "09:00" }, { s.slots[1].start, s.slots[2].start, s.slots[3].start })
+			assert.same({ "a", "b", "c" }, { s.slots[1].target_rid, s.slots[2].target_rid, s.slots[3].target_rid })
+		end)
+
+		it("takes any other start kind as written, sunrise included", function()
+			local s = hue_model.smart_scene({ id = "ss", type = "smart_scene", week_timeslots = {
+				schedule({ "monday" }, {
+					{ { kind = "sunrise", time = { hour = 0, minute = 0, second = 0 } }, "a" },
+					{ { kind = "sunset" }, "b" },
+					{ { kind = "civil_dusk" }, "c" },
+				}),
+			} })
+			assert.same({ "sunrise", "sunset", "civil_dusk" }, { s.slots[1].start, s.slots[2].start, s.slots[3].start })
+		end)
+
+		it("leaves a start unknown without a kind, or without a whole clock in range", function()
+			local function start(start_time)
+				local s = hue_model.smart_scene({ id = "ss", type = "smart_scene",
+					week_timeslots = { schedule({ "monday" }, { { start_time, "a" } }) } })
+				assert.equal("a", s.slots[1].target_rid, "the target is read on its own")
+				return s.slots[1].start
+			end
+			assert.equal("07:00", start(at(7, 0)))
+			assert.is_nil(start(nil))
+			assert.is_nil(start("07:00"))
+			assert.is_nil(start({ kind = "" }))
+			assert.is_nil(start({ kind = {} }))
+			assert.is_nil(start({ time = { hour = 7, minute = 0 } }))
+			assert.is_nil(start({ kind = "time" }))
+			assert.is_nil(start({ kind = "time", time = "07:00" }))
+			assert.is_nil(start({ kind = "time", time = { hour = "7", minute = 0 } }))
+			assert.is_nil(start({ kind = "time", time = { hour = 7 } }))
+			assert.is_nil(start(at(24, 0)))
+			assert.is_nil(start(at(7, 60)))
+			assert.is_nil(start(at(7.5, 0)))
+			assert.is_nil(start(at(-1, 0)))
+		end)
+
+		it("keeps a malformed timeslot's place, so a timeslot_id still names the right slot", function()
+			local s = hue_model.smart_scene({ id = "ss", type = "smart_scene",
+				active_timeslot = { timeslot_id = 4, weekday = "monday" },
+				week_timeslots = { "junk", { recurrence = { "monday" }, timeslots = {
+					"junk",
+					{},
+					{ start_time = "t", target = "x" },
+					{ start_time = at(7, 0), target = { rid = {} } },
+					{ start_time = at(9, 0), target = { rid = "a", rtype = "scene" } },
+				} } } })
+			assert.same({
+				{ days = { "monday" } },
+				{ days = { "monday" } },
+				{ days = { "monday" } },
+				{ days = { "monday" }, start = "07:00" },
+				{ days = { "monday" }, start = "09:00", target_rid = "a" },
+			}, s.slots)
+			assert.equal(s.slots[5], hue_model.current_slot(s))
+		end)
+
+		it("gives each slot its week entry's weekday names, skipping junk days", function()
+			local s = hue_model.smart_scene({ id = "ss", type = "smart_scene", week_timeslots = {
+				{ recurrence = { "monday", 5, {}, "", "friday" }, timeslots = { { target = { rid = "a" } } } },
+				{ recurrence = "junk", timeslots = { { target = { rid = "b" } } } },
+				{ recurrence = { "saturday" }, timeslots = "junk" },
+				{ recurrence = { "sunday" } },
+			} })
+			assert.same({ { days = { "monday", "friday" }, target_rid = "a" }, { days = {}, target_rid = "b" } }, s.slots)
+		end)
+
+		it("has exactly the fields of the contract and drops the image", function()
+			local fields = { rid = 1, name = 1, base_name = 1, group_rid = 1, group_type = 1, state = 1, slot_id = 1,
+				slot_weekday = 1, slots = 1, transition_duration = 1 }
+			for _, raw in ipairs(items(F.smart_scenes)) do
+				assert.is_table(raw.metadata.image, "the fixture does carry an image")
+				local s = hue_model.smart_scene(raw)
+				for k in pairs(s) do
+					assert.truthy(fields[k], "unexpected field " .. k)
+				end
+				for _, slot in ipairs(s.slots) do
+					for k in pairs(slot) do
+						assert.truthy(({ days = 1, start = 1, target_rid = 1 })[k], "unexpected slot field " .. k)
+					end
+				end
+			end
+		end)
+
+		it("parses a complete add item from the stream, which arrives active", function()
+			local container = decode(F.events.smart_added)[1]
+			assert.equal("add", container.type)
+			local s = hue_model.smart_scene(container.data[1])
+			assert.equal(F.smart_scene_rids.added, s.rid)
+			assert.equal("Natural light 7", s.name)
+			assert.equal("Natural light", s.base_name)
+			assert.equal("active", s.state)
+			assert.equal(F.group_rids.living_room, s.group_rid)
+			assert.equal("room", s.group_type)
+			assert.same({ days = EVERY_DAY, start = "07:00", target_rid = F.scene_rids.bright }, hue_model.current_slot(s))
+			assert.equal("22:00", s.slots[2].start)
+		end)
+
+		it("is nil for anything that is not a smart scene", function()
+			local container = decode(F.events.smart_slot_scene)[1]
+			assert.equal(2, #container.data)
+			for _, item in ipairs(container.data) do
+				assert.is_nil(hue_model.smart_scene(item), item.type)
+			end
+			assert.is_nil(hue_model.smart_scene(items(F.scene)[1]))
+			assert.is_nil(hue_model.smart_scene(light_items[F.rids.living]))
+			assert.is_nil(hue_model.smart_scene(items(F.zone)[1]))
+			assert.is_nil(hue_model.smart_scene({ id = "x", metadata = { name = "Golden hours" } }), "no type")
+			assert.is_nil(hue_model.smart_scene({ type = "smart_scene", metadata = { name = "Golden hours" } }), "no id")
+			assert.is_nil(hue_model.smart_scene({ id = "", type = "smart_scene" }), "an empty id")
+			assert.is_nil(hue_model.smart_scene({ id = {}, type = "smart_scene" }), "a null id")
+			assert.is_nil(hue_model.smart_scene({ id = 7, type = "smart_scene" }), "a number")
+			assert.is_nil(hue_model.smart_scene("junk"))
+			assert.is_nil(hue_model.smart_scene(nil))
+		end)
+
+		it("gives a bare item, such as a delete's, a fallback name and an empty slot list", function()
+			local deleted = decode(F.events.smart_deleted)[1]
+			assert.equal("delete", deleted.type)
+			assert.same({ id = F.smart_scene_rids.living, type = "smart_scene" }, deleted.data[1])
+			local s = hue_model.smart_scene(deleted.data[1])
+			local name = "Hue time-based scene " .. F.smart_scene_rids.living
+			assert.same({ rid = F.smart_scene_rids.living, name = name, base_name = name, slots = {} }, s)
+			assert.is_nil(hue_model.current_slot(s))
+		end)
+
+		it("treats nulls decoded as empty tables, and values of the wrong type, like absent fields", function()
+			local bare = hue_model.smart_scene({ id = "ss", type = "smart_scene" })
+			assert.same({ rid = "ss", name = "Hue time-based scene ss", base_name = "Hue time-based scene ss",
+				slots = {} }, bare)
+			assert.same(bare, hue_model.smart_scene({ id = "ss", type = "smart_scene",
+				metadata = { name = {}, image = {} }, group = { rid = {}, rtype = "zone" }, state = {},
+				active_timeslot = { timeslot_id = {}, weekday = {} }, transition_duration = {}, week_timeslots = {} }))
+			assert.same(bare, hue_model.smart_scene({ id = "ss", type = "smart_scene", metadata = "junk", group = "g",
+				state = 5, active_timeslot = "t", transition_duration = "60000", week_timeslots = "w" }))
+			assert.same(bare, hue_model.smart_scene({ id = "ss", type = "smart_scene", metadata = { name = "" },
+				group = { rtype = "zone" }, active_timeslot = { timeslot_id = "1", weekday = 6 } }))
+		end)
+
+		it("keeps the state only when it is active or inactive", function()
+			local function state(value)
+				return hue_model.smart_scene({ id = "ss", type = "smart_scene", state = value }).state
+			end
+			assert.equal("active", state("active"))
+			assert.equal("inactive", state("inactive"))
+			assert.is_nil(state("paused"))
+			assert.is_nil(state("ACTIVE"))
+			assert.is_nil(state(""))
+			assert.is_nil(state(true))
+		end)
+
+		it("takes a whole timeslot_id from 0 up, and the weekday on its own", function()
+			local function slot(timeslot_id)
+				return hue_model.smart_scene({ id = "ss", type = "smart_scene",
+					active_timeslot = { timeslot_id = timeslot_id, weekday = "monday" } })
+			end
+			assert.equal(0, slot(0).slot_id)
+			assert.equal(4, slot(4).slot_id)
+			assert.is_nil(slot(-1).slot_id)
+			assert.is_nil(slot(1.5).slot_id)
+			assert.is_nil(slot("1").slot_id)
+			assert.equal("monday", slot(-1).slot_weekday)
+		end)
+
+		it("keeps the group rid under an rtype the contract does not name", function()
+			local s = hue_model.smart_scene({ id = "ss", type = "smart_scene",
+				group = { rid = "pg", rtype = "private_group" } })
+			assert.equal("pg", s.group_rid)
+			assert.is_nil(s.group_type)
+			assert.equal("bridge_home", hue_model.smart_scene({ id = "ss", type = "smart_scene",
+				group = { rid = F.group_rids.home, rtype = "bridge_home" } }).group_type)
+		end)
+	end)
+
+	describe("current_slot()", function()
+		local smart_items
+
+		before_each(function()
+			smart_items = by_rid(items(F.smart_scenes))
+		end)
+
+		it("finds each fixture's slot: timeslot_id counts from 0", function()
+			local living = hue_model.smart_scene(smart_items[F.smart_scene_rids.living])
+			assert.same({ days = EVERY_DAY, start = "07:00", target_rid = F.scene_rids.savanna },
+				hue_model.current_slot(living))
+			local natural = hue_model.smart_scene(smart_items[F.smart_scene_rids.natural])
+			assert.equal(1, natural.slot_id)
+			assert.same({ days = EVERY_DAY, start = "21:00", target_rid = F.scene_rids.nightlight },
+				hue_model.current_slot(natural))
+			local older = hue_model.smart_scene(items(F.smart_scene)[1])
+			assert.same({ 1, "tuesday" }, { older.slot_id, older.slot_weekday })
+			assert.equal("sunset", hue_model.current_slot(older).start)
+		end)
+
+		it("returns the model's own slot table", function()
+			local living = hue_model.smart_scene(smart_items[F.smart_scene_rids.living])
+			assert.equal(living.slots[1], hue_model.current_slot(living))
+		end)
+
+		it("counts within the week entry that holds the weekday", function()
+			local s = hue_model.smart_scene({ id = "ss", type = "smart_scene", week_timeslots = {
+				schedule({ "monday", "tuesday", "wednesday", "thursday", "friday" },
+					{ { at(6, 0), "wake" }, { at(9, 0), "work" }, { at(18, 0), "evening" } }),
+				schedule({ "saturday", "sunday" }, { { at(8, 0), "lazy" }, { at(20, 0), "night" } }),
+			} })
+			assert.equal(5, #s.slots)
+			local function current(slot_id, weekday)
+				s.slot_id, s.slot_weekday = slot_id, weekday
+				local slot = hue_model.current_slot(s)
+				return slot and slot.target_rid
+			end
+			assert.equal("wake", current(0, "monday"))
+			assert.equal("evening", current(2, "wednesday"))
+			assert.equal("lazy", current(0, "saturday"), "not the flat list's first slot")
+			assert.equal("night", current(1, "sunday"))
+			assert.is_nil(current(2, "saturday"), "past the end of the weekend's slots")
+		end)
+
+		it("is nil when the slot or the weekday is unknown, or no week entry holds the weekday", function()
+			local living = hue_model.smart_scene(smart_items[F.smart_scene_rids.living])
+			living.slot_id = 2
+			assert.is_nil(hue_model.current_slot(living), "past the end")
+			living.slot_id, living.slot_weekday = 0, "funday"
+			assert.is_nil(hue_model.current_slot(living), "a weekday no entry holds")
+			living.slot_weekday = nil
+			assert.is_nil(hue_model.current_slot(living), "no weekday")
+			living.slot_id, living.slot_weekday = nil, "saturday"
+			assert.is_nil(hue_model.current_slot(living), "no slot")
+			living.slot_id = 0
+			assert.is_not_nil(hue_model.current_slot(living))
+			living.slots = {}
+			assert.is_nil(hue_model.current_slot(living), "no slots")
+		end)
+
+		it("is nil for, and never raises on, a model of the wrong shape", function()
+			assert.is_nil(hue_model.current_slot(nil))
+			assert.is_nil(hue_model.current_slot("junk"))
+			assert.is_nil(hue_model.current_slot({}))
+			assert.is_nil(hue_model.current_slot({ slot_id = 0, slot_weekday = "monday", slots = "junk" }))
+			assert.is_nil(hue_model.current_slot({ slot_id = "0", slot_weekday = "monday",
+				slots = { { days = { "monday" } } } }))
+			assert.is_nil(hue_model.current_slot({ slot_id = 0, slot_weekday = 5, slots = { { days = { 5 } } } }))
+			local slot = { days = { "monday" }, start = "07:00" }
+			assert.equal(slot, hue_model.current_slot({ slot_id = 0, slot_weekday = "monday",
+				slots = { "junk", { days = "monday" }, { start = "06:00" }, slot } }))
+		end)
+	end)
+
+	describe("update_smart_scene()", function()
+		local living
+
+		-- The changed fields come as a list in field order that also holds the
+		-- same names as keys; check both views.
+		local function assert_changed(expected, changed)
+			assert.is_table(changed)
+			local list, set, expected_set = {}, {}, {}
+			for key, value in pairs(changed) do
+				if type(key) == "number" then
+					list[key] = value
+				else
+					set[key] = value
+				end
+			end
+			for _, name in ipairs(expected) do
+				expected_set[name] = true
+			end
+			assert.same(expected, list)
+			assert.same(expected_set, set)
+		end
+
+		-- The smart_scene item of a feed container.
+		local function smart_in(container)
+			for _, item in ipairs(decode(container)[1].data) do
+				if item.type == "smart_scene" then
+					return item
+				end
+			end
+		end
+
+		local function fresh()
+			return hue_model.smart_scene(by_rid(items(F.smart_scenes))[F.smart_scene_rids.living])
+		end
+
+		before_each(function()
+			living = fresh()
+		end)
+
+		it("goes active from the activation event; the slot it reports is the one it had", function()
+			assert_changed({ "state" }, hue_model.update_smart_scene(living, smart_in(F.events.smart_activated)))
+			assert.equal("active", living.state)
+			assert.equal(0, living.slot_id)
+			assert.equal("saturday", living.slot_weekday)
+			assert.equal("Golden hours 4", living.name)
+			assert.equal(2, #living.slots)
+		end)
+
+		it("moves to the next time slot while it runs", function()
+			hue_model.update_smart_scene(living, smart_in(F.events.smart_activated))
+			assert.equal(2, #decode(F.events.smart_next_slot)[1].data, "the slot's scene shares the container")
+			assert_changed({ "slot_id" }, hue_model.update_smart_scene(living, smart_in(F.events.smart_next_slot)))
+			assert.equal(1, living.slot_id)
+			assert.equal("active", living.state)
+			assert.same({ days = EVERY_DAY, start = "16:00", target_rid = F.scene_rids.relax },
+				hue_model.current_slot(living))
+		end)
+
+		it("goes inactive and keeps its slot", function()
+			hue_model.update_smart_scene(living, smart_in(F.events.smart_activated))
+			assert_changed({ "state" }, hue_model.update_smart_scene(living, smart_in(F.events.smart_inactive)))
+			assert.equal("inactive", living.state)
+			assert.equal(0, living.slot_id)
+			assert.equal(F.scene_rids.savanna, hue_model.current_slot(living).target_rid)
+		end)
+
+		it("renames, and the base name follows", function()
+			assert_changed({ "name", "base_name" },
+				hue_model.update_smart_scene(living, smart_in(F.events.smart_renamed)))
+			assert.equal("Evening glow", living.name)
+			assert.equal("Evening glow", living.base_name)
+			assert.equal("inactive", living.state)
+		end)
+
+		it("reports only the name when the app renumbers, and nothing for the same name", function()
+			assert_changed({ "name" }, hue_model.update_smart_scene(living, { metadata = { name = "Golden hours 5" } }))
+			assert.equal("Golden hours 5", living.name)
+			assert.equal("Golden hours", living.base_name)
+			assert.is_nil(hue_model.update_smart_scene(living, { metadata = { name = "Golden hours 5" } }))
+		end)
+
+		it("replaces the slot list when renamed and re-timed in one item", function()
+			local week = schedule(EVERY_DAY, { { at(7, 0), F.scene_rids.savanna }, { at(16, 30), F.scene_rids.relax },
+				{ { kind = "sunset" }, F.scene_rids.nightlight } })
+			assert_changed({ "name", "base_name", "slots" },
+				hue_model.update_smart_scene(living, { metadata = { name = "Evening glow" }, week_timeslots = { week } }))
+			assert.same({ "07:00", "16:30", "sunset" },
+				{ living.slots[1].start, living.slots[2].start, living.slots[3].start })
+			assert.equal(F.scene_rids.nightlight, living.slots[3].target_rid)
+			assert.equal(living.slots[1], hue_model.current_slot(living))
+			assert_changed({ "slots" }, hue_model.update_smart_scene(living, { week_timeslots = {} }))
+			assert.same({}, living.slots, "an empty schedule empties the list")
+			assert.is_nil(hue_model.current_slot(living))
+		end)
+
+		it("notices a change in any slot's start, target or days, and nothing else", function()
+			local function retime(edit)
+				local week_timeslots = decode(F.smart_scene_items.living).week_timeslots
+				edit(week_timeslots[1])
+				return hue_model.update_smart_scene(fresh(), { week_timeslots = week_timeslots })
+			end
+			assert.is_nil(retime(function() end), "the same timeslots again")
+			assert_changed({ "slots" }, retime(function(week) week.timeslots[2].start_time.time.minute = 15 end))
+			assert_changed({ "slots" }, retime(function(week) week.timeslots[2].start_time = { kind = "sunset" } end))
+			assert_changed({ "slots" }, retime(function(week) week.timeslots[1].target.rid = F.scene_rids.bright end))
+			assert_changed({ "slots" }, retime(function(week) week.recurrence[7] = nil end))
+			assert_changed({ "slots" }, retime(function(week) week.timeslots[3] = week.timeslots[1] end))
+		end)
+
+		it("reports every changed field in a stable order, with the same names as keys", function()
+			local changed = hue_model.update_smart_scene(living, {
+				group = { rid = F.group_rids.downstairs, rtype = "zone" },
+				transition_duration = 30000,
+				week_timeslots = {
+					schedule({ "sunday" }, { { at(5, 0), F.scene_rids.bright }, { at(20, 0), F.scene_rids.nightlight } }),
+				},
+				active_timeslot = { timeslot_id = 1, weekday = "sunday" },
+				state = "active",
+				metadata = { name = "Nightfall 2" },
+			})
+			assert_changed({ "name", "base_name", "state", "slot_id", "slot_weekday", "slots", "transition_duration",
+				"group_rid", "group_type" }, changed)
+			assert.same({ "Nightfall 2", "Nightfall", "active", 1, "sunday", 30000, F.group_rids.downstairs, "zone" },
+				{ living.name, living.base_name, living.state, living.slot_id, living.slot_weekday,
+					living.transition_duration, living.group_rid, living.group_type })
+			assert.same({ days = { "sunday" }, start = "20:00", target_rid = F.scene_rids.nightlight },
+				hue_model.current_slot(living))
+		end)
+
+		it("returns nil when nothing changed: the same values again, an image, a delete item, no item", function()
+			assert.is_nil(hue_model.update_smart_scene(living, decode(F.smart_scene_items.living)), "the whole item")
+			assert.is_nil(hue_model.update_smart_scene(living, { state = "inactive" }))
+			assert.is_nil(hue_model.update_smart_scene(living,
+				{ active_timeslot = { timeslot_id = 0, weekday = "saturday" } }))
+			assert.is_nil(hue_model.update_smart_scene(living, { transition_duration = 60000 }))
+			assert.is_nil(hue_model.update_smart_scene(living,
+				{ group = { rid = F.group_rids.living_room, rtype = "room" } }))
+			assert.is_nil(hue_model.update_smart_scene(living,
+				{ metadata = { image = { rid = "i", rtype = "public_image" } } }))
+			assert.is_nil(hue_model.update_smart_scene(living, decode(F.events.smart_deleted)[1].data[1]))
+			assert.is_nil(hue_model.update_smart_scene(living, {}))
+			assert.is_nil(hue_model.update_smart_scene(living, nil))
+			assert.is_nil(hue_model.update_smart_scene(living, "junk"))
+			assert.same(fresh(), living)
+		end)
+
+		it("ignores values of the wrong type, nulls decoded as empty tables included", function()
+			assert.is_nil(hue_model.update_smart_scene(living, { metadata = { name = {} }, state = {},
+				active_timeslot = { timeslot_id = {}, weekday = {} }, transition_duration = {},
+				group = { rid = {}, rtype = "zone" } }))
+			assert.is_nil(hue_model.update_smart_scene(living, { metadata = "junk", state = 5, active_timeslot = "t",
+				transition_duration = "1000", week_timeslots = "w", group = "g" }))
+			assert.is_nil(hue_model.update_smart_scene(living, { metadata = { name = "" },
+				active_timeslot = { timeslot_id = -1, weekday = "" } }))
+			assert.same(fresh(), living)
+		end)
+
+		it("takes either leaf of active_timeslot on its own", function()
+			assert_changed({ "slot_id" }, hue_model.update_smart_scene(living, { active_timeslot = { timeslot_id = 1 } }))
+			assert.equal("saturday", living.slot_weekday)
+			assert_changed({ "slot_weekday" },
+				hue_model.update_smart_scene(living, { active_timeslot = { weekday = "sunday" } }))
+			assert.equal(1, living.slot_id)
+		end)
+
+		it("drops a state string it does not know to nil", function()
+			hue_model.update_smart_scene(living, { state = "active" })
+			assert_changed({ "state" }, hue_model.update_smart_scene(living, { state = "paused" }))
+			assert.is_nil(living.state)
+			assert.is_nil(hue_model.update_smart_scene(living, { state = "paused" }), "still unknown: no change")
+			assert_changed({ "state" }, hue_model.update_smart_scene(living, { state = "inactive" }))
+			assert.equal("inactive", living.state)
+		end)
+
+		it("moves to another group and follows its rtype", function()
+			assert_changed({ "group_rid", "group_type" },
+				hue_model.update_smart_scene(living, { group = { rid = F.group_rids.downstairs, rtype = "zone" } }))
+			assert.equal(F.group_rids.downstairs, living.group_rid)
+			assert.equal("zone", living.group_type)
+			assert_changed({ "group_type" }, hue_model.update_smart_scene(living,
+				{ group = { rid = F.group_rids.downstairs, rtype = "private_group" } }))
+			assert.is_nil(living.group_type)
+		end)
+
+		it("leaves a model that is not a table alone and fills a hand-made one", function()
+			assert.is_nil(hue_model.update_smart_scene(nil, { state = "active" }))
+			assert.is_nil(hue_model.update_smart_scene("junk", { state = "active" }))
+			local bare = { rid = "ss" }
+			assert.is_nil(hue_model.update_smart_scene(bare, { id = "ss", type = "smart_scene" }), "no slots either side")
+			assert_changed({ "state" }, hue_model.update_smart_scene(bare, { state = "active" }))
+			local named = { rid = "ss", name = "Golden hours 4" }
+			assert_changed({ "base_name" }, hue_model.update_smart_scene(named, { metadata = { name = "Golden hours 4" } }))
+			assert.equal("Golden hours", named.base_name)
+			local odd = { rid = "ss", slots = "junk" }
+			assert_changed({ "slots" }, hue_model.update_smart_scene(odd, { week_timeslots = {} }))
+			assert.same({}, odd.slots)
+		end)
+	end)
+
 	describe("smart_scene_count()", function()
 		it("counts the smart_scene items of a GET body", function()
 			assert.equal(1, hue_model.smart_scene_count(items(F.smart_scene)))
+			assert.equal(3, hue_model.smart_scene_count(items(F.smart_scenes)))
 			assert.equal(0, hue_model.smart_scene_count(items(F.scene)))
 		end)
 
