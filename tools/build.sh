@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build build/hue_bridge.c4z and build/hue_light.c4z with Control4's dp3 packager.
+# Build build/hue_bridge.c4z, build/hue_light.c4z and build/hue_scene.c4z with Control4's dp3 packager.
 #
 # Usage: tools/build.sh [--dev]
 #   --dev   developer build: ships common/devloop.lua (the self-reloading dev

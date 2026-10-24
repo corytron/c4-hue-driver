@@ -2,8 +2,8 @@ local altaddr = require("bridge.altaddr")
 
 describe("bridge.altaddr", function()
 	it("zero-pads every octet below 8 and leaves the others alone", function()
-		assert.equal("10.000.001.143", altaddr.padded("10.0.1.143", 3))
-		assert.equal("10.00.01.143", altaddr.padded("10.0.1.143", 2))
+		assert.equal("10.000.002.143", altaddr.padded("10.0.2.143", 3))
+		assert.equal("10.00.02.143", altaddr.padded("10.0.2.143", 2))
 		assert.equal("192.168.001.50", altaddr.padded("192.168.1.50", 3))
 	end)
 
@@ -15,7 +15,7 @@ describe("bridge.altaddr", function()
 	end)
 
 	it("gives distinct strings for the stream and the self-check", function()
-		local ip = "10.0.1.143"
+		local ip = "10.0.2.143"
 		assert.are_not.equal(altaddr.for_stream(ip), altaddr.for_check(ip))
 		assert.are_not.equal(altaddr.for_stream(ip), ip)
 		assert.are_not.equal(altaddr.for_check(ip), ip)

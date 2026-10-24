@@ -1,5 +1,7 @@
 # Control4-side edge cases for the lights, rooms and scenes design
 
+> **Historical research (2026-10-21)**, written before the import-ui and scenes features; "today" and `[code: …]` describe that day's code. The decisions are `docs/import-design.md` (§1–§10) and `docs/scenes-design.md`; the present is in `docs/status.md`.
+
 What Director and Composer do to our devices behind the driver's back, and
 what the driver can know about it. Written for the next design round: lights
 added one at a time, moved between rooms, replaced, removed; a "pick a

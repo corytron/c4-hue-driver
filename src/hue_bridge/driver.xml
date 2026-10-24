@@ -245,8 +245,8 @@
 				<sort_order>11</sort_order>
 				<params/>
 			</action>
-			<!-- Scenes (docs/scenes-design.md §5): one light_v2 switch per Hue
-			     scene, created only here. -->
+			<!-- Scenes (docs/scenes-design.md §5): one light_v2 device per Hue
+			     scene (a dimmer since build 160), created only here. -->
 			<action>
 				<name>Add Scene</name>
 				<command>Add Scene</command>

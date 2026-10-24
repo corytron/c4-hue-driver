@@ -9,6 +9,14 @@ referenced and examples of what to type into each field, plus how Hue's
 constructs map onto Control4's. The deliverable is a new build with the
 documentation and icon inside.
 
+**Current (2026-10-24):** delivered. Build 125 (2026-10-22) brought the
+Documentation tab in all three drivers and the first icons, build 135 the
+reviewed second edition (13 chapters and a Glossary) and the
+second-generation icons (`docs/design.md`, "Build 125" and "Build 135").
+The manual has since been revised with the features that followed (keypad
+Button Links, the scene dimmer). What shipped is noted in §1, §5, §6 and
+§8; open: the 32 px List View icons of lights and scenes (`docs/status.md`).
+
 ## 1. Mechanics (verified in the SDK fundamentals)
 
 - Documentation tab: `driver.xml` gets `<documentation file="www/documentation.html"/>`
@@ -27,6 +35,8 @@ documentation and icon inside.
   16×16 and 32×32 pixels, **96 DPI** [verified: Fundamentals 19, "Driver
   Icon Management"]. Light and scene devices keep the light_v2 proxy's
   standard icons (they are lights to Control4); only the bridge changes.
+  Superseded (2026-10-22): the owner asked for light and scene icons too
+  (§6).
 
 ## 2. Deliverables and owners (one writer per file)
 
@@ -65,7 +75,8 @@ Required chapters, in this order:
    light → a Hue Light device (a Control4 light with dimming, colour and
    colour temperature as the bulb allows); Hue room and zone → Room
    Mappings → a Control4 room; Hue scene → a Hue Scene switch device
-   (ON recalls, OFF turns the room or zone off); Hue names → device names
+   (ON recalls, OFF turns the room or zone off; a dimmer since 2026-10-23,
+   `docs/scene-dimmer-design.md`); Hue names → device names
    (Adopt Hue Names / Accept Names As They Are); what has no counterpart
    (Hue zones as controllable devices, motion sensors, entertainment,
    several bridges, smart scenes).
@@ -123,6 +134,9 @@ Required chapters, in this order:
     CA Pinning) in one paragraph each, marked "normally not needed".
 12. **Limits and what is not supported**, and a one-page **quick
     reference** of all actions with one line each.
+
+As shipped (build 135) the manual has 13 chapters, this list plus "Using
+the lights from Control4" (§8 item 11) as chapter 11, and a Glossary.
 
 Every action and every property of the three drivers must appear at least
 once with its exact Composer name in bold. Field examples are written as
@@ -182,6 +196,12 @@ Upload: `python3 -I tools/collect.py --dir build/collect` runs on this VM
 `Invoke-WebRequest -Method Put -InFile <file> http://<this VM>:8090/img/<name>.png`.
 The coordinator copies `build/collect/img/*` to `src/hue_bridge/www/img/`.
 
+Shipped: all 22, plus `relink-device-light.png` from §8 item 26, so 23
+files in `src/hue_bridge/www/img/`, each shown once in the manual; all
+date from 2026-10-22 and none shows the later keypad or dimmer features
+(the module's `Save-*Shot` and `Send-DocShot`, `docs/composer-remote.md`,
+do the cropping and upload).
+
 ## 6. Icons
 
 All drawn by `tools/make_icons.py` with Pillow at 16×16 and 32×32, 96 DPI
@@ -216,6 +236,17 @@ Wiring: each driver's header gets `<small image_source="c4z">` and
 element so the List View uses them **[assumed: the attribute form for c4z
 proxies, by analogy with the url form in Fundamentals 19; verified on the
 install]**.
+
+Shipped: the first icons in build 125, the second generation in build 135
+(2026-10-22). Outcome on the house (`docs/design.md`, "Build 125" and
+"Build 135"): the bridge's icon changed at once in the tree and the List
+View. A light or scene device's 16 px tree icon is stamped when the device
+is created: a device created under a build that declared a custom icon
+shows it and follows later icon changes, one created before keeps the
+standard bulb for good. The 32 px tile in the room's List View stayed the
+light_v2 standard bulb for every light and scene (cause unknown; open in
+`docs/status.md`). The Items pane shows a generic placeholder for all
+three drivers, as it does for Control4's own Hue drivers.
 
 ## 7. Verification
 
@@ -280,7 +311,9 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
     chapter: a Hue Light is an ordinary Control4 dimmer in Programming,
     keypads and Navigators; `Turn On` and a tap mean 100 %, not Hue's
     power-on level; events fire for changes made in the Hue app too; a Hue
-    Scene is a switch (0 or 100) and an Advanced Lighting Scenes member;
+    Scene is a switch (0 or 100) and an Advanced Lighting Scenes member
+    (superseded 2026-10-23: a dimmer showing its room's level,
+    `docs/scene-dimmer-design.md`);
     a whole-room command sends one request per light at ten per second,
     so a room of 47 lights takes about five seconds; "stop ramp" settles at
     the last reported level; Refresh Navigators after adding devices.
@@ -359,3 +392,9 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
 
 **Not done**: verifying whether a revoked key answers 401 or 403 (needs the
 key revoked on the house bridge).
+
+**Outcome**: the revision shipped in build 135 (2026-10-22 14:21); the
+Documentation tab then showed the 13 chapters and the
+Glossary, in-page links worked and every picture rendered, and the scene
+device lists Adopt Hue Name before Forget This Scene (`docs/design.md`,
+"Build 135"). The revoked-key question is still open (`docs/status.md`).
