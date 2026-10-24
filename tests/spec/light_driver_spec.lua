@@ -149,6 +149,20 @@ describe("Hue Light driver", function()
 			assert.equal("1", env.Properties["Driver Version"])
 		end)
 
+		it("shows the build's own version stamp when Director answers the lookup with nothing", function()
+			-- A device created by AddDevice gets no version at its first init
+			-- [hardware 2026-10-24, device 1166]; tools/build.sh stamps
+			-- common/build_version.lua for that case.
+			package.preload["common.build_version"] = function() return "196" end
+			package.loaded["common.build_version"] = nil
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4.config_info.version = ""
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("196", env.Properties["Driver Version"])
+			package.preload["common.build_version"] = nil
+			package.loaded["common.build_version"] = nil
+		end)
+
 		it("greets without a rid key when it has none (SendToDevice drops empty values)", function()
 			local _, c4 = load_light()
 			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { device_id = "2001" } } }, c4.sent)
