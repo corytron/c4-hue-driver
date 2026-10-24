@@ -98,4 +98,11 @@ and "1.0 (build N)" in the README and status page, where N is the build
 number the drivers show as `Driver Version` (Control4 needs an integer
 there, so the driver files keep the commit count). Later releases of the
 same spike move the tag and the attached files; a new version number comes
-when development here is finished.
+when development here is finished. **How a release is cut:** stamp the
+build number into the README and the status page in a PR, merge it, tag
+the merge commit (`git tag -f -a vX.Y`), push the tag; the release
+workflow (`.github/workflows/release.yml`) lints, tests, builds and
+attaches the three packages and `SHA256SUMS.txt` to the release of that
+tag (creating it if needed); then edit the release notes. The local
+`tools/build.sh` of the same commit is only for the Windows session's
+install.
