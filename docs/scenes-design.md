@@ -62,7 +62,7 @@ Added later: `HUE_SCENE_DIM`, `HUE_SCENE_GROUP` and the recall's
 `brightness` (`docs/keypad-design.md`, "Scene hold-to-dim"),
 `HUE_SCENE_LEVEL` and `HUE_SCENE_GROUP`'s `level`
 (`docs/scene-dimmer-design.md`); in dev builds `HUE_LOG` (a device's log
-lines to the bridge) and `HUE_DUMP` (bridge → scene, dumps its state).
+lines to the bridge) and `HUE_DUMP` (bridge → scene, dumped its state; removed 2026-10-24, nothing sent it).
 
 ## 3. Scene device (`src/hue_scene/`)
 
