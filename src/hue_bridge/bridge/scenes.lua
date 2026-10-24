@@ -2705,9 +2705,22 @@ function scenes:summary()
 		return string.format("%d imported", self:count())
 	end
 	local c = self.reg:counts()
-	return string.format("%d scenes and %s time-based on bridge, %d imported, %d missing, %d unbound, %d deleted",
-		self:bridge_count(), self.smart_synced and tostring(self:smart_count()) or "?", self:count(), c.gone, c.unbound,
-		c.tombstones)
+	-- Short enough for Composer's value column (about 75 characters, no
+	-- wrapping): missing and unbound appear only when not zero; Attention
+	-- lists them then.
+	local parts = {
+		string.format("%d + %s time-based on bridge", self:bridge_count(),
+			self.smart_synced and tostring(self:smart_count()) or "?"),
+		string.format("%d imported", self:count()),
+	}
+	if c.gone > 0 then
+		parts[#parts + 1] = string.format("%d missing", c.gone)
+	end
+	if c.unbound > 0 then
+		parts[#parts + 1] = string.format("%d unbound", c.unbound)
+	end
+	parts[#parts + 1] = string.format("%d deleted", c.tombstones)
+	return table.concat(parts, ", ")
 end
 
 -- The Attention items (driver.lua joins them after the lights'): missing

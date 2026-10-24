@@ -15,7 +15,9 @@ local STREAM_URL = "https://192.000.002.10/eventstream/clip/v2"
 local STREAM_URL_2 = "https://192.000.02.10/eventstream/clip/v2"
 local STREAM_URL_3 = "https://192.000.2.10/eventstream/clip/v2"
 local DOTTED_STREAM_URL = "https://192.0.2.10/eventstream/clip/v2"
-local ROTATING = " (own queue, rotating over 7 spellings; commands use 192.0.2.10)"
+local function rotating(spelling, index)
+	return string.format("%s (own queue, spelling %d of 7)", spelling, index)
+end
 
 local function quiet()
 	log.sink = function() end
@@ -101,7 +103,7 @@ describe("Hue Bridge driver", function()
 		assert.equal(SHIPPED, s.options.ssl_cabundle)
 		assert.is_false(s.options.ssl_verify_host)
 		assert.equal(600, s.options.timeout, "driver.xml default")
-		assert.equal("192.000.002.10" .. ROTATING, env.Properties["Stream Address"])
+		assert.equal(rotating("192.000.002.10", 1), env.Properties["Stream Address"])
 		assert.equal("192.000.002.10", c4.persist.hue_stream_spelling, "the spelling in use is persisted")
 	end)
 
@@ -120,7 +122,7 @@ describe("Hue Bridge driver", function()
 		local second = c4.last_transfer()
 		assert.equal(STREAM_URL_2, second.url)
 		assert.equal("abc123", second.headers["hue-application-key"])
-		assert.equal("192.000.02.10" .. ROTATING, env.Properties["Stream Address"])
+		assert.equal(rotating("192.000.02.10", 2), env.Properties["Stream Address"])
 		assert.equal("192.000.02.10", c4.persist.hue_stream_spelling)
 
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
@@ -139,7 +141,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 		assert.equal(STREAM_URL_3, c4.last_transfer().url)
-		assert.equal("192.000.2.10" .. ROTATING, env.Properties["Stream Address"])
+		assert.equal(rotating("192.000.2.10", 3), env.Properties["Stream Address"])
 	end)
 
 	it("wraps around the family and starts over when the persisted spelling is unknown", function()
@@ -165,8 +167,7 @@ describe("Hue Bridge driver", function()
 		local first = c4.last_transfer()
 		assert.equal("https://192.168.001.50/eventstream/clip/v2", first.url)
 		assert.equal(600, first.options.timeout, "still dual-queue: commands stay on the dotted address")
-		assert.equal("192.168.001.50 (own queue, no second spelling to rotate; commands use 192.168.1.50)",
-			env.Properties["Stream Address"])
+		assert.equal("192.168.001.50 (own queue, the only spelling)", env.Properties["Stream Address"])
 
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
@@ -205,12 +206,19 @@ describe("Hue Bridge driver", function()
 	it("falls back to a shared queue with a short stream timeout when the self-check fails", function()
 		local env, c4 = paired_driver({ ["Stream Timeout (s)"] = "900" })
 		env.OnDriverLateInit("DIT_STARTUP")
+		local logged = {}
+		log.sink = function(...)
+			for _, a in ipairs({ ... }) do
+				logged[#logged + 1] = tostring(a)
+			end
+		end
 		answer_check(c4, false)
 		local s = c4.last_transfer()
 		assert.equal(DOTTED_STREAM_URL, s.url)
 		assert.equal(60, s.options.timeout, "capped so commands wait at most a minute")
-		assert.truthy(env.Properties["Stream Address"]:find("^192.0.2.10 %(shared queue"))
-		assert.truthy(env.Properties["Stream Address"]:find("Couldn't resolve host name", 1, true))
+		assert.equal("192.0.2.10 (shared queue with commands: self-check failed)", env.Properties["Stream Address"],
+			"short enough for Composer's column; the detail goes to the log")
+		assert.truthy(table.concat(logged, "\n"):find("Couldn't resolve host name", 1, true))
 	end)
 
 	it("uses a shared queue when no octet of the address can be padded", function()
