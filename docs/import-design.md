@@ -451,7 +451,6 @@ g:group(rid) -> { rid, type = "room"|"zone"|"bridge_home", name, children = { ri
                   child_rtype = "device"|"light"|"room", grouped_light_rid, id_v1 } | nil
 g:groups(type?) -> array sorted by name; nil = rooms then zones
 g:room_of_device(device_rid) -> group_rid | nil
-g:zones_of_light(light_rid) -> array of zone rids (sorted by name)
 g:label(rid) -> "Kitchen" | "Downstairs (zone)" | "(no room)" for nil or unknown
 ```
 

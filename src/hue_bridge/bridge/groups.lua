@@ -1,21 +1,21 @@
--- The bridge's cache of Hue rooms, zones and the bridge_home, with the
--- membership indexes the import UI needs: which room a device is in, which
--- zones a light is in, which devices are in no room, and display labels
--- (docs/import-design.md §5 step 3 and §13). Pure Lua, no C4 calls; the
--- parsing lives in bridge.hue_model (group / update_group).
+-- The bridge's cache of Hue rooms, zones and the bridge_home, with the one
+-- membership index the import flows need (which room a device is in) and the
+-- display labels (docs/import-design.md §5 step 3 and §13). Pure Lua, no C4
+-- calls; the parsing lives in bridge.hue_model (group / update_group).
 --
 -- Membership facts [verified: Core Concepts, and hardware 2026-10-21 on the
 -- house bridge: 16 rooms with device children only, no device in two rooms;
 -- 7 zones with light children only; one bridge_home whose children are two
 -- devices and the 16 rooms, with no metadata]: a room's children are
 -- devices and a device is in at most one room; a zone's children are light
--- services and a light can be in any number of zones; bridge_home's children
--- are the devices in no room plus the rooms. Rooms are the authority for
--- device → room; bridge_home is only consulted for the room-less list and
--- never contradicts a room.
+-- services and a light can be in any number of zones (the zone lights read a
+-- zone's members from group.children); bridge_home's children are the
+-- devices in no room plus the rooms. Rooms are the authority for device →
+-- room; nothing is inferred from a zone or from bridge_home.
 --
--- Indexes are rebuilt whole after every change (a handful of groups, tens of
--- children: microseconds) so lookups are plain table reads on the event path.
+-- The index is rebuilt whole after every change (a handful of groups, tens
+-- of children: microseconds) so lookups are plain table reads on the event
+-- path.
 
 local hue_model = require("bridge.hue_model")
 
@@ -29,8 +29,6 @@ function groups.new()
 		by_rid = {},            -- group rid → group (hue_model.group shape)
 		sorted = {},            -- type → array of groups, sorted by name
 		room_by_device = {},    -- device rid → room rid
-		zones_by_light = {},    -- light rid → array of zone rids, sorted by zone name
-		roomless = {},          -- device rids that are direct children of bridge_home and in no room
 	}, groups)
 	self:rebuild()
 	return self
@@ -80,34 +78,8 @@ function groups:rebuild()
 		end
 	end
 
-	local zones_by_light = {}
-	for _, zone in ipairs(sorted.zone) do
-		local seen = {}
-		for _, rid in ipairs(zone.children) do
-			if zone.child_rtypes[rid] == "light" and not seen[rid] then
-				seen[rid] = true
-				local list = zones_by_light[rid] or {}
-				list[#list + 1] = zone.rid
-				zones_by_light[rid] = list
-			end
-		end
-	end
-
-	local roomless, seen = {}, {}
-	for _, home in ipairs(sorted.bridge_home) do
-		for _, rid in ipairs(home.children) do
-			if home.child_rtypes[rid] == "device" and room_by_device[rid] == nil and not seen[rid] then
-				seen[rid] = true
-				roomless[#roomless + 1] = rid
-			end
-		end
-	end
-	table.sort(roomless)
-
 	self.sorted = sorted
 	self.room_by_device = room_by_device
-	self.zones_by_light = zones_by_light
-	self.roomless = roomless
 end
 
 -- Replace the cache from full GETs: `items` is an array of raw CLIP items
@@ -207,34 +179,15 @@ function groups:room_of_device(device_rid)
 	return self.room_by_device[device_rid]
 end
 
--- Zone rids holding the light, sorted by zone name; empty when none.
-function groups:zones_of_light(light_rid)
-	if light_rid == nil then
-		return {}
-	end
-	return copy(self.zones_by_light[light_rid])
-end
-
--- Device rids bridge_home lists directly (in no room), sorted by rid. The
--- house bridge lists two such devices [verified: hardware 2026-10-21; which
--- ones, e.g. the bridge itself, was not resolved]; callers filter by the
--- devices they care about.
-function groups:roomless_devices()
-	return copy(self.roomless)
-end
-
 -- Display label: "Kitchen" for a room, "Downstairs (zone)" for a zone,
--- "(all lights)" for the bridge_home, "(no room)" for nil or an unknown rid.
+-- "(all lights)" for the bridge_home, "(no room)" for nil or an unknown rid
+-- (hue_model.group_label carries the wording).
 function groups:label(rid)
 	local group = self:group(rid)
 	if not group then
 		return "(no room)"
-	elseif group.type == "zone" then
-		return tostring(group.name) .. " (zone)"
-	elseif group.type == "bridge_home" then
-		return "(all lights)"
 	end
-	return tostring(group.name)
+	return hue_model.group_label(group.name, group.type)
 end
 
 -- { room = n, zone = n, bridge_home = n }
