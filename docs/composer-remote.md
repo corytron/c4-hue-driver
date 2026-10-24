@@ -54,11 +54,11 @@ behalf, not the owner.
 1. **Read first, click second.** Reading properties, listing actions,
    opening a dialog to inspect its pickers and cancelling it, taking
    screenshots: always allowed.
-2. **Nothing hard to undo without the owner's word**: deleting a device,
+2. **Hard-to-undo steps are named in the brief**: deleting a device,
    Update Driver, Connections changes, Load/Save project, OK in a dialog
-   that creates or changes a device. The coordinator asks the owner first
-   and quotes the approval in the brief (for installs, deletes, restarts
-   and reboots the Windows session now also asks him itself: rule 8).
+   that creates or changes a device. They are covered by the owner's
+   standing approval (rule 8); the brief names them so the session knows
+   what it is about to change.
 3. **Stop on surprises**: any unexpected dialog, error or prompt ends the
    round with a report, not a guess.
 4. **Report exact texts** (UIA Names, property values) and keep screenshots
@@ -84,11 +84,14 @@ behalf, not the owner.
    Composer shows the new value at once but sends nothing to Director until
    Set (which appears with Cancel beside the changed value); every earlier
    "the driver ignored my change" was this. `Set-ComposerProperty` does it.
-8. **Approval comes from the owner on the Windows side, per round.**
-   Installs, deletes, restarts and reboots need Cory's OK given to the
-   Windows session in that round; a peer's quote of him is not enough
-   there (the session's own policy; the batch of pre-approvals he once
-   gave is used up). The brief still says what needs approval and why.
+8. **Standing approval (2026-10-24).** Cory: "i approve everything all the
+   time everytime". Every coordinator brief is approved: installs,
+   "Restart Director?", Composer changes, deletes, Refresh Navigators,
+   project actions the brief names. The session does not ask him again on
+   its side. (Until then it had asked him per round, which once stalled an
+   install he had already requested.) The safety rules that are not
+   approvals stay: stop on surprises (rule 3), the click and focus checks,
+   no ALT, never elevate.
 9. **System Manager is out of reach.** `Sysman.exe` needs administrator
    rights and the non-elevated session's input cannot reach it, so a
    controller reboot is the owner's, by hand. Never elevate or work
