@@ -163,6 +163,24 @@ describe("Hue Light driver", function()
 			package.loaded["common.build_version"] = nil
 		end)
 
+		it("shows its version even when Director's property table is still empty at late init", function()
+			-- The first init of a device created by AddDevice [hardware
+			-- 2026-10-24, devices 1166 and 1168]: nothing to replay.
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			for name in pairs(env.Properties) do env.Properties[name] = nil end
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("1", env.Properties["Driver Version"])
+			-- And when the version is not known at all yet, it is looked at again.
+			local env2, c42 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c42.config_info.version = ""
+			env2.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("", env2.Properties["Driver Version"])
+			c42.config_info.version = "7"
+			c42.fire_timers()
+			assert.equal("7", env2.Properties["Driver Version"])
+			assert.is_not_nil(c4)
+		end)
+
 		it("greets without a rid key when it has none (SendToDevice drops empty values)", function()
 			local _, c4 = load_light()
 			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { device_id = "2001" } } }, c4.sent)
