@@ -11,39 +11,19 @@
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
+local device = require("common.device")
 local state = require("light.state")
 local caps = require("light.caps")
 
--- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the bridge
--- forwards this driver's new code as DEV_RELOAD, see docs/dev-loop.md.
--- Release builds have no such module, so this is nil.
-local devloop_ok, devloop = pcall(require, "common.devloop")
-if not devloop_ok then
-	-- Absent in release builds (expected); anything else is a real error
-	-- that must be visible, since the loop is how the controller gets tested.
-	-- A missing module reads "not found" under busted and "An unknown error
-	-- occurred" on the controller [hardware 2026-10-24].
-	local reason = tostring(devloop):lower()
-	if not (reason:find("not found", 1, true) or reason:find("unknown error", 1, true)) then
-		print("[ERROR] Hue Light: dev loop failed to load: " .. tostring(devloop))
-	end
-	devloop = nil
-end
-
--- Binding IDs, see driver.xml.
-local PROXY_BINDING = 5001
-local BRIDGE_BINDING = 1
+-- Binding IDs, see driver.xml; common/device.lua holds the proxy's (5001).
+local BRIDGE_BINDING = device.BRIDGE_BINDING
 
 -- Grace after the requested ramp before a target the bridge never confirmed
 -- is reported as reached, so the UI never sticks in "changing".
 local FALLBACK_MS = 1000
 
--- Prefix of every line this driver logs; the dev-build log forwarding below
--- recognises its own lines by it.
+-- Prefix of every line this driver logs.
 local LOG_PREFIX = "Hue Light"
-
--- Lines logged before the bridge is known wait for hello(); only this many.
-local LOG_BUFFER = 30
 
 -- SET_COLOR_TARGET parameter names are [assumed] (the docs print them with
 -- spaces, one with a "CIE 1931" suffix); the first one received is logged
@@ -71,91 +51,24 @@ local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaTimer, assume = fn }
 local color_params_logged = false
-local late_init_done = false -- UpdateProperty and SendToProxy are unsafe before OnDriverLateInit
-local early = {}             -- bridge messages received before late init, in arrival order
 
--- Dev log forwarding -------------------------------------------------------
-
--- Dev builds: every line this driver logs, debug excepted, also goes to the
--- bridge as HUE_LOG { rid, line }, so the dev loop shows the lights' output
--- next to the bridge's own (docs/dev-loop.md). Release builds leave log.sink
--- alone. Lines logged before the bridge is known wait, newest LOG_BUFFER
--- kept, and go out from hello().
-local flush_log = function() end
-
-if devloop then
-	local previous_sink = log.sink
-	local original_print = print
-	local pending = {}
-	local send_failed = false
-
-	-- Only lines our own logger produced: "[LEVEL] Hue Light: ..." or, from
-	-- log.always, "Hue Light: ...". On the controller that is every line;
-	-- the test harness shares one common.log between drivers, where
-	-- forwarding another driver's output would echo back and forth.
-	local OWN_PLAIN = "^" .. LOG_PREFIX .. ": "
-	local OWN_LEVELED = "^%[%u+%] " .. LOG_PREFIX .. ": "
-	local function own_line(line)
-		return line:find(OWN_PLAIN) ~= nil or line:find(OWN_LEVELED) ~= nil
-	end
-
-	-- A failing send is said once per failure streak, through print alone,
-	-- so it cannot feed back into the forwarding.
-	local function send_log(line)
-		local ok, err = pcall(function()
-			C4:SendToDevice(bridge, "HUE_LOG", { rid = st.rid, line = line }, false, false)
-		end)
-		if ok then
-			send_failed = false
-		elseif not send_failed then
-			send_failed = true
-			original_print("[WARN] " .. LOG_PREFIX .. ": log forwarding to the bridge failed: " .. tostring(err))
-		end
-	end
-
-	log.sink = function(line)
-		previous_sink(line)
-		line = tostring(line)
-		if line:sub(1, 7) == "[DEBUG]" or not own_line(line) then
-			return
-		end
-		if bridge then
-			send_log(line)
-		else
-			pending[#pending + 1] = line
-			if #pending > LOG_BUFFER then
-				table.remove(pending, 1)
-			end
-		end
-	end
-
-	flush_log = function()
-		local lines = pending
-		pending = {}
-		for _, line in ipairs(lines) do
-			send_log(line)
-		end
-	end
-end
-
-local function prop(name, value)
-	C4:UpdateProperty(name, tostring(value == nil and "" or value))
-end
-
-local function notify(command, params)
-	local parts = {}
-	for k, v in pairs(params or {}) do parts[#parts + 1] = k .. "=" .. tostring(v) end
-	table.sort(parts)
-	log.debug("-> proxy %s %s", command, table.concat(parts, " "))
-	C4:SendToProxy(PROXY_BINDING, command, params)
-end
+-- The plumbing both device drivers share (common/device.lua): properties and
+-- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
+-- for bridge messages that arrive before late init, the keypad LEDs and
+-- Button Links, the binding re-check, the goodbye, and in dev builds the dev
+-- loop's log forwarding and DEV_RELOAD. The hooks it asks of this driver
+-- (is_on, button_action, on_bridge_found) are set below, with their functions.
+local dev = device.new({
+	prefix = LOG_PREFIX,
+	tree = "light", -- the dev loop's name for this driver's source tree
+	bridge = function() return bridge end,
+	rid = function() return st.rid end,
+})
+local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
+local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
+local update_leds, LINK_BUTTON = dev.update_leds, device.LINK_BUTTON
 
 -- Identity and status texts ------------------------------------------------
-
--- Every inter-driver param is a string.
-local function device_id()
-	return tostring(C4:GetDeviceID())
-end
 
 -- "#12" from Hue's v1 id (the bridge sends "/lights/12" or "12"; "/groups/2"
 -- for a zone or room), or nil.
@@ -338,92 +251,11 @@ local function refresh_status()
 end
 
 -- Keypad LEDs ----------------------------------------------------------------
--- A keypad bound to a Button Link follows the light: MATCH_LED_STATE on each
--- link, and BUTTON_INFO per button to the proxy [verified: Snap One's
--- drivers-template-code-public c4hook_light_v2.lua, docs/keypad-design.md
--- "Keypad LEDs"; BUTTON_INFO fields: proxy ref, BUTTON_INFO notification].
-
--- Keypad buttons bound to the driver's Button Link connections (driver.xml
--- 200 top, 201 bottom, 202 toggle) -> BUTTON_ID.
-local LINK_BUTTON = { [200] = 0, [201] = 1, [202] = 2 }
-local LINK_BINDINGS = { 200, 201, 202 }
-local BUTTON_LINK = { [0] = 200, [1] = 201, [2] = 202 }
-
--- Per-button colours: bottom is lit while the light is off.
-local COLOR_DEFAULTS = {
-	[0] = { on = "0000ff", off = "000000" },
-	[1] = { on = "000000", off = "0000ff" },
-	[2] = { on = "0000ff", off = "000000" },
-}
-local colors = { [0] = {}, [1] = {}, [2] = {} } -- persisted overrides, nil = default
-local led_on = nil -- the on state the LEDs were last sent, nil before the first
-
--- "0000ff" from a 6-digit hex string, nil for anything else.
-local function valid_color(v)
-	v = v ~= nil and tostring(v) or ""
-	if v:match("^%x%x%x%x%x%x$") then
-		return v:lower()
-	end
-	return nil
-end
-
-local function color_key(button, which)
-	return string.format("button_%d_%s_color", button, which)
-end
-
-local function button_color(button, which)
-	return colors[button][which] or COLOR_DEFAULTS[button][which]
-end
-
-local function load_colors()
-	for button in pairs(COLOR_DEFAULTS) do
-		for _, which in ipairs({ "on", "off" }) do
-			colors[button][which] = valid_color(C4:PersistGetValue(color_key(button, which)))
-		end
-	end
-end
-
-local function send_button_info(button, on)
-	C4:SendToProxy(PROXY_BINDING, "BUTTON_INFO", {
-		BUTTON_ID = button,
-		ON_COLOR = button_color(button, "on"),
-		OFF_COLOR = button_color(button, "off"),
-		CURRENT_COLOR = button_color(button, on and "on" or "off"),
-	}, "NOTIFY")
-end
-
--- BUTTON_COLORS on a link: the colours of the button bound there, with the
--- same four fields as BUTTON_INFO [verified: Snap One c4hook_light_v2.lua,
--- NOTIFY.BTN_COLOR_CHANGED].
-local function send_button_colors(binding, button)
-	C4:SendToProxy(binding, "BUTTON_COLORS", {
-		BUTTON_ID = button,
-		ON_COLOR = button_color(button, "on"),
-		OFF_COLOR = button_color(button, "off"),
-		CURRENT_COLOR = button_color(button, (st.on == true) and "on" or "off"),
-	}, "NOTIFY")
-end
-
-local function send_leds(on)
-	led_on = on
-	for _, binding in ipairs(LINK_BINDINGS) do
-		C4:SendToProxy(binding, "MATCH_LED_STATE", { STATE = on }, "COMMAND")
-	end
-	for button = 0, 2 do
-		send_button_info(button, on)
-	end
-end
-
--- The LEDs follow st.on once it is known; `force` resends an unchanged
--- state (a keypad was just bound to a link).
-local function update_leds(force)
-	if st.on == nil then
-		return
-	end
-	local on = st.on == true
-	if force or on ~= led_on then
-		send_leds(on)
-	end
+-- MATCH_LED_STATE on each Button Link and BUTTON_INFO per button follow the
+-- light (common/device.lua, docs/keypad-design.md "Keypad LEDs"); what they
+-- follow here is st.on, nil until the bridge has reported.
+function dev.is_on()
+	return st.on
 end
 
 -- Proxy notifies -----------------------------------------------------------
@@ -454,7 +286,6 @@ end
 
 local function report_online()
 	notify("ONLINE_CHANGED", { STATE = is_online() })
-	return true
 end
 
 -- Targets ------------------------------------------------------------------
@@ -575,33 +406,6 @@ end
 
 -- Bridge binding -----------------------------------------------------------
 
--- The bound bridge's device id. The API documents a table of id/name pairs,
--- the idc_client sample uses the result as a number: accept both. With
--- nothing bound the docs say nil but OS 3.4.2 answers the number 0 [hardware
--- 2026-10-22, design.md "Project APIs"], which Lua would take for a bridge.
-local function bound_bridge()
-	local found = C4:GetBoundProviderDevice(C4:GetDeviceID(), BRIDGE_BINDING)
-	if type(found) == "table" then
-		found = next(found)
-	end
-	found = tonumber(found)
-	if found and found > 0 then
-		return found
-	end
-	return nil
-end
-
--- Our light_v2 proxy: the consumer bound to binding 5001, the device Composer
--- shows and renames [verified: API 32/_3 usage note; hardware, docs/design.md
--- "Lights: verified on hardware": first key of the table]. nil when none.
-local function proxy_id()
-	local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), PROXY_BINDING)
-	if type(bound) ~= "table" then
-		return nil
-	end
-	return tonumber((next(bound)))
-end
-
 -- What HUE_HELLO carries: the persisted identity, so the bridge can adopt a
 -- bound light its registry lacks. Absent keys for what is unknown: a rid-less
 -- light sends no rid, a light never told its kind no kind (SendToDevice drops
@@ -622,7 +426,7 @@ local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
 		C4:SendToDevice(bridge, "HUE_HELLO", hello_params())
-		flush_log() -- dev builds: lines logged while the bridge was unknown
+		dev.flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
 end
@@ -646,67 +450,11 @@ local function save_identity()
 	end
 end
 
--- Properties ---------------------------------------------------------------
-
--- Director answers the version lookup with nothing at the first init of a
--- device created by AddDevice [hardware 2026-10-24, device 1166], so the
--- build's own stamp (common/build_version.lua, tools/build.sh) is the fallback.
-local build_version_ok, build_version = pcall(require, "common.build_version")
-local function driver_version()
-	local v = C4:GetDriverConfigInfo("version")
-	if v == nil or tostring(v) == "" then
-		v = build_version_ok and tostring(build_version) or ""
-	end
-	return v
-end
-
-dispatch.properties["Driver_Version"] = function()
-	prop("Driver Version", driver_version())
-end
-
--- Director fills a new device's property table late: at the first init of
--- a device created by AddDevice the replay of the properties reaches no
--- Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168], so
--- late init writes the row itself and looks again twice while it is empty.
-local function show_driver_version(attempt)
-	local v = driver_version()
-	prop("Driver Version", v)
-	if v == "" and attempt < 3 then
-		C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
-	end
-end
-
-dispatch.properties["Debug_Mode"] = function(value)
-	log.set_debug(value == "On")
-end
-
 -- From the bridge (ExecuteCommand) -------------------------------------------
-
 -- Director late-inits drivers in no particular order, so the bridge's
 -- messages can reach a light before its own OnDriverLateInit, where
--- UpdateProperty and SendToProxy are not yet safe [verified: API 22/_25.2].
--- Such messages wait, in order, and OnDriverLateInit applies them.
-local function after_late_init(name, handler)
-	return function(params)
-		if late_init_done then
-			return handler(params)
-		end
-		early[#early + 1] = { name = name, handler = handler, params = params }
-		log.debug("%s before late init; buffered (%d waiting)", name, #early)
-	end
-end
-
-local function drain_early()
-	local queued = early
-	early = {}
-	for _, m in ipairs(queued) do
-		log.debug("applying buffered %s", m.name)
-		local ok, err = pcall(m.handler, m.params)
-		if not ok then
-			log.error("buffered %s failed: %s", m.name, tostring(err))
-		end
-	end
-end
+-- UpdateProperty and SendToProxy are not yet safe; after_late_init
+-- (common/device.lua) holds them until then, in order.
 
 -- The kind a configure names ("group" for a zone or room, "light" or none for
 -- a light) is kept by state.configure; this only says what happened. A later
@@ -781,33 +529,8 @@ dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(p
 	report_online()
 end)
 
-dispatch.commands["DEV_RELOAD"] = function(params)
-	if not (devloop and devloop.apply_forwarded) then
-		return log.warn("DEV_RELOAD ignored: no dev loop in this build")
-	end
-	-- Lights and scene devices share the bridge's binding; a bundle for the
-	-- scene tree is not ours (an older bridge forwards without filtering).
-	if params and params.tree and params.tree ~= "light" then
-		return log.debug("DEV_RELOAD for the %s tree ignored", tostring(params.tree))
-	end
-	-- On success the new code is already running; this handler, its log
-	-- module and its bridge id are the old instance's, still good for one
-	-- more line. The failure detail went through devloop's own print, which
-	-- is not forwarded.
-	if devloop.apply_forwarded(params) then
-		log.always("light reloaded to version %s", tostring(params.version))
-	else
-		log.warn("light reload failed; see this light's Lua output")
-	end
-end
-
 -- Composer actions (LUA_ACTION) ----------------------------------------------
 -- Every click ends in Last Action and a log line, whatever happened.
-
-local function result(text)
-	log.always("%s", text)
-	prop("Last Action", text)
-end
 
 -- The Composer name the Hue name calls for: the Hue name itself, except that
 -- a room device is "<Room> Lights", so the Lighting page of a Control4 room
@@ -921,7 +644,7 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVE
 -- [verified: proxy-protocol reference, light_v2 BUTTON_ACTION command and
 -- notification]. Behaviour and defaults: docs/keypad-design.md.
 local BUTTON_TOP, BUTTON_BOTTOM = 0, 1
-local ACT_RELEASE, ACT_PRESS, ACT_CLICK = 0, 1, 2
+local ACT_RELEASE, ACT_PRESS, ACT_CLICK = device.ACT_RELEASE, device.ACT_PRESS, device.ACT_CLICK
 local HOLD_AFTER_MS = 400       -- a press still down after this starts a ramp
 local HOLD_TICK_MS = 100        -- the level estimate advances this often during a ramp
 local RAMP_AFTER_ON_MS = 600    -- hold from off: the ramp follows the turn-on at 1 % this much later
@@ -1103,43 +826,10 @@ local function button_action(button, action)
 	end
 end
 
--- The proxy's own route (BUTTON_ACTION on the proxy binding) carries the
--- button in the parameters and wants every action echoed.
-dispatch.proxy["BUTTON_ACTION"] = function(_, params)
-	local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
-	if not button or not action then
-		return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
-	end
-	notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
-	button_action(button, action)
-end
-
--- A keypad button bound to one of the driver's Button Link connections
--- (driver.xml ids 200 top, 201 bottom, 202 toggle) delivers DO_PUSH,
--- DO_RELEASE and DO_CLICK on that binding [verified: public light_v2
--- drivers]. LINK_BUTTON is with the keypad LEDs above.
-local function link_button(binding, command)
-	local button = LINK_BUTTON[tonumber(binding)]
-	if not button then
-		log.warn("%s on binding %s: not a Button Link", command, tostring(binding))
-	end
-	return button
-end
-
-dispatch.proxy["DO_PUSH"] = function(binding)
-	local button = link_button(binding, "DO_PUSH")
-	if button then button_action(button, ACT_PRESS) end
-end
-
-dispatch.proxy["DO_RELEASE"] = function(binding)
-	local button = link_button(binding, "DO_RELEASE")
-	if button then button_action(button, ACT_RELEASE) end
-end
-
-dispatch.proxy["DO_CLICK"] = function(binding)
-	local button = link_button(binding, "DO_CLICK")
-	if button then button_action(button, ACT_CLICK) end
-end
+-- The proxy's own route (BUTTON_ACTION on the proxy binding, echoed) and the
+-- Button Link bindings (DO_PUSH / DO_RELEASE / DO_CLICK on 200, 201, 202)
+-- both end here (common/device.lua).
+dev.button_action = button_action
 
 dispatch.proxy["SET_PRESET_LEVEL"] = function(_, params) save_setting("preset", params.LEVEL) end
 dispatch.proxy["SET_CLICK_RATE_UP"] = function(_, params) save_setting("click_up", params.RATE) end
@@ -1147,98 +837,35 @@ dispatch.proxy["SET_CLICK_RATE_DOWN"] = function(_, params) save_setting("click_
 dispatch.proxy["SET_HOLD_RATE_UP"] = function(_, params) save_setting("hold_up", params.RATE) end
 dispatch.proxy["SET_HOLD_RATE_DOWN"] = function(_, params) save_setting("hold_down", params.RATE) end
 
--- A keypad on a link asks for its button's colours and the LED state.
-dispatch.proxy["REQUEST_BUTTON_COLORS"] = function(binding)
-	local button = link_button(binding, "REQUEST_BUTTON_COLORS")
-	if not button then
-		return
-	end
-	send_button_colors(tonumber(binding), button)
-	C4:SendToProxy(tonumber(binding), "MATCH_LED_STATE", { STATE = st.on == true }, "COMMAND")
-end
-
--- The proxy stores a button's on or off colour (the docs print the names
--- with spaces; both spellings are accepted).
-dispatch.proxy["SET_BUTTON_COLOR"] = function(_, params)
-	local button = tonumber(params.BUTTON_ID or params["BUTTON ID"])
-	if not (button and COLOR_DEFAULTS[button]) then
-		return log.warn("SET_BUTTON_COLOR without a known BUTTON_ID (%s)", tostring(params.BUTTON_ID))
-	end
-	for which, names in pairs({ on = { "ON_COLOR", "ON COLOR" }, off = { "OFF_COLOR", "OFF COLOR" } }) do
-		local raw = params[names[1]] or params[names[2]]
-		if raw ~= nil then
-			local color = valid_color(raw)
-			if color then
-				colors[button][which] = color
-				C4:PersistSetValue(color_key(button, which), color)
-			else
-				log.warn("SET_BUTTON_COLOR: %s %q is not a 6-digit hex colour", names[1], tostring(raw))
-			end
-		end
-	end
-	send_button_colors(BUTTON_LINK[button], button)
-	send_button_info(button, st.on == true)
-end
-
 -- Lifecycle ----------------------------------------------------------------
 
-log.set_prefix(LOG_PREFIX)
 dispatch.install(_G)
 
 function OnDriverInit()
 end
 
--- After a Director restart the binding to the bridge can be invisible to
--- GetBoundProviderDevice at late init although Composer shows it, and no
--- OnBindingChanged follows, so the device read "Not bound to a Hue Bridge"
--- until something else woke it [hardware 2026-10-22, docs/keypad-design.md].
--- While unbound it looks again a few times, then gives up quietly; a binding
--- event or a bridge found ends the retries.
-local RECHECK_MS = { 5000, 10000, 15000, 30000 }  -- gaps: checks at 5, 15, 30 and 60 s
-local recheck_timer = nil
-
-local function cancel_recheck()
-	if recheck_timer then
-		recheck_timer:Cancel()
-		recheck_timer = nil
-	end
+-- After a Director restart the binding to the bridge can be invisible at late
+-- init although Composer shows it [hardware 2026-10-22, docs/keypad-design.md];
+-- while unbound the device looks again at 5, 15, 30 and 60 s
+-- (common/device.lua) and greets the bridge as soon as it is visible.
+function dev.on_bridge_found()
+	hello()
+	report_online()
 end
-
-local function schedule_recheck(attempt)
-	cancel_recheck()
-	local delay = RECHECK_MS[attempt]
-	if not delay then
-		return log.info("still not bound to a Hue Bridge %d s after start; waiting for a binding", 60)
-	end
-	recheck_timer = C4:SetTimer(delay, function()
-		recheck_timer = nil
-		if bridge then
-			return
-		end
-		local found = bound_bridge()
-		if found then
-			log.info("bridge binding visible after %d checks; greeting device %d", attempt, found)
-			hello()
-			report_online()
-		else
-			schedule_recheck(attempt + 1)
-		end
-	end)
-end
+local schedule_recheck, cancel_recheck = dev.schedule_recheck, dev.cancel_recheck
 
 function OnDriverLateInit()
-	late_init_done = true
 	load_identity()
 	load_settings()
-	load_colors()
+	dev.load_colors()
 	dispatch.replay_properties(Properties)
-	show_driver_version(1)
+	dev.show_driver_version(1)
 	prop("Hue Light ID", light_id_label())
 	-- The bridge first, so messages it sent before this point are applied
 	-- against the right binding state; then the hello carries whatever
 	-- identity they delivered.
 	bridge = bound_bridge()
-	drain_early()
+	dev.late_init()
 	hello()
 	report_online()
 	-- The LEDs, once, when buffered messages made the state known already
@@ -1274,22 +901,10 @@ function OnBindingChanged(idBinding, _, bound, otherDevice)
 end
 
 -- Composer is deleting this device: tell the bridge, so it tombstones the
--- entry instead of fanning state out to a dead id [verified: API 22/_26;
--- that SendToDevice still works here is assumed, docs/import-design.md
--- probe 2]. OnDriverDestroyed follows and stops the timers.
+-- entry instead of fanning state out to a dead id (common/device.lua).
+-- OnDriverDestroyed follows and stops the timers.
 function OnDriverRemovedFromProject()
-	if not bridge then
-		return
-	end
-	local target = bridge
-	local ok, err = pcall(function()
-		C4:SendToDevice(target, "HUE_GOODBYE", { rid = st.rid, device_id = device_id() })
-	end)
-	if ok then
-		log.debug("HUE_GOODBYE sent to bridge %d", target)
-	else
-		log.warn("HUE_GOODBYE failed: %s", tostring(err))
-	end
+	dev.goodbye("HUE_GOODBYE")
 end
 
 function OnDriverDestroyed()

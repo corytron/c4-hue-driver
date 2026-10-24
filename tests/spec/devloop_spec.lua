@@ -921,6 +921,121 @@ describe("common.devloop", function()
 		end)
 	end)
 
+	-- The two pieces a device driver takes from this module through
+	-- common.device: its HUE_LOG sink and its DEV_RELOAD handler. The drivers'
+	-- specs pin both end to end; this is the module's own contract.
+	describe("forward_logs (device side)", function()
+		local log, seen, bridge, rid
+
+		-- A stand-in for the driver's common.log: only the sink matters here.
+		before_each(function()
+			seen = {}
+			log = { sink = function(line) seen[#seen + 1] = line end }
+			bridge, rid = 15, "r1"
+		end)
+
+		local function install()
+			return devloop.forward_logs(log, "Hue Test", function() return bridge end, function() return rid end)
+		end
+
+		it("forwards its own non-debug lines as HUE_LOG, feeding the previous sink first", function()
+			install()
+			log.sink("[WARN] Hue Test: something odd")
+			log.sink("Hue Test: diagnostic")
+			log.sink("[DEBUG] Hue Test: noise")
+			log.sink("[WARN] Hue Bridge: another driver's line")
+			log.sink("plain print output")
+			assert.same({ "[WARN] Hue Test: something odd", "Hue Test: diagnostic", "[DEBUG] Hue Test: noise",
+				"[WARN] Hue Bridge: another driver's line", "plain print output" }, seen, "everything still reaches the sink")
+			assert.same({
+				{ device_id = 15, command = "HUE_LOG", params = { rid = "r1", line = "[WARN] Hue Test: something odd" },
+					allow_empty = false, log_command = false, nargs = 5 },
+				{ device_id = 15, command = "HUE_LOG", params = { rid = "r1", line = "Hue Test: diagnostic" },
+					allow_empty = false, log_command = false, nargs = 5 },
+			}, sent)
+		end)
+
+		it("omits the rid while the device has none", function()
+			install()
+			rid = nil
+			log.sink("[WARN] Hue Test: no rid yet")
+			assert.same({ line = "[WARN] Hue Test: no rid yet" }, sent[1].params)
+		end)
+
+		it("keeps the newest LOG_BUFFER lines while the bridge is unknown and sends them on flush, in order", function()
+			local flush = install()
+			bridge = nil
+			for i = 1, devloop.LOG_BUFFER + 5 do
+				log.sink(string.format("[INFO] Hue Test: line %d", i))
+			end
+			assert.same({}, sent, "nowhere to send yet")
+			bridge = 15
+			flush()
+			assert.equal(devloop.LOG_BUFFER, #sent)
+			assert.equal("[INFO] Hue Test: line 6", sent[1].params.line)
+			assert.equal("[INFO] Hue Test: line 35", sent[#sent].params.line)
+			flush()
+			assert.equal(devloop.LOG_BUFFER, #sent, "the buffer is spent")
+		end)
+
+		it("says a failing send once per streak through the print captured at install, never through the sink", function()
+			install()
+			local later = {}
+			rawset(_G, "print", function(...) later[#later + 1] = table.concat({ ... }, " ") end)
+			c4.SendToDevice = function() error("Director says no") end
+			log.sink("[WARN] Hue Test: one")
+			log.sink("[WARN] Hue Test: two")
+			assert.same({}, later, "not the print of the moment")
+			assert.equal(1, #printed)
+			assert.truthy(printed[1]:find("^%[WARN%] Hue Test: log forwarding to the bridge failed: .*Director says no"))
+			assert.same({ "[WARN] Hue Test: one", "[WARN] Hue Test: two" }, seen, "the sink saw only the lines")
+
+			c4.SendToDevice = function(_, device_id, command, params) table.insert(sent, { device_id = device_id,
+				command = command, params = params }) end
+			log.sink("[WARN] Hue Test: three")
+			c4.SendToDevice = function() error("again") end
+			log.sink("[WARN] Hue Test: four")
+			assert.equal(2, #printed, "a new streak is said again")
+		end)
+	end)
+
+	describe("reload_handler (device side)", function()
+		local log, lines, got
+
+		before_each(function()
+			lines = {}
+			local function keep(level)
+				return function(fmt, ...) lines[#lines + 1] = level .. " " .. string.format(fmt, ...) end
+			end
+			log = { debug = keep("debug"), always = keep("always"), warn = keep("warn") }
+			got = nil
+			devloop.apply_forwarded = function(params) got = params; return params.ok == true end
+		end)
+
+		it("applies its own tree's bundle and logs the version always", function()
+			local handler = devloop.reload_handler(log, "light")
+			handler({ tree = "light", version = "L1", files = "{}", ok = true })
+			assert.same({ tree = "light", version = "L1", files = "{}", ok = true }, got)
+			assert.same({ "always light reloaded to version L1" }, lines)
+		end)
+
+		it("takes a bundle without a tree as its own (an older bridge) and warns when the reload fails", function()
+			local handler = devloop.reload_handler(log, "scene")
+			handler({ version = "S2", files = "{}" })
+			assert.equal("S2", got.version)
+			assert.same({ "warn scene reload failed; see this scene's Lua output" }, lines)
+			handler(nil)
+			assert.same({}, got, "nil params read as none")
+		end)
+
+		it("ignores another tree's bundle at debug level without touching the dev loop", function()
+			local handler = devloop.reload_handler(log, "scene")
+			handler({ tree = "light", version = "L1", files = "{}" })
+			assert.is_nil(got)
+			assert.same({ "debug DEV_RELOAD for the light tree ignored" }, lines)
+		end)
+	end)
+
 	describe("commands", function()
 		it("execute goes through ExecuteCommand and reports command_done", function()
 			start_synced()
