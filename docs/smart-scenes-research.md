@@ -178,3 +178,28 @@ All through `tools/devctl.py run "Hue Request" Method=… Path=/clip/v2/resource
    proxy honours `dimmer` false sent at run time (untested)?
 6. Mark slot scenes in the picker, e.g. "Shine (in Golden hours)"?
 7. Which room and time may the probes in §4 change, and is a throwaway zone and smart scene on the bridge acceptable?
+
+
+## 6. Owner's answers (2026-10-24)
+
+1. "Daylight" means **Natural light**.
+2. **Add All Scenes Of Room includes** time-based scenes.
+3. **OFF stops the schedule and turns the room/zone off**, as OFF on an
+   ordinary scene.
+4. **Names drop the app's number** ("Golden hours 8" → "Golden hours");
+   zone scenes get the zone's name in front, as ordinary zone scenes do.
+5. **Hold top while off: start, then brighten.** The owner adds: the scene
+   must keep playing after a dim (the schedule keeps switching time slots;
+   a dynamic scene keeps animating). Hue may end a scene when its lights
+   are dimmed; check it (V11 and a dynamic-scene variant) and, if so, look
+   for a way to keep it playing: for dynamic scenes, re-recalling with a
+   brightness override instead of `dimming_delta`; for time-based scenes,
+   whether the active state and the next slot survive a dim, and what
+   re-activation would do. The same expectation applies to ordinary
+   dynamic scenes dimmed from a keypad or slider today.
+6. **Mark slot scenes** in Add Scene, e.g. "Master Bedroom: Shine (in
+   Golden hours)".
+7. **Checks now, in the Study, with the Desk Lamp**; throwaway zone and
+   time-based scene on the bridge allowed (created and deleted by the
+   checks). Run on a development build of the bridge driver installed for
+   the duration; production build back afterwards.
