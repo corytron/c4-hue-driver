@@ -101,5 +101,8 @@ reboot.
   `hue_bridge/driver.xml` but the code treats anything below 60 as 60; the
   group queue (scene OFF, dims) is paced at up to 10 requests a second
   although Hue's guidance for groups is about one a second (a comment in
-  `driver.lua` still says one a second).
+  `driver.lua` now says so). Release builds also keep two diagnostic paths:
+  Test Connection's Host override and Connection Test's "Diagnostic Server"
+  target (insecure TLS), and the scene driver's `HUE_DUMP` handler is not
+  gated on the dev loop.
 - The Composer project is unsaved.

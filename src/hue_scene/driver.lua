@@ -1011,7 +1011,7 @@ dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
 	set_target(params.LIGHT_BRIGHTNESS_TARGET, params.RATE)
 end
 
--- Advanced Lighting Scenes with reduced_als_support drive the switch with
+-- Advanced Lighting Scenes with reduced_als_support drive the scene with
 -- SET_BRIGHTNESS_TARGET and end a scene ramp with these; both carry no
 -- parameters [verified: proxy ref, SET_BRIGHTNESS_STOP, reduced_als_support,
 -- supports_brightness_stop]. Nothing goes to the bridge: a scene recall
@@ -1026,7 +1026,7 @@ end
 -- is accepted as a brightness stop.
 dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
 
--- Toggle relative to where the switch is heading: a pending recall counts as
+-- Toggle relative to where the scene is heading: a pending recall counts as
 -- on, so two quick presses end up off [verified: proxy ref, TOGGLE].
 dispatch.proxy["TOGGLE"] = function()
 	local on
