@@ -9,7 +9,7 @@ running inside the Claude desktop app **on the Windows VM** acts as the
 coordinator's hands in Composer, driven by messages from the coordinator's
 session.
 
-**Current state (2026-10-24):** in use since 2026-10-21, 23 rounds so far
+**Current state (2026-10-24):** in use since 2026-10-21, 29 rounds so far
 (history at the end). The house runs production builds, so the dev loop is
 off and Composer is where results are read (rule 13); installs follow
 `docs/status.md`, "How builds reach the house".
@@ -184,4 +184,7 @@ They produced rules 8–16 and, in round 18c, the click check of rule 5.
 Rounds 21–23 (2026-10-24) installed builds 184, 185 and 196, read the new
 Room Mappings drop-down (its items through MSAA, since Composer's combo
 refuses CB_GETLBTEXT cross-process), and created the first zone light from
-the Actions tab, reading every picker on the way.
+the Actions tab, reading every picker on the way. Rounds 24–29 found the
+blank Driver Version of a fresh device (Director's empty property table at
+first init), installed the dev build 224 for the regression pass and the
+release builds 226 and 228, and read the Documentation tabs' Apache footer.

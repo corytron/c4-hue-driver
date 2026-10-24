@@ -90,7 +90,7 @@ in Composer once installed (Control4 needs an integer there, so the files
 carry the build number while the release is called 1.0). A later release of
 1.0 moves the attached files to a newer build.
 
-<!-- At release time: replace "build 228" above with the real build number (the
+<!-- The build number above is stamped at release time (the
      release checklist's naming section), and check the Releases URL if the
      repository is published under a new name (licensing research, §6 step 7). -->
 
