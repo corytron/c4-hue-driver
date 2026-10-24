@@ -113,6 +113,14 @@ this page disagree about the present, this page and the code win.
   second with a burst of three (closes the pacing item below). A group with
   no lights is offline; a zone deleted in Hue leaves the device gone until
   Re-link Zone Light or Forget Light.
+- **Bridge compatibility** (2026-10-24, after 1.0; `docs/bridge-compat-design.md`):
+  pairing refuses the round first-generation bridge (BSB001), a device that
+  is not a Hue bridge, and bridge software older than 1948086000 (the first
+  with the CLIP v2 API), each with its own Status text; the identity check
+  at every start refuses a first-generation bridge too. `Bridge Model` shows
+  the friendly name with the id ("Hue Bridge Pro (BSB003)"); new rows
+  `Bridge Name` (the bridge's own name) and `Bridge Firmware` (version and
+  API version, with an update note when old).
 - **Binding re-check**: a light or scene that is unbound at start looks again
   at 5, 15, 30 and 60 s (after a Director restart the binding can be late).
 - **Documentation tab** in every driver (the owner's manual on the bridge),

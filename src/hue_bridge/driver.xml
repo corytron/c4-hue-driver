@@ -58,6 +58,20 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- docs/bridge-compat-design.md: the bridge's own name and its
+				 firmware, read without the key at pairing and at every start. -->
+			<property>
+				<name>Bridge Name</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Bridge Firmware</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
 			<property>
 				<name>Event Stream</name>
 				<default></default>
