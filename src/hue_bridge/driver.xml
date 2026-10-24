@@ -83,7 +83,7 @@
 			<property>
 				<name>Lights</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>false</readonly>
+				<readonly>true</readonly>
 			</property>
 			<!-- docs/import-design.md §6: what needs the owner's attention, the
 			     result of the last click, and the Hue room → Control4 room map. -->
@@ -95,10 +95,44 @@
 			</property>
 			<!-- A list (summary on the row, every item in the drop-down), since
 				 Composer clips a value at about 75 characters; a pick changes nothing. -->
+			<!-- A long result continues on the rows (2) to (6), word-wrapped at
+				 about 70 characters; unused rows are hidden with
+				 SetPropertyAttribs. Nothing to click, nothing editable. -->
 			<property>
 				<name>Last Action</name>
-				<type>DYNAMIC_LIST</type>
-				<readonly>false</readonly>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (2)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (3)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (4)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (5)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (6)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
 			</property>
 			<!-- A list, not a string: Composer's value column shows about 75
 				 characters and does not wrap, so the row carries a summary and
@@ -107,7 +141,7 @@
 			<property>
 				<name>Room Mappings</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>false</readonly>
+				<readonly>true</readonly>
 				<tooltip>Open the list to read every Hue room and zone with its Control4 room</tooltip>
 			</property>
 			<!-- A list (summary on the row, every item in the drop-down), since
@@ -115,7 +149,7 @@
 			<property>
 				<name>Scenes</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>false</readonly>
+				<readonly>true</readonly>
 			</property>
 			<!-- docs/zone-light-design.md §5: zones and rooms imported as
 				 Hue Light devices of kind "group". -->
@@ -124,7 +158,7 @@
 			<property>
 				<name>Zone Lights</name>
 				<type>DYNAMIC_LIST</type>
-				<readonly>false</readonly>
+				<readonly>true</readonly>
 			</property>
 			<property>
 				<name>Stream Address</name>
