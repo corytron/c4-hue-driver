@@ -660,4 +660,105 @@ F.events.smart_deleted = container(7, "delete", {
 	'{"id":"' .. F.smart_scene_rids.living .. '","type":"smart_scene"}',
 })
 
+-- Grouped lights (docs/zone-light-design.md). GET /grouped_light: one item
+-- per group that has lights, the empty Attic zone absent [verified: hardware
+-- 2026-10-21, an empty zone's services array is empty]. Item keys follow the
+-- items logged from the house bridge (research §7 V4, V12): id, id_v1,
+-- owner, on, dimming, dimming_delta, alert, signaling, dynamics, type; no
+-- colour block has ever appeared. The values are this bridge's own: on while
+-- any member is lit, brightness the average of the lit members (Living Room
+-- = Hallway Ambiance 40.16 and Living Room Lamp 73.52; Downstairs = the Lamp
+-- alone, Garage White being off; Garage off at its remembered 100).
+
+local function grouped_light_full(key, owner_key, owner_rtype, id_v1, on, brightness)
+	return '{"id":"' .. F.grouped_light_rids[key] .. '","id_v1":"' .. id_v1 .. '","owner":{"rid":"' .. F.group_rids[owner_key]
+		.. '","rtype":"' .. owner_rtype .. '"},"on":{"on":' .. tostring(on) .. '},"dimming":{"brightness":' .. brightness
+		.. '},"dimming_delta":{},"alert":{"action_values":["breathe"]},'
+		.. '"signaling":{"signal_values":["no_signal","on_off","on_off_color","alternating"]},'
+		.. '"dynamics":{},"type":"grouped_light"}'
+end
+
+F.grouped_light_levels = { living_room = 56.84, garage = 100, downstairs = 73.52, home = 71.23 }
+F.grouped_light = '{"errors":[],"data":['
+	.. grouped_light_full("living_room", "living_room", "room", "/groups/2", true, "56.84") .. ','
+	.. grouped_light_full("garage", "garage", "room", "/groups/1", false, "100.0") .. ','
+	.. grouped_light_full("downstairs", "downstairs", "zone", "/groups/3", true, "73.52") .. ','
+	.. grouped_light_full("home", "home", "bridge_home", "/groups/0", true, "71.23")
+	.. ']}'
+
+-- Two containers in one SSE data line (an update and a delete arrive as
+-- separate containers; whether they share a line is [assumed]).
+local function two(first, second)
+	return "[" .. first:sub(2, -2) .. "," .. second:sub(2, -2) .. "]"
+end
+
+-- Zone-light events, all on the Downstairs zone (Garage White + Living Room
+-- Lamp, grouped_light g003) unless said otherwise. Item bodies carry only
+-- the changed block, as the bridge's light items do [verified for
+-- grouped_light on/dimming: hardware, research §7 V4].
+
+-- The zone switched on from the Hue app: on and the average of the lit lamps.
+F.events.zone_on = container(8, "update", {
+	grouped_light_item("downstairs", "downstairs", "zone", "/groups/3", '"on":{"on":true},"dimming":{"brightness":73.52}'),
+})
+-- The zone switched off: on alone.
+F.events.zone_off = container(9, "update", {
+	grouped_light_item("downstairs", "downstairs", "zone", "/groups/3", '"on":{"on":false}'),
+})
+-- The zone dimmed to 40 %: the level alone.
+F.events.zone_level = container(10, "update", {
+	grouped_light_item("downstairs", "downstairs", "zone", "/groups/3", '"dimming":{"brightness":40.0}'),
+})
+-- Hallway Ambiance (CCT only, 153-454) added to the zone: the whole children
+-- array [assumed: docs/edge-cases-hue.md §2].
+F.events.zone_children = container(11, "update", {
+	'{"id":"' .. F.group_rids.downstairs .. '","id_v1":"/groups/3","children":[' .. child(F.rids.garage, "light") .. ','
+		.. child(F.rids.living, "light") .. ',' .. child(F.rids.hallway, "light") .. '],"type":"zone"}',
+})
+-- The zone emptied: children and services both [] (as an empty zone GETs
+-- [verified]; carried by the event [assumed]), then its grouped_light deleted.
+F.events.zone_emptied = two(
+	container(12, "update", {
+		'{"id":"' .. F.group_rids.downstairs .. '","id_v1":"/groups/3","children":[],"services":[],"type":"zone"}',
+	}),
+	container(13, "delete", {
+		'{"id":"' .. F.grouped_light_rids.downstairs .. '","type":"grouped_light"}',
+	}))
+-- The zone refilled with Garage White: a new grouped_light (its rid is not
+-- reused [assumed]) arrives whole, then the zone names it in its services.
+F.refilled_grouped_light_rid = "8e7d6c5b-0000-4000-8000-00000000g006"
+F.events.zone_refilled = two(
+	container(14, "add", {
+		'{"id":"' .. F.refilled_grouped_light_rid .. '","id_v1":"/groups/3","owner":{"rid":"' .. F.group_rids.downstairs
+			.. '","rtype":"zone"},"on":{"on":false},"dimming":{"brightness":100.0},"alert":{"action_values":["breathe"]},'
+			.. '"signaling":{"signal_values":["no_signal","on_off"]},"type":"grouped_light"}',
+	}),
+	container(15, "update", {
+		'{"id":"' .. F.group_rids.downstairs .. '","id_v1":"/groups/3","children":[' .. child(F.rids.garage, "light") .. '],'
+			.. '"services":[' .. child(F.refilled_grouped_light_rid, "grouped_light") .. '],"type":"zone"}',
+	}))
+-- The zone deleted in the Hue app: bare identifiers, grouped_light and zone.
+F.events.zone_deleted = container(16, "delete", {
+	'{"id":"' .. F.grouped_light_rids.downstairs .. '","type":"grouped_light"}',
+	'{"id":"' .. F.group_rids.downstairs .. '","type":"zone"}',
+})
+-- The zone renamed in the Hue app.
+F.events.zone_renamed = container(17, "update", {
+	'{"id":"' .. F.group_rids.downstairs .. '","id_v1":"/groups/3","metadata":{"name":"Ground Floor"},"type":"zone"}',
+})
+-- Member light events for the colour derivation (F.events.color is the Living
+-- Room Lamp going to a colour, F.events.ct the Kitchen Strip to a white
+-- point). Hallway Ambiance (a Living Room member, CCT only) to mirek 400,
+-- then switched off, each with the room's grouped_light riding along as the
+-- bridge batches them.
+F.events.zone_member_ct = container(18, "update", {
+	'{"id":"' .. F.rids.hallway .. '","id_v1":"/lights/3","owner":{"rid":"' .. F.device_rids.hallway
+		.. '","rtype":"device"},"color_temperature":{"mirek":400,"mirek_valid":true},"type":"light"}',
+})
+F.events.zone_member_off = container(19, "update", {
+	'{"id":"' .. F.rids.hallway .. '","id_v1":"/lights/3","owner":{"rid":"' .. F.device_rids.hallway
+		.. '","rtype":"device"},"on":{"on":false},"type":"light"}',
+	grouped_light_item("living_room", "living_room", "room", "/groups/2", '"dimming":{"brightness":73.52}'),
+})
+
 return F

@@ -1414,4 +1414,194 @@ describe("bridge.hue_model", function()
 			assert.equal(0, hue_model.smart_scene_count("junk"))
 		end)
 	end)
+
+	-- docs/zone-light-design.md: grouped lights and the group derivations.
+	describe("grouped_light() and update_grouped_light()", function()
+		it("normalises a GET item: rid, owner, on and the average brightness, nothing else", function()
+			local by = by_rid(items(F.grouped_light))
+			local g = hue_model.grouped_light(by[F.grouped_light_rids.downstairs])
+			assert.same({ rid = F.grouped_light_rids.downstairs, owner_rid = F.group_rids.downstairs, owner_type = "zone",
+				on = true, brightness = 73.52 }, g)
+			local garage = hue_model.grouped_light(by[F.grouped_light_rids.garage])
+			assert.is_false(garage.on)
+			assert.equal(100, garage.brightness)
+			assert.equal("room", garage.owner_type)
+			assert.equal("bridge_home", hue_model.grouped_light(by[F.grouped_light_rids.home]).owner_type)
+			assert.equal(4, #items(F.grouped_light), "the empty zone has no grouped_light")
+		end)
+
+		it("takes a stream item without an owner, and refuses junk and other types", function()
+			local event = decode(F.events.zone_level)[1].data[1]
+			local g = hue_model.grouped_light({ id = event.id, type = "grouped_light", dimming = event.dimming })
+			assert.same({ rid = F.grouped_light_rids.downstairs, brightness = 40 }, g)
+			assert.is_nil(hue_model.grouped_light(nil))
+			assert.is_nil(hue_model.grouped_light("junk"))
+			assert.is_nil(hue_model.grouped_light({ type = "grouped_light" }))
+			assert.is_nil(hue_model.grouped_light({ id = "", type = "grouped_light" }))
+			assert.is_nil(hue_model.grouped_light(decode(F.events.brightness)[1].data[1]), "a light item")
+			assert.same({ rid = "bare" }, hue_model.grouped_light({ id = "bare" }), "no type: taken as one")
+		end)
+
+		it("merges on and brightness as carried, reporting them in a stable order", function()
+			local g = hue_model.grouped_light(by_rid(items(F.grouped_light))[F.grouped_light_rids.downstairs])
+			assert.same({ "on" }, hue_model.update_grouped_light(g, decode(F.events.zone_off)[1].data[1]))
+			assert.is_false(g.on)
+			assert.equal(73.52, g.brightness)
+			assert.same({ "brightness" }, hue_model.update_grouped_light(g, decode(F.events.zone_level)[1].data[1]))
+			assert.equal(40, g.brightness)
+			assert.same({ "on", "brightness" }, hue_model.update_grouped_light(g, decode(F.events.zone_on)[1].data[1]))
+			assert.is_true(g.on)
+			assert.equal(73.52, g.brightness)
+			assert.same({ "on", "brightness" }, hue_model.update_grouped_light(g, decode(F.events.zone_on)[1].data[1]),
+				"carried counts as changed, value or no value")
+		end)
+
+		it("ignores nulls, junk and an owner change is taken but not reported", function()
+			local g = hue_model.grouped_light({ id = "g", type = "grouped_light" })
+			assert.same({}, hue_model.update_grouped_light(g, { on = { on = {} }, dimming = { brightness = {} } }))
+			assert.same({}, hue_model.update_grouped_light(g, { on = "yes", dimming = 7 }))
+			assert.same({}, hue_model.update_grouped_light(g, nil))
+			assert.same({}, hue_model.update_grouped_light(nil, { on = { on = true } }))
+			assert.is_nil(g.on)
+			assert.same({}, hue_model.update_grouped_light(g, { owner = { rid = "z", rtype = "zone" } }))
+			assert.equal("z", g.owner_rid)
+			assert.equal("zone", g.owner_type)
+		end)
+	end)
+
+	describe("group_caps()", function()
+		local lights
+
+		before_each(function()
+			lights = {}
+			for key, rid in pairs(F.rids) do
+				lights[key] = hue_model.light(light_items[rid])
+			end
+		end)
+
+		it("takes the union of the flags and the intersection of the CT ranges, min_dim 1", function()
+			assert.same({ has_color = true, has_cct = true, mirek_min = 153, mirek_max = 454, min_dim = 1 },
+				hue_model.group_caps({ lights.hallway, lights.living }), "Living Room: 153-454 within 153-500")
+			assert.same({ has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 1 },
+				hue_model.group_caps({ lights.garage, lights.living }), "Downstairs: the white lamp adds nothing")
+			assert.same({ has_color = false, has_cct = false, min_dim = 1 }, hue_model.group_caps({ lights.garage }))
+			assert.same({ has_color = false, has_cct = true, mirek_min = 153, mirek_max = 454, min_dim = 1 },
+				hue_model.group_caps({ lights.hallway }))
+		end)
+
+		it("falls back to the first ranged member's range when the intersection is empty", function()
+			local warm = { has_cct = true, mirek_min = 400, mirek_max = 500 }
+			local cool = { has_cct = true, mirek_min = 153, mirek_max = 300 }
+			assert.same({ has_color = false, has_cct = true, mirek_min = 400, mirek_max = 500, min_dim = 1 },
+				hue_model.group_caps({ warm, cool }))
+			assert.same({ has_color = false, has_cct = true, mirek_min = 153, mirek_max = 300, min_dim = 1 },
+				hue_model.group_caps({ cool, warm }))
+			assert.same({ has_color = false, has_cct = true, mirek_min = 200, mirek_max = 300, min_dim = 1 },
+				hue_model.group_caps({ { has_cct = true, mirek_min = 200, mirek_max = 454 }, cool }))
+		end)
+
+		it("leaves the bounds out when no CT member has a range, and tolerates junk", function()
+			assert.same({ has_color = false, has_cct = true, min_dim = 1 }, hue_model.group_caps({ { has_cct = true } }))
+			assert.same({ has_color = false, has_cct = true, mirek_min = 153, mirek_max = 454, min_dim = 1 },
+				hue_model.group_caps({ { has_cct = true, mirek_min = "153" }, lights.hallway }), "a half range is no range")
+			assert.same({ has_color = false, has_cct = false, min_dim = 1 }, hue_model.group_caps({}))
+			assert.same({ has_color = false, has_cct = false, min_dim = 1 }, hue_model.group_caps(nil))
+			assert.same({ has_color = false, has_cct = false, min_dim = 1 }, hue_model.group_caps({ "junk", 7 }))
+		end)
+
+		it("feeds registry_configure_params() like a light's caps", function()
+			local p = hue_model.registry_configure_params("z", { device_id = 1, name = "Downstairs",
+				caps = hue_model.group_caps({ lights.garage, lights.living }) })
+			assert.same({ rid = "z", name = "Downstairs", has_color = "true", has_cct = "true", mirek_min = "153",
+				mirek_max = "500", min_dim = "1" }, p)
+		end)
+	end)
+
+	describe("group_color()", function()
+		local lights
+
+		before_each(function()
+			lights = {}
+			for key, rid in pairs(F.rids) do
+				lights[key] = hue_model.light(light_items[rid])
+			end
+		end)
+
+		it("shows the first lit member's mirek when no lit member sits in xy mode", function()
+			assert.same({ mirek = 250, color_mode = "ct" }, hue_model.group_color({ lights.hallway, lights.living }),
+				"Living Room: Hallway Ambiance first in the room's order")
+			assert.same({ mirek = 366, color_mode = "ct" }, hue_model.group_color({ lights.garage, lights.living }),
+				"Downstairs: the white lamp is off and has no colour anyway")
+			assert.same({ mirek = 366, color_mode = "ct" }, hue_model.group_color({ lights.living, lights.hallway }))
+		end)
+
+		it("prefers a lit colour-capable member in xy mode, wherever it stands", function()
+			assert.same({ x = 0.2731, y = 0.1192, color_mode = "xy" },
+				hue_model.group_color({ lights.hallway, lights.kitchen }), "the Kitchen Strip sits at a colour")
+			hue_model.update(lights.living, decode(F.events.color)[1].data[1])
+			assert.same({ x = 0.1532, y = 0.0475, color_mode = "xy" }, hue_model.group_color({ lights.hallway, lights.living }))
+			assert.same({ x = 0.1532, y = 0.0475, color_mode = "xy" }, hue_model.group_color({ lights.living, lights.kitchen }),
+				"the first xy member wins")
+		end)
+
+		it("is nil while no member is lit, or no lit member shows a colour", function()
+			assert.is_nil(hue_model.group_color({ lights.garage }))
+			lights.living.on = false
+			assert.is_nil(hue_model.group_color({ lights.garage, lights.living }))
+			lights.garage.on = true
+			assert.is_nil(hue_model.group_color({ lights.garage, lights.living }), "a lit white lamp has no colour")
+			assert.is_nil(hue_model.group_color({}))
+			assert.is_nil(hue_model.group_color(nil))
+			assert.is_nil(hue_model.group_color({ "junk" }))
+		end)
+
+		it("skips a lit member whose mirek is invalid and has no xy", function()
+			local odd = { on = true, has_cct = true, mirek_valid = false, mirek = nil }
+			assert.is_nil(hue_model.group_color({ odd }))
+			assert.same({ mirek = 250, color_mode = "ct" }, hue_model.group_color({ odd, lights.hallway }))
+		end)
+	end)
+
+	describe("group_label() and group_configure_params()", function()
+		it("labels a zone with its type, a room by name, the bridge_home and no name specially", function()
+			assert.equal("Bedside Lights (zone)", hue_model.group_label("Bedside Lights", "zone"))
+			assert.equal("Master Bedroom", hue_model.group_label("Master Bedroom", "room"))
+			assert.equal("(all lights)", hue_model.group_label(nil, "bridge_home"))
+			assert.equal("(no room)", hue_model.group_label(nil, "zone"))
+			assert.equal("(no room)", hue_model.group_label("", "room"))
+			assert.equal("Odd", hue_model.group_label("Odd", nil))
+		end)
+
+		it("builds the string-valued HUE_CONFIGURE params of a zone from a registry entry", function()
+			local p = hue_model.group_configure_params(F.group_rids.downstairs, {
+				device_id = 2001, name = "Downstairs", group_type = "zone", light_count = 2, no_lights = false,
+				caps = { has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 1 },
+				id_v1 = "/groups/3", state = "linked",
+			})
+			for k, v in pairs(p) do
+				assert.equal("string", type(v), k)
+			end
+			assert.same({ rid = F.group_rids.downstairs, name = "Downstairs", kind = "group", group_type = "zone",
+				model = "Hue zone", light_count = "2", no_lights = "false", hue_room = "Downstairs (zone)", id_v1 = "/groups/3",
+				has_color = "true", has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "1" }, p)
+		end)
+
+		it("builds a room's, with no_lights true, persisted strings normalised and the extra fields merged", function()
+			local p = hue_model.group_configure_params("r", {
+				device_id = 2002, name = "Garage", group_type = "room", light_count = "0", no_lights = "true",
+				caps = { has_color = "false", has_cct = "false", min_dim = "1" },
+			}, { state = "gone", gone_since = 1761000000, hue_room = "ignored: the label is the group's own" })
+			assert.same({ rid = "r", name = "Garage", kind = "group", group_type = "room", model = "Hue room",
+				light_count = "0", no_lights = "true", hue_room = "ignored: the label is the group's own",
+				has_color = "false", has_cct = "false", min_dim = "1", state = "gone", gone_since = "1761000000" }, p)
+		end)
+
+		it("leaves out what the entry lacks: an adopted entry whose group is not on the bridge", function()
+			local p = hue_model.group_configure_params("z", { device_id = 3, name = "Old Zone" })
+			assert.same({ rid = "z", name = "Old Zone", kind = "group", no_lights = "false", hue_room = "Old Zone",
+				has_color = "false", has_cct = "false", min_dim = "1" }, p)
+			assert.same({ rid = "z", kind = "group", no_lights = "false", has_color = "false", has_cct = "false",
+				min_dim = "1" }, hue_model.group_configure_params("z", nil))
+		end)
+	end)
 end)
