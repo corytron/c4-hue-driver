@@ -15,6 +15,8 @@ its expected result, and the result goes into `docs/status.md`.
   `Connection Test`, `Reload Credentials`, `Check CA Pinning`; no
   `common/devloop.lua`, `bridge/conntest.lua`, `bridge/pinning.lua`. The dev
   build has all of them. Every `driver.xml` parses.
+- `unzip -l build/<driver>.c4z` lists `LICENSE` and `NOTICE` in each of the
+  three packages (Apache 2.0 §4).
 - No LAN address, Hue application key or private certificate in `src/`,
   `docs/`, `tools/`, `tests/` (`git grep` for the house's addresses; the
   placeholders 10.0.2.143 and 192.0.2.7 are the only ones allowed).

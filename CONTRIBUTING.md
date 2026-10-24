@@ -31,8 +31,10 @@ optional.
   project. Placeholders: `10.0.2.143` for the bridge, `192.0.2.7` for the
   development machine, `001788fffe25b8f8` for a bridge id (Signify's own
   documentation example), and the RFC 5737 ranges (`192.0.2.0/24`,
-  `198.51.100.0/24`, `203.0.113.0/24`) for any other example address.
-  Screenshots are taken on a demo project with invented names.
+  `198.51.100.0/24`, `203.0.113.0/24`) for any other example address in
+  code, tests and design notes (the manual and the README may use
+  home-network-looking examples such as `192.168.1.50`). Screenshots are
+  taken on a demo project with invented names.
 - **Logos, badges or trade dress** of Snap One or Signify, and any wording
   that suggests affiliation, certification or endorsement. "Works with
   Philips Hue" and "for Philips Hue" are the allowed phrasings.
@@ -55,8 +57,10 @@ optional.
   invented Hue resources in `tests/fixtures/hue_resources.lua`. Every change
   of behaviour comes with a spec; `busted tests` stays green.
 - **Three drivers, one build.** `tools/build.sh` stages `src/common/` into
-  each driver and stamps all three with the same build number (the commit
-  count), so a change to a shared module is a change to all three.
+  each driver (the bridge without `device.lua`; release builds without
+  `devloop.lua` and the bridge's development modules) and stamps all three
+  with the same build number (the commit count), so a change to a shared
+  module is a change to all three.
 - **Texts users read.** Property texts, `Last Action` results and `Attention`
   lines are part of the contract: the manual
   (`src/hue_bridge/www/documentation.html`) quotes them. A change to one
@@ -88,5 +92,5 @@ Open a GitHub issue with the details the README asks for (Driver Version,
 Control4 OS version, bridge model, the property texts, the Lua output with
 private data replaced). For something security-sensitive, for example a way
 to read the stored application key, use GitHub's private vulnerability
-reporting on this repository or contact the author privately instead of
-opening a public issue.
+reporting on this repository, if it is enabled, or contact the author
+privately instead of opening a public issue.

@@ -109,3 +109,22 @@ contracts above.
   [`reviews/slim-lights.md`](reviews/slim-lights.md),
   [`reviews/slim-runtime.md`](reviews/slim-runtime.md) and
   [`reviews/slim-scenes-zones.md`](reviews/slim-scenes-zones.md).
+- [`reviews/security-2026-10-24.md`](reviews/security-2026-10-24.md): the
+  read-only security review of the slimmed release code and `tools/build.sh`
+  on `release-prep` before 1.0, checked item by item against the
+  2026-10-22 analyses.
+- [`reviews/diff-review-2026-10-24.md`](reviews/diff-review-2026-10-24.md):
+  the read-only review of the slimming's diff (`main..release-prep`, `src`
+  and `tools/build.sh`) hunk by hunk against the brief's rule that no
+  owner-visible behaviour changes.
+- [`reviews/efficiency-2026-10-24.md`](reviews/efficiency-2026-10-24.md):
+  the efficiency review after the slimming: the five paths
+  `slim-runtime.md` costed, re-costed on `release-prep`.
+- [`reviews/manual-bridge-2026-10-24.md`](reviews/manual-bridge-2026-10-24.md):
+  the release review of the owner's manual (the Hue Bridge Documentation
+  tab) against the code, every quoted text checked, with the corrections
+  applied before 1.0.
+- [`reviews/manual-devices-readme-2026-10-24.md`](reviews/manual-devices-readme-2026-10-24.md):
+  the release review of the Hue Light and Hue Scene device pages, the README
+  set and the manual's install chapters against the code, with the
+  corrections applied before 1.0.
