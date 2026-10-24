@@ -44,7 +44,11 @@ for driver in "${DRIVERS[@]}"; do
 	cp -R "$ROOT/src/$driver" "$stage"
 	cp -R "$ROOT/src/common" "$stage/common"
 	if [[ "$dev_build" != yes ]]; then
-		rm -f "$stage/common/devloop.lua"
+		# Release builds: no dev loop, no connection experiment or pinning
+		# check modules, and none of the DEV-ONLY properties and actions.
+		rm -f "$stage/common/devloop.lua" "$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua"
+		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
+			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
 	fi
 	# The drivers' own copy of the version: Director's answer is empty at the
 	# first init of a device created by AddDevice (docs/status.md, 2026-10-24).
