@@ -137,15 +137,17 @@ reboot, time-of-day scenes activated and deactivated from the bridge and
 listed in Composer (2026-10-24, build 180), the readable Room Mappings
 list (build 185), Add Zone Light creating the Bedside Lights zone light and the Master
 Bedroom room light with the right texts, pickers and counts, Forget Light
-and a Composer delete of a zone light (builds 196–199, Composer side only).
+and a Composer delete of a zone light (builds 196–199); the Bedside Lights
+zone light from the owner's phone and keypad (2026-10-24, build 199): ON,
+the slider, colour and OFF reach both lamps and the tile follows the Hue
+app, which also confirms that a grouped_light PUT takes `color` and
+`color_temperature`.
 
 ## Open
 
-- Zone lights: the owner's checks from the phone and the keypad (ON = both
-  lamps 100 %, slider, colour and colour temperature reaching both lamps,
-  OFF, Hue-app changes reaching the tile, Shine's tile going off on a zone
-  OFF, the Bedside Lights Switch rebound to device 1166); the grouped_light
-  PUT accepting `color` / `color_temperature` is assumed until then. (Settled on the way, build 199: a device created by AddDevice has an
+- Zone lights: Shine's tile going off on a zone OFF, and a change of the
+  zone's lights in Hue reaching a live tile's colour controls, not yet seen
+  by the owner. (Settled on the way, build 199: a device created by AddDevice has an
   empty property table at its first init, so a property written only by
   the replay of the property handlers, `Driver Version`, stayed blank until
   a reload; the three drivers now write it at late init and look again at 5
