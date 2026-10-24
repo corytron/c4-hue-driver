@@ -286,6 +286,7 @@ local function new_c4(env)
 		timers = {},
 		persist = {},
 		property_lists = {},
+		property_attribs = {},  -- name → 1 hidden, 0 shown (SetPropertyAttribs)
 	}
 
 	local function record(name, ...)
@@ -299,6 +300,12 @@ local function new_c4(env)
 
 	-- C4:UpdatePropertyList(name, "a,b,c", value): the drop-down of a
 	-- DYNAMIC_LIST property (kept in c4.property_lists) and what its row shows.
+	-- C4:SetPropertyAttribs(name, 1) hides a property row, 0 shows it.
+	function c4:SetPropertyAttribs(name, attribs)
+		record("SetPropertyAttribs", name, attribs)
+		c4.property_attribs[name] = attribs
+	end
+
 	function c4:UpdatePropertyList(name, list, value)
 		record("UpdatePropertyList", name, list, value)
 		c4.property_lists[name] = list
@@ -759,6 +766,21 @@ local function forget_driver_modules()
 			end
 		end
 	end
+end
+
+-- The bridge's Last Action as the owner reads it: the row and its
+-- continuation rows "Last Action (2)" … while they are shown, joined with
+-- a space (a long result is word-wrapped onto them).
+function fake.last_action(env)
+	local parts = { env.Properties["Last Action"] or "" }
+	for i = 2, 6 do
+		local name = string.format("Last Action (%d)", i)
+		local value = env.Properties[name]
+		if value and value ~= "" and env.C4.property_attribs[name] ~= 1 then
+			parts[#parts + 1] = value
+		end
+	end
+	return table.concat(parts, " ")
 end
 
 -- Property names and defaults declared in a driver.xml, as Director would

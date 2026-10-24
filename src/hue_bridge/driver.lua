@@ -815,38 +815,92 @@ end
 -- Last Action and refreshes the counts. The pickers are CUSTOM_SELECT lists
 -- built on demand by the global functions below [verified: FUND 12.3].
 
--- The text as the row; a long text also as its "; "-separated parts in the
--- drop-down, each readable where the row clips.
+-- Composer's value column holds about 75 characters and does not wrap, so
+-- a long result is word-wrapped onto `Last Action` and the rows `Last
+-- Action (2)` … `(6)`; rows not in use are hidden (SetPropertyAttribs 1).
+-- Nothing to click, nothing editable (issue #68).
+local LAST_ACTION_ROWS, LAST_ACTION_WIDTH = 6, 72
+local last_action_rows_shown = 0
+
+local function wrap_text(text, width)
+	local lines, line = {}, ""
+	for word in text:gmatch("%S+") do
+		while #word > width do
+			if line ~= "" then
+				lines[#lines + 1] = line
+				line = ""
+			end
+			lines[#lines + 1] = word:sub(1, width)
+			word = word:sub(width + 1)
+		end
+		if line == "" then
+			line = word
+		elseif #line + 1 + #word <= width then
+			line = line .. " " .. word
+		else
+			lines[#lines + 1] = line
+			line = word
+		end
+	end
+	if line ~= "" then
+		lines[#lines + 1] = line
+	end
+	return lines
+end
+
+local function row_visible(name, visible)
+	if C4.SetPropertyAttribs then
+		pcall(C4.SetPropertyAttribs, C4, name, visible and 0 or 1)
+	end
+end
+
+local function last_action_row(i)
+	return string.format("Last Action (%d)", i)
+end
+
 local function last_action(text)
 	text = tostring(text == nil and "" or text)
 	log.always("%s", text)
-	-- The parts of a long result: the "; "-separated items of an audit or
-	-- an import, and the " | "-separated halves of an action the lights,
-	-- scenes and zone lights share (Link Devices, the name actions).
-	local parts = {}
-	if #text > 70 and (text:find("; ", 1, true) or text:find(" | ", 1, true)) then
-		for part in (text:gsub(" | ", "; ") .. "; "):gmatch("(.-); ") do
-			if part ~= "" then
-				parts[#parts + 1] = part
+	local lines = wrap_text(text, LAST_ACTION_WIDTH)
+	if #lines > LAST_ACTION_ROWS then
+		lines[LAST_ACTION_ROWS] = lines[LAST_ACTION_ROWS]:sub(1, LAST_ACTION_WIDTH - 16) .. " … (Lua output)"
+	end
+	prop("Last Action", lines[1] or "")
+	for i = 2, LAST_ACTION_ROWS do
+		if lines[i] then
+			prop(last_action_row(i), lines[i])
+			if i > last_action_rows_shown then
+				row_visible(last_action_row(i), true)
 			end
+		elseif i <= last_action_rows_shown then
+			prop(last_action_row(i), "")
+			row_visible(last_action_row(i), false)
 		end
 	end
-	show_list("Last Action", text, parts)
+	last_action_rows_shown = math.min(#lines, LAST_ACTION_ROWS)
 	refresh_lights_props()
 end
 
--- The lists are for reading: a pick in Composer changes nothing and the row
+-- At late init: continuation rows that still hold text from before the
+-- restart stay shown, the empty ones are hidden.
+local function settle_last_action_rows()
+	last_action_rows_shown = 1
+	for i = 2, LAST_ACTION_ROWS do
+		local value = Properties and Properties[last_action_row(i)] or ""
+		row_visible(last_action_row(i), value ~= "")
+		if value ~= "" then
+			last_action_rows_shown = i
+		end
+	end
+end
+
+-- The lists are read-only in Composer; should a pick still arrive, the row
 -- goes back to its summary (only when it left it, so this cannot loop).
 local function list_pick(name)
 	return function(value)
 		if state.late_init_done and list_rows[name] ~= nil and value ~= list_rows[name] then
 			list_rows_sent[name] = nil
-			if name == "Last Action" then
-				last_action(name .. " is for reading; the row shows the text again")
-			else
-				refresh_lights_props()
-				last_action(name .. " is for reading; the row shows the summary again")
-			end
+			refresh_lights_props()
 		end
 	end
 end
@@ -854,7 +908,6 @@ dispatch.properties["Room_Mappings"] = list_pick("Room Mappings")
 dispatch.properties["Lights"] = list_pick("Lights")
 dispatch.properties["Scenes"] = list_pick("Scenes")
 dispatch.properties["Zone_Lights"] = list_pick("Zone Lights")
-dispatch.properties["Last_Action"] = list_pick("Last Action")
 
 -- False, with the reason in Last Action, when an action cannot run.
 local function can()
@@ -1464,6 +1517,7 @@ function OnDriverLateInit()
 	refresh_lights_props()
 	dispatch.replay_properties(Properties)
 	show_driver_version(1)
+	settle_last_action_rows()
 	state.stream = new_stream()
 	state.late_init_done = true
 	replay_early_commands()
