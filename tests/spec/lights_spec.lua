@@ -826,6 +826,28 @@ describe("bridge.lights", function()
 			assert.equal(1, #c4.sent)
 		end)
 
+		-- The zone lights derive a group's colour from the member lights' models,
+		-- imported or not (docs/zone-light-design.md Decision 8).
+		it("keeps the model of an unimported light current, telling nobody", function()
+			L = new_lights()
+			L:import_new(done)
+			answer_gets()  -- Kitchen Strip stays unimported
+			c4.sent = {}
+			assert.is_nil(L:device_for(F.rids.kitchen))
+			assert.equal(0, L:on_container({ type = "update", data = { { id = F.rids.kitchen, type = "light",
+				on = { on = true }, dimming = { brightness = 42 }, color = { xy = { x = 0.2, y = 0.3 } } } } }))
+			local model = L.models[F.rids.kitchen]
+			assert.same({ true, 42, 0.2, 0.3, "xy" }, { model.on, model.brightness, model.x, model.y, model.color_mode })
+			assert.equal(0, L:on_container({ type = "update", data = { { id = F.zigbee_rids.kitchen,
+				type = "zigbee_connectivity", owner = { rid = F.device_rids.kitchen, rtype = "device" },
+				status = "connectivity_issue" } } }))
+			assert.is_false(L.models[F.rids.kitchen].online)
+			assert.equal(0, L:on_container({ type = "update", data = { { id = F.rids.kitchen, type = "light",
+				color_temperature = { mirek = 300, mirek_valid = true } } } }))
+			assert.same({ 300, "ct" }, { L.models[F.rids.kitchen].mirek, L.models[F.rids.kitchen].color_mode })
+			assert.equal(0, #c4.sent)
+		end)
+
 		it("sends nothing for an event that touches no reported field", function()
 			assert.equal(0, L:on_container(container(F.events.noop)))
 			assert.equal(0, #c4.sent)
@@ -1089,6 +1111,132 @@ describe("bridge.lights", function()
 		end)
 	end)
 
+	-- docs/zone-light-design.md §4: zone-light devices run hue_light.c4z too.
+	-- The module is told which devices another module owns (ctx.skip_devices,
+	-- or link_devices' own argument) and never adopts, lists, re-links or
+	-- messages one of them.
+	describe("skip set (zone-light devices)", function()
+		local ZONE_DEVICE = 2005
+
+		-- A zone-light device bound to the bridge, named like an unimported
+		-- light so that a name match would otherwise adopt it.
+		local function add_zone_device(name)
+			c4:AddDevice("hue_light.c4z", LIVING_ROOM, name, function() end)  -- 2005
+			c4:Bind(15, 1, ZONE_DEVICE, 1, "HUE_BRIDGE")
+		end
+
+		local function logs_matching(text)
+			local n = 0
+			for _, line in ipairs(logged) do
+				if line:find(text, 1, true) then n = n + 1 end
+			end
+			return n
+		end
+
+		it("link_devices leaves the call's skip set out of matching and counting", function()
+			import_all()
+			c4.persist.hue_lights = nil
+			L = new_lights()
+			L:load()
+			resync()
+			add_zone_device("Kitchen Strip")
+			L.announced[ZONE_DEVICE] = { rid = F.rids.hallway }  -- even an announced rid adopts nothing
+			c4.sent = {}
+			assert.equal("Linked 4 devices: Garage White (device 2001) to Garage White [Garage] #4 by name, "
+				.. "Hallway Ambiance (device 2002) to Hallway Ambiance [Living Room] #3 by name, "
+				.. "Living Room Lamp (device 2003) to Living Room Lamp [Living Room] #1 by name, "
+				.. "Kitchen Strip (device 2004) to Kitchen Strip #2 by name", L:link_devices({ [ZONE_DEVICE] = true }))
+			assert.equal(4, L:count())
+			assert.is_nil(L:rid_for(ZONE_DEVICE))
+			assert.same({}, sent_to(ZONE_DEVICE))
+			assert.equal("All 4 bound devices are registered", L:link_devices({ [ZONE_DEVICE] = true }),
+				"the skipped device is not counted")
+			-- Without the skip set the zone light would be a candidate and nagged about.
+			L.announced[ZONE_DEVICE] = nil
+			assert.equal("not linked 1: Kitchen Strip (device 2005): no unimported Hue light has that name; "
+				.. "rename the device in Composer to the Hue light's exact name and run Link Devices again", L:link_devices())
+		end)
+
+		it("ctx.skip_devices does the same for every call, as a set, a list or a function", function()
+			import_all()
+			add_zone_device("Kitchen Strip")
+			local shapes = { { [ZONE_DEVICE] = true }, { ZONE_DEVICE }, function() return { [ZONE_DEVICE] = true } end }
+			for i, skip in ipairs(shapes) do
+				c4.persist.hue_lights = nil
+				L = new_lights({ skip_devices = skip })
+				L:load()
+				resync()
+				assert.same({ [ZONE_DEVICE] = true }, L:skip_set(), "shape " .. i)
+				assert.truthy(L:link_devices():find("^Linked 4 devices: "), "shape " .. i)
+				assert.is_nil(L:rid_for(ZONE_DEVICE), "shape " .. i)
+				assert.equal("All 4 bound devices are registered", L:link_devices(), "shape " .. i)
+			end
+			assert.same({ [ZONE_DEVICE] = true, [7] = true, [9] = true }, L:skip_set({ 7, "junk", [9] = true, [0] = true }),
+				"the call's set is added; junk is ignored")
+		end)
+
+		it("a failing skip provider reads as empty and is logged", function()
+			L = new_lights({ skip_devices = function() error("boom") end })
+			assert.same({}, L:skip_set())
+			assert.is_true(saw_log("skip_devices failed"))
+			assert.is_false(L:foreign(ZONE_DEVICE))
+		end)
+
+		it("a hello from a foreign device adopts nothing", function()
+			L = new_lights({ skip_devices = { [ZONE_DEVICE] = true } })
+			L:import_new(done)
+			answer_gets()
+			add_zone_device("Bedside Lights")
+			c4.sent = {}
+			assert.is_false(L:hello(F.rids.kitchen, { device_id = tostring(ZONE_DEVICE), name = "Bedside Lights" }))
+			assert.is_nil(L:device_for(F.rids.kitchen))
+			assert.is_true(saw_log("not adopting device 2005 for " .. F.rids.kitchen
+				.. ": the device belongs to another module"))
+			assert.same({}, c4.sent)
+		end)
+
+		it("keeps a stale entry held by a zone light, never messages it, refuses its re-link and drops it on forget",
+			function()
+			L:import_new(done)
+			answer_gets()
+			add_zone_device("Bedside Lights")
+			-- A build without kinds adopted the zone light's hello as a light [§7 Q11].
+			L.reg:add("zone-rid", { device_id = ZONE_DEVICE, name = "Bedside Lights" })
+			L:save()
+			L.ctx.skip_devices = function() return { [ZONE_DEVICE] = true } end
+			c4.sent = {}
+
+			-- Startup: the lights hear HUE_CONFIGURE, the zone light hears nothing from this module.
+			L:configure_all()
+			assert.same({ "HUE_CONFIGURE@2001", "HUE_CONFIGURE@2002", "HUE_CONFIGURE@2003" }, commands_sent())
+			assert.is_true(saw_log("HUE_CONFIGURE to device 2005 not sent: the device belongs to another module"))
+
+			-- Reconcile: the device exists, so the entry is not tombstoned; the oddity is logged once.
+			assert.same({ unbound = {}, relinked = {}, tombstoned = {} }, L:reconcile())
+			assert.equal(ZONE_DEVICE, L:device_for("zone-rid"))
+			assert.equal(1, logs_matching("Bedside Lights #zone-rid (device 2005) is registered as a light, but the device "
+				.. "is a zone light; Forget Light drops the stale entry (the device stays bound)"))
+			L:reconcile()
+			assert.equal(1, logs_matching("is registered as a light, but the device is a zone light"))
+
+			-- A resync finds no such light and marks the entry gone, telling the device nothing.
+			resync()
+			assert.equal("gone", L.registry["zone-rid"].state)
+			assert.same({}, sent_to(ZONE_DEVICE))
+
+			-- Re-link to a real light is refused; Forget drops the entry and leaves the binding alone.
+			assert.same({ false, "Not re-linked: device 2005 is a zone light; Forget Light drops its stale light entry" },
+				{ L:relink(ZONE_DEVICE, F.rids.kitchen) })
+			assert.same({ true, "Forgot Bedside Lights #zone-rid (device 2005): dropped the stale light entry; "
+				.. "the device stays bound as a zone light" }, { L:forget(ZONE_DEVICE) })
+			assert.is_nil(L.registry["zone-rid"])
+			assert.is_nil(c4.persist.hue_lights["zone-rid"])
+			assert.same({}, sent_to(ZONE_DEVICE), "no HUE_FORGOTTEN")
+			assert.equal(0, #c4.calls_to("Unbind"))
+			assert.equal(3, L:count())
+		end)
+	end)
+
 	describe("forget", function()
 		before_each(function()
 			import_all()
@@ -1304,6 +1452,35 @@ describe("bridge.lights", function()
 			-- Nothing moved, no rename: the audit only reads.
 			assert.equal(0, #c4.calls_to("RenameDevice"))
 			assert.equal(LIVING_ROOM, fake.project.devices[ID.garage].room_id)
+		end)
+
+		it("room_audit audits another module's devices by their group's mapping, after the lights", function()
+			import_all()
+			c4:AddDevice("hue_light.c4z", LIVING_ROOM, "Bedside Lights", function() end)  -- 2005, a zone light
+			L:set_room_mapping(F.group_rids.downstairs, GARAGE_ROOM)
+			local extra = {
+				{ device_id = 2005, name = "Bedside Lights", group_rid = F.group_rids.downstairs },
+				{ device_id = 2005, name = "Twice", group_rid = F.group_rids.downstairs },        -- a duplicate: once
+				{ device_id = ID.garage, name = "Garage White", group_rid = F.group_rids.downstairs }, -- a light's: left out
+				{ device_id = 2006, name = "Attic Light", group_rid = F.group_rids.attic },        -- unmapped group: left out
+				{ device_id = 0, name = "Nobody", group_rid = F.group_rids.downstairs },           -- bad id: left out
+				{ device_id = 2007, name = "Vanished", group_rid = F.group_rids.downstairs },      -- not in the project
+				"junk",
+			}
+			assert.equal("1 of 5 are not in the room their Hue room maps to: Bedside Lights is in Living Room; "
+				.. "Hue says Downstairs (zone) → drag it to Garage in Composer if you want it there; 1 not found in the project",
+				L:room_audit(extra))
+			assert.same({ { { DeviceIds = "2001,2002,2003,2005,2007" } } },
+				{ c4.calls_to("GetDevices")[#c4.calls_to("GetDevices")] })
+			fake.move_device(2005, GARAGE_ROOM)
+			assert.equal("All 4 linked lights in mapped Hue rooms are in the rooms their Hue rooms map to",
+				L:room_audit({ extra[1] }))
+			assert.equal("All 3 linked lights in mapped Hue rooms are in the rooms their Hue rooms map to", L:room_audit())
+			-- The project's name wins over the given one, as for a light.
+			fake.move_device(2005, LIVING_ROOM)
+			assert.equal("1 of 4 are not in the room their Hue room maps to: Bedside Lights is in Living Room; "
+				.. "Hue says Downstairs (zone) → drag it to Garage in Composer if you want it there",
+				L:room_audit({ { device_id = 2005, name = "Other Name", group_rid = F.group_rids.downstairs } }))
 		end)
 	end)
 
