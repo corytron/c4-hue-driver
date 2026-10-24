@@ -37,9 +37,9 @@ Hue Light (`src/hue_light/driver.lua`):
 | click top | brightness target = On preset over click rate up |
 | click bottom | target 0 over click rate down |
 | click toggle | off → preset over click up; on → 0 over click down |
-| hold (timer fired before the release) | ramp to 100 (top, or toggle while off) or to 1 (bottom, or toggle while on) over the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level |
-| release after hold | stop: a brightness target at the estimated level with rate 0 (Hue has no stop request) |
-| release-as-click after a ramp started | same as stop |
+| hold (timer fired before the release) | `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing (superseded 2026-10-23, see "Light parity") |
+| release after hold | `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop) |
+| release-as-click after a ramp started | same as stop; a click on the same button within 1 s after a hold's release is ignored |
 
 Settings persist per device (`preset_level`, `click_rate_up`,
 `click_rate_down`, `hold_rate_up`, `hold_rate_down`); defaults 100 %,

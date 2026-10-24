@@ -60,12 +60,13 @@ local function known_scene(active, opts)
 	return env, c4
 end
 
--- Params of every SendToProxy with that command, in order.
+-- Params of every SendToProxy to the proxy binding (5001) with that
+-- command, in order; the keypad LED messages on the Button Links (200-202)
+-- are left out.
 local function notifies(c4, command)
 	local out = {}
 	for _, args in ipairs(c4.calls_to("SendToProxy")) do
-		assert.equal(5001, args[1])
-		if args[2] == command then out[#out + 1] = args[3] end
+		if args[1] == 5001 and args[2] == command then out[#out + 1] = args[3] end
 	end
 	return out
 end
@@ -94,6 +95,36 @@ local function capture_sends(c4)
 		return original(self, id, command, params, allow_empty, log_command)
 	end
 	return out
+end
+
+-- The fake records three SendToProxy arguments; this keeps the message type
+-- too, as { binding, command, params, type }, from now on.
+local function capture_proxy(c4)
+	local out = {}
+	local original = c4.SendToProxy
+	c4.SendToProxy = function(self, binding, command, params, message_type)
+		out[#out + 1] = { binding, command, params, message_type }
+		return original(self, binding, command, params, message_type)
+	end
+	return out
+end
+
+-- The captured calls with that command, in order.
+local function with_command(captured, command)
+	local out = {}
+	for _, call in ipairs(captured) do
+		if call[2] == command then out[#out + 1] = call end
+	end
+	return out
+end
+
+-- The three MATCH_LED_STATE commands, one per Button Link, for `on`.
+local function leds(on)
+	return {
+		{ 200, "MATCH_LED_STATE", { STATE = on }, "COMMAND" },
+		{ 201, "MATCH_LED_STATE", { STATE = on }, "COMMAND" },
+		{ 202, "MATCH_LED_STATE", { STATE = on }, "COMMAND" },
+	}
 end
 
 -- Run `body` with devloop.apply_forwarded replaced by `stub`, on the instance
@@ -1063,7 +1094,7 @@ describe("Hue Scene driver", function()
 	end)
 
 	describe("keypad buttons (BUTTON_ACTION)", function()
-		it("top recalls, bottom turns off, toggle toggles, presses only echo", function()
+		it("top clicks recall, bottom clicks turn off, presses only echo", function()
 			local env, c4 = known_scene()
 			c4.sent = {}
 			c4.calls = {}
@@ -1078,7 +1109,7 @@ describe("Hue Scene driver", function()
 	end)
 
 	describe("keypad buttons on the Button Link bindings", function()
-		it("clicks on 200 recall, on 201 turn off; pushes do nothing", function()
+		it("clicks on 200 recall, on 201 turn off; a push alone sends nothing", function()
 			local env, c4 = known_scene()
 			c4.sent = {}
 			env.ReceivedFromProxy(200, "DO_PUSH", {})
@@ -1089,6 +1120,335 @@ describe("Hue Scene driver", function()
 			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
 			local xml = io.open("src/hue_scene/driver.xml"):read("*a")
 			assert.truthy(xml:find("Toggle Button Link", 1, true))
+		end)
+	end)
+
+	describe("keypad holds (hold to dim)", function()
+		local function dims(c4)
+			local out = {}
+			for _, m in ipairs(messages(c4, "HUE_SCENE_DIM")) do out[#out + 1] = m.params end
+			return out
+		end
+
+		it("holding top on an active scene dims up over the hold rate; the release stops it", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			assert.equal(0, #c4.sent, "nothing before the hold time")
+			assert.same({ 400, false }, c4.calls_to("SetTimer")[1])
+			c4.fire_timers()
+			assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } }, dims(c4))
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.same({ rid = "s1", device_id = "2061", direction = "stop" }, dims(c4)[2])
+			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+			assert.equal(0, #messages(c4, "HUE_SCENE_OFF"))
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "it was on and stays on")
+		end)
+
+		it("holding bottom (proxy route) dims down over the hold-down rate set through the proxy, persisted", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "3000" })
+			assert.equal(3000, c4.persist.hold_rate_down)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "1" })
+			c4.fire_timers()
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "0" })
+			assert.same({
+				{ rid = "s1", device_id = "2061", direction = "down", duration = "3000" },
+				{ rid = "s1", device_id = "2061", direction = "stop" },
+			}, dims(c4))
+			assert.same({ { BUTTON_ID = 1, ACTION = 1 }, { BUTTON_ID = 1, ACTION = 0 } }, notifies(c4, "BUTTON_ACTION"))
+		end)
+
+		it("reads persisted hold rates at late init; toggle held while on dims down, while off up", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid = "s1"
+			c4.persist.hold_rate_up = 7000
+			c4.persist.hold_rate_down = 2000
+			env.OnDriverLateInit("DIT_STARTUP")
+			configure(env)
+			state(env, "static")
+			c4.sent = {}
+			env.ReceivedFromProxy(202, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(202, "DO_RELEASE", {})
+			assert.same({ direction = "down", duration = "2000" },
+				{ direction = dims(c4)[1].direction, duration = dims(c4)[1].duration })
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_UP", { RATE = "8000" })
+			assert.equal(8000, c4.persist.hold_rate_up)
+		end)
+
+		it("holding top while off recalls at 1 % at once, then dims up 600 ms later", function()
+			local env, c4 = known_scene("inactive")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_RECALL",
+				params = { rid = "s1", action = "active", brightness = "1" } } }, c4.sent)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			local timers = c4.calls_to("SetTimer")
+			assert.same({ 600, false }, timers[#timers])
+			assert.equal(0, #dims(c4))
+			c4.fire_timers() -- 600 ms later
+			assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } }, dims(c4))
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.equal("stop", dims(c4)[2].direction)
+		end)
+
+		it("a release before the delayed dim cancels it and sends no stop", function()
+			local env, c4 = known_scene("inactive")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			c4.fire_timers()
+			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+			assert.equal(0, #dims(c4))
+		end)
+
+		it("holding bottom while off sends nothing, nor does the click after it", function()
+			local env, c4 = known_scene("inactive")
+			env.ReceivedFromProxy(201, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(201, "DO_RELEASE", {})
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.same({}, c4.sent)
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("a tap is still a tap: push, release and click recall once, with no dim", function()
+			local env, c4 = known_scene("inactive")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+			assert.is_nil(messages(c4, "HUE_SCENE_RECALL")[1].params.brightness)
+			assert.equal(0, #dims(c4))
+		end)
+
+		it("a release-as-click after a hold (proxy route) stops the dim instead of recalling", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
+			c4.fire_timers()
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "2" })
+			assert.same({ "up", "stop" }, { dims(c4)[1].direction, dims(c4)[2].direction })
+			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+		end)
+
+		it("ignores a click on the same button within 1 s after a hold's release, not on another", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			local timers = c4.calls_to("SetTimer")
+			assert.same({ 1000, false }, timers[#timers])
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"), "the keypad's click after the hold")
+			c4.fire_timers() -- 1 s later
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+		end)
+
+		it("only guards the held button: a bottom tap right after a top hold turns off", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
+		end)
+
+		it("does nothing to the bridge while unbound", function()
+			local env, c4 = load_scene({ bind = false, rid = "s1" })
+			c4.sent = {}
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.equal(0, #messages(c4, "HUE_SCENE_DIM"))
+			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+		end)
+
+		it("is cancelled on destroy", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			env.OnDriverDestroyed()
+			assert.equal(0, #c4.active_timers())
+		end)
+	end)
+
+	describe("dimmed-on state", function()
+		-- Held up and released on an active scene: dimmed from its own buttons.
+		local function dimmed_scene()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			c4.fire_timers() -- the click guard runs out
+			c4.calls = {}
+			c4.sent = {}
+			return env, c4
+		end
+
+		it("keeps the switch at 100 and the LEDs on when Hue then reports the scene inactive", function()
+			local env, c4 = dimmed_scene()
+			local proxy = capture_proxy(c4)
+			state(env, "inactive")
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #with_command(proxy, "MATCH_LED_STATE"))
+			env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("ends with HUE_SCENE_GROUP on=false: CHANGED 0 and the LEDs off; on=true alone changes nothing", function()
+			local env, c4 = dimmed_scene()
+			state(env, "inactive")
+			local proxy = capture_proxy(c4)
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true" })
+			assert.same({}, proxy)
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
+		end)
+
+		it("ends when another scene of the group becomes active", function()
+			local env, c4 = dimmed_scene()
+			state(env, "inactive")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", other_active = "true" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("ignores HUE_SCENE_GROUP for another rid", function()
+			local env, c4 = dimmed_scene()
+			state(env, "inactive")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "other", on = "false" })
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("ends with a bottom tap: OFF to the bridge and CHANGED 0 when it settles", function()
+			local env, c4 = dimmed_scene()
+			state(env, "inactive")
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
+			state(env, "inactive")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("makes TOGGLE turn the scene off although Hue reports it inactive", function()
+			local env, c4 = dimmed_scene()
+			state(env, "inactive")
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
+		end)
+
+		it("is replaced by a normal recall, so a later inactive report turns the switch off", function()
+			local env, c4 = dimmed_scene()
+			env.ReceivedFromProxy(5001, "ON", {})
+			state(env, "static")
+			c4.calls = {}
+			state(env, "inactive")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("is buffered before late init like the other bridge messages", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+			assert.equal(0, #c4.calls_to("SendToProxy"))
+			env.OnDriverLateInit("DIT_STARTUP")
+		end)
+	end)
+
+	describe("keypad LEDs", function()
+		it("MATCH_LED_STATE follows the scene on 200, 201 and 202, with BUTTON_INFO to the proxy", function()
+			local env, c4 = known_scene("inactive")
+			local proxy = capture_proxy(c4)
+			state(env, "static")
+			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+			assert.same({
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 0, ON_COLOR = "0000ff", OFF_COLOR = "000000",
+					CURRENT_COLOR = "0000ff" }, "NOTIFY" },
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 1, ON_COLOR = "000000", OFF_COLOR = "0000ff",
+					CURRENT_COLOR = "000000" }, "NOTIFY" },
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 2, ON_COLOR = "0000ff", OFF_COLOR = "000000",
+					CURRENT_COLOR = "0000ff" }, "NOTIFY" },
+			}, with_command(proxy, "BUTTON_INFO"))
+			state(env, "dynamic_palette")
+			assert.equal(3, #with_command(proxy, "MATCH_LED_STATE"), "still on: nothing new")
+			state(env, "inactive")
+			local all = with_command(proxy, "MATCH_LED_STATE")
+			assert.same(leds(false), { all[4], all[5], all[6] })
+			assert.equal("0000ff", with_command(proxy, "BUTTON_INFO")[5][3].CURRENT_COLOR, "bottom lit while off")
+		end)
+
+		it("sends them with the first known status, not before, and again only on a flip", function()
+			local env, c4 = load_scene({ rid = "s1" })
+			local proxy = capture_proxy(c4)
+			configure(env)
+			assert.equal(0, #with_command(proxy, "MATCH_LED_STATE"))
+			state(env, "inactive")
+			assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
+			configure(env) -- re-reports the brightness, but the LEDs have not changed
+			assert.equal(3, #with_command(proxy, "MATCH_LED_STATE"))
+		end)
+
+		it("turns on with a hold from off, before Hue reports anything", function()
+			local env, c4 = known_scene("inactive")
+			local proxy = capture_proxy(c4)
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+		end)
+
+		it("resends the state when a keypad is bound to a Button Link", function()
+			local env, c4 = known_scene("static")
+			local proxy = capture_proxy(c4)
+			env.OnBindingChanged(201, "BUTTON_LINK", true, 77, 1)
+			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+			env.OnBindingChanged(201, "BUTTON_LINK", false, 77, 1)
+			assert.equal(3, #with_command(proxy, "MATCH_LED_STATE"))
+			assert.equal(0, #c4.sent, "a link binding is not the bridge's")
+		end)
+
+		it("REQUEST_BUTTON_COLORS on 201 answers the default bottom colours there, then the LED state", function()
+			local env, c4 = known_scene("static")
+			local proxy = capture_proxy(c4)
+			env.ReceivedFromProxy(201, "REQUEST_BUTTON_COLORS", {})
+			assert.same({
+				{ 201, "BUTTON_COLORS", { BUTTON_ID = 1, ON_COLOR = "000000", OFF_COLOR = "0000ff",
+					CURRENT_COLOR = "000000" }, "NOTIFY" },
+				{ 201, "MATCH_LED_STATE", { STATE = true }, "COMMAND" },
+			}, proxy)
+		end)
+
+		it("SET_BUTTON_COLOR persists the colour and echoes it on the link and to the proxy", function()
+			local env, c4 = known_scene("static")
+			local proxy = capture_proxy(c4)
+			env.ReceivedFromProxy(5001, "SET_BUTTON_COLOR", { BUTTON_ID = "1", ON_COLOR = "FF8000" })
+			assert.equal("ff8000", c4.persist.button_1_on_color)
+			assert.same({
+				{ 201, "BUTTON_COLORS", { BUTTON_ID = 1, ON_COLOR = "ff8000", OFF_COLOR = "0000ff",
+					CURRENT_COLOR = "ff8000" }, "NOTIFY" },
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 1, ON_COLOR = "ff8000", OFF_COLOR = "0000ff",
+					CURRENT_COLOR = "ff8000" }, "NOTIFY" },
+			}, proxy)
+		end)
+
+		it("accepts the documented spelling with spaces and ignores a colour that is not 6-digit hex", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(5001, "SET_BUTTON_COLOR", { BUTTON_ID = "2", ["OFF COLOR"] = "00ff00",
+				ON_COLOR = "blue" })
+			assert.equal("00ff00", c4.persist.button_2_off_color)
+			assert.is_nil(c4.persist.button_2_on_color)
+		end)
+
+		it("uses persisted colours after a restart", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid = "s1"
+			c4.persist.button_0_on_color = "ff0000"
+			env.OnDriverLateInit("DIT_STARTUP")
+			local proxy = capture_proxy(c4)
+			env.ReceivedFromProxy(200, "REQUEST_BUTTON_COLORS", {})
+			assert.same({ BUTTON_ID = 0, ON_COLOR = "ff0000", OFF_COLOR = "000000", CURRENT_COLOR = "000000" },
+				proxy[1][3])
+			assert.same({ STATE = false }, proxy[2][3], "nothing known yet reads as off")
 		end)
 	end)
 
