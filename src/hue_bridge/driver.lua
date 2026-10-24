@@ -230,57 +230,141 @@ if not scenes_ok then
 	scenes_mod = nil
 end
 
+-- The grouped_light hooks the scenes and the zone lights share: every
+-- grouped_light PUT goes through the group queue (one coalescing entry per
+-- group, so a "room off" reaching several devices sends one PUT).
+local group_hooks = {
+	-- Scene OFF / zone light OFF.
+	group_off = function(grouped_light_rid)
+		if state.group_queue then
+			state.group_queue:set(grouped_light_rid, { on = false })
+			return true
+		end
+		return false
+	end,
+	-- Hold-to-dim on a keypad: dimming_delta start/stop on the grouped_light
+	-- (docs/keypad-design.md). The queue builds the PUT from a "dim" field.
+	group_dim = function(grouped_light_rid, body)
+		local delta = type(body) == "table" and body.dimming_delta or nil
+		if not state.group_queue or type(delta) ~= "table" then
+			return false
+		end
+		state.group_queue:set(grouped_light_rid, {
+			dim = delta.action,
+			delta = delta.brightness_delta,
+			rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
+		})
+		return true
+	end,
+	-- Absolute fields on the grouped_light: a scene slider while the group's
+	-- level is unknown (docs/scene-dimmer-design.md), every zone light
+	-- command (docs/zone-light-design.md Decision 5).
+	group_set = function(grouped_light_rid, fields)
+		if state.group_queue and type(fields) == "table" then
+			state.group_queue:set(grouped_light_rid, fields)
+			return true
+		end
+		return false
+	end,
+}
+
+local function device_send(id, command, params)
+	log.debug("%s %s -> %d: %s", command, tostring(params and params.rid):sub(1, 8), id, params_text(params))
+	C4:SendToDevice(id, command, params)
+end
+
 local function new_scenes()
 	if not scenes_mod then
 		return nil
 	end
 	return scenes_mod.new({
 		http = bridge_request,
-		send = function(id, command, params)
-			log.debug("%s %s -> %d: %s", command, tostring(params and params.rid):sub(1, 8), id, params_text(params))
-			C4:SendToDevice(id, command, params)
-		end,
+		send = device_send,
 		bridge_id = C4:GetDeviceID(),
 		log = log,
 		now = os.time,
 		project = project_calls,
 		lights = state.lights,
-		-- Scene OFF turns the scene's group off through its own coalescing
-		-- queue, so a "room off" reaching several scene devices sends one PUT.
-		group_off = function(grouped_light_rid)
-			if state.group_queue then
-				state.group_queue:set(grouped_light_rid, { on = false })
-				return true
-			end
-			return false
-		end,
-		-- Hold-to-dim on a scene keypad: dimming_delta start/stop on the
-		-- scene's grouped_light through the same queue (docs/keypad-design.md).
-		group_dim = function(grouped_light_rid, body)
-			local delta = type(body) == "table" and body.dimming_delta or nil
-			if not state.group_queue or type(delta) ~= "table" then
-				return false
-			end
-			-- The queue builds the PUT itself from a "dim" field.
-			state.group_queue:set(grouped_light_rid, {
-				dim = delta.action,
-				delta = delta.brightness_delta,
-				rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
-			})
-			return true
-		end,
-		-- A scene slider when the group's level is unknown: an absolute
-		-- grouped_light brightness (docs/scene-dimmer-design.md).
-		group_set = function(grouped_light_rid, fields)
-			if state.group_queue and type(fields) == "table" then
-				state.group_queue:set(grouped_light_rid, fields)
-				return true
-			end
-			return false
-		end,
+		group_off = group_hooks.group_off,
+		group_dim = group_hooks.group_dim,
+		group_set = group_hooks.group_set,
 		persist_get = function(name) return C4:PersistGetValue(name) end,
 		persist_set = function(name, value) C4:PersistSetValue(name, value) end,
 	})
+end
+
+-- Zone lights (docs/zone-light-design.md): Hue zones and rooms as Hue Light
+-- devices of kind "group". Optional like the scenes module.
+local zone_lights_ok, zone_lights_mod = pcall(require, "bridge.zone_lights")
+if not zone_lights_ok then
+	log.warn("bridge.zone_lights not loadable: %s", tostring(zone_lights_mod))
+	zone_lights_mod = nil
+end
+
+local function new_zone_lights()
+	if not zone_lights_mod then
+		return nil
+	end
+	return zone_lights_mod.new({
+		http = bridge_request,
+		send = device_send,
+		bridge_id = C4:GetDeviceID(),
+		log = log,
+		now = os.time,
+		project = project_calls,
+		lights = state.lights,
+		groups = state.lights and state.lights.groups or nil,
+		group_off = group_hooks.group_off,
+		group_dim = group_hooks.group_dim,
+		group_set = group_hooks.group_set,
+		persist_get = function(name) return C4:PersistGetValue(name) end,
+		persist_set = function(name, value) C4:PersistSetValue(name, value) end,
+	})
+end
+
+-- The zone lights' half of something, or nil without the module.
+local function zone_text(method, ...)
+	if state.zone_lights and type(state.zone_lights[method]) == "function" then
+		return state.zone_lights[method](state.zone_lights, ...)
+	end
+	return nil
+end
+
+-- The zone-light devices' ids as a set (the module may hand back a set or
+-- a list), empty without the module.
+local function zone_light_ids()
+	local set = {}
+	local ids = zone_text("device_ids")
+	if type(ids) == "table" then
+		for k, v in pairs(ids) do
+			if type(k) == "number" and type(v) == "number" then
+				set[v] = true
+			elseif tonumber(k) and v then
+				set[tonumber(k)] = true
+			end
+		end
+	end
+	return set
+end
+
+local function zone_light_device(device_id)
+	local id = tonumber(device_id)
+	return id ~= nil and zone_light_ids()[id] == true
+end
+
+-- The light devices' ids as a set, for the zone lights' Link Devices.
+local function light_device_ids()
+	local set = {}
+	for _, entry in pairs(state.lights and state.lights.registry or {}) do
+		if entry.device_id then
+			set[entry.device_id] = true
+		end
+	end
+	return set
+end
+
+local function is_zone_light_rid(rid)
+	return rid ~= nil and rid ~= "" and zone_text("is_group", rid) == true
 end
 
 -- The owner-facing counts and lists (docs/import-design.md §6). Methods the
@@ -299,6 +383,9 @@ local function attention_text()
 		for _, item in ipairs(state.scenes:attention_items() or {}) do
 			items[#items + 1] = item
 		end
+	end
+	for _, item in ipairs(zone_text("attention_items") or {}) do
+		items[#items + 1] = item
 	end
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
@@ -337,6 +424,10 @@ local function refresh_lights_props()
 	if state.scenes and state.scenes.summary then
 		prop("Scenes", state.scenes:summary())
 	end
+	local zone_summary = zone_text("summary")
+	if zone_summary then
+		prop("Zone Lights", zone_summary)
+	end
 end
 
 local function new_queue()
@@ -347,12 +438,15 @@ local function new_queue()
 	})
 end
 
--- Grouped-light PUTs (scene OFF, dims, levels) have their own queue and
--- bucket, separate from the lights'. Hue's guidance for groups is about one
--- request a second [verified: Core Concepts], but this bucket uses the
--- module-wide rate (commands.RATE_PER_SEC, 10/s); open item in docs/status.md.
+-- Grouped-light PUTs (scene OFF, dims, levels, zone lights) have their own
+-- queue and bucket, separate from the lights': Hue's guidance for groups is
+-- about one request a second [verified: Core Concepts], so one a second
+-- sustained with a burst of three (a hold's start and stop, a tap after a
+-- hold) (docs/zone-light-design.md Decision 9).
 local function new_group_queue()
 	return commands.new({
+		rate_per_sec = 1,
+		burst = 3,
 		send = function(rid, body, done)
 			bridge_request({ method = "PUT", path = "/clip/v2/resource/grouped_light/" .. rid, body = body }, done)
 		end,
@@ -380,6 +474,20 @@ local function new_stream()
 					log.warn("resync failed: %s", tostring(err))
 				end
 				refresh_lights_props()
+				-- The zone lights follow the scenes (their grouped_light GET
+				-- is small; the groups come from the lights' resync).
+				local function zone_resync()
+					if state.zone_lights and state.zone_lights.resync then
+						state.zone_lights:resync(function(zok, zerr, zsent)
+							if zok then
+								log.info("zone light resync done: %d state messages", tonumber(zsent) or 0)
+							else
+								log.warn("zone light resync failed: %s", tostring(zerr))
+							end
+							refresh_lights_props()
+						end)
+					end
+				end
 				-- The scenes follow the lights: their catalogue GET is the
 				-- large one (351 KB on the house bridge) and their groups and
 				-- room mappings come from the lights' resync.
@@ -391,7 +499,10 @@ local function new_stream()
 							log.warn("scene resync failed: %s", tostring(serr))
 						end
 						refresh_lights_props()
+						zone_resync()
 					end)
+				else
+					zone_resync()
 				end
 			end)
 		end,
@@ -401,6 +512,9 @@ local function new_stream()
 			state.lights:on_container(container)
 			if state.scenes and state.scenes.on_container then
 				state.scenes:on_container(container)
+			end
+			if state.zone_lights and state.zone_lights.on_container then
+				state.zone_lights:on_container(container)
 			end
 			-- A resource appearing or disappearing changes the counts and the
 			-- Attention list; plain updates (state, names) do not.
@@ -820,7 +934,8 @@ end
 function HueLightList() return picker("picker_lights") end
 function RoomList() return picker("picker_rooms", "add") end
 function RelinkDeviceList() return picker("picker_relink_devices") end
-function ForgetDeviceList() return picker("picker_forget_devices") end
+-- ForgetDeviceList is defined with the zone lights' pickers below: it joins
+-- the lights' and the zone lights' devices.
 function HueRoomList() return picker("picker_hue_rooms") end
 function MappingTargetList() return picker("picker_rooms", "mapping") end
 
@@ -862,11 +977,64 @@ local function scene_text(method, ...)
 	return nil
 end
 
-local function join_texts(lights_text, scenes_text)
-	if scenes_text == nil or scenes_text == "" then
-		return lights_text
+local function join_texts(lights_text, scenes_text, zone_lights_text)
+	local text = tostring(lights_text)
+	if scenes_text ~= nil and scenes_text ~= "" then
+		text = text .. " | Scenes: " .. tostring(scenes_text)
 	end
-	return tostring(lights_text) .. " | Scenes: " .. tostring(scenes_text)
+	if zone_lights_text ~= nil and zone_lights_text ~= "" then
+		text = text .. " | Zone lights: " .. tostring(zone_lights_text)
+	end
+	return text
+end
+
+-- Zone lights (docs/zone-light-design.md §8): the same shapes against
+-- state.zone_lights.
+local function can_zone(method)
+	if not connection() then
+		last_action("Not paired")
+		return false
+	end
+	if not state.zone_lights or type(state.zone_lights[method]) ~= "function" then
+		last_action("Not available in this build (zone_lights." .. method .. ")")
+		return false
+	end
+	return true
+end
+
+local function zone_picker(method, ...)
+	if state.zone_lights and type(state.zone_lights[method]) == "function" then
+		local ok, list = pcall(state.zone_lights[method], state.zone_lights, ...)
+		if ok and type(list) == "table" then
+			return list
+		end
+		log.warn("%s: %s", method, tostring(list))
+		return { { text = "(error building the list; see Lua output)", value = "" } }
+	end
+	return { { text = "(not available in this build)", value = "" } }
+end
+
+-- Two pickers as one: real entries of both, or whichever has them, or the
+-- first's placeholder.
+local function join_pickers(first, second)
+	local function real(list)
+		return type(list) == "table" and #list > 0 and list[1].value ~= ""
+	end
+	if not real(second) then
+		return first
+	elseif not real(first) then
+		return second
+	end
+	local out = {}
+	for _, entry in ipairs(first) do out[#out + 1] = entry end
+	for _, entry in ipairs(second) do out[#out + 1] = entry end
+	return out
+end
+
+function ZoneGroupList() return zone_picker("picker_groups") end
+function RelinkZoneLightList() return zone_picker("picker_relink_devices") end
+function ForgetDeviceList()
+	return join_pickers(picker("picker_forget_devices"), zone_picker("picker_forget_devices"))
 end
 
 -- A message from a scene device, routed when the module is present.
@@ -911,7 +1079,10 @@ end
 
 dispatch.commands["Link_Devices"] = function()
 	if can("link_devices") then
-		last_action(join_texts(state.lights:link_devices(), scene_text("link_devices")))
+		-- Zone-light devices run the light driver too: each module skips the
+		-- other's devices.
+		last_action(join_texts(state.lights:link_devices(zone_light_ids()), scene_text("link_devices"),
+			zone_text("link_devices", light_device_ids())))
 	end
 end
 
@@ -920,6 +1091,10 @@ dispatch.commands["Forget_Light"] = function(params)
 	local device = tonumber(selection(params, "Device"))
 	if not device then
 		return last_action("Not forgotten: pick a device first")
+	end
+	if zone_light_device(device) then
+		local _, text = state.zone_lights:forget(device)
+		return last_action(text)
 	end
 	local _, text = state.lights:forget(device)
 	last_action(text)
@@ -950,13 +1125,14 @@ end
 dispatch.commands["Adopt_Hue_Names"] = function()
 	if can("adopt_hue_names") then
 		fill_proxy_ids()
-		last_action(join_texts(state.lights:adopt_hue_names(), scene_text("adopt_hue_names")))
+		last_action(join_texts(state.lights:adopt_hue_names(), scene_text("adopt_hue_names"),
+			zone_text("adopt_hue_names")))
 	end
 end
 
 dispatch.commands["Accept_Names_As_They_Are"] = function()
 	if can("accept_names") then
-		last_action(join_texts(state.lights:accept_names(), scene_text("accept_names")))
+		last_action(join_texts(state.lights:accept_names(), scene_text("accept_names"), zone_text("accept_names")))
 	end
 end
 
@@ -985,22 +1161,52 @@ dispatch.commands["Room_Audit"] = function()
 	if can("room_audit") then last_action(state.lights:room_audit()) end
 end
 
--- From a light being deleted in Composer (docs/import-design.md §4).
+-- From a light (or zone light) being deleted in Composer (docs/import-design.md §4).
 dispatch.commands["HUE_GOODBYE"] = function(params)
-	if state.lights and state.lights.goodbye then
-		state.lights:goodbye(params or {})
+	params = params or {}
+	if zone_light_device(params.device_id) then
+		state.zone_lights:goodbye(params)
+		refresh_lights_props()
+	elseif state.lights and state.lights.goodbye then
+		state.lights:goodbye(params)
 		refresh_lights_props()
 	else
 		log.warn("HUE_GOODBYE ignored: not available in this build")
 	end
 end
 
--- From a light's Forget This Light action.
+-- From a light's (or zone light's) Forget This Light action.
 dispatch.commands["HUE_FORGET"] = function(params)
+	params = params or {}
+	if zone_light_device(params.device_id) then
+		local _, text = state.zone_lights:forget_request(params)
+		return last_action(text)
+	end
 	if can("forget_request") then
-		local _, text = state.lights:forget_request(params or {})
+		local _, text = state.lights:forget_request(params)
 		last_action(text)
 	end
+end
+
+-- Zone light actions (docs/zone-light-design.md §8) --------------------------
+
+dispatch.commands["Add_Zone_Light"] = function(params)
+	if not can_zone("add") then return end
+	local rid = selection(params, "Group")
+	if not rid then
+		return last_action("Not added: pick a zone or room first")
+	end
+	state.zone_lights:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
+end
+
+dispatch.commands["Re-link_Zone_Light"] = function(params)
+	if not can_zone("relink") then return end
+	local device, rid = tonumber(selection(params, "Device")), selection(params, "Group")
+	if not device or not rid then
+		return last_action("Not re-linked: pick a device and a zone or room")
+	end
+	local _, text = state.zone_lights:relink(device, rid)
+	last_action(text)
 end
 
 -- Scene actions (docs/scenes-design.md §5) ----------------------------------
@@ -1098,6 +1304,9 @@ end
 dispatch.commands["HUE_SET"] = function(params)
 	params = params or {}
 	local rid = params.rid
+	if is_zone_light_rid(rid) then
+		return zone_text("set", params)
+	end
 	if not rid or rid == "" or not state.lights:device_for(rid) then
 		log.warn("HUE_SET for unknown light %s", tostring(rid))
 		return
@@ -1122,6 +1331,9 @@ end
 dispatch.commands["HUE_DIM"] = function(params)
 	params = params or {}
 	local rid = params.rid
+	if is_zone_light_rid(rid) then
+		return zone_text("dim", params)
+	end
 	if not rid or rid == "" or not state.lights:device_for(rid) then
 		log.warn("HUE_DIM for unknown light %s", tostring(rid))
 		return
@@ -1216,6 +1428,7 @@ dispatch.commands["Lights_Report"] = function(params)
 	if state.lights.attention then log.always("  Attention: %s", state.lights:attention()) end
 	if state.lights.room_mappings_text then log.always("  Room Mappings: %s", state.lights:room_mappings_text()) end
 	if state.scenes and state.scenes.summary then log.always("  Scenes: %s", state.scenes:summary()) end
+	if zone_text("summary") then log.always("  Zone Lights: %s", zone_text("summary")) end
 	for i = 1, math.min(limit, #names) do
 		local e = names[i].entry
 		local caps = e.caps or {}
@@ -1235,6 +1448,12 @@ end
 dispatch.commands["HUE_HELLO"] = function(params)
 	params = params or {}
 	local rid = params.rid or ""
+	if params.kind == "group" then
+		if not zone_text("hello", params) then
+			log.debug("HUE_HELLO from unregistered zone light %q (device %s)", tostring(rid), tostring(params.device_id))
+		end
+		return
+	end
 	if not state.lights:hello(rid, params) then
 		log.debug("HUE_HELLO from unregistered light %q (device %s)", tostring(rid), tostring(params.device_id))
 	end
@@ -1345,6 +1564,9 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 		tostring(otherDeviceID), tostring(otherBindingID))
 	if state.scenes and state.scenes.on_binding_changed then
 		state.scenes:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
+	end
+	if state.zone_lights and state.zone_lights.on_binding_changed then
+		state.zone_lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
 	end
 	if state.lights and state.lights.on_binding_changed then
 		state.lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
@@ -1467,6 +1689,12 @@ function OnDriverLateInit()
 		state.scenes:load()
 		if state.scenes.configure_all then state.scenes:configure_all() end
 		if state.scenes.reconcile then state.scenes:reconcile() end
+	end
+	state.zone_lights = new_zone_lights()
+	if state.zone_lights then
+		state.zone_lights:load()
+		if state.zone_lights.configure_all then state.zone_lights:configure_all() end
+		if state.zone_lights.reconcile then state.zone_lights:reconcile() end
 	end
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).
