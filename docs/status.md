@@ -1,9 +1,14 @@
 # Status of the Hue driver (2026-10-24)
 
 **Release 1.0 (build 237), tag `v1.0`**, published on GitHub with the three
-`.c4z` files; re-cut from build 228 (PR #33) with the bridge-compatibility
-check (PR #35) and the public-repository files (PR #34). The house runs build
-228 since 2026-10-24 18:54 until 237 is installed.
+`.c4z` files built by the release workflow; re-cut from build 228 (PR #33)
+with the bridge-compatibility check (PR #35) and the public-repository files
+(PR #34). The house runs it since 2026-10-24 19:26. **The repository is
+public since 2026-10-24** (history rewritten: placeholder addresses, two
+screenshots dropped): main is protected (pull requests only, CI `test` and
+`build` required, no force pushes), secret scanning and private
+vulnerability reporting are on, Issues, Discussions and the public project
+board "Hue driver" track the work, and every open item below is an issue.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -11,12 +16,14 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 228, release 1.0** (no dev loop), on all three drivers (installed
-  2026-10-24 18:54 after the slimming, the release hygiene and the
-  security hardening of the release preparation below; before it build 199
-  with the zone lights, 185 with the readable properties, 180 with the
-  time-of-day scenes): Hue Bridge, Hue Light, Hue Scene. The house's
-  `Stream Timeout (s)` is 3600 and `Stream Watchdog (s)` 600. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
+- **Build 237, release 1.0** (no dev loop), on all three drivers (installed
+  2026-10-24 19:26: 228's slimming, release hygiene and security hardening
+  plus the bridge-compatibility check; before it build 199 with the zone
+  lights, 185 with the readable properties, 180 with the time-of-day
+  scenes): Hue Bridge, Hue Light, Hue Scene. Read back from Composer: Bridge
+  Model "Hue Bridge Pro (BSB003)", Bridge Name "Hue Bridge Pro", Bridge
+  Firmware "2071524040 (API 1.78.0)"; `Stream Timeout (s)` 3600, `Stream
+  Watchdog (s)` 600. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
   1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
@@ -194,11 +201,11 @@ app, which also confirms that a grouped_light PUT takes `color` and
   corrected; the release checklist (`docs/release-checklist.md`) names 1.0.
 - **Done for 1.0**: the dev-build regression pass (build 224,
   `tools/regress.sh` all pass, the reconnect chain clean in the shipped
-  log), the release installs (226, then 228 with the Last Action parts
-  fix) and the Composer checks of the release checklist §2, the tag `v1.0`
-  and the GitHub release. The owner's phone and keypad pass on 228 (§3) is
-  the remaining check; before going public: the git history rewrite and
-  the screenshot retake (`docs/licensing-research.md` §6).
+  log), the release installs (226, 228, 237) and the Composer checks of the
+  release checklist §2, the tag `v1.0` and the GitHub release, the history
+  rewrite and the flip to public. Still open as issues: the owner's phone
+  and keypad pass (#38), the screenshot retake (#61), the GitHub Support
+  purge of the pre-rewrite commits (#62).
 
 ## Open
 
