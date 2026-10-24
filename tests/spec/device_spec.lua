@@ -141,7 +141,7 @@ describe("common.device", function()
 			local lines = capture_log()
 			dev.result("Renamed device 7 to Desk")
 			assert.same({ "Hue Test: Renamed device 7 to Desk" }, lines)
-			assert.equal("Renamed device 7 to Desk", env.Properties["Last Action"])
+			assert.equal("Renamed device 7 to Desk", fake.last_action(env))
 		end)
 	end)
 
