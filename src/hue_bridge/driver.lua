@@ -256,7 +256,7 @@ local group_hooks = {
 	end,
 	-- Hold-to-dim on a keypad: dimming_delta start/stop on the grouped_light
 	-- (docs/keypad-design.md). The queue builds the PUT from a "dim" field.
-	group_dim = function(grouped_light_rid, body)
+	group_dim = function(grouped_light_rid, body, level)
 		local delta = type(body) == "table" and body.dimming_delta or nil
 		if not state.group_queue or type(delta) ~= "table" then
 			return false
@@ -265,6 +265,9 @@ local group_hooks = {
 			dim = delta.action,
 			delta = delta.brightness_delta,
 			rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
+			-- A zone light's stop carries the level it ended at, written
+			-- only if the bridge refuses the stop (as the light queue does).
+			level = tonumber(level),
 		})
 		return true
 	end,
@@ -1045,7 +1048,13 @@ local function join_pickers(first, second)
 end
 
 function ZoneGroupList() return zone_picker("picker_groups") end
-function RelinkZoneLightList() return zone_picker("picker_relink_devices") end
+function RelinkZoneLightList()
+	local list = zone_picker("picker_relink_devices")
+	if #list == 0 then
+		return { { text = "(no zone light device is gone or unbound)", value = "" } }
+	end
+	return list
+end
 function ForgetDeviceList()
 	return join_pickers(picker("picker_forget_devices"), zone_picker("picker_forget_devices"))
 end
@@ -1181,9 +1190,10 @@ end
 -- stands for, audited against that group's mapping like a light.
 local function zone_audit_entries()
 	local entries = {}
-	local reg = state.zone_lights and state.zone_lights.registry
-	if type(reg) == "table" then
-		for rid, entry in pairs(reg) do
+	local zl = state.zone_lights
+	if zl and type(zl.registered_rids) == "function" and type(zl.entry) == "function" then
+		for _, rid in ipairs(zl:registered_rids() or {}) do
+			local entry = zl:entry(rid)
 			if type(entry) == "table" and entry.device_id then
 				entries[#entries + 1] = { device_id = entry.device_id, name = entry.name, group_rid = rid }
 			end
