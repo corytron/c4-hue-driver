@@ -10,8 +10,6 @@ local config = require("bridge.config")
 local altaddr = require("bridge.altaddr")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
-local pinning = require("bridge.pinning")
-local conntest = require("bridge.conntest")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
 local lights_mod = require("bridge.lights")
@@ -32,6 +30,12 @@ if not devloop_ok then
 	end
 	devloop = nil
 end
+
+-- The connection experiment and the CA pinning check are development
+-- diagnostics; release builds ship neither module nor their actions
+-- (tools/build.sh strips the DEV-ONLY blocks of driver.xml).
+local conntest = devloop and require("bridge.conntest") or nil
+local pinning = devloop and require("bridge.pinning") or nil
 
 local state = {
 	ip = nil,            -- validated Bridge IP Address property
@@ -408,31 +412,57 @@ local function attention_text()
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
 
--- `Room Mappings` is a dynamic list: the row shows a summary and the
--- drop-down one mapping per line, readable in full where a string would be
--- clipped at Composer's column width. The list is comma-delimited, so a
--- comma in a name becomes "‚".
+-- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`, `Last
+-- Action`): Composer clips a value at about 75 characters, so the row shows
+-- a summary and the drop-down every item on a line of its own. The list is
+-- comma-delimited, so a comma in any text becomes "‚". A pick in Composer
+-- changes nothing: the row snaps back to the summary (list_rows remembers
+-- it, and only a value that left it is reset, so this cannot loop).
+local list_rows = {}
+
+local function commaless(text)
+	return (tostring(text == nil and "" or text):gsub(",", "‚"))
+end
+
+local list_rows_sent = {}
+
+local function show_list(name, summary, items)
+	summary = commaless(summary)
+	local list = { summary }
+	for _, item in ipairs(items or {}) do
+		list[#list + 1] = commaless(item)
+	end
+	list_rows[name] = summary
+	-- Director and Composer are told only when the list changed (the lists
+	-- are rebuilt at every refresh); a pick clears the memory first.
+	local joined = table.concat(list, ",")
+	if list_rows_sent[name] ~= joined then
+		list_rows_sent[name] = joined
+		prop_list(name, list, summary)
+	end
+end
+
 local function refresh_room_mappings()
 	local items, unmapped = state.lights:room_mapping_items()
 	if #items == 0 then
-		state.room_mappings_summary = "None; use Map Rooms By Name"
-		prop_list("Room Mappings", { state.room_mappings_summary })
-		return
+		return show_list("Room Mappings", "None; use Map Rooms By Name")
 	end
-	local summary = string.format("%d Hue rooms and zones; %d unmapped (open the list to read)", #items, unmapped)
-	local list = { summary }
-	for _, item in ipairs(items) do
-		list[#list + 1] = (item:gsub(",", "‚"))
-	end
-	state.room_mappings_summary = summary
-	prop_list("Room Mappings", list, summary)
+	show_list("Room Mappings", string.format("%d Hue rooms and zones; %d unmapped (open the list to read)",
+		#items, unmapped), items)
+end
+
+-- A module's summary as the row and its list_items() as the drop-down; a
+-- module without list_items shows the summary alone.
+local function show_module_list(name, module)
+	local items = type(module.list_items) == "function" and module:list_items() or {}
+	show_list(name, module:summary(), items)
 end
 
 local function refresh_lights_props()
 	if not state.lights then
 		return
 	end
-	prop("Lights", state.lights:summary())
+	show_module_list("Lights", state.lights)
 	if state.lights.attention then
 		prop("Attention", attention_text())
 	end
@@ -440,11 +470,10 @@ local function refresh_lights_props()
 		refresh_room_mappings()
 	end
 	if state.scenes and state.scenes.summary then
-		prop("Scenes", state.scenes:summary())
+		show_module_list("Scenes", state.scenes)
 	end
-	local zone_summary = zone_text("summary")
-	if zone_summary then
-		prop("Zone Lights", zone_summary)
+	if state.zone_lights and state.zone_lights.summary then
+		show_module_list("Zone Lights", state.zone_lights)
 	end
 end
 
@@ -676,14 +705,6 @@ dispatch.properties["Stream_Watchdog_(s)"] = function()
 	if state.late_init_done then restart_stream() end
 end
 
--- The list is for reading: a pick in Composer changes nothing and the row
--- goes back to its summary (only when it left it, so this cannot loop).
-dispatch.properties["Room_Mappings"] = function(value)
-	if state.late_init_done and state.lights and value ~= state.room_mappings_summary then
-		refresh_room_mappings()
-		prop("Last Action", "Room Mappings is for reading; the row shows the summary again")
-	end
-end
 
 -- Actions ------------------------------------------------------------------
 
@@ -731,7 +752,7 @@ dispatch.commands["Test_Connection"] = function(params)
 		return
 	end
 	local host = state.ip
-	if params and params.Host and params.Host ~= "" then
+	if devloop and params and params.Host and params.Host ~= "" then
 		host = params.Host
 		log.always("Test Connection via host %s instead of %s", host, state.ip)
 	end
@@ -933,12 +954,43 @@ end
 -- Last Action and refreshes the counts. The pickers are CUSTOM_SELECT lists
 -- built on demand by the global functions below [verified: FUND 12.3].
 
+-- The text as the row; a long text also as its "; "-separated parts in the
+-- drop-down, each readable where the row clips.
 local function last_action(text)
 	text = tostring(text == nil and "" or text)
 	log.always("%s", text)
-	prop("Last Action", text)
+	local parts = {}
+	if #text > 70 and text:find("; ", 1, true) then
+		for part in (text .. "; "):gmatch("(.-); ") do
+			if part ~= "" then
+				parts[#parts + 1] = part
+			end
+		end
+	end
+	show_list("Last Action", text, parts)
 	refresh_lights_props()
 end
+
+-- The lists are for reading: a pick in Composer changes nothing and the row
+-- goes back to its summary (only when it left it, so this cannot loop).
+local function list_pick(name)
+	return function(value)
+		if state.late_init_done and list_rows[name] ~= nil and value ~= list_rows[name] then
+			list_rows_sent[name] = nil
+			if name == "Last Action" then
+				last_action(name .. " is for reading; the row shows the text again")
+			else
+				refresh_lights_props()
+				last_action(name .. " is for reading; the row shows the summary again")
+			end
+		end
+	end
+end
+dispatch.properties["Room_Mappings"] = list_pick("Room Mappings")
+dispatch.properties["Lights"] = list_pick("Lights")
+dispatch.properties["Scenes"] = list_pick("Scenes")
+dispatch.properties["Zone_Lights"] = list_pick("Zone Lights")
+dispatch.properties["Last_Action"] = list_pick("Last Action")
 
 -- False, with the reason in Last Action, when the action cannot run.
 local function can(method)
@@ -1735,7 +1787,7 @@ end
 -- state are for development builds only [code analysis 2026-10-22, M4].
 if not devloop then
 	for _, name in ipairs({ "Hue_Request", "Probe_Project", "Probe_Errors", "Probe_Scenes", "Probe_Call",
-		"Proxy_Command", "Lights_Report" }) do
+		"Proxy_Command", "Lights_Report", "Connection_Test", "Reload_Credentials", "Check_CA_Pinning" }) do
 		dispatch.commands[name] = nil
 	end
 end
