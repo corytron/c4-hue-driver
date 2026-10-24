@@ -501,6 +501,9 @@ local function new_stream()
 				else
 					log.warn("resync failed: %s", tostring(err))
 				end
+				-- The lights' rows at once (the scene catalogue GET that
+				-- follows is the slow one), then once more after the chain.
+				refresh_lights_props()
 				-- The scenes hand their grouped_light items on, so the zone
 				-- lights skip their own GET of the same resource.
 				state.scenes:resync(function(sok, serr, ssent, grouped)

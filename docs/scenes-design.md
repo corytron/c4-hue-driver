@@ -152,7 +152,7 @@ sc:picker_scenes() -> { { text = "Kitchen: Relax", value = rid }... }          -
                                         -- dynamic scenes suffixed " (dynamic)"; tombstoned last "(deleted from Composer <date>)"
 sc:picker_groups() -> { { text = "Kitchen → Kitchen (7 scenes)", value = group_rid }... }   -- groups that have scenes
 sc:picker_relink_devices() / sc:picker_forget_devices() -> as the lights' pickers
-sc:count() / sc:entry(rid).device_id (device_for removed 2026-10-24)(rid) / sc:entry(rid)
+sc:count() / sc:entry(rid) (its `.device_id`; `device_for(rid)` was removed 2026-10-24)
 ```
 
 Texts follow the lights' wording with "scene" in place of "light":
