@@ -150,7 +150,7 @@ describe("Hue Bridge driver", function()
 		assert.equal(STREAM_URL, c4.last_transfer().url)
 
 		env, c4 = paired_driver()
-		c4.persist.hue_stream_spelling = "10.000.001.143" -- from another address
+		c4.persist.hue_stream_spelling = "10.000.002.143" -- from another address
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 		assert.equal(STREAM_URL, c4.last_transfer().url)

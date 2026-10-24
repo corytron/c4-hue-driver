@@ -928,7 +928,7 @@ end
 
 -- CONFIGURE (when asked for, or when it changed) then STATE. The state is
 -- sent only once a GET has told us something (or the catalogue has the
--- scene): before that a guessed "inactive" would flip a lit scene's switch.
+-- scene): before that a guessed "inactive" would turn a lit scene's tile off.
 function scenes:push(rid, reason, with_configure)
 	if not self.registry[rid] then
 		return false
@@ -1420,7 +1420,7 @@ end
 
 -- HUE_SCENE_RECALL { rid, action?, duration?, brightness? }: PUT the recall
 -- (a brightness 1-100 overrides the scene's as recall.dimming); on success
--- STATE with the state the action produces (reason "recall") so the switch
+-- STATE with the state the action produces (reason "recall") so the device
 -- settles even if the stream item is missed; on failure a warning and STATE
 -- with the cached status. Returns true when a PUT was started.
 function scenes:recall(params)

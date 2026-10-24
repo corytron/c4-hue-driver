@@ -1,5 +1,7 @@
 # Spike checklist: pairing and the event stream
 
+> **Historical checklist (2026-10-19 to 2026-10-21)** for the first pairing and event-stream spike; the stream design it led to is option A in `docs/design.md` ("Two ways to keep commands flowing"), its open steps moved to `docs/composer-checklist.md`, and the present is in `docs/status.md`.
+
 Run in Composer Pro with the `hue_bridge.c4z` from this branch. The light
 driver is unchanged. Write down the exact property text and Lua output at
 each step; the wording is designed to tell us which code path ran.
@@ -113,3 +115,11 @@ restart (12), which also checks that the encrypted key survives a reboot.
 
 The lights work has its own checklist, `docs/composer-checklist.md`, whose
 section F carries steps 12–13 of this spike, which remain open.
+
+Update (2026-10-24): step 12 is answered by the controller reboots of
+2026-10-22 (build 150) and 2026-10-23 (build 160): the bridge came back
+paired and its event feed reconnected with nothing touched, so the
+encrypted key survives a reboot (`docs/keypad-design.md`, "Hardware
+findings"; `docs/scene-dimmer-design.md`, "Verified on hardware"). Step 13
+was never run as such; the house has run on these drivers since
+2026-10-22.

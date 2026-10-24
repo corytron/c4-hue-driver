@@ -723,8 +723,8 @@ function Save-PropertyRowShot {
 }
 
 function Send-DocShot {
-    # Upload a PNG from C:\c4-hue\shots\doc\ to the Ubuntu dev server (PUT http://10.0.1.7:8090/img/<name>); returns the server's reply.
-    param([Parameter(Mandatory)][string]$Name, [string]$Server = 'http://10.0.1.7:8090')
+    # Upload a PNG from C:\c4-hue\shots\doc\ to the Ubuntu dev server (PUT http://<dev VM>:8090/img/<name>); returns the server's reply.
+    param([Parameter(Mandatory)][string]$Name, [string]$Server = 'http://192.0.2.7:8090'  # placeholder: the dev VM's address)
     $p = "C:\c4-hue\shots\doc\$Name"
     $r = Invoke-WebRequest -Method Put -InFile $p -Uri "$Server/img/$Name" -UseBasicParsing -TimeoutSec 60
     [pscustomobject]@{ Name = $Name; Bytes = (Get-Item $p).Length; Status = $r.StatusCode; Reply = ($r.Content -as [string]).Trim() }
