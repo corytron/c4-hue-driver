@@ -190,3 +190,33 @@ true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
 
 The switch's own "LED Behavior" may need its option that follows the bound
 device instead of "Push/Release" (owner checks on the switch).
+
+Both `driver.xml` declare `has_leds` True so Composer offers the button LED
+colour settings (which arrive as `SET_BUTTON_COLOR`); the scene's also
+declares `hold_rates` True with `hold_rate_min` 1000. Both are capability
+changes, so installing this build is expected to ask for a Director
+restart, as build 144 did.
+
+### Light parity (owner, 2026-10-23: "whatever capabilities we implement for scenes get intelligently carried over to the individual light driver as well")
+
+- Holds on a Hue Light use the same native relative dim as the scene:
+  `HUE_DIM {rid, direction up|down|stop, duration, level}` → the light's
+  queue sends `dimming_delta` up/down with `dynamics.duration`, then a bare
+  `stop`. The device keeps its 100 ms estimate and sends it as `level` with
+  the stop; the proxy's tile settles on the bridge's next report, or on the
+  estimate after the fallback time.
+- Hold top (or toggle) while the light is off: on at 1 %, then dim up
+  600 ms later. Hold bottom while off: nothing (it used to turn the light
+  on dimmed).
+- LED state, button colours, `has_leds`, hold rates and the 1 s click
+  suppression after a hold are the same in both drivers.
+
+### Queue support (`src/hue_bridge/bridge/commands.lua`)
+
+A `dim` field (`up`/`down`/`stop`) builds the `dimming_delta` body; a dim
+replaces a pending brightness or on/off and vice versa. If the bridge
+refuses a stop with a non-retriable error, the queue writes a fallback
+brightness: the stop's `level` (lights), else the group level recorded at
+the ramp's start (`scenes.group_level`, from grouped_light reports) moved by
+the elapsed share of the ramp (scenes). Without either the ramp runs to its
+end and a warning is logged.

@@ -115,7 +115,7 @@
 		<hold_rate_min>1000</hold_rate_min>
 		<supports_default_on>True</supports_default_on>
 		<cold_start>False</cold_start>
-		<has_leds>False</has_leds>
+		<has_leds>True</has_leds>
 		<supports_target>True</supports_target>
 		<supports_brightness_stop>True</supports_brightness_stop>
 		<supports_color_stop>True</supports_color_stop>

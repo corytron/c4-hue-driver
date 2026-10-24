@@ -54,6 +54,12 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		t = bc4.last_transfer()
 		assert.equal("https://192.0.2.10/clip/v2/resource/smart_scene", t.url)
 		fake.as(bridge, function() t:respond(200, F.smart_scene) end)
+		t = bc4.last_transfer()
+		assert.equal("https://192.0.2.10/clip/v2/resource/grouped_light", t.url)
+		fake.as(bridge, function()
+			t:respond(200, '{"errors":[],"data":[{"id":"' .. F.grouped_light_rids.living_room
+				.. '","on":{"on":true},"type":"grouped_light"}]}')
+		end)
 	end
 
 	local function event(text)
