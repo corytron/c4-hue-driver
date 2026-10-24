@@ -32,9 +32,22 @@ local function paired_driver(extra)
 	return env, c4
 end
 
+-- The identity check that precedes every keyed request: GET /api/0/config
+-- without a key, answered with the paired bridge id unless told otherwise.
+local function answer_identity(c4, bridgeid)
+	local t = c4.last_transfer()
+	if t and t.url:find("/api/0/config", 1, true) and not t.answered_identity then
+		t.answered_identity = true
+		assert.is_nil(t.headers["hue-application-key"], "the identity check carries no key")
+		t:respond(200, '{"bridgeid":"' .. (bridgeid or "001788FFFE25B8F8") .. '","modelid":"BSB003","name":"Hue"}')
+	end
+	return t
+end
+
 -- Answer the startup self-check (the GET via the check spelling) so the
 -- stream can open. Returns the check transfer.
 local function answer_check(c4, ok)
+	answer_identity(c4)
 	local t = c4.last_transfer()
 	assert(t and t.url == CHECK_URL, "expected the self-check request, got " .. tostring(t and t.url))
 	if ok == false then
@@ -91,13 +104,14 @@ describe("Hue Bridge driver", function()
 		assert.equal("Paired", env.Properties["Status"])
 		assert.equal("001788fffe25b8f8", env.Properties["Bridge ID"])
 
-		local check = c4.transfers[5]
+		answer_identity(c4)
+		local check = c4.transfers[6]
 		assert.equal(CHECK_URL, check.url, "self-check before the stream")
 		assert.equal("abc123", check.headers["hue-application-key"])
-		assert.equal(5, #c4.transfers, "the stream waits for the self-check")
+		assert.equal(6, #c4.transfers, "the stream waits for the self-check")
 		answer_check(c4)
 
-		local s = c4.transfers[6]
+		local s = c4.transfers[7]
 		assert.equal(STREAM_URL, s.url)
 		assert.equal("abc123", s.headers["hue-application-key"])
 		assert.equal(SHIPPED, s.options.ssl_cabundle)
@@ -161,6 +175,7 @@ describe("Hue Bridge driver", function()
 	it("keeps a single spelling when only one octet can be padded, and says so", function()
 		local env, c4 = paired_driver({ ["Bridge IP Address"] = "192.168.1.50" })
 		env.OnDriverLateInit("DIT_STARTUP")
+		answer_identity(c4)
 		local check = c4.last_transfer()
 		assert.equal("https://192.168.01.50/clip/v2/resource/bridge", check.url)
 		check:respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
@@ -184,7 +199,7 @@ describe("Hue Bridge driver", function()
 		c4.transfers[2]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
 		assert.equal("Paired", env.Properties["Status"])
 		answer_check(c4)
-		assert.equal(STREAM_URL, c4.transfers[4].url)
+		assert.equal(STREAM_URL, c4.transfers[5].url)
 		assert.equal("abc123", c4.transfers[4].headers["hue-application-key"])
 	end)
 
@@ -276,6 +291,7 @@ describe("Hue Bridge driver", function()
 	it("uses a shared queue when no octet of the address can be padded", function()
 		local env, c4 = paired_driver({ ["Bridge IP Address"] = "10.10.10.10" })
 		env.OnDriverLateInit("DIT_STARTUP")
+		answer_identity(c4)
 		local s = c4.last_transfer()
 		assert.equal("https://10.10.10.10/eventstream/clip/v2", s.url, "no self-check, straight to the stream")
 		assert.equal(60, s.options.timeout)
@@ -457,6 +473,72 @@ describe("Hue Bridge driver", function()
 		assert.is_false(t.options.ssl_verify_peer, "diagnostic server is self-signed")
 	end)
 
+	it("brings the feed back by itself when an invalid address is corrected while paired", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_check(c4)
+		local stream_t = c4.last_transfer()
+		assert.equal(DOTTED_STREAM_URL:gsub("192%.0%.2%.10", "192.000.002.10"), stream_t.url)
+
+		env.Properties["Bridge IP Address"] = "not an address"
+		env.OnPropertyChanged("Bridge IP Address")
+		assert.is_true(stream_t.cancelled, "the feed stops while the address is invalid")
+		local n = #c4.transfers
+
+		env.Properties["Bridge IP Address"] = "192.0.2.10"
+		env.OnPropertyChanged("Bridge IP Address")
+		answer_check(c4)
+		assert.is_true(#c4.transfers > n, "a new transfer after the self-check")
+		assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true), "the feed is back without a click")
+	end)
+
+	it("sends nothing with the key to a bridge whose id is not the paired one", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		local t = c4.last_transfer()
+		assert.equal("https://192.0.2.10/api/0/config", t.url)
+		assert.is_nil(t.headers["hue-application-key"])
+		local n = #c4.transfers
+		answer_identity(c4, "AABBCCDDEEFF0011")
+		assert.equal(n, #c4.transfers, "no self-check, no stream")
+		assert.equal("Bridge at 192.0.2.10 reports ID aabbccddeeff0011, expected 001788fffe25b8f8; nothing is sent "
+			.. "until the address is corrected", env.Properties["Status"])
+		env.ExecuteCommand("HUE_SET", { rid = "l1", on = "true" })
+		c4.fire_timers()
+		assert.equal(n, #c4.transfers, "a command is refused before the identity is verified")
+
+		-- A corrected address is checked afresh.
+		env.Properties["Bridge IP Address"] = "192.0.2.12"
+		env.OnPropertyChanged("Bridge IP Address")
+		assert.equal("https://192.0.2.12/api/0/config", c4.last_transfer().url)
+		answer_identity(c4)
+		local check = c4.last_transfer()
+		assert.equal("https://192.00.02.12/clip/v2/resource/bridge", check.url)
+		check:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
+		assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true))
+	end)
+
+	it("asks an unreachable bridge for its identity again every 30 s and sends nothing meanwhile", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		local t = c4.last_transfer()
+		t:done(6, "Couldn't resolve host name")
+		assert.truthy(env.Properties["Status"]:find("^Bridge at 192.0.2.10 not reachable"), env.Properties["Status"])
+		local n = #c4.transfers
+		local retry
+		for _, timer in ipairs(c4.active_timers()) do
+			if timer.delay == 30000 then retry = timer end
+		end
+		assert.is_not_nil(retry, "the 30 s retry timer")
+		retry.active = false
+		retry.callback(retry, 0)
+		assert.equal(n + 1, #c4.transfers)
+		assert.equal("https://192.0.2.10/api/0/config", c4.last_transfer().url)
+		answer_check(c4)
+		assert.equal("Paired", env.Properties["Status"])
+		assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true))
+	end)
+
 	it("Hue Request sends an authenticated request and summarises resource lists", function()
 		local lines = {}
 		log.sink = function(line) table.insert(lines, line) end
@@ -551,6 +633,7 @@ describe("Hue Bridge driver", function()
 		env.Properties["Bridge IP Address"] = "192.0.2.11"
 		env.OnPropertyChanged("Bridge IP Address")
 		assert.is_true(first.cancelled)
+		answer_identity(c4)
 		local check = c4.last_transfer()
 		assert.equal("https://192.00.02.11/clip/v2/resource/bridge", check.url)
 		check:respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')

@@ -150,7 +150,7 @@
 				<type>RANGED_INTEGER</type>
 				<minimum>30</minimum>
 				<maximum>86400</maximum>
-				<default>600</default>
+				<default>3600</default>
 				<readonly>false</readonly>
 			</property>
 			<property>

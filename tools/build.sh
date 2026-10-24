@@ -52,7 +52,13 @@ for driver in "${DRIVERS[@]}"; do
 			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua"
 		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
 			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
+		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" ]]; then
+			echo "release build still carries development items in $driver" >&2
+			exit 1
+		fi
 	fi
+	# Apache 2.0 §4: the license and notice travel with every package.
+	cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$stage/"
 	# The device drivers' shared module is of no use to the bridge.
 	if [[ "$driver" == hue_bridge ]]; then
 		rm -f "$stage/common/device.lua"

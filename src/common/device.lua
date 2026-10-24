@@ -259,6 +259,10 @@ function device.new(opts)
 			if late_init_done then
 				return handler(params)
 			end
+			if #early >= 200 then
+				log.warn("%s before late init dropped: %d already waiting", name, #early)
+				return
+			end
 			early[#early + 1] = { name = name, handler = handler, params = params }
 			log.debug("%s before late init; buffered (%d waiting)", name, #early)
 		end
