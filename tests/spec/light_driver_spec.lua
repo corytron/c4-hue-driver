@@ -1334,4 +1334,368 @@ describe("Hue Light driver", function()
 			assert.equal(0, #bound_c4.active_timers())
 		end)
 	end)
+
+	-- A Hue zone or room as a Hue Light device (docs/zone-light-design.md §5):
+	-- the bridge's HUE_CONFIGURE names kind "group" and the group's fields; the
+	-- proxy, keypad and bridge-command side stays the light's.
+	describe("zone and room devices (kind group)", function()
+		local ZONE_RID = "b90ea7b4-aaaa-4bbb-8ccc-ddddeeeeffff"
+		local ROOM_RID = "7104cbc3-aaaa-4bbb-8ccc-ddddeeeeffff"
+
+		-- What the bridge sends for a zone and a room, every value a string.
+		local ZONE = { rid = ZONE_RID, kind = "group", group_type = "zone", name = "Bedside Lights", light_count = "2",
+			model = "Hue zone", hue_room = "Bedside Lights (zone)", id_v1 = "/groups/2", has_color = "true",
+			has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "1" }
+		local ROOM = { rid = ROOM_RID, kind = "group", group_type = "room", name = "Master Bedroom", light_count = "9",
+			model = "Hue room", hue_room = "Master Bedroom", id_v1 = "/groups/5", has_color = "true",
+			has_cct = "true", mirek_min = "153", mirek_max = "454", min_dim = "1" }
+
+		-- HUE_CONFIGURE from `base` with `extra` merged in and the keys in `drop` left out.
+		local function configure_group(env, base, extra, drop)
+			local params = {}
+			for k, v in pairs(base) do params[k] = v end
+			for k, v in pairs(extra or {}) do params[k] = v end
+			for _, k in ipairs(drop or {}) do params[k] = nil end
+			env.ExecuteCommand("HUE_CONFIGURE", params)
+		end
+
+		-- A configured zone device, on at 40 % in a member's colour, as the
+		-- bridge reports a group (Decisions 3 and 8).
+		local function lit_zone()
+			local env, c4 = load_light({ rid = ZONE_RID })
+			configure_group(env, ZONE)
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "40", x = "0.4", y = "0.35",
+				color_mode = "xy", online = "true", reason = "hello" })
+			c4.calls = {}
+			c4.sent = {}
+			return env, c4
+		end
+
+		-- Composer clips a property at about 75 characters; the contract asks
+		-- for texts under 60 where the name allows.
+		local function fits(text)
+			assert.is_true(#text <= 60, string.format("%d characters: %s", #text, text))
+			return text
+		end
+
+		local function proxy_of(light_id)
+			return assert(fake.project.devices[light_id].proxy_id, "the fake registers a proxy per loaded light")
+		end
+
+		local NO_LIGHTS = "Hue zone Bedside Lights has no lights; nothing to control"
+
+		after_each(function() log.set_debug(false) end)
+
+		it("labels a zone from the configure and persists the kind beside the rid", function()
+			local env, c4 = load_light({ rid = ZONE_RID })
+			c4.calls = {}
+			configure_group(env, ZONE)
+			assert.equal("Hue zone Bedside Lights (2 lights)", fits(env.Properties["Status"]))
+			assert.equal("zone #2 (b90ea7b4…)", env.Properties["Hue Light ID"])
+			assert.equal("Hue zone (2 lights)", env.Properties["Model"])
+			assert.equal("Bedside Lights", env.Properties["Hue Name"])
+			assert.equal("Bedside Lights (zone)", env.Properties["Hue Room"])
+			assert.equal("", env.Properties["Online"], "not known until the bridge reports")
+			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
+			assert.same({ {
+				supports_color = "true",
+				supports_color_correlated_temperature = "true",
+				color_correlated_temperature_min = 2000,
+				color_correlated_temperature_max = 6530,
+			} }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "the union of the members, as for a bulb")
+			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group" },
+				c4.persist)
+		end)
+
+		it("labels a room the same way", function()
+			local env = load_light({ rid = ROOM_RID })
+			configure_group(env, ROOM)
+			assert.equal("Hue room Master Bedroom (9 lights)", fits(env.Properties["Status"]))
+			assert.equal("room #5 (7104cbc3…)", env.Properties["Hue Light ID"])
+			assert.equal("Hue room (9 lights)", env.Properties["Model"])
+			assert.equal("Master Bedroom", env.Properties["Hue Name"])
+			assert.equal("Master Bedroom", env.Properties["Hue Room"])
+		end)
+
+		it("counts one light in the singular, and shows no count while the bridge sends none", function()
+			local env = load_light({ rid = ZONE_RID })
+			configure_group(env, ZONE, { light_count = "1" })
+			assert.equal("Hue zone Bedside Lights (1 light)", env.Properties["Status"])
+			assert.equal("Hue zone (1 light)", env.Properties["Model"])
+			configure_group(env, ZONE, nil, { "light_count" })
+			assert.equal("Hue zone Bedside Lights", env.Properties["Status"])
+			assert.equal("Hue zone", env.Properties["Model"])
+		end)
+
+		it("greets the bridge with kind group and no model after a restart, labelled from what it persisted", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid, c4.persist.hue_name = ZONE_RID, "Bedside Lights"
+			c4.persist.hue_model, c4.persist.hue_kind = "Hue zone", "group"
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
+				params = { rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" } } }, c4.sent)
+			assert.equal("Hue zone Bedside Lights", env.Properties["Status"],
+				"the persisted model stands in for the type until the bridge answers")
+			assert.equal(ZONE_RID, env.Properties["Hue Light ID"])
+			assert.equal("", env.Properties["Online"])
+		end)
+
+		it("applies a configure buffered before late init, and the hello carries the kind it delivered", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			configure_group(env, ZONE)
+			assert.equal(0, #c4.calls_to("PersistSetValue"))
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("Hue zone Bedside Lights (2 lights)", env.Properties["Status"])
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
+				params = { rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" } } }, c4.sent)
+		end)
+
+		it("a light told kind light persists it and says so in its hello; one never told stays silent", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env, { kind = "light" })
+			assert.equal("light", c4.persist.hue_kind)
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("l1", env.Properties["Hue Light ID"])
+
+			local env2, c42 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c42:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c42.persist.hue_rid, c42.persist.hue_name = "l1", "Desk"
+			c42.persist.hue_model, c42.persist.hue_kind = "Hue color lamp", "light"
+			env2.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp", kind = "light" },
+				c42.sent[1].params)
+			-- The startup specs above cover a light never told its kind: no kind key in the hello.
+		end)
+
+		it("keeps its kind when a configure names none, and ignores one it does not know, with a warning", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			local env, c4 = load_light({ rid = ZONE_RID })
+			configure_group(env, ZONE)
+
+			-- An older bridge answering a zone light's hello as if it were a
+			-- light (contract §7 Q11): no kind, no group fields, state gone.
+			configure_group(env, ZONE, { state = "gone", gone_since = "1761000000" }, { "kind", "group_type", "light_count" })
+			assert.equal("group", c4.persist.hue_kind)
+			assert.equal("Group deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; re-link or Forget",
+				env.Properties["Status"])
+			assert.equal("Hue zone", env.Properties["Model"])
+
+			configure_group(env, ZONE, { kind = "entertainment" })
+			assert.equal("group", c4.persist.hue_kind)
+			assert.equal("Hue zone Bedside Lights (2 lights)", env.Properties["Status"])
+			local warned = false
+			for _, line in ipairs(lines) do
+				if line:find("^%[WARN%] Hue Light: HUE_CONFIGURE with unknown kind entertainment ignored; still a zone light") then
+					warned = true
+				end
+			end
+			assert.is_true(warned)
+		end)
+
+		it("ignores a persisted kind it does not know: the hello names none", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid, c4.persist.hue_kind = "l1", "sparkly"
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ rid = "l1", device_id = "2001" }, c4.sent[1].params)
+		end)
+
+		it("Decision 11: without lights it goes offline, shows off, and drops commands with the reason", function()
+			local env, c4 = lit_zone()
+			local proxy = capture_proxy(c4)
+			configure_group(env, ZONE, { no_lights = "true", light_count = "0" })
+			assert.equal(NO_LIGHTS, fits(env.Properties["Status"]))
+			assert.equal("Offline", env.Properties["Online"])
+			assert.equal("Hue zone (0 lights)", env.Properties["Model"])
+			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "tile off")
+			assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, online = "false", reason = "event" })
+
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			log.set_debug(true) -- the dropped-command line is info level
+			c4.calls = {}
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.3", LIGHT_COLOR_TARGET_Y = "0.3",
+				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.equal(0, #messages(c4, "HUE_SET"), "no HUE_SET")
+			assert.equal(0, #dims(c4), "no HUE_DIM")
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.equal(0, #notifies(c4, "LIGHT_COLOR_CHANGING"))
+			assert.equal(NO_LIGHTS, env.Properties["Status"])
+			local dropped = {}
+			for _, line in ipairs(lines) do
+				local what = line:match("^%[INFO%] Hue Light: (.-) dropped: " .. NO_LIGHTS:gsub("%p", "%%%0") .. "$")
+				if what then dropped[#dropped + 1] = what end
+			end
+			assert.same({ "brightness target", "colour target", "hold", "brightness target" }, dropped,
+				"the slider, the colour pick, the held top button and the tap on bottom, each with the reason")
+		end)
+
+		it("comes back online when the group is refilled, with nothing to click", function()
+			local env, c4 = lit_zone()
+			configure_group(env, ZONE, { no_lights = "true", light_count = "0" })
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, online = "false", reason = "event" })
+			c4.calls = {}
+			configure_group(env, ZONE, { light_count = "1" })
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "60", online = "true",
+				reason = "event" })
+			assert.equal("Hue zone Bedside Lights (1 light)", env.Properties["Status"])
+			assert.equal("Online", env.Properties["Online"])
+			local online = notifies(c4, "ONLINE_CHANGED")
+			assert.same({ STATE = true }, online[#online])
+			-- The configure re-reports the cached off (as every configure does); the report lights the tile.
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 }, { LIGHT_BRIGHTNESS_CURRENT = 60 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.same({ rid = ZONE_RID, on = "true", brightness = "75", rate = "0" }, last_sent(c4).params)
+		end)
+
+		it("says deleted in Hue while the bridge reports the zone gone, and comes back when re-linked", function()
+			local env, c4 = lit_zone()
+			configure_group(env, ZONE, { state = "gone", gone_since = "1761000000" })
+			local expected = "Zone deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; re-link or Forget"
+			assert.equal(expected, fits(env.Properties["Status"]))
+			assert.equal("Offline", env.Properties["Online"])
+			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
+
+			c4.sent = {}
+			c4.calls = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(0, #c4.sent, "dropped")
+			assert.equal(expected, env.Properties["Status"])
+
+			-- Re-link Device To Light to another zone: a configure with the new identity.
+			local other = "c0ffee00-aaaa-4bbb-8ccc-ddddeeeeffff"
+			configure_group(env, ZONE, { rid = other, name = "Reading Nook", id_v1 = "/groups/7", light_count = "3" })
+			assert.equal("Hue zone Reading Nook (3 lights)", env.Properties["Status"])
+			assert.equal("zone #7 (c0ffee00…)", env.Properties["Hue Light ID"])
+			assert.equal("Online", env.Properties["Online"])
+			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
+			assert.equal(other, c4.persist.hue_rid)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(other, messages(c4, "HUE_SET")[1].params.rid)
+		end)
+
+		it("says Room deleted for a room, without a date when the bridge sends none", function()
+			local env = load_light({ rid = ROOM_RID })
+			configure_group(env, ROOM, { state = "gone" })
+			assert.equal("Room deleted in Hue; re-link or Forget", env.Properties["Status"])
+		end)
+
+		it("names the zone when forgotten and puts the instruction in Last Action", function()
+			local env, c4 = lit_zone()
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = ZONE_RID, name = "Bedside Lights" })
+			assert.equal("Forgotten by the bridge (was Hue zone Bedside Lights)", fits(env.Properties["Status"]))
+			assert.equal("Delete this device in Composer, or bind it again and use Link Devices",
+				env.Properties["Last Action"])
+			assert.equal("Offline", env.Properties["Online"])
+			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
+
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
+			assert.equal(0, #c4.sent)
+			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group" },
+				c4.persist, "the identity stays, so binding the device again lets Link Devices adopt it")
+
+			c4.calls = {}
+			configure_group(env, ZONE)
+			assert.equal("Hue zone Bedside Lights (2 lights)", env.Properties["Status"])
+			assert.equal("Online", env.Properties["Online"])
+		end)
+
+		it("names a forgotten room from its own state when the message carries no name", function()
+			local env = load_light({ rid = ROOM_RID })
+			configure_group(env, ROOM)
+			env.ExecuteCommand("HUE_FORGOTTEN", { rid = ROOM_RID })
+			assert.equal("Forgotten by the bridge (was Hue room Master Bedroom)", fits(env.Properties["Status"]))
+		end)
+
+		it("Decision 7: re-announces both colour flags and the CT range when a configure changes them", function()
+			local env, c4 = lit_zone()
+			configure_group(env, ZONE, { has_color = "false", has_cct = "true", mirek_min = "153", mirek_max = "454",
+				light_count = "3" })
+			assert.same({ {
+				supports_color = "false",
+				supports_color_correlated_temperature = "true",
+				color_correlated_temperature_min = 2210,
+				color_correlated_temperature_max = 6530,
+			} }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "both flags in one notify")
+			assert.equal("Hue zone Bedside Lights (3 lights)", env.Properties["Status"])
+
+			c4.calls = {}
+			configure_group(env, ZONE, { has_color = "false", has_cct = "false", light_count = "3" })
+			assert.same({ { supports_color = "false", supports_color_correlated_temperature = "false" } },
+				notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+
+			c4.calls = {}
+			configure_group(env, ZONE, { light_count = "3" })
+			assert.equal(1, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "every configure announces them again")
+			assert.equal("true", notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED")[1].supports_color)
+		end)
+
+		it("drives the group exactly as a light: HUE_DIM holds, HUE_SET bodies, HUE_STATE mapping", function()
+			local env, c4 = lit_zone() -- on at 40 %
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			assert.same({ { rid = ZONE_RID, direction = "up", duration = "3000" } }, dims(c4))
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.equal("stop", dims(c4)[2].direction)
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, brightness = "47", reason = "event" })
+
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ id = BRIDGE_ID, command = "HUE_SET",
+				params = { rid = ZONE_RID, on = "true", brightness = "100", rate = "0" } }, last_sent(c4))
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.3", LIGHT_COLOR_TARGET_Y = "0.3",
+				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+			assert.same({ rid = ZONE_RID, x = "0.3", y = "0.3", rate = "0" }, last_sent(c4).params)
+
+			c4.calls = {}
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "55.5", mirek = "370",
+				color_mode = "ct", reason = "event" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 56 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(1, notifies(c4, "LIGHT_COLOR_CHANGED")[1].LIGHT_COLOR_CURRENT_COLOR_MODE)
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "false" })
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
+			assert.equal(1, #c4.active_timers(), "only the hold's click guard is left: both targets were confirmed")
+		end)
+
+		it("Adopt Hue Name and Forget This Light speak of the zone or room", function()
+			local env, c4 = lit_zone()
+			local proxy_id = proxy_of(LIGHT_ID)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.same({ { proxy_id, "Bedside Lights" } }, c4.calls_to("RenameDevice"), "a zone's name verbatim")
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
+			assert.same({ rid = ZONE_RID, device_id = "2001" }, messages(c4, "HUE_FORGET")[1].params)
+			assert.equal("Asked the bridge to forget this zone light; its answer sets Status", env.Properties["Last Action"])
+
+			env, c4 = load_light({ rid = ROOM_RID })
+			configure_group(env, ROOM)
+			proxy_id = proxy_of(LIGHT_ID)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.same({ { proxy_id, "Master Bedroom Lights" } }, c4.calls_to("RenameDevice"),
+				"a room device is <Room> Lights (contract §5 Naming)")
+			assert.equal(string.format("Renamed device %d to Master Bedroom Lights", proxy_id), env.Properties["Last Action"])
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
+			assert.equal("Asked the bridge to forget this room light; its answer sets Status", env.Properties["Last Action"])
+
+			env = load_light({ rid = ZONE_RID })
+			configure_group(env, ZONE, nil, { "name" })
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.equal("Not renamed: no Hue name known yet (the bridge has not configured this zone light)",
+				env.Properties["Last Action"])
+		end)
+	end)
 end)

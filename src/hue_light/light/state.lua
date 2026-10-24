@@ -2,6 +2,11 @@
 -- and what the light_v2 proxy speaks. Pure Lua except for the colour
 -- conversions, which go through C4:ColorCCTtoXY / C4:ColorXYtoCCT (3.3.0+).
 --
+-- The same device can stand for a Hue zone or room driven through its
+-- grouped_light (kind "group", docs/zone-light-design.md §2); the bridge
+-- reports a group's on/off, average brightness and a member's colour in the
+-- same HUE_STATE fields, so only the identity part knows the difference.
+--
 -- Every value in an inter-driver message is a string (docs/lights-design.md,
 -- "Messages"), so the parsers accept strings and numbers alike and the
 -- HUE_SET builders hand back strings.
@@ -20,13 +25,24 @@ state.MODE_CCT = 1
 -- Hue's widest CCT range, used until HUE_CONFIGURE says what this bulb does.
 local DEFAULT_MIREK_MIN, DEFAULT_MIREK_MAX = 153, 500
 
+-- What the device stands for: a Hue light, or a Hue zone or room (its
+-- grouped_light). A configure names the kind; a device never told one is a
+-- light, as every light imported before zone lights existed.
+state.KIND_LIGHT = "light"
+state.KIND_GROUP = "group"
+state.KINDS = { [state.KIND_LIGHT] = true, [state.KIND_GROUP] = true }
+
 function state.new()
 	return {
-		rid = nil,            -- Hue light resource id; the key in every message
+		rid = nil,            -- Hue light (or zone/room) resource id; the key in every message
+		kind = nil,           -- state.KIND_LIGHT / KIND_GROUP; nil until told (reads as a light)
+		group_type = nil,     -- group: "zone" / "room", nil while unknown
+		light_count = nil,    -- group: lights in the zone or room, nil while unknown
+		no_lights = false,    -- group: no lights, so no grouped_light to drive (Decision 11)
 		name = nil,
-		model = nil,
-		hue_room = nil,       -- Hue room name, nil while unknown or in no room
-		id_v1 = nil,          -- Hue's v1 id ("/lights/12" or "12"), nil while unknown
+		model = nil,          -- "Hue color lamp"; for a group "Hue zone" / "Hue room"
+		hue_room = nil,       -- Hue room name (for a group: its own label), nil while unknown or in no room
+		id_v1 = nil,          -- Hue's v1 id ("/lights/12", "12", "/groups/2"), nil while unknown
 		gone = false,         -- the bridge reports the rid is no longer on it
 		gone_since = nil,     -- unix time the bridge entered that state, when it said
 		forgotten = nil,      -- { name } after HUE_FORGOTTEN, until the next HUE_CONFIGURE
@@ -98,14 +114,34 @@ end
 
 -- Merge a HUE_CONFIGURE message: identity, lifecycle and capabilities. The
 -- bridge builds every configure from its whole registry entry, so the
--- lifecycle fields (hue_room, id_v1, state, gone_since) are taken as sent
--- and reset when absent: a light that left its room, or a bridge build that
--- does not send them yet, both read as "none". A configure also ends a
--- forgotten state: the bridge knows the light again.
+-- lifecycle fields (hue_room, id_v1, state, gone_since, and a group's
+-- group_type, light_count, no_lights) are taken as sent and reset when
+-- absent: a light that left its room, or a bridge build that does not send
+-- them yet, both read as "none". A configure also ends a forgotten state:
+-- the bridge knows the light again.
+--
+-- The kind sticks: a configure that names none leaves what the device is
+-- (the bridge's lights module names none, and so does an older bridge that
+-- answers a zone light's hello as if it were a light, docs/zone-light-design.md
+-- §7 Q11); an unknown kind is ignored. Re-linking across kinds is refused on
+-- the bridge, so a kind only ever changes when a configure says so.
 function state.configure(st, params)
 	params = params or {}
 	if params.rid and params.rid ~= "" then
 		st.rid = params.rid
+	end
+	local kind = text(params.kind)
+	if kind and state.KINDS[kind] then
+		st.kind = kind
+	end
+	st.group_type = text(params.group_type)
+	st.light_count = to_num(params.light_count)
+	st.no_lights = to_bool(params.no_lights) == true
+	if st.no_lights then
+		-- Nothing in the group can be lit and there is no grouped_light to
+		-- say otherwise: the proxy and the keypad LEDs see off until the
+		-- group is refilled and the bridge reports again.
+		st.on = false
 	end
 	st.name = params.name or st.name
 	st.model = params.model or st.model
@@ -121,6 +157,12 @@ function state.configure(st, params)
 	st.mirek_min = to_num(params.mirek_min) or st.mirek_min
 	st.mirek_max = to_num(params.mirek_max) or st.mirek_max
 	st.min_dim = to_num(params.min_dim) or st.min_dim
+end
+
+-- A zone or room device (docs/zone-light-design.md §2); false for a light
+-- and for a device never told its kind.
+function state.is_group(st)
+	return st.kind == state.KIND_GROUP
 end
 
 -- What the proxy would be told right now; compared before and after a merge.
