@@ -42,7 +42,7 @@ local function sent_params(c4, command)
 end
 
 describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-link, deleted in Composer", function()
-	local bridge, light, bc4, L, Z, Q, now, last_action, last_hello
+	local bridge, light, bc4, L, Z, Q, now, last_hello
 
 	local function http_ctx(req, cb)
 		req.ip = "192.0.2.10"
@@ -137,7 +137,6 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		Z:load()
 
 		-- What driver.lua does with a zone light's messages.
-		last_action = nil
 		bridge.ExecuteCommand = function(command, params)
 			if command == "HUE_HELLO" then
 				last_hello = params
@@ -149,8 +148,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 			elseif command == "HUE_GOODBYE" then
 				Z:goodbye(params)
 			elseif command == "HUE_FORGET" then
-				local _, text = Z:forget_request(params)
-				last_action = text
+				Z:forget_request(params)
 			end
 		end
 		bridge.OnBindingChanged = function(binding, class, bound, other)
