@@ -443,7 +443,12 @@ describe("bridge.hue_model", function()
 		end)
 	end)
 
-	describe("caps() and configure_params()", function()
+	describe("caps() and registry_configure_params()", function()
+		-- The entry lights.lua persists for a light: its name, its device's model and caps().
+		local function entry_of(light, device)
+			return { name = light.name, model = device and device.model or nil, caps = hue_model.caps(light) }
+		end
+
 		it("extracts the capabilities the registry persists", function()
 			assert.same({ has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 0.2 },
 				hue_model.caps(hue_model.light(light_items[F.rids.living])))
@@ -451,10 +456,10 @@ describe("bridge.hue_model", function()
 				hue_model.caps(hue_model.light(light_items[F.rids.garage])))
 		end)
 
-		it("builds string-valued HUE_CONFIGURE params from a light and its device", function()
+		it("builds string-valued HUE_CONFIGURE params from a light's entry and its device", function()
 			local devices = hue_model.devices(device_items)
 			local l = hue_model.light(light_items[F.rids.living])
-			local p = hue_model.configure_params(l, devices[l.device_rid])
+			local p = hue_model.registry_configure_params(l.rid, entry_of(l, devices[l.device_rid]))
 			for k, v in pairs(p) do
 				assert.equal("string", type(v), k)
 			end
@@ -463,7 +468,8 @@ describe("bridge.hue_model", function()
 		end)
 
 		it("omits unknown limits for a white light and the model without a device", function()
-			local p = hue_model.configure_params(hue_model.light(light_items[F.rids.garage]), nil)
+			local l = hue_model.light(light_items[F.rids.garage])
+			local p = hue_model.registry_configure_params(l.rid, entry_of(l, nil))
 			assert.same({ rid = F.rids.garage, name = "Garage White", has_color = "false", has_cct = "false",
 				min_dim = "5" }, p)
 		end)
@@ -482,7 +488,7 @@ describe("bridge.hue_model", function()
 		it("merges the import-ui fields of `extra` as strings, after the existing fields", function()
 			local devices = hue_model.devices(device_items)
 			local l = hue_model.light(light_items[F.rids.living])
-			local p = hue_model.configure_params(l, devices[l.device_rid],
+			local p = hue_model.registry_configure_params(l.rid, entry_of(l, devices[l.device_rid]),
 				{ hue_room = "Living Room", id_v1 = "/lights/1", state = "linked" })
 			for k, v in pairs(p) do
 				assert.equal("string", type(v), k)
@@ -502,10 +508,10 @@ describe("bridge.hue_model", function()
 
 		it("is unchanged without extra", function()
 			local l = hue_model.light(light_items[F.rids.garage])
-			local plain = hue_model.configure_params(l, nil)
-			assert.same(plain, hue_model.configure_params(l, nil, nil))
-			assert.same(plain, hue_model.configure_params(l, nil, {}))
-			assert.same(plain, hue_model.configure_params(l, nil, "junk"))
+			local plain = hue_model.registry_configure_params(l.rid, entry_of(l, nil))
+			assert.same(plain, hue_model.registry_configure_params(l.rid, entry_of(l, nil), nil))
+			assert.same(plain, hue_model.registry_configure_params(l.rid, entry_of(l, nil), {}))
+			assert.same(plain, hue_model.registry_configure_params(l.rid, entry_of(l, nil), "junk"))
 			assert.same({ rid = F.rids.garage, name = "Garage White", has_color = "false", has_cct = "false",
 				min_dim = "5" }, plain)
 		end)
@@ -1392,26 +1398,6 @@ describe("bridge.hue_model", function()
 			local odd = { rid = "ss", slots = "junk" }
 			assert_changed({ "slots" }, hue_model.update_smart_scene(odd, { week_timeslots = {} }))
 			assert.same({}, odd.slots)
-		end)
-	end)
-
-	describe("smart_scene_count()", function()
-		it("counts the smart_scene items of a GET body", function()
-			assert.equal(1, hue_model.smart_scene_count(items(F.smart_scene)))
-			assert.equal(3, hue_model.smart_scene_count(items(F.smart_scenes)))
-			assert.equal(0, hue_model.smart_scene_count(items(F.scene)))
-		end)
-
-		it("counts only smart scenes in a mixed list and tolerates junk", function()
-			local mixed = items(F.scene)
-			mixed[#mixed + 1] = items(F.smart_scene)[1]
-			mixed[#mixed + 1] = { id = "x", type = "smart_scene" }
-			mixed[#mixed + 1] = "junk"
-			mixed[#mixed + 1] = { type = "scene" }
-			assert.equal(2, hue_model.smart_scene_count(mixed))
-			assert.equal(0, hue_model.smart_scene_count({}))
-			assert.equal(0, hue_model.smart_scene_count(nil))
-			assert.equal(0, hue_model.smart_scene_count("junk"))
 		end)
 	end)
 

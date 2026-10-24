@@ -117,7 +117,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(STREAM_URL, stream_t.url)
 		stream_t:respond_headers(200, {})
 		assert.equal(1, fire_fast_timers(bridge, 1), "on_connected deferral")
-		assert.equal(10, answer_resource_gets(bridge, 1))
+		-- 6 for the lights, scene + smart_scene + grouped_light for the scenes;
+		-- the zone lights take the scenes' grouped_light items instead of a GET.
+		assert.equal(9, answer_resource_gets(bridge, 1))
 		assert.equal(0, #bc4.sent, "nothing registered yet")
 		-- List rows carry "‚" for "," (Composer splits a list at commas).
 		assert.equal("4 on bridge‚ 0 imported‚ 4 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])

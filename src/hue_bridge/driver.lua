@@ -494,7 +494,9 @@ local function new_stream()
 				else
 					log.warn("resync failed: %s", tostring(err))
 				end
-				state.scenes:resync(function(sok, serr, ssent)
+				-- The scenes hand their grouped_light items on, so the zone
+				-- lights skip their own GET of the same resource.
+				state.scenes:resync(function(sok, serr, ssent, grouped)
 					if sok then
 						log.info("scene resync done: %d state messages", tonumber(ssent) or 0)
 					else
@@ -507,7 +509,7 @@ local function new_stream()
 							log.warn("zone light resync failed: %s", tostring(zerr))
 						end
 						refresh_lights_props()
-					end)
+					end, grouped)
 				end)
 			end)
 		end,

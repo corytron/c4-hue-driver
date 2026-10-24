@@ -278,6 +278,19 @@ describe("bridge.scenes", function()
 			assert.equal(5, S:bridge_count())
 		end)
 
+		it("hands the grouped_light items to its done callback, nil when that GET failed", function()
+			local got = "unset"
+			S:resync(function(_, _, _, grouped) got = grouped end)
+			answer_gets({ grouped = grouped_lights({ living_room = true, garage = false }) })
+			assert.equal("table", type(got))
+			assert.equal(2, #got)
+			assert.equal(F.grouped_light_rids.garage, got[1].id)
+			assert.is_true(got[2].on.on)
+			S:resync(function(_, _, _, grouped) got = grouped end)
+			answer_gets({ grouped_code = 503 })
+			assert.is_nil(got)
+		end)
+
 		it("runs a resync requested during a resync once more afterwards, latest done wins", function()
 			S:resync(function() done(true, "first") end)
 			S:resync(function() done(true, "second") end)
@@ -338,8 +351,7 @@ describe("bridge.scenes", function()
 			assert.same({ rid = F.scene_rids.relax, active = "inactive", reason = "resync" }, c4.sent[2].params)
 			assert.is_nil(entry.kind, "an ordinary scene's entry has no kind")
 			assert.equal("5 + 1 time-based on bridge, 1 imported, 0 deleted", S:summary())
-			assert.equal(2001, S:device_for(F.scene_rids.relax))
-			assert.equal(F.scene_rids.relax, S:rid_for(2001))
+			assert.equal(F.scene_rids.relax, (S.reg:by_device(2001)))
 			assert.is_true(saw_log("scenes: Added Relax to Living Room (device 2001)"))
 		end)
 
@@ -393,7 +405,7 @@ describe("bridge.scenes", function()
 			resync()
 			S:add_scene(F.scene_rids.relax, nil, done)
 			assert.equal(2001, S:entry(F.scene_rids.relax).device_id)
-			assert.equal(3001, S:proxy_for(F.scene_rids.relax))
+			assert.equal(3001, S:entry(F.scene_rids.relax).proxy_id)
 			assert.is_true(saw_log("AddDevice callback for scene Relax"))
 		end)
 	end)
@@ -1348,9 +1360,9 @@ describe("bridge.scenes", function()
 				.. "Bright (device 2095): 2 bound devices share that name; rename one in Composer and run Link Devices again; "
 				.. "Bright (device 2096): 2 bound devices share that name; rename one in Composer and run Link Devices again",
 				text)
-			assert.equal(2091, S:device_for(F.scene_rids.relax))
-			assert.equal(2092, S:device_for(F.scene_rids.savanna))
-			assert.equal(2093, S:device_for(F.scene_rids.nightlight))
+			assert.equal(2091, S:entry(F.scene_rids.relax).device_id)
+			assert.equal(2092, S:entry(F.scene_rids.savanna).device_id)
+			assert.equal(2093, S:entry(F.scene_rids.nightlight).device_id)
 			assert.same({ "HUE_SCENE_CONFIGURE@2091", "HUE_SCENE_STATE@2091", "HUE_SCENE_CONFIGURE@2092", "HUE_SCENE_STATE@2092",
 				"HUE_SCENE_CONFIGURE@2093", "HUE_SCENE_STATE@2093" }, commands_sent())
 		end)
@@ -1715,8 +1727,8 @@ describe("bridge.scenes", function()
 				c4.sent = {}
 				assert.equal(4, S:on_container(container(smart_event(SMART.golden, '"state":"active"'))))
 				for _, id in ipairs({ 2001, 2002, 2004 }) do
-					assert.same({ { id = id, command = "HUE_SCENE_GROUP", params = { rid = S:rid_for(id), other_active = "true" } } },
-						sent_to(id), "device " .. id)
+					assert.same({ { id = id, command = "HUE_SCENE_GROUP", params = { rid = (S.reg:by_device(id)),
+						other_active = "true" } } }, sent_to(id), "device " .. id)
 				end
 				assert.equal("active", sent_to(2003, "HUE_SCENE_STATE")[1].params.active)
 				assert.same({}, sent_to(2005), "another group")
