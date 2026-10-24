@@ -1329,4 +1329,64 @@ describe("bridge.zone_lights", function()
 			assert.equal("1 imported", Z:summary())
 		end)
 	end)
+
+	describe("list_items", function()
+		local function deleted(ts)
+			return " (deleted from Composer " .. os.date("%Y-%m-%d", ts) .. ")"
+		end
+
+		local function no_commas(items)
+			for _, item in ipairs(items) do
+				assert.is_nil(item:find(",", 1, true), "comma in " .. item)
+			end
+		end
+
+		it("is empty without groups or a registry", function()
+			Z = zone_lights.new({ http = http_ctx })
+			assert.same({}, Z:list_items())
+		end)
+
+		it("lists zones then rooms with the picker's labels, ';' inside the parentheses, and the device", function()
+			assert.same({ "Attic (zone; no lights)", "Downstairs (zone; 2 lights)", "Garage (room; 1 light)",
+				"Living Room (room; 2 lights)" }, Z:list_items())
+			add_downstairs()
+			Z:add(LIVING, nil, done)
+			assert.same({ "Attic (zone; no lights)", "Downstairs (zone; 2 lights) → device 2001", "Garage (room; 1 light)",
+				"Living Room (room; 2 lights) → device 2002" }, Z:list_items())
+		end)
+
+		it("marks tombstones, groups deleted in Hue (after the rooms) and unbound devices", function()
+			add_downstairs()          -- device 2001
+			Z:add(LIVING, nil, done)  -- device 2002
+			Z:add(GARAGE, nil, done)  -- device 2003
+			now = T0 + 100
+			Z:goodbye({ device_id = "2002" })
+			feed(F.events.zone_deleted)
+			Z:on_binding_changed(1, "HUE_BRIDGE", false, 2003)
+			assert.same({
+				"Attic (zone; no lights)",
+				"Garage (room; 1 light) (unbound; device 2003)",
+				"Living Room (room; 2 lights)" .. deleted(T0 + 100),
+				"Downstairs (zone; 2 lights) (deleted in Hue; device 2001)",
+			}, Z:list_items())
+			assert.equal("1 zone, 2 rooms on bridge; 2 imported, 1 missing, 1 unbound, 1 deleted", Z:summary())
+		end)
+
+		it("reads the registry alone before the groups are fetched", function()
+			add_downstairs()
+			Z = new_zone_lights({ lights = lights.new({ http = http_ctx }) })
+			Z:load()
+			assert.is_false(Z:groups_loaded())
+			assert.same({ "Downstairs (zone; 2 lights) → device 2001" }, Z:list_items())
+		end)
+
+		it("turns commas in names into U+201A so Composer keeps one line per group", function()
+			L:absorb({ room = decode_data(F.room), bridge_home = decode_data(F.bridge_home),
+				zone = decode_data(F.zone:gsub('"name":"Downstairs"', '"name":"Down, stairs"')) })
+			local items = Z:list_items()
+			assert.equal("Down‚ stairs (zone; 2 lights)", items[2])
+			assert.equal(4, #items)
+			no_commas(items)
+		end)
+	end)
 end)
