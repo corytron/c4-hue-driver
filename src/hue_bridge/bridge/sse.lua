@@ -13,6 +13,7 @@ local sse = {}
 sse.__index = sse
 
 -- A single line longer than this means we're not reading an event stream.
+sse.MAX_EVENT = 1024 * 1024 -- the data of one event, all lines together
 sse.MAX_LINE = 1024 * 1024
 
 function sse.new()
@@ -29,6 +30,7 @@ end
 local function reset_event(self)
 	self.event = nil
 	self.data = {}
+	self.data_bytes = 0
 end
 
 function sse:dispatch(out)
@@ -59,6 +61,14 @@ function sse:line(text, out)
 		field, value = text, ""
 	end
 	if field == "data" then
+		-- One event's data is bounded like one line: a bridge (or whatever
+		-- answers at its address) cannot grow the buffer without end.
+		self.data_bytes = (self.data_bytes or 0) + #value
+		if self.data_bytes > sse.MAX_EVENT then
+			self.overflowed = true
+			reset_event(self)
+			return
+		end
 		table.insert(self.data, value)
 	elseif field == "id" then
 		-- Hue ids look like "1634576695:0"; keep the whole thing.

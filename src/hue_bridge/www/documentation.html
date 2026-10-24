@@ -143,7 +143,7 @@ dd { margin: 2px 0 6px 18px; }
 <li><b>Event Stream</b>: <code>Not paired</code>.</li>
 <li><b>Lights</b>: <code>0 imported</code>; <b>Scenes</b>: <code>0 imported</code>; <b>Zone Lights</b>: <code>0 imported</code>.</li>
 <li><b>Attention</b>: <code>None</code>; <b>Room Mappings</b>: <code>None; use Map Rooms By Name</code>.</li>
-<li><b>Events Received</b>: <code>0</code>; <b>Stream Timeout (s)</b>: <code>600</code>; <b>Stream Watchdog (s)</b>: <code>600</code>.</li>
+<li><b>Events Received</b>: <code>0</code>; <b>Stream Timeout (s)</b>: <code>3600</code>; <b>Stream Watchdog (s)</b>: <code>600</code>.</li>
 </ul>
 <p>Chapter 4 fills in the rest; chapter 5 explains every row.</p>
 
@@ -234,7 +234,7 @@ dd { margin: 2px 0 6px 18px; }
 <tr><td><b>Events Received</b></td><td>read-only</td><td>How many bundles of changes the feed has delivered since it was last set up (a driver start, a change of the stream settings or the address, or pairing). It rises whenever something changes on the Hue side; a good sign that the feed is alive.</td></tr>
 <tr><td><b>Last Event</b></td><td>read-only</td><td>The time of the last event, for example <code>14:40:01</code>.</td></tr>
 <tr><td><b>Zone Lights</b></td><td>drop-down, for reading</td><td>The row shows the zone and room lights (chapter 7, "Adding a zone or room as a light"): <code>7 zones, 16 rooms on bridge; 1 imported</code>, with <code>, 1 missing</code>, <code>, 1 unbound</code> or <code>, 1 deleted</code> added only when they are not zero (<b>Attention</b> lists them then). Open the list and every zone, then every room, is a line: <code>Bedside Lights (zone; 2 lights) &rarr; device 1166</code>, <code>Master Bedroom (room; 2 lights) &rarr; device 1168</code>, <code>Attic (zone; no lights)</code>, <code>&hellip; (deleted in Hue; device 1166)</code>, <code>&hellip; (deleted from Composer 2026-10-24)</code>. <b>Lights</b> counts lights only.</td></tr>
-<tr><td><b>Stream Timeout (s)</b></td><td>you (rarely)</td><td>How long one connection to the event feed may live before the driver deliberately reopens it and does a full read; 30 to 86400 seconds, default <code>600</code>. Each reopening is harmless. On an address with no number below 8 the driver caps it at 60 whatever you set (see Stream Address). Leave the default unless the developer suggests otherwise.</td></tr>
+<tr><td><b>Stream Timeout (s)</b></td><td>you (rarely)</td><td>How long one connection to the event feed may live before the driver deliberately reopens it and does a full read; 30 to 86400 seconds, default <code>3600</code> (an hour: each reopening re-reads the whole bridge, so it is kept rare; the watchdog catches a feed that went quiet). Each reopening is harmless. On an address with no number below 8 the driver caps it at 60 whatever you set (see Stream Address). Leave the default unless the developer suggests otherwise.</td></tr>
 <tr><td><b>Stream Watchdog (s)</b></td><td>you (rarely)</td><td>After this many seconds without any event the driver assumes the feed has gone quiet for a bad reason and reopens it; Composer accepts 0 to 3600 seconds, default <code>600</code>; the driver uses at least 60, so 0 or any value below 60 works as 60 and the watchdog cannot be switched off. The bridge sends nothing while nothing changes, so in a quiet house <b>Event Stream</b> will show a fresh <code>Connected since</code> time every ten minutes; that is expected.</td></tr>
 </table>
 
@@ -838,7 +838,7 @@ dd { margin: 2px 0 6px 18px; }
 <table>
 <tr><th>Device</th><th>Property</th><th>Values</th></tr>
 <tr><td>Hue Bridge</td><td><b>Bridge IP Address</b></td><td>Four numbers and dots, for example <code>192.168.1.50</code>.</td></tr>
-<tr><td>Hue Bridge</td><td><b>Stream Timeout (s)</b></td><td>30 to 86400, default <code>600</code>; capped at 60 on an address with no number below 8.</td></tr>
+<tr><td>Hue Bridge</td><td><b>Stream Timeout (s)</b></td><td>30 to 86400, default <code>3600</code>; capped at 60 on an address with no number below 8.</td></tr>
 <tr><td>Hue Bridge</td><td><b>Stream Watchdog (s)</b></td><td>0 to 3600, default <code>600</code>; anything below 60, 0 included, works as 60.</td></tr>
 <tr><td>Hue Scene</td><td><b>Recall As</b></td><td><code>As set in Hue</code> (default), <code>Static</code>, <code>Dynamic</code>. Not shown on a time-of-day scene.</td></tr>
 <tr><td>All three</td><td><b>Debug Mode</b></td><td><code>Off</code> (default), <code>On</code>; developer use only.</td></tr>

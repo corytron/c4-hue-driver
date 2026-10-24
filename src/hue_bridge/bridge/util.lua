@@ -23,7 +23,15 @@ function util.sanitise(text)
 	return (tostring(text):gsub(",", " "))
 end
 
+-- A persisted timestamp is trusted only within this century: os.date
+-- raises on absurd values, and a restored backup is not above them.
+local function sane(ts)
+	ts = tonumber(ts)
+	return ts and ts >= 0 and ts < 4102444800 and ts or nil
+end
+
 function util.date_of(ts)
+	ts = sane(ts)
 	if not ts then
 		return "?"
 	end
@@ -31,6 +39,7 @@ function util.date_of(ts)
 end
 
 function util.short_date_of(ts)
+	ts = sane(ts)
 	if not ts then
 		return "?"
 	end

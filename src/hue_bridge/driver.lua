@@ -219,12 +219,19 @@ end
 
 -- Authenticated request on the dotted address. The registry and the command
 -- queue go through this, so they never learn about addresses or keys.
+-- Every request that carries the application key goes through here: only
+-- to the paired bridge, only once its identity is verified (below), and
+-- never with a caller-supplied TLS table (the pinned bundle always applies).
 local function bridge_request(req, callback)
 	if not connection() then
 		return callback({ ok = false, err = "not paired" })
 	end
+	if state.identity_ok ~= true then
+		return callback({ ok = false, err = "bridge identity not verified yet" })
+	end
 	req.ip = state.ip
 	req.key = state.creds.key
+	req.tls = nil
 	return http.request(req, callback)
 end
 
@@ -551,6 +558,51 @@ end
 -- waits for the transfer it replaced. The self-check uses a spelling no
 -- stream ever takes, so it can never queue behind a stream or an abandoned
 -- one. Calls back when done; until then the stream must not be started.
+-- The bridge's identity, checked without the key before any request
+-- carries it (docs/reviews/security-2026-10-24.md): GET /api/0/config is
+-- public and answers the bridge id. Until it matches the paired id nothing
+-- is sent; an unreachable bridge is asked again every 30 s, a different
+-- bridge never (it does not become ours by waiting).
+local IDENTITY_RETRY_MS = 30000
+local identity_timer = nil
+
+local function cancel_identity_retry()
+	if identity_timer then
+		identity_timer:Cancel()
+		identity_timer = nil
+	end
+end
+
+local function verify_identity(callback)
+	cancel_identity_retry()
+	local ip = state.ip
+	http.request({ ip = ip, path = "/api/0/config", timeout = 10 }, function(r)
+		if ip ~= state.ip then
+			return -- the address changed meanwhile; its own check runs
+		end
+		local reported = r.ok and type(r.json) == "table" and config.normalise_bridge_id(r.json.bridgeid) or nil
+		if reported and reported == state.creds.bridge_id then
+			state.identity_ok = true
+			refresh_status()
+			return callback(true)
+		end
+		state.identity_ok = false
+		if reported then
+			prop("Status", string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
+				.. "is corrected", ip, reported, state.creds.bridge_id))
+			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
+			return callback(false)
+		end
+		prop("Status", string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
+			tostring(r.ok and "no bridge id in the answer" or r.err), IDENTITY_RETRY_MS / 1000))
+		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
+		identity_timer = C4:SetTimer(IDENTITY_RETRY_MS, function()
+			identity_timer = nil
+			verify_identity(callback)
+		end)
+	end)
+end
+
 local function choose_stream_address(callback)
 	local check_ip = altaddr.for_check(state.ip)
 	local family = altaddr.stream_family(state.ip)
@@ -562,8 +614,18 @@ local function choose_stream_address(callback)
 			detail and (" (" .. detail .. ")") or "", SINGLE_QUEUE_TIMEOUT)
 		callback()
 	end
-	if not family or not check_ip or not paired() then
-		return single(paired() and "no octet below 8 to pad" or "not paired")
+	if not paired() then
+		return single("not paired")
+	end
+	if state.identity_ok ~= true then
+		return verify_identity(function(ok)
+			if ok then
+				choose_stream_address(callback)
+			end
+		end)
+	end
+	if not family or not check_ip then
+		return single("no octet below 8 to pad")
 	end
 	http.request({ ip = check_ip, key = state.creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
 		if r.ok then
@@ -621,13 +683,22 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 	if changed and state.late_init_done then
 		state.stream_ip = nil
 		state.stream_family = nil
+		cancel_identity_retry()
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
-			local was_running = state.stream and state.stream:running()
+			-- Running now, stopped only while the address was invalid, or
+			-- never started because the identity check failed: a corrected
+			-- address brings the feed back by itself.
+			local was_running = (state.stream and state.stream:running()) or state.stream_paused_by_address
+				or state.identity_ok ~= true
+			state.stream_paused_by_address = nil
+			state.identity_ok = nil
 			if state.stream then state.stream:stop() end
 			choose_stream_address(function() restart_stream(was_running) end)
 		else
+			state.stream_paused_by_address = (state.stream and state.stream:running()) or nil
+			state.identity_ok = nil
 			restart_stream()
 		end
 	end
@@ -1190,6 +1261,8 @@ dispatch.commands["Disconnect_Event_Stream"] = function()
 end
 
 dispatch.commands["Forget_Pairing"] = function()
+	state.identity_ok = nil
+	cancel_identity_retry()
 	state.stream:stop()
 	credentials.clear()
 	state.creds = nil
