@@ -81,7 +81,7 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 
 ### The release
 
-The release is **1.0 (build N)**: a GitHub release titled *1.0* on the
+The release is **1.0 (build 226)**: a GitHub release titled *1.0* on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases) with the
 three driver files attached, `hue_bridge.c4z`, `hue_light.c4z` and
 `hue_scene.c4z`. Download all three; they must come from the same build. `N`
@@ -90,7 +90,7 @@ in Composer once installed (Control4 needs an integer there, so the files
 carry the build number while the release is called 1.0). A later release of
 1.0 moves the attached files to a newer build.
 
-<!-- At release time: replace "build N" above with the real build number (the
+<!-- At release time: replace "build 226" above with the real build number (the
      release checklist's naming section), and check the Releases URL if the
      repository is published under a new name (licensing research, §6 step 7). -->
 
