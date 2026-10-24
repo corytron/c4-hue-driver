@@ -13,6 +13,7 @@ local sse = {}
 sse.__index = sse
 
 -- A single line longer than this means we're not reading an event stream.
+sse.MAX_EVENT = 1024 * 1024 -- the data of one event, all lines together
 sse.MAX_LINE = 1024 * 1024
 
 function sse.new()
@@ -29,6 +30,7 @@ end
 local function reset_event(self)
 	self.event = nil
 	self.data = {}
+	self.data_bytes = 0
 end
 
 function sse:dispatch(out)
@@ -59,6 +61,14 @@ function sse:line(text, out)
 		field, value = text, ""
 	end
 	if field == "data" then
+		-- One event's data is bounded like one line: a bridge (or whatever
+		-- answers at its address) cannot grow the buffer without end.
+		self.data_bytes = (self.data_bytes or 0) + #value
+		if self.data_bytes > sse.MAX_EVENT then
+			self.overflowed = true
+			reset_event(self)
+			return
+		end
 		table.insert(self.data, value)
 	elseif field == "id" then
 		-- Hue ids look like "1634576695:0"; keep the whole thing.
@@ -69,22 +79,26 @@ function sse:line(text, out)
 	-- "retry" and unknown fields are ignored.
 end
 
--- Returns an array of the events completed by this chunk.
+-- Returns an array of the events completed by this chunk. The buffer is
+-- walked by position and cut once at the end, not once per line (a chunk
+-- used to be copied about as many times as it had lines).
 function sse:feed(chunk)
 	local out = {}
-	self.buffer = self.buffer .. chunk
+	local buffer = self.buffer .. chunk
+	local pos = 1
 	while true do
-		local nl = self.buffer:find("\n", 1, true)
+		local nl = buffer:find("\n", pos, true)
 		if not nl then
 			break
 		end
-		local text = self.buffer:sub(1, nl - 1)
-		self.buffer = self.buffer:sub(nl + 1)
+		local text = buffer:sub(pos, nl - 1)
+		pos = nl + 1
 		if text:sub(-1) == "\r" then
 			text = text:sub(1, -2)
 		end
 		self:line(text, out)
 	end
+	self.buffer = pos > 1 and buffer:sub(pos) or buffer
 	if #self.buffer > sse.MAX_LINE then
 		self.overflowed = true
 		self.buffer = ""

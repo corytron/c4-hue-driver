@@ -48,6 +48,7 @@
 -- numeric device_id, and no other entry holding that device.
 
 local default_log = require("common.log")
+local util = require("bridge.util")
 
 local registry = {}
 registry.__index = registry
@@ -60,6 +61,9 @@ registry.STATES = { linked = true, gone = true, unbound = true }
 
 -- The timestamp a state stamps on entry and clears on exit.
 local STAMP = { gone = "gone_since", unbound = "unbound_since" }
+
+-- The entry fields that are numbers: timestamps and ids, coerced at load.
+local NUMERIC_FIELDS = { "gone_since", "unbound_since", "created_at", "created_room_id" }
 
 -- Pass as a field value to update() to remove that field: a nil in a table
 -- literal is invisible to pairs(), so it cannot mean "clear".
@@ -102,13 +106,7 @@ end
 
 -- Helpers ------------------------------------------------------------------
 
-local function positive(value)
-	local n = tonumber(value)
-	if n and n > 0 then
-		return n
-	end
-	return nil
-end
+local positive = util.positive  -- a number above zero, or nil (bridge.util)
 
 local function shallow_copy(t)
 	local out = {}
@@ -201,7 +199,7 @@ function registry:normalise_entry(rid, raw)
 		self.log.warn("registry: %s had state %s; treating it as linked", label(rid, entry), tostring(raw.state))
 		entry.state = "linked"
 	end
-	for _, field in ipairs({ "gone_since", "unbound_since", "created_at", "created_room_id" }) do
+	for _, field in ipairs(NUMERIC_FIELDS) do
 		entry[field] = tonumber(raw[field])
 	end
 	for state, field in pairs(STAMP) do

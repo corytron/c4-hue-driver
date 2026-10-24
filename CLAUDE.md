@@ -16,7 +16,7 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 **Parallel by default.** For every piece of work, split it into parts that touch disjoint files and run them as background agents at the same time: module and its spec, VM-side tooling, changes to existing modules and their specs, docs and design notes. A single serial pass is only acceptable when the work truly cannot be split (one file, a handful of edits). Before starting any task, say in one line how it is being split and which agent owns which files; if it is not being split, say why.
 
 - **Coordinator first.** Before spawning, write the contract the pieces share (an interface, a wire protocol, a file layout) into `docs/` so every agent builds against the same text. Then spawn them in one go, in the background.
-- **One writer per file.** Each brief names the exact files the agent may create or edit and says that others are editing the rest of the checkout concurrently. No agent runs `git`; the coordinator integrates, runs `luacheck src tests`, `busted` and `tools/build.sh`, and commits.
+- **One writer per file.** Each brief names the exact files the agent may create or edit and says that others are editing the rest of the checkout concurrently. No agent runs `git`; the coordinator integrates, runs `luacheck src tests tools`, `busted` and `tools/build.sh`, and commits.
 - **Briefs are self-contained.** Agents start cold: include the doc paths to read, the conventions (Lua 5.1, tabs, `.luacheckrc`, busted style, the fake C4 runtime), the hardware facts that matter, and what "done" looks like, including the verification commands to run.
 - **Research agents are read-only** and write one new file under `docs/` (for example a design for a new transport), citing the SDK doc file for every API claim.
 - Typical split for a feature: VM-side tooling (Python) / driver-side Lua module plus its spec / changes to existing modules plus their specs / a design or research document. Integration into `driver.lua`, `driver.xml`, `tools/build.sh` and `CLAUDE.md` stays with the coordinator.
@@ -33,7 +33,7 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 - Local tools installed by `setup-vm.sh`:
   - `lua5.1`, `luacheck` (lint), `busted` (unit tests)
   - `~/c4-tools/drivers-driverpackager/` — official Python packager for `.c4z` files (read its README for invocation)
-  - `~/c4-tools/drivers-common-public/` — Control4's helper Lua libraries (JSON, timers, URL requests, etc.); vendor what we use into `src/` rather than referencing this path
+  - `~/c4-tools/drivers-common-public/` — Snap One's helper Lua libraries (JSON, timers, URL requests, etc.), for reading only: **never vendor Snap One code into `src/`** (their license keeps derivative works theirs); the driver uses the C4 API and its own modules, nothing else
   - `~/c4-tools/reference/` — DriverWorks API and Fundamentals docs, for reading only
 
 ## Targets
@@ -63,7 +63,7 @@ Later, not v1: Hue motion sensors and MotionAware (Bridge Pro only), entertainme
 ## Repository layout (proposed; adjust in the first plan)
 
 ```
-src/            driver.lua, driver.xml, lib/ (vendored Lua libraries), www/ (docs, icons)
+src/            driver.lua, driver.xml, bridge/ and common/ (our own modules), www/ (docs, icons)
 tests/          busted specs, with a fake C4 global and recorded Hue API fixtures
 tools/          build.sh, deploy helper
 build/          generated .c4z (gitignored)
@@ -72,7 +72,7 @@ docs/           design notes and the testing checklist I run in Composer
 
 ## Commands (fill in as they're created)
 
-- Lint: `luacheck src tests`
+- Lint: `luacheck src tests tools`
 - Test: `busted tests`
 - Build: `tools/build.sh` → `build/hue_bridge.c4z`, `build/hue_light.c4z`, `build/hue_scene.c4z` (`<version>` = git commit count). `tools/build.sh --dev` adds the dev loop and the Lua command window; never install a dev build as the production driver.
 - Dev loop (only while a `--dev` build is installed; not running since 2026-10-22): `tools/devserver.py` (background, once), `tools/devctl.py status|run|set|reload|wait|log|pin|unpin`; details in `docs/dev-loop.md`. While agents edit `src/`, keep the loop **pinned** and re-pin only states that pass lint and tests.

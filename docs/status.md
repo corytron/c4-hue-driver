@@ -1,4 +1,8 @@
-# Status of the Hue driver (2026-10-24, build 199)
+# Status of the Hue driver (2026-10-24)
+
+**Release 1.0 (build 228), tag `v1.0`**, published on GitHub with the three
+`.c4z` files (branch `release-prep`, PR #33); the house runs it since
+2026-10-24 18:54.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -6,10 +10,12 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 199**, production (no dev loop), on all three drivers (installed
-  2026-10-24 14:17; zone lights, PR #30, after build 185's readable
-  properties and build 180's time-of-day scenes): Hue Bridge, Hue Light,
-  Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
+- **Build 228, release 1.0** (no dev loop), on all three drivers (installed
+  2026-10-24 18:54 after the slimming, the release hygiene and the
+  security hardening of the release preparation below; before it build 199
+  with the zone lights, 185 with the readable properties, 180 with the
+  time-of-day scenes): Hue Bridge, Hue Light, Hue Scene. The house's
+  `Stream Timeout (s)` is 3600 and `Stream Watchdog (s)` 600. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
   1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
@@ -39,9 +45,11 @@ this page disagree about the present, this page and the code win.
   Scenes), diagnostics. Follows each Hue room/zone's on/off and brightness
   from the event feed and tells scene devices.
   **Composer properties fit the column** (2026-10-24): Composer shows a value
-  on one line of about 75 characters and clips the rest, so `Room Mappings`
-  is a drop-down list (summary on the row, one mapping per line in the
-  list, a pick snaps back to the summary), `Scenes` reads "126 + 15
+  on one line of about 75 characters and clips the rest, so `Room Mappings`,
+  `Lights`, `Scenes`, `Zone Lights` and `Last Action` are drop-down lists
+  (the summary or text on the row, every item or a long text's "; "-parts
+  in the list, a pick snaps back; commas read as "‚" there, since the list
+  is comma-delimited), `Scenes` reads "126 + 15
   time-based on bridge, 2 imported, 2 deleted" (missing and unbound only
   when not zero) and `Stream Address` reads "10.00.002.143 (own queue,
   spelling 1 of 7)" or "… (shared queue with commands: <reason>)". Verified in
@@ -143,7 +151,48 @@ the slider, colour and OFF reach both lamps and the tile follows the Hue
 app, which also confirms that a grouped_light PUT takes `color` and
 `color_temperature`.
 
+## Release preparation (2026-10-24, branch `release-prep`, not yet installed)
+
+- **Slimmed** by four agents from five reviews (`docs/reviews/slim-*.md`):
+  release Lua code 16,665 → 15,917 lines and 1,438 more lines dev-only
+  (`bridge/devtools.lua`, `conntest.lua`, `pinning.lua`, `common/devloop.lua`);
+  the two device drivers share `common/device.lua`; the bridge modules share
+  `bridge/util.lua` and `bridge/project.lua`. Per event: no watchdog timer
+  churn, the three per-container property writes coalesced to one a second,
+  no debug strings with debug off, the zone module touches only the groups
+  an item can change, one grouped_light GET per resync, the owner-facing rows
+  refreshed twice per reconnect (after the lights' resync and after the
+  chain) instead of three times
+  (`docs/reviews/efficiency-2026-10-24.md`: nine of fifteen costs gone).
+- **Release builds** carry no dev loop, diagnostics or insecure TLS mode
+  (`tools/build.sh` strips them and refuses to package a release that still
+  has them); `Stream Timeout (s)` default 3600 and `Stream Watchdog (s)` 600
+  (idle resyncs from every 10 minutes to every hour; set the house's Timeout
+  row to 3600 at the install, Director keeps the old value otherwise).
+- **Security** (`docs/reviews/security-2026-10-24.md`): the bridge's identity
+  is now verified without the key (GET `/api/0/config`) before any request
+  carries it, after start and after an address change; a different bridge
+  at the address gets nothing and Status says so; an unreachable one is
+  asked again every 30 s. Also capped: one SSE event's data (1 MB), the
+  device drivers' pre-late-init buffer (200); persisted dates are range
+  checked; `bridge_request` ignores a caller's TLS table. Open from that
+  review (dev builds only): the dev loop is an unauthenticated LAN surface
+  by design; never install a dev build where the LAN is not trusted.
+- **Behaviour fixes found by the manual review**: a corrected `Bridge IP
+  Address` restarts the feed by itself (it used to stay Stopped).
+- **Docs**: README, LICENSE (Apache 2.0), NOTICE, CONTRIBUTING, `docs/README.md`;
+  both manuals reviewed against the code (`docs/reviews/manual-*.md`) and
+  corrected; the release checklist (`docs/release-checklist.md`) names 1.0.
+- **Done for 1.0**: the dev-build regression pass (build 224,
+  `tools/regress.sh` all pass, the reconnect chain clean in the shipped
+  log), the release installs (226, then 228 with the Last Action parts
+  fix) and the Composer checks of the release checklist §2, the tag `v1.0`
+  and the GitHub release. The owner's phone and keypad pass on 228 (§3) is
+  the remaining check; before going public: the git history rewrite and
+  the screenshot retake (`docs/licensing-research.md` §6).
+
 ## Open
+
 
 - Zone lights: Shine's tile going off on a zone OFF, and a change of the
   zone's lights in Hue reaching a live tile's colour controls, not yet seen
@@ -172,10 +221,11 @@ app, which also confirms that a grouped_light PUT takes `color` and
   of the scene's lights to that level (follows Hue's brightness override).
 - Code: `Stream Watchdog (s)` is declared with a minimum of 0 in
   `hue_bridge/driver.xml` but the code treats anything below 60 as 60.
-  Release builds also keep two diagnostic paths:
-  Test Connection's Host override and Connection Test's "Diagnostic Server"
-  target (insecure TLS), and the scene driver's `HUE_DUMP` handler is not
-  gated on the dev loop.
+  (Resolved 2026-10-24: release builds no longer carry the Dev Server and
+  Diagnostic Server properties, the Connection Test, Reload Credentials and
+  Check CA Pinning actions, the conntest and pinning modules, the Test
+  Connection host override or the scene driver's `HUE_DUMP`; development
+  builds keep them.)
 - The Composer project is unsaved.
 - Approvals: the owner approves everything, always (2026-10-24); the
   Windows session asked him once on its side to confirm that standing rule.

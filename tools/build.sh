@@ -44,7 +44,24 @@ for driver in "${DRIVERS[@]}"; do
 	cp -R "$ROOT/src/$driver" "$stage"
 	cp -R "$ROOT/src/common" "$stage/common"
 	if [[ "$dev_build" != yes ]]; then
-		rm -f "$stage/common/devloop.lua"
+		# Release builds: no dev loop, none of the bridge's development
+		# handlers (bridge/devtools.lua) nor the connection experiment and
+		# pinning check modules they drive, and none of the DEV-ONLY
+		# properties and actions.
+		rm -f "$stage/common/devloop.lua" "$stage/bridge/devtools.lua" \
+			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua"
+		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
+			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
+		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" ]]; then
+			echo "release build still carries development items in $driver" >&2
+			exit 1
+		fi
+	fi
+	# Apache 2.0 §4: the license and notice travel with every package.
+	cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$stage/"
+	# The device drivers' shared module is of no use to the bridge.
+	if [[ "$driver" == hue_bridge ]]; then
+		rm -f "$stage/common/device.lua"
 	fi
 	# The drivers' own copy of the version: Director's answer is empty at the
 	# first init of a device created by AddDevice (docs/status.md, 2026-10-24).

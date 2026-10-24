@@ -198,6 +198,35 @@ describe("bridge.stream", function()
 		assert.equal("waiting", s.state)
 	end)
 
+	it("re-arms the watchdog for the rest of the period when a chunk arrived, and reconnects after that", function()
+		s:start()
+		local t = open_ok()
+		fire_deferrals()
+		assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays(), "one watchdog per connection")
+		local armed = c4.calls_to("SetTimer")
+
+		-- A chunk 100 s in: the timer is left alone (no Cancel, no SetTimer).
+		c4.now_ms = c4.now_ms + 100 * 1000
+		t:chunk(": hi\n\n")
+		assert.equal(#armed, #c4.calls_to("SetTimer"), "a chunk does not re-create the timer")
+		assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays())
+
+		-- It fires at the end of the period: the chunk was 500 s ago, so it is
+		-- re-armed for the remaining 100 s instead of reconnecting.
+		c4.now_ms = c4.now_ms + (stream.DEFAULT_WATCHDOG - 100) * 1000
+		assert.equal(1, c4.fire_timers())
+		assert.equal("connected", s.state)
+		assert.is_false(t.cancelled)
+		assert.same({ 100 * 1000 }, timer_delays(), "re-armed for the remainder")
+
+		-- Nothing more arrives: the remainder elapses and the stream reconnects.
+		c4.now_ms = c4.now_ms + 100 * 1000
+		assert.equal(1, c4.fire_timers())
+		assert.is_true(t.cancelled)
+		assert.equal("waiting", s.state)
+		assert.truthy(s.stats.last_error:find("no data for " .. stream.DEFAULT_WATCHDOG .. " s", 1, true))
+	end)
+
 	it("stop() cancels the transfer and does not reconnect", function()
 		s:start()
 		local t = open_ok()

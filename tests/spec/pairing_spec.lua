@@ -53,7 +53,8 @@ describe("bridge.pairing", function()
 		local post = c4.transfers[2]
 		assert.equal("POST", post.method)
 		assert.equal("https://192.0.2.10/api", post.url)
-		assert.same({ devicetype = "control4#hue_bridge", generateclientkey = true }, c4:JsonDecode(post.data))
+		-- "application#device": the driver's own name, not Control4's (docs/licensing-research.md §2).
+		assert.same({ devicetype = "c4-hue-driver#bridge", generateclientkey = true }, c4:JsonDecode(post.data))
 
 		post:respond(200, '[{"error":{"type":101,"address":"","description":"link button not pressed"}}]')
 		assert.equal("link_button", events[2][1])

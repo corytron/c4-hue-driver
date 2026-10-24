@@ -192,7 +192,7 @@ describe("bridge.zone_lights", function()
 		it("reads nothing into the summary without a lights instance", function()
 			Z = zone_lights.new({ http = http_ctx })
 			assert.equal("0 imported", Z:summary())
-			assert.is_nil(Z:device_for(DOWNSTAIRS))
+			assert.is_nil(Z:entry(DOWNSTAIRS))
 			assert.same({ { text = "(no zones or rooms on the bridge)", value = "" } }, Z:picker_groups())
 		end)
 	end)
@@ -238,6 +238,28 @@ describe("bridge.zone_lights", function()
 			answer_get()
 			assert.equal("third", last_result().text)
 			assert.equal(2, #results)
+		end)
+
+		it("takes the grouped_light items another module fetched and skips its own GET", function()
+			add_downstairs()
+			c4.sent = {}
+			local n = #c4.transfers
+			Z:resync(done, decode_data(F.grouped_light))
+			assert.equal(n, #c4.transfers, "no GET of its own")
+			assert.same({ ok = true, text = nil, sent = 1 }, last_result())
+			assert.same({ "HUE_STATE@2001" }, commands_sent())
+			assert.equal("73.52", c4.sent[1].params.brightness)
+			assert.equal("resync", c4.sent[1].params.reason)
+			assert.is_false(Z.resyncing)
+			c4.sent = {}
+			Z:resync(done, decode_data((F.grouped_light:gsub('"brightness":73.52', '"brightness":20.5'))))
+			assert.equal("20.5", c4.sent[1].params.brightness, "the items given are the state")
+			assert.equal(20.5, Z.group_state[G_DOWNSTAIRS].brightness)
+			assert.equal(n, #c4.transfers)
+			Z:resync(done, "junk")
+			assert.equal(n + 1, #c4.transfers, "anything but a list of items: the GET as before")
+			answer_get()
+			assert.equal(73.52, Z.group_state[G_DOWNSTAIRS].brightness)
 		end)
 
 		it("refuses actions while resyncing", function()
@@ -312,10 +334,8 @@ describe("bridge.zone_lights", function()
 				end
 			end
 			assert.equal("2 zones, 2 rooms on bridge; 1 imported", Z:summary())
-			assert.equal(2001, Z:device_for(DOWNSTAIRS))
-			assert.equal(DOWNSTAIRS, Z:rid_for(2001))
+			assert.equal(DOWNSTAIRS, (Z.reg:by_device(2001)))
 			assert.same({ [2001] = true }, Z:device_ids())
-			assert.same({ min_dim = 1, mirek_min = 153, mirek_max = 500 }, Z:limits(DOWNSTAIRS))
 			assert.is_true(saw_log("zone_lights: Added Downstairs (zone) to Garage (device 2001)"))
 		end)
 
@@ -330,7 +350,6 @@ describe("bridge.zone_lights", function()
 				has_cct = "true", mirek_min = "153", mirek_max = "454", min_dim = "1" }, c4.sent[1].params)
 			assert.same({ rid = LIVING, on = "true", brightness = "56.84", mirek = "250", color_mode = "ct", online = "true",
 				reason = "resync" }, c4.sent[2].params, "the colour of the first lit member, Hallway Ambiance")
-			assert.same({ min_dim = 1, mirek_min = 153, mirek_max = 454 }, Z:limits(LIVING))
 		end)
 
 		it("takes the action's own params, a white room shows no colour, an off group no colour either", function()
@@ -391,7 +410,7 @@ describe("bridge.zone_lights", function()
 			end })
 			add_downstairs()
 			assert.equal(2001, Z:entry(DOWNSTAIRS).device_id)
-			assert.equal(3001, Z:proxy_for(DOWNSTAIRS))
+			assert.equal(3001, Z:entry(DOWNSTAIRS).proxy_id)
 			assert.is_true(saw_log("AddDevice callback for zone light Downstairs"))
 		end)
 	end)
@@ -719,6 +738,42 @@ describe("bridge.zone_lights", function()
 			assert.equal("unbound", Z:entry(DOWNSTAIRS).state)
 		end)
 
+		it("checks only the registered groups an item can change: an outsider's event costs nothing", function()
+			add_downstairs()
+			Z:add(GARAGE, nil, done)  -- Downstairs (zone: Garage White + Living Room Lamp) and Garage (room: Garage White)
+			c4.sent = {}
+			local refreshed = {}
+			local refresh_entry = Z.refresh_entry
+			Z.refresh_entry = function(self, rid)
+				refreshed[#refreshed + 1] = rid
+				return refresh_entry(self, rid)
+			end
+			local color_sent, online_sent = Z.color_sent[DOWNSTAIRS], Z.online_sent[DOWNSTAIRS]
+			assert.equal(0, feed(F.events.ct), "the Kitchen Strip is in no group")
+			assert.equal(0, feed(F.events.zone_member_ct), "Hallway Ambiance is in the Living Room, which has no device")
+			assert.equal(0, feed(F.events.room_rename), "the Living Room renamed")
+			assert.equal(0, feed('[{"creationtime":"2026-10-24T16:00:00Z","id":"9de116fc-00e1-4a2b-8c3d-0000000000e1",'
+				.. '"type":"update","data":[{"id":"' .. F.device_rids.hallway .. '","metadata":{"name":"Hall"},'
+				.. '"type":"device"}]}]'), "the Hallway's device renamed")
+			assert.same({}, refreshed, "no registered group was looked at")
+			assert.same({}, c4.sent)
+			assert.equal(color_sent, Z.color_sent[DOWNSTAIRS])
+			assert.equal(online_sent, Z.online_sent[DOWNSTAIRS])
+			assert.equal(0, feed(light_event("living", '"on":{"on":false}')), "a member of the zone alone")
+			assert.same({ DOWNSTAIRS }, refreshed)
+			refreshed = {}
+			assert.equal(1, feed(F.events.off), "Garage White is in both; the Garage's grouped_light rides along")
+			assert.same({ DOWNSTAIRS, GARAGE }, refreshed, "in name order")
+			assert.same({ rid = GARAGE, on = "false", reason = "event" }, c4.sent[1].params)
+			refreshed = {}
+			feed('[{"creationtime":"2026-10-24T16:00:00Z","id":"9de116fc-00e2-4a2b-8c3d-0000000000e2","type":"delete",'
+				.. '"data":[{"id":"unknown-device","type":"device"}]}]')
+			assert.same({ DOWNSTAIRS, GARAGE }, refreshed, "a device the cache has no record for: every entry, as before")
+			refreshed = {}
+			assert.equal(0, feed(replace(F.events.zone_renamed, DOWNSTAIRS, ATTIC)), "a zone without a device")
+			assert.same({}, refreshed)
+		end)
+
 		it("logs a new zone, and follows a Hue rename: entry, CONFIGURE, the Composer name untouched", function()
 			add_downstairs()
 			assert.equal(0, feed(F.events.zone_add))
@@ -1020,7 +1075,7 @@ describe("bridge.zone_lights", function()
 				.. "again)" }, { Z:relink(2001, "nope") })
 			assert.same({ false, "Not re-linked: zone or room " .. F.group_rids.home .. " is not on the bridge (connect the "
 				.. "event stream and try again)" }, { Z:relink(2001, F.group_rids.home) })
-			assert.equal(2001, Z:device_for(DOWNSTAIRS))
+			assert.equal(2001, Z:entry(DOWNSTAIRS).device_id)
 		end)
 	end)
 
@@ -1094,9 +1149,9 @@ describe("bridge.zone_lights", function()
 				.. "Attic (device 2096): 2 bound devices share that name; rename one in Composer and run Link Devices again; "
 				.. "Attic (device 2097): 2 bound devices share that name; rename one in Composer and run Link Devices again",
 				text)
-			assert.equal(2091, Z:device_for(GARAGE))
-			assert.equal(2092, Z:device_for(DOWNSTAIRS))
-			assert.equal(2093, Z:device_for(LIVING))
+			assert.equal(2091, Z:entry(GARAGE).device_id)
+			assert.equal(2092, Z:entry(DOWNSTAIRS).device_id)
+			assert.equal(2093, Z:entry(LIVING).device_id)
 			assert.same({ "HUE_CONFIGURE@2091", "HUE_STATE@2091", "HUE_CONFIGURE@2092", "HUE_STATE@2092", "HUE_CONFIGURE@2093",
 				"HUE_STATE@2093" }, commands_sent())
 			assert.equal("Living Room Lights", c4.added[1] and c4.added[1].name or "Living Room Lights", "nothing was created")
@@ -1128,7 +1183,7 @@ describe("bridge.zone_lights", function()
 			Z.announced[4242] = { rid = F.rids.living, model = "Hue color lamp" }
 			assert.equal("Linked 1 zone light device: device 2091 (device 2091) to Downstairs (zone) by its rid",
 				Z:link_devices())
-			assert.equal(2091, Z:device_for(DOWNSTAIRS))
+			assert.equal(2091, Z:entry(DOWNSTAIRS).device_id)
 		end)
 	end)
 
@@ -1214,18 +1269,6 @@ describe("bridge.zone_lights", function()
 			assert.same({ "2001", "2003" }, values(Z:picker_relink_devices()))
 			assert.same({ "Downstairs (zone light, device 2001) gone", "Garage (room light, device 2003) unbound",
 				"Living Room (room light, device 2002)" }, texts(Z:picker_forget_devices()))
-		end)
-
-		it("join appends the group entries to the lights' list and drops a placeholder when the other has entries", function()
-			local placeholder = { { text = "(no gone or unbound devices)", value = "" } }
-			local mine = { { text = "Downstairs (zone light, device 2001, gone since 10-24)", value = "2001" } }
-			local theirs = { { text = "Desk Lamp (device 2043, gone since 10-22)", value = "2043" } }
-			assert.same(placeholder, zone_lights.join(placeholder, {}))
-			assert.same(mine, zone_lights.join(placeholder, mine))
-			assert.same({ theirs[1], mine[1] }, zone_lights.join(theirs, mine))
-			assert.same(theirs, zone_lights.join(theirs, {}))
-			assert.same(theirs, zone_lights.join(theirs, nil))
-			assert.same({}, zone_lights.join(nil, nil))
 		end)
 	end)
 
@@ -1327,6 +1370,66 @@ describe("bridge.zone_lights", function()
 			assert.equal("linked", Z:entry(DOWNSTAIRS).state)
 			assert.same({}, c4.sent, "no state is known yet, nothing is told")
 			assert.equal("1 imported", Z:summary())
+		end)
+	end)
+
+	describe("list_items", function()
+		local function deleted(ts)
+			return " (deleted from Composer " .. os.date("%Y-%m-%d", ts) .. ")"
+		end
+
+		local function no_commas(items)
+			for _, item in ipairs(items) do
+				assert.is_nil(item:find(",", 1, true), "comma in " .. item)
+			end
+		end
+
+		it("is empty without groups or a registry", function()
+			Z = zone_lights.new({ http = http_ctx })
+			assert.same({}, Z:list_items())
+		end)
+
+		it("lists zones then rooms with the picker's labels, ';' inside the parentheses, and the device", function()
+			assert.same({ "Attic (zone; no lights)", "Downstairs (zone; 2 lights)", "Garage (room; 1 light)",
+				"Living Room (room; 2 lights)" }, Z:list_items())
+			add_downstairs()
+			Z:add(LIVING, nil, done)
+			assert.same({ "Attic (zone; no lights)", "Downstairs (zone; 2 lights) → device 2001", "Garage (room; 1 light)",
+				"Living Room (room; 2 lights) → device 2002" }, Z:list_items())
+		end)
+
+		it("marks tombstones, groups deleted in Hue (after the rooms) and unbound devices", function()
+			add_downstairs()          -- device 2001
+			Z:add(LIVING, nil, done)  -- device 2002
+			Z:add(GARAGE, nil, done)  -- device 2003
+			now = T0 + 100
+			Z:goodbye({ device_id = "2002" })
+			feed(F.events.zone_deleted)
+			Z:on_binding_changed(1, "HUE_BRIDGE", false, 2003)
+			assert.same({
+				"Attic (zone; no lights)",
+				"Garage (room; 1 light) (unbound; device 2003)",
+				"Living Room (room; 2 lights)" .. deleted(T0 + 100),
+				"Downstairs (zone; 2 lights) (deleted in Hue; device 2001)",
+			}, Z:list_items())
+			assert.equal("1 zone, 2 rooms on bridge; 2 imported, 1 missing, 1 unbound, 1 deleted", Z:summary())
+		end)
+
+		it("reads the registry alone before the groups are fetched", function()
+			add_downstairs()
+			Z = new_zone_lights({ lights = lights.new({ http = http_ctx }) })
+			Z:load()
+			assert.is_false(Z:groups_loaded())
+			assert.same({ "Downstairs (zone; 2 lights) → device 2001" }, Z:list_items())
+		end)
+
+		it("turns commas in names into U+201A so Composer keeps one line per group", function()
+			L:absorb({ room = decode_data(F.room), bridge_home = decode_data(F.bridge_home),
+				zone = decode_data(F.zone:gsub('"name":"Downstairs"', '"name":"Down, stairs"')) })
+			local items = Z:list_items()
+			assert.equal("Down‚ stairs (zone; 2 lights)", items[2])
+			assert.equal(4, #items)
+			no_commas(items)
 		end)
 	end)
 end)
