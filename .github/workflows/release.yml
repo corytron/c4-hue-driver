@@ -20,7 +20,7 @@ jobs:
     name: Build and attach the packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The build number is the commit count; a shallow checkout would stamp 1.
           fetch-depth: 0
@@ -58,7 +58,7 @@ jobs:
           sha256sum hue_bridge.c4z hue_light.c4z hue_scene.c4z | tee SHA256SUMS.txt
 
       - name: Keep the packages as a workflow artifact too
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hue-drivers-${{ github.ref_name }}
           path: |
