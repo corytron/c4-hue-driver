@@ -1,5 +1,7 @@
 # Hue edge cases: lights, rooms, zones, scenes and the bridge
 
+> **Historical research (2026-10-21)**, written before the import-ui and scenes features; "today" means that day's code. The decisions are `docs/import-design.md` and `docs/scenes-design.md` (smart scenes: the draft `docs/smart-scenes-research.md`); the present is in `docs/status.md`.
+
 What the Hue bridge does when the house changes (a bulb added, moved,
 replaced, renamed; a room or scene edited; the bridge itself replaced), how
 the driver can tell, and what it should do about it. Written before the

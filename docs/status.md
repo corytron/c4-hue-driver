@@ -41,20 +41,26 @@ this page disagree about the present, this page and the code win.
   when on, bottom lit when off).
 - **Hue Scene** (light_v2 proxy, **dimmer** since build 160): ON plays the
   scene (Recall As: As set in Hue / Static / Dynamic), OFF turns its room or
-  zone off. The level is the room/zone brightness Hue reports; the slider
-  moves the room relative to it (keeping the scene's colours and per-light
-  differences), 0 % = off, a level from off plays the scene at that level,
-  100 % from off plays it as designed. **On rule**: on from any activation
+  zone off (a zone with no lights, which has no group light, only reports
+  off). The level is the room/zone brightness Hue reports; the slider moves
+  the room relative to it (keeping the scene's colours and per-light
+  differences; while the room's level is not yet known it sets one absolute
+  level for all its lights instead), 0 % = off, a level from off plays the
+  scene at that level, 100 % from off plays it as designed. **On rule**: on from any activation
   (Control4, keypad, Hue app) until the room/zone turns off, another scene
   of it is played, or the device itself is turned off; persisted across
   restarts. ON is one request (dropped back if it fails); OFF and slider
-  moves go through the group queue and are retried like light commands. Keypad: tap top plays, tap
-  bottom turns off, hold dims the room (relative), hold top while off plays
-  at 1 % and brightens; LEDs follow the on state.
+  moves go through the group queue and are retried like light commands.
+  Keypad: tap top plays, tap bottom turns off (taps are immediate: the scene
+  declares no click rates), hold dims the room (relative), hold top while off
+  plays at 1 % and brightens; LEDs follow the on state.
 - **Both device drivers** declare `hide_proxy_properties`, so the proxy's
   own settings (click and hold rates, button LED colours) are not shown in
-  Composer: the defaults apply (click 250 ms, hold 5 s for the full range,
-  blue LEDs). Exposing them is a small open change (needs a reboot).
+  Composer: the defaults apply (lights: On preset 100 %, click 250 ms; both:
+  hold 5 s for the full range, blue LEDs). Exposing them is a small open
+  change: either a `driver.xml` capability change (needs the reboot) or,
+  per the light_v2 reference, switching `hide_proxy_properties` at run time
+  with `DYNAMIC_CAPABILITIES_CHANGED` (documented, not tried on the house).
 - **Binding re-check**: a light or scene that is unbound at start looks again
   at 5, 15, 30 and 60 s (after a Director restart the binding can be late).
 - **Documentation tab** in every driver (the owner's manual on the bridge),

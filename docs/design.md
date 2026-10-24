@@ -1,5 +1,7 @@
 # Design notes
 
+> Addresses: the house's own LAN addresses were replaced on 2026-10-24 by placeholders of the same shape (`10.0.2.143` for the bridge, `192.0.2.7` for this VM), per CLAUDE.md; the behaviour described is unchanged.
+
 **Current state:** `docs/status.md` (2026-10-24) is the one page that says
 what runs on the house (build 160, release builds of all three drivers),
 what the drivers do now and what is open; where this notebook and
@@ -187,13 +189,13 @@ the dev loop (`build/dev/driver.log` of 2026-10-20, 20:08–20:26):
 - **The queue key is the host text as parsed from the URL.** Sharing a queue
   with `10.0.2.143`: `10.0.2.143:443`, `hue@10.0.2.143`, `@10.0.2.143`
   (all timed out behind the stream). Rejected by curl with error 6
-  "Couldn't resolve host name": decimal (`167772559`), hex octets
-  (`10.0.1.0x8f`, `0x0a.0x00.0x01.0x8f`), the short form `10.0.399`, and the
+  "Couldn't resolve host name": decimal (`167772815`), hex octets
+  (`10.0.2.0x8f`, `0x0a.0x00.0x02.0x8f`), the short form `10.0.655`, and the
   IPv6-mapped `[::ffff:10.0.2.143]`. **Getting their own queue and still
-  reaching the bridge: zero-padded octets, `10.0.2.143` and
-  `10.0.2.143`** (GET OK in under a second with the stream connected).
+  reaching the bridge: zero-padded octets, `10.000.002.143` and
+  `10.00.2.143`** (GET OK in under a second with the stream connected).
   Leading zeros are octal to curl's resolver, so only octets with a value
-  below 8 can be padded (`010` means 8: `010.0.2.143` connected to the
+  below 8 can be padded (`010` means 8: `010.000.002.143` connected to the
   wrong address and hit the 5 s connect timeout). Most home subnets have such
   an octet (`192.168.1.x`, `10.0.x.x`); not all do.
 - **`Cancel()` does not end an active transfer.** An abandoned stream only
@@ -233,8 +235,8 @@ certificate's CN being the bridge id.
 
 **Decision (2026-10-21): A**, built and verified through the dev loop.
 `bridge/altaddr.lua` derives the spellings; the driver self-checks via the
-2-digit padding (`10.0.2.143`), streams on the 3-digit one
-(`10.0.2.143`) and keeps commands on the dotted address. Result on the
+2-digit padding (`10.00.02.143`), streams on the 3-digit one
+(`10.000.002.143`) and keeps commands on the dotted address. Result on the
 controller: with the stream connected, `GET /clip/v2/resource/bridge` on the
 dotted address returned in 0 s where it had timed out at 15 s before, and
 a 47-light listing came back in under a second **[verified]**. Fallback
@@ -264,8 +266,8 @@ replaces, so the two are on different Director queues.
   below 8, minus the dotted spelling (commands) and the all-2-digit one
   (`for_check`), capped at `altaddr.FAMILY_MAX` (8). The first entry is
   `for_stream(ip)` (all 3-digit), then the widths count down octet by octet:
-  for `10.0.2.143` that is `10.0.2.143`, `10.0.2.143`, `10.0.2.143`,
-  `10.0.2.143`, `10.0.2.143`, `10.0.2.143`, `10.0.2.143` (7). An
+  for `10.0.2.143` that is `10.000.002.143`, `10.000.02.143`, `10.000.2.143`,
+  `10.00.002.143`, `10.00.2.143`, `10.0.002.143`, `10.0.02.143` (7). An
   address with one paddable octet (`192.168.1.50`) has a one-entry family,
   `192.168.001.50`: no rotation, today's behaviour, and the property says so.
   No paddable octet: nil, single-queue fallback as before. Only forms
@@ -285,7 +287,7 @@ replaces, so the two are on different Director queues.
   zombie, and moving on anyway keeps the rule simple and the zombie-free
   spelling the least recently used one.
 - **Property.** `Stream Address` shows the spelling in use and the mode:
-  `10.0.2.143 (own queue, rotating over 7 spellings; commands use
+  `10.000.02.143 (own queue, rotating over 7 spellings; commands use
   10.0.2.143)`, or `… (own queue, no second spelling to rotate; …)` for a
   one-entry family. The single-queue text is unchanged.
 - **Stream module.** `bridge/stream.lua` already asks `opts.connection()`
@@ -297,7 +299,7 @@ Verified vs assumed: that distinct host texts get distinct queues is
 on the 2-digit spelling goes through while a zombie sits on the 3-digit
 one); that every pair of family members is likewise separate is
 **[assumed]** from the host-text key; mixed widths per octet resolving is
-**[verified]** (`10.0.2.143`). That the persisted pick is readable by the
+**[verified]** (`10.00.2.143`). That the persisted pick is readable by the
 next reload is **[assumed]**: the store can lag by moments
 (`bridge/credentials.lua`), a reload is seconds or more later. Hardware
 check (`docs/composer-checklist.md` E): two reloads a minute apart must each
