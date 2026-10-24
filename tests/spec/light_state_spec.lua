@@ -76,6 +76,98 @@ describe("light.state", function()
 		end)
 	end)
 
+	-- A Hue zone or room as a Hue Light device (docs/zone-light-design.md §5
+	-- Messages): the configure names kind "group" and the group's fields.
+	describe("configure for a zone or room device", function()
+		local function zone(extra)
+			local params = { rid = "z1", kind = "group", group_type = "zone", name = "Bedside Lights", light_count = "2",
+				model = "Hue zone", hue_room = "Bedside Lights (zone)", id_v1 = "/groups/2", min_dim = "1" }
+			for k, v in pairs(extra or {}) do params[k] = v end
+			return params
+		end
+
+		it("takes the kind as sent, keeps it when a configure names none, and ignores one it does not know", function()
+			local st = state.new()
+			assert.is_false(state.is_group(st), "never told its kind: a light")
+			assert.is_nil(st.kind)
+
+			state.configure(st, zone())
+			assert.is_true(state.is_group(st))
+			assert.equal(state.KIND_GROUP, st.kind)
+
+			state.configure(st, { rid = "z1", name = "Bedside Lights", state = "gone" })
+			assert.is_true(state.is_group(st), "an older bridge answering a zone light as a light names no kind")
+
+			state.configure(st, zone({ kind = "entertainment" }))
+			assert.is_true(state.is_group(st))
+
+			state.configure(st, zone({ kind = "light" }))
+			assert.is_false(state.is_group(st), "an explicit kind is taken as sent")
+			assert.equal(state.KIND_LIGHT, st.kind)
+		end)
+
+		it("parses the group fields and resets them when a configure leaves them out", function()
+			local st = state.new()
+			state.configure(st, zone())
+			assert.equal("zone", st.group_type)
+			assert.equal(2, st.light_count)
+			assert.is_false(st.no_lights)
+			assert.equal("Bedside Lights", st.name)
+			assert.equal("Hue zone", st.model)
+			assert.equal("Bedside Lights (zone)", st.hue_room)
+			assert.equal("/groups/2", st.id_v1)
+			assert.equal(1, st.min_dim)
+
+			state.configure(st, { rid = "z1", kind = "group", group_type = "room", light_count = "9" })
+			assert.equal("room", st.group_type)
+			assert.equal(9, st.light_count)
+
+			state.configure(st, { rid = "z1", kind = "group" })
+			assert.is_nil(st.group_type)
+			assert.is_nil(st.light_count)
+			assert.is_false(st.no_lights)
+		end)
+
+		it("reads no_lights as off for the proxy until the bridge reports the refilled group", function()
+			local st = state.new()
+			state.configure(st, zone())
+			state.apply_hue(st, { on = "true", brightness = "40", online = "true" })
+			assert.equal(40, state.to_proxy_brightness(st))
+
+			state.configure(st, zone({ light_count = "0", no_lights = "true" }))
+			assert.is_true(st.no_lights)
+			assert.is_false(st.on, "nothing in the group can be lit")
+			assert.equal(0, state.to_proxy_brightness(st))
+			assert.equal(40, st.brightness, "Hue's last level is kept, as while off")
+
+			state.configure(st, zone({ light_count = "1", no_lights = "false" }))
+			assert.is_false(st.no_lights)
+			assert.equal(0, state.to_proxy_brightness(st), "still off until a report says otherwise")
+			local changed = state.apply_hue(st, { on = "true", brightness = "60" })
+			assert.is_true(changed.brightness)
+			assert.equal(60, state.to_proxy_brightness(st))
+
+			state.configure(st, zone())
+			assert.is_false(st.no_lights, "absent reads as false, as every lifecycle field")
+		end)
+
+		it("reads no_lights as off even before any report, so the tile never shows unknown", function()
+			local st = state.new()
+			state.configure(st, zone({ light_count = "0", no_lights = "true" }))
+			assert.is_false(st.on)
+			assert.equal(0, state.to_proxy_brightness(st))
+		end)
+
+		it("leaves a light's configure alone: no kind, type, count or no_lights", function()
+			local st = color_bulb()
+			assert.is_nil(st.kind)
+			assert.is_nil(st.group_type)
+			assert.is_nil(st.light_count)
+			assert.is_false(st.no_lights)
+			assert.is_nil(st.on, "a light's on state waits for the bridge")
+		end)
+	end)
+
 	describe("apply_hue and the proxy view", function()
 		it("knows nothing until the bridge reports", function()
 			local st = color_bulb()
