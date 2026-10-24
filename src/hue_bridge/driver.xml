@@ -1,5 +1,5 @@
 <devicedata>
-	<copyright>Copyright 2026 Cory Fair. Private, not for distribution.</copyright>
+	<copyright>Copyright 2026 Cory Fair. Licensed under the Apache License, Version 2.0 (see LICENSE). Not affiliated with Signify or Snap One.</copyright>
 	<creator>Cory Fair</creator>
 	<manufacturer>Philips Hue</manufacturer>
 	<name>Hue Bridge</name>
@@ -158,7 +158,7 @@
 				<type>RANGED_INTEGER</type>
 				<minimum>0</minimum>
 				<maximum>3600</maximum>
-				<default>300</default>
+				<default>600</default>
 				<readonly>false</readonly>
 			</property>
 		</properties>

@@ -203,6 +203,58 @@ describe("Hue Bridge driver", function()
 		assert.truthy(env.Properties["Last Event"]:match("^%d%d:%d%d:%d%d$"))
 	end)
 
+	it("writes the per-event rows at most once a second, the latest value last", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_check(c4)
+		local s = c4.last_transfer()
+		s:respond_headers(200, {})
+		local function event(n)
+			s:chunk("id: " .. n .. ':0\ndata: [{"type":"update","id":"x","creationtime":"t",'
+				.. '"data":[{"type":"light","id":"l"}]}]\n\n')
+		end
+		local function writes(name)
+			local n = 0
+			for _, args in ipairs(c4.calls_to("UpdateProperty")) do
+				if args[1] == name then n = n + 1 end
+			end
+			return n
+		end
+
+		-- The first event of a burst lands at once, the rest wait for the timer.
+		event(1)
+		local first = writes("Events Received")
+		assert.equal("1", env.Properties["Events Received"])
+		assert.truthy(env.Properties["Last Event"]:match("^%d%d:%d%d:%d%d$"))
+		event(2)
+		event(3)
+		assert.equal("1", env.Properties["Events Received"])
+		assert.equal(first, writes("Events Received"), "no write per event inside the second")
+		assert.truthy(env.Properties["Event Stream"]:find("1 containers", 1, true))
+
+		local fired = 0
+		for _, t in ipairs(c4.active_timers()) do
+			if t.delay == 1000 then
+				t.active = false
+				t.callback(t, 0)
+				fired = fired + 1
+			end
+		end
+		assert.equal(1, fired, "one coalescing timer for the three rows")
+		assert.equal("3", env.Properties["Events Received"])
+		assert.equal(first + 1, writes("Events Received"), "one write for the whole burst")
+		assert.truthy(env.Properties["Event Stream"]:find("3 containers", 1, true))
+
+		-- A state change is never held back, and a value still waiting never
+		-- overwrites it; the count still lands.
+		event(4)
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
+		assert.equal("Stopped", env.Properties["Event Stream"])
+		c4.fire_timers()
+		assert.equal("Stopped", env.Properties["Event Stream"])
+		assert.equal("4", env.Properties["Events Received"])
+	end)
+
 	it("falls back to a shared queue with a short stream timeout when the self-check fails", function()
 		local env, c4 = paired_driver({ ["Stream Timeout (s)"] = "900" })
 		env.OnDriverLateInit("DIT_STARTUP")
@@ -256,6 +308,37 @@ describe("Hue Bridge driver", function()
 		end)
 		devloop.stop()
 		_G.print = real_print
+		assert(ok, err)
+	end)
+
+	it("a release build (no common.devloop) carries none of the development handlers", function()
+		-- Under busted the dev loop module is always on the path; a release
+		-- .c4z has neither it nor bridge/devtools.lua (tools/build.sh), and
+		-- then driver.lua must register no dev handler and no Host override.
+		package.loaded["common.devloop"] = nil
+		package.preload["common.devloop"] = function() error("module 'common.devloop' not found") end
+		local ok, err = pcall(function()
+			local env, c4 = paired_driver({ ["Dev Server"] = "192.0.2.7:8080" })
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.is_nil(package.loaded["bridge.devtools"], "devtools not loaded without the dev loop")
+			answer_check(c4)
+			local transfers = #c4.transfers
+			for _, action in ipairs({ "Hue Request", "Connection Test", "Check CA Pinning", "Reload Credentials",
+				"Proxy Command", "Lights Report", "Probe Project" }) do
+				env.ExecuteCommand("LUA_ACTION", { ACTION = action, Path = "/clip/v2/resource/light", Target = "Bridge" })
+			end
+			env.ExecuteCommand("HUE_LOG", { rid = "x", line = "hello" })
+			env.Properties["Dev Server"] = ""
+			env.OnPropertyChanged("Dev Server")
+			assert.equal(transfers, #c4.transfers, "no dev action started a transfer")
+			assert.equal("Paired", env.Properties["Status"])
+
+			-- Test Connection stays, on the dotted address whatever Host says.
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection", Host = "192.00.2.10" })
+			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", c4.last_transfer().url)
+		end)
+		package.preload["common.devloop"] = nil
+		package.loaded["common.devloop"] = nil
 		assert(ok, err)
 	end)
 

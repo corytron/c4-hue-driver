@@ -43,11 +43,8 @@ function altaddr.padded(ip, width)
 	return table.concat(octets, ".")
 end
 
--- The spelling the stream uses, and the one the startup self-check uses.
-function altaddr.for_stream(ip)
-	return altaddr.padded(ip, 3)
-end
-
+-- The spelling the startup self-check uses; the stream's come from
+-- stream_family below.
 function altaddr.for_check(ip)
 	return altaddr.padded(ip, 2)
 end
@@ -61,7 +58,7 @@ altaddr.FAMILY_MAX = 8
 -- family is every combination of those widths over the paddable octets
 -- except two reserved ones: all-1-digit is the dotted spelling commands use,
 -- and all-2-digit is the self-check's (`for_check`). The first entry is the
--- all-3-digit spelling (`for_stream`); after that the widths count down
+-- all-3-digit spelling (`padded(ip, 3)`); after that the widths count down
 -- like an odometer, the last paddable octet turning fastest.
 --
 -- With four paddable octets there would be 79 spellings; the list is cut at

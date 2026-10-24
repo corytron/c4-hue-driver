@@ -8,8 +8,13 @@
 --
 -- The POST goes to the v1-era /api endpoint because key creation is the one
 -- operation CLIP v2 does not offer. Verified against a Bridge Pro (BSB003)
--- on OS 3.4.2: the devicetype body below yields a key. [assumed: error type
--- 101 for "link button not pressed" is from memory of the Hue docs]
+-- on OS 3.4.2: a devicetype body of this shape yields a key (it was
+-- "control4#hue_bridge" then; the Hue format is "application#device", both
+-- parts short, no spaces, and the name below says whose driver this is
+-- rather than reading as Control4's own app, docs/licensing-research.md §2;
+-- a key already issued keeps the name it was created with [assumed]).
+-- [assumed: error type 101 for "link button not pressed" is from memory of
+-- the Hue docs]
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -18,7 +23,7 @@ local credentials = require("bridge.credentials")
 
 local pairing = {}
 
-pairing.DEVICE_TYPE = "control4#hue_bridge"
+pairing.DEVICE_TYPE = "c4-hue-driver#bridge"
 pairing.LINK_BUTTON_ERROR = 101
 
 -- Read the bridge's public config. callback(info|nil, err).
