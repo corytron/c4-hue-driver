@@ -48,12 +48,52 @@ local function lit_light()
 	return env, c4
 end
 
--- Params of every SendToProxy with that command, in order.
+-- Params of every SendToProxy to the proxy binding (5001) with that
+-- command, in order; the keypad LED messages on the Button Links (200-202)
+-- are left out.
 local function notifies(c4, command)
 	local out = {}
 	for _, args in ipairs(c4.calls_to("SendToProxy")) do
-		assert.equal(5001, args[1])
-		if args[2] == command then out[#out + 1] = args[3] end
+		if args[1] == 5001 and args[2] == command then out[#out + 1] = args[3] end
+	end
+	return out
+end
+
+-- The fake records three SendToProxy arguments; this keeps the message type
+-- too, as { binding, command, params, type }, from now on.
+local function capture_proxy(c4)
+	local out = {}
+	local original = c4.SendToProxy
+	c4.SendToProxy = function(self, binding, command, params, message_type)
+		out[#out + 1] = { binding, command, params, message_type }
+		return original(self, binding, command, params, message_type)
+	end
+	return out
+end
+
+-- The captured calls with that command, in order.
+local function with_command(captured, command)
+	local out = {}
+	for _, call in ipairs(captured) do
+		if call[2] == command then out[#out + 1] = call end
+	end
+	return out
+end
+
+-- The three MATCH_LED_STATE commands, one per Button Link, for `on`.
+local function leds(on)
+	return {
+		{ 200, "MATCH_LED_STATE", { STATE = on }, "COMMAND" },
+		{ 201, "MATCH_LED_STATE", { STATE = on }, "COMMAND" },
+		{ 202, "MATCH_LED_STATE", { STATE = on }, "COMMAND" },
+	}
+end
+
+-- Params of every HUE_DIM sent, in order.
+local function dims(c4)
+	local out = {}
+	for _, m in ipairs(c4.sent) do
+		if m.command == "HUE_DIM" then out[#out + 1] = m.params end
 	end
 	return out
 end
@@ -1005,32 +1045,215 @@ describe("Hue Light driver", function()
 			assert.equal("1500", tostring(messages(c4, "HUE_SET")[1].params.rate))
 		end)
 
-		it("a held top button ramps toward 100 over the hold rate and the release writes the reached level", function()
+		it("a held top button dims up with HUE_DIM over the scaled hold rate; the release stops at the estimate", function()
 			local env, c4 = lit_light() -- on at 40 %
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
 			assert.equal(0, #c4.sent, "nothing until the hold timer")
 			c4.fire_timers() -- the 400 ms hold timer: the ramp starts
-			local ramp = messages(c4, "HUE_SET")[1]
-			assert.equal("100", tostring(ramp.params.brightness))
-			assert.equal("3000", tostring(ramp.params.rate), "60 % of the 5000 ms hold rate")
+			assert.same({ { rid = "l1", direction = "up", duration = "3000" } }, dims(c4), "60 % of 5000 ms")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 3000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
 			for _ = 1, 10 do c4.fire_timers() end -- ten 100 ms ticks: about a third of the way
 			c4.sent = {}
+			c4.calls = {}
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "0" })
-			local stop = messages(c4, "HUE_SET")[1]
-			assert.equal("60", tostring(stop.params.brightness))
-			assert.equal("0", tostring(stop.params.rate))
-			assert.equal(0, #c4.active_timers() - 1, "only the brightness fallback remains")
+			assert.same({ { rid = "l1", direction = "stop", level = "60" } }, dims(c4))
+			assert.equal(0, #messages(c4, "HUE_SET"), "no absolute target for a hold any more")
+			assert.equal(2, #c4.active_timers(), "the brightness fallback and the click guard")
+			c4.fire_timers() -- no report from the bridge: the estimate is assumed
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
 
-		it("a held bottom button dims toward 1, never off", function()
+		it("a HUE_STATE after the stop settles it, and the estimate is never assumed", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
+			c4.fire_timers()
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "0" })
+			c4.calls = {}
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "47" })
+			c4.fire_timers()
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 47 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("a held bottom button dims down toward 1, never off", function()
 			local env, c4 = lit_light()
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "1" })
 			c4.fire_timers()
-			local ramp = messages(c4, "HUE_SET")[1]
-			assert.equal("1", tostring(ramp.params.brightness))
-			assert.is_nil(ramp.params.on == "false" or nil)
+			assert.same({ { rid = "l1", direction = "down", duration = "1950" } }, dims(c4), "39 % of 5000 ms")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 1, RATE = 1950 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.equal(0, #messages(c4, "HUE_SET"))
+		end)
+
+		it("a release-as-click after a hold stops the dim instead of tapping", function()
+			local env, c4 = lit_light()
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
+			c4.fire_timers()
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "2" })
+			assert.same({ "up", "stop" }, { dims(c4)[1].direction, dims(c4)[2].direction })
+			assert.equal(0, #messages(c4, "HUE_SET"))
+		end)
+	end)
+
+	describe("keypad holds from off and the click guard", function()
+		-- A configured light, reported off.
+		local function dark_light()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "40", online = "true" })
+			c4.calls = {}
+			c4.sent = {}
+			return env, c4
+		end
+
+		it("holding top while off turns on at 1 % at once, then dims up 600 ms later", function()
+			local env, c4 = dark_light()
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			assert.same({ { id = BRIDGE_ID, command = "HUE_SET",
+				params = { rid = "l1", on = "true", brightness = "1", rate = "0" } } }, c4.sent)
+			local timers = c4.calls_to("SetTimer")
+			assert.same({ 600, false }, timers[#timers])
+			assert.equal(0, #dims(c4))
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "1" })
+			c4.fire_timers() -- 600 ms later
+			assert.same({ { rid = "l1", direction = "up", duration = "4950" } }, dims(c4))
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.equal("stop", dims(c4)[2].direction)
+		end)
+
+		it("a release before the delayed dim cancels it and sends no stop", function()
+			local env, c4 = dark_light()
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			c4.fire_timers()
+			assert.equal(1, #messages(c4, "HUE_SET"))
+			assert.equal(0, #dims(c4))
+		end)
+
+		it("holding bottom while off sends nothing, nor does the click after it", function()
+			local env, c4 = dark_light()
+			env.ReceivedFromProxy(201, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(201, "DO_RELEASE", {})
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.same({}, c4.sent)
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+		end)
+
+		it("holding toggle dims down while on and up while off", function()
+			local env, c4 = lit_light()
+			c4.sent = {}
+			env.ReceivedFromProxy(202, "DO_PUSH", {})
+			c4.fire_timers()
+			assert.equal("down", dims(c4)[1].direction)
+			env.ReceivedFromProxy(202, "DO_RELEASE", {})
+			env, c4 = dark_light()
+			env.ReceivedFromProxy(202, "DO_PUSH", {})
+			c4.fire_timers()
+			assert.equal("1", messages(c4, "HUE_SET")[1].params.brightness)
+		end)
+
+		it("ignores a click on the same button within 1 s after a hold's release, not on another", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			local timers = c4.calls_to("SetTimer")
+			assert.same({ 1000, false }, timers[#timers])
+			c4.sent = {}
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.same({}, c4.sent, "the keypad's click after the hold")
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+			assert.equal("false", messages(c4, "HUE_SET")[1].params.on, "another button is not guarded")
+			c4.fire_timers() -- 1 s later
+			c4.sent = {}
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.equal("100", messages(c4, "HUE_SET")[1].params.brightness)
+		end)
+
+		it("cancels the hold, the guard and the fallback on destroy", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.OnDriverDestroyed()
+			assert.equal(0, #c4.active_timers())
+		end)
+	end)
+
+	describe("keypad LEDs", function()
+		it("MATCH_LED_STATE follows on/off on 200, 201 and 202, with BUTTON_INFO to the proxy", function()
+			local env, c4 = lit_light()
+			local proxy = capture_proxy(c4)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "70" })
+			assert.equal(0, #with_command(proxy, "MATCH_LED_STATE"), "a level change is not a flip")
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+			assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
+			assert.same({
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 0, ON_COLOR = "0000ff", OFF_COLOR = "000000",
+					CURRENT_COLOR = "000000" }, "NOTIFY" },
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 1, ON_COLOR = "000000", OFF_COLOR = "0000ff",
+					CURRENT_COLOR = "0000ff" }, "NOTIFY" },
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 2, ON_COLOR = "0000ff", OFF_COLOR = "000000",
+					CURRENT_COLOR = "000000" }, "NOTIFY" },
+			}, with_command(proxy, "BUTTON_INFO"))
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true" })
+			local all = with_command(proxy, "MATCH_LED_STATE")
+			assert.same(leds(true), { all[4], all[5], all[6] })
+		end)
+
+		it("sends them with the first known state, not before", function()
+			local env, c4 = load_light({ rid = "l1" })
+			local proxy = capture_proxy(c4)
+			configure(env)
+			assert.equal(0, #with_command(proxy, "MATCH_LED_STATE"))
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40" })
+			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+		end)
+
+		it("resends the state when a keypad is bound to a Button Link", function()
+			local env, c4 = lit_light()
+			local proxy = capture_proxy(c4)
+			env.OnBindingChanged(200, "BUTTON_LINK", true, 77, 1)
+			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+			assert.equal(0, #c4.sent, "a link binding is not the bridge's")
+		end)
+
+		it("REQUEST_BUTTON_COLORS on 201 answers the default bottom colours there, then the LED state", function()
+			local env, c4 = lit_light()
+			local proxy = capture_proxy(c4)
+			env.ReceivedFromProxy(201, "REQUEST_BUTTON_COLORS", {})
+			assert.same({
+				{ 201, "BUTTON_COLORS", { BUTTON_ID = 1, ON_COLOR = "000000", OFF_COLOR = "0000ff",
+					CURRENT_COLOR = "000000" }, "NOTIFY" },
+				{ 201, "MATCH_LED_STATE", { STATE = true }, "COMMAND" },
+			}, proxy)
+		end)
+
+		it("SET_BUTTON_COLOR persists the colour, echoes it, and uses it after a restart", function()
+			local env, c4 = lit_light()
+			local proxy = capture_proxy(c4)
+			env.ReceivedFromProxy(5001, "SET_BUTTON_COLOR", { BUTTON_ID = "0", OFF_COLOR = "00FF00" })
+			assert.equal("00ff00", c4.persist.button_0_off_color)
+			assert.same({
+				{ 200, "BUTTON_COLORS", { BUTTON_ID = 0, ON_COLOR = "0000ff", OFF_COLOR = "00ff00",
+					CURRENT_COLOR = "0000ff" }, "NOTIFY" },
+				{ 5001, "BUTTON_INFO", { BUTTON_ID = 0, ON_COLOR = "0000ff", OFF_COLOR = "00ff00",
+					CURRENT_COLOR = "0000ff" }, "NOTIFY" },
+			}, proxy)
+			local env2, c42 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c42.persist.button_0_off_color = "00ff00"
+			env2.OnDriverLateInit("DIT_STARTUP")
+			local proxy2 = capture_proxy(c42)
+			env2.ReceivedFromProxy(200, "REQUEST_BUTTON_COLORS", {})
+			assert.same({ BUTTON_ID = 0, ON_COLOR = "0000ff", OFF_COLOR = "00ff00", CURRENT_COLOR = "00ff00" },
+				proxy2[1][3])
+			assert.same({ STATE = false }, proxy2[2][3], "nothing known yet reads as off")
 		end)
 	end)
 
@@ -1057,18 +1280,19 @@ describe("Hue Light driver", function()
 			assert.equal("false", tostring(messages(c4, "HUE_SET")[1].params.on))
 		end)
 
-		it("a push held on binding 201 dims toward 1 and the release stops at the reached level", function()
+		it("a push held on binding 201 dims down and the release stops at the reached level", function()
 			local env, c4 = lit_light() -- on at 40 %
 			c4.sent = {}
 			env.ReceivedFromProxy(201, "DO_PUSH", {})
 			c4.fire_timers()
-			assert.equal("1", tostring(messages(c4, "HUE_SET")[1].params.brightness))
+			assert.equal("down", dims(c4)[1].direction)
 			for _ = 1, 5 do c4.fire_timers() end
 			c4.sent = {}
 			env.ReceivedFromProxy(201, "DO_RELEASE", {})
-			local stop = messages(c4, "HUE_SET")[1]
-			assert.equal("0", tostring(stop.params.rate))
-			assert.is_true(tonumber(stop.params.brightness) < 40 and tonumber(stop.params.brightness) > 1)
+			local stop = dims(c4)[1]
+			assert.equal("stop", stop.direction)
+			assert.is_true(tonumber(stop.level) < 40 and tonumber(stop.level) > 1)
+			assert.equal(0, #messages(c4, "HUE_SET"))
 		end)
 
 		it("ignores the commands on an unknown binding", function()
