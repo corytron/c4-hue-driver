@@ -16,6 +16,8 @@
 -- bridge never confirmed) the driver applies the sent HUE_SET to it, so the
 -- next real report differs from it and corrects the proxy.
 
+local device = require("common.device")
+
 local state = {}
 
 -- light_v2 colour modes (LIGHT_COLOR_*_COLOR_MODE).
@@ -64,18 +66,11 @@ end
 
 -- Parsing and formatting ---------------------------------------------------
 
-local function to_bool(v)
-	if type(v) == "boolean" then
-		return v
-	end
-	v = v ~= nil and tostring(v):lower() or nil
-	if v == "true" or v == "1" then
-		return true
-	elseif v == "false" or v == "0" then
-		return false
-	end
-	return nil
-end
+-- A string param or nil when absent or empty (SendToDevice drops empty
+-- values, so "" never arrives; an absent key is the same thing), and a
+-- boolean from "true"/"1" and "false"/"0": the parsers both device drivers
+-- use (common/device.lua).
+local text, to_bool = device.text, device.to_bool
 
 local function to_num(v)
 	if v == nil then
@@ -102,15 +97,6 @@ local function str(n)
 end
 
 -- Bridge -> cache ----------------------------------------------------------
-
--- A string param, or nil when absent or empty (SendToDevice drops empty
--- values, so "" never arrives; an absent key is the same thing).
-local function text(v)
-	if v == nil or v == "" then
-		return nil
-	end
-	return tostring(v)
-end
 
 -- Merge a HUE_CONFIGURE message: identity, lifecycle and capabilities. The
 -- bridge builds every configure from its whole registry entry, so the
