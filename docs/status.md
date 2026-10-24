@@ -1,4 +1,4 @@
-# Status of the Hue driver (2026-10-24, build 196)
+# Status of the Hue driver (2026-10-24, build 199)
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -6,16 +6,17 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 196**, production (no dev loop), on all three drivers (installed
-  2026-10-24 13:53 from branch `feature/zone-lights`, PR #30, not yet merged;
-  zone lights, after build 185's readable properties and build 180's
-  time-of-day scenes): Hue Bridge, Hue Light, Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
+- **Build 199**, production (no dev loop), on all three drivers (installed
+  2026-10-24 14:17; zone lights, PR #30, after build 185's readable
+  properties and build 180's time-of-day scenes): Hue Bridge, Hue Light,
+  Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
   1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
-  room's time-of-day scene, created 2026-10-24 12:06); one zone light,
-  "Bedside Lights" (device 1166, the Hue zone of the two bedside lamps,
-  created 2026-10-24 13:55 with Add Zone Light into the Master Bedroom). No Hue Light devices: all 47
+  room's time-of-day scene, created 2026-10-24 12:06); two zone lights
+  in the Master Bedroom, created with Add Zone Light on 2026-10-24: "Bedside
+  Lights" (device 1166, the Hue zone of the two bedside lamps) and "Master
+  Bedroom Lights" (device 1168, the whole Hue room). No Hue Light devices: all 47
   lights were deleted in Composer on 2026-10-22 and are remembered as
   deleted (Add Light brings any of them back). 126 scenes on the bridge, 1
   imported.
@@ -134,8 +135,9 @@ and the `stop` action on a grouped_light), the scene dimmer in the iPhone app
 and its LEDs (2026-10-24), the light staying bound through a controller
 reboot, time-of-day scenes activated and deactivated from the bridge and
 listed in Composer (2026-10-24, build 180), the readable Room Mappings
-list (build 185), Add Zone Light creating the Bedside Lights device with
-the right texts and pickers (build 196, Composer side only).
+list (build 185), Add Zone Light creating the Bedside Lights zone light and the Master
+Bedroom room light with the right texts, pickers and counts, Forget Light
+and a Composer delete of a zone light (builds 196–199, Composer side only).
 
 ## Open
 
@@ -143,10 +145,12 @@ the right texts and pickers (build 196, Composer side only).
   lamps 100 %, slider, colour and colour temperature reaching both lamps,
   OFF, Hue-app changes reaching the tile, Shine's tile going off on a zone
   OFF, the Bedside Lights Switch rebound to device 1166); the grouped_light
-  PUT accepting `color` / `color_temperature` is assumed until then. Device
-  1166 showed an empty `Driver Version` after its creation (the other rows
-  were right; seen once before on a device re-created under a fresh
-  install, `docs/keypad-design.md`); under diagnosis. The manual's chapter
+  PUT accepting `color` / `color_temperature` is assumed until then. (Settled on the way, build 199: a device created by AddDevice has an
+  empty property table at its first init, so a property written only by
+  the replay of the property handlers, `Driver Version`, stayed blank until
+  a reload; the three drivers now write it at late init and look again at 5
+  and 15 s. The controller words a missing module "An unknown error
+  occurred", which release builds no longer report as a dev-loop error.) The manual's chapter
   7 has no screenshot of Add Zone Light yet (shots are in `build/shots/img/`).
 
 
