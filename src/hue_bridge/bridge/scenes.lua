@@ -21,6 +21,19 @@
 -- at decode time, so 125 scenes are 125 small tables [assumed: the 351 KB
 -- decode is fine on the controller; docs/design.md measured about a second].
 --
+-- Time-based ("smart") scenes (docs/smart-scenes-design.md): Hue's
+-- `smart_scene` resources ("Golden hours", "Natural light") are scene devices
+-- of the same driver with a kind. They have their own catalogue
+-- (`smart_catalogue`, hue_model.smart_scene() records tagged kind
+-- "smart_scene") filled from the resync's /smart_scene GET and the stream;
+-- their registry entries carry `kind = "smart_scene"` (absent = an ordinary
+-- scene) in the same registry, so every lifecycle rule, text and picker is
+-- shared. What differs: ON activates and OFF deactivates then turns the
+-- group off (both on /smart_scene/<rid>); the state reported is Hue's
+-- `state` ("active" / "inactive") with the current time slot; names drop the
+-- app's trailing number (hue_model.base_name). A failed /smart_scene GET
+-- keeps the previous catalogue and changes nothing.
+--
 -- Callback rules inherited from lights.lua: the GETs run serially, chained
 -- from http.request callbacks; on_container runs inside OnBodyChunk and only
 -- sends messages; every callback body is pcall-wrapped.
@@ -59,6 +72,18 @@ scenes.LEVEL_MIN_DELTA = 0.5
 scenes.ACTIONS = { active = true, static = true, dynamic_palette = true }
 -- status.active values [verified: hardware 2026-10-21].
 scenes.ACTIVE = { inactive = true, static = true, dynamic_palette = true }
+
+-- The registry entry's `kind` of a time-based scene (absent = an ordinary
+-- scene), also what HUE_SCENE_CONFIGURE and HUE_SCENE_HELLO carry.
+scenes.SMART_KIND = "smart_scene"
+scenes.PLAIN_KIND = "scene"
+-- smart_scene `state` values, which HUE_SCENE_STATE carries as `active` for a
+-- time-based scene [verified: hardware 2026-10-24, docs/smart-scenes-research.md §7].
+scenes.SMART_STATES = { active = true, inactive = true }
+-- The recall bodies of a time-based scene: start and stop its schedule
+-- [verified: hardware 2026-10-24, V4 and V7].
+scenes.SMART_ACTIVATE = "activate"
+scenes.SMART_DEACTIVATE = "deactivate"
 
 -- ctx fields (all but http optional; lights and group_off should be given):
 --   http(req, cb)            req = { path, method, body }; the driver adds ip and key; cb(result)
@@ -142,12 +167,15 @@ function scenes.new(ctx)
 		reg = reg,
 		registry = reg:entries(),  -- rid → entry, the live table (identity kept across load())
 		catalogue = {},            -- rid → hue_model.scene() record, from the last GET and the stream (memory only)
-		smart_scenes = nil,        -- smart scene count from the last GET, nil until known (log only, v1)
+		smart_catalogue = {},      -- rid → hue_model.smart_scene() record tagged kind "smart_scene", the same way;
+		                           -- kept as it was when a /smart_scene GET fails
+		smart_synced = false,      -- a /smart_scene GET has succeeded (missing means something)
+		smart_fresh = false,       -- the last resync's /smart_scene GET succeeded (its states are current)
 		group_on = {},             -- grouped_light rid → on (boolean) from the last GET and the stream; absent = unknown
 		group_level = {},          -- grouped_light rid → dimming.brightness (average of the lights on), when reported
 		level_sent = {},           -- grouped_light rid → the HUE_SCENE_GROUP level text last sent to its scenes
 		last_configure = {},       -- rid → signature of the last HUE_SCENE_CONFIGURE sent
-		announced = {},            -- device_id → { rid, name } from HUE_SCENE_HELLO, for Link Devices
+		announced = {},            -- device_id → { rid, name, kind } from HUE_SCENE_HELLO, for Link Devices
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id }
 		early_hellos = {},         -- hellos received before load(), answered after configure_all()
 		loaded = false,
@@ -197,9 +225,29 @@ local function level_text(n)
 	return (string.format("%.2f", r):gsub("0+$", ""))
 end
 
--- Name order, case-insensitive, ties by rid.
+-- A registry entry or a catalogue record of a time-based scene (both carry
+-- the kind: entries in the registry, records tagged when cached).
+local function is_smart(x)
+	return type(x) == "table" and x.kind == scenes.SMART_KIND
+end
+
+-- The owner-facing Hue name of an entry or a record: a time-based scene's
+-- base name ("Golden hours 4" → "Golden hours", docs/smart-scenes-design.md
+-- Decision 7), else the scene's own name.
+local function name_of(x)
+	local name = type(x) == "table" and x.name or nil
+	if name == nil then
+		return "?"
+	end
+	if is_smart(x) then
+		return hue_model.base_name(tostring(name))
+	end
+	return tostring(name)
+end
+
+-- Name order (the owner-facing name), case-insensitive, ties by rid.
 local function by_name(a, b)
-	local an, bn = string.lower(tostring(a.name or "")), string.lower(tostring(b.name or ""))
+	local an, bn = string.lower(name_of(a)), string.lower(name_of(b))
 	if an ~= bn then
 		return an < bn
 	end
@@ -285,8 +333,8 @@ function scenes:load()
 	self.reg:load()
 	for rid, entry in pairs(self.registry) do
 		entry.auto_dynamic = entry.auto_dynamic == true or entry.auto_dynamic == "true"
-		self.ctx.log.debug("scenes: loaded %s (device %s, %s)", tostring(entry.name), tostring(entry.device_id),
-			tostring(rid))
+		self.ctx.log.debug("scenes: loaded %s%s (device %s, %s)", tostring(entry.name),
+			is_smart(entry) and " (time-based)" or "", tostring(entry.device_id), tostring(rid))
 	end
 	self.loaded = true
 	self.dirty = false
@@ -353,6 +401,15 @@ function scenes:bridge_count()
 	return n
 end
 
+-- Time-based scenes seen on the bridge (the smart catalogue).
+function scenes:smart_count()
+	local n = 0
+	for _ in pairs(self.smart_catalogue) do
+		n = n + 1
+	end
+	return n
+end
+
 function scenes:registered_rids()
 	return self.reg:rids()
 end
@@ -363,6 +420,23 @@ function scenes:scene(rid)
 		return nil
 	end
 	return self.catalogue[rid]
+end
+
+-- The smart catalogue record for a rid, or nil.
+function scenes:smart_scene(rid)
+	if rid == nil then
+		return nil
+	end
+	return self.smart_catalogue[rid]
+end
+
+-- The record of a rid in whichever catalogue has it (rids are unique across
+-- resource types), or nil.
+function scenes:record_of(rid)
+	if rid == nil then
+		return nil
+	end
+	return self.catalogue[rid] or self.smart_catalogue[rid]
 end
 
 -- Project access ----------------------------------------------------------------
@@ -492,31 +566,39 @@ end
 
 -- Labels ---------------------------------------------------------------------
 
--- "Kitchen: Relax" for a catalogue record; " (dynamic)" when asked.
+-- "Kitchen: Relax" for a catalogue record; " (dynamic)" when asked. A
+-- time-based scene is always "Kitchen: Golden hours (time-based)", its base
+-- name with the kind (docs/smart-scenes-design.md Decision 8).
 function scenes:scene_label(scene, with_dynamic)
-	local text = sanitise(self:group_label(scene.group_rid, scene)) .. ": " .. sanitise(scene.name or "?")
-	if with_dynamic and scene.auto_dynamic then
+	local text = sanitise(self:group_label(scene.group_rid, scene)) .. ": " .. sanitise(name_of(scene))
+	if is_smart(scene) then
+		text = text .. " (time-based)"
+	elseif with_dynamic and scene.auto_dynamic then
 		text = text .. " (dynamic)"
 	end
 	return text
 end
 
--- The bare scene name of an entry: what the contract's texts use.
+-- The bare scene name of an entry (a time-based scene's base name): what the
+-- contract's texts use.
 function scenes.entry_label(_self, _rid, entry)
-	return sanitise(entry.name or "?")
+	return sanitise(name_of(entry))
 end
 
 -- Composer name at creation (§1): "<Scene>" for a room scene, "<Zone> <Scene>"
--- for a zone scene. `record` is a catalogue record or an entry.
+-- for a zone scene, a time-based scene's base name in place of <Scene>
+-- (docs/smart-scenes-design.md Decision 7). `record` is a catalogue record or
+-- an entry.
 function scenes:creation_name(record)
 	local name, gtype = self:group_info(record.group_rid, record)
 	if gtype == "zone" and name ~= nil and name ~= "" then
-		return tostring(name) .. " " .. tostring(record.name or "?")
+		return tostring(name) .. " " .. name_of(record)
 	end
-	return tostring(record.name or "?")
+	return name_of(record)
 end
 
--- The registry fields a catalogue record supplies.
+-- The registry fields a catalogue record supplies; `kind` only for a
+-- time-based scene (an ordinary entry has none).
 function scenes:fields_from_scene(scene)
 	if not scene then
 		return {}
@@ -529,23 +611,31 @@ function scenes:fields_from_scene(scene)
 		group_name = name,
 		id_v1 = scene.id_v1,
 		auto_dynamic = scene.auto_dynamic == true,
+		kind = is_smart(scene) and scenes.SMART_KIND or nil,
 	}
 end
 
 -- Catalogue views -----------------------------------------------------------------
 
--- Catalogue records without a registry entry, sorted by group label then name.
+-- Catalogue records of both kinds without a registry entry, sorted by group
+-- label, then the time-based ones before the ordinary ones of the same group
+-- (docs/smart-scenes-design.md Decision 8), then name.
 function scenes:unimported_scenes()
 	local list = {}
-	for rid, scene in pairs(self.catalogue) do
-		if not self.registry[rid] then
-			list[#list + 1] = scene
+	for _, catalogue in ipairs({ self.catalogue, self.smart_catalogue }) do
+		for rid, record in pairs(catalogue) do
+			if not self.registry[rid] then
+				list[#list + 1] = record
+			end
 		end
 	end
 	table.sort(list, function(a, b)
 		local ag, bg = self:group_label(a.group_rid, a):lower(), self:group_label(b.group_rid, b):lower()
 		if ag ~= bg then
 			return ag < bg
+		end
+		if is_smart(a) ~= is_smart(b) then
+			return is_smart(a)
 		end
 		return by_name(a, b)
 	end)
@@ -556,12 +646,13 @@ function scenes:is_tombstoned(rid)
 	return self.reg:tombstones()[rid] ~= nil
 end
 
--- The catalogue records of one group, name order.
-function scenes:scenes_of_group(group_rid)
+-- The catalogue records of one group, name order: its ordinary scenes, or
+-- with `smart` its time-based ones.
+function scenes:scenes_of_group(group_rid, smart)
 	local list = {}
-	for _, scene in pairs(self.catalogue) do
-		if scene.group_rid == group_rid then
-			list[#list + 1] = scene
+	for _, record in pairs(smart and self.smart_catalogue or self.catalogue) do
+		if record.group_rid == group_rid then
+			list[#list + 1] = record
 		end
 	end
 	table.sort(list, by_name)
@@ -593,11 +684,11 @@ end
 
 -- Fetching and absorbing -------------------------------------------------------------
 
--- GET /scene, then /smart_scene for its count, then /grouped_light for the
--- groups' on/off and level (HUE_SCENE_GROUP). done({ scene = items, smart =
--- n | nil, grouped_light = items | nil }) or done(nil, err) when the scene GET
--- failed; a failed smart scene GET only costs the count (v1 lists nothing
--- from it), a failed grouped_light GET only leaves the groups' on/off and
+-- GET /scene, then /smart_scene, then /grouped_light for the groups' on/off
+-- and level (HUE_SCENE_GROUP). done({ scene = items, smart_scene = items |
+-- nil, grouped_light = items | nil }) or done(nil, err) when the scene GET
+-- failed; a failed smart scene GET keeps the previous time-based catalogue
+-- (absorb), a failed grouped_light GET only leaves the groups' on/off and
 -- level unknown.
 function scenes:fetch_all(done)
 	self.ctx.http({ path = scenes.SCENE_PATH, method = "GET" }, function(r)
@@ -611,17 +702,12 @@ function scenes:fetch_all(done)
 			end
 			self.ctx.http({ path = scenes.SMART_SCENE_PATH, method = "GET" }, function(r2)
 				self:protect("fetch smart_scene", function()
-					local smart = nil
-					local list = r2.ok and type(r2.json) == "table" and r2.json.data or nil
-					if type(list) == "table" then
-						if type(hue_model.smart_scene_count) == "function" then
-							smart = hue_model.smart_scene_count(list)
-						else
-							smart = #list
-						end
-					else
-						self.ctx.log.warn("scenes: GET %s: %s; smart scenes not counted", scenes.SMART_SCENE_PATH,
-							tostring(r2.err or "malformed response"))
+					local smart = r2.ok and type(r2.json) == "table" and r2.json.data or nil
+					if type(smart) ~= "table" then
+						smart = nil
+						self.ctx.log.warn("scenes: GET %s: %s; kept the %d time-based scenes known before, none marked "
+							.. "gone and none told a state", scenes.SMART_SCENE_PATH, tostring(r2.err or "malformed response"),
+							self:smart_count())
 					end
 					self.ctx.http({ path = scenes.GROUPED_LIGHT_PATH, method = "GET" }, function(r3)
 						self:protect("fetch grouped_light", function()
@@ -631,7 +717,7 @@ function scenes:fetch_all(done)
 								self.ctx.log.warn("scenes: GET %s: %s; group on/off and level unknown", scenes.GROUPED_LIGHT_PATH,
 									tostring(r3.err or "malformed response"))
 							end
-							done({ scene = items, smart = smart, grouped_light = gl })
+							done({ scene = items, smart_scene = smart, grouped_light = gl })
 						end)
 					end)
 				end)
@@ -640,8 +726,27 @@ function scenes:fetch_all(done)
 	end)
 end
 
--- Replace the catalogue with a fetch result and refresh the registry's
--- cached identity fields. The GET is authoritative for status too.
+-- The smart catalogue from a /smart_scene GET body's data: records tagged
+-- with the kind, malformed items dropped.
+function scenes.smart_records(items)
+	local out = {}
+	for _, item in ipairs(items) do
+		if type(item) == "table" and item.id ~= nil then
+			local record = hue_model.smart_scene(item)
+			if record then
+				record.kind = scenes.SMART_KIND
+				out[record.rid] = record
+			end
+		end
+	end
+	return out
+end
+
+-- Replace the catalogues with a fetch result and refresh the registry's
+-- cached identity fields. The GETs are authoritative for status too. Without
+-- a /smart_scene body (its GET failed) the time-based catalogue stays as it
+-- was and `smart_fresh` says its states are not current
+-- (docs/smart-scenes-design.md Decision 11).
 function scenes:absorb(res)
 	local catalogue = {}
 	for _, item in ipairs(res.scene or {}) do
@@ -653,8 +758,11 @@ function scenes:absorb(res)
 		end
 	end
 	self.catalogue = catalogue
-	if res.smart ~= nil then
-		self.smart_scenes = res.smart
+	if type(res.smart_scene) == "table" then
+		self.smart_catalogue = scenes.smart_records(res.smart_scene)
+		self.smart_synced, self.smart_fresh = true, true
+	else
+		self.smart_fresh = false
 	end
 	local group_on, group_level = {}, {}
 	for _, item in ipairs(res.grouped_light or {}) do
@@ -668,8 +776,8 @@ function scenes:absorb(res)
 	end
 	self.group_on = group_on
 	self.group_level = group_level
-	self.ctx.log.debug("scenes: %d scenes cached, %s smart scenes (not listed in v1)", self:bridge_count(),
-		tostring(self.smart_scenes or "?"))
+	self.ctx.log.debug("scenes: %d scenes and %d time-based scenes cached%s", self:bridge_count(), self:smart_count(),
+		self.smart_fresh and "" or " (time-based ones from before)")
 	self:refresh_registry()
 end
 
@@ -684,16 +792,21 @@ function scenes:take_name(entry, scene)
 	return true
 end
 
--- The identity fields of one entry from its catalogue record. True when
--- something changed (the caller marks).
+-- The identity fields of one entry from its catalogue record (of either
+-- kind). True when something changed (the caller marks).
 function scenes:refresh_entry(rid)
-	local entry, scene = self.registry[rid], self.catalogue[rid]
+	local entry, scene = self.registry[rid], self:record_of(rid)
 	if not entry or not scene then
 		return false
 	end
 	local changed = self:take_name(entry, scene)
 	local fields = self:fields_from_scene(scene)
 	fields.name = nil
+	-- The entry follows the kind of the record its rid names (rids are unique
+	-- across resource types): an entry adopted without one heals here.
+	if is_smart(entry) and not is_smart(scene) then
+		fields.kind = registry.CLEAR
+	end
 	local delta = {}
 	for k, v in pairs(fields) do
 		if entry[k] ~= v then
@@ -737,34 +850,88 @@ end
 
 -- Messages -----------------------------------------------------------------
 
+-- The current time slot of a time-based record as HUE_SCENE_CONFIGURE and
+-- HUE_SCENE_STATE carry it: the slot scene's name and the slot's start
+-- ("07:00", "sunset"), each nil when unknown (no slot, or a slot scene the
+-- scene catalogue lacks). nil, nil for anything else.
+function scenes:slot_info(record)
+	if not is_smart(record) then
+		return nil, nil
+	end
+	local slot = hue_model.current_slot(record)
+	if type(slot) ~= "table" then
+		return nil, nil
+	end
+	local target = slot.target_rid ~= nil and self.catalogue[slot.target_rid] or nil
+	local start = slot.start
+	if type(start) ~= "string" or start == "" then
+		start = nil
+	end
+	return target and target.name or nil, start
+end
+
 -- HUE_SCENE_CONFIGURE params (§2): rid, name, group_name, group_type, id_v1?,
--- auto_dynamic, state, gone_since?. Every value a non-empty string
--- (hue_model drops nil and "", as C4:SendToDevice would).
+-- auto_dynamic, state, gone_since?, kind ("scene" / "smart_scene"); for a
+-- time-based scene the name is its base name, auto_dynamic "false", plus
+-- slot_name? and slot_start? (docs/smart-scenes-design.md, Messages). Every
+-- value a non-empty string (hue_model drops nil and "", as C4:SendToDevice
+-- would).
 function scenes:configure_params(rid, entry)
+	local smart = is_smart(entry)
 	local extra = {
 		group_name = self:group_name(entry.group_rid, entry),
 		group_type = entry.group_type,
 		state = entry.state == "gone" and "gone" or "linked",
+		kind = smart and scenes.SMART_KIND or scenes.PLAIN_KIND,
 	}
 	if entry.state == "gone" then
 		extra.gone_since = entry.gone_since
 	end
+	if smart then
+		extra.slot_name, extra.slot_start = self:slot_info(self.smart_catalogue[rid])
+	end
 	return hue_model.scene_configure_params({
-		rid = rid, name = entry.name, id_v1 = entry.id_v1, auto_dynamic = entry.auto_dynamic == true,
+		rid = rid, name = (smart and entry.name ~= nil) and name_of(entry) or entry.name, id_v1 = entry.id_v1,
+		auto_dynamic = not smart and entry.auto_dynamic == true,
 	}, extra)
 end
 
 -- HUE_SCENE_STATE params (§2). The bridge always names a status: a scene
--- whose status it does not know (not on the bridge) reads as inactive.
-function scenes.state_params(_self, rid, active, reason)
+-- whose status it does not know (not on the bridge) reads as inactive. A
+-- time-based scene's `active` is its state, "active" or "inactive", with its
+-- current slot_name? and slot_start? (docs/smart-scenes-design.md, Messages).
+function scenes:state_params(rid, active, reason)
+	if is_smart(self.registry[rid]) then
+		local params = { rid = rid, active = scenes.SMART_STATES[active] and active or "inactive",
+			reason = reason or "event" }
+		params.slot_name, params.slot_start = self:slot_info(self.smart_catalogue[rid])
+		return params
+	end
 	return hue_model.scene_state_params({ rid = rid, active = scenes.ACTIVE[active] and active or "inactive" }, reason)
 end
 
--- The status the bridge last reported for a registered scene: the catalogue's,
--- "inactive" for a scene that is not on the bridge.
+-- The status the bridge last reported for a registered scene: the
+-- catalogue's (a time-based scene's state), "inactive" for a scene that is
+-- not on the bridge.
 function scenes:current_active(rid)
-	local scene = self.catalogue[rid]
-	return scene and scene.active or "inactive"
+	local record = self:record_of(rid)
+	if not record then
+		return "inactive"
+	end
+	if is_smart(record) then
+		return record.state or "inactive"
+	end
+	return record.active or "inactive"
+end
+
+-- Whether the bridge knows a registered scene's status well enough to tell
+-- it: a GET of its kind has succeeded, or the catalogue has the scene. Before
+-- that a guessed "inactive" would turn a lit scene's tile off.
+function scenes:state_known(rid)
+	if is_smart(self.registry[rid]) then
+		return self.smart_synced or self.smart_catalogue[rid] ~= nil
+	end
+	return self.synced or self.catalogue[rid] ~= nil
 end
 
 function scenes:send_configure(rid)
@@ -798,9 +965,9 @@ end
 
 -- Group on/off and other scenes (docs/keypad-design.md "Scene hold-to-dim") -----
 
--- The group a registered scene belongs to: the catalogue's, else the entry's.
+-- The group a scene of either kind belongs to: the catalogue's, else the entry's.
 function scenes:group_rid_of(rid)
-	local scene, entry = self.catalogue[rid], self.registry[rid]
+	local scene, entry = self:record_of(rid), self.registry[rid]
 	return (scene and scene.group_rid) or (entry and entry.group_rid) or nil
 end
 
@@ -907,18 +1074,34 @@ function scenes:on_grouped_light(item)
 	return sent
 end
 
--- Scene `rid` became active (static / dynamic_palette): every other linked
--- scene of its group hears HUE_SCENE_GROUP other_active. `rid` need not be
--- imported (a scene recalled from the Hue app). Returns the number sent.
+-- Whether registered scene `rid` is a time-based one whose current slot
+-- targets scene `target_rid`.
+function scenes:slot_targets(rid, target_rid)
+	if not is_smart(self.registry[rid]) then
+		return false
+	end
+	local record = self.smart_catalogue[rid]
+	local slot = record and hue_model.current_slot(record)
+	return type(slot) == "table" and slot.target_rid == target_rid
+end
+
+-- Scene `rid` became active (static / dynamic_palette), or time-based scene
+-- `rid` became active: every other linked scene device of its group hears
+-- HUE_SCENE_GROUP other_active. For an ordinary scene a time-based device
+-- whose current slot targets it is left out: that scene starting is its
+-- schedule running (docs/smart-scenes-design.md Decision 10). `rid` need not
+-- be imported (a scene recalled from the Hue app). Returns the number sent.
 function scenes:send_other_active(rid)
 	local group_rid = self:group_rid_of(rid)
 	if group_rid == nil then
 		return 0
 	end
+	local from_smart = is_smart(self:record_of(rid)) or is_smart(self.registry[rid])
 	local sent = 0
 	for _, other in ipairs(self.reg:rids()) do
 		local entry = self.registry[other]
-		if other ~= rid and entry.state == "linked" and self:group_rid_of(other) == group_rid then
+		if other ~= rid and entry.state == "linked" and self:group_rid_of(other) == group_rid
+			and (from_smart or not self:slot_targets(other, rid)) then
 			self.ctx.send(entry.device_id, "HUE_SCENE_GROUP", { rid = other, other_active = "true" })
 			sent = sent + 1
 		end
@@ -928,7 +1111,8 @@ end
 
 -- CONFIGURE (when asked for, or when it changed) then STATE. The state is
 -- sent only once a GET has told us something (or the catalogue has the
--- scene): before that a guessed "inactive" would turn a lit scene's tile off.
+-- scene): before that a guessed "inactive" would turn a lit scene's tile off
+-- (state_known).
 function scenes:push(rid, reason, with_configure)
 	if not self.registry[rid] then
 		return false
@@ -936,7 +1120,7 @@ function scenes:push(rid, reason, with_configure)
 	if with_configure or self:configure_changed(rid) then
 		self:send_configure(rid)
 	end
-	if not (self.synced or self.catalogue[rid]) then
+	if not self:state_known(rid) then
 		return false
 	end
 	return self:send_state(rid, reason)
@@ -981,7 +1165,7 @@ end
 
 -- Configuration and (once something is known) the status.
 function scenes:answer_hello(rid)
-	if self.synced or self.catalogue[rid] then
+	if self:state_known(rid) then
 		local answered = self:push(rid, "hello", true)
 		self:send_group_known(rid)
 		return answered
@@ -1002,27 +1186,36 @@ function scenes:send_group_known(rid)
 end
 
 -- Register a bound device for a rid the registry lacks (auto-adopt, Link
--- Devices). Returns the entry or nil.
+-- Devices). The kind is the catalogue's; for a rid neither catalogue has,
+-- the one the device announced (HUE_SCENE_HELLO `kind`), and the entry is
+-- gone once a GET of that kind has succeeded. Returns the entry or nil.
 function scenes:adopt(device_id, rid, hello, how)
-	local scene = self.catalogue[rid]
+	local scene = self:record_of(rid)
 	local fields = self:fields_from_scene(scene)
 	fields.device_id = device_id
 	fields.name = fields.name or hello.name
+	if not scene and hello.kind == scenes.SMART_KIND then
+		fields.kind = scenes.SMART_KIND
+	end
 	local entry, err = self.reg:add(rid, fields)
 	if not entry then
 		self.ctx.log.warn("scenes: could not adopt device %d for %s: %s", device_id, tostring(rid), tostring(err))
 		return nil
 	end
 	self:mark()
-	if not scene and self.synced then
+	if not scene and (is_smart(entry) and self.smart_synced or not is_smart(entry) and self.synced) then
 		self.reg:set_state(rid, "gone")
 	end
-	self.ctx.log.always("scenes: adopted %s (device %d) %s", tostring(entry.name or rid), device_id, how)
+	self.ctx.log.always("scenes: adopted %s%s (device %d) %s", tostring(entry.name or rid),
+		is_smart(entry) and " (time-based)" or "", device_id, how)
 	return entry
 end
 
--- HUE_SCENE_HELLO { rid?, device_id, name? }: the same rules as lights:hello
--- (§4 of import-design). Returns true when answered.
+-- HUE_SCENE_HELLO { rid?, device_id, name?, kind? }: the same rules as
+-- lights:hello (§4 of import-design). `kind` ("scene" / "smart_scene", what
+-- the device persisted beside its rid) only matters when the device is
+-- adopted for a rid neither catalogue has; otherwise the registry's kind is
+-- the truth and the answer's CONFIGURE carries it. Returns true when answered.
 function scenes:hello(rid, params)
 	params = params or {}
 	if type(rid) ~= "string" or rid == "" then
@@ -1036,7 +1229,7 @@ function scenes:hello(rid, params)
 		return false
 	end
 	if device_id then
-		self.announced[device_id] = { rid = rid, name = params.name }
+		self.announced[device_id] = { rid = rid, name = params.name, kind = params.kind }
 	end
 
 	local entry = rid and self.registry[rid] or nil
@@ -1194,19 +1387,25 @@ function scenes:reconcile(no_save)
 	return r
 end
 
--- Step 2, the scenes: a registered rid absent from /scene is "gone" (the
--- device hears state gone and STATE inactive); back again is "linked". New
--- unimported scenes are counted at debug only: nothing is ever created from
--- a resync and Hue's default scenes would make a nag meaningless.
+-- Step 2, the scenes: a registered rid absent from /scene (a time-based one:
+-- from /smart_scene) is "gone" (the device hears state gone and STATE
+-- inactive); back again is "linked". After a failed /smart_scene GET the
+-- time-based entries are left as they are: a kept catalogue proves nothing
+-- missing (docs/smart-scenes-design.md Decision 11). New unimported scenes
+-- are counted at debug only: nothing is ever created from a resync and Hue's
+-- default scenes would make a nag meaningless.
 function scenes:reconcile_scenes()
 	for _, rid in ipairs(self.reg:rids()) do
-		local entry, scene = self.registry[rid], self.catalogue[rid]
+		local entry, scene = self.registry[rid], self:record_of(rid)
 		if scene then
 			if entry.state == "gone" and self.reg:set_state(rid, "linked") then
 				self:mark()
 				self.ctx.log.always("scenes: %s (device %d) is back on the bridge", self:entry_label(rid, entry),
 					entry.device_id)
 			end
+		elseif is_smart(entry) and not self.smart_fresh then
+			self.ctx.log.debug("scenes: %s (device %d) not checked: the time-based scenes were not fetched",
+				self:entry_label(rid, entry), entry.device_id)
 		elseif entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
 			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Re-link Scene or Forget Scene)",
@@ -1214,18 +1413,24 @@ function scenes:reconcile_scenes()
 			self:announce_gone(rid, "resync")
 		end
 	end
-	self.ctx.log.debug("scenes: %d scenes on the bridge not imported", #self:unimported_scenes())
+	self.ctx.log.debug("scenes: %d scenes on the bridge not imported (time-based ones included)",
+		#self:unimported_scenes())
 end
 
 -- Step 5, the fan-out: STATE (and CONFIGURE first when asked or changed) to
 -- every linked entry (§4: "STATE for every linked scene"); a gone one hears
 -- only a changed CONFIGURE, its inactive went out when it became gone (and
--- goes out again on its hello).
+-- goes out again on its hello). A time-based entry hears no STATE after a
+-- failed /smart_scene GET: its state is not known to be current.
 function scenes:fanout(reason, with_configure)
 	local sent = 0
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
-		if entry.state == "linked" then
+		if entry.state == "linked" and is_smart(entry) and not self.smart_fresh then
+			if with_configure or self:configure_changed(rid) then
+				self:send_configure(rid)
+			end
+		elseif entry.state == "linked" then
 			if self:push(rid, reason, with_configure) then
 				sent = sent + 1
 			end
@@ -1295,6 +1500,53 @@ end
 
 -- Event fan-out --------------------------------------------------------------
 
+-- A registered scene of either kind is on the bridge again (an add item; its
+-- catalogue has the record): linked again, refreshed (logged under the name
+-- the owner knows) and told. Returns the number of messages sent.
+function scenes:scene_back(rid, entry)
+	if entry.state == "gone" and self.reg:set_state(rid, "linked") then
+		self:mark()
+		self.ctx.log.always("scenes: %s (device %d) is back on the bridge", self:entry_label(rid, entry),
+			entry.device_id)
+	end
+	if self:refresh_entry(rid) then
+		self:mark()
+	end
+	if entry.state == "unbound" then
+		return 0
+	end
+	return self:push(rid, "event", true) and 1 or 0
+end
+
+-- A scene of either kind left the bridge (a delete item; its catalogue has
+-- forgotten it): a linked entry is gone and told. Returns the number sent.
+function scenes:scene_deleted(rid, entry)
+	if entry and entry.state == "linked" then
+		if self.reg:set_state(rid, "gone") then
+			self:mark()
+		end
+		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Re-link Scene or Forget Scene)",
+			self:entry_label(rid, entry), entry.device_id)
+		return self:announce_gone(rid, "event") and 1 or 0
+	end
+	if not entry then
+		self.ctx.log.debug("scenes: unimported scene %s was deleted on the bridge", tostring(rid))
+	end
+	return 0
+end
+
+-- Scene `target_rid` was renamed: the linked time-based scenes whose current
+-- slot it is hear their new slot name (CONFIGURE). Returns the number sent.
+function scenes:tell_slot_scene(target_rid)
+	local sent = 0
+	for _, rid in ipairs(self.reg:rids("linked")) do
+		if self:slot_targets(rid, target_rid) and self:configure_changed(rid) and self:send_configure(rid) then
+			sent = sent + 1
+		end
+	end
+	return sent
+end
+
 -- A scene item of an event container. Returns the number of messages sent.
 function scenes:on_scene_item(item, kind)
 	local rid = item.id
@@ -1306,35 +1558,13 @@ function scenes:on_scene_item(item, kind)
 		end
 		self.catalogue[rid] = fresh
 		if entry then
-			if entry.state == "gone" and self.reg:set_state(rid, "linked") then
-				self:mark()
-				self.ctx.log.always("scenes: %s (device %d) is back on the bridge", self:entry_label(rid, entry),
-					entry.device_id)
-			end
-			if self:refresh_entry(rid) then
-				self:mark()
-			end
-			if entry.state == "unbound" then
-				return 0
-			end
-			return self:push(rid, "event", true) and 1 or 0
+			return self:scene_back(rid, entry)
 		end
 		self.ctx.log.debug("scenes: new scene %s on the bridge; Add Scene lists it", self:scene_label(fresh))
 		return 0
 	elseif kind == "delete" then
 		self.catalogue[rid] = nil
-		if entry and entry.state == "linked" then
-			if self.reg:set_state(rid, "gone") then
-				self:mark()
-			end
-			self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Re-link Scene or Forget Scene)",
-				self:entry_label(rid, entry), entry.device_id)
-			return self:announce_gone(rid, "event") and 1 or 0
-		end
-		if not entry then
-			self.ctx.log.debug("scenes: unimported scene %s was deleted on the bridge", tostring(rid))
-		end
-		return 0
+		return self:scene_deleted(rid, entry)
 	end
 	if not scene then
 		return 0  -- an update for a scene the resync has not brought yet
@@ -1343,6 +1573,9 @@ function scenes:on_scene_item(item, kind)
 	local sent = 0
 	if has_field(changed, "active") and (scene.active == "static" or scene.active == "dynamic_palette") then
 		sent = sent + self:send_other_active(rid)
+	end
+	if has_field(changed, "name") then
+		sent = sent + self:tell_slot_scene(rid)
 	end
 	if not entry then
 		return sent
@@ -1364,8 +1597,83 @@ function scenes:on_scene_item(item, kind)
 	return sent
 end
 
--- One event-stream container. Scene items are handled; a grouped_light item
--- updates the group's on/off and level (HUE_SCENE_GROUP with what changed); a
+-- What a time-based record shows its device, to tell what an update changed
+-- (the model may change the record's tables in place).
+function scenes.smart_snapshot(_self, record)
+	local slot = hue_model.current_slot(record)
+	slot = type(slot) == "table" and slot or {}
+	return { state = record.state, name = record.name, group_rid = record.group_rid, slot_target = slot.target_rid,
+		slot_start = slot.start }
+end
+
+-- A smart_scene item of an event container (docs/smart-scenes-design.md
+-- Decisions 2, 10, 11). add: cached (created in the app it arrives running,
+-- V12, so its group hears other_active), and a registered entry is back;
+-- delete: a linked entry is gone; update: becoming active tells the other
+-- scene devices of its group (other_active), a rename refreshes the entry,
+-- and its device hears a changed CONFIGURE and, when the item carried a
+-- state or the current slot moved, STATE. Returns the number of messages
+-- sent.
+function scenes:on_smart_item(item, kind)
+	local rid = item.id
+	local entry, record = self.registry[rid], self.smart_catalogue[rid]
+	if kind == "add" then
+		local fresh = hue_model.smart_scene(item)
+		if not fresh then
+			return 0
+		end
+		fresh.kind = scenes.SMART_KIND
+		self.smart_catalogue[rid] = fresh
+		local sent = fresh.state == "active" and self:send_other_active(rid) or 0
+		if entry then
+			return sent + self:scene_back(rid, entry)
+		end
+		self.ctx.log.debug("scenes: new scene %s on the bridge; Add Scene lists it", self:scene_label(fresh))
+		return sent
+	elseif kind == "delete" then
+		self.smart_catalogue[rid] = nil
+		return self:scene_deleted(rid, entry)
+	end
+	if not record then
+		return 0  -- an update for a time-based scene the resync has not brought yet
+	end
+	local before = self:smart_snapshot(record)
+	hue_model.update_smart_scene(record, item)
+	local after = self:smart_snapshot(record)
+	-- A state the item carried is told to the device even when unchanged, as
+	-- a scene's status is; other_active only goes out when it becomes active
+	-- (scenes:activate covers an answer that lands before the event).
+	local state_told = type(item.state) == "string" and record.state == item.state
+	local sent = 0
+	if before.state ~= "active" and after.state == "active" then
+		sent = sent + self:send_other_active(rid)
+	end
+	if not entry then
+		return sent
+	end
+	if before.name ~= after.name or before.group_rid ~= after.group_rid then
+		if self:refresh_entry(rid) then
+			self:mark()
+		end
+	end
+	if entry.state == "unbound" then
+		return sent
+	end
+	if self:configure_changed(rid) and self:send_configure(rid) then
+		sent = sent + 1
+	end
+	local slot_moved = before.slot_target ~= after.slot_target or before.slot_start ~= after.slot_start
+	if (state_told or before.state ~= after.state or slot_moved) and self:send_state(rid, "event") then
+		sent = sent + 1
+	end
+	return sent
+end
+
+-- One event-stream container. Scene and smart_scene items are handled, the
+-- smart_scene ones first: a time slot starting and its slot scene's status
+-- may share a container, and other_active reads the current slot
+-- (docs/smart-scenes-design.md Decision 10). A grouped_light item updates
+-- the group's on/off and level (HUE_SCENE_GROUP with what changed); a
 -- room/zone item means the lights' group cache may have changed
 -- (lights:on_container runs first), so the entries' group names are
 -- refreshed. Runs inside OnBodyChunk: no transfers are started here.
@@ -1375,21 +1683,29 @@ function scenes:on_container(container)
 	end
 	local sent, groups_changed = 0, false
 	local kind = container.type
+	local rest = {}
 	for _, item in ipairs(container.data) do
 		if type(item) == "table" and item.id ~= nil then
-			if item.type == "scene" then
-				sent = sent + self:on_scene_item(item, kind)
-			elseif item.type == "grouped_light" then
-				if kind == "delete" then
-					self.group_on[item.id] = nil
-					self.group_level[item.id] = nil
-					self.level_sent[item.id] = nil
-				else
-					sent = sent + self:on_grouped_light(item)
-				end
-			elseif item.type == "room" or item.type == "zone" or item.type == "bridge_home" then
-				groups_changed = true
+			if item.type == "smart_scene" then
+				sent = sent + self:on_smart_item(item, kind)
+			else
+				rest[#rest + 1] = item
 			end
+		end
+	end
+	for _, item in ipairs(rest) do
+		if item.type == "scene" then
+			sent = sent + self:on_scene_item(item, kind)
+		elseif item.type == "grouped_light" then
+			if kind == "delete" then
+				self.group_on[item.id] = nil
+				self.group_level[item.id] = nil
+				self.level_sent[item.id] = nil
+			else
+				sent = sent + self:on_grouped_light(item)
+			end
+		elseif item.type == "room" or item.type == "zone" or item.type == "bridge_home" then
+			groups_changed = true
 		end
 	end
 	if groups_changed then
@@ -1418,11 +1734,81 @@ function scenes:entry_for_command(params, what)
 	return rid, entry
 end
 
+-- Whether the answer to a recall or off PUT of `rid` (generation `gen`, for
+-- `entry`'s device) may still report: not when the scene was re-linked,
+-- forgotten or gone while the PUT was in flight, nor when a later recall or
+-- OFF of the same scene superseded it [code analysis 2026-10-22, F3].
+function scenes:still_current(rid, entry, gen)
+	local current = self.registry[rid]
+	if not current or current.device_id ~= entry.device_id or current.state ~= "linked" then
+		return false
+	end
+	return self.recall_gen[rid] == gen
+end
+
+-- Why a PUT failed, for a warning: "HTTP 404 (<hint>)", "HTTP <code>", or
+-- the transfer error.
+local function failure_text(r, hint)
+	if r.code == 404 then
+		return "HTTP 404 (" .. hint .. ")"
+	elseif r.code then
+		return "HTTP " .. tostring(r.code)
+	end
+	return tostring(r.err)
+end
+
+-- HUE_SCENE_RECALL for a time-based scene (docs/smart-scenes-design.md
+-- Decision 3): PUT {"recall":{"action":"activate"}} on /smart_scene/<rid>
+-- whatever the action, without duration or brightness (a smart recall has
+-- neither; a debug line names what was ignored); on success STATE active
+-- (reason "recall"), on failure a warning and STATE with the cached state.
+-- Returns true (a PUT was started).
+function scenes:activate(rid, entry, params)
+	local ignored = {}
+	for _, key in ipairs({ "action", "duration", "brightness" }) do
+		local value = params[key]
+		if value ~= nil and value ~= "" and not (key == "action" and value == scenes.SMART_ACTIVATE) then
+			ignored[#ignored + 1] = key .. " " .. tostring(value)
+		end
+	end
+	if #ignored > 0 then
+		self.ctx.log.debug("scenes: recall of time-based %s (device %d) activates it; ignored %s",
+			self:entry_label(rid, entry), entry.device_id, table.concat(ignored, ", "))
+	end
+	local gen = self:next_recall_gen(rid)
+	self.ctx.log.info("scenes: activate %s (device %d)", self:entry_label(rid, entry), entry.device_id)
+	local body = { recall = { action = scenes.SMART_ACTIVATE } }
+	self.ctx.http({ path = scenes.SMART_SCENE_PATH .. "/" .. rid, method = "PUT", body = body }, function(r)
+		self:protect("activate done", function()
+			if not self:still_current(rid, entry, gen) then
+				return
+			end
+			if r.ok then
+				-- The bridge's event usually comes first [verified: hardware
+				-- 2026-10-24, V4: about 50 ms before the answer]; when it has
+				-- not, this is where the scene becomes active (Decision 10).
+				local record = self.smart_catalogue[rid]
+				if record and record.state ~= "active" then
+					record.state = "active"
+					self:send_other_active(rid)
+				end
+				self:send_state(rid, "recall", "active")
+				return
+			end
+			self.ctx.log.warn("scenes: %s (device %d): Recall failed: %s", self:entry_label(rid, entry), entry.device_id,
+				failure_text(r, "time-based scene gone?"))
+			self:send_state(rid, "recall")
+		end)
+	end)
+	return true
+end
+
 -- HUE_SCENE_RECALL { rid, action?, duration?, brightness? }: PUT the recall
 -- (a brightness 1-100 overrides the scene's as recall.dimming); on success
 -- STATE with the state the action produces (reason "recall") so the device
 -- settles even if the stream item is missed; on failure a warning and STATE
--- with the cached status. Returns true when a PUT was started.
+-- with the cached status. A time-based scene is activated instead
+-- (scenes:activate). Returns true when a PUT was started.
 function scenes:recall(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_RECALL")
@@ -1434,6 +1820,9 @@ function scenes:recall(params)
 			.. "Forget Scene)", self:entry_label(rid, entry), entry.device_id, date_of(entry.gone_since))
 		self:send_state(rid, "recall", "inactive")
 		return false
+	end
+	if is_smart(entry) then
+		return self:activate(rid, entry, params)
 	end
 	local action = params.action
 	if not scenes.ACTIONS[action] then
@@ -1464,12 +1853,8 @@ function scenes:recall(params)
 		body.recall.dimming and (" at " .. tostring(body.recall.dimming.brightness) .. "%") or "", entry.device_id)
 	self.ctx.http({ path = scenes.SCENE_PATH .. "/" .. rid, method = "PUT", body = body }, function(r)
 		self:protect("recall done", function()
-			local current = self.registry[rid]
-			if not current or current.device_id ~= entry.device_id or current.state ~= "linked" then
-				return  -- re-linked, forgotten or gone while the PUT was in flight
-			end
-			if self.recall_gen[rid] ~= gen then
-				return  -- superseded; the later command reports the state
+			if not self:still_current(rid, entry, gen) then
+				return  -- re-linked, forgotten, gone or superseded while the PUT was in flight
 			end
 			if r.ok then
 				local resulting = action
@@ -1482,16 +1867,59 @@ function scenes:recall(params)
 				self:send_state(rid, "recall", resulting)
 				return
 			end
-			local why
-			if r.code == 404 then
-				why = "HTTP 404 (scene gone?)"
-			elseif r.code then
-				why = "HTTP " .. tostring(r.code)
-			else
-				why = tostring(r.err)
-			end
-			self.ctx.log.warn("scenes: %s (device %d): Recall failed: %s", self:entry_label(rid, entry), entry.device_id, why)
+			self.ctx.log.warn("scenes: %s (device %d): Recall failed: %s", self:entry_label(rid, entry), entry.device_id,
+				failure_text(r, "scene gone?"))
 			self:send_state(rid, "recall")
+		end)
+	end)
+	return true
+end
+
+-- HUE_SCENE_OFF for a time-based scene (docs/smart-scenes-design.md
+-- Decision 5): PUT {"recall":{"action":"deactivate"}} first, so a time slot
+-- starting cannot light the room again, then, on its answer, the group off
+-- through ctx.group_off (deactivate alone leaves the lights on, V7), then
+-- STATE: inactive when either took (the group going off ends the schedule as
+-- well, V9), else the cached state. The group goes off even when the
+-- deactivate failed: OFF means the lights. A later recall or OFF supersedes
+-- the answer (no group off then). A gone scene reports inactive without a
+-- call. Returns true when the PUT was started.
+function scenes:deactivate(rid, entry)
+	local gen = self:next_recall_gen(rid)
+	local label = self:entry_label(rid, entry)
+	if entry.state == "gone" then
+		self.ctx.log.info("scenes: off for %s (device %d): scene not on the bridge; reporting inactive", label,
+			entry.device_id)
+		self:send_state(rid, "recall", "inactive")
+		return false
+	end
+	self.ctx.log.info("scenes: off for %s (device %d): deactivate, then its group off", label, entry.device_id)
+	local body = { recall = { action = scenes.SMART_DEACTIVATE } }
+	self.ctx.http({ path = scenes.SMART_SCENE_PATH .. "/" .. rid, method = "PUT", body = body }, function(r)
+		self:protect("deactivate done", function()
+			if not self:still_current(rid, entry, gen) then
+				return
+			end
+			local ended = r.ok == true
+			if not ended then
+				self.ctx.log.warn("scenes: %s (device %d): deactivate failed: %s; turning its group off anyway", label,
+					entry.device_id, failure_text(r, "time-based scene gone?"))
+			end
+			local grouped = self:grouped_light_of(self:group_rid_of(rid))
+			if not grouped then
+				self.ctx.log.info("scenes: off for %s (device %d): its group has no grouped_light", label, entry.device_id)
+			elseif self.ctx.group_off(grouped) then
+				self.ctx.log.info("scenes: off for %s (device %d): grouped_light %s off", label, entry.device_id,
+					tostring(grouped):sub(1, 8))
+				ended = true
+			else
+				self.ctx.log.warn("scenes: off for %s (device %d): group off: nothing queued", label, entry.device_id)
+			end
+			local record = self.smart_catalogue[rid]
+			if ended and record then
+				record.state = "inactive"
+			end
+			self:send_state(rid, "recall", ended and "inactive" or nil)
 		end)
 	end)
 	return true
@@ -1500,12 +1928,17 @@ end
 -- HUE_SCENE_OFF { rid }: the scene's group grouped_light off through
 -- ctx.group_off (coalesced per group by the driver), then STATE inactive. A
 -- group without a grouped_light (an empty zone), an unknown group or a gone
--- scene report inactive without a call. Returns true when group_off was called.
+-- scene report inactive without a call. A time-based scene is deactivated
+-- first (scenes:deactivate). Returns true when group_off was called (for a
+-- time-based scene: when the deactivate PUT was started).
 function scenes:off(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_OFF")
 	if not rid then
 		return false
+	end
+	if is_smart(entry) then
+		return self:deactivate(rid, entry)
 	end
 	self:next_recall_gen(rid)
 	local scene = self.catalogue[rid]
@@ -1544,7 +1977,9 @@ end
 -- and per-light differences are kept. up/down run 0 -> 100 % over `duration`
 -- ms (clamped to 0..DIM_MAX_DURATION, default DIM_DEFAULT_DURATION), stop
 -- ends it [verified on hardware 2026-10-23: Hue accepts `dimming_delta` with
--- `dynamics` and the `stop` action on a grouped_light]. No STATE is sent. Returns true when queued.
+-- `dynamics` and the `stop` action on a grouped_light]. No STATE is sent. The
+-- same for a time-based scene: a whole-room dim leaves it running (V11,
+-- docs/smart-scenes-design.md Decision 6). Returns true when queued.
 function scenes:dim(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_DIM")
@@ -1557,7 +1992,7 @@ function scenes:dim(params)
 			entry.device_id, tostring(direction))
 		return false
 	end
-	local scene = self.catalogue[rid]
+	local scene = self:record_of(rid)
 	if entry.state == "gone" or not scene then
 		self.ctx.log.warn("scenes: dim of %s (device %d) ignored: scene not on the bridge", self:entry_label(rid, entry),
 			entry.device_id)
@@ -1597,7 +2032,9 @@ end
 -- current is the bridge's last known group level (group_level); nothing when
 -- the difference is under LEVEL_MIN_DELTA. With no level known, an absolute
 -- brightness through ctx.group_set instead. No STATE is sent (the level
--- reports follow from the stream). Returns true when queued.
+-- reports follow from the stream). The same for a time-based scene (the next
+-- time slot's look replaces the level when it starts; Decisions 4 and 6 of
+-- docs/smart-scenes-design.md). Returns true when queued.
 function scenes:level(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_LEVEL")
@@ -1611,7 +2048,7 @@ function scenes:level(params)
 		return false
 	end
 	level = math.max(1, math.min(100, level))
-	local scene = self.catalogue[rid]
+	local scene = self:record_of(rid)
 	if entry.state == "gone" or not scene then
 		self.ctx.log.warn("scenes: level of %s (device %d) ignored: scene not on the bridge", self:entry_label(rid, entry),
 			entry.device_id)
@@ -1780,7 +2217,7 @@ function scenes:room_for_add(scene, room_id, rooms)
 	end
 	local id, why = self:default_room(scene, rooms)
 	if not id then
-		return nil, string.format("Not added: %s: %s; pick a room, or Set Room Mapping first", sanitise(scene.name or "?"),
+		return nil, string.format("Not added: %s: %s; pick a room, or Set Room Mapping first", sanitise(name_of(scene)),
 			why)
 	end
 	return id, why
@@ -1806,7 +2243,7 @@ function scenes:add_scene(rid, room_id, done)
 			entry.device_id))
 		return false
 	end
-	local scene = self.catalogue[rid]
+	local scene = self:record_of(rid)
 	if not scene then
 		done(false, string.format("Not added: scene %s is not on the bridge (Refresh Scenes and try again)", tostring(rid)))
 		return false
@@ -1819,7 +2256,7 @@ function scenes:add_scene(rid, room_id, done)
 	end
 
 	self.adding, self.adding_since = true, os.time()
-	local label = sanitise(scene.name or "?")
+	local label = sanitise(name_of(scene))
 	self:create_scenes({ { scene = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.adding = false
 		self:reconcile(true)
@@ -1840,9 +2277,11 @@ function scenes:add_scene(rid, room_id, done)
 end
 
 -- Add All Scenes Of Room: every unimported, non-tombstoned scene of the
--- group into its mapped room, one AddDevice at a time; tombstoned ones are
--- listed. No GET first: the catalogue follows the stream (Refresh Scenes
--- exists for doubt). done(ok, text) once, at the end.
+-- group into its mapped room, one AddDevice at a time, the time-based ones
+-- after the ordinary ones, each with its kind (docs/smart-scenes-design.md
+-- Decision 9); tombstoned ones are listed. No GET first: the catalogues
+-- follow the stream (Refresh Scenes exists for doubt). done(ok, text) once,
+-- at the end.
 function scenes:add_all_of_group(group_rid, done)
 	done = done or function() end
 	local busy = self:busy_text()
@@ -1862,6 +2301,10 @@ function scenes:add_all_of_group(group_rid, done)
 	end
 	local label = sanitise(self:group_label(group_rid))
 	local all = self:scenes_of_group(group_rid)
+	local plain_count = #all
+	for _, record in ipairs(self:scenes_of_group(group_rid, true)) do
+		all[#all + 1] = record
+	end
 	if #all == 0 then
 		done(false, string.format("Not added: %s has no scenes", label))
 		return false
@@ -1879,7 +2322,7 @@ function scenes:add_all_of_group(group_rid, done)
 			imported = imported + 1
 		elseif self:is_tombstoned(scene.rid) then
 			local tomb = self.reg:tombstones()[scene.rid]
-			deleted[#deleted + 1] = string.format("%s (deleted %s)", sanitise(scene.name or "?"), date_of(tomb.deleted_at))
+			deleted[#deleted + 1] = string.format("%s (deleted %s)", sanitise(name_of(scene)), date_of(tomb.deleted_at))
 		else
 			jobs[#jobs + 1] = { scene = scene, room_id = room_id, room_name = room_name }
 		end
@@ -1890,19 +2333,22 @@ function scenes:add_all_of_group(group_rid, done)
 		if #created > 0 then
 			local names = {}
 			for _, c in ipairs(created) do
-				names[#names + 1] = string.format("%s (device %d)", sanitise(c.scene.name or "?"), c.device_id)
+				names[#names + 1] = string.format("%s (device %d)", sanitise(name_of(c.scene)), c.device_id)
 			end
 			parts[#parts + 1] = string.format("Added %s of %s to %s: %s", plural(#created, "scene"), label, room_name,
 				table.concat(names, ", "))
-		elseif #jobs == 0 and #deleted == 0 then
+		elseif #jobs == 0 and #deleted == 0 and plain_count == #all then
 			parts[#parts + 1] = string.format("No new scenes in %s (%d on bridge, %d imported)", label, #all, imported)
+		elseif #jobs == 0 and #deleted == 0 then
+			parts[#parts + 1] = string.format("No new scenes in %s (%d scenes and %d time-based on bridge, %d imported)",
+				label, plain_count, #all - plain_count, imported)
 		else
 			parts[#parts + 1] = "Added no scenes"
 		end
 		if #failed > 0 then
 			local names = {}
 			for _, scene in ipairs(failed) do
-				names[#names + 1] = sanitise(scene.name or "?")
+				names[#names + 1] = sanitise(name_of(scene))
 			end
 			parts[#parts + 1] = string.format("AddDevice failed for %d: %s", #failed, table.concat(names, ", "))
 		end
@@ -1930,7 +2376,9 @@ function scenes:add_all_of_group(group_rid, done)
 end
 
 -- Re-link Scene: the entry keeps its device, proxy, programming and name and
--- swaps the rid; the device hears its new configuration and state. ok, text.
+-- swaps the rid; the device hears its new configuration and state. Either
+-- kind to either kind: the entry takes the new scene's kind and CONFIGURE
+-- carries it (docs/smart-scenes-design.md Decision 12). ok, text.
 function scenes:relink(device_id, new_rid)
 	local busy = self:busy_text()
 	if busy then
@@ -1953,7 +2401,7 @@ function scenes:relink(device_id, new_rid)
 		return false, string.format("Not re-linked: %s is already linked to device %d", self:entry_label(new_rid, holder),
 			holder.device_id)
 	end
-	local scene = self.catalogue[new_rid]
+	local scene = self:record_of(new_rid)
 	if not scene then
 		return false, string.format("Not re-linked: scene %s is not on the bridge (Refresh Scenes and try again)",
 			tostring(new_rid))
@@ -1961,6 +2409,7 @@ function scenes:relink(device_id, new_rid)
 	local old_label = self:entry_label(old_rid, entry)
 	local fields = self:fields_from_scene(scene)
 	fields.name_dismissed = registry.CLEAR
+	fields.kind = fields.kind or registry.CLEAR
 	local relinked, err = self.reg:relink(old_rid, new_rid, fields)
 	if not relinked then
 		return false, "Not re-linked: " .. tostring(err)
@@ -1976,7 +2425,8 @@ function scenes:relink(device_id, new_rid)
 	return true, text
 end
 
--- The unimported scenes whose Hue name or creation name matches one of `names`.
+-- The unimported scenes of either kind whose Hue name, base name (a
+-- time-based one's) or creation name matches one of `names`.
 function scenes:match_unimported_by_name(names)
 	local wanted = {}
 	for _, name in ipairs(names) do
@@ -1986,7 +2436,7 @@ function scenes:match_unimported_by_name(names)
 	end
 	local out = {}
 	for _, scene in ipairs(self:unimported_scenes()) do
-		if wanted[norm(scene.name)] or wanted[norm(self:creation_name(scene))] then
+		if wanted[norm(scene.name)] or wanted[norm(name_of(scene))] or wanted[norm(self:creation_name(scene))] then
 			out[#out + 1] = scene
 		end
 	end
@@ -2050,9 +2500,10 @@ function scenes:link_devices()
 		elseif rid then
 			local entry = self:adopt(id, rid, hello, "from its own persisted rid (Link Devices)")
 			if entry then
+				local record = self:record_of(rid)
 				linked[#linked + 1] = string.format("%s to %s by its rid%s", who,
-					self.catalogue[rid] and self:scene_label(self.catalogue[rid]) or self:entry_label(rid, entry),
-					self.catalogue[rid] and "" or " (not on the bridge: marked gone)")
+					record and self:scene_label(record) or self:entry_label(rid, entry),
+					record and "" or (entry.state == "gone" and " (not on the bridge: marked gone)" or ""))
 				self:answer_hello(rid)
 			else
 				problems[#problems + 1] = string.format("%s: could not register %s (see the Lua output)", who, rid)
@@ -2116,7 +2567,7 @@ function scenes:forget(device_id)
 	self.conflicts[rid] = nil
 	self:clear_conflicts_for(device_id)
 	self.announced[device_id] = nil
-	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = entry.name })
+	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = is_smart(entry) and name_of(entry) or entry.name })
 	local ok, err = self:project_call("unbind", device_id)
 	if not ok then
 		self.ctx.log.warn("scenes: unbind of device %d failed: %s", device_id, tostring(err))
@@ -2245,15 +2696,18 @@ end
 
 -- Texts ---------------------------------------------------------------------------
 
--- The Scenes property: "125 on bridge, 3 imported, 0 missing, 0 unbound, 0
--- deleted"; "<n> imported" before the first GET.
+-- The Scenes property: "125 scenes and 15 time-based on bridge, 3 imported,
+-- 0 missing, 0 unbound, 0 deleted", the devices of both kinds counted
+-- together (docs/smart-scenes-design.md Decision 14); "?" time-based until a
+-- /smart_scene GET has succeeded; "<n> imported" before the first GET.
 function scenes:summary()
 	if not self.synced then
 		return string.format("%d imported", self:count())
 	end
 	local c = self.reg:counts()
-	return string.format("%d on bridge, %d imported, %d missing, %d unbound, %d deleted", self:bridge_count(),
-		self:count(), c.gone, c.unbound, c.tombstones)
+	return string.format("%d scenes and %s time-based on bridge, %d imported, %d missing, %d unbound, %d deleted",
+		self:bridge_count(), self.smart_synced and tostring(self:smart_count()) or "?", self:count(), c.gone, c.unbound,
+		c.tombstones)
 end
 
 -- The Attention items (driver.lua joins them after the lights'): missing
@@ -2297,8 +2751,8 @@ function scenes:attention_items()
 		local label = tostring(rid)
 		if entry then
 			label = self:entry_label(rid, entry)
-		elseif self.catalogue[rid] then
-			label = self:scene_label(self.catalogue[rid])
+		elseif self:record_of(rid) then
+			label = self:scene_label(self:record_of(rid))
 		end
 		items[#items + 1] = string.format("2 devices claim Hue scene %s: %d and %d (Forget Scene on one of them)", label,
 			c.holder, c.claimant)
@@ -2334,20 +2788,59 @@ local function empty_list(text)
 	return { { text = text, value = "" } }
 end
 
--- Add Scene / Re-link's Scene: the unimported scenes as "Kitchen: Relax",
--- grouped by group label then name, dynamic ones suffixed, tombstoned last.
+-- The base names of the time-based scenes whose time slots target each
+-- scene: { [scene rid] = "Golden hours, Natural light" } (distinct, name
+-- order), for the picker's "(in …)" mark (docs/smart-scenes-design.md
+-- Decision 8).
+function scenes:slot_owners()
+	local sets = {}
+	for _, record in pairs(self.smart_catalogue) do
+		for _, slot in ipairs(type(record.slots) == "table" and record.slots or {}) do
+			if type(slot) == "table" and slot.target_rid ~= nil then
+				sets[slot.target_rid] = sets[slot.target_rid] or {}
+				sets[slot.target_rid][sanitise(name_of(record))] = true
+			end
+		end
+	end
+	local out = {}
+	for target, set in pairs(sets) do
+		local names = {}
+		for name in pairs(set) do
+			names[#names + 1] = name
+		end
+		table.sort(names, function(a, b)
+			if a:lower() ~= b:lower() then
+				return a:lower() < b:lower()
+			end
+			return a < b
+		end)
+		out[target] = table.concat(names, ", ")
+	end
+	return out
+end
+
+-- Add Scene / Re-link's Scene: the unimported scenes of both kinds as
+-- "Kitchen: Relax", grouped by group label, the time-based ones first
+-- ("Kitchen: Golden hours (time-based)"), then name; dynamic ones suffixed,
+-- the slot scenes of time-based ones marked "(in Golden hours)"; tombstoned
+-- last.
 function scenes:picker_scenes()
 	if not self.synced then
 		return empty_list("(no scenes fetched yet; connect the event stream)")
 	end
+	local owners = self:slot_owners()
 	local plain, deleted = {}, {}
 	for _, scene in ipairs(self:unimported_scenes()) do
+		local text = self:scene_label(scene, true)
+		if not is_smart(scene) and owners[scene.rid] then
+			text = text .. " (in " .. owners[scene.rid] .. ")"
+		end
 		local tomb = self.reg:tombstones()[scene.rid]
 		if tomb then
-			deleted[#deleted + 1] = { text = string.format("%s (deleted from Composer %s)", self:scene_label(scene, true),
-				date_of(tomb.deleted_at)), value = scene.rid }
+			deleted[#deleted + 1] = { text = string.format("%s (deleted from Composer %s)", text, date_of(tomb.deleted_at)),
+				value = scene.rid }
 		else
-			plain[#plain + 1] = { text = self:scene_label(scene, true), value = scene.rid }
+			plain[#plain + 1] = { text = text, value = scene.rid }
 		end
 	end
 	for _, item in ipairs(deleted) do
@@ -2359,27 +2852,36 @@ function scenes:picker_scenes()
 	return plain
 end
 
--- Add All Scenes Of Room's Hue Room: the groups that have scenes, with their
--- mapping and counts: "Kitchen → Kitchen (7 scenes)", "Attic (zone) →
--- (unmapped) (2 scenes, 1 imported)".
+-- Add All Scenes Of Room's Hue Room: the groups that have scenes of either
+-- kind, with their mapping and counts: "Kitchen → Kitchen (7 scenes)",
+-- "Attic (zone) → (unmapped) (2 scenes, 1 imported)", "Downstairs (zone) →
+-- (unmapped) (16 scenes, 2 time-based)" (docs/smart-scenes-design.md
+-- Decision 8; imported counts both kinds).
 function scenes:picker_groups()
 	if not self.synced then
 		return empty_list("(no scenes fetched yet; connect the event stream)")
 	end
 	local rooms = self:project_rooms()
-	local counts, imported = {}, {}
-	for rid, scene in pairs(self.catalogue) do
-		local g = scene.group_rid
-		if g then
-			counts[g] = (counts[g] or 0) + 1
-			if self.registry[rid] then
-				imported[g] = (imported[g] or 0) + 1
+	local counts, smart, imported = {}, {}, {}
+	local function tally(catalogue, into)
+		for rid, scene in pairs(catalogue) do
+			local g = scene.group_rid
+			if g then
+				into[g] = (into[g] or 0) + 1
+				if self.registry[rid] then
+					imported[g] = (imported[g] or 0) + 1
+				end
 			end
 		end
 	end
+	tally(self.catalogue, counts)
+	tally(self.smart_catalogue, smart)
+	for group_rid in pairs(smart) do
+		counts[group_rid] = counts[group_rid] or 0
+	end
 	local list = {}
 	for group_rid, n in pairs(counts) do
-		local scene = self:scenes_of_group(group_rid)[1]
+		local scene = self:scenes_of_group(group_rid)[1] or self:scenes_of_group(group_rid, true)[1]
 		local label = self:group_label(group_rid, scene)
 		local mapping = self:room_mapping(group_rid)
 		local target
@@ -2392,11 +2894,14 @@ function scenes:picker_groups()
 		else
 			target = "(Control4 room gone)"
 		end
-		local tally = plural(n, "scene")
-		if (imported[group_rid] or 0) > 0 then
-			tally = tally .. string.format(", %d imported", imported[group_rid])
+		local text = plural(n, "scene")
+		if (smart[group_rid] or 0) > 0 then
+			text = text .. string.format(", %d time-based", smart[group_rid])
 		end
-		list[#list + 1] = { text = string.format("%s → %s (%s)", sanitise(label), sanitise(target), tally), value = group_rid,
+		if (imported[group_rid] or 0) > 0 then
+			text = text .. string.format(", %d imported", imported[group_rid])
+		end
+		list[#list + 1] = { text = string.format("%s → %s (%s)", sanitise(label), sanitise(target), text), value = group_rid,
 			key = label:lower() }
 	end
 	table.sort(list, function(a, b)
@@ -2414,6 +2919,13 @@ function scenes:picker_groups()
 	return list
 end
 
+-- "Kitchen: Relax" for an entry, "Kitchen: Golden hours (time-based)" for a
+-- time-based one: how the device pickers name a registered scene.
+function scenes:entry_picker_label(rid, entry)
+	return sanitise(self:group_label(entry.group_rid, entry)) .. ": " .. self:entry_label(rid, entry)
+		.. (is_smart(entry) and " (time-based)" or "")
+end
+
 -- Re-link's Device: the gone and unbound entries.
 function scenes:picker_relink_devices()
 	local list = {}
@@ -2421,8 +2933,7 @@ function scenes:picker_relink_devices()
 		for _, rid in ipairs(self.reg:rids(state)) do
 			local entry = self.registry[rid]
 			-- Labelled like Forget Scene's picker, group first, so the two read alike.
-			list[#list + 1] = { text = string.format("%s: %s (device %d, %s since %s)",
-				sanitise(self:group_label(entry.group_rid, entry)), self:entry_label(rid, entry),
+			list[#list + 1] = { text = string.format("%s (device %d, %s since %s)", self:entry_picker_label(rid, entry),
 				entry.device_id, state, short_date_of(entry[state .. "_since"])), value = tostring(entry.device_id) }
 		end
 	end
@@ -2437,8 +2948,7 @@ function scenes:picker_forget_devices()
 	local list = {}
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
-		local text = string.format("%s: %s (device %d)", sanitise(self:group_label(entry.group_rid, entry)),
-			self:entry_label(rid, entry), entry.device_id)
+		local text = string.format("%s (device %d)", self:entry_picker_label(rid, entry), entry.device_id)
 		if entry.state ~= "linked" then
 			text = text .. " " .. entry.state
 		end
