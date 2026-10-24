@@ -218,6 +218,14 @@ local function new_lights()
 		log = log,
 		now = os.time,
 		project = project_calls,
+		-- Zone-light devices run the light driver too (docs/zone-light-design.md):
+		-- the lights module never adopts, links or messages them. Read live,
+		-- since the zone module is created after the lights.
+		skip_devices = function()
+			local zl = state.zone_lights
+			local ids = zl and type(zl.device_ids) == "function" and zl:device_ids() or nil
+			return type(ids) == "table" and ids or {}
+		end,
 	})
 end
 
@@ -1094,6 +1102,13 @@ dispatch.commands["Forget_Light"] = function(params)
 	end
 	if zone_light_device(device) then
 		local _, text = state.zone_lights:forget(device)
+		-- A stale light entry for the same device (an older bridge adopted
+		-- the zone light's hello as a light) is dropped too; the lights
+		-- module neither unbinds nor messages a device it knows is foreign.
+		if light_device_ids()[device] then
+			local _, stale = state.lights:forget(device)
+			text = tostring(text) .. " | " .. tostring(stale)
+		end
 		return last_action(text)
 	end
 	local _, text = state.lights:forget(device)
@@ -1157,8 +1172,23 @@ dispatch.commands["Map_Rooms_By_Name"] = function()
 	if can("map_rooms_by_name") then last_action(state.lights:map_rooms_by_name()) end
 end
 
+-- The zone-light devices for the Room Audit: each with the zone/room it
+-- stands for, audited against that group's mapping like a light.
+local function zone_audit_entries()
+	local entries = {}
+	local reg = state.zone_lights and state.zone_lights.registry
+	if type(reg) == "table" then
+		for rid, entry in pairs(reg) do
+			if type(entry) == "table" and entry.device_id then
+				entries[#entries + 1] = { device_id = entry.device_id, name = entry.name, group_rid = rid }
+			end
+		end
+	end
+	return entries
+end
+
 dispatch.commands["Room_Audit"] = function()
-	if can("room_audit") then last_action(state.lights:room_audit()) end
+	if can("room_audit") then last_action(state.lights:room_audit(zone_audit_entries())) end
 end
 
 -- From a light (or zone light) being deleted in Composer (docs/import-design.md §4).

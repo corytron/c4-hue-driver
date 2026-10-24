@@ -72,6 +72,15 @@ lights.RESOURCES = {
 --   project                  the project calls of docs/import-design.md §13:
 --                            rooms(), hierarchy(), devices(filter), bound(),
 --                            unbind(device_id), rename(id, name), display_name(id)
+--   skip_devices             the device ids another module owns, as a set
+--                            { [device_id] = true } (or a list of ids), or a
+--                            function returning one, consulted at each use.
+--                            Zone-light devices run hue_light.c4z too
+--                            (docs/zone-light-design.md §4): this module never
+--                            adopts, lists as a candidate, re-links or messages
+--                            one of them; Forget Light on one only drops the
+--                            stale entry. Optional; link_devices(skip_ids) adds
+--                            to it for one call.
 function lights.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "lights.new: ctx.http is required")
@@ -134,6 +143,7 @@ function lights.new(ctx)
 		announced_new = {},        -- rid → true once a new light was logged
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id } (two devices, one rid)
 		early_hellos = {},         -- HUE_HELLOs received before load(), answered after configure_all()
+		foreign_logged = {},       -- rid → true once an entry held by another module's device was logged
 		loaded = false,
 		synced = false,            -- a full GET has succeeded (new/missing counts mean something)
 		groups_loaded = false,     -- /room, /zone, /bridge_home fetched in this run (a missing group means deleted)
@@ -274,6 +284,67 @@ end
 -- The protocol id alone; the name the import used before ids_from.
 function lights.protocol_id_from(info)
 	return lights.ids_from(info).protocol
+end
+
+-- Add the device ids of `ids` (a set { [id] = true } or a list of ids) to
+-- the set `out`, as numbers. Anything else in the table is ignored.
+local function add_ids(out, ids)
+	if type(ids) ~= "table" then
+		return out
+	end
+	for k, v in pairs(ids) do
+		local id
+		if type(v) == "number" then
+			id = v
+		elseif v == true then
+			id = tonumber(k)
+		end
+		if id and id > 0 then
+			out[id] = true
+		end
+	end
+	return out
+end
+
+-- The device ids this module must leave alone: ctx.skip_devices (a set, a
+-- list or a function returning one; a failing function reads as empty) plus
+-- `extra` in the same shapes. Always a fresh set.
+function lights:skip_set(extra)
+	local out = {}
+	local given = self.ctx.skip_devices
+	if type(given) == "function" then
+		local ok, result = pcall(given)
+		if ok then
+			given = result
+		else
+			self.ctx.log.warn("lights: skip_devices failed: %s", tostring(result))
+			given = nil
+		end
+	end
+	add_ids(out, given)
+	add_ids(out, extra)
+	return out
+end
+
+-- True when the device belongs to another module (see ctx.skip_devices).
+function lights:foreign(device_id)
+	if self.ctx.skip_devices == nil then
+		return false
+	end
+	local id = positive(device_id)
+	return id ~= nil and self:skip_set()[id] == true
+end
+
+-- Every message to a device goes through here: one owned by another module
+-- is never told anything by this one, whatever a stale entry says.
+function lights:tell(device_id, command, params)
+	if self:foreign(device_id) then
+		self.ctx.log.debug("lights: %s to device %s not sent: the device belongs to another module", tostring(command),
+			tostring(device_id))
+		return false
+	end
+	self.ctx.send(device_id, command, params)
+	return true
 end
 
 -- Name order, case-insensitive, ties by rid: the order every list is in.
@@ -544,7 +615,10 @@ function lights:project_bound_set()
 end
 
 -- The hue_light devices in the project as { [device_id] = GetDevices info },
--- or nil when the call failed or returned nothing: unknown, never "deleted" (§5).
+-- or nil when the call failed or returned nothing: unknown, never "deleted"
+-- (§5). Zone-light devices are among them (same driver); callers that choose
+-- candidates cut them out with skip_set(), callers that ask whether a device
+-- still exists do not (it does).
 function lights:project_lights()
 	local ok, raw = self:project_call("devices", { C4iNames = lights.LIGHT_DRIVER })
 	if not ok or type(raw) ~= "table" or next(raw) == nil then
@@ -876,7 +950,7 @@ function lights:send_configure(rid)
 	end
 	local params = self:configure_params(rid, entry)
 	self.last_configure[rid] = signature(params)
-	self.ctx.send(entry.device_id, "HUE_CONFIGURE", params)
+	self:tell(entry.device_id, "HUE_CONFIGURE", params)
 	return true
 end
 
@@ -896,7 +970,7 @@ function lights:send_state(rid, reason)
 	if not entry or not model then
 		return false
 	end
-	self.ctx.send(entry.device_id, "HUE_STATE", hue_model.state_params(model, nil, reason))
+	self:tell(entry.device_id, "HUE_STATE", hue_model.state_params(model, nil, reason))
 	return true
 end
 
@@ -921,7 +995,7 @@ function lights:announce_gone(rid, reason)
 		return false
 	end
 	self:send_configure(rid)
-	self.ctx.send(entry.device_id, "HUE_STATE", { rid = rid, online = "false", reason = reason or "event" })
+	self:tell(entry.device_id, "HUE_STATE", { rid = rid, online = "false", reason = reason or "event" })
 	return true
 end
 
@@ -966,8 +1040,14 @@ end
 
 -- Register a bound device for a rid the registry lacks (§4 auto-adopt, Link
 -- Devices). Fields from the model when it is known, else from what the light
--- announced. Returns the entry or nil.
+-- announced. A device another module owns is never adopted. Returns the
+-- entry or nil.
 function lights:adopt(device_id, rid, hello, how)
+	if self:foreign(device_id) then
+		self.ctx.log.warn("lights: not adopting device %d for %s: the device belongs to another module (a zone light)",
+			device_id, tostring(rid))
+		return nil
+	end
 	local model = self.models[rid]
 	local fields = self:fields_from_model(model)
 	fields.device_id = device_id
@@ -1149,6 +1229,22 @@ function lights:reconcile(no_save)
 	local r = self.reg:reconcile({ bound = bound, present = present })
 	if #r.unbound + #r.relinked + #r.tombstoned > 0 then
 		self:mark()
+	end
+	-- An entry whose device another module owns (a zone light a build without
+	-- kinds adopted as a light, docs/zone-light-design.md §7 Q11): the device
+	-- exists, so it is not tombstoned, and it is never messaged (tell());
+	-- Forget Light drops the entry. Logged once per run.
+	local skip = self:skip_set()
+	if next(skip) ~= nil then
+		for _, rid in ipairs(self.reg:rids()) do
+			local entry = self.registry[rid]
+			if skip[entry.device_id] and not self.foreign_logged[rid] then
+				self.foreign_logged[rid] = true
+				self.ctx.log.warn("lights: %s (device %d) is registered as a light, but the device is a zone light; "
+					.. "Forget Light drops the stale entry (the device stays bound)", self:entry_label(rid, entry),
+					entry.device_id)
+			end
+		end
 	end
 	for _, rid in ipairs(r.tombstoned) do
 		local tomb = self.reg:tombstones()[rid] or {}
@@ -1396,7 +1492,7 @@ function lights:on_light_item(item, kind)
 	end
 	local params = hue_model.state_params(model, changed, "event")
 	if hue_model.has_state(params) then
-		self.ctx.send(entry.device_id, "HUE_STATE", params)
+		self:tell(entry.device_id, "HUE_STATE", params)
 		return 1
 	end
 	return 0
@@ -1421,7 +1517,7 @@ function lights:on_connectivity_item(item)
 			self:track_offline(rid, model)
 		end
 		if entry and model and entry.state ~= "unbound" then
-			self.ctx.send(entry.device_id, "HUE_STATE", hue_model.state_params(model, { "online" }, "event"))
+			self:tell(entry.device_id, "HUE_STATE", hue_model.state_params(model, { "online" }, "event"))
 			sent = sent + 1
 		end
 	end
@@ -1806,6 +1902,10 @@ function lights:relink(device_id, new_rid)
 	if not old_rid then
 		return false, string.format("Not re-linked: device %d is not a registered light", device_id)
 	end
+	if self:foreign(device_id) then
+		return false, string.format("Not re-linked: device %d is a zone light; Forget Light drops its stale light entry",
+			device_id)
+	end
 	local holder = self.registry[new_rid]
 	if holder then
 		if holder.device_id == device_id then
@@ -1859,8 +1959,11 @@ end
 -- Link Devices: every device bound to the bridge that the registry lacks
 -- is adopted by the rid it announced in HUE_HELLO, else by an exact, unique
 -- name match (Composer name or announced name) against the unimported
--- lights. Returns the report text.
-function lights:link_devices()
+-- lights. `skip_ids` (a set { [device_id] = true } or a list) names devices
+-- another module owns for this call, on top of ctx.skip_devices: the
+-- zone-light devices, which run the light driver too and would otherwise
+-- be matched by name (docs/zone-light-design.md §4). Returns the report text.
+function lights:link_devices(skip_ids)
 	local busy = self:busy_text()
 	if busy then
 		return busy
@@ -1869,23 +1972,24 @@ function lights:link_devices()
 	if not bound then
 		return "Not linked: the bound-device lookup failed (see the Lua output)"
 	end
-	-- Scene devices share binding 1 (docs/scenes-design.md); only hue_light
-	-- devices are candidates here. Without the project lookup every bound
-	-- device is considered, as before scene devices existed.
+	-- Scene devices share binding 1 (docs/scenes-design.md) and zone-light
+	-- devices share the driver: only hue_light devices outside the skip set
+	-- are candidates here. Without the project lookup every bound device
+	-- outside the skip set is considered, as before scene devices existed.
 	local in_project = self:project_lights()
-	if in_project then
-		local only_lights = {}
-		for id, name in pairs(bound) do
-			if in_project[tonumber(id) or id] then
-				only_lights[id] = name
-			end
+	local skip = self:skip_set(skip_ids)
+	local candidates = {}
+	for id in pairs(bound) do
+		local n = positive(id)
+		if n and not skip[n] and (not in_project or in_project[n]) then
+			candidates[n] = true
 		end
-		bound = only_lights
 	end
+	bound = candidates
 	local ids = {}
 	for id in pairs(bound) do
-		if positive(id) and not self.reg:by_device(id) then
-			ids[#ids + 1] = positive(id)
+		if not self.reg:by_device(id) then
+			ids[#ids + 1] = id
 		end
 	end
 	table.sort(ids)
@@ -1988,16 +2092,25 @@ function lights:forget(device_id)
 	self:mark()
 	self.last_configure[rid] = nil
 	self.conflicts[rid] = nil
+	self.foreign_logged[rid] = nil
 	self:clear_conflicts_for(device_id)
 	self.announced[device_id] = nil
-	self.ctx.send(device_id, "HUE_FORGOTTEN", { rid = rid, name = entry.name })
-	local ok, err = self:project_call("unbind", device_id)
-	if not ok then
-		self.ctx.log.warn("lights: unbind of device %d failed: %s", device_id, tostring(err))
+	local text
+	if self:foreign(device_id) then
+		-- A stale entry for a device another module owns (a zone light): the
+		-- entry goes; the device, its binding and its own module are left alone.
+		text = string.format("Forgot %s (device %d): dropped the stale light entry; the device stays bound as a zone light",
+			label, device_id)
+	else
+		self:tell(device_id, "HUE_FORGOTTEN", { rid = rid, name = entry.name })
+		local ok, err = self:project_call("unbind", device_id)
+		if not ok then
+			self.ctx.log.warn("lights: unbind of device %d failed: %s", device_id, tostring(err))
+		end
+		text = string.format("Forgot %s (device %d): unbound and left in the project for you to delete; "
+			.. "the Hue light is listed under Add Light again", label, device_id)
 	end
 	self:flush()
-	local text = string.format("Forgot %s (device %d): unbound and left in the project for you to delete; "
-		.. "the Hue light is listed under Add Light again", label, device_id)
 	self.ctx.log.always("lights: %s", text)
 	return true, text
 end
@@ -2015,7 +2128,7 @@ function lights:forget_request(params)
 		return false, "Not forgotten: the light named no device"
 	end
 	if not self.reg:by_device(device_id) then
-		self.ctx.send(device_id, "HUE_FORGOTTEN", { rid = params.rid, name = params.name })
+		self:tell(device_id, "HUE_FORGOTTEN", { rid = params.rid, name = params.name })
 		self.announced[device_id] = nil
 		return false, string.format("Not forgotten: device %d is not a registered light (told it so)", device_id)
 	end
@@ -2264,18 +2377,35 @@ end
 
 -- Room Audit: every linked device whose Control4 room (GetDevices → roomId)
 -- differs from the room its Hue room maps to, as a drag list [Q 12]. Reads
--- only; nothing is moved (no API exists). Returns the text.
-function lights:room_audit()
+-- only; nothing is moved (no API exists). `extra` audits another module's
+-- devices in the same list (the zone lights, docs/zone-light-design.md §4):
+-- a list of { device_id, name, group_rid }, each checked after the lights
+-- against the mapping of `group_rid` (the zone or room the device stands
+-- for), with the lights' texts; `name` is the fallback when the project has
+-- no name for the device. An entry whose group has no mapping, whose id is
+-- not positive or whose device a light already holds is left out, as a light
+-- in an unmapped room is. Returns the text.
+function lights:room_audit(extra)
 	if next(self.reg:room_mappings()) == nil then
 		return "No room mappings; use Map Rooms By Name or Set Room Mapping first"
 	end
-	local checks, ids = {}, {}
+	local checks, ids, seen = {}, {}, {}
+	local function check(device_id, name, group_rid)
+		local mapping = self.reg:room_mapping(group_rid)
+		if mapping and mapping.c4_room_id and not seen[device_id] then
+			seen[device_id] = true
+			checks[#checks + 1] = { device_id = device_id, name = name, group_rid = group_rid, mapping = mapping }
+			ids[#ids + 1] = tostring(device_id)
+		end
+	end
 	for _, rid in ipairs(self.reg:rids("linked")) do
 		local entry = self.registry[rid]
-		local mapping = self.reg:room_mapping(entry.hue_room_rid)
-		if mapping and mapping.c4_room_id then
-			checks[#checks + 1] = { rid = rid, entry = entry, mapping = mapping }
-			ids[#ids + 1] = tostring(entry.device_id)
+		check(entry.device_id, entry.name, entry.hue_room_rid)
+	end
+	for _, x in ipairs(type(extra) == "table" and extra or {}) do
+		local device_id = type(x) == "table" and positive(x.device_id) or nil
+		if device_id and type(x.group_rid) == "string" and x.group_rid ~= "" then
+			check(device_id, x.name, x.group_rid)
 		end
 	end
 	if #checks == 0 then
@@ -2292,12 +2422,12 @@ function lights:room_audit()
 	local rooms = self:project_rooms()
 	local lines, unknown = {}, 0
 	for _, c in ipairs(checks) do
-		local info = infos[c.entry.device_id]
+		local info = infos[c.device_id]
 		if type(info) ~= "table" then
 			unknown = unknown + 1
 		elseif tonumber(info.roomId) ~= c.mapping.c4_room_id then
-			local name = tostring(info.deviceName or c.entry.name)
-			local hue_room = self.groups:label(c.entry.hue_room_rid)
+			local name = tostring(info.deviceName or c.name or ("device " .. tostring(c.device_id)))
+			local hue_room = self:group_label(c.group_rid, c.mapping)
 			local target = rooms[c.mapping.c4_room_id]
 			if target then
 				lines[#lines + 1] = string.format("%s is in %s; Hue says %s → drag it to %s in Composer if you want it there",
