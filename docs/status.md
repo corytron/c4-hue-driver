@@ -39,9 +39,11 @@ this page disagree about the present, this page and the code win.
   Scenes), diagnostics. Follows each Hue room/zone's on/off and brightness
   from the event feed and tells scene devices.
   **Composer properties fit the column** (2026-10-24): Composer shows a value
-  on one line of about 75 characters and clips the rest, so `Room Mappings`
-  is a drop-down list (summary on the row, one mapping per line in the
-  list, a pick snaps back to the summary), `Scenes` reads "126 + 15
+  on one line of about 75 characters and clips the rest, so `Room Mappings`,
+  `Lights`, `Scenes`, `Zone Lights` and `Last Action` are drop-down lists
+  (the summary or text on the row, every item or a long text's "; "-parts
+  in the list, a pick snaps back; commas read as "‚" there, since the list
+  is comma-delimited), `Scenes` reads "126 + 15
   time-based on bridge, 2 imported, 2 deleted" (missing and unbound only
   when not zero) and `Stream Address` reads "10.00.002.143 (own queue,
   spelling 1 of 7)" or "… (shared queue with commands: <reason>)". Verified in
@@ -172,10 +174,11 @@ app, which also confirms that a grouped_light PUT takes `color` and
   of the scene's lights to that level (follows Hue's brightness override).
 - Code: `Stream Watchdog (s)` is declared with a minimum of 0 in
   `hue_bridge/driver.xml` but the code treats anything below 60 as 60.
-  Release builds also keep two diagnostic paths:
-  Test Connection's Host override and Connection Test's "Diagnostic Server"
-  target (insecure TLS), and the scene driver's `HUE_DUMP` handler is not
-  gated on the dev loop.
+  (Resolved 2026-10-24: release builds no longer carry the Dev Server and
+  Diagnostic Server properties, the Connection Test, Reload Credentials and
+  Check CA Pinning actions, the conntest and pinning modules, the Test
+  Connection host override or the scene driver's `HUE_DUMP`; development
+  builds keep them.)
 - The Composer project is unsaved.
 - Approvals: the owner approves everything, always (2026-10-24); the
   Windows session asked him once on its side to confirm that standing rule.
