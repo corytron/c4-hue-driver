@@ -154,9 +154,10 @@ and a Composer delete of a zone light (builds 196–199, Composer side only).
   7 has no screenshot of Add Zone Light yet (shots are in `build/shots/img/`).
 
 
-- Time-of-day scenes: whether a running schedule still advances to its
-  next slot after a whole-room dim (a 16:00 check on 2026-10-24 reads the
-  Golden hours device's Status after its 16:00 slot); whether `Recall As`
+- Time-of-day scenes: a running schedule advanced to its 16:00 slot and
+  the device showed "now Shine (from 16:00)" within two minutes (2026-10-24;
+  `docs/smart-scenes-research.md` §7), though whether the room had been
+  dimmed before that is not known; whether `Recall As`
   reappears on an ordinary device after a re-link from a time-based one
   (`SetPropertyAttribs(…, 0)`, assumed); the keypad on a time-of-day scene
   not yet tried by the owner.
