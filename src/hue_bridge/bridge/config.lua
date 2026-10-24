@@ -44,4 +44,64 @@ function config.normalise_bridge_id(value)
 	return id
 end
 
+-- Bridge generations (docs/bridge-compat-design.md). The round
+-- first-generation bridge never had the CLIP v2 API; a model id this table
+-- does not know but that starts with BSB is a newer Hue bridge and is let
+-- through; anything else is not a Hue bridge.
+config.MODELS = {
+	BSB001 = { label = "Hue Bridge v1, round", supported = false },
+	BSB002 = { label = "Hue Bridge v2, square", supported = true },
+	BSB003 = { label = "Hue Bridge Pro", supported = true },
+}
+
+-- The first bridge software with the CLIP v2 API [assumed: Signify's
+-- developer notes give 1948086000].
+config.MIN_FIRMWARE = 1948086000
+
+function config.model_label(modelid)
+	if modelid == nil or modelid == "" then
+		return ""
+	end
+	local id = tostring(modelid)
+	local known = config.MODELS[id]
+	if known then
+		return string.format("%s (%s)", known.label, id)
+	elseif id:match("^BSB") then
+		return string.format("Hue bridge %s (untested model)", id)
+	end
+	return string.format("%s (not a Hue bridge)", id)
+end
+
+function config.model_supported(modelid)
+	local id = tostring(modelid or "")
+	local known = config.MODELS[id]
+	if known then
+		return known.supported
+	end
+	return id:match("^BSB") ~= nil
+end
+
+-- "ok", "old" or "unknown" (not a number).
+function config.firmware_check(swversion)
+	local n = tonumber(swversion)
+	if not n then
+		return "unknown"
+	end
+	return n >= config.MIN_FIRMWARE and "ok" or "old"
+end
+
+function config.firmware_label(swversion, apiversion)
+	if swversion == nil or swversion == "" then
+		return ""
+	end
+	local text = tostring(swversion)
+	if apiversion and apiversion ~= "" then
+		text = text .. " (API " .. tostring(apiversion) .. ")"
+	end
+	if config.firmware_check(swversion) == "old" then
+		text = text .. string.format("; older than %d, update the bridge in the Hue app", config.MIN_FIRMWARE)
+	end
+	return text
+end
+
 return config
