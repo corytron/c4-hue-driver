@@ -42,6 +42,7 @@ function pairing.probe(ip, callback)
 			bridge_id = id,
 			model = cfg.modelid,
 			sw_version = cfg.swversion,
+			api_version = cfg.apiversion,
 			name = cfg.name,
 		})
 	end)
@@ -72,6 +73,23 @@ function pairing.parse_response(json)
 	return "error", "unexpected response"
 end
 
+-- Why a probed bridge cannot be paired, or nil when it can.
+function pairing.refusal(ip, info)
+	local model = tostring(info.model or "")
+	if not config.model_supported(model) then
+		if model == "BSB001" then
+			return "This is a Hue Bridge v1, round (BSB001): it has no CLIP v2 API; this driver needs a Hue Bridge v2 "
+				.. "(square) or a Hue Bridge Pro"
+		end
+		return string.format("The device at %s is not a Hue bridge (model %s)", ip, model ~= "" and model or "unknown")
+	end
+	if config.firmware_check(info.sw_version) == "old" then
+		return string.format("Bridge firmware %s is older than %d, the first with the CLIP v2 API; update the bridge "
+			.. "in the Hue app, then pair again", tostring(info.sw_version), config.MIN_FIRMWARE)
+	end
+	return nil
+end
+
 -- Run the whole flow. `handlers`:
 --   on_probed(info)        bridge answered the config request
 --   on_link_button(info)   press the button and try again
@@ -81,10 +99,17 @@ function pairing.pair(ip, handlers)
 	pairing.probe(ip, function(info, err)
 		if not info then
 			log.warn("pairing: config probe failed: %s", err)
-			return handlers.on_error("Bridge not reachable: " .. err)
+			return handlers.on_error(string.format("No Hue bridge answered at %s: %s", ip, tostring(err)))
 		end
 		if handlers.on_probed then
 			handlers.on_probed(info)
+		end
+		-- The generation and the firmware, before any key is asked for
+		-- (docs/bridge-compat-design.md Decision 2).
+		local refusal = pairing.refusal(ip, info)
+		if refusal then
+			log.warn("pairing refused: %s", refusal)
+			return handlers.on_error(refusal)
 		end
 		http.request({
 			ip = ip,
