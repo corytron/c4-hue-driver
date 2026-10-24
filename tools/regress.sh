@@ -32,17 +32,33 @@ run_action() { # run_action "Action" [Param=value ...] -> prints the wait output
 	"${DEVCTL[@]}" wait "$id" --timeout 120 2>&1
 }
 
+# An action's handler returns before the bridge answers, and the property
+# snapshot in `status` refreshes only with the 30 s heartbeat: read the
+# shipped log (every Status and Last Action text is logged as it is set)
+# until <pattern> shows up, at most <seconds>; prints the matching lines.
+settle() { # settle <pattern> <seconds>
+	local i out
+	for i in $(seq 1 "$2"); do
+		out="$("${DEVCTL[@]}" log 2>&1 | tail -300 | grep -E "$1" | tail -3)"
+		if [[ -n "$out" ]]; then echo "$out"; return 0; fi
+		sleep 2
+	done
+	echo "(no match in the shipped log after $2 tries)"; return 1
+}
+
 say "Test Connection"
-out="$(run_action "Test Connection")"; echo "$out" | grep -E "Status|Last Action" | head -4
-expect "Test OK: HTTP 200" "$out" "Test Connection answers Test OK"
+run_action "Test Connection" >/dev/null
+out="$(settle "Test Connection via .*: (OK|.*) after [0-9]+ s" 20)"; echo "$out"
+expect "Test Connection via .*: OK after" "$out" "Test Connection answers OK"
 
 say "Refresh Scenes"
-out="$(run_action "Refresh Scenes")"; echo "$out" | grep -E "Status|Last Action|Scenes" | head -4
+run_action "Refresh Scenes" >/dev/null
+out="$(settle "Scenes refreshed|Scene refresh failed" 30)"; echo "$out"
 expect "Scenes refreshed: [0-9]+ \+ [0-9]+ time-based on bridge" "$out" "Refresh Scenes reports the counts"
 
 say "Room Audit"
 out="$(run_action "Room Audit")"; echo "$out" | grep -E "Last Action" | head -2
-expect "linked lights|not in the room|No linked|nothing to audit|audit" "$out" "Room Audit reports"
+expect "linked light|not in the room|No linked|nothing to audit|audit" "$out" "Room Audit reports"
 
 say "Link Devices"
 out="$(run_action "Link Devices")"; echo "$out" | grep -E "Last Action" | head -2
