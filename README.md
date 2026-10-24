@@ -64,6 +64,10 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
   bridge by its address only. An address with a number below 8 in it
   (`192.168.1.50`, not `192.168.10.50`) gives the event stream a connection
   queue of its own; the manual's chapter 3 explains why.
+- Not supported: the round first-generation bridge (BSB001), which has no CLIP v2
+  API, and devices that are not Hue bridges; both are refused at pairing. The
+  bridge's software must be 1948086000 or newer (keep it updated in the Hue
+  app; the driver shows it as Bridge Firmware).
 - HTTPS from the controller to the bridge on port 443. No internet access and
   no Hue account are needed.
 
@@ -138,7 +142,7 @@ chapters 3 to 7 and 9 are the long version of this list.
    button, then run Pair Bridge*.
 5. Press the round **link button** on the bridge, then within 30 seconds click
    **Pair Bridge** on the **Actions** tab. Status goes *Pairing: contacting
-   bridge*, *Pairing: found BSB003 ..., requesting key*, **Paired**; Bridge ID
+   bridge*, *Pairing: found Hue Bridge Pro (BSB003) ..., requesting key*, **Paired**; Bridge ID
    and Bridge Model fill in, Event Stream reads *Connected since ...*, Lights
    reads for example *47 on bridge, 0 imported, 47 new, ...*, Attention lists
    the new lights, and Room Mappings is filled by a one-time automatic **Map

@@ -576,6 +576,18 @@ local function cancel_identity_retry()
 	end
 end
 
+-- The bridge's model, name and firmware rows (docs/bridge-compat-design.md
+-- Decision 3), from a /api/0/config answer or a pairing probe.
+local function show_bridge_info(info)
+	prop("Bridge Model", config.model_label(info.model))
+	prop("Bridge Name", info.name or "")
+	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
+	if config.firmware_check(info.sw_version) == "old" then
+		log.warn("bridge firmware %s is older than %d: the CLIP v2 API may be missing", tostring(info.sw_version),
+			config.MIN_FIRMWARE)
+	end
+end
+
 local function verify_identity(callback)
 	cancel_identity_retry()
 	local ip = state.ip
@@ -583,7 +595,20 @@ local function verify_identity(callback)
 		if ip ~= state.ip then
 			return -- the address changed meanwhile; its own check runs
 		end
-		local reported = r.ok and type(r.json) == "table" and config.normalise_bridge_id(r.json.bridgeid) or nil
+		local cfg = r.ok and type(r.json) == "table" and r.json or nil
+		local reported = cfg and config.normalise_bridge_id(cfg.bridgeid) or nil
+		if cfg and reported then
+			show_bridge_info({ model = cfg.modelid, name = cfg.name, sw_version = cfg.swversion,
+				api_version = cfg.apiversion })
+			-- A model id this driver cannot use (none at all is let through).
+			if cfg.modelid and not config.model_supported(cfg.modelid) then
+				state.identity_ok = false
+				prop("Status", string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip,
+					config.model_label(cfg.modelid)))
+				log.warn("bridge at %s is %s: no request is sent", ip, config.model_label(cfg.modelid))
+				return callback(false)
+			end
+		end
 		if reported and reported == state.creds.bridge_id then
 			state.identity_ok = true
 			refresh_status()
@@ -726,8 +751,9 @@ dispatch.commands["Pair_Bridge"] = function()
 	prop("Status", "Pairing: contacting bridge")
 	pairing.pair(state.ip, {
 		on_probed = function(info)
-			prop("Bridge Model", info.model or "")
-			prop("Status", string.format("Pairing: found %s %s, requesting key", tostring(info.model), info.bridge_id))
+			show_bridge_info(info)
+			prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
+				info.bridge_id))
 		end,
 		on_link_button = function()
 			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
@@ -736,7 +762,7 @@ dispatch.commands["Pair_Bridge"] = function()
 			-- Use the in-memory result: the store writes on its own thread
 			-- and may not return the value yet.
 			state.creds = creds
-			prop("Bridge Model", creds.model or "")
+			prop("Bridge Model", config.model_label(creds.model))
 			refresh_status()
 			choose_stream_address(function() restart_stream(true) end)
 		end,
@@ -1276,6 +1302,8 @@ dispatch.commands["Forget_Pairing"] = function()
 	state.stream_family = nil
 	prop("Stream Address", "")
 	prop("Bridge Model", "")
+	prop("Bridge Name", "")
+	prop("Bridge Firmware", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
 	refresh_status()

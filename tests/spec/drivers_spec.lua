@@ -39,7 +39,8 @@ local function answer_identity(c4, bridgeid)
 	if t and t.url:find("/api/0/config", 1, true) and not t.answered_identity then
 		t.answered_identity = true
 		assert.is_nil(t.headers["hue-application-key"], "the identity check carries no key")
-		t:respond(200, '{"bridgeid":"' .. (bridgeid or "001788FFFE25B8F8") .. '","modelid":"BSB003","name":"Hue"}')
+		t:respond(200, '{"bridgeid":"' .. (bridgeid or "001788FFFE25B8F8") .. '","modelid":"BSB003","name":"Hue",'
+			.. '"swversion":"1968096020","apiversion":"1.68.0"}')
 	end
 	return t
 end
@@ -92,7 +93,7 @@ describe("Hue Bridge driver", function()
 
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
 		c4.transfers[1]:respond(200, CONFIG)
-		assert.equal("BSB002", env.Properties["Bridge Model"])
+		assert.equal("Hue Bridge v2, square (BSB002)", env.Properties["Bridge Model"])
 
 		c4.transfers[2]:respond(200, '[{"error":{"type":101,"description":"link button not pressed"}}]')
 		assert.truthy(env.Properties["Status"]:find("link button", 1, true))
@@ -548,6 +549,25 @@ describe("Hue Bridge driver", function()
 		assert.truthy(text:find(" | Scenes: ", 1, true), text)
 		local list = c4.property_lists["Last Action"]
 		assert.equal(text .. "," .. text:gsub(" | ", ",", 2), list, "the full text, then its three parts")
+	end)
+
+	it("shows the bridge's model, name and firmware from the identity check; refuses a first-generation bridge", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_identity(c4)
+		assert.equal("Hue Bridge Pro (BSB003)", env.Properties["Bridge Model"])
+		assert.equal("Hue", env.Properties["Bridge Name"])
+		assert.equal("1968096020 (API 1.68.0)", env.Properties["Bridge Firmware"])
+
+		local env2, c42 = paired_driver()
+		env2.OnDriverLateInit("DIT_STARTUP")
+		local n = #c42.transfers
+		c42.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8","modelid":"BSB001","name":"Old",'
+			.. '"swversion":"1935074050"}')
+		assert.equal("Bridge at 192.0.2.10 is a Hue Bridge v1, round (BSB001): no CLIP v2 API; nothing is sent",
+			env2.Properties["Status"])
+		assert.equal("Hue Bridge v1, round (BSB001)", env2.Properties["Bridge Model"])
+		assert.equal(n, #c42.transfers, "nothing sent to a first-generation bridge")
 	end)
 
 	it("Hue Request sends an authenticated request and summarises resource lists", function()
