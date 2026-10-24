@@ -47,6 +47,8 @@ local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
 local groups = require("bridge.groups")
 local lights = require("bridge.lights")   -- ids_from / dump only: the AddDevice callback shapes
+local util = require("bridge.util")
+local project = require("bridge.project")
 
 local scenes = {}
 scenes.__index = scenes
@@ -133,30 +135,7 @@ function scenes.new(ctx)
 		ctx.log.warn("scenes: no group_set in ctx; grouped_light %s not set", tostring(grouped_light_rid))
 		return false
 	end
-	ctx.project = ctx.project or {}
-	local project = ctx.project
-	-- [verified: hardware, docs/design.md "Project APIs"] for every shape below.
-	project.rooms = project.rooms or function()
-		return C4:GetDevicesByC4iName("roomdevice.c4i")
-	end
-	project.hierarchy = project.hierarchy or function()
-		return C4:GetProjectHierarchy()
-	end
-	project.devices = project.devices or function(filter)
-		return C4:GetDevices(filter)
-	end
-	project.bound = project.bound or function()
-		return C4:GetBoundConsumerDevices(C4:GetDeviceID(), scenes.BINDING)
-	end
-	project.unbind = project.unbind or function(device_id)
-		C4:Unbind(device_id, scenes.BINDING)
-	end
-	project.rename = project.rename or function(id, name)
-		C4:RenameDevice(id, name)
-	end
-	project.display_name = project.display_name or function(id)
-		return C4:GetDeviceDisplayName(id)
-	end
+	project.defaults(ctx, scenes.BINDING)
 
 	local reg = registry.new({
 		persist_get = ctx.persist_get, persist_set = ctx.persist_set, now = ctx.now, log = ctx.log,
@@ -165,6 +144,7 @@ function scenes.new(ctx)
 	return setmetatable({
 		ctx = ctx,
 		reg = reg,
+		project = project.new(ctx, "scenes"),  -- the pcall-wrapped project calls
 		registry = reg:entries(),  -- rid → entry, the live table (identity kept across load())
 		catalogue = {},            -- rid → hue_model.scene() record, from the last GET and the stream (memory only)
 		smart_catalogue = {},      -- rid → hue_model.smart_scene() record tagged kind "smart_scene", the same way;
@@ -175,6 +155,7 @@ function scenes.new(ctx)
 		group_level = {},          -- grouped_light rid → dimming.brightness (average of the lights on), when reported
 		level_sent = {},           -- grouped_light rid → the HUE_SCENE_GROUP level text last sent to its scenes
 		last_configure = {},       -- rid → signature of the last HUE_SCENE_CONFIGURE sent
+		recall_gen = {},           -- rid → generation of the latest recall or off (still_current)
 		announced = {},            -- device_id → { rid, name, kind } from HUE_SCENE_HELLO, for Link Devices
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id }
 		early_hellos = {},         -- hellos received before load(), answered after configure_all()
@@ -201,14 +182,6 @@ function scenes:protect(what, fn, ...)
 		self.ctx.log.error("scenes: %s failed: %s", what, tostring(err))
 	end
 	return ok, err
-end
-
-local function positive(value)
-	local n = tonumber(value)
-	if n and n > 0 then
-		return n
-	end
-	return nil
 end
 
 local function round2(n)
@@ -254,79 +227,6 @@ local function by_name(a, b)
 	return tostring(a.rid) < tostring(b.rid)
 end
 
-local function norm(name)
-	return (tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
-end
-
--- CUSTOM_SELECT lists are comma-delimited [verified: FUND 12.3].
-local function sanitise(text)
-	return (tostring(text):gsub(",", " "))
-end
-
-local function date_of(ts)
-	if not ts then
-		return "?"
-	end
-	return os.date("%Y-%m-%d", ts)
-end
-
-local function short_date_of(ts)
-	if not ts then
-		return "?"
-	end
-	return os.date("%m-%d", ts)
-end
-
-local function plural(n, word)
-	return string.format("%d %s%s", n, word, n == 1 and "" or "s")
-end
-
-local function some(names)
-	if #names <= scenes.MAX_NAMED then
-		return table.concat(names, ", ")
-	end
-	local head = {}
-	for i = 1, scenes.MAX_NAMED do
-		head[i] = names[i]
-	end
-	return table.concat(head, ", ") .. string.format(" +%d more", #names - scenes.MAX_NAMED)
-end
-
-local function signature(params)
-	local keys = {}
-	for k in pairs(params) do
-		keys[#keys + 1] = k
-	end
-	table.sort(keys)
-	local parts = {}
-	for _, k in ipairs(keys) do
-		parts[#parts + 1] = k .. "=" .. tostring(params[k])
-	end
-	return table.concat(parts, "\n")
-end
-
-local function has_field(fields, name)
-	for _, field in ipairs(fields or {}) do
-		if field == name then
-			return true
-		end
-	end
-	return false
-end
-
--- Display label of a group from its raw name and type: "Kitchen",
--- "Downstairs (zone)", "(all lights)", "(no room)" (same wording as groups:label).
-local function label_of(name, gtype)
-	if gtype == "bridge_home" then
-		return "(all lights)"
-	elseif name == nil then
-		return "(no room)"
-	elseif gtype == "zone" then
-		return tostring(name) .. " (zone)"
-	end
-	return tostring(name)
-end
-
 -- Registry access ---------------------------------------------------------------
 
 function scenes:load()
@@ -357,16 +257,6 @@ function scenes:save()
 	self.reg:save()
 end
 
-function scenes:device_for(rid)
-	local entry = rid ~= nil and self.registry[rid] or nil
-	return entry and entry.device_id or nil
-end
-
-function scenes:proxy_for(rid)
-	local entry = rid ~= nil and self.registry[rid] or nil
-	return entry and entry.proxy_id or nil
-end
-
 -- A copy of the registry entry, or nil.
 function scenes:entry(rid)
 	local entry = rid ~= nil and self.registry[rid] or nil
@@ -378,10 +268,6 @@ function scenes:entry(rid)
 		out[k] = v
 	end
 	return out
-end
-
-function scenes:rid_for(device_id)
-	return (self.reg:by_device(device_id))
 end
 
 function scenes:count()
@@ -410,10 +296,6 @@ function scenes:smart_count()
 	return n
 end
 
-function scenes:registered_rids()
-	return self.reg:rids()
-end
-
 -- The catalogue record for a rid, or nil.
 function scenes:scene(rid)
 	if rid == nil then
@@ -437,73 +319,6 @@ function scenes:record_of(rid)
 		return nil
 	end
 	return self.catalogue[rid] or self.smart_catalogue[rid]
-end
-
--- Project access ----------------------------------------------------------------
-
-function scenes:project_call(name, ...)
-	local ok, result = pcall(self.ctx.project[name], ...)
-	if not ok then
-		self.ctx.log.warn("scenes: project.%s failed: %s", name, tostring(result))
-		return false, nil
-	end
-	return true, result
-end
-
--- { [room_id] = name } with numeric ids; empty when unknown.
-function scenes:project_rooms()
-	local _, raw = self:project_call("rooms")
-	local out = {}
-	if type(raw) == "table" then
-		for id, name in pairs(raw) do
-			local n = tonumber(id)
-			if n and name ~= nil then
-				out[n] = tostring(name)
-			end
-		end
-	end
-	return out
-end
-
--- { [device_id] = true } of everything bound to the bridge's binding 1 (lights
--- and scenes alike); nil when the lookup failed.
-function scenes:project_bound_set()
-	local ok, raw = self:project_call("bound")
-	if not ok then
-		return nil
-	end
-	local out = {}
-	if type(raw) == "table" then
-		for id in pairs(raw) do
-			out[tonumber(id) or id] = true
-		end
-	end
-	return out
-end
-
--- The hue_scene devices in the project as { [device_id] = info }, or nil when
--- the call failed or returned nothing: unknown, never "deleted" (§5).
-function scenes:project_scenes()
-	local ok, raw = self:project_call("devices", { C4iNames = scenes.SCENE_DRIVER })
-	if not ok or type(raw) ~= "table" or next(raw) == nil then
-		return nil
-	end
-	local out = {}
-	for id, info in pairs(raw) do
-		out[tonumber(id) or id] = info
-	end
-	return out
-end
-
-function scenes:display_name(id)
-	if not id then
-		return nil
-	end
-	local ok, name = self:project_call("display_name", id)
-	if ok and name ~= nil and name ~= "" then
-		return tostring(name)
-	end
-	return nil
 end
 
 -- Groups (through the lights' live cache) -------------------------------------------
@@ -545,19 +360,11 @@ function scenes:group_info(group_rid, fallback)
 	return nil, nil, false
 end
 
--- The group's plain name ("Kitchen", "Downstairs"): what HUE_SCENE_CONFIGURE
--- carries as group_name next to group_type; the scene device adds the
--- "(zone)" itself [verified: a label here showed as "… (zone) (zone)"].
-function scenes:group_name(group_rid, fallback)
-	local name = self:group_info(group_rid, fallback)
-	return name
-end
-
 -- The label for owner-facing texts: marked "(deleted in Hue)" once this run
 -- has fetched the groups and the cache lacks it (lights.lua's rule).
 function scenes:group_label(group_rid, fallback)
 	local name, gtype, cached = self:group_info(group_rid, fallback)
-	local label = label_of(name, gtype)
+	local label = hue_model.group_label(name, gtype)
 	if not cached and name ~= nil and self:groups_loaded() then
 		label = label .. " (deleted in Hue)"
 	end
@@ -570,7 +377,7 @@ end
 -- time-based scene is always "Kitchen: Golden hours (time-based)", its base
 -- name with the kind (docs/smart-scenes-design.md Decision 8).
 function scenes:scene_label(scene, with_dynamic)
-	local text = sanitise(self:group_label(scene.group_rid, scene)) .. ": " .. sanitise(name_of(scene))
+	local text = util.sanitise(self:group_label(scene.group_rid, scene)) .. ": " .. util.sanitise(name_of(scene))
 	if is_smart(scene) then
 		text = text .. " (time-based)"
 	elseif with_dynamic and scene.auto_dynamic then
@@ -582,7 +389,7 @@ end
 -- The bare scene name of an entry (a time-based scene's base name): what the
 -- contract's texts use.
 function scenes.entry_label(_self, _rid, entry)
-	return sanitise(name_of(entry))
+	return util.sanitise(name_of(entry))
 end
 
 -- Composer name at creation (§1): "<Scene>" for a room scene, "<Zone> <Scene>"
@@ -640,10 +447,6 @@ function scenes:unimported_scenes()
 		return by_name(a, b)
 	end)
 	return list
-end
-
-function scenes:is_tombstoned(rid)
-	return self.reg:tombstones()[rid] ~= nil
 end
 
 -- The catalogue records of one group, name order: its ordinary scenes, or
@@ -879,7 +682,9 @@ end
 function scenes:configure_params(rid, entry)
 	local smart = is_smart(entry)
 	local extra = {
-		group_name = self:group_name(entry.group_rid, entry),
+		-- The plain name ("Kitchen", "Downstairs"): the device adds "(zone)"
+		-- itself [verified: a label here showed as "… (zone) (zone)"].
+		group_name = (self:group_info(entry.group_rid, entry)),
 		group_type = entry.group_type,
 		state = entry.state == "gone" and "gone" or "linked",
 		kind = smart and scenes.SMART_KIND or scenes.PLAIN_KIND,
@@ -940,7 +745,7 @@ function scenes:send_configure(rid)
 		return false
 	end
 	local params = self:configure_params(rid, entry)
-	self.last_configure[rid] = signature(params)
+	self.last_configure[rid] = util.signature(params)
 	self.ctx.send(entry.device_id, "HUE_SCENE_CONFIGURE", params)
 	return true
 end
@@ -950,7 +755,7 @@ function scenes:configure_changed(rid)
 	if not entry then
 		return false
 	end
-	return self.last_configure[rid] ~= signature(self:configure_params(rid, entry))
+	return self.last_configure[rid] ~= util.signature(self:configure_params(rid, entry))
 end
 
 -- HUE_SCENE_STATE with the given status (default: the current one).
@@ -1221,7 +1026,7 @@ function scenes:hello(rid, params)
 	if type(rid) ~= "string" or rid == "" then
 		rid = nil
 	end
-	local device_id = positive(params.device_id)
+	local device_id = util.positive(params.device_id)
 	if not (self.loaded or self.synced) then
 		if rid or device_id then
 			self.early_hellos[#self.early_hellos + 1] = { rid = rid, params = params }
@@ -1255,7 +1060,7 @@ function scenes:hello(rid, params)
 		return false  -- a bare device: Link Devices matches it by name
 	end
 
-	local bound = self:project_bound_set()
+	local bound = self.project:bound_set()
 	if not bound or not bound[device_id] then
 		self.ctx.log.info("scenes: device %d announced %s but is not bound; not adopted", device_id, rid)
 		return false
@@ -1279,7 +1084,7 @@ end
 -- Composer; the entry becomes a tombstone. Returns the tombstone or nil.
 function scenes:goodbye(params)
 	params = params or {}
-	local device_id = positive(params.device_id)
+	local device_id = util.positive(params.device_id)
 	local rid = device_id and self.reg:by_device(device_id) or nil
 	if not rid and type(params.rid) == "string" and self.registry[params.rid] then
 		local entry = self.registry[params.rid]
@@ -1316,7 +1121,7 @@ function scenes:on_binding_changed(binding, class, bound, other_id)
 	if class ~= nil and class ~= scenes.BINDING_CLASS then
 		return false
 	end
-	local device_id = positive(other_id)
+	local device_id = util.positive(other_id)
 	if not device_id then
 		return false
 	end
@@ -1349,12 +1154,12 @@ end
 -- Step 1, the project side: the bound set and the hue_scene devices in the
 -- project. Saves unless `no_save`.
 function scenes:reconcile(no_save)
-	local bound = self:project_bound_set()
+	local bound = self.project:bound_set()
 	if not bound then
 		self.ctx.log.warn("scenes: reconcile skipped: the bound-device lookup failed")
 		return { unbound = {}, relinked = {}, tombstoned = {} }
 	end
-	local infos = self:project_scenes()
+	local infos = self.project:devices_of(scenes.SCENE_DRIVER)
 	local present = nil
 	if infos then
 		present = {}
@@ -1413,8 +1218,10 @@ function scenes:reconcile_scenes()
 			self:announce_gone(rid, "resync")
 		end
 	end
-	self.ctx.log.debug("scenes: %d scenes on the bridge not imported (time-based ones included)",
-		#self:unimported_scenes())
+	if self.ctx.log.enabled("debug") then   -- the count sorts the whole catalogue: only when it is shown
+		self.ctx.log.debug("scenes: %d scenes on the bridge not imported (time-based ones included)",
+			#self:unimported_scenes())
+	end
 end
 
 -- Step 5, the fan-out: STATE (and CONFIGURE first when asked or changed) to
@@ -1457,7 +1264,10 @@ end
 -- Resync ---------------------------------------------------------------------
 
 -- After every stream connect (the coordinator runs it after lights:resync so
--- the group cache is fresh) and from Refresh Scenes. done(ok, err, sent).
+-- the group cache is fresh) and from Refresh Scenes. done(ok, err, sent,
+-- grouped_light): the fourth value is the /grouped_light body's data array
+-- when that GET succeeded (nil otherwise), for the zone lights' resync to
+-- take instead of fetching the same records again.
 function scenes:resync(done)
 	done = done or function() end
 	self:expire_stale_busy()
@@ -1484,7 +1294,7 @@ function scenes:resync(done)
 		elseif not ok then
 			self:protect("resync done", done, false, tostring(e))
 		else
-			self:protect("resync done", done, true, nil, sent)
+			self:protect("resync done", done, true, nil, sent, res.grouped_light)
 		end
 		self:run_pending_resync()
 	end)
@@ -1571,16 +1381,17 @@ function scenes:on_scene_item(item, kind)
 	end
 	local changed = hue_model.update_scene(scene, item)
 	local sent = 0
-	if has_field(changed, "active") and (scene.active == "static" or scene.active == "dynamic_palette") then
+	if util.has_field(changed, "active") and (scene.active == "static" or scene.active == "dynamic_palette") then
 		sent = sent + self:send_other_active(rid)
 	end
-	if has_field(changed, "name") then
+	if util.has_field(changed, "name") then
 		sent = sent + self:tell_slot_scene(rid)
 	end
 	if not entry then
 		return sent
 	end
-	if has_field(changed, "name") or has_field(changed, "group_rid") or has_field(changed, "auto_dynamic") then
+	if util.has_field(changed, "name") or util.has_field(changed, "group_rid")
+		or util.has_field(changed, "auto_dynamic") then
 		if self:refresh_entry(rid) then
 			self:mark()
 		end
@@ -1591,7 +1402,7 @@ function scenes:on_scene_item(item, kind)
 	if self:configure_changed(rid) and self:send_configure(rid) then
 		sent = sent + 1
 	end
-	if has_field(changed, "active") and self:send_state(rid, "event") then
+	if util.has_field(changed, "active") and self:send_state(rid, "event") then
 		sent = sent + 1
 	end
 	return sent
@@ -1670,11 +1481,11 @@ function scenes:on_smart_item(item, kind)
 end
 
 -- One event-stream container. Scene and smart_scene items are handled, the
--- smart_scene ones first: a time slot starting and its slot scene's status
--- may share a container, and other_active reads the current slot
--- (docs/smart-scenes-design.md Decision 10). A grouped_light item updates
--- the group's on/off and level (HUE_SCENE_GROUP with what changed); a
--- room/zone item means the lights' group cache may have changed
+-- smart_scene ones first (a pass of their own): a time slot starting and its
+-- slot scene's status may share a container, and other_active reads the
+-- current slot (docs/smart-scenes-design.md Decision 10). A grouped_light
+-- item updates the group's on/off and level (HUE_SCENE_GROUP with what
+-- changed); a room/zone item means the lights' group cache may have changed
 -- (lights:on_container runs first), so the entries' group names are
 -- refreshed. Runs inside OnBodyChunk: no transfers are started here.
 function scenes:on_container(container)
@@ -1682,30 +1493,27 @@ function scenes:on_container(container)
 		return 0
 	end
 	local sent, groups_changed = 0, false
-	local kind = container.type
-	local rest = {}
-	for _, item in ipairs(container.data) do
-		if type(item) == "table" and item.id ~= nil then
-			if item.type == "smart_scene" then
-				sent = sent + self:on_smart_item(item, kind)
-			else
-				rest[#rest + 1] = item
-			end
+	local kind, items = container.type, container.data
+	for _, item in ipairs(items) do
+		if type(item) == "table" and item.id ~= nil and item.type == "smart_scene" then
+			sent = sent + self:on_smart_item(item, kind)
 		end
 	end
-	for _, item in ipairs(rest) do
-		if item.type == "scene" then
-			sent = sent + self:on_scene_item(item, kind)
-		elseif item.type == "grouped_light" then
-			if kind == "delete" then
-				self.group_on[item.id] = nil
-				self.group_level[item.id] = nil
-				self.level_sent[item.id] = nil
-			else
-				sent = sent + self:on_grouped_light(item)
+	for _, item in ipairs(items) do
+		if type(item) == "table" and item.id ~= nil then
+			if item.type == "scene" then
+				sent = sent + self:on_scene_item(item, kind)
+			elseif item.type == "grouped_light" then
+				if kind == "delete" then
+					self.group_on[item.id] = nil
+					self.group_level[item.id] = nil
+					self.level_sent[item.id] = nil
+				else
+					sent = sent + self:on_grouped_light(item)
+				end
+			elseif item.type == "room" or item.type == "zone" or item.type == "bridge_home" then
+				groups_changed = true
 			end
-		elseif item.type == "room" or item.type == "zone" or item.type == "bridge_home" then
-			groups_changed = true
 		end
 	end
 	if groups_changed then
@@ -1817,7 +1625,7 @@ function scenes:recall(params)
 	end
 	if entry.state == "gone" then
 		self.ctx.log.warn("scenes: recall of %s (device %d) ignored: scene deleted in Hue since %s (Re-link Scene or "
-			.. "Forget Scene)", self:entry_label(rid, entry), entry.device_id, date_of(entry.gone_since))
+			.. "Forget Scene)", self:entry_label(rid, entry), entry.device_id, util.date_of(entry.gone_since))
 		self:send_state(rid, "recall", "inactive")
 		return false
 	end
@@ -1833,7 +1641,7 @@ function scenes:recall(params)
 		action = "active"
 	end
 	local body = { recall = { action = action } }
-	local duration = positive(params.duration)
+	local duration = util.positive(params.duration)
 	if duration then
 		body.recall.duration = math.floor(duration)   -- [assumed: recall.duration in ms; confirm once on hardware]
 	end
@@ -2076,14 +1884,19 @@ function scenes:level(params)
 		end
 		local action = difference > 0 and "up" or "down"
 		local delta = round2(math.abs(difference))
-		self.ctx.log.info("scenes: level %s for %s (device %d): grouped_light %s %s by %s over %d ms",
-			level_text(level), self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), action,
-			level_text(delta), rate)
+		if self.ctx.log.enabled("info") then   -- a slider drag sends several of these a second
+			self.ctx.log.info("scenes: level %s for %s (device %d): grouped_light %s %s by %s over %d ms",
+				level_text(level), self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), action,
+				level_text(delta), rate)
+		end
 		queued = self.ctx.group_dim(grouped, { dimming_delta = { action = action, brightness_delta = delta },
 			dynamics = { duration = rate } })
 	else
-		self.ctx.log.info("scenes: level %s for %s (device %d): group level unknown; grouped_light %s brightness over %d ms",
-			level_text(level), self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), rate)
+		if self.ctx.log.enabled("info") then
+			self.ctx.log.info("scenes: level %s for %s (device %d): group level unknown; grouped_light %s brightness "
+				.. "over %d ms", level_text(level), self:entry_label(rid, entry), entry.device_id,
+				tostring(grouped):sub(1, 8), rate)
+		end
 		queued = self.ctx.group_set(grouped, { brightness = level, rate = rate })
 	end
 	if queued ~= true then
@@ -2114,7 +1927,6 @@ end
 
 -- Per-rid generation of the latest recall or off; a callback compares.
 function scenes:next_recall_gen(rid)
-	self.recall_gen = self.recall_gen or {}
 	self.recall_gen[rid] = (self.recall_gen[rid] or 0) + 1
 	return self.recall_gen[rid]
 end
@@ -2204,7 +2016,7 @@ end
 
 -- Resolve the room an add goes to. Returns room_id, room_name or nil, text.
 function scenes:room_for_add(scene, room_id, rooms)
-	room_id = positive(room_id)
+	room_id = util.positive(room_id)
 	if room_id then
 		local room_name = rooms[room_id]
 		if room_name then
@@ -2217,7 +2029,7 @@ function scenes:room_for_add(scene, room_id, rooms)
 	end
 	local id, why = self:default_room(scene, rooms)
 	if not id then
-		return nil, string.format("Not added: %s: %s; pick a room, or Set Room Mapping first", sanitise(name_of(scene)),
+		return nil, string.format("Not added: %s: %s; pick a room, or Set Room Mapping first", util.sanitise(name_of(scene)),
 			why)
 	end
 	return id, why
@@ -2249,14 +2061,14 @@ function scenes:add_scene(rid, room_id, done)
 		return false
 	end
 	local room_name
-	room_id, room_name = self:room_for_add(scene, room_id, self:project_rooms())
+	room_id, room_name = self:room_for_add(scene, room_id, self.project:rooms())
 	if not room_id then
 		done(false, room_name)
 		return false
 	end
 
 	self.adding, self.adding_since = true, os.time()
-	local label = sanitise(name_of(scene))
+	local label = util.sanitise(name_of(scene))
 	self:create_scenes({ { scene = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.adding = false
 		self:reconcile(true)
@@ -2299,7 +2111,7 @@ function scenes:add_all_of_group(group_rid, done)
 			tostring(group_rid)))
 		return false
 	end
-	local label = sanitise(self:group_label(group_rid))
+	local label = util.sanitise(self:group_label(group_rid))
 	local all = self:scenes_of_group(group_rid)
 	local plain_count = #all
 	for _, record in ipairs(self:scenes_of_group(group_rid, true)) do
@@ -2309,20 +2121,21 @@ function scenes:add_all_of_group(group_rid, done)
 		done(false, string.format("Not added: %s has no scenes", label))
 		return false
 	end
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local room_id, why = self:default_room(all[1], rooms)
 	if not room_id then
 		done(false, string.format("Not added: %s; Set Room Mapping first", why))
 		return false
 	end
 	local room_name = why
-	local jobs, deleted, imported = {}, {}, 0
+	local jobs, deleted, imported, tombs = {}, {}, 0, self.reg:tombstones()
 	for _, scene in ipairs(all) do
+		local tomb = tombs[scene.rid]
 		if self.registry[scene.rid] then
 			imported = imported + 1
-		elseif self:is_tombstoned(scene.rid) then
-			local tomb = self.reg:tombstones()[scene.rid]
-			deleted[#deleted + 1] = string.format("%s (deleted %s)", sanitise(name_of(scene)), date_of(tomb.deleted_at))
+		elseif tomb then
+			deleted[#deleted + 1] = string.format("%s (deleted %s)", util.sanitise(name_of(scene)),
+				util.date_of(tomb.deleted_at))
 		else
 			jobs[#jobs + 1] = { scene = scene, room_id = room_id, room_name = room_name }
 		end
@@ -2333,9 +2146,9 @@ function scenes:add_all_of_group(group_rid, done)
 		if #created > 0 then
 			local names = {}
 			for _, c in ipairs(created) do
-				names[#names + 1] = string.format("%s (device %d)", sanitise(name_of(c.scene)), c.device_id)
+				names[#names + 1] = string.format("%s (device %d)", util.sanitise(name_of(c.scene)), c.device_id)
 			end
-			parts[#parts + 1] = string.format("Added %s of %s to %s: %s", plural(#created, "scene"), label, room_name,
+			parts[#parts + 1] = string.format("Added %s of %s to %s: %s", util.plural(#created, "scene"), label, room_name,
 				table.concat(names, ", "))
 		elseif #jobs == 0 and #deleted == 0 and plain_count == #all then
 			parts[#parts + 1] = string.format("No new scenes in %s (%d on bridge, %d imported)", label, #all, imported)
@@ -2348,7 +2161,7 @@ function scenes:add_all_of_group(group_rid, done)
 		if #failed > 0 then
 			local names = {}
 			for _, scene in ipairs(failed) do
-				names[#names + 1] = sanitise(name_of(scene))
+				names[#names + 1] = util.sanitise(name_of(scene))
 			end
 			parts[#parts + 1] = string.format("AddDevice failed for %d: %s", #failed, table.concat(names, ", "))
 		end
@@ -2384,7 +2197,7 @@ function scenes:relink(device_id, new_rid)
 	if busy then
 		return false, busy
 	end
-	device_id = positive(device_id)
+	device_id = util.positive(device_id)
 	if not device_id or type(new_rid) ~= "string" or new_rid == "" then
 		return false, "Not re-linked: pick a device and a scene"
 	end
@@ -2430,13 +2243,14 @@ end
 function scenes:match_unimported_by_name(names)
 	local wanted = {}
 	for _, name in ipairs(names) do
-		if name ~= nil and norm(name) ~= "" then
-			wanted[norm(name)] = true
+		if name ~= nil and util.norm(name) ~= "" then
+			wanted[util.norm(name)] = true
 		end
 	end
 	local out = {}
 	for _, scene in ipairs(self:unimported_scenes()) do
-		if wanted[norm(scene.name)] or wanted[norm(name_of(scene))] or wanted[norm(self:creation_name(scene))] then
+		if wanted[util.norm(scene.name)] or wanted[util.norm(name_of(scene))]
+			or wanted[util.norm(self:creation_name(scene))] then
 			out[#out + 1] = scene
 		end
 	end
@@ -2454,14 +2268,14 @@ function scenes:link_devices()
 	if busy then
 		return busy
 	end
-	local bound = self:project_bound_set()
+	local bound = self.project:bound_set()
 	if not bound then
 		return "Not linked: the bound-device lookup failed (see the Lua output)"
 	end
-	local present = self:project_scenes()
+	local present = self.project:devices_of(scenes.SCENE_DRIVER)
 	local ids, total = {}, 0
 	for id in pairs(bound) do
-		local n = positive(id)
+		local n = util.positive(id)
 		local mine = n and ((present and present[n] ~= nil) or (not present and self.announced[n] ~= nil))
 		if mine then
 			total = total + 1
@@ -2480,9 +2294,9 @@ function scenes:link_devices()
 
 	local names, shared = {}, {}
 	for _, id in ipairs(ids) do
-		names[id] = self:display_name(id)
+		names[id] = self.project:display_name(id)
 		if names[id] then
-			shared[norm(names[id])] = (shared[norm(names[id])] or 0) + 1
+			shared[util.norm(names[id])] = (shared[util.norm(names[id])] or 0) + 1
 		end
 	end
 
@@ -2508,9 +2322,9 @@ function scenes:link_devices()
 			else
 				problems[#problems + 1] = string.format("%s: could not register %s (see the Lua output)", who, rid)
 			end
-		elseif names[id] and shared[norm(names[id])] > 1 then
+		elseif names[id] and shared[util.norm(names[id])] > 1 then
 			problems[#problems + 1] = string.format("%s: %d bound devices share that name; rename one in Composer and run "
-				.. "Link Devices again", who, shared[norm(names[id])])
+				.. "Link Devices again", who, shared[util.norm(names[id])])
 		else
 			local matches = self:match_unimported_by_name({ composer, hello.name })
 			if #matches == 1 then
@@ -2534,7 +2348,7 @@ function scenes:link_devices()
 	self:flush()
 	local parts = {}
 	if #linked > 0 then
-		parts[#parts + 1] = string.format("Linked %s: %s", plural(#linked, "scene device"), table.concat(linked, ", "))
+		parts[#parts + 1] = string.format("Linked %s: %s", util.plural(#linked, "scene device"), table.concat(linked, ", "))
 	end
 	if #problems > 0 then
 		parts[#parts + 1] = string.format("not linked %d: %s", #problems, table.concat(problems, "; "))
@@ -2552,7 +2366,7 @@ function scenes:forget(device_id)
 	if busy then
 		return false, busy
 	end
-	device_id = positive(device_id)
+	device_id = util.positive(device_id)
 	if not device_id then
 		return false, "Not forgotten: pick a device first"
 	end
@@ -2568,7 +2382,7 @@ function scenes:forget(device_id)
 	self:clear_conflicts_for(device_id)
 	self.announced[device_id] = nil
 	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = is_smart(entry) and name_of(entry) or entry.name })
-	local ok, err = self:project_call("unbind", device_id)
+	local ok, err = self.project:call("unbind", device_id)
 	if not ok then
 		self.ctx.log.warn("scenes: unbind of device %d failed: %s", device_id, tostring(err))
 	end
@@ -2583,7 +2397,7 @@ end
 -- Scene action. Returns ok, text.
 function scenes:forget_request(params)
 	params = params or {}
-	local device_id = positive(params.device_id)
+	local device_id = util.positive(params.device_id)
 	if not device_id and type(params.rid) == "string" and self.registry[params.rid] then
 		device_id = self.registry[params.rid].device_id
 	end
@@ -2612,7 +2426,7 @@ function scenes:name_differences()
 		local entry = self.registry[rid]
 		local expected = self:expected_name(rid, entry)
 		if entry.name and entry.name ~= "" and entry.name_dismissed ~= expected then
-			local current = self:display_name(entry.proxy_id or entry.device_id)
+			local current = self.project:display_name(entry.proxy_id or entry.device_id)
 			if current and current ~= expected then
 				out[#out + 1] = { rid = rid, entry = entry, current = current, expected = expected }
 			end
@@ -2633,12 +2447,12 @@ function scenes:adopt_hue_names()
 		local entry = self.registry[rid]
 		if entry.name and entry.name ~= "" then
 			local expected = self:expected_name(rid, entry)
-			local current = self:display_name(entry.proxy_id or entry.device_id)
+			local current = self.project:display_name(entry.proxy_id or entry.device_id)
 			if current and current ~= expected then
 				if not entry.proxy_id then
 					skipped[#skipped + 1] = string.format("%s (device %d): no proxy id known", current, entry.device_id)
 				else
-					local ok, err = self:project_call("rename", entry.proxy_id, expected)
+					local ok, err = self.project:call("rename", entry.proxy_id, expected)
 					if ok then
 						renamed[#renamed + 1] = string.format("%s → %s (device %d)", current, expected, entry.device_id)
 						if entry.name_dismissed ~= nil then
@@ -2660,7 +2474,8 @@ function scenes:adopt_hue_names()
 	else
 		local parts = {}
 		if #renamed > 0 then
-			parts[#parts + 1] = string.format("Renamed %s: %s", plural(#renamed, "scene device"), table.concat(renamed, ", "))
+			parts[#parts + 1] = string.format("Renamed %s: %s", util.plural(#renamed, "scene device"),
+				table.concat(renamed, ", "))
 		end
 		if #skipped > 0 then
 			parts[#parts + 1] = string.format("not renamed %d: %s", #skipped, table.concat(skipped, ", "))
@@ -2688,7 +2503,7 @@ function scenes:accept_names()
 	if #accepted == 0 then
 		text = "No Composer names differ from the Hue scene names"
 	else
-		text = string.format("Accepted %s: %s", plural(#accepted, "scene name difference"), table.concat(accepted, ", "))
+		text = string.format("Accepted %s: %s", util.plural(#accepted, "scene name difference"), table.concat(accepted, ", "))
 	end
 	self.ctx.log.always("scenes: %s", text)
 	return text
@@ -2736,10 +2551,10 @@ function scenes:attention_items()
 		for _, rid in ipairs(gone) do
 			local entry = self.registry[rid]
 			names[#names + 1] = string.format("%s (device %d, since %s)", self:entry_label(rid, entry), entry.device_id,
-				date_of(entry.gone_since))
+				util.date_of(entry.gone_since))
 		end
 		items[#items + 1] = string.format("%s missing from the bridge: %s (Re-link Scene or Forget Scene)",
-			plural(#gone, "scene"), some(names))
+			util.plural(#gone, "scene"), util.some(names, scenes.MAX_NAMED))
 	end
 
 	local unbound = self.reg:rids("unbound")
@@ -2750,7 +2565,7 @@ function scenes:attention_items()
 			names[#names + 1] = string.format("%s (device %d)", self:entry_label(rid, entry), entry.device_id)
 		end
 		items[#items + 1] = string.format("%s: %s (bind it to this bridge in Composer, or Forget Scene)",
-			plural(#unbound, "unbound scene device"), some(names))
+			util.plural(#unbound, "unbound scene device"), util.some(names, scenes.MAX_NAMED))
 	end
 
 	local conflict_rids = {}
@@ -2779,7 +2594,7 @@ function scenes:attention_items()
 		end
 		items[#items + 1] = string.format("%d Hue scene name%s differ%s from the Composer names: %s "
 			.. "(Adopt Hue Names or Accept Names As They Are)", #diffs, #diffs == 1 and "" or "s",
-			#diffs == 1 and "s" or "", some(names))
+			#diffs == 1 and "s" or "", util.some(names, scenes.MAX_NAMED))
 	end
 
 	return items
@@ -2797,10 +2612,6 @@ end
 -- Pickers (§4): { text, value } arrays, value a string; one explanatory
 -- entry with value "" when there is nothing to pick -------------------------------
 
-local function empty_list(text)
-	return { { text = text, value = "" } }
-end
-
 -- The base names of the time-based scenes whose time slots target each
 -- scene: { [scene rid] = "Golden hours, Natural light" } (distinct, name
 -- order), for the picker's "(in …)" mark (docs/smart-scenes-design.md
@@ -2811,7 +2622,7 @@ function scenes:slot_owners()
 		for _, slot in ipairs(type(record.slots) == "table" and record.slots or {}) do
 			if type(slot) == "table" and slot.target_rid ~= nil then
 				sets[slot.target_rid] = sets[slot.target_rid] or {}
-				sets[slot.target_rid][sanitise(name_of(record))] = true
+				sets[slot.target_rid][util.sanitise(name_of(record))] = true
 			end
 		end
 	end
@@ -2839,7 +2650,7 @@ end
 -- last.
 function scenes:picker_scenes()
 	if not self.synced then
-		return empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; connect the event stream)")
 	end
 	local owners = self:slot_owners()
 	local plain, deleted = {}, {}
@@ -2850,7 +2661,7 @@ function scenes:picker_scenes()
 		end
 		local tomb = self.reg:tombstones()[scene.rid]
 		if tomb then
-			deleted[#deleted + 1] = { text = string.format("%s (deleted from Composer %s)", text, date_of(tomb.deleted_at)),
+			deleted[#deleted + 1] = { text = string.format("%s (deleted from Composer %s)", text, util.date_of(tomb.deleted_at)),
 				value = scene.rid }
 		else
 			plain[#plain + 1] = { text = text, value = scene.rid }
@@ -2860,7 +2671,7 @@ function scenes:picker_scenes()
 		plain[#plain + 1] = item
 	end
 	if #plain == 0 then
-		return empty_list("(every scene on the bridge is imported)")
+		return util.empty_list("(every scene on the bridge is imported)")
 	end
 	return plain
 end
@@ -2872,15 +2683,16 @@ end
 -- Decision 8; imported counts both kinds).
 function scenes:picker_groups()
 	if not self.synced then
-		return empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; connect the event stream)")
 	end
-	local rooms = self:project_rooms()
-	local counts, smart, imported = {}, {}, {}
+	local rooms = self.project:rooms()
+	local counts, smart, imported, records = {}, {}, {}, {}
 	local function tally(catalogue, into)
 		for rid, scene in pairs(catalogue) do
 			local g = scene.group_rid
 			if g then
 				into[g] = (into[g] or 0) + 1
+				records[g] = records[g] or scene  -- any record of the group: the label's fallback (its type)
 				if self.registry[rid] then
 					imported[g] = (imported[g] or 0) + 1
 				end
@@ -2894,8 +2706,7 @@ function scenes:picker_groups()
 	end
 	local list = {}
 	for group_rid, n in pairs(counts) do
-		local scene = self:scenes_of_group(group_rid)[1] or self:scenes_of_group(group_rid, true)[1]
-		local label = self:group_label(group_rid, scene)
+		local label = self:group_label(group_rid, records[group_rid])
 		local mapping = self:room_mapping(group_rid)
 		local target
 		if not mapping or not mapping.c4_room_id then
@@ -2907,15 +2718,15 @@ function scenes:picker_groups()
 		else
 			target = "(Control4 room gone)"
 		end
-		local text = plural(n, "scene")
+		local text = util.plural(n, "scene")
 		if (smart[group_rid] or 0) > 0 then
 			text = text .. string.format(", %d time-based", smart[group_rid])
 		end
 		if (imported[group_rid] or 0) > 0 then
 			text = text .. string.format(", %d imported", imported[group_rid])
 		end
-		list[#list + 1] = { text = string.format("%s → %s (%s)", sanitise(label), sanitise(target), text), value = group_rid,
-			key = label:lower() }
+		list[#list + 1] = { text = string.format("%s → %s (%s)", util.sanitise(label), util.sanitise(target), text),
+			value = group_rid, key = label:lower() }
 	end
 	table.sort(list, function(a, b)
 		if a.key ~= b.key then
@@ -2927,7 +2738,7 @@ function scenes:picker_groups()
 		item.key = nil
 	end
 	if #list == 0 then
-		return empty_list("(no scenes on the bridge)")
+		return util.empty_list("(no scenes on the bridge)")
 	end
 	return list
 end
@@ -2935,7 +2746,7 @@ end
 -- "Kitchen: Relax" for an entry, "Kitchen: Golden hours (time-based)" for a
 -- time-based one: how the device pickers name a registered scene.
 function scenes:entry_picker_label(rid, entry)
-	return sanitise(self:group_label(entry.group_rid, entry)) .. ": " .. self:entry_label(rid, entry)
+	return util.sanitise(self:group_label(entry.group_rid, entry)) .. ": " .. self:entry_label(rid, entry)
 		.. (is_smart(entry) and " (time-based)" or "")
 end
 
@@ -2947,11 +2758,11 @@ function scenes:picker_relink_devices()
 			local entry = self.registry[rid]
 			-- Labelled like Forget Scene's picker, group first, so the two read alike.
 			list[#list + 1] = { text = string.format("%s (device %d, %s since %s)", self:entry_picker_label(rid, entry),
-				entry.device_id, state, short_date_of(entry[state .. "_since"])), value = tostring(entry.device_id) }
+				entry.device_id, state, util.short_date_of(entry[state .. "_since"])), value = tostring(entry.device_id) }
 		end
 	end
 	if #list == 0 then
-		return empty_list("(no gone or unbound scene devices)")
+		return util.empty_list("(no gone or unbound scene devices)")
 	end
 	return list
 end
@@ -2968,7 +2779,7 @@ function scenes:picker_forget_devices()
 		list[#list + 1] = { text = text, value = tostring(entry.device_id) }
 	end
 	if #list == 0 then
-		return empty_list("(no registered scenes)")
+		return util.empty_list("(no registered scenes)")
 	end
 	return list
 end
@@ -3020,7 +2831,7 @@ function scenes:list_items()
 			if entry then
 				suffix = entry_suffix(entry)
 			elseif tomb then
-				suffix = string.format(" (deleted from Composer %s)", date_of(tomb.deleted_at))
+				suffix = string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
 			row(record, rid, suffix)
 		end
