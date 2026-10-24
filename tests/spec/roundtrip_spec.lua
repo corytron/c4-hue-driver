@@ -111,6 +111,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- and the zone lights' one, nothing to send, and the one-time Map
 		-- Rooms By Name pairs the Hue rooms with the Control4 rooms. The rows
 		-- are refreshed once, after the last of the three resyncs.
+		-- The bridge's identity first (no key), then the self-check.
+		assert.equal("https://192.0.2.10/api/0/config", bc4.last_transfer().url)
+		bc4.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8"}')
 		assert.equal(CHECK_URL, bc4.last_transfer().url)
 		bc4.last_transfer():respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
 		local stream_t = bc4.last_transfer()

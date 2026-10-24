@@ -145,7 +145,44 @@ the slider, colour and OFF reach both lamps and the tile follows the Hue
 app, which also confirms that a grouped_light PUT takes `color` and
 `color_temperature`.
 
+## Release preparation (2026-10-24, branch `release-prep`, not yet installed)
+
+- **Slimmed** by four agents from five reviews (`docs/reviews/slim-*.md`):
+  release Lua code 16,665 → 15,917 lines and 1,438 more lines dev-only
+  (`bridge/devtools.lua`, `conntest.lua`, `pinning.lua`, `common/devloop.lua`);
+  the two device drivers share `common/device.lua`; the bridge modules share
+  `bridge/util.lua` and `bridge/project.lua`. Per event: no watchdog timer
+  churn, the three per-container property writes coalesced to one a second,
+  no debug strings with debug off, the zone module touches only the groups
+  an item can change, one grouped_light GET per resync
+  (`docs/reviews/efficiency-2026-10-24.md`: nine of fifteen costs gone).
+- **Release builds** carry no dev loop, diagnostics or insecure TLS mode
+  (`tools/build.sh` strips them and refuses to package a release that still
+  has them); `Stream Timeout (s)` default 3600 and `Stream Watchdog (s)` 600
+  (idle resyncs from every 10 minutes to every hour; set the house's Timeout
+  row to 3600 at the install, Director keeps the old value otherwise).
+- **Security** (`docs/reviews/security-2026-10-24.md`): the bridge's identity
+  is now verified without the key (GET `/api/0/config`) before any request
+  carries it, after start and after an address change; a different bridge
+  at the address gets nothing and Status says so; an unreachable one is
+  asked again every 30 s. Also capped: one SSE event's data (1 MB), the
+  device drivers' pre-late-init buffer (200); persisted dates are range
+  checked; `bridge_request` ignores a caller's TLS table. Open from that
+  review (dev builds only): the dev loop is an unauthenticated LAN surface
+  by design; never install a dev build where the LAN is not trusted.
+- **Behaviour fixes found by the manual review**: a corrected `Bridge IP
+  Address` restarts the feed by itself (it used to stay Stopped).
+- **Docs**: README, LICENSE (Apache 2.0), NOTICE, CONTRIBUTING, `docs/README.md`;
+  both manuals reviewed against the code (`docs/reviews/manual-*.md`) and
+  corrected; the release checklist (`docs/release-checklist.md`) names 1.0.
+- **Still to do before 1.0**: the dev-build regression pass on the house
+  (`tools/regress.sh`), the release install and Composer checks, the owner's
+  phone and keypad pass, the tag `v1.0` and the GitHub release. Before going
+  public: the git history rewrite and the screenshot retake
+  (`docs/licensing-research.md` §6).
+
 ## Open
+
 
 - Zone lights: Shine's tile going off on a zone OFF, and a change of the
   zone's lights in Hue reaching a live tile's colour controls, not yet seen
