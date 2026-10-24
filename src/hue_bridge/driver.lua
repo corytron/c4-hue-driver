@@ -247,9 +247,19 @@ local function new_scenes()
 			-- The queue builds the PUT itself from a "dim" field.
 			state.group_queue:set(grouped_light_rid, {
 				dim = delta.action,
+				delta = delta.brightness_delta,
 				rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
 			})
 			return true
+		end,
+		-- A scene slider when the group's level is unknown: an absolute
+		-- grouped_light brightness (docs/scene-dimmer-design.md).
+		group_set = function(grouped_light_rid, fields)
+			if state.group_queue and type(fields) == "table" then
+				state.group_queue:set(grouped_light_rid, fields)
+				return true
+			end
+			return false
 		end,
 		persist_get = function(name) return C4:PersistGetValue(name) end,
 		persist_set = function(name, value) C4:PersistSetValue(name, value) end,
@@ -1020,6 +1030,10 @@ end
 
 dispatch.commands["HUE_SCENE_DIM"] = function(params)
 	scene_message("dim", params)
+end
+
+dispatch.commands["HUE_SCENE_LEVEL"] = function(params)
+	scene_message("level", params)
 end
 
 dispatch.commands["HUE_SCENE_GOODBYE"] = function(params)
