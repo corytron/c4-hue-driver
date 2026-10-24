@@ -83,3 +83,15 @@ Hue-app dim keeps the tile on at the new level; group off and other scene
 active turn it off; `held_on` survives a restart and is dropped by a group
 off; hold reports CHANGING. Light: a spec that a Hue-side `HUE_STATE` off
 sends `MATCH_LED_STATE` false on the three links.
+
+## Decisions made while building
+
+- 100 % from off (slider, or a Navigator "on" that arrives as a target of
+  100) plays the scene as designed, without a brightness override, so its
+  look is kept; other targets from off recall with the override as above.
+- A queued level move assumes its target as the group's level until Hue
+  reports, so a second move before that report is measured correctly.
+- A hello answer also sends the group's known on/off and level, so a device
+  added or restarted between resyncs shows the right percentage at once.
+- A group level of 0 (no light lit) is not cached or shown; the last lit
+  level stays. A fallback's assumed recall does not set `held_on`.
