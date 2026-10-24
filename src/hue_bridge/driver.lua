@@ -794,9 +794,12 @@ end
 local function last_action(text)
 	text = tostring(text == nil and "" or text)
 	log.always("%s", text)
+	-- The parts of a long result: the "; "-separated items of an audit or
+	-- an import, and the " | "-separated halves of an action the lights,
+	-- scenes and zone lights share (Link Devices, the name actions).
 	local parts = {}
-	if #text > 70 and text:find("; ", 1, true) then
-		for part in (text .. "; "):gmatch("(.-); ") do
+	if #text > 70 and (text:find("; ", 1, true) or text:find(" | ", 1, true)) then
+		for part in (text:gsub(" | ", "; ") .. "; "):gmatch("(.-); ") do
 			if part ~= "" then
 				parts[#parts + 1] = part
 			end
