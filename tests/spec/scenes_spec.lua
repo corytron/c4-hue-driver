@@ -2102,4 +2102,83 @@ describe("bridge.scenes", function()
 			end)
 		end)
 	end)
+
+	describe("list_items", function()
+		local function deleted(ts)
+			return " (deleted from Composer " .. os.date("%Y-%m-%d", ts) .. ")"
+		end
+
+		local function no_commas(items)
+			for _, item in ipairs(items) do
+				assert.is_nil(item:find(",", 1, true), "comma in " .. item)
+			end
+		end
+
+		it("is empty before the first GET with nothing registered, and for a bridge without scenes", function()
+			assert.same({}, S:list_items())
+			resync({ body = '{"errors":[],"data":[]}', smart = '{"errors":[],"data":[]}' })
+			assert.same({}, S:list_items())
+		end)
+
+		it("lists every scene by group as the Add Scene picker does, time-based first, with its device", function()
+			resync()
+			assert.same({
+				"Downstairs (zone): Golden hours (time-based)",
+				"Downstairs (zone): Bright (in Golden hours)",
+				"Downstairs (zone): Nightlight (in Golden hours)",
+				"Garage: Concentrate",
+				"Living Room: Relax",
+				"Living Room: Savanna sunset",
+			}, S:list_items())
+			S:add_scene(F.scene_rids.relax, nil, done)
+			S:add_scene(F.smart_scene_rid, GARAGE_ROOM, done)
+			local items = S:list_items()
+			assert.equal("Downstairs (zone): Golden hours (time-based) → device 2002", items[1])
+			assert.equal("Living Room: Relax → device 2001", items[5])
+			assert.equal(6, #items)
+		end)
+
+		it("marks tombstones, missing scenes and unbound devices", function()
+			add_relax()                                             -- device 2001
+			S:add_scene(F.scene_rids.nightlight, GARAGE_ROOM, done) -- device 2002
+			S:add_scene(F.scene_rids.concentrate, nil, done)        -- device 2003
+			now = T0 + 100
+			S:goodbye({ device_id = "2002" })
+			S:on_container(container(F.events.scene_deleted))       -- Relax, deleted in the Hue app
+			S:on_binding_changed(1, "HUE_BRIDGE", false, 2003)
+			assert.same({
+				"Downstairs (zone): Golden hours (time-based)",
+				"Downstairs (zone): Bright (in Golden hours)",
+				"Downstairs (zone): Nightlight (in Golden hours)" .. deleted(T0 + 100),
+				"Garage: Concentrate (unbound; device 2003)",
+				"Living Room: Relax (missing; device 2001)",
+				"Living Room: Savanna sunset",
+			}, S:list_items())
+			assert.equal("4 + 1 time-based on bridge, 2 imported, 1 missing, 1 unbound, 1 deleted", S:summary())
+		end)
+
+		it("reads the registry alone before the first GET", function()
+			add_relax()
+			S = new_scenes()
+			S:load()
+			assert.is_false(S.synced)
+			assert.same({ "Living Room: Relax → device 2001" }, S:list_items())
+		end)
+
+		it("turns commas into U+201A, in names and in the schedules a scene is in", function()
+			resync({ body = F.scene:gsub('"name":"Relax"', '"name":"Relax, please"'), smart = F.smart_scenes })
+			local items = S:list_items()
+			assert.same({
+				"Downstairs (zone): Golden hours (time-based)",
+				"Downstairs (zone): Natural light (time-based)",
+				"Downstairs (zone): Bright (in Golden hours‚ Natural light)",
+				"Downstairs (zone): Nightlight (in Golden hours‚ Natural light)",
+				"Garage: Concentrate",
+				"Living Room: Golden hours (time-based)",
+				"Living Room: Relax‚ please (in Golden hours)",
+				"Living Room: Savanna sunset (in Golden hours)",
+			}, items)
+			no_commas(items)
+		end)
+	end)
 end)

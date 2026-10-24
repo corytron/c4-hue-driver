@@ -1899,4 +1899,85 @@ describe("bridge.lights", function()
 			assert.same({ "roomdevice.c4i" }, c4.calls_to("GetDevicesByC4iName")[1])
 		end)
 	end)
+
+	describe("list_items", function()
+		local function deleted(ts)
+			return " (deleted from Composer " .. os.date("%Y-%m-%d", ts) .. ")"
+		end
+
+		local function no_commas(items)
+			for _, item in ipairs(items) do
+				assert.is_nil(item:find(",", 1, true), "comma in " .. item)
+			end
+		end
+
+		it("is empty before the first GET with nothing registered, and for a bridge without lights", function()
+			assert.same({}, L:list_items())
+			resync({ light = lights_json({}) })
+			assert.same({}, L:list_items())
+		end)
+
+		it("lists every light on the bridge as room: light with its state, by room label then name", function()
+			resync()
+			assert.same({
+				"(no room): Kitchen Strip (new)",
+				"Garage: Garage White (new)",
+				"Living Room: Hallway Ambiance (new)",
+				"Living Room: Living Room Lamp (new)",
+			}, L:list_items())
+			import_all()
+			assert.same({
+				"(no room): Kitchen Strip → device 2004",
+				"Garage: Garage White → device 2001",
+				"Living Room: Hallway Ambiance → device 2002",
+				"Living Room: Living Room Lamp → device 2003",
+			}, L:list_items())
+		end)
+
+		it("marks tombstones, missing lights (under the room they were last seen in) and unbound devices", function()
+			import_all()
+			now = T0 + 100
+			L:goodbye({ rid = F.rids.hallway, device_id = tostring(ID.hallway) })
+			c4:Unbind(ID.kitchen, 1)
+			L:on_binding_changed(1, "HUE_BRIDGE", false, ID.kitchen)
+			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
+			assert.same({
+				"(no room): Kitchen Strip (unbound; device 2004)",
+				"Garage: Garage White (missing; device 2001)",
+				"Living Room: Hallway Ambiance" .. deleted(T0 + 100),
+				"Living Room: Living Room Lamp → device 2003",
+			}, L:list_items())
+			assert.equal("3 on bridge, 3 imported, 0 new, 1 missing, 1 unbound, 1 deleted", L:summary())
+			-- Deleted on the bridge as well: a tombstone without a light is nothing to list.
+			resync({ light = lights_json({ "living", "kitchen" }) })
+			assert.same({
+				"(no room): Kitchen Strip (unbound; device 2004)",
+				"Garage: Garage White (missing; device 2001)",
+				"Living Room: Living Room Lamp → device 2003",
+			}, L:list_items())
+		end)
+
+		it("reads the registry alone before the first GET", function()
+			import_all()
+			L = new_lights()
+			L:load()
+			assert.is_false(L.synced)
+			assert.same({
+				"(no room): Kitchen Strip → device 2004",
+				"Garage: Garage White → device 2001",
+				"Living Room: Hallway Ambiance → device 2002",
+				"Living Room: Living Room Lamp → device 2003",
+			}, L:list_items())
+		end)
+
+		it("turns commas in names and room labels into U+201A so Composer keeps one line per light", function()
+			resync({ light = F.light:gsub("Kitchen Strip", "Kitchen, Strip"),
+				room = F.room:gsub('"name":"Garage"', '"name":"Gar, age"') })
+			local items = L:list_items()
+			assert.equal("(no room): Kitchen‚ Strip (new)", items[1])
+			assert.equal("Gar‚ age: Garage White (new)", items[2])
+			assert.equal(4, #items)
+			no_commas(items)
+		end)
+	end)
 end)

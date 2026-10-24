@@ -2973,4 +2973,80 @@ function scenes:picker_forget_devices()
 	return list
 end
 
+-- Lists (the drop-down properties) ----------------------------------------------
+
+-- The state a list line ends in for a registry entry (the lights' wording):
+-- " → device N" linked, " (missing; device N)" gone, " (unbound; device N)".
+local function entry_suffix(entry)
+	if entry.state == "gone" then
+		return string.format(" (missing; device %d)", entry.device_id)
+	elseif entry.state == "unbound" then
+		return string.format(" (unbound; device %d)", entry.device_id)
+	end
+	return string.format(" → device %d", entry.device_id)
+end
+
+-- The Scenes drop-down (the row shows summary()): one line per scene on the
+-- bridge of either kind, "<Hue room>: <scene>" labelled and ordered as the
+-- Add Scene picker does (by group label, the time-based ones first in their
+-- group, then name), " (time-based)" for a time-based scene, " (in
+-- <schedule>)" for a scene a time-based one's slot targets, then the state:
+-- " → device N" imported, " (deleted from Composer <date>)" a tombstone,
+-- " (unbound; device N)"; an unimported scene carries no mark (Hue keeps
+-- about seven per room). The registered scenes the bridge lacks follow
+-- under the group they remember as "(missing; device N)". Commas become "‚"
+-- (U+201A): the list is comma-delimited (driver.lua's
+-- refresh_room_mappings). Before the first GET, the registry alone: what is
+-- known. Empty when nothing is.
+function scenes:list_items()
+	local owners = self:slot_owners()
+	local tombs = self.reg:tombstones()
+	local rows = {}
+	local function row(x, rid, suffix)
+		local label, name, smart = self:group_label(x.group_rid, x), name_of(x), is_smart(x)
+		local text = label .. ": " .. name
+		if smart then
+			text = text .. " (time-based)"
+		elseif owners[rid] then
+			text = text .. " (in " .. owners[rid] .. ")"
+		end
+		rows[#rows + 1] = { group = label:lower(), smart = smart, name = name:lower(), rid = tostring(rid),
+			text = text .. suffix }
+	end
+	for _, catalogue in ipairs({ self.catalogue, self.smart_catalogue }) do
+		for rid, record in pairs(catalogue) do
+			local entry, tomb = self.registry[rid], tombs[rid]
+			local suffix = ""
+			if entry then
+				suffix = entry_suffix(entry)
+			elseif tomb then
+				suffix = string.format(" (deleted from Composer %s)", date_of(tomb.deleted_at))
+			end
+			row(record, rid, suffix)
+		end
+	end
+	for rid, entry in pairs(self.registry) do
+		if not self:record_of(rid) then
+			row(entry, rid, entry_suffix(entry))
+		end
+	end
+	table.sort(rows, function(a, b)
+		if a.group ~= b.group then
+			return a.group < b.group
+		end
+		if a.smart ~= b.smart then
+			return a.smart
+		end
+		if a.name ~= b.name then
+			return a.name < b.name
+		end
+		return a.rid < b.rid
+	end)
+	local out = {}
+	for i, r in ipairs(rows) do
+		out[i] = (r.text:gsub(",", "‚"))
+	end
+	return out
+end
+
 return scenes
