@@ -427,6 +427,15 @@ describe("bridge.commands", function()
 			assert.same({ dimming_delta = { action = "stop" } }, sends[2].body)
 		end)
 
+		it("moves by a given delta for a scene slider, clamped to 0-100", function()
+			set_now("g", { dim = "down", delta = 12.345, rate = 500 })
+			assert.same({ dimming_delta = { action = "down", brightness_delta = 12.35 }, dynamics = { duration = 500 } },
+				sends[1].body)
+			sends[1].done({ ok = true, code = 200 })
+			set_now("g", { dim = "up", delta = 250 })
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 } }, sends[2].body)
+		end)
+
 		it("lets a dim replace a pending brightness and a brightness replace a pending dim", function()
 			q:set("a", { brightness = 40 })
 			q:set("a", { dim = "down", rate = 2000 })
