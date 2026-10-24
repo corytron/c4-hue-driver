@@ -259,6 +259,16 @@ event items. Bridge time zone `EST5EDT`.
   changes the way app-made ones do (open). To be checked with the real
   Golden hours 4 at its 16:00 slot (target Shine): activate before 16:00,
   dim, read the active slot after 16:00.
+- **Slot advance after a dim (16:00 check, 2026-10-24, build 199,
+  production).** The Golden hours device (1164, Master Bedroom) read "…; now
+  Arise (from 07:00)" at 15:57 and "…; now Shine (from 16:00)" at 16:02 and
+  16:04, never ending in "not running", with the event feed alive (30
+  containers, last 16:01:38). So a running app-made schedule does advance
+  its slot at the boundary and the device shows the new slot within two
+  minutes. Whether the room had been dimmed before 16:00 is not known (the
+  check read Composer only; nobody dimmed it from here); V11 showed a dim
+  leaves the schedule active, and this shows an active schedule advances.
+  The throwaway API-made schedule above remains the odd one out.
 - **V12 create.** `POST /zone` → 201; `POST /scene` → 201; `POST
   /smart_scene` → 201; the add event shows the new smart scene already
   **`active`**. An 8-minute slot was accepted. A new `grouped_light`
