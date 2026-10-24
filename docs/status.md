@@ -45,8 +45,10 @@ this page disagree about the present, this page and the code win.
   moves the room relative to it (keeping the scene's colours and per-light
   differences), 0 % = off, a level from off plays the scene at that level,
   100 % from off plays it as designed. **On rule**: on from any activation
-  (Control4, keypad, Hue app) until the room/zone turns off or another scene
-  of it is played; persisted across restarts. Keypad: tap top plays, tap
+  (Control4, keypad, Hue app) until the room/zone turns off, another scene
+  of it is played, or the device itself is turned off; persisted across
+  restarts. ON is one request (dropped back if it fails); OFF and slider
+  moves go through the group queue and are retried like light commands. Keypad: tap top plays, tap
   bottom turns off, hold dims the room (relative), hold top while off plays
   at 1 % and brightens; LEDs follow the on state.
 - **Both device drivers** declare `hide_proxy_properties`, so the proxy's
@@ -91,5 +93,13 @@ reboot.
 - Second-priority hardening items in `docs/code-analysis-2026-10-22.md`.
 - Proxy settings hidden on light and scene devices (above).
 - List View 32 px icons for lights and scenes.
-- Not verified: whether a revoked key answers HTTP 401 or 403.
+- Not verified: whether a revoked key answers HTTP 401 or 403; the
+  binding re-check path itself (the reboot test ended bound, but which path
+  got there is not visible from Composer); a slider level from off sets all
+  of the scene's lights to that level (follows Hue's brightness override).
+- Code: `Stream Watchdog (s)` is declared with a minimum of 0 in
+  `hue_bridge/driver.xml` but the code treats anything below 60 as 60; the
+  group queue (scene OFF, dims) is paced at up to 10 requests a second
+  although Hue's guidance for groups is about one a second (a comment in
+  `driver.lua` still says one a second).
 - The Composer project is unsaved.
