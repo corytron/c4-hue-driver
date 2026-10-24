@@ -1,8 +1,9 @@
 # Status of the Hue driver (2026-10-24)
 
-**Release 1.0 (build 228), tag `v1.0`**, published on GitHub with the three
-`.c4z` files (branch `release-prep`, PR #33); the house runs it since
-2026-10-24 18:54.
+**Release 1.0 (build 237), tag `v1.0`**, published on GitHub with the three
+`.c4z` files; re-cut from build 228 (PR #33) with the bridge-compatibility
+check (PR #35) and the public-repository files (PR #34). The house runs build
+228 since 2026-10-24 18:54 until 237 is installed.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
