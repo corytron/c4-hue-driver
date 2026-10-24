@@ -51,6 +51,9 @@ scenes.GROUPED_LIGHT_PATH = "/clip/v2/resource/grouped_light"
 -- scene device's default hold rate).
 scenes.DIM_MAX_DURATION = 6000000
 scenes.DIM_DEFAULT_DURATION = 5000
+-- HUE_SCENE_LEVEL: a smaller move than this (in %) queues nothing
+-- (docs/scene-dimmer-design.md).
+scenes.LEVEL_MIN_DELTA = 0.5
 
 -- recall.action values [community: openhue/aiohue; `active` verified on hardware].
 scenes.ACTIONS = { active = true, static = true, dynamic_palette = true }
@@ -71,6 +74,8 @@ scenes.ACTIVE = { inactive = true, static = true, dynamic_palette = true }
 --   group_off(grouped_light_rid)   the coalesced grouped_light off of driver.lua (§5)
 --   group_dim(grouped_light_rid, body)   the coalesced grouped_light dimming_delta PUT of driver.lua
 --                            (docs/keypad-design.md "Scene hold-to-dim"); true when queued
+--   group_set(grouped_light_rid, fields)  the coalesced absolute grouped_light PUT of driver.lua,
+--                            fields { brightness, rate } (docs/scene-dimmer-design.md); true when queued
 function scenes.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "scenes.new: ctx.http is required")
@@ -97,6 +102,10 @@ function scenes.new(ctx)
 	end
 	ctx.group_dim = ctx.group_dim or function(grouped_light_rid)
 		ctx.log.warn("scenes: no group_dim in ctx; grouped_light %s not dimmed", tostring(grouped_light_rid))
+		return false
+	end
+	ctx.group_set = ctx.group_set or function(grouped_light_rid)
+		ctx.log.warn("scenes: no group_set in ctx; grouped_light %s not set", tostring(grouped_light_rid))
 		return false
 	end
 	ctx.project = ctx.project or {}
@@ -136,6 +145,7 @@ function scenes.new(ctx)
 		smart_scenes = nil,        -- smart scene count from the last GET, nil until known (log only, v1)
 		group_on = {},             -- grouped_light rid → on (boolean) from the last GET and the stream; absent = unknown
 		group_level = {},          -- grouped_light rid → dimming.brightness (average of the lights on), when reported
+		level_sent = {},           -- grouped_light rid → the HUE_SCENE_GROUP level text last sent to its scenes
 		last_configure = {},       -- rid → signature of the last HUE_SCENE_CONFIGURE sent
 		announced = {},            -- device_id → { rid, name } from HUE_SCENE_HELLO, for Link Devices
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id }
@@ -171,6 +181,20 @@ local function positive(value)
 		return n
 	end
 	return nil
+end
+
+local function round2(n)
+	return math.floor(n * 100 + 0.5) / 100
+end
+
+-- A group level as HUE_SCENE_GROUP carries it (docs/scene-dimmer-design.md):
+-- an integer when whole, else up to two decimals ("57", "56.5", "56.69").
+local function level_text(n)
+	local r = round2(n)
+	if r == math.floor(r) then
+		return string.format("%d", r)
+	end
+	return (string.format("%.2f", r):gsub("0+$", ""))
 end
 
 -- Name order, case-insensitive, ties by rid.
@@ -570,10 +594,11 @@ end
 -- Fetching and absorbing -------------------------------------------------------------
 
 -- GET /scene, then /smart_scene for its count, then /grouped_light for the
--- groups' on/off (HUE_SCENE_GROUP). done({ scene = items, smart = n | nil,
--- grouped_light = items | nil }) or done(nil, err) when the scene GET failed;
--- a failed smart scene GET only costs the count (v1 lists nothing from it), a
--- failed grouped_light GET only leaves the groups' on/off unknown.
+-- groups' on/off and level (HUE_SCENE_GROUP). done({ scene = items, smart =
+-- n | nil, grouped_light = items | nil }) or done(nil, err) when the scene GET
+-- failed; a failed smart scene GET only costs the count (v1 lists nothing
+-- from it), a failed grouped_light GET only leaves the groups' on/off and
+-- level unknown.
 function scenes:fetch_all(done)
 	self.ctx.http({ path = scenes.SCENE_PATH, method = "GET" }, function(r)
 		self:protect("fetch scene", function()
@@ -603,7 +628,7 @@ function scenes:fetch_all(done)
 							local gl = r3.ok and type(r3.json) == "table" and r3.json.data or nil
 							if type(gl) ~= "table" then
 								gl = nil
-								self.ctx.log.warn("scenes: GET %s: %s; group on/off unknown", scenes.GROUPED_LIGHT_PATH,
+								self.ctx.log.warn("scenes: GET %s: %s; group on/off and level unknown", scenes.GROUPED_LIGHT_PATH,
 									tostring(r3.err or "malformed response"))
 							end
 							done({ scene = items, smart = smart, grouped_light = gl })
@@ -789,58 +814,97 @@ function scenes:grouped_light_of(group_rid)
 	return group and group.grouped_light_rid or nil
 end
 
--- HUE_SCENE_GROUP { rid, on } to one registered scene's device.
-function scenes:send_group_on(rid, on)
+-- HUE_SCENE_GROUP { rid, on?, level? } to one registered scene's device;
+-- `fields` holds the strings sent besides the rid.
+function scenes:send_group(rid, fields)
 	local entry = self.registry[rid]
 	if not entry or entry.state ~= "linked" then
 		return false
 	end
-	self.ctx.send(entry.device_id, "HUE_SCENE_GROUP", { rid = rid, on = on and "true" or "false" })
+	local params = { rid = rid }
+	for k, v in pairs(fields) do
+		params[k] = v
+	end
+	self.ctx.send(entry.device_id, "HUE_SCENE_GROUP", params)
 	return true
 end
 
--- Every linked scene whose group owns grouped_light `grouped_rid` hears its
--- on/off. Returns the number of messages sent.
-function scenes:send_group_on_for(grouped_rid)
-	local on = self.group_on[grouped_rid]
-	if on == nil then
-		return 0
-	end
+-- Every linked scene whose group owns grouped_light `grouped_rid` hears
+-- `fields`. Returns the number of messages sent.
+function scenes:send_group_for(grouped_rid, fields)
 	local sent = 0
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
 		if entry.state == "linked" and self:grouped_light_of(self:group_rid_of(rid)) == grouped_rid
-			and self:send_group_on(rid, on) then
+			and self:send_group(rid, fields) then
 			sent = sent + 1
 		end
 	end
 	return sent
 end
 
--- After a resync: every linked scene whose group's on/off is known hears it.
-function scenes:send_group_on_all()
-	local sent = 0
+-- What a resync tells the scenes of grouped_light `grouped_rid`: its on/off
+-- and its level, each when known; nil when neither is.
+function scenes:group_fields(grouped_rid)
+	local on, level = self.group_on[grouped_rid], self.group_level[grouped_rid]
+	if on == nil and level == nil then
+		return nil
+	end
+	local fields = {}
+	if on ~= nil then
+		fields.on = on and "true" or "false"
+	end
+	if level ~= nil then
+		fields.level = level_text(level)
+	end
+	return fields
+end
+
+-- After a resync: every linked scene whose group's on/off or level is known
+-- hears them, changed or not; the levels sent become the groups' last sent.
+function scenes:send_group_all()
+	local sent, level_sent = 0, {}
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
 		if entry.state == "linked" then
 			local grouped = self:grouped_light_of(self:group_rid_of(rid))
-			local on = grouped and self.group_on[grouped]
-			if on ~= nil and self:send_group_on(rid, on) then
+			local fields = grouped and self:group_fields(grouped)
+			if fields and self:send_group(rid, fields) then
 				sent = sent + 1
+				level_sent[grouped] = fields.level
 			end
 		end
 	end
+	self.level_sent = level_sent
 	return sent
 end
 
--- A grouped_light's on/off from the stream: the scenes of its group hear a
--- change only. Returns the number of messages sent.
-function scenes:set_group_on(grouped_rid, on)
-	if self.group_on[grouped_rid] == on then
+-- A grouped_light item from the stream: the scenes of its group hear what
+-- changed, in one HUE_SCENE_GROUP each: `on` when the on/off changed,
+-- `level` when it differs from the last level sent to the group. Returns
+-- the number of messages sent.
+function scenes:on_grouped_light(item)
+	local grouped = item.id
+	local fields = {}
+	if type(item.dimming) == "table" and type(item.dimming.brightness) == "number" then
+		self.group_level[grouped] = item.dimming.brightness
+		local text = level_text(item.dimming.brightness)
+		if self.level_sent[grouped] ~= text then
+			fields.level = text
+		end
+	end
+	if type(item.on) == "table" and type(item.on.on) == "boolean" and self.group_on[grouped] ~= item.on.on then
+		self.group_on[grouped] = item.on.on
+		fields.on = item.on.on and "true" or "false"
+	end
+	if next(fields) == nil then
 		return 0
 	end
-	self.group_on[grouped_rid] = on
-	return self:send_group_on_for(grouped_rid)
+	local sent = self:send_group_for(grouped, fields)
+	if sent > 0 and fields.level then
+		self.level_sent[grouped] = fields.level
+	end
+	return sent
 end
 
 -- Scene `rid` became active (static / dynamic_palette): every other linked
@@ -918,9 +982,23 @@ end
 -- Configuration and (once something is known) the status.
 function scenes:answer_hello(rid)
 	if self.synced or self.catalogue[rid] then
-		return self:push(rid, "hello", true)
+		local answered = self:push(rid, "hello", true)
+		self:send_group_known(rid)
+		return answered
 	end
 	return self:send_configure(rid)
+end
+
+-- A device that says hello between resyncs (added, re-linked, restarted)
+-- hears its group's on/off and level at once instead of at the next change.
+function scenes:send_group_known(rid)
+	local entry = self.registry[rid]
+	if not entry or entry.state ~= "linked" then
+		return false
+	end
+	local grouped = self:grouped_light_of(self:group_rid_of(rid))
+	local fields = grouped and self:group_fields(grouped)
+	return fields ~= nil and self:send_group(rid, fields) or false
 end
 
 -- Register a bound device for a rid the registry lacks (auto-adopt, Link
@@ -1166,7 +1244,7 @@ function scenes:settle(reason, with_configure)
 	self:reconcile_scenes()
 	self:refresh_group_names(false)
 	local sent = self:fanout(reason, with_configure)
-	self:send_group_on_all()
+	self:send_group_all()
 	self:flush()
 	return sent
 end
@@ -1287,7 +1365,7 @@ function scenes:on_scene_item(item, kind)
 end
 
 -- One event-stream container. Scene items are handled; a grouped_light item
--- carrying on.on updates the group's on/off (HUE_SCENE_GROUP on a change); a
+-- updates the group's on/off and level (HUE_SCENE_GROUP with what changed); a
 -- room/zone item means the lights' group cache may have changed
 -- (lights:on_container runs first), so the entries' group names are
 -- refreshed. Runs inside OnBodyChunk: no transfers are started here.
@@ -1305,13 +1383,9 @@ function scenes:on_container(container)
 				if kind == "delete" then
 					self.group_on[item.id] = nil
 					self.group_level[item.id] = nil
+					self.level_sent[item.id] = nil
 				else
-					if type(item.dimming) == "table" and type(item.dimming.brightness) == "number" then
-						self.group_level[item.id] = item.dimming.brightness
-					end
-					if type(item.on) == "table" and type(item.on.on) == "boolean" then
-						sent = sent + self:set_group_on(item.id, item.on.on)
-					end
+					sent = sent + self:on_grouped_light(item)
 				end
 			elseif item.type == "room" or item.type == "zone" or item.type == "bridge_home" then
 				groups_changed = true
@@ -1512,6 +1586,76 @@ function scenes:dim(params)
 		self.ctx.log.warn("scenes: dim of %s (device %d): nothing queued", self:entry_label(rid, entry), entry.device_id)
 		return false
 	end
+	return true
+end
+
+-- HUE_SCENE_LEVEL { rid, device_id, level, rate }: the scene's slider while
+-- it is on (docs/scene-dimmer-design.md). Moves the scene's group to `level`
+-- (clamped to 1..100) over `rate` ms (clamped to 0..DIM_MAX_DURATION,
+-- default 0) keeping its lights' differences: a relative dimming_delta up or
+-- down by |level - current| (2 decimals) through ctx.group_dim, where
+-- current is the bridge's last known group level (group_level); nothing when
+-- the difference is under LEVEL_MIN_DELTA. With no level known, an absolute
+-- brightness through ctx.group_set instead. No STATE is sent (the level
+-- reports follow from the stream). Returns true when queued.
+function scenes:level(params)
+	params = params or {}
+	local rid, entry = self:entry_for_command(params, "HUE_SCENE_LEVEL")
+	if not rid then
+		return false
+	end
+	local level = tonumber(params.level)
+	if not level or level ~= level then
+		self.ctx.log.warn("scenes: level of %s (device %d) ignored: bad level %s", self:entry_label(rid, entry),
+			entry.device_id, tostring(params.level))
+		return false
+	end
+	level = math.max(1, math.min(100, level))
+	local scene = self.catalogue[rid]
+	if entry.state == "gone" or not scene then
+		self.ctx.log.warn("scenes: level of %s (device %d) ignored: scene not on the bridge", self:entry_label(rid, entry),
+			entry.device_id)
+		return false
+	end
+	local grouped = self:grouped_light_of(scene.group_rid)
+	if not grouped then
+		self.ctx.log.warn("scenes: level of %s (device %d) ignored: its group has no grouped_light",
+			self:entry_label(rid, entry), entry.device_id)
+		return false
+	end
+	local rate = tonumber(params.rate)
+	if not rate or rate ~= rate then
+		rate = 0
+	end
+	rate = math.floor(math.max(0, math.min(scenes.DIM_MAX_DURATION, rate)))
+	local current = self.group_level[grouped]
+	local queued
+	if type(current) == "number" then
+		local difference = level - current
+		if math.abs(difference) < scenes.LEVEL_MIN_DELTA then
+			self.ctx.log.debug("scenes: level %s for %s (device %d): the group is at %s; nothing to do", level_text(level),
+				self:entry_label(rid, entry), entry.device_id, level_text(current))
+			return false
+		end
+		local action = difference > 0 and "up" or "down"
+		local delta = round2(math.abs(difference))
+		self.ctx.log.info("scenes: level %s for %s (device %d): grouped_light %s %s by %s over %d ms",
+			level_text(level), self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), action,
+			level_text(delta), rate)
+		queued = self.ctx.group_dim(grouped, { dimming_delta = { action = action, brightness_delta = delta },
+			dynamics = { duration = rate } })
+	else
+		self.ctx.log.info("scenes: level %s for %s (device %d): group level unknown; grouped_light %s brightness over %d ms",
+			level_text(level), self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), rate)
+		queued = self.ctx.group_set(grouped, { brightness = level, rate = rate })
+	end
+	if queued ~= true then
+		self.ctx.log.warn("scenes: level of %s (device %d): nothing queued", self:entry_label(rid, entry), entry.device_id)
+		return false
+	end
+	-- Assume the target until Hue reports, so a second slider move made
+	-- before that report is measured from where the first one goes.
+	self.group_level[grouped] = level
 	return true
 end
 
