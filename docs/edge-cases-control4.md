@@ -39,16 +39,16 @@ what to test on the controller through the dev loop.
 
 | Fact | Status |
 | --- | --- |
-| `C4:AddDevice(driver, roomId?, name?, cb)`; `cb(deviceId, tDeviceInfo)`, `deviceId` 0 on failure; room defaults to the calling driver's room; 3.2.0+; "should only be initiated through user interaction" | [verified: API 9/_0.1] |
+| `C4:AddDevice(driver, roomId?, name?, cb)`; `cb(deviceId, tDeviceInfo)`, `deviceId` 0 on failure; room defaults to the calling driver's room; 3.2.0+; the API doc reserves it for user-initiated use | [verified: API 9/_0.1] |
 | On OS 3.4.2 `deviceId` is the protocol id and `tDeviceInfo` is a parsed-XML node tree with children `protocol` and `proxy` | [verified: hardware] |
 | `C4:Bind(providerDev, providerBinding, consumerDev, consumerBinding, class)`; `C4:Unbind(consumerDev, consumerBinding)`; 2.9.0+ | [verified: API 9/_1, 9/_19] |
 | `OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBindingID)`; only for control-type bindings, not AV/room; the last two params were "missing" from the docs before OS 3 | [verified: API 9/_12, API 3_whats_new/_20] |
-| `OnDriverDestroyed(DIT)`: on delete, update, or Director shutdown; `DIT_UPDATING` / `DIT_LOADED`; timers are killed. `OnDriverRemovedFromProject()`: "whenever a driver is removed or deleted from a project" | [verified: API 22/_24, 22/_26] |
+| `OnDriverDestroyed(DIT)`: on delete, update, or Director shutdown; `DIT_UPDATING` / `DIT_LOADED`; timers are killed. `OnDriverRemovedFromProject()`: called when the driver is removed from the project | [verified: API 22/_24, 22/_26] |
 | `OnDriverInit`/`OnDriverLateInit(DIT)`: `DIT_ADDING`, `DIT_STARTUP`, `DIT_UPDATING` (3.2.0+). At project load every driver's `OnDriverInit` runs, then every driver's `OnDriverLateInit`; bindings are complete only at late init | [verified: API 22/_25, 22/_25.1; FUND 28/_3] |
 | Not safe before `OnDriverLateInit`: `GetBoundConsumerDevices`, `GetBoundProviderDevice`, `RoomGetId`, `SendToDevice`, `SendToProxy`, `UpdateProperty`, `UpdatePropertyList`, `SetPropertyAttribs`, `RenameDevice`, `GetDevices*`, `GetProjectItems`. Safe: `PersistGetValue`/`PersistSetValue`, `AddVariable`, `ParseXml` | [verified: API 22/_25.2; FUND 28/_2] |
 | `PersistSetValue` writes on its own thread that starts just before late init; a `PersistGetValue` right after a set may miss it; an empty value does not delete (use `PersistDeleteValue`); tables allowed | [verified: API 26.5/_3, 26.5/_4] |
 | The persistence store is per device id: delete + re-add loses it, update-in-place keeps it | [verified: hardware, design.md "Storage"] |
-| `C4:SendToDevice`: "no confirmation that the message was received" | [verified: API 32/_19] |
+| `C4:SendToDevice`: delivery is not confirmed to the sender | [verified: API 32/_19] |
 | `GetBoundConsumerDevices(id, binding)` -> nil or `{ [deviceId] = name }`; `GetBoundProviderDevice` is documented with the same return text but its example prints a number | [verified: API 32/_3, 32/_4] |
 | `GetBoundConsumerDevices(protocolId, 5001)` finds the light's proxy; `GetBoundProviderDevice(protocolId, 5001)` returned the protocol id itself | [verified: hardware] |
 | `idc_controller` treats `GetBoundProviderDevice(clientId, 5001)` as the proxy id, the opposite of what we saw | [verified: sample idc_controller `CheckBindings`] |
@@ -221,14 +221,14 @@ what to test on the controller through the dev loop.
 - Test: set a wrong `hue_rid` on one light through a dev action, restart, watch the resolution.
 
 **3.4 Driver update in place**
-- Director/Composer: `OnDriverDestroyed("DIT_UPDATING")`, then `OnDriverInit`/`LateInit("DIT_UPDATING")` [verified: FUND 28/_3]; properties, `PersistSetValue` values and bindings survive [verified: FUND 14/_2; hardware]; `PersistData` too [verified: FUND 24/_1]. A LuaJIT load failure falls back to PUC Lua with properties "temporarily lost" [verified: FUND 14/_2].
+- Director/Composer: `OnDriverDestroyed("DIT_UPDATING")`, then `OnDriverInit`/`LateInit("DIT_UPDATING")` [verified: FUND 28/_3]; properties, `PersistSetValue` values and bindings survive [verified: FUND 14/_2; hardware]; `PersistData` too [verified: FUND 24/_1]. A LuaJIT load failure falls back to PUC Lua with properties lost for the moment (paraphrased) [verified: FUND 14/_2].
 - Reaction: keep `PersistSetValue` (immediate "state database") over `PersistData` (round-robin save) [verified: API 22/_5]; never remove the light_v2 `<proxy>` or change binding 1's type in a future hue_light; add bindings only [verified: FUND 14/_2]; log the DIT at late init.
 - Test: update both drivers in place; `Lights` count and pairing unchanged; every light re-hellos.
 
 **3.5 Reinstall after deletion**: new id, empty persistence [verified: hardware]; `OnDriverLateInit("DIT_ADDING")` with no registry; see 1.8 (bridge) and 1.6 (light).
 
 **3.6 Project restore from backup**
-- Director/Composer: the backup is the project file (media/personal info optional) and Load Project replaces the controller's project [community: docs.control4.com]. `PersistData` is "retained when the Composer user saves (backs up) the project" [verified: FUND 24/_1]; whether the `PersistSetValue` state database is in the backup is [silent]; sandbox files (SQLite) are **not** backed up [verified: FUND 3_whats_new/_17].
+- Director/Composer: the backup is the project file (media/personal info optional) and Load Project replaces the controller's project [community: docs.control4.com]. `PersistData` survives a project save or backup, per the fundamentals (paraphrased) [verified: FUND 24/_1]; whether the `PersistSetValue` state database is in the backup is [silent]; sandbox files (SQLite) are **not** backed up [verified: FUND 3_whats_new/_17].
 - Learns: `OnProjectRestored` (123) / `OnProjectLoaded` (5) [verified: lib list]; `DIT_STARTUP`.
 - Reaction: keep the recovery import (1.8) cheap enough to run after any restore; keep re-pairing one click (`Pair Bridge`); consider mirroring the registry into `PersistData`, the store documented as backed up [assumed useful].
 - Test: back up, delete a light, restore; check whether the registry and the key came back; record which store survived.

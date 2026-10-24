@@ -33,7 +33,7 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 - Local tools installed by `setup-vm.sh`:
   - `lua5.1`, `luacheck` (lint), `busted` (unit tests)
   - `~/c4-tools/drivers-driverpackager/` — official Python packager for `.c4z` files (read its README for invocation)
-  - `~/c4-tools/drivers-common-public/` — Control4's helper Lua libraries (JSON, timers, URL requests, etc.); vendor what we use into `src/` rather than referencing this path
+  - `~/c4-tools/drivers-common-public/` — Snap One's helper Lua libraries (JSON, timers, URL requests, etc.), for reading only: **never vendor Snap One code into `src/`** (their license keeps derivative works theirs); the driver uses the C4 API and its own modules, nothing else
   - `~/c4-tools/reference/` — DriverWorks API and Fundamentals docs, for reading only
 
 ## Targets
@@ -63,7 +63,7 @@ Later, not v1: Hue motion sensors and MotionAware (Bridge Pro only), entertainme
 ## Repository layout (proposed; adjust in the first plan)
 
 ```
-src/            driver.lua, driver.xml, lib/ (vendored Lua libraries), www/ (docs, icons)
+src/            driver.lua, driver.xml, bridge/ and common/ (our own modules), www/ (docs, icons)
 tests/          busted specs, with a fake C4 global and recorded Hue API fixtures
 tools/          build.sh, deploy helper
 build/          generated .c4z (gitignored)
