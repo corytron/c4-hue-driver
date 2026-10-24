@@ -9,16 +9,13 @@
 -- referenced relative to the archive: on OS 3.4.2, C4:url prefixes
 -- ssl_cabundle with the extracted archive's directory, and the option
 -- replaces the system CA bundle, so trust is pinned to the two Signify roots
--- (spike runs 4 and 5; see docs/design.md). http.ca describes the
--- configuration in use:
---   { mode = "cabundle", path = <file> }   ssl_cabundle, relative to the c4z
---   { mode = "cacerts",  paths = {...} }    ssl_cacerts; Director opens the
---                                          files (absolute paths only) and
---                                          ADDS them to the system CAs
---   { mode = "system" }                     system CAs, hostname checked; for
---                                          public hosts such as discovery
---   { mode = "insecure" }                   no verification; diagnostics only
--- Any description may carry verify_host = true to turn hostname checking on.
+-- (spike runs 4 and 5; see docs/design.md). http.ca is the bundle in use,
+-- { path = <file inside the archive> }; nil fails every request.
+--
+-- That is the only TLS configuration this module knows. The development
+-- diagnostics (bridge/conntest.lua and bridge/pinning.lua, dev builds only)
+-- pass the ssl_* options for their other targets as req.tls; no release
+-- code does.
 
 local log = require("common.log")
 
@@ -30,55 +27,23 @@ http.CONNECT_TIMEOUT = 5
 -- Path inside the archive, see tools/gen_ca_bundle.sh.
 http.CA_BUNDLE = "certs/hue_ca_bundle.pem"
 
-http.ca = { mode = "cabundle", path = http.CA_BUNDLE }
+http.ca = { path = http.CA_BUNDLE }
 
-function http.set_ca(ca)
-	http.ca = ca
+-- TLS options of every transfer: the peer verified against the bundle, the
+-- hostname not (see the header).
+local function ssl_options()
+	return { ssl_verify_peer = true, ssl_verify_host = false, ssl_cabundle = http.ca.path }
 end
 
--- Convenience for the common case.
-function http.set_ca_bundle(path)
-	http.set_ca(path and { mode = "cabundle", path = path } or nil)
-end
-
-function http.describe_ca(ca)
-	ca = ca or http.ca
-	if not ca then
-		return "none"
-	elseif ca.mode == "cabundle" then
-		return "ssl_cabundle=" .. tostring(ca.path)
-	elseif ca.mode == "cacerts" then
-		return "ssl_cacerts={" .. table.concat(ca.paths or {}, ",") .. "}"
-	elseif ca.mode == "system" then
-		return "system CAs"
-	elseif ca.mode == "insecure" then
-		return "INSECURE (no verification)"
-	end
-	return "unknown mode " .. tostring(ca.mode)
-end
-
--- TLS options for a given CA description.
-function http.ssl_options(ca)
-	if ca.mode == "insecure" then
-		return { ssl_verify_peer = false, ssl_verify_host = false }
-	end
-	local opts = { ssl_verify_peer = true, ssl_verify_host = ca.mode == "system" or ca.verify_host == true }
-	if ca.mode == "cabundle" then
-		opts.ssl_cabundle = ca.path
-	elseif ca.mode == "cacerts" then
-		opts.ssl_cacerts = ca.paths
-	end
-	return opts
-end
-
--- Shared options for every transfer. `ca` defaults to http.ca.
-function http.options(overrides, ca)
+-- Shared options for every transfer; `tls` replaces the ssl_* options
+-- (development diagnostics only, see the header).
+function http.options(overrides, tls)
 	local opts = {
 		fail_on_error = false,
 		timeout = http.DEFAULT_TIMEOUT,
 		connect_timeout = http.CONNECT_TIMEOUT,
 	}
-	for k, v in pairs(http.ssl_options(ca or http.ca)) do
+	for k, v in pairs(tls or ssl_options()) do
 		opts[k] = v
 	end
 	for k, v in pairs(overrides or {}) do
@@ -127,7 +92,7 @@ end
 -- One request/response exchange. `req` has:
 --   ip, path, method ("GET"|"POST"|"PUT"|"DELETE"), key (optional),
 --   body (table, JSON-encoded, optional), timeout (optional),
---   ca (optional CA description overriding http.ca, used by the probe).
+--   tls (optional ssl_* options replacing the bundle's; dev diagnostics only).
 -- `callback(result)` receives { ok, code, body, json, err }:
 --   ok    true when the transfer completed and the status is 2xx
 --   code  HTTP status, or nil when no response arrived
@@ -137,8 +102,7 @@ end
 -- transfer could not be started (the callback has then already been called).
 function http.request(req, callback)
 	local method = req.method or "GET"
-	local ca = req.ca or http.ca
-	if not ca then
+	if not http.ca then
 		log.warn("%s %s: no CA configuration", method, req.path)
 		callback({ ok = false, err = "no CA configuration" })
 		return nil
@@ -150,10 +114,12 @@ function http.request(req, callback)
 	local data = req.body and C4:JsonEncode(req.body, false, true) or nil
 	local headers = headers_for(req.key, data and { ["Content-Type"] = "application/json" } or nil)
 
-	log.debug("%s %s%s", method, url, data and (" " .. data) or "")
+	if log.enabled("debug") then
+		log.debug("%s %s%s", method, url, data and (" " .. data) or "")
+	end
 
 	local transfer = C4:url()
-		:SetOptions(http.options({ timeout = req.timeout }, ca))
+		:SetOptions(http.options({ timeout = req.timeout }, req.tls))
 		:OnDone(function(_, responses, err_code, err_msg)
 			-- Guarded up to the callback: a raise here would leave the caller
 			-- waiting for ever (a light's queue stays "in flight") [code
@@ -197,7 +163,7 @@ function http.request(req, callback)
 		elseif method == "DELETE" then
 			transfer:Delete(url, headers)
 		else
-			transfer:Custom(url, method, data or "", headers)
+			error("unsupported method " .. tostring(method))
 		end
 	end)
 	if not started then
@@ -216,8 +182,7 @@ end
 -- Returns the transfer so the caller can Cancel() it, or nil when it could
 -- not be started (on_done has then already been called).
 function http.stream(req, handlers)
-	local ca = req.ca or http.ca
-	if not ca then
+	if not http.ca then
 		handlers.on_done(-2, "no CA configuration", nil)
 		return nil
 	end
@@ -226,10 +191,12 @@ function http.stream(req, handlers)
 	local headers = headers_for(req.key, req.headers)
 	local last_code
 
-	log.debug("STREAM %s (timeout %s s)", url, tostring(req.timeout))
+	if log.enabled("debug") then
+		log.debug("STREAM %s (timeout %s s)", url, tostring(req.timeout))
+	end
 
 	local transfer = C4:url()
-		:SetOptions(http.options({ timeout = req.timeout }, ca))
+		:SetOptions(http.options({ timeout = req.timeout }, req.tls))
 		:OnHeaders(function(_, response)
 			last_code = response.code
 			if handlers.on_headers then

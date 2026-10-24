@@ -69,22 +69,26 @@ function sse:line(text, out)
 	-- "retry" and unknown fields are ignored.
 end
 
--- Returns an array of the events completed by this chunk.
+-- Returns an array of the events completed by this chunk. The buffer is
+-- walked by position and cut once at the end, not once per line (a chunk
+-- used to be copied about as many times as it had lines).
 function sse:feed(chunk)
 	local out = {}
-	self.buffer = self.buffer .. chunk
+	local buffer = self.buffer .. chunk
+	local pos = 1
 	while true do
-		local nl = self.buffer:find("\n", 1, true)
+		local nl = buffer:find("\n", pos, true)
 		if not nl then
 			break
 		end
-		local text = self.buffer:sub(1, nl - 1)
-		self.buffer = self.buffer:sub(nl + 1)
+		local text = buffer:sub(pos, nl - 1)
+		pos = nl + 1
 		if text:sub(-1) == "\r" then
 			text = text:sub(1, -2)
 		end
 		self:line(text, out)
 	end
+	self.buffer = pos > 1 and buffer:sub(pos) or buffer
 	if #self.buffer > sse.MAX_LINE then
 		self.overflowed = true
 		self.buffer = ""

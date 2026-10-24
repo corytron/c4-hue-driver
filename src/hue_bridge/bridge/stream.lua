@@ -20,6 +20,12 @@
 --    OnHeaders/OnBodyChunk callback does abort it, which is what the
 --    generation check at the top of every callback does for an abandoned
 --    transfer. drop_transfer still calls Cancel() for the case where it works.
+--
+-- The watchdog is one timer per connection: armed when the headers arrive,
+-- it notes the clock on every chunk instead of being cancelled and re-created
+-- per chunk (two Director calls per event). When it fires it reconnects if
+-- nothing arrived for the whole period, else it is re-armed for what remains
+-- of the period after the last chunk.
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -30,7 +36,7 @@ stream.__index = stream
 
 stream.PATH = "/eventstream/clip/v2"
 stream.DEFAULT_TIMEOUT = 3600       -- seconds; the transfer's total lifetime
-stream.DEFAULT_WATCHDOG = 300       -- seconds of silence before reconnecting
+stream.DEFAULT_WATCHDOG = 600       -- seconds of silence before reconnecting
 stream.BACKOFF_MIN = 1              -- seconds
 stream.BACKOFF_MAX = 60
 
@@ -46,7 +52,10 @@ stream.BACKOFF_MAX = 60
 --   timeout         seconds, see DEFAULT_TIMEOUT
 --   watchdog        seconds, see DEFAULT_WATCHDOG
 --   on_container(container, event)  one Hue event container (type, data, ...)
---   on_status(text)                 human-readable state for a property
+--   on_status(text, per_event)      human-readable state for a property;
+--                                   per_event is true for the per-container
+--                                   rewrite (count and clock), so the owner
+--                                   can coalesce those writes
 --   on_connected()                  stream is up; resync state here
 function stream.new(opts)
 	return setmetatable({
@@ -56,6 +65,8 @@ function stream.new(opts)
 		transfer = nil,
 		parser = nil,
 		watchdog = nil,
+		last_data = nil,            -- ms clock of the last chunk, for the watchdog
+		fed_since_arm = false,      -- a chunk arrived since the watchdog was (re)armed
 		connected_timer = nil,      -- defers on_connected out of OnHeaders
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
@@ -69,9 +80,23 @@ local function clock()
 	return os.date("%H:%M:%S")
 end
 
-function stream:status(text)
+-- Milliseconds (C4:GetTime, SDK 34_timer/_2-GetTime; OS 3.2.3 and later),
+-- falling back to os.time() where it is missing.
+local function c4_time()
+	return C4:GetTime()
+end
+
+local function now_ms()
+	local ok, ms = pcall(c4_time)
+	if ok and type(ms) == "number" then
+		return ms
+	end
+	return os.time() * 1000
+end
+
+function stream:status(text, per_event)
 	if self.opts.on_status then
-		self.opts.on_status(text)
+		self.opts.on_status(text, per_event)
 	end
 end
 
@@ -82,16 +107,26 @@ function stream:cancel_timer(name)
 	end
 end
 
-function stream:arm_watchdog()
+-- Arm the watchdog for the whole period, or for `delay_ms` (the remainder
+-- of a period a chunk interrupted). See the header.
+function stream:arm_watchdog(delay_ms)
 	self:cancel_timer("watchdog")
 	local seconds = self.opts.watchdog or stream.DEFAULT_WATCHDOG
 	if seconds <= 0 then
 		return
 	end
+	self.fed_since_arm = false
 	local gen = self.generation
-	self.watchdog = C4:SetTimer(seconds * 1000, function()
+	self.watchdog = C4:SetTimer(delay_ms or seconds * 1000, function()
 		if gen ~= self.generation then
 			return
+		end
+		self.watchdog = nil
+		if self.fed_since_arm then
+			local remaining = seconds * 1000 - (now_ms() - (self.last_data or 0))
+			if remaining > 0 then
+				return self:arm_watchdog(remaining)
+			end
 		end
 		log.warn("event stream: no data for %d s, reconnecting", seconds)
 		self.stats.last_error = "watchdog: no data for " .. seconds .. " s"
@@ -216,7 +251,8 @@ function stream:handle_headers(code)
 end
 
 function stream:handle_chunk(data)
-	self:arm_watchdog()
+	self.last_data = now_ms()
+	self.fed_since_arm = true
 	local before = self.parser.comments
 	for _, event in ipairs(self.parser:feed(data)) do
 		self:handle_event(event)
@@ -252,7 +288,7 @@ function stream:handle_event(event)
 		end
 	end
 	self:status(string.format("Connected since %s, %d containers, last %s",
-		tostring(self.stats.connected_since), self.stats.containers, self.stats.last_event))
+		tostring(self.stats.connected_since), self.stats.containers, self.stats.last_event), true)
 end
 
 function stream:handle_done(err_code, err_msg, code)

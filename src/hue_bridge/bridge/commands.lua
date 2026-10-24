@@ -47,8 +47,14 @@ commands.DEFAULT_LIMITS = { min_dim = 1, mirek_min = 153, mirek_max = 500 }
 
 local NUMERIC_FIELDS = { "brightness", "x", "y", "mirek", "rate" }
 
+local function c4_time()
+	return C4:GetTime()
+end
+
+-- Milliseconds from C4:GetTime, else os.time() (the pcall'd function is
+-- hoisted: now() runs two or three times per PUT).
 local function default_now()
-	local ok, ms = pcall(function() return C4:GetTime() end)
+	local ok, ms = pcall(c4_time)
 	if ok and type(ms) == "number" then
 		return ms
 	end
