@@ -1,4 +1,4 @@
-# Status of the Hue driver (2026-10-24)
+# Status of the Hue driver (2026-10-24, build 169)
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -6,7 +6,8 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 160**, production (no dev loop), on all three drivers: Hue Bridge,
+- **Build 169**, production (no dev loop), on all three drivers (installed
+  2026-10-24 00:46; same code as build 160 plus the updated manual): Hue Bridge,
   Hue Light, Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** One Hue Scene device, "Shine" (device 1162, Master Bedroom,
@@ -112,3 +113,5 @@ reboot.
   target (insecure TLS), and the scene driver's `HUE_DUMP` handler is not
   gated on the dev loop.
 - The Composer project is unsaved.
+- Approvals: the owner approves everything, always (2026-10-24); the
+  Windows session asked him once on its side to confirm that standing rule.
