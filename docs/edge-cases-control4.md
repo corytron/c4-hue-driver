@@ -210,7 +210,7 @@ what to test on the controller through the dev loop.
 - Test: restart Director; count error lines for HUE_HELLO in the bridge log; confirm every light ends configured (Lights Report, Navigator).
 
 **3.2 The bridge's late init before a light's**
-- Director/Composer: `HUE_CONFIGURE` arrives while the light is pre-late-init; its handler calls `UpdateProperty` and `SendToProxy`, both "NO before OnDriverLateInit" [verified: API 22/_25.2]; delivery of `ExecuteCommand` that early is [assumed].
+- Director/Composer: `HUE_CONFIGURE` arrives while the light is pre-late-init; its handler calls `UpdateProperty` and `SendToProxy`, both not before OnDriverLateInit (paraphrased) [verified: API 22/_25.2]; delivery of `ExecuteCommand` that early is [assumed].
 - Reaction: the light buffers messages until `late_init_done`, then applies the last CONFIGURE/STATE; its own HELLO fetches a fresh copy anyway.
 - Test: restart with debug on; look in a light's Lua output for a CONFIGURE before its late-init line.
 

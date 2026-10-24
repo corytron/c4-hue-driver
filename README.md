@@ -55,7 +55,9 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 - A Control4 controller on **OS 3.3.0 or newer** (the `minimum_os_version` of
   the three drivers) and Composer Pro. Written and tested on **OS 3.4.2 with
   Composer Pro 3.4.2**; nothing OS-version-specific is used, but OS 4 has not
-  been tried.
+  been tried. Tested with a Hue Bridge Pro; the square version 2 bridge speaks
+  the same CLIP v2 API and is signed by the same root certificates, but has
+  not been tried.
 - A **Philips Hue Bridge** (the square version 2 bridge, BSB002) or a **Hue
   Bridge Pro** (BSB003) on the same network as the controller, with a fixed
   IPv4 address (a DHCP reservation in your router). The driver finds the
@@ -104,11 +106,11 @@ tools/build.sh --dev    # development build: dev loop and Lua command window; ne
 ```
 
 It needs bash, git (the build number is the commit count) and Python 3; set
-`DP3=/path/to/dp3/driverpackager.py` if the packager lives elsewhere. Lint and
-tests run on Lua 5.1 with `luacheck`, `busted` and `dkjson` from luarocks; the
-specs run the drivers against a fake DriverWorks runtime
-(`tests/helpers/fake_c4.lua`) and invented Hue resources
-(`tests/fixtures/hue_resources.lua`):
+`DP3=/path/to/dp3/driverpackager.py` if the packager lives elsewhere. Each
+`.c4z` carries the `LICENSE` and `NOTICE` files. Lint and tests run on Lua 5.1
+with `luacheck`, `busted` and `dkjson` from luarocks; the specs run the
+drivers against a fake DriverWorks runtime (`tests/helpers/fake_c4.lua`) and
+invented Hue resources (`tests/fixtures/hue_resources.lua`):
 
 ```sh
 luacheck src tests tools
@@ -117,9 +119,10 @@ busted tests
 
 ## Install in Composer Pro
 
-The **Documentation** tab of every device holds the full owner's manual
-(`src/hue_bridge/www/documentation.html`); its chapters 3 to 7 and 9 are the
-long version of this list.
+The **Documentation** tab of the **Hue Bridge** device holds the full owner's
+manual (`src/hue_bridge/www/documentation.html`); a Hue Light or Hue Scene
+device's Documentation tab is a one-page summary of that device. The manual's
+chapters 3 to 7 and 9 are the long version of this list.
 
 1. Copy the three `.c4z` files to the computer that runs Composer Pro.
 2. **Driver > Add or Update Driver or Agent...**, select all three files at
@@ -153,20 +156,18 @@ long version of this list.
 9. **File > Refresh Navigators**, so the touch screens and the app show the
    new tiles.
 
-<!-- Screenshots. The two below are the ones the licensing research
-     (docs/licensing-research.md, section 4 and section 6 step 4) lets a public
-     README use: add-driver-menu.png is clean; room-mappings.png is flagged P5
-     (the house's room and zone names, low-medium) and is to be re-taken on a
-     demo project before the repository goes public. Never reference
-     bridge-properties.png (the real bridge id, P3) or tree-bridge.png (the
-     house's device inventory, P4) here; light-properties.png and
-     scene-properties.png carry the owner's light and scene identifiers (P6);
-     bridge-actions.png is clean but predates Add Zone Light and Re-link Zone
-     Light and shows three development-only actions. -->
+<!-- Screenshots. Only add-driver-menu.png is used here: the licensing research
+     (docs/licensing-research.md, section 4 and section 6 step 4) rates it
+     clean. room-mappings.png is flagged P5 (the house's room and zone names,
+     low-medium) and also shows a development build (Dev Server rows); it
+     goes back in here once re-taken on a demo project with invented names on
+     a release build. Never reference bridge-properties.png (the real bridge id,
+     P3) or tree-bridge.png (the house's device inventory, P4) here;
+     light-properties.png and scene-properties.png carry the owner's light and
+     scene identifiers (P6); bridge-actions.png is clean but predates Add Zone
+     Light and Re-link Zone Light and shows three development-only actions. -->
 
 ![Composer's Driver menu with Add or Update Driver or Agent highlighted](src/hue_bridge/www/img/add-driver-menu.png)
-
-![The Room Mappings drop-down open on the Hue Bridge's Properties page](src/hue_bridge/www/img/room-mappings.png)
 
 ### Updating
 
@@ -201,9 +202,11 @@ Lua take effect at once.
   Button Link**. Tap top = on (a light at 100 %, a scene played), tap bottom = off,
   hold = Hue dims up or down until released; the LEDs follow the device.
 - **Device properties** are written by the bridge: a Hue Light shows Status,
-  Hue Light ID, Hue Name, Model, Online and Hue Room; a Hue Scene shows Hue
-  Scene, Hue Room, Hue Scene ID and Recall As. Each device has two actions,
-  **Adopt Hue Name** and **Forget This Light** / **Forget This Scene**.
+  Hue Light ID, Hue Name, Model, Online and Hue Room; a Hue Scene shows Status,
+  Hue Scene, Hue Room, Hue Scene ID and Online, and has one setting of your
+  own, **Recall As** (how ON plays the scene; click Set after changing it).
+  Each device has two actions, **Adopt Hue Name** and **Forget This Light** /
+  **Forget This Scene**.
 
 ## Troubleshooting
 
@@ -237,7 +240,9 @@ never paste one. Pull requests are welcome; see
 ## Repository layout
 
 ```
-src/common/        modules shared by the three drivers (dispatch, log)
+src/common/        shared modules: dispatch and log (all three drivers), device (what the
+                   light and scene drivers share: proxy, keypad, LEDs, binding re-check),
+                   devloop (development builds only); build.sh adds build_version.lua
 src/hue_bridge/    the bridge driver: driver.lua, driver.xml, bridge/ (HTTP, event stream,
                    SSE parsing, pairing, credentials, lights, scenes, zone lights, registry),
                    certs/ (Signify's root certificates), www/ (the manual and its screenshots)
@@ -286,11 +291,12 @@ Use of the Hue bridge API is subject to Signify's
 [Hue Developer Program Terms](https://developers.meethue.com/terms-of-use-and-conditions/);
 you pair the driver with your own bridge and your own key. Composer Pro and
 DriverWorks are licensed by Snap One to Control4 dealers; the driver was
-written against Snap One's public DriverWorks documentation, and nothing from
-Snap One's SDK repositories (code, libraries or documentation text) is
-included here. The two root CA certificates in `src/hue_bridge/certs/` are
-public key material published by Signify for verifying Hue bridges, included
-unmodified and not covered by this project's license (see `NOTICE`).
+written against Snap One's DriverWorks documentation as published on GitHub,
+and nothing from Snap One's SDK repositories (code, libraries or
+documentation text) is included here. The two root CA certificates in
+`src/hue_bridge/certs/` are public key material published by Signify for
+verifying Hue bridges, included unmodified and not covered by this project's
+license (see `NOTICE`).
 
 Written by Cory Fair with AI pair-programming (Anthropic's Claude, through
 Claude Code; see the `Co-Authored-By` trailers in the history). The copyright
