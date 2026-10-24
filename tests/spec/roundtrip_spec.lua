@@ -135,7 +135,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		bridge.Properties["Room Mappings"] = "Garage → Garage"
 		bridge.OnPropertyChanged("Room Mappings")
 		assert.equal(summary, bridge.Properties["Room Mappings"])
-		assert.equal("Room Mappings is for reading; the row shows the summary again", bridge.Properties["Last Action"])
+		-- (read-only lists: a pick leaves no Last Action note)
 		assert.equal("done", bc4.persist.hue_rooms_automapped)
 		assert.truthy(bridge.Properties["Attention"]:find("^4 new lights on the bridge: "))
 
@@ -152,13 +152,15 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(LIVING_ID, bc4.added[3].id)
 		assert.equal(3, #bc4.bindings)
 		assert.equal("4 on bridge‚ 3 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
-		-- A long Last Action is a drop-down too: the text on the row ("‚" for
-		-- ","), its "; "-separated parts in the list.
-		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001)‚ Hallway Ambiance #3 to Living Room "
-			.. "(device 2002)‚ Living Room Lamp #1 to Living Room (device 2003)"
+		-- A long Last Action is word-wrapped onto the continuation rows,
+		-- which are shown only while used; fake.last_action joins them.
+		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001), Hallway Ambiance #3 to Living Room "
+			.. "(device 2002), Living Room Lamp #1 to Living Room (device 2003)"
 		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)"
-		assert.equal(added .. "; " .. skipped, bridge.Properties["Last Action"])
-		assert.equal(added .. "; " .. skipped .. "," .. added .. "," .. skipped, bc4.property_lists["Last Action"])
+		assert.equal(added .. "; " .. skipped, fake.last_action(bridge))
+		assert.is_true(#bridge.Properties["Last Action"] <= 72, "the row itself fits the column")
+		assert.equal(0, bc4.property_attribs["Last Action (2)"], "a continuation row shown")
+		assert.equal(1, bc4.property_attribs["Last Action (6)"], "an unused row hidden")
 		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Add Light or Import All New Lights)",
 			bridge.Properties["Attention"])
 		assert.same({ "HUE_CONFIGURE", "HUE_STATE" }, messages_to(bc4, LIVING_ID))
@@ -262,7 +264,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- two lights have a mapped Hue room to audit.)
 		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
 		assert.equal("1 of 2 are not in the room their Hue room maps to: Living Room Lamp is in Living Room; Hue says "
-			.. "Garage → drag it to Garage in Composer if you want it there", bridge.Properties["Last Action"])
+			.. "Garage → drag it to Garage in Composer if you want it there", fake.last_action(bridge))
 
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the
 		-- binding goes, and Import All New Lights would skip it; Add Light
@@ -279,7 +281,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal("(mapped room)", fake.custom_select(bridge, "RoomList")[1].text)
 
 		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Add Light", Light = F.rids.living, Room = "" })
-		assert.equal("Added Living Room Lamp #1 to Garage (device 2004)", bridge.Properties["Last Action"])
+		assert.equal("Added Living Room Lamp #1 to Garage (device 2004)", fake.last_action(bridge))
 		assert.equal(GARAGE_ROOM, bc4.added[4].room, "the mapped room of its new Hue room")
 		assert.is_nil(bc4.persist.hue_tombstones[F.rids.living])
 		assert.equal(2004, bc4.persist.hue_lights[F.rids.living].device_id)
