@@ -1,8 +1,8 @@
 # Status of the Hue driver (2026-10-24)
 
-**Release 1.0 (build 228), tag `v1.0`**, prepared on branch `release-prep` (PR #33);
-the house runs it once the Windows session's install of this build is
-confirmed below.
+**Release 1.0 (build 228), tag `v1.0`**, published on GitHub with the three
+`.c4z` files (branch `release-prep`, PR #33); the house runs it since
+2026-10-24 18:54.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -10,10 +10,12 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 199**, production (no dev loop), on all three drivers (installed
-  2026-10-24 14:17; zone lights, PR #30, after build 185's readable
-  properties and build 180's time-of-day scenes): Hue Bridge, Hue Light,
-  Hue Scene. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
+- **Build 228, release 1.0** (no dev loop), on all three drivers (installed
+  2026-10-24 18:54 after the slimming, the release hygiene and the
+  security hardening of the release preparation below; before it build 199
+  with the zone lights, 185 with the readable properties, 180 with the
+  time-of-day scenes): Hue Bridge, Hue Light, Hue Scene. The house's
+  `Stream Timeout (s)` is 3600 and `Stream Watchdog (s)` 600. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue
   Bridge Pro (BSB003), paired.
 - **Devices.** Two Hue Scene devices in the Master Bedroom: "Shine" (device
   1162, the ordinary scene Shine) and "Golden hours" (device 1164, the
@@ -181,11 +183,13 @@ app, which also confirms that a grouped_light PUT takes `color` and
 - **Docs**: README, LICENSE (Apache 2.0), NOTICE, CONTRIBUTING, `docs/README.md`;
   both manuals reviewed against the code (`docs/reviews/manual-*.md`) and
   corrected; the release checklist (`docs/release-checklist.md`) names 1.0.
-- **Still to do before 1.0**: the dev-build regression pass on the house
-  (`tools/regress.sh`), the release install and Composer checks, the owner's
-  phone and keypad pass, the tag `v1.0` and the GitHub release. Before going
-  public: the git history rewrite and the screenshot retake
-  (`docs/licensing-research.md` §6).
+- **Done for 1.0**: the dev-build regression pass (build 224,
+  `tools/regress.sh` all pass, the reconnect chain clean in the shipped
+  log), the release installs (226, then 228 with the Last Action parts
+  fix) and the Composer checks of the release checklist §2, the tag `v1.0`
+  and the GitHub release. The owner's phone and keypad pass on 228 (§3) is
+  the remaining check; before going public: the git history rewrite and
+  the screenshot retake (`docs/licensing-research.md` §6).
 
 ## Open
 
