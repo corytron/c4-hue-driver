@@ -17,8 +17,29 @@ local ATTIC_ITEM = '{"id":"' .. ATTIC_RID .. '","id_v1":"/scenes/AtTiC0000000Dus
 
 local T0 = 1761000000
 
+-- GET /grouped_light bodies: the default answer knows no group's on/off (so
+-- resyncs send no HUE_SCENE_GROUP); grouped_lights({ living_room = true })
+-- lists the named groups' grouped_lights with on.on.
+local NO_GROUPED_LIGHTS = '{"errors":[],"data":[]}'
+local function grouped_lights(on_by_key)
+	local items = {}
+	for _, key in ipairs({ "garage", "living_room", "downstairs", "home" }) do
+		if on_by_key[key] ~= nil then
+			items[#items + 1] = '{"id":"' .. F.grouped_light_rids[key] .. '","on":{"on":' .. tostring(on_by_key[key])
+				.. '},"dimming":{"brightness":50.0},"type":"grouped_light"}'
+		end
+	end
+	return '{"errors":[],"data":[' .. table.concat(items, ",") .. ']}'
+end
+
+-- A one-item event container for a grouped_light's on/off.
+local function grouped_light_event(key, on)
+	return '[{"creationtime":"2026-10-23T18:00:00Z","id":"9de116fc-00f0-4a2b-8c3d-0000000000f0","type":"update",'
+		.. '"data":[{"id":"' .. F.grouped_light_rids[key] .. '","on":{"on":' .. tostring(on) .. '},"type":"grouped_light"}]}]'
+end
+
 describe("bridge.scenes", function()
-	local scenes, lights, http, c4, L, S, results, logged, now, offs
+	local scenes, lights, http, c4, L, S, results, logged, now, offs, dims
 
 	local function http_ctx(req, cb)
 		req.ip = "192.0.2.10"
@@ -58,7 +79,8 @@ describe("bridge.scenes", function()
 
 	local function new_scenes(extra)
 		local ctx = { http = http_ctx, now = function() return now end, lights = L,
-			group_off = function(rid) offs[#offs + 1] = rid; return true end }
+			group_off = function(rid) offs[#offs + 1] = rid; return true end,
+			group_dim = function(rid, body) dims[#dims + 1] = { rid = rid, body = body }; return true end }
 		for k, v in pairs(extra or {}) do ctx[k] = v end
 		return scenes.new(ctx)
 	end
@@ -73,7 +95,7 @@ describe("bridge.scenes", function()
 		return body
 	end
 
-	-- Answer the two serial GETs: /scene then /smart_scene.
+	-- Answer the three serial GETs: /scene, /smart_scene, then /grouped_light.
 	local function answer_gets(opts)
 		opts = opts or {}
 		local t = c4.last_transfer()
@@ -87,6 +109,9 @@ describe("bridge.scenes", function()
 		local t2 = c4.last_transfer()
 		assert.equal("https://192.0.2.10/clip/v2/resource/smart_scene", t2.url)
 		t2:respond(opts.smart_code or 200, opts.smart or F.smart_scene)
+		local t3 = c4.last_transfer()
+		assert.equal("https://192.0.2.10/clip/v2/resource/grouped_light", t3.url)
+		t3:respond(opts.grouped_code or 200, opts.grouped or NO_GROUPED_LIGHTS)
 	end
 
 	local function resync(opts)
@@ -157,6 +182,7 @@ describe("bridge.scenes", function()
 		scenes = require("bridge.scenes")
 		results = {}
 		offs = {}
+		dims = {}
 		L = new_lights()
 		S = new_scenes()
 	end)
@@ -177,13 +203,17 @@ describe("bridge.scenes", function()
 	end)
 
 	describe("resync", function()
-		it("GETs /scene then /smart_scene with the key, caches the scenes and counts the smart ones", function()
+		it("GETs /scene, /smart_scene and /grouped_light with the key, caches scenes and counts smart ones", function()
 			S:resync(done)
 			assert.equal(1, #c4.transfers)
 			assert.equal("k", c4.transfers[1].headers["hue-application-key"])
 			c4.transfers[1]:respond(200, F.scene)
 			assert.equal(2, #c4.transfers)
 			c4.transfers[2]:respond(200, F.smart_scene)
+			assert.equal(3, #c4.transfers)
+			assert.is_nil(last_result().ok, "done waits for the grouped_light GET")
+			assert.equal("k", c4.transfers[3].headers["hue-application-key"])
+			c4.transfers[3]:respond(200, grouped_lights({ living_room = true, garage = false }))
 			assert.same({ ok = true, text = nil }, last_result())
 			assert.equal(5, S:bridge_count())
 			assert.equal(1, S.smart_scenes)
@@ -197,6 +227,7 @@ describe("bridge.scenes", function()
 			assert.is_true(S:scene(F.scene_rids.savanna).auto_dynamic)
 			assert.is_nil(relax.actions, "the catalogue is compact")
 			assert.is_true(saw_log("5 scenes cached, 1 smart scenes"))
+			assert.same({ [F.grouped_light_rids.living_room] = true, [F.grouped_light_rids.garage] = false }, S.group_on)
 		end)
 
 		it("fails on a failed /scene GET and survives a failed /smart_scene GET", function()
@@ -211,13 +242,23 @@ describe("bridge.scenes", function()
 			assert.equal(5, S:bridge_count())
 		end)
 
+		it("survives a failed /grouped_light GET, which leaves the groups' on/off unknown", function()
+			resync({ grouped = grouped_lights({ living_room = true }) })
+			assert.is_true(S.group_on[F.grouped_light_rids.living_room])
+			resync({ grouped_code = 503 })
+			assert.is_true(last_result().ok)
+			assert.same({}, S.group_on)
+			assert.is_true(saw_log("group on/off unknown"))
+			assert.equal(5, S:bridge_count())
+		end)
+
 		it("runs a resync requested during a resync once more afterwards, latest done wins", function()
 			S:resync(function() done(true, "first") end)
 			S:resync(function() done(true, "second") end)
 			S:resync(function() done(true, "third") end)
 			answer_gets()
 			assert.equal("first", last_result().text)
-			assert.equal(3, #c4.transfers, "the pending resync started")
+			assert.equal(4, #c4.transfers, "the pending resync started")
 			answer_gets()
 			assert.equal("third", last_result().text)
 			assert.equal(2, #results)
@@ -387,11 +428,12 @@ describe("bridge.scenes", function()
 	end)
 
 	describe("events", function()
-		it("mirrors a recall and the status going inactive onto the scene device, ignoring the grouped_lights", function()
+		it("mirrors a recall and the status going inactive onto the scene device, with its group's on", function()
 			add_relax()
 			c4.sent = {}
-			assert.equal(1, S:on_container(container(F.events.scene_recalled)))
-			assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
+			assert.equal(2, S:on_container(container(F.events.scene_recalled)))
+			assert.same({ { id = 2001, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.relax, on = "true" } },
+				{ id = 2001, command = "HUE_SCENE_STATE",
 				params = { rid = F.scene_rids.relax, active = "static", reason = "event" } } }, c4.sent)
 			assert.equal("static", S:scene(F.scene_rids.relax).active)
 			c4.sent = {}
@@ -761,6 +803,24 @@ describe("bridge.scenes", function()
 			assert.equal("dynamic_palette", c4.sent[3].params.active)
 		end)
 
+		it("passes a brightness 1-100 as recall.dimming and ignores one out of range", function()
+			add_relax()
+			S:recall({ rid = F.scene_rids.relax, action = "active", brightness = "1" })
+			assert.same({ recall = { action = "active", dimming = { brightness = 1 } } }, json.decode(c4.last_transfer().data))
+			respond_ok(c4.last_transfer())
+			S:recall({ rid = F.scene_rids.relax, brightness = "100" })
+			assert.same({ brightness = 100 }, json.decode(c4.last_transfer().data).recall.dimming)
+			respond_ok(c4.last_transfer())
+			for _, bad in ipairs({ "0", "101", "-3", "lots" }) do
+				S:recall({ rid = F.scene_rids.relax, brightness = bad })
+				assert.same({ recall = { action = "active" } }, json.decode(c4.last_transfer().data))
+				respond_ok(c4.last_transfer())
+			end
+			assert.is_true(saw_log("recall brightness 101 for Relax out of range"))
+			S:recall({ rid = F.scene_rids.relax, brightness = "" })
+			assert.same({ recall = { action = "active" } }, json.decode(c4.last_transfer().data))
+		end)
+
 		it("treats an unknown action as active with a warning", function()
 			add_relax()
 			S:recall({ rid = F.scene_rids.relax, action = "sideways" })
@@ -813,6 +873,147 @@ describe("bridge.scenes", function()
 		end)
 	end)
 
+	describe("group on/off and other scenes (HUE_SCENE_GROUP)", function()
+		-- Relax (2001) and Savanna sunset (2002) in the Living Room, Concentrate
+		-- (2003) in the Garage.
+		local function add_three(opts)
+			resync(opts)
+			S:add_all_of_group(F.group_rids.living_room, done)
+			S:add_scene(F.scene_rids.concentrate, nil, done)
+			c4.sent = {}
+		end
+
+		it("sends each linked scene its group's on/off after a resync", function()
+			add_three()
+			resync({ grouped = grouped_lights({ living_room = true, garage = false }) })
+			local groups_sent = {}
+			for _, m in ipairs(c4.sent) do
+				if m.command == "HUE_SCENE_GROUP" then groups_sent[#groups_sent + 1] = m end
+			end
+			table.sort(groups_sent, function(a, b) return a.id < b.id end)
+			assert.same({
+				{ id = 2001, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.relax, on = "true" } },
+				{ id = 2002, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.savanna, on = "true" } },
+				{ id = 2003, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.concentrate, on = "false" } },
+			}, groups_sent)
+			c4.sent = {}
+			resync({ grouped = grouped_lights({ living_room = true, garage = false }) })
+			for _, id in ipairs({ 2001, 2002, 2003 }) do
+				assert.equal(1, #sent_to(id, "HUE_SCENE_GROUP"), "again at every resync, changed or not")
+			end
+		end)
+
+		it("sends nothing at resync for an unknown group, an unbound or a gone scene", function()
+			add_three()
+			local kept = {}
+			for _, b in ipairs(c4.bindings) do
+				if b.consumer ~= 2002 then kept[#kept + 1] = b end
+			end
+			c4.bindings = kept
+			resync({ body = F.scene:gsub(replace(F.scene_rids.concentrate, "-", "%-"), "deadbeef-0000-4000-8000-000000000000"),
+				grouped = grouped_lights({ garage = true }) })
+			assert.equal("gone", S:entry(F.scene_rids.concentrate).state)
+			assert.same({}, sent_to(2001, "HUE_SCENE_GROUP"), "the Living Room's on/off is unknown")
+			assert.same({}, sent_to(2002), "unbound")
+			assert.same({}, sent_to(2003, "HUE_SCENE_GROUP"), "gone")
+		end)
+
+		it("a grouped_light event that flips on tells the scenes of that group only, once", function()
+			add_three({ grouped = grouped_lights({ living_room = false, garage = false }) })
+			S:on_binding_changed(1, "HUE_BRIDGE", false, 2002)
+			c4.sent = {}
+			assert.equal(1, S:on_container(container(grouped_light_event("living_room", true))))
+			assert.same({ { id = 2001, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.relax, on = "true" } } },
+				c4.sent)
+			c4.sent = {}
+			assert.equal(0, S:on_container(container(grouped_light_event("living_room", true))))
+			assert.same({}, c4.sent, "the same value again sends nothing")
+			assert.equal(1, S:on_container(container(grouped_light_event("garage", true))))
+			assert.same({ "HUE_SCENE_GROUP@2003" }, commands_sent())
+			assert.equal("true", c4.sent[1].params.on)
+			c4.sent = {}
+			assert.equal(1, S:on_container(container(grouped_light_event("living_room", false))))
+			assert.equal("false", c4.sent[1].params.on)
+			assert.equal(0, S:on_container(container(grouped_light_event("home", true))), "a group without imported scenes")
+		end)
+
+		it("a scene becoming active tells the other linked scenes of its group, not itself", function()
+			add_three()
+			assert.equal(1 + 1, S:on_container(container(F.events.scene_dynamic)))
+			assert.same({ "HUE_SCENE_GROUP@2001", "HUE_SCENE_STATE@2002" }, commands_sent())
+			assert.same({ rid = F.scene_rids.relax, other_active = "true" }, c4.sent[1].params)
+			c4.sent = {}
+			S:on_container(container(F.events.scene_inactive))
+			assert.same({}, sent_to(2002, "HUE_SCENE_GROUP"), "going inactive tells no one")
+			assert.same({}, sent_to(2003))
+		end)
+
+		it("an unimported scene becoming active tells the linked scenes of its group", function()
+			resync()
+			S:add_scene(F.scene_rids.relax, nil, done)
+			c4.sent = {}
+			assert.equal(1, S:on_container(container(F.events.scene_dynamic)))
+			assert.same({ { id = 2001, command = "HUE_SCENE_GROUP",
+				params = { rid = F.scene_rids.relax, other_active = "true" } } }, c4.sent)
+		end)
+	end)
+
+	describe("dim", function()
+		it("queues a dimming_delta up or down on the scene's grouped_light with the duration clamped", function()
+			add_relax()
+			c4.sent = {}
+			local n = #c4.transfers
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, device_id = "2001", direction = "up", duration = "5000" }))
+			assert.same({ rid = F.grouped_light_rids.living_room, body = { dimming_delta = { action = "up",
+				brightness_delta = 100 }, dynamics = { duration = 5000 } } }, dims[1])
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, direction = "down", duration = "99999999" }))
+			assert.same({ dimming_delta = { action = "down", brightness_delta = 100 }, dynamics = { duration = 6000000 } },
+				dims[2].body)
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, direction = "up", duration = "-5" }))
+			assert.equal(0, dims[3].body.dynamics.duration)
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, direction = "up" }))
+			assert.equal(5000, dims[4].body.dynamics.duration, "the default hold rate")
+			assert.equal(n, #c4.transfers, "no transfer of its own")
+			assert.same({}, c4.sent, "no STATE")
+		end)
+
+		it("queues a stop without dynamics", function()
+			add_relax()
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, direction = "stop", duration = "5000" }))
+			assert.same({ rid = F.grouped_light_rids.living_room, body = { dimming_delta = { action = "stop" } } }, dims[1])
+		end)
+
+		it("returns false when nothing was queued, for a gone scene, a group without grouped_light or bad params", function()
+			add_relax()
+			S.ctx.group_dim = function() return false end
+			assert.is_false(S:dim({ rid = F.scene_rids.relax, direction = "up" }))
+			assert.is_true(saw_log("nothing queued"))
+			S.ctx.group_dim = function(rid, body) dims[#dims + 1] = { rid = rid, body = body }; return true end
+			assert.is_false(S:dim({ rid = F.scene_rids.relax, direction = "sideways" }))
+			assert.is_false(S:dim({ rid = "nope", direction = "up" }))
+			assert.is_false(S:dim({ direction = "up" }))
+			S:on_container(container(F.events.scene_deleted))
+			assert.is_false(S:dim({ rid = F.scene_rids.relax, direction = "up" }))
+			assert.is_true(saw_log("dim of Relax (device 2001) ignored: scene not on the bridge"))
+
+			resync({ attic = true })
+			L.reg:set_room_mapping(F.group_rids.attic, { c4_room_id = GARAGE_ROOM, c4_room_name = "Garage", hue_name = "Attic",
+				type = "zone" })
+			S:add_scene(ATTIC_RID, nil, done)
+			assert.is_false(S:dim({ rid = ATTIC_RID, direction = "down" }))
+			assert.is_true(saw_log("its group has no grouped_light"))
+			assert.same({}, dims)
+		end)
+
+		it("without group_dim in ctx logs and returns false", function()
+			S = scenes.new({ http = http_ctx, now = function() return now end, lights = L })
+			resync()
+			S:add_scene(F.scene_rids.relax, nil, done)
+			assert.is_false(S:dim({ rid = F.scene_rids.relax, direction = "up" }))
+			assert.is_true(saw_log("no group_dim in ctx"))
+		end)
+	end)
+
 	describe("off", function()
 		it("turns the scene's group off through group_off once and reports inactive", function()
 			add_relax()
@@ -823,7 +1024,7 @@ describe("bridge.scenes", function()
 			assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
 				params = { rid = F.scene_rids.relax, active = "inactive", reason = "recall" } } }, c4.sent)
 			assert.equal("inactive", S:scene(F.scene_rids.relax).active)
-			assert.equal(#c4.transfers, 2, "no transfer of its own")
+			assert.equal(#c4.transfers, 3, "no transfer of its own")
 		end)
 
 		it("reports inactive without a call for a group without grouped_light, a gone scene or an unknown rid", function()

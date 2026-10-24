@@ -117,9 +117,10 @@
 		<on_off>True</on_off>
 		<min_max>False</min_max>
 		<click_rates>False</click_rates>
-		<hold_rates>False</hold_rates>
+		<hold_rates>True</hold_rates>
+		<hold_rate_min>1000</hold_rate_min>
 		<cold_start>False</cold_start>
-		<has_leds>False</has_leds>
+		<has_leds>True</has_leds>
 		<supports_target>True</supports_target>
 		<supports_brightness_stop>True</supports_brightness_stop>
 		<supports_color_stop>False</supports_color_stop>

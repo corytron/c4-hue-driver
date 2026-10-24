@@ -74,6 +74,7 @@ function commands.new(opts)
 	return setmetatable({
 		send = assert(opts.send, "commands.new needs opts.send"),
 		now = opts.now or default_now,
+		level_of = opts.level_of,  -- rid -> current brightness or nil (start of a dim's fallback estimate)
 		lights = {},                -- rid -> { pending, timer, timer_kind, inflight, failures, limits }
 		generation = 0,
 		tokens = commands.BURST,
@@ -96,6 +97,17 @@ local function merge(pending, fields)
 		f.on = true
 	elseif fields.on == false or fields.on == "false" then
 		f.on = false
+	end
+
+	-- A relative dim (Hue's dimming_delta) is an action, not a state: it
+	-- replaces a pending brightness or on/off, and either of those replaces
+	-- a pending dim. `level` travels with a stop as the fallback brightness.
+	if fields.dim == "up" or fields.dim == "down" or fields.dim == "stop" then
+		pending.dim = fields.dim
+		pending.level = tonumber(fields.level)
+		pending.brightness, pending.on = nil, nil
+	elseif f.brightness or f.on ~= nil then
+		pending.dim, pending.level = nil, nil
 	end
 
 	if f.mirek then
@@ -135,6 +147,20 @@ end
 function commands.body(pending, limits)
 	limits = limits or commands.DEFAULT_LIMITS
 	local body = {}
+	if pending.dim then
+		-- Hue ramps the whole range over `rate` and keeps the lights' relative
+		-- levels; "stop" ends a ramp where it is [assumed: dimming_delta
+		-- "stop" and dynamics on light and grouped_light; docs/keypad-design.md].
+		if pending.dim == "stop" then
+			body.dimming_delta = { action = "stop" }
+		else
+			body.dimming_delta = { action = pending.dim, brightness_delta = 100 }
+			if pending.rate and pending.rate > 0 then
+				body.dynamics = { duration = round(pending.rate) }
+			end
+		end
+		return body
+	end
 	if pending.brightness ~= nil and pending.brightness <= 0 then
 		body.on = { on = false }
 	else
@@ -252,6 +278,12 @@ function commands:flush(rid)
 		return -- nothing the bridge could act on (a lone rate, say)
 	end
 	light.inflight = fields
+	if fields.dim == "up" or fields.dim == "down" then
+		light.dim_start = { t = self.now(), dir = fields.dim, duration = fields.rate or 0,
+			from = self.level_of and tonumber(self.level_of(rid)) or nil }
+	elseif fields.dim == "stop" then
+		light.dim_stop_at = self.now()
+	end
 	if log.enabled("debug") then
 		log.debug("PUT light %s: %s", tostring(rid), C4:JsonEncode(body))
 	end
@@ -277,6 +309,23 @@ function commands:flush(rid)
 	end
 end
 
+-- The level a refused stop falls back to: the device's own estimate sent
+-- with the stop, else the start level moved by the elapsed share of the
+-- ramp. nil when neither is known (the ramp then runs to its end).
+function commands:stop_fallback(light, sent)
+	local level = tonumber(sent.level)
+	local start = light.dim_start
+	if not level and start and start.from and start.duration > 0 then
+		local elapsed = (light.dim_stop_at or self.now()) - start.t
+		local moved = 100 * math.min(1, math.max(0, elapsed / start.duration))
+		level = start.dir == "up" and start.from + moved or start.from - moved
+	end
+	if not level then
+		return nil
+	end
+	return math.floor(math.max(1, math.min(100, level)) + 0.5)
+end
+
 local function retriable(result)
 	return result.code == nil or result.code == 429 or result.code >= 500
 end
@@ -299,6 +348,13 @@ function commands:on_done(rid, light, result)
 		light.failures = 0
 		self.counters.dropped = self.counters.dropped + 1
 		log.warn("light %s: %s, dropping the command", tostring(rid), tostring(result.err))
+		if sent and sent.dim == "stop" then
+			local level = self:stop_fallback(light, sent)
+			if level then
+				log.warn("light %s: the bridge refused the dim stop; setting %d %% instead", tostring(rid), level)
+				light.pending = merge(light.pending or {}, { brightness = level })
+			end
+		end
 	end
 	if light.pending then
 		self:flush(rid) -- changes made while this PUT was in flight
