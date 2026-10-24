@@ -6,10 +6,6 @@
 # Composer exposes every control to UIA as ControlType.Pane with NO patterns (no Invoke/Value/Selection),
 # so this module READS through UIA (Name / ClassName / BoundingRectangle) and ACTS through real mouse and
 # keyboard input at UIA-reported screen coordinates.
-#
-# Repo copy: updated 2026-10-24 from the Windows session's C:\c4-hue\Composer.psm1 (49,370 bytes, sha256
-# b3dc42a491ae2471f00970d468e831fcd708e629b3b6766656e289eb5e0bbe31), which writes and exercises it through
-# Composer rounds 1-20; the rules it follows are in docs/composer-remote.md. Not run on this VM.
 
 Set-StrictMode -Off
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
@@ -79,7 +75,8 @@ function Get-ComposerDialog {
     $winCond = New-Object System.Windows.Automation.PropertyCondition($script:A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Window)
     $mainEl = $script:A::FromHandle($mainH)
     # ignore unnamed windows (tooltips) - real dialogs have a title
-    $owned = @($mainEl.FindAll($script:Scope::Children, $winCond) | Where-Object { $_.Current.Name -and $_.Current.Name -ne 'GlassPanelForm' })
+    # ...and device tooltips (multi-line text with "Device ID:"), which Composer shows as owned windows while the mouse hovers the tree
+    $owned = @($mainEl.FindAll($script:Scope::Children, $winCond) | Where-Object { $_.Current.Name -and $_.Current.Name -ne 'GlassPanelForm' -and $_.Current.Name -notmatch 'Device ID:' })
     if ($owned.Count -gt 0) {
         # nested: a dialog opened from a dialog is a child of that dialog; descend to the deepest one
         $d = $owned[-1]
@@ -723,8 +720,8 @@ function Save-PropertyRowShot {
 }
 
 function Send-DocShot {
-    # Upload a PNG from C:\c4-hue\shots\doc\ to the Ubuntu dev server (PUT http://<dev VM>:8090/img/<name>); returns the server's reply.
-    param([Parameter(Mandatory)][string]$Name, [string]$Server = 'http://192.0.2.7:8090'  # placeholder: the dev VM's address)
+    # Upload a PNG from C:\c4-hue\shots\doc\ to the Ubuntu dev server (PUT http://192.0.2.7:8090/img/<name>); returns the server's reply.
+    param([Parameter(Mandatory)][string]$Name, [string]$Server = 'http://192.0.2.7:8090')
     $p = "C:\c4-hue\shots\doc\$Name"
     $r = Invoke-WebRequest -Method Put -InFile $p -Uri "$Server/img/$Name" -UseBasicParsing -TimeoutSec 60
     [pscustomobject]@{ Name = $Name; Bytes = (Get-Item $p).Length; Status = $r.StatusCode; Reply = ($r.Content -as [string]).Trim() }
@@ -761,6 +758,67 @@ function Invoke-SafeClick {
     if ($fgRoot -ne $Hwnd) { [void](Show-AnyWindow -Hwnd $Hwnd); $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2) }
     if ($fgRoot -ne $Hwnd) { throw "Refusing click at ($X,$Y): window $Hwnd is not in the foreground (foreground root = $fgRoot)" }
     Invoke-MouseClick -X $X -Y $Y -Right:$Right -Double:$Double
+}
+
+# ---- Win32 ComboBox reader (cross-process, 32-bit target): item texts without opening the list ----
+if (-not ('C4.Combo' -as [type])) {
+Add-Type -Language CSharp -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Text;
+namespace C4 {
+public static class Combo {
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern IntPtr VirtualAllocEx(IntPtr p, IntPtr addr, uint size, uint type, uint prot);
+    [DllImport("kernel32.dll")] static extern bool VirtualFreeEx(IntPtr p, IntPtr addr, uint size, uint type);
+    [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr p, IntPtr addr, byte[] buf, uint size, out IntPtr read);
+    const uint CB_GETCOUNT = 0x0146, CB_GETCURSEL = 0x0147, CB_GETLBTEXT = 0x0148, CB_GETLBTEXTLEN = 0x0149, CB_GETDROPPEDSTATE = 0x0157, CB_GETITEMHEIGHT = 0x0154;
+    const uint PROCESS_VM = 0x0008|0x0010|0x0020|0x0400;
+    public static int GetCount(IntPtr h) { return (int)(long)SendMessage(h, CB_GETCOUNT, IntPtr.Zero, IntPtr.Zero); }
+    public static int GetCurSel(IntPtr h) { return (int)(long)SendMessage(h, CB_GETCURSEL, IntPtr.Zero, IntPtr.Zero); }   // CB_ERR (-1) would overflow a plain (int) cast on x64
+    public static int GetTextLen(IntPtr h, int i) { return (int)(long)SendMessage(h, CB_GETLBTEXTLEN, (IntPtr)i, IntPtr.Zero); }
+    public static bool IsDropped(IntPtr h) { return SendMessage(h, CB_GETDROPPEDSTATE, IntPtr.Zero, IntPtr.Zero) != IntPtr.Zero; }
+    public static int GetItemHeight(IntPtr h) { return (int)SendMessage(h, CB_GETITEMHEIGHT, IntPtr.Zero, IntPtr.Zero); }
+    public static string GetText(IntPtr h, int i) {
+        int len = (int)SendMessage(h, CB_GETLBTEXTLEN, (IntPtr)i, IntPtr.Zero); if (len < 0) return null;
+        uint pid; GetWindowThreadProcessId(h, out pid); IntPtr p = OpenProcess(PROCESS_VM, false, pid); if (p == IntPtr.Zero) throw new Exception("OpenProcess failed");
+        uint size = (uint)((len + 1) * 2); IntPtr mem = VirtualAllocEx(p, IntPtr.Zero, size, 0x3000, 0x04);
+        try { SendMessage(h, CB_GETLBTEXT, (IntPtr)i, mem); byte[] buf = new byte[size]; IntPtr n; ReadProcessMemory(p, mem, buf, size, out n); string s = Encoding.Unicode.GetString(buf); int z = s.IndexOf('\0'); return z >= 0 ? s.Substring(0, z) : s; }
+        finally { VirtualFreeEx(p, mem, 0, 0x8000); CloseHandle(p); }
+    }
+}}
+'@
+}
+
+function Get-ComboItems {
+    # All items of a Win32 combo box (hwnd from a UIA element's NativeWindowHandle), with the selected index.
+    # NOTE: Composer's WinForms combo boxes answer CB_GETLBTEXTLEN but return CB_ERR for CB_GETLBTEXT sent cross-process,
+    # so this gives counts/selection only; use Get-ComboListItemsMsaa on the dropped ComboLBox window for the texts.
+    param([Parameter(Mandatory)][IntPtr]$Hwnd)
+    $n = [C4.Combo]::GetCount($Hwnd); $sel = [C4.Combo]::GetCurSel($Hwnd)
+    for ($i = 0; $i -lt $n; $i++) { [pscustomobject]@{ Index = $i; Text = [C4.Combo]::GetText($Hwnd, $i); Selected = ($i -eq $sel) } }
+}
+
+if (-not ('C4.Msaa' -as [type])) {
+Add-Type -AssemblyName Accessibility
+Add-Type -Language CSharp -ReferencedAssemblies Accessibility -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Collections.Generic; using Accessibility;
+namespace C4 {
+public static class Msaa {
+    [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
+    static IAccessible Client(IntPtr hwnd) { Guid g = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); object o; int hr = AccessibleObjectFromWindow(hwnd, 0xFFFFFFFC, ref g, out o); if (hr != 0 || o == null) throw new Exception("AccessibleObjectFromWindow failed hr=" + hr); return (IAccessible)o; }
+    // Names of the child accessible objects (for a list box: its items, in order).
+    public static List<string> ChildNames(IntPtr hwnd) { IAccessible a = Client(hwnd); var l = new List<string>(); int n = a.accChildCount; for (int i = 1; i <= n; i++) { string s; try { s = a.get_accName(i); } catch (Exception e) { s = "<err " + e.Message + ">"; } l.Add(s); } return l; }
+    public static string Value(IntPtr hwnd) { try { return Client(hwnd).get_accValue(0); } catch { return null; } }
+}}
+'@
+}
+
+function Get-ComboListItemsMsaa {
+    # Texts of a dropped combo list (the top-level 'ComboLBox' window) via MSAA, in order. Works where CB_GETLBTEXT does not.
+    param([Parameter(Mandatory)][IntPtr]$ListHwnd)
+    $i = 0; foreach ($t in [C4.Msaa]::ChildNames($ListHwnd)) { [pscustomobject]@{ Index = $i; Text = $t }; $i++ }
 }
 
 Export-ModuleMember -Function *

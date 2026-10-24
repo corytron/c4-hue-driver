@@ -427,3 +427,10 @@ section, this section wins.
    (PR #29, awaiting its Composer check) so that nothing waits; it merges
    after #29. A build of it changes no `<capabilities>`, so the install needs
    no controller reboot.
+6. **`Re-link Zone Light`** (coordinator, while wiring): with `Add Light` and
+   its `Light` picker lights-only, a zone-light device whose zone was deleted
+   could not be re-linked through `Re-link Device To Light`; so a second
+   bridge action, `Re-link Zone Light` (`Device` = the zone-light devices,
+   `Group` = `picker_groups()`), does it, and `Re-link Device To Light` stays
+   lights-only. `Forget Light`'s `Device` picker lists the zone-light devices
+   after the lights'. The cross-kind refusal of Q10 is therefore structural.
