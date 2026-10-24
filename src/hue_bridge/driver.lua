@@ -237,6 +237,20 @@ local function new_scenes()
 			end
 			return false
 		end,
+		-- Hold-to-dim on a scene keypad: dimming_delta start/stop on the
+		-- scene's grouped_light through the same queue (docs/keypad-design.md).
+		group_dim = function(grouped_light_rid, body)
+			local delta = type(body) == "table" and body.dimming_delta or nil
+			if not state.group_queue or type(delta) ~= "table" then
+				return false
+			end
+			-- The queue builds the PUT itself from a "dim" field.
+			state.group_queue:set(grouped_light_rid, {
+				dim = delta.action,
+				rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
+			})
+			return true
+		end,
 		persist_get = function(name) return C4:PersistGetValue(name) end,
 		persist_set = function(name, value) C4:PersistSetValue(name, value) end,
 	})
@@ -293,6 +307,10 @@ local function new_group_queue()
 	return commands.new({
 		send = function(rid, body, done)
 			bridge_request({ method = "PUT", path = "/clip/v2/resource/grouped_light/" .. rid, body = body }, done)
+		end,
+		-- Where a refused dim stop's fallback estimate starts.
+		level_of = function(rid)
+			return state.scenes and state.scenes.group_level and state.scenes.group_level[rid] or nil
 		end,
 	})
 end
@@ -1000,6 +1018,10 @@ dispatch.commands["HUE_SCENE_OFF"] = function(params)
 	scene_message("off", params)
 end
 
+dispatch.commands["HUE_SCENE_DIM"] = function(params)
+	scene_message("dim", params)
+end
+
 dispatch.commands["HUE_SCENE_GOODBYE"] = function(params)
 	scene_message("goodbye", params)
 	refresh_lights_props()
@@ -1032,6 +1054,26 @@ dispatch.commands["HUE_SET"] = function(params)
 		tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek), tostring(fields.rate))
 	state.queue:limits(rid, state.lights:limits(rid))
 	state.queue:set(rid, fields)
+end
+
+-- HUE_DIM { rid, direction up | down | stop, duration ms, level }: a keypad
+-- hold on a Hue Light, as Hue's relative dim (docs/keypad-design.md). The
+-- level goes with a stop and is written only if the bridge refuses the stop.
+dispatch.commands["HUE_DIM"] = function(params)
+	params = params or {}
+	local rid = params.rid
+	if not rid or rid == "" or not state.lights:device_for(rid) then
+		log.warn("HUE_DIM for unknown light %s", tostring(rid))
+		return
+	end
+	local dir = params.direction
+	if dir ~= "up" and dir ~= "down" and dir ~= "stop" then
+		log.warn("HUE_DIM %s: unknown direction %s", rid:sub(1, 8), tostring(dir))
+		return
+	end
+	log.info("HUE_DIM %s: %s duration=%s level=%s", rid:sub(1, 8), dir, tostring(params.duration), tostring(params.level))
+	state.queue:limits(rid, state.lights:limits(rid))
+	state.queue:set(rid, { dim = dir, rate = tonumber(params.duration), level = tonumber(params.level) })
 end
 
 -- A light driver's own log line (dev builds forward info and above), so it
