@@ -95,3 +95,15 @@ sends `MATCH_LED_STATE` false on the three links.
   added or restarted between resyncs shows the right percentage at once.
 - A group level of 0 (no light lit) is not cached or shown; the last lit
   level stays. A fallback's assumed recall does not set `held_on`.
+
+## Verified on hardware (2026-10-24, build 160)
+
+Installed with "Add or Update Driver or Agent…"; Composer's "Restart
+Director?" did not load the scene's new capabilities, the owner's
+controller reboot from System Manager did (Director lost 23:55:14, back
+23:57:33). After File » Refresh Navigators the owner confirmed: the Shine
+tile in the iPhone app shows a slider with the room's percentage and
+behaves correctly, and the Bedside Lights Switch's keypad LEDs follow Shine
+between 0 % and on. The keypad hold-to-dim from build 154 also works on the
+same switch (2026-10-23), which confirms Hue accepts `dimming_delta` with
+`dynamics` and the `stop` action on a grouped_light.
