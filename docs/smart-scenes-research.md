@@ -199,7 +199,8 @@ All through `tools/devctl.py run "Hue Request" Method=… Path=/clip/v2/resource
    dynamic scenes dimmed from a keypad or slider today.
 6. **Mark slot scenes** in Add Scene, e.g. "Master Bedroom: Shine (in
    Golden hours)".
-7. **Checks now, in the Study, with the Desk Lamp**; throwaway zone and
+7. **Checks now, in the Master Bedroom** (the owner first named the Study and
+   its Desk Lamp, then switched: the Study has no keypad); throwaway zone and
    time-based scene on the bridge allowed (created and deleted by the
    checks). Run on a development build of the bridge driver installed for
    the duration; production build back afterwards.
