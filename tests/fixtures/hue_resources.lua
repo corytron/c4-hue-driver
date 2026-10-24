@@ -579,4 +579,85 @@ F.events.scene_added = '[{"creationtime":"2026-10-21T18:18:00Z","id":"9de116fc-0
 F.events.scene_deleted = '[{"creationtime":"2026-10-21T18:19:00Z","id":"9de116fc-0011-4a2b-8c3d-000000000011","type":"delete",'
 	.. '"data":[{"id":"' .. F.scene_rids.relax .. '","type":"scene"}]}]'
 
+-- Time-of-day ("smart") scenes as the house bridge shows them
+-- [verified: hardware 2026-10-24, docs/smart-scenes-research.md §7]: the app
+-- numbers repeats ("Golden hours 4"), app-made ones carry a 60 s
+-- transition, `active_timeslot` is present even while inactive, and there is
+-- no id_v1. Three: two in the Downstairs zone, one in the Living Room.
+F.smart_scene_rids = {
+	golden = F.smart_scene_rid,                     -- "Golden hours", Downstairs (zone)
+	natural = "6f5e4d3c-0000-4000-8000-0000000ss002", -- "Natural light 6", Downstairs (zone)
+	living = "6f5e4d3c-0000-4000-8000-0000000ss003",  -- "Golden hours 4", Living Room
+}
+
+local function slot(kind, hour, minute, target)
+	local start = kind == "sunset" and '{"kind":"sunset","time":{"hour":0,"minute":0,"second":0}}'
+		or string.format('{"kind":"time","time":{"hour":%d,"minute":%d,"second":0}}', hour, minute)
+	return '{"start_time":' .. start .. ',"target":{"rid":"' .. target .. '","rtype":"scene"}}'
+end
+
+local EVERY_DAY = '["sunday","monday","tuesday","wednesday","thursday","friday","saturday"]'
+
+local function smart_item(rid, name, group_rid, group_type, slots, state, slot_id)
+	return '{"id":"' .. rid .. '","type":"smart_scene",'
+		.. '"metadata":{"name":"' .. name .. '","image":{"rid":"6f5e4d3c-img0-4000-8000-000000000000","rtype":"public_image"}},'
+		.. '"group":{"rid":"' .. group_rid .. '","rtype":"' .. group_type .. '"},'
+		.. '"week_timeslots":[{"timeslots":[' .. table.concat(slots, ",") .. '],"recurrence":' .. EVERY_DAY .. '}],'
+		.. '"transition_duration":60000,'
+		.. '"active_timeslot":{"timeslot_id":' .. slot_id .. ',"weekday":"saturday"},'
+		.. '"state":"' .. state .. '"}'
+end
+
+F.smart_scene_items = {
+	golden = smart_item(F.smart_scene_rids.golden, "Golden hours", F.group_rids.downstairs, "zone",
+		{ slot("time", 7, 0, F.scene_rids.bright), slot("sunset", 0, 0, F.scene_rids.nightlight) }, "inactive", 0),
+	natural = smart_item(F.smart_scene_rids.natural, "Natural light 6", F.group_rids.downstairs, "zone",
+		{ slot("time", 6, 30, F.scene_rids.bright), slot("time", 21, 0, F.scene_rids.nightlight) }, "inactive", 1),
+	living = smart_item(F.smart_scene_rids.living, "Golden hours 4", F.group_rids.living_room, "room",
+		{ slot("time", 7, 0, F.scene_rids.savanna), slot("time", 16, 0, F.scene_rids.relax) }, "inactive", 0),
+}
+
+F.smart_scenes = '{"errors":[],"data":[' .. F.smart_scene_items.golden .. ',' .. F.smart_scene_items.natural
+	.. ',' .. F.smart_scene_items.living .. ']}'
+
+local function container(seq, kind, items)
+	return string.format('[{"creationtime":"2026-10-24T15:19:%02dZ","id":"9de116fc-00%02d-4a2b-8c3d-0000000000%02d",'
+		.. '"type":"%s","data":[%s]}]', seq, 40 + seq, 40 + seq, kind, table.concat(items, ","))
+end
+
+-- "Golden hours 4" activated (V4 on hardware): the smart scene's state first,
+-- then the slot scene (Savanna sunset, slot 0) static and the group on.
+F.events.smart_activated = container(1, "update", {
+	'{"id":"' .. F.smart_scene_rids.living .. '","type":"smart_scene","state":"active",'
+		.. '"active_timeslot":{"timeslot_id":0,"weekday":"saturday"}}',
+})
+F.events.smart_slot_scene = container(2, "update", {
+	'{"id":"' .. F.scene_rids.savanna .. '","type":"scene","status":{"active":"static","last_recall":"2026-10-24T15:19:12.321Z"}}',
+	'{"id":"' .. F.grouped_light_rids.living_room .. '","type":"grouped_light","on":{"on":true},"dimming":{"brightness":100},'
+		.. '"owner":{"rid":"' .. F.group_rids.living_room .. '","rtype":"room"}}',
+})
+-- The next time slot (16:00 → Relax) while it runs.
+F.events.smart_next_slot = container(3, "update", {
+	'{"id":"' .. F.smart_scene_rids.living .. '","type":"smart_scene","active_timeslot":{"timeslot_id":1,"weekday":"saturday"}}',
+	'{"id":"' .. F.scene_rids.relax .. '","type":"scene","status":{"active":"static","last_recall":"2026-10-24T20:00:01.000Z"}}',
+})
+-- Deactivated, or ended by the group going off or another scene (V7, V9, V10).
+F.events.smart_inactive = container(4, "update", {
+	'{"id":"' .. F.smart_scene_rids.living .. '","type":"smart_scene","state":"inactive"}',
+})
+-- Created in the app: the add arrives already active (V12).
+F.smart_scene_rids.added = "6f5e4d3c-0000-4000-8000-0000000ss004"
+F.events.smart_added = container(5, "add", {
+	smart_item(F.smart_scene_rids.added, "Natural light 7", F.group_rids.living_room, "room",
+		{ slot("time", 7, 0, F.scene_rids.bright), slot("time", 22, 0, F.scene_rids.relax) }, "active", 0),
+})
+-- Renamed and re-timed in one update (V13).
+F.events.smart_renamed = container(6, "update", {
+	'{"id":"' .. F.smart_scene_rids.living .. '","type":"smart_scene","metadata":{"name":"Evening glow"}}',
+})
+-- Deleted, also what the bridge does by itself when a slot's scene is deleted (V14).
+F.events.smart_deleted = container(7, "delete", {
+	'{"id":"' .. F.smart_scene_rids.living .. '","type":"smart_scene"}',
+})
+
 return F
