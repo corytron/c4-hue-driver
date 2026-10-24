@@ -87,3 +87,13 @@ capability changed (then the owner reboots the controller). Read:
 
 A build passes when every line reads as expected; anything else goes to
 `docs/status.md` "Open" with the build number, and the release waits.
+
+## Naming
+
+The release of this spike is **1.0** (owner, 2026-10-24): git tag `v1.0`, a
+GitHub release titled "1.0" with the three release `.c4z` files attached,
+and "1.0 (build N)" in the README and status page, where N is the build
+number the drivers show as `Driver Version` (Control4 needs an integer
+there, so the driver files keep the commit count). Later releases of the
+same spike move the tag and the attached files; a new version number comes
+when development here is finished.
