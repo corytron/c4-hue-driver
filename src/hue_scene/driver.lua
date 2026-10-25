@@ -117,7 +117,7 @@ local dev = device.new({
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
-local update_leds, LINK_BUTTON = dev.update_leds, device.LINK_BUTTON
+local update_leds, LINK_BUTTON, send = dev.update_leds, device.LINK_BUTTON, dev.send
 
 -- Parsing ------------------------------------------------------------------
 
@@ -336,6 +336,17 @@ local function report_brightness()
 	return true
 end
 
+-- A command that never reached the bridge (common/device.lua logged why):
+-- the proxy heard CHANGING and hears CHANGED with the level the tile shows,
+-- which nothing changed, or `current`, the level that CHANGING came from,
+-- while the bridge has reported none.
+local function report_unchanged(current)
+	if not report_brightness() then
+		last_reported = current
+		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = current })
+	end
+end
+
 -- Report only when what the tile shows moved from `before`.
 local function report_if_changed(before)
 	if brightness() ~= before then
@@ -512,14 +523,19 @@ end
 -- report, or the target after the ramp plus LEVEL_FALLBACK_MS. `unconfirmed`:
 -- the move follows a time-based scene's start that no STATE has confirmed
 -- yet, so its fallback assumes the start too, as the start's own would have.
-local function send_level(level, rate, unconfirmed)
+-- True when the move went to the bridge; otherwise the unchanged state is
+-- reported (`current`: what the CHANGING before it came from).
+local function send_level(level, rate, unconfirmed, current)
 	log.info("level: %d %% over %d ms", level, rate)
-	C4:SendToDevice(bridge, "HUE_SCENE_LEVEL", {
+	if not send("HUE_SCENE_LEVEL", {
 		rid = st.rid,
 		device_id = device_id(),
 		level = string.format("%d", level),
 		rate = string.format("%d", rate),
-	})
+	}) then
+		report_unchanged(current)
+		return false
+	end
 	local delay = rate + LEVEL_FALLBACK_MS
 	local p = { kind = "level", on = true, starting = unconfirmed == true }
 	p.assume = function()
@@ -532,14 +548,16 @@ local function send_level(level, rate, unconfirmed)
 		report_brightness()
 	end
 	arm(p, delay)
+	return true
 end
 
+-- What follows a time-based scene's start: the CHANGING before it (the
+-- start's, or the slider's while the start was on its way) came from off.
 local function go_level(f)
 	if blocker() then
 		return false
 	end
-	send_level(f.level, f.rate, not is_on())
-	return true
+	return send_level(f.level, f.rate, not is_on(), 0)
 end
 
 -- The level the room moves to once a starting time-based scene's look is
@@ -558,14 +576,18 @@ end
 -- brightness, so neither is sent, and the action is Hue's own choice
 -- (Decision 3). Its STATE active settles it, or the fallback assumes it runs.
 -- A level below 100 (the slider from off) follows as a move of the room,
--- which then closes the proxy's transaction (Decision 4).
-local function start_smart(rate, level)
+-- which then closes the proxy's transaction (Decision 4). A start that never
+-- reaches the bridge (logged) reports the unchanged state, and nothing
+-- follows it (`current`: what turn_on's CHANGING came from).
+local function start_smart(rate, level, current)
 	if level then
 		log.info("ON: starting the time-based scene, then the room to %d %%", level)
 	else
 		log.info("ON: starting the time-based scene")
 	end
-	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", { rid = st.rid, action = DEFAULT_RECALL })
+	if not send("HUE_SCENE_RECALL", { rid = st.rid, action = DEFAULT_RECALL }) then
+		return report_unchanged(current)
+	end
 	arm({ kind = "switch", on = true, assume = function()
 		log.debug("start unconfirmed after %d ms; assuming the time-based scene runs", FALLBACK_MS)
 		st.active = "active"
@@ -580,7 +602,8 @@ end
 -- Recall the scene; with `level` (the slider from off) at that brightness.
 -- The bridge's STATE settles it. The fallback's assumption is not a report:
 -- it does not hold the scene on, so a later inactive report still corrects it.
--- A time-based scene starts instead (start_smart).
+-- A time-based scene starts instead (start_smart). A recall that never
+-- reaches the bridge (logged) reports the unchanged state.
 local function turn_on(rate, level)
 	rate = tonumber(rate) or 0
 	-- 100 % from off is the scene as designed: a brightness override would
@@ -593,13 +616,14 @@ local function turn_on(rate, level)
 		return
 	end
 	cancel_follow()
+	local current = brightness() or 0
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = brightness() or 0,
+		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = level or 100,
 		RATE = rate,
 	})
 	if is_smart() then
-		return start_smart(rate, level)
+		return start_smart(rate, level, current)
 	end
 	local action = recall_action
 	local params = recall_params(rate)
@@ -609,7 +633,9 @@ local function turn_on(rate, level)
 	else
 		log.info("ON: recalling as %s", action)
 	end
-	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", params)
+	if not send("HUE_SCENE_RECALL", params) then
+		return report_unchanged(current)
+	end
 	local p = { kind = "switch", on = true, level = level, seq = level_seq }
 	p.assume = function()
 		log.debug("recall (%s) unconfirmed after %d ms; assuming the scene is on", action, FALLBACK_MS)
@@ -622,20 +648,26 @@ end
 
 -- This device turning the scene off ends the held state at once. A
 -- time-based scene stops: the bridge deactivates it, then turns the group
--- off (docs/smart-scenes-design.md, Decision 5).
+-- off (docs/smart-scenes-design.md, Decision 5). An off that never reaches
+-- the bridge (logged) ends nothing and reports the unchanged state.
 local function turn_off(rate)
 	rate = tonumber(rate) or 0
 	if not ready("OFF") then
 		return
 	end
 	cancel_follow()
+	local current = brightness() or 100
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = brightness() or 100,
+		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = 0,
 		RATE = rate,
 	})
+	local was_held = held_on
 	set_held(false)
-	C4:SendToDevice(bridge, "HUE_SCENE_OFF", { rid = st.rid })
+	if not send("HUE_SCENE_OFF", { rid = st.rid }) then
+		set_held(was_held)
+		return report_unchanged(current)
+	end
 	arm({ kind = "switch", on = false, assume = function()
 		log.debug("off unconfirmed after %d ms; assuming the scene is off", FALLBACK_MS)
 		st.active = "inactive"
@@ -656,12 +688,13 @@ local function move_level(level, rate)
 		return
 	end
 	cancel_follow()
+	local current = brightness() or 100
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = brightness() or 100,
+		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = level,
 		RATE = rate,
 	})
-	send_level(level, rate)
+	send_level(level, rate, false, current)
 end
 
 -- SET_BRIGHTNESS_TARGET (and SET_LEVEL / RAMP_TO_LEVEL): 0 turns the scene off
@@ -1165,14 +1198,15 @@ local function button_click(button)
 	end
 end
 
--- HUE_SCENE_DIM to the bridge: up / down over `duration` ms, or stop.
+-- HUE_SCENE_DIM to the bridge: up / down over `duration` ms, or stop. True
+-- when it went out (common/device.lua logs a failure).
 local function send_dim(direction, duration)
 	local params = { rid = st.rid, device_id = device_id(), direction = direction }
 	if duration then
 		params.duration = string.format("%d", duration)
 	end
 	log.debug("hold: dim %s%s", direction, duration and (" over " .. params.duration .. " ms") or "")
-	C4:SendToDevice(bridge, "HUE_SCENE_DIM", params)
+	return send("HUE_SCENE_DIM", params)
 end
 
 -- The proxy hears a hold as a CHANGING toward the end of the range over the
@@ -1192,23 +1226,31 @@ end
 -- start at 1 % with), and the dim up follows once the slot's look is on,
 -- while the button is still down (docs/smart-scenes-design.md, Decision 4);
 -- released before then, the scene just runs. The tile and the LEDs follow
--- its STATE.
+-- its STATE. A start that never reaches the bridge (logged) closes the
+-- hold's CHANGING with the unchanged state, and nothing follows it.
 local function start_smart_hold(h, duration)
 	hold_changing(h, 0, true, duration)
 	log.info("hold: starting the time-based scene, then dimming up")
-	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", { rid = st.rid, action = DEFAULT_RECALL })
+	if not send("HUE_SCENE_RECALL", { rid = st.rid, action = DEFAULT_RECALL }) then
+		h.changing = false
+		return report_unchanged(0)
+	end
 	arm_follow({ kind = "dim", hold = h, go = function()
 		if hold ~= h or not h.held or blocker() then
 			return false
 		end
-		send_dim("up", duration)
-		h.dim_sent = true
-		return true
+		h.dim_sent = send_dim("up", duration)
+		return h.dim_sent
 	end })
 end
 
 -- The hold timer fired with the button still down. A hold from here makes an
--- ordinary scene held on (a keypad recall or dim, the on rule).
+-- ordinary scene held on (a keypad recall or dim, the on rule). A dim or
+-- recall that never reaches the bridge (logged) leaves the scene as it was,
+-- not held by this hold, and closes the hold's CHANGING with the unchanged
+-- state; the dim that follows a recall that did go out is then just not
+-- sent (no stop at the release), and the bridge's level reports close the
+-- hold as they do after any recall.
 local function start_hold(h)
 	h.held = true
 	local on = effective_on()
@@ -1221,34 +1263,45 @@ local function start_hold(h)
 	end
 	cancel_follow()
 	local duration = setting(up and "hold_up" or "hold_down")
+	local was_held = held_on
 	if not is_smart() then
 		set_held(true)
 	end
+	local function failed(current)
+		set_held(was_held)
+		h.changing = false
+		report_unchanged(current)
+	end
 	if on then
-		hold_changing(h, brightness() or 100, up, duration)
-		send_dim(up and "up" or "down", duration)
-		h.dim_sent = true
+		local current = brightness() or 100
+		hold_changing(h, current, up, duration)
+		if send_dim(up and "up" or "down", duration) then
+			h.dim_sent = true
+		else
+			failed(current)
+		end
 		return
 	end
 	if is_smart() then
 		return start_smart_hold(h, duration)
 	end
 	-- Off: recall at 1 %, then ramp up from there once Hue has applied it.
-	-- The LEDs turn on at once; the tile follows the CHANGING.
+	-- The LEDs turn on once the recall is out; the tile follows the CHANGING.
 	hold_changing(h, 0, true, duration)
-	update_leds()
 	local params = recall_params(0)
 	params.brightness = "1"
 	log.info("hold: recalling as %s at 1 %%, then dimming up", recall_action)
-	C4:SendToDevice(bridge, "HUE_SCENE_RECALL", params)
+	if not send("HUE_SCENE_RECALL", params) then
+		return failed(0)
+	end
+	update_leds()
 	h.timer = C4:SetTimer(RECALL_DIM_AFTER_MS, function()
 		if hold ~= h then
 			return
 		end
 		h.timer = nil
 		if bridge and st.rid then
-			send_dim("up", duration)
-			h.dim_sent = true
+			h.dim_sent = send_dim("up", duration)
 		end
 	end)
 end
@@ -1355,11 +1408,15 @@ function OnDriverLateInit()
 	if not bridge then
 		schedule_recheck(1)
 	end
+	-- Last: a binding change Director delivered before late init acts now
+	-- (common/device.lua), against the binding state read above.
+	dev.replay_bindings()
 end
 
 -- Control bindings only: the bridge binding, and the Button Links, where a
--- newly bound keypad gets the LED state; the proxy's binding is not one.
-function OnBindingChanged(idBinding, _, bound, otherDevice)
+-- newly bound keypad gets the LED state; the proxy's binding is not one. A
+-- call before late init waits for it (common/device.lua).
+OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice)
 	if LINK_BUTTON[idBinding] then
 		if bound then
 			update_leds(true)
@@ -1379,7 +1436,7 @@ function OnBindingChanged(idBinding, _, bound, otherDevice)
 		refresh_status()
 		report_online()
 	end
-end
+end)
 
 -- Composer is deleting this device: tell the bridge, so it tombstones the
 -- entry instead of fanning state out to a dead id (common/device.lua).
@@ -1393,6 +1450,6 @@ function OnDriverDestroyed()
 	cancel_follow()
 	end_hold()
 	disarm_guard()
-	cancel_recheck()
+	dev.cancel_timers() -- the binding re-check and the Driver Version looks
 	close_level_window()
 end

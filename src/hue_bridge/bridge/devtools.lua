@@ -292,6 +292,25 @@ local function find_light(key)
 	return nil
 end
 
+-- A zone light or scene device by its device id or its Composer or Hue
+-- name (dev builds only): { device_id, name } or nil.
+local function find_group_device(key)
+	local wanted = tostring(key):lower()
+	for _, module in ipairs({ ctx.state.zone_lights, ctx.state.scenes }) do
+		local registry = module and module.registry or {}
+		for rid, entry in pairs(registry) do
+			if type(entry) == "table" and entry.device_id then
+				local display = C4:GetDeviceDisplayName(tonumber(entry.device_id) or 0)
+				if rid == key or tostring(entry.device_id) == wanted or (entry.name or ""):lower() == wanted
+					or (display and tostring(display):lower() == wanted) then
+					return { device_id = entry.device_id, name = entry.name or display or rid }
+				end
+			end
+		end
+	end
+	return nil
+end
+
 -- Not in driver.xml: a light_v2 proxy command to one light, the way a
 -- Navigator or programming would send it, so the whole command path can be
 -- exercised from the dev loop. Params: Light (rid, Hue name or protocol
@@ -302,7 +321,26 @@ local function proxy_command(params)
 	local lights = ctx.state.lights
 	local rid, entry = find_light(params.Light or "")
 	if not rid then
-		return log.always("Proxy Command: no registered light matches %q", tostring(params.Light))
+		-- A zone light or a scene device: its light_v2 proxy is the consumer
+		-- of its binding 5001, as for a light.
+		local group = find_group_device(params.Light or "")
+		if not group then
+			return log.always("Proxy Command: no registered light, zone light or scene matches %q",
+				tostring(params.Light))
+		end
+		local consumers = C4:GetBoundConsumerDevices(tonumber(group.device_id), 5001)
+		local gproxy = type(consumers) == "table" and next(consumers) or nil
+		if not gproxy then
+			return log.always("Proxy Command: no proxy found for %s (device %s)", group.name, tostring(group.device_id))
+		end
+		local command = params.Command or "SET_BRIGHTNESS_TARGET"
+		local forwarded = {}
+		for k, v in pairs(params) do
+			if k ~= "Light" and k ~= "Command" then forwarded[k] = v end
+		end
+		C4:SendToDevice(gproxy, command, forwarded)
+		return log.always("Proxy Command: %s -> %s (proxy %s): %s", command, group.name, tostring(gproxy),
+			C4:JsonEncode(forwarded))
 	end
 	local proxy = lights:proxy_for(rid)
 	if not proxy then

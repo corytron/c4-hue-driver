@@ -362,6 +362,11 @@ Setup (done for Shine on the Bedside Lights Switch):
     over 250 ms, a hold covers the full range in 5 s, the On preset is
     100 %, the LEDs are blue). Showing them would be a capability change
     (a reboot). **Open** as a recorded check (`docs/status.md` states it).
+    Superseded (2026-10-25, #59): the drivers now declare
+    `hide_proxy_properties` False. After the install and the owner's
+    controller reboot, a Hue Light lists the On preset, click and hold rates
+    and LED colours and a Hue Scene its hold rate and LED colours; change a
+    hold rate once and see it on a keypad (#59's hardware check).
 
 A Hue Scene on the keypad (Shine):
 

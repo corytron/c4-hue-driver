@@ -213,6 +213,31 @@ describe("common.device", function()
 			assert(ok, err)
 		end)
 
+		it("a second show_driver_version starts over: one look pending, never two chains", function()
+			local dev, c4 = new_device()
+			c4.config_info.version = ""
+			dev.show_driver_version(1)
+			c4.fire_timers()
+			assert.same({ 10000 }, delays(c4))
+			dev.show_driver_version(1) -- late init run again
+			assert.same({ 5000 }, delays(c4), "the pending look was replaced")
+		end)
+
+		it("cancel_timers stops the pending look and the binding re-check (OnDriverDestroyed)", function()
+			local dev, c4, env, _, st = new_device()
+			c4.config_info.version = ""
+			dev.show_driver_version(1)
+			st.bridge = nil
+			dev.schedule_recheck(1)
+			assert.same({ 5000, 5000 }, delays(c4))
+			dev.cancel_timers()
+			assert.same({}, delays(c4))
+			c4.config_info.version = "7"
+			assert.equal(0, c4.fire_timers())
+			assert.equal("", env.Properties["Driver Version"], "no stray write after the destroy")
+			assert.has_no.errors(dev.cancel_timers, "nothing pending is fine")
+		end)
+
 		it("Debug_Mode On enables debug lines, anything else keeps them off", function()
 			local _, _, _, dispatch = new_device()
 			dispatch.property_changed("Debug Mode", "On")
@@ -248,6 +273,104 @@ describe("common.device", function()
 			assert.same({ "good" }, seen)
 			assert.equal(1, #lines)
 			assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: buffered BAD failed: .*boom"))
+		end)
+	end)
+
+	-- docs/review-leftovers-design.md #49: OnBindingChanged acts only after
+	-- late init; an earlier call waits and is replayed once late init has run.
+	describe("binding changes before late init", function()
+		-- A handler through binding_changed that records every call it gets.
+		local function recorder(dev)
+			local seen = {}
+			local handler = dev.binding_changed(function(id, class, bound, other, other_binding)
+				seen[#seen + 1] = { id, class, bound, other, other_binding }
+			end)
+			return handler, seen
+		end
+
+		it("wait until replay_bindings, the latest call per binding in arrival order, then pass straight through", function()
+			local dev, c4 = new_device()
+			local handler, seen = recorder(dev)
+			c4.calls = {}
+			handler(200, "BUTTON_LINK", true, 77, 1)
+			handler(1, "HUE_BRIDGE", true, 16, 1)
+			handler(200, "BUTTON_LINK", false, 77, 1)
+			assert.same({}, seen)
+			assert.same({}, c4.calls, "nothing touches Director before late init")
+			dev.late_init()
+			assert.same({}, seen, "late_init applies the bridge's messages only; the driver greets first")
+			dev.replay_bindings()
+			assert.same({ { 1, "HUE_BRIDGE", true, 16, 1 }, { 200, "BUTTON_LINK", false, 77, 1 } }, seen,
+				"one call per binding, the latest; the older one for 200 says nothing the latest does not")
+			handler(201, "BUTTON_LINK", true, 78, 1)
+			assert.same({ 201, "BUTTON_LINK", true, 78, 1 }, seen[3], "after late init: at once")
+			dev.replay_bindings()
+			assert.equal(3, #seen, "nothing is replayed twice")
+		end)
+
+		it("drop a bridge binding bound to the bridge late init found, which it has greeted already", function()
+			local dev = new_device() -- its bridge is 15: what late init's lookup found
+			local handler, seen = recorder(dev)
+			handler(1, "HUE_BRIDGE", true, 15, 1)
+			dev.late_init()
+			dev.replay_bindings()
+			assert.same({}, seen)
+
+			-- Late init's lookup did not show the binding yet: the call is what says it.
+			local lagging, _, _, _, st = new_device()
+			handler, seen = recorder(lagging)
+			st.bridge = nil
+			handler(1, "HUE_BRIDGE", true, 15, 1)
+			lagging.late_init()
+			lagging.replay_bindings()
+			assert.same({ { 1, "HUE_BRIDGE", true, 15, 1 } }, seen)
+
+			-- An unbind, and a binding to another bridge, are replayed too.
+			for _, call in ipairs({ { 1, "HUE_BRIDGE", false, 15, 1 }, { 1, "HUE_BRIDGE", true, 16, 1 } }) do
+				dev = new_device()
+				handler, seen = recorder(dev)
+				handler(unpack(call))
+				dev.late_init()
+				dev.replay_bindings()
+				assert.same({ call }, seen)
+			end
+		end)
+
+		it("a replayed call that fails is logged and does not stop the rest", function()
+			local dev = new_device()
+			local seen = {}
+			local handler = dev.binding_changed(function(id)
+				if id == 200 then error("boom") end
+				seen[#seen + 1] = id
+			end)
+			handler(200, "BUTTON_LINK", true, 77, 1)
+			handler(201, "BUTTON_LINK", true, 78, 1)
+			dev.late_init()
+			local lines = capture_log()
+			dev.replay_bindings()
+			assert.same({ 201 }, seen)
+			assert.equal(1, #lines)
+			assert.truthy(lines[1]:find(
+				"^%[ERROR%] Hue Test: OnBindingChanged on binding 200 from before late init failed: .*boom"))
+		end)
+	end)
+
+	describe("commands to the bridge", function()
+		it("send hands the command to the bound bridge and answers true", function()
+			local dev, c4 = new_device()
+			assert.is_true(dev.send("HUE_SET", { rid = "r1", on = "true" }))
+			assert.same({ { id = 15, command = "HUE_SET", params = { rid = "r1", on = "true" } } }, c4.sent)
+		end)
+
+		it("answers false with an error line when SendToDevice fails, and raises nothing", function()
+			local dev, c4 = new_device()
+			local lines = capture_log()
+			c4.SendToDevice = function() error("Director says no") end
+			local ok
+			assert.has_no.errors(function() ok = dev.send("HUE_SCENE_RECALL", { rid = "r1" }) end)
+			assert.is_false(ok)
+			assert.equal(1, #lines)
+			assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: HUE_SCENE_RECALL to the bridge failed: .*Director says no"))
 		end)
 	end)
 

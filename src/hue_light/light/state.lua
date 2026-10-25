@@ -224,13 +224,23 @@ function state.to_proxy_brightness(st)
 	return clamp(round(st.brightness or 100), 1, 100)
 end
 
+-- The last mirek converted and its xy: a ct-mode HUE_STATE asks for the same
+-- conversion up to three times (the view before and after the merge, then
+-- the report), each a call into the controller; this keeps it to one
+-- (docs/reviews/efficiency-2026-10-24.md R10). The xy is a function of the
+-- mirek alone, so the entry never goes stale; a new mirek replaces it.
+local memo_mirek, memo_x, memo_y = nil, nil, nil
+
 -- x, y, mode for LIGHT_COLOR_*; nil while no colour is known. In "ct" mode
 -- the xy is derived from the mirek, so the proxy sees the white point the
 -- controller's own conversion gives for that temperature.
 function state.to_proxy_color(st)
 	if st.color_mode == "ct" and st.mirek and st.mirek > 0 then
-		local x, y = C4:ColorCCTtoXY(1000000 / st.mirek)
-		return x, y, state.MODE_CCT
+		if st.mirek ~= memo_mirek then
+			memo_x, memo_y = C4:ColorCCTtoXY(1000000 / st.mirek)
+			memo_mirek = st.mirek
+		end
+		return memo_x, memo_y, state.MODE_CCT
 	end
 	if st.x and st.y then
 		return st.x, st.y, state.MODE_XY

@@ -36,12 +36,15 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
   schedule.
 - **Keypads.** Hue Light and Hue Scene devices offer Top, Bottom and Toggle
   Button Links: tap for on and off, hold for Hue's own smooth dimming, and the
-  keypad LEDs follow the device, including changes made on the Hue side. A
-  Control4 switch can run as a decoupled two-button keypad for a Hue bulb.
+  keypad LEDs follow the device, including changes made on the Hue side. The
+  click and hold rates, the On preset and the LED colours are set in
+  Composer as on any Control4 dimmer. A Control4 switch can run as a
+  decoupled two-button keypad for a Hue bulb.
 - **Pairing from Composer.** Enter the bridge's address, press the link
   button, click Pair Bridge. The application key is stored on the controller
   and never shown. HTTPS only; the bridge's certificate is verified against
-  Signify's root certificates, which ship with the driver.
+  Signify's root certificates, which ship with the driver, and a check at
+  every start makes sure the controller really applies them.
 - **Lifecycle handling.** Renames on either side, lights replaced or deleted in
   Hue, devices deleted in Composer, a bridge reset or replaced, a project
   restored from a backup: each is reported in a readable `Attention` line and
@@ -67,7 +70,7 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
   Bridge Pro** (BSB003) on the same network as the controller, with a fixed
   IPv4 address (a DHCP reservation in your router). The driver finds the
   bridge by its address only. An address with a number below 8 in it
-  (`192.168.1.50`, not `192.168.10.50`) gives the event stream a connection
+  (`10.0.2.143`, not `198.51.100.50`) gives the event stream a connection
   queue of its own; the manual's chapter 3 explains why.
 - Not supported: the round first-generation bridge (BSB001), which has no CLIP v2
   API, and devices that are not Hue bridges; both are refused at pairing. The
@@ -338,12 +341,14 @@ the [Environments page](https://github.com/corytron/c4-hue-driver/deployments/ho
 the newest release is on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases/latest).
 
-Open: the proxy settings (click and hold rates, On preset, LED colours) are
-hidden on Hue Light and Hue Scene devices, so the defaults apply; the 32 px
-List View icons are Control4's standard ones; whether a revoked key answers
-401 or 403 is not verified; a few zone-light corner cases have not been seen
-on the house yet; second-priority hardening items are listed in
-`docs/code-analysis-2026-10-22.md`.
+Open: the 32 px List View icons are Control4's standard ones; the keypad
+settings shown since 2026-10-25 (click and hold rates, On preset, LED
+colours) have not been changed on the house yet; a few zone-light corner cases
+have not been seen on the house yet; some fixes of the review findings
+(`docs/code-analysis-2026-10-22.md`, `docs/reviews/`) still wait for a check
+on the house, among them the code a revoked key gets (an unknown key gets
+HTTP 403 from the Bridge Pro, verified 2026-10-25); the development loop's
+own security (development builds only) has an issue of its own.
 
 ## License, trademarks and provenance
 

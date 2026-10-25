@@ -36,11 +36,15 @@
 --
 -- Callback rules inherited from lights.lua: the GETs run serially, chained
 -- from http.request callbacks; on_container runs inside OnBodyChunk and only
--- sends messages; every callback body is pcall-wrapped.
+-- sends messages; every callback body is pcall-wrapped. The one timer is a
+-- recall's coalescing window (RECALL_WINDOW_MS, ctx.set_timer); its callback
+-- is pcall-wrapped too.
 --
 -- Persistence: the registry's mutators change memory only; this module marks
 -- itself dirty and saves once per batch, except during device creation, where
--- it saves after every AddDevice.
+-- it saves after every AddDevice. Beside the registry's two keys it persists
+-- the devices Forget Scene let go (FORGOTTEN_KEY), written first and only
+-- when they changed.
 
 local log = require("common.log")
 local hue_model = require("bridge.hue_model")
@@ -55,6 +59,8 @@ scenes.__index = scenes
 
 scenes.SCENES_KEY = "hue_scenes"
 scenes.TOMBSTONES_KEY = "hue_scene_tombstones"
+-- The devices Forget Scene let go: { ["<device id>"] = { rid, name, kind, at } }.
+scenes.FORGOTTEN_KEY = "hue_scene_forgotten"
 scenes.SCENE_DRIVER = "hue_scene.c4z"
 scenes.BINDING = 1
 scenes.BINDING_CLASS = "HUE_BRIDGE"
@@ -69,6 +75,12 @@ scenes.DIM_DEFAULT_DURATION = 5000
 -- HUE_SCENE_LEVEL: a smaller move than this (in %) queues nothing
 -- (docs/scene-dimmer-design.md).
 scenes.LEVEL_MIN_DELTA = 0.5
+-- HUE_SCENE_RECALL: a recall of a scene within this many ms of its last
+-- recall PUT waits for the window to end, and the ones that waited leave as
+-- one PUT carrying the latest parameters (docs/review-leftovers-design.md,
+-- #47 F9). The first recall of a quiet scene goes at once: no tap is slowed,
+-- and a keypad hold's recall at 1 % keeps its lead over the dim that follows.
+scenes.RECALL_WINDOW_MS = 300
 
 -- recall.action values [community: openhue/aiohue; `active` verified on hardware].
 scenes.ACTIONS = { active = true, static = true, dynamic_palette = true }
@@ -103,6 +115,7 @@ scenes.SMART_DEACTIVATE = "deactivate"
 --                            (docs/keypad-design.md "Scene hold-to-dim"); true when queued
 --   group_set(grouped_light_rid, fields)  the coalesced absolute grouped_light PUT of driver.lua,
 --                            fields { brightness, rate } (docs/scene-dimmer-design.md); true when queued
+--   set_timer(delay_ms, fn)  C4:SetTimer(delay_ms, fn), an object with Cancel() [verified: API 34/_1]
 function scenes.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "scenes.new: ctx.http is required")
@@ -123,6 +136,9 @@ function scenes.new(ctx)
 	end
 	ctx.log = ctx.log or log
 	ctx.now = ctx.now or os.time
+	ctx.set_timer = ctx.set_timer or function(delay_ms, fn)
+		return C4:SetTimer(delay_ms, fn)
+	end
 	ctx.group_off = ctx.group_off or function(grouped_light_rid)
 		ctx.log.warn("scenes: no group_off in ctx; grouped_light %s not turned off", tostring(grouped_light_rid))
 		return false
@@ -156,8 +172,13 @@ function scenes.new(ctx)
 		level_sent = {},           -- grouped_light rid → the HUE_SCENE_GROUP level text last sent to its scenes
 		last_configure = {},       -- rid → signature of the last HUE_SCENE_CONFIGURE sent
 		recall_gen = {},           -- rid → generation of the latest recall or off (still_current)
+		recall_windows = {},       -- rid → { timer, params?, device_id? } for RECALL_WINDOW_MS after a recall PUT;
+		                           -- params is the recall waiting for the window to end (the latest)
 		announced = {},            -- device_id → { rid, name, kind } from HUE_SCENE_HELLO, for Link Devices
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id }
+		forgotten = {},            -- device_id → { rid, name, kind, at }: devices Forget Scene let go (persisted
+		                           -- under FORGOTTEN_KEY); a hello from one is answered HUE_SCENE_FORGOTTEN
+		forgotten_dirty = false,
 		early_hellos = {},         -- hellos received before load(), answered after configure_all()
 		loaded = false,
 		synced = false,            -- a full GET /scene has succeeded (missing means something)
@@ -165,7 +186,7 @@ function scenes.new(ctx)
 		configured_once = false,
 		adding = false,            -- Add Scene / Add All Scenes Of Room running
 		resyncing = false,
-		resync_pending = nil,
+		resync_pending = {},       -- the done callbacks waiting for the next resync, each called once by it
 		device_info_logged = false,
 	}, scenes)
 end
@@ -227,6 +248,29 @@ local function by_name(a, b)
 	return tostring(a.rid) < tostring(b.rid)
 end
 
+-- The registry's own order, the one reg:rids() gives (bridge/registry.lua's
+-- by_name over { rid, name, key }): the cached Hue name lower-cased, then the
+-- exact name, then the rid. A subset sorted by it keeps the order rids()
+-- gave the whole (rids_where).
+local function registry_order(a, b)
+	if a.key ~= b.key then
+		return a.key < b.key
+	end
+	if a.name ~= b.name then
+		return a.name < b.name
+	end
+	return a.rid < b.rid
+end
+
+-- Membership in a { [device_id] = true } set from a project call, whose ids
+-- may arrive as numbers or strings.
+local function in_set(set, id)
+	if type(set) ~= "table" or id == nil then
+		return false
+	end
+	return set[id] ~= nil or set[tostring(id)] ~= nil
+end
+
 -- Registry access ---------------------------------------------------------------
 
 function scenes:load()
@@ -236,9 +280,54 @@ function scenes:load()
 		self.ctx.log.debug("scenes: loaded %s%s (device %s, %s)", tostring(entry.name),
 			is_smart(entry) and " (time-based)" or "", tostring(entry.device_id), tostring(rid))
 	end
+	self:load_forgotten()
 	self.loaded = true
 	self.dirty = false
 	return self.registry
+end
+
+-- The forgotten devices from FORGOTTEN_KEY: keyed by the device id as a
+-- string there (a persisted table keeps names as keys whatever its
+-- serialiser does with sparse numbers), by number in memory. A record that
+-- is not a table, or a key that is not a device id, is dropped.
+function scenes:load_forgotten()
+	local forgotten = self.forgotten
+	for id in pairs(forgotten) do
+		forgotten[id] = nil
+	end
+	self.forgotten_dirty = false
+	local raw = self.ctx.persist_get(scenes.FORGOTTEN_KEY)
+	if type(raw) ~= "table" then
+		return
+	end
+	for key, record in pairs(raw) do
+		local id = util.positive(key)
+		if id and type(record) == "table" then
+			forgotten[id] = {
+				rid = (type(record.rid) == "string" and record.rid ~= "") and record.rid or nil,
+				name = type(record.name) == "string" and record.name or nil,
+				kind = record.kind == scenes.SMART_KIND and scenes.SMART_KIND or nil,
+				at = tonumber(record.at),
+			}
+		end
+	end
+end
+
+-- Write FORGOTTEN_KEY when it changed. It goes before the registry (flush,
+-- save): a crash between the two writes then leaves a forgotten device
+-- marked and still registered, which its hello heals, rather than gone from
+-- the registry and unmarked, which a late hello would re-adopt (the order
+-- registry:save keeps for its tombstones).
+function scenes:save_forgotten()
+	if not self.forgotten_dirty then
+		return
+	end
+	self.forgotten_dirty = false
+	local out = {}
+	for id, record in pairs(self.forgotten) do
+		out[tostring(id)] = { rid = record.rid, name = record.name, kind = record.kind, at = record.at }
+	end
+	self.ctx.persist_set(scenes.FORGOTTEN_KEY, out)
 end
 
 function scenes:mark()
@@ -246,6 +335,7 @@ function scenes:mark()
 end
 
 function scenes:flush()
+	self:save_forgotten()
 	if self.dirty then
 		self.dirty = false
 		self.reg:save()
@@ -253,8 +343,30 @@ function scenes:flush()
 end
 
 function scenes:save()
+	self:save_forgotten()
 	self.dirty = false
 	self.reg:save()
+end
+
+-- Forget Scene let device `device_id` go (docs/review-leftovers-design.md,
+-- #47 F8): remembered, persisted at the next flush, so its hello is answered
+-- HUE_SCENE_FORGOTTEN instead of adopting it again. `told` is the name its
+-- HUE_SCENE_FORGOTTEN carried.
+function scenes:remember_forgotten(device_id, rid, told, entry)
+	self.forgotten[device_id] = { rid = rid, name = told ~= nil and tostring(told) or nil,
+		kind = is_smart(entry) and scenes.SMART_KIND or nil, at = self.ctx.now() }
+	self.forgotten_dirty = true
+end
+
+-- The device is registered again (Link Devices, an adoption) or left the
+-- project: its mark goes. True when there was one.
+function scenes:clear_forgotten(device_id)
+	if device_id == nil or self.forgotten[device_id] == nil then
+		return false
+	end
+	self.forgotten[device_id] = nil
+	self.forgotten_dirty = true
+	return true
 end
 
 -- A copy of the registry entry, or nil.
@@ -801,14 +913,43 @@ function scenes:send_group(rid, fields)
 	return true
 end
 
+-- The registered rids `keep(rid, entry)` accepts, in the registry's order
+-- (registry_order): the registry is filtered first and only the matches are
+-- sorted, so a per-event lookup costs a sort of the few scenes it concerns
+-- rather than of every scene imported (docs/reviews/efficiency-2026-10-24.md,
+-- R8). Pure: `keep` only reads.
+function scenes:rids_where(keep)
+	local list = {}
+	for rid, entry in pairs(self.registry) do
+		if keep(rid, entry) then
+			local name = entry.name ~= nil and tostring(entry.name) or ""
+			list[#list + 1] = { rid = rid, name = name, key = name:lower() }
+		end
+	end
+	if #list > 1 then
+		table.sort(list, registry_order)
+	end
+	for i, item in ipairs(list) do
+		list[i] = item.rid
+	end
+	return list
+end
+
+-- The linked scenes whose group owns grouped_light `grouped_rid`, in the
+-- registry's order.
+function scenes:linked_scenes_on(grouped_rid)
+	return self:rids_where(function(rid, entry)
+		return entry.state == "linked" and self:grouped_light_of(self:group_rid_of(rid)) == grouped_rid
+	end)
+end
+
 -- Every linked scene whose group owns grouped_light `grouped_rid` hears
--- `fields`. Returns the number of messages sent.
-function scenes:send_group_for(grouped_rid, fields)
+-- `fields`; `rids` (optional) are those scenes when the caller has them
+-- already. Returns the number of messages sent.
+function scenes:send_group_for(grouped_rid, fields, rids)
 	local sent = 0
-	for _, rid in ipairs(self.reg:rids()) do
-		local entry = self.registry[rid]
-		if entry.state == "linked" and self:grouped_light_of(self:group_rid_of(rid)) == grouped_rid
-			and self:send_group(rid, fields) then
+	for _, rid in ipairs(rids or self:linked_scenes_on(grouped_rid)) do
+		if self:send_group(rid, fields) then
 			sent = sent + 1
 		end
 	end
@@ -853,26 +994,41 @@ end
 
 -- A grouped_light item from the stream: the scenes of its group hear what
 -- changed, in one HUE_SCENE_GROUP each: `on` when the on/off changed,
--- `level` when it differs from the last level sent to the group. Returns
--- the number of messages sent.
+-- `level` when it differs from the last level sent to the group. The group's
+-- on/off and level are kept whatever the group; a group no linked scene is
+-- on (most of a house's) costs no level text and no sort (R8). Returns the
+-- number of messages sent.
 function scenes:on_grouped_light(item)
 	local grouped = item.id
-	local fields = {}
-	if type(item.dimming) == "table" and type(item.dimming.brightness) == "number" then
-		self.group_level[grouped] = item.dimming.brightness
-		local text = level_text(item.dimming.brightness)
-		if self.level_sent[grouped] ~= text then
-			fields.level = text
-		end
+	local level = type(item.dimming) == "table" and item.dimming.brightness or nil
+	if type(level) ~= "number" then
+		level = nil
 	end
+	if level ~= nil then
+		self.group_level[grouped] = level
+	end
+	local fields = {}
 	if type(item.on) == "table" and type(item.on.on) == "boolean" and self.group_on[grouped] ~= item.on.on then
 		self.group_on[grouped] = item.on.on
 		fields.on = item.on.on and "true" or "false"
 	end
+	if level == nil and fields.on == nil then
+		return 0
+	end
+	local rids = self:linked_scenes_on(grouped)
+	if #rids == 0 then
+		return 0
+	end
+	if level ~= nil then
+		local text = level_text(level)
+		if self.level_sent[grouped] ~= text then
+			fields.level = text
+		end
+	end
 	if next(fields) == nil then
 		return 0
 	end
-	local sent = self:send_group_for(grouped, fields)
+	local sent = self:send_group_for(grouped, fields, rids)
 	if sent > 0 and fields.level then
 		self.level_sent[grouped] = fields.level
 	end
@@ -902,16 +1058,14 @@ function scenes:send_other_active(rid)
 		return 0
 	end
 	local from_smart = is_smart(self:record_of(rid)) or is_smart(self.registry[rid])
-	local sent = 0
-	for _, other in ipairs(self.reg:rids()) do
-		local entry = self.registry[other]
-		if other ~= rid and entry.state == "linked" and self:group_rid_of(other) == group_rid
-			and (from_smart or not self:slot_targets(other, rid)) then
-			self.ctx.send(entry.device_id, "HUE_SCENE_GROUP", { rid = other, other_active = "true" })
-			sent = sent + 1
-		end
+	local others = self:rids_where(function(other, entry)
+		return other ~= rid and entry.state == "linked" and self:group_rid_of(other) == group_rid
+			and (from_smart or not self:slot_targets(other, rid))
+	end)
+	for _, other in ipairs(others) do
+		self.ctx.send(self.registry[other].device_id, "HUE_SCENE_GROUP", { rid = other, other_active = "true" })
 	end
-	return sent
+	return #others
 end
 
 -- CONFIGURE (when asked for, or when it changed) then STATE. The state is
@@ -1007,6 +1161,7 @@ function scenes:adopt(device_id, rid, hello, how)
 		self.ctx.log.warn("scenes: could not adopt device %d for %s: %s", device_id, tostring(rid), tostring(err))
 		return nil
 	end
+	self:clear_forgotten(device_id)  -- Link Devices brought a forgotten device back
 	self:mark()
 	if not scene and (is_smart(entry) and self.smart_synced or not is_smart(entry) and self.synced) then
 		self.reg:set_state(rid, "gone")
@@ -1032,6 +1187,16 @@ function scenes:hello(rid, params)
 			self.early_hellos[#self.early_hellos + 1] = { rid = rid, params = params }
 		end
 		return false
+	end
+	local remembered = device_id and self.forgotten[device_id] or nil
+	if remembered then
+		if not self.reg:by_device(device_id) then
+			return self:refuse_forgotten(device_id, rid, remembered)
+		end
+		-- Registered again after all (a crash between the two writes of a
+		-- forget): the registry is the truth and the mark is stale.
+		self:clear_forgotten(device_id)
+		self:flush()
 	end
 	if device_id then
 		self.announced[device_id] = { rid = rid, name = params.name, kind = params.kind }
@@ -1080,6 +1245,18 @@ function scenes:hello(rid, params)
 	return self:answer_hello(rid)
 end
 
+-- The hello of a device Forget Scene let go (#47 F8): told
+-- HUE_SCENE_FORGOTTEN again, never adopted, never counted as a claimant or
+-- remembered as announced; Link Devices, an owner's click, is the way back.
+-- Returns false (not answered with a configuration).
+function scenes:refuse_forgotten(device_id, rid, remembered)
+	rid = rid or remembered.rid
+	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = remembered.name })
+	self.ctx.log.info("scenes: device %d said hello for %s, but Forget Scene let it go on %s; told so, not adopted "
+		.. "(Link Devices links it again)", device_id, tostring(rid), util.date_of(remembered.at))
+	return false
+end
+
 -- HUE_SCENE_GOODBYE { rid?, device_id }: the device is being deleted in
 -- Composer; the entry becomes a tombstone. Returns the tombstone or nil.
 function scenes:goodbye(params)
@@ -1098,6 +1275,9 @@ function scenes:goodbye(params)
 	if not rid then
 		self.ctx.log.debug("scenes: HUE_SCENE_GOODBYE from an unregistered device (%s, %s)", tostring(params.device_id),
 			tostring(params.rid))
+		if self:clear_forgotten(device_id) then
+			self:flush()  -- a forgotten device leaving the project takes its mark along
+		end
 		return nil
 	end
 	local entry = self.registry[rid]
@@ -1152,11 +1332,19 @@ end
 -- Reconciliation (§5) ------------------------------------------------------------
 
 -- Step 1, the project side: the bound set and the hue_scene devices in the
--- project. Saves unless `no_save`.
-function scenes:reconcile(no_save)
-	local bound = self.project:bound_set()
+-- project. `created` (optional, rids) are the entries the caller's batch
+-- has just made: they are left as they are, since Director may not list a
+-- device AddDevice has just created, or its new binding, yet, and this must
+-- not mislabel what it just made (code analysis 2026-10-22 item 13, #48).
+-- Conflicts and forgotten marks whose devices left the project go too.
+-- Saves unless `no_save`.
+function scenes:reconcile(no_save, created)
+	local bound, why = self.project:bound_set()
 	if not bound then
-		self.ctx.log.warn("scenes: reconcile skipped: the bound-device lookup failed")
+		-- A failed lookup, or an answer that is no list (bridge/project.lua:
+		-- unknown, #48 item 14), which is expected while nothing is imported.
+		local note = (why == "unknown" and self:count() == 0) and self.ctx.log.debug or self.ctx.log.warn
+		note("scenes: reconcile skipped: the bound-device lookup %s", why == "unknown" and "answered no list" or "failed")
 		return { unbound = {}, relinked = {}, tombstoned = {} }
 	end
 	local infos = self.project:devices_of(scenes.SCENE_DRIVER)
@@ -1167,7 +1355,12 @@ function scenes:reconcile(no_save)
 			present[id] = true
 		end
 	end
-	local r = self.reg:reconcile({ bound = bound, present = present })
+	local skip = nil
+	for _, rid in ipairs(created or {}) do
+		skip = skip or {}
+		skip[rid] = true
+	end
+	local r = self.reg:reconcile({ bound = bound, present = present, skip = skip })
 	if #r.unbound + #r.relinked + #r.tombstoned > 0 then
 		self:mark()
 	end
@@ -1186,10 +1379,44 @@ function scenes:reconcile(no_save)
 	for _, rid in ipairs(r.relinked) do
 		self:answer_hello(rid)
 	end
+	self:prune_conflicts(present)
+	self:prune_forgotten(present)
 	if not no_save then
 		self:flush()
 	end
 	return r
+end
+
+-- A claim (two devices on one scene, `conflicts`) ends once fewer than two
+-- of its devices are still in the project: a claimant deleted in Composer
+-- while the bridge was not watching sends no goodbye (code analysis
+-- 2026-10-22, F10). Nothing is pruned while the project's hue_scene devices
+-- are unknown (`present` nil).
+function scenes:prune_conflicts(present)
+	if not present then
+		return
+	end
+	for rid, c in pairs(self.conflicts) do
+		if not (in_set(present, c.holder) and in_set(present, c.claimant)) then
+			self.conflicts[rid] = nil
+			self.ctx.log.info("scenes: devices %s and %s no longer both claim %s: one left the project",
+				tostring(c.holder), tostring(c.claimant), tostring(rid))
+		end
+	end
+end
+
+-- A forgotten device deleted in Composer (after Forget its goodbye may not
+-- reach the bridge) needs no mark any more. Unknown project: nothing goes.
+function scenes:prune_forgotten(present)
+	if not present then
+		return
+	end
+	for id in pairs(self.forgotten) do
+		if not in_set(present, id) then
+			self:clear_forgotten(id)
+			self.ctx.log.debug("scenes: forgotten device %d is no longer in the project", id)
+		end
+	end
 end
 
 -- Step 2, the scenes: a registered rid absent from /scene (a time-based one:
@@ -1267,12 +1494,16 @@ end
 -- the group cache is fresh) and from Refresh Scenes. done(ok, err, sent,
 -- grouped_light): the fourth value is the /grouped_light body's data array
 -- when that GET succeeded (nil otherwise), for the zone lights' resync to
--- take instead of fetching the same records again.
+-- take instead of fetching the same records again. A resync asked for while
+-- one (or an add) runs waits for it, and one more resync then answers every
+-- caller that waited, each once: a connect's chain (the zone lights' resync
+-- and the rows' refresh) is not lost to a Refresh Scenes click that came
+-- after it (code analysis 2026-10-22, F2; #47).
 function scenes:resync(done)
 	done = done or function() end
 	self:expire_stale_busy()
 	if self.resyncing or self.adding then
-		self.resync_pending = done
+		self.resync_pending[#self.resync_pending + 1] = done
 		return
 	end
 	self.resyncing, self.resyncing_since = true, os.time()
@@ -1300,12 +1531,19 @@ function scenes:resync(done)
 	end)
 end
 
+-- The resync the waiting callers asked for: one, whose done answers each of
+-- them in the order they asked (each pcall-wrapped on its own).
 function scenes:run_pending_resync()
 	local pending = self.resync_pending
-	self.resync_pending = nil
-	if pending then
-		self:resync(pending)
+	if #pending == 0 then
+		return
 	end
+	self.resync_pending = {}
+	self:resync(function(...)
+		for _, done in ipairs(pending) do
+			self:protect("resync done", done, ...)
+		end
+	end)
 end
 
 -- Event fan-out --------------------------------------------------------------
@@ -1349,8 +1587,11 @@ end
 -- slot it is hear their new slot name (CONFIGURE). Returns the number sent.
 function scenes:tell_slot_scene(target_rid)
 	local sent = 0
-	for _, rid in ipairs(self.reg:rids("linked")) do
-		if self:slot_targets(rid, target_rid) and self:configure_changed(rid) and self:send_configure(rid) then
+	local slots = self:rids_where(function(rid, entry)
+		return entry.state == "linked" and self:slot_targets(rid, target_rid)
+	end)
+	for _, rid in ipairs(slots) do
+		if self:configure_changed(rid) and self:send_configure(rid) then
 			sent = sent + 1
 		end
 	end
@@ -1384,22 +1625,27 @@ function scenes:on_scene_item(item, kind)
 	if util.has_field(changed, "active") and (scene.active == "static" or scene.active == "dynamic_palette") then
 		sent = sent + self:send_other_active(rid)
 	end
-	if util.has_field(changed, "name") then
+	local renamed = util.has_field(changed, "name")
+	if renamed then
 		sent = sent + self:tell_slot_scene(rid)
 	end
 	if not entry then
 		return sent
 	end
-	if util.has_field(changed, "name") or util.has_field(changed, "group_rid")
-		or util.has_field(changed, "auto_dynamic") then
-		if self:refresh_entry(rid) then
-			self:mark()
-		end
+	-- The scene's own CONFIGURE inputs a scene item can carry: its name, its
+	-- group and auto_dynamic. A status (every recall, every member light
+	-- changed by hand) or a speed cannot change it, so its signature is not
+	-- even computed; group renames reach CONFIGURE through
+	-- refresh_group_names, slot renames through tell_slot_scene
+	-- (docs/reviews/efficiency-2026-10-24.md, R3).
+	local identity = renamed or util.has_field(changed, "group_rid") or util.has_field(changed, "auto_dynamic")
+	if identity and self:refresh_entry(rid) then
+		self:mark()
 	end
 	if entry.state == "unbound" then
 		return sent
 	end
-	if self:configure_changed(rid) and self:send_configure(rid) then
+	if identity and self:configure_changed(rid) and self:send_configure(rid) then
 		sent = sent + 1
 	end
 	if util.has_field(changed, "active") and self:send_state(rid, "event") then
@@ -1611,12 +1857,98 @@ function scenes:activate(rid, entry, params)
 	return true
 end
 
+-- Recall coalescing (docs/review-leftovers-design.md, #47 F9) -------------------
+-- A recall PUT opens a window of RECALL_WINDOW_MS for its scene. A recall of
+-- the same scene inside it waits, replacing any that waits already (the
+-- latest parameters win), and supersedes the answer of the PUT before it
+-- (still_current); when the window ends the one that waited goes as one PUT,
+-- which opens the next window. So a double tap, a programming loop or a
+-- slider dragged from off makes one PUT per window instead of one each, and
+-- the first recall of a quiet scene is not delayed at all. What came after a
+-- waiting recall must not overtake it: an OFF of the scene drops it (the OFF
+-- is the latest word), and any other command of the scenes (a dim, a level,
+-- another scene's recall or off) sends it first. So at most one recall waits
+-- at a time.
+
+function scenes:open_recall_window(rid)
+	local window = {}
+	window.timer = self.ctx.set_timer(scenes.RECALL_WINDOW_MS, function()
+		self:protect("recall window", function()
+			if self.recall_windows[rid] ~= window then
+				return  -- released early, or replaced
+			end
+			self.recall_windows[rid] = nil
+			self:send_waiting(rid, window)
+		end)
+	end)
+	self.recall_windows[rid] = window
+end
+
+-- The recall that waited in `window` (closed already) goes now, unless its
+-- scene left the registry or changed devices meanwhile (forgotten,
+-- re-linked, deleted): that device's own command is over then.
+function scenes:send_waiting(rid, window)
+	local params = window.params
+	if not params then
+		return false
+	end
+	window.params = nil
+	local current = self.registry[rid]
+	if not current or current.device_id ~= window.device_id then
+		self.ctx.log.debug("scenes: a waiting recall of %s dropped: its device %s is not the scene's any more", rid,
+			tostring(window.device_id))
+		return false
+	end
+	if current.state == "gone" then
+		-- Deleted in Hue meanwhile: the device heard STATE inactive with it.
+		self.ctx.log.debug("scenes: a waiting recall of %s dropped: the scene left the bridge", rid)
+		return false
+	end
+	return self:send_recall(rid, current, params)
+end
+
+-- The waiting recall, unless it is `keep`'s, goes at once; its window
+-- closes and the PUT opens the next. The windows are collected first: the
+-- PUT adds one to the table, which a traversal must not see happen.
+function scenes:release_recalls(keep)
+	if next(self.recall_windows) == nil then
+		return
+	end
+	local waiting = {}
+	for rid, window in pairs(self.recall_windows) do
+		if rid ~= keep and window.params then
+			waiting[#waiting + 1] = rid
+		end
+	end
+	for _, rid in ipairs(waiting) do
+		local window = self.recall_windows[rid]
+		if window.timer then
+			window.timer:Cancel()
+		end
+		self.recall_windows[rid] = nil
+		self:send_waiting(rid, window)
+	end
+end
+
+-- An OFF of scene `rid`: the recall waiting in its window is dropped (the
+-- window stays, so recalls after the OFF are still paced).
+function scenes:drop_waiting_recall(rid)
+	local window = self.recall_windows[rid]
+	if window and window.params then
+		window.params = nil
+		self.ctx.log.debug("scenes: a waiting recall of %s dropped: an off came after it", rid)
+	end
+end
+
 -- HUE_SCENE_RECALL { rid, action?, duration?, brightness? }: PUT the recall
--- (a brightness 1-100 overrides the scene's as recall.dimming); on success
--- STATE with the state the action produces (reason "recall") so the device
--- settles even if the stream item is missed; on failure a warning and STATE
--- with the cached status. A time-based scene is activated instead
--- (scenes:activate). Returns true when a PUT was started.
+-- (a brightness 1-100 overrides the scene's as recall.dimming, a duration
+-- in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with the state
+-- the action produces (reason "recall") so the device settles even if the
+-- stream item is missed; on failure a warning and STATE with the cached
+-- status. A recall within RECALL_WINDOW_MS of the scene's last recall PUT
+-- waits for the window to end (open_recall_window). A time-based scene is
+-- activated instead (scenes:activate). Returns true when a PUT was started
+-- or waits to be.
 function scenes:recall(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_RECALL")
@@ -1629,6 +1961,22 @@ function scenes:recall(params)
 		self:send_state(rid, "recall", "inactive")
 		return false
 	end
+	self:release_recalls(rid)
+	local window = self.recall_windows[rid]
+	if window then
+		window.params, window.device_id = params, entry.device_id
+		self:next_recall_gen(rid)  -- the answer of the PUT before it no longer reports
+		self.ctx.log.debug("scenes: recall of %s (device %d) waits for the %d ms after the last one", self:entry_label(rid,
+			entry), entry.device_id, scenes.RECALL_WINDOW_MS)
+		return true
+	end
+	return self:send_recall(rid, entry, params)
+end
+
+-- The recall PUT of a registered, present scene (a time-based one's
+-- activate), opening its window. Returns true (a PUT was started).
+function scenes:send_recall(rid, entry, params)
+	self:open_recall_window(rid)
 	if is_smart(entry) then
 		return self:activate(rid, entry, params)
 	end
@@ -1643,7 +1991,10 @@ function scenes:recall(params)
 	local body = { recall = { action = action } }
 	local duration = util.positive(params.duration)
 	if duration then
-		body.recall.duration = math.floor(duration)   -- [assumed: recall.duration in ms; confirm once on hardware]
+		-- [assumed: recall.duration in ms; confirm once on hardware] Clamped as
+		-- the dim and level durations are: "1e400" is inf, which no JSON body
+		-- can carry (code analysis 2026-10-22, F12).
+		body.recall.duration = math.floor(math.min(scenes.DIM_MAX_DURATION, duration))
 	end
 	local brightness = tonumber(params.brightness)
 	if brightness and brightness >= 1 and brightness <= 100 then
@@ -1745,6 +2096,8 @@ function scenes:off(params)
 	if not rid then
 		return false
 	end
+	self:drop_waiting_recall(rid)
+	self:release_recalls(rid)
 	if is_smart(entry) then
 		return self:deactivate(rid, entry)
 	end
@@ -1825,6 +2178,7 @@ function scenes:dim(params)
 	end
 	self.ctx.log.info("scenes: dim %s %s (device %d): grouped_light %s", self:entry_label(rid, entry), direction,
 		entry.device_id, tostring(grouped):sub(1, 8))
+	self:release_recalls()  -- a recall still waiting goes before the dim
 	if self.ctx.group_dim(grouped, body) ~= true then
 		self.ctx.log.warn("scenes: dim of %s (device %d): nothing queued", self:entry_label(rid, entry), entry.device_id)
 		return false
@@ -1882,6 +2236,7 @@ function scenes:level(params)
 				self:entry_label(rid, entry), entry.device_id, level_text(current))
 			return false
 		end
+		self:release_recalls()  -- a recall still waiting goes before the move
 		local action = difference > 0 and "up" or "down"
 		local delta = round2(math.abs(difference))
 		if self.ctx.log.enabled("info") then   -- a slider drag sends several of these a second
@@ -1897,6 +2252,7 @@ function scenes:level(params)
 				.. "over %d ms", level_text(level), self:entry_label(rid, entry), entry.device_id,
 				tostring(grouped):sub(1, 8), rate)
 		end
+		self:release_recalls()
 		queued = self.ctx.group_set(grouped, { brightness = level, rate = rate })
 	end
 	if queued ~= true then
@@ -1980,6 +2336,7 @@ function scenes:create_scenes(jobs, finish)
 			failed[#failed + 1] = scene
 			return
 		end
+		self:clear_forgotten(device_id)  -- a registered device is never a forgotten one
 		self:save()
 		created[#created + 1] = { scene = scene, device_id = device_id, room_name = job.room_name }
 		self.ctx.log.info("scenes: added %s to %s (device %d, %d of %d)", tostring(scene.name), tostring(job.room_name),
@@ -2010,6 +2367,16 @@ function scenes:create_scenes(jobs, finish)
 	end
 
 	step()
+end
+
+-- The rids a create_scenes batch registered (its `created` list), for the
+-- reconcile that follows it to leave alone.
+function scenes.created_rids(created)
+	local rids = {}
+	for _, c in ipairs(created or {}) do
+		rids[#rids + 1] = c.scene.rid
+	end
+	return rids
 end
 
 -- Actions (§4) -------------------------------------------------------------------
@@ -2071,7 +2438,7 @@ function scenes:add_scene(rid, room_id, done)
 	local label = util.sanitise(name_of(scene))
 	self:create_scenes({ { scene = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.adding = false
-		self:reconcile(true)
+		self:reconcile(true, scenes.created_rids(created))
 		self:flush()
 		local text
 		if created[1] then
@@ -2178,7 +2545,7 @@ function scenes:add_all_of_group(group_rid, done)
 	self.adding, self.adding_since = true, os.time()
 	self:create_scenes(jobs, function(created, failed, err)
 		self.adding = false
-		self:reconcile(true)
+		self:reconcile(true, scenes.created_rids(created))
 		self:flush()
 		local text = summary(created, failed, err)
 		self.ctx.log.always("scenes: %s", text)
@@ -2262,13 +2629,20 @@ end
 -- (Composer name or announced name) against the unimported scenes. Only
 -- hue_scene devices count: the bound set also holds the lights, so it is cut
 -- down to the project's hue_scene devices, or to the devices that said
--- HUE_SCENE_HELLO when the project lookup is unavailable. Returns the text.
+-- HUE_SCENE_HELLO when the project lookup is unavailable. A device Forget
+-- Scene let go is a candidate like any other (the owner's click is the way
+-- back, #47 F8), by the rid it had. Returns the text.
 function scenes:link_devices()
 	local busy = self:busy_text()
 	if busy then
 		return busy
 	end
-	local bound = self.project:bound_set()
+	local bound, why = self.project:bound_set()
+	if not bound and why == "unknown" then
+		-- Director answers nil when nothing is bound [verified: API 32/_3]; an
+		-- action that only adds may read it so (bridge/project.lua).
+		bound = {}
+	end
 	if not bound then
 		return "Not linked: the bound-device lookup failed (see the Lua output)"
 	end
@@ -2302,7 +2676,7 @@ function scenes:link_devices()
 
 	local linked, problems = {}, {}
 	for _, id in ipairs(ids) do
-		local hello = self.announced[id] or {}
+		local hello = self.announced[id] or self.forgotten[id] or {}
 		local composer = names[id] or ("device " .. tostring(id))
 		local rid = hello.rid
 		local who = string.format("%s (device %d)", composer, id)
@@ -2360,7 +2734,10 @@ end
 
 -- Forget Scene: the entry goes, the device is unbound and told
 -- HUE_SCENE_FORGOTTEN, and stays in the project for the owner to delete; the
--- scene is listed under Add Scene again. Returns ok, text.
+-- scene is listed under Add Scene again. The device is remembered
+-- (FORGOTTEN_KEY): a later hello from it, whether its unbind failed or it was
+-- bound again, is answered HUE_SCENE_FORGOTTEN and never adopted; Link
+-- Devices brings it back (#47 F8). Returns ok, text.
 function scenes:forget(device_id)
 	local busy = self:busy_text()
 	if busy then
@@ -2375,13 +2752,15 @@ function scenes:forget(device_id)
 		return false, string.format("Not forgotten: device %d is not a registered scene", device_id)
 	end
 	local label = self:entry_label(rid, entry)
+	local told = is_smart(entry) and name_of(entry) or entry.name
 	self.reg:forget(rid)
 	self:mark()
+	self:remember_forgotten(device_id, rid, told, entry)
 	self.last_configure[rid] = nil
 	self.conflicts[rid] = nil
 	self:clear_conflicts_for(device_id)
 	self.announced[device_id] = nil
-	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = is_smart(entry) and name_of(entry) or entry.name })
+	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = told })
 	local ok, err = self.project:call("unbind", device_id)
 	if not ok then
 		self.ctx.log.warn("scenes: unbind of device %d failed: %s", device_id, tostring(err))
@@ -2540,8 +2919,7 @@ end
 
 -- The Attention items (driver.lua joins them after the lights'): missing
 -- scenes, unbound scene devices, two devices claiming one scene, name
--- differences (name_differences() is public so the driver can count them
--- together with the lights' instead).
+-- differences.
 function scenes:attention_items()
 	local items = {}
 

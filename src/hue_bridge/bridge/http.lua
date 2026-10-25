@@ -12,10 +12,12 @@
 -- (spike runs 4 and 5; see docs/design.md). http.ca is the bundle in use,
 -- { path = <file inside the archive> }; nil fails every request.
 --
--- That is the only TLS configuration this module knows. The development
+-- That is the only TLS configuration this module knows. A request may adjust
+-- it through req.tls, applied on top of it (http.options): the development
 -- diagnostics (bridge/conntest.lua and bridge/pinning.lua, dev builds only)
--- pass the ssl_* options for their other targets as req.tls; no release
--- code does.
+-- for their other targets, and the TLS self-check (bridge/tlscheck.lua),
+-- which swaps the bundle for a decoy. No keyed request does: bridge_request
+-- in hue_bridge/driver.lua clears req.tls.
 
 local log = require("common.log")
 
@@ -35,21 +37,57 @@ local function ssl_options()
 	return { ssl_verify_peer = true, ssl_verify_host = false, ssl_cabundle = http.ca.path }
 end
 
--- Shared options for every transfer; `tls` replaces the ssl_* options
--- (development diagnostics only, see the header).
+-- Shared options for every transfer. `tls` (see the header) is applied on
+-- top of the bundle's ssl_* options, so whatever it does not name stays as
+-- every bridge request has it: ssl_verify_peer in particular stays true
+-- unless `tls` itself sets it false (docs/reviews/diff-review-2026-10-24.md
+-- row 6; a partial table used to leave it out altogether). An ssl_cabundle
+-- of false leaves the option out, which puts the platform's own CA bundle in
+-- charge [verified: SDK 35_url/_12-SetOption, ssl_cabundle is used "instead
+-- of the system's"].
 function http.options(overrides, tls)
 	local opts = {
 		fail_on_error = false,
 		timeout = http.DEFAULT_TIMEOUT,
 		connect_timeout = http.CONNECT_TIMEOUT,
 	}
-	for k, v in pairs(tls or ssl_options()) do
+	for k, v in pairs(ssl_options()) do
 		opts[k] = v
+	end
+	for k, v in pairs(tls or {}) do
+		opts[k] = v
+	end
+	if opts.ssl_cabundle == false then
+		opts.ssl_cabundle = nil
 	end
 	for k, v in pairs(overrides or {}) do
 		opts[k] = v
 	end
 	return opts
+end
+
+-- curl's codes for a peer certificate that did not verify against the CA
+-- bundle: 60 (CURLE_PEER_FAILED_VERIFICATION since curl 7.62, CURLE_SSL_CACERT
+-- before it) and 51 (CURLE_PEER_FAILED_VERIFICATION before 7.62). Director
+-- hands curl's code to OnDone as errCode: on OS 3.4.2 a public site refused
+-- with the Signify bundle gave 60, an unreadable bundle path 77, a GET stuck
+-- behind the stream 28 and an unresolvable spelling 6 [verified: hardware,
+-- docs/design.md "Certificates" and "C4:url transfer scheduling"]. The SDK
+-- itself promises only "a number with an error code" [verified: SDK
+-- 35_url/_8-OnDone]. 51 is from curl's documentation and has not been seen on
+-- a controller [assumed].
+http.CERTIFICATE_ERRORS = { [51] = true, [60] = true }
+
+-- True when `result` (an http.request result) is a transfer that failed
+-- because the peer's certificate did not verify: no HTTP status, and curl's
+-- code says so. Anything else is not: a timeout (28), a refused or
+-- unreachable host (7), a name that does not resolve (6), a CA file that
+-- cannot be read (77), a TLS handshake that failed some other way (35), a
+-- transfer that never started (no code at all) [curl's codes: assumed from
+-- curl's documentation where the list above does not say verified].
+function http.certificate_failure(result)
+	return type(result) == "table" and result.code == nil
+		and http.CERTIFICATE_ERRORS[tonumber(result.err_code)] == true
 end
 
 function http.url(ip, path)
@@ -79,6 +117,16 @@ function http.decode(body)
 	return value
 end
 
+-- A failed request's log line: a warning, or a debug line for a request
+-- that is expected to fail (req.quiet).
+local function failed(method, req, err)
+	if req.quiet then
+		log.debug("%s %s: %s", method, req.path, err)
+	else
+		log.warn("%s %s: %s", method, req.path, err)
+	end
+end
+
 -- C4:url raises a Lua error at Get()/Post() time for some problems (a CA
 -- file it can't open, for one). Turn that into a normal failure.
 local function start(transfer, fn)
@@ -92,18 +140,23 @@ end
 -- One request/response exchange. `req` has:
 --   ip, path, method ("GET"|"POST"|"PUT"|"DELETE"), key (optional),
 --   body (table, JSON-encoded, optional), timeout (optional),
---   tls (optional ssl_* options replacing the bundle's; dev diagnostics only).
--- `callback(result)` receives { ok, code, body, json, err }:
---   ok    true when the transfer completed and the status is 2xx
---   code  HTTP status, or nil when no response arrived
---   json  decoded body when it parsed, else nil
---   err   a human-readable reason when ok is false
+--   tls (optional ssl_* options on top of the bundle's, see http.options;
+--   dev diagnostics and the TLS self-check only),
+--   quiet (optional: a failure is logged at debug, not warn; for a request
+--   expected to fail, the TLS self-check's).
+-- `callback(result)` receives { ok, code, body, json, err, err_code }:
+--   ok        true when the transfer completed and the status is 2xx
+--   code      HTTP status, or nil when no response arrived
+--   json      decoded body when it parsed, else nil
+--   err       a human-readable reason when ok is false
+--   err_code  the transfer's error code (curl's, see http.CERTIFICATE_ERRORS)
+--             when it failed without a response; nil otherwise
 -- Returns the C4LuaUrl transfer so callers can Cancel() it, or nil when the
 -- transfer could not be started (the callback has then already been called).
 function http.request(req, callback)
 	local method = req.method or "GET"
 	if not http.ca then
-		log.warn("%s %s: no CA configuration", method, req.path)
+		failed(method, req, "no CA configuration")
 		callback({ ok = false, err = "no CA configuration" })
 		return nil
 	end
@@ -129,6 +182,7 @@ function http.request(req, callback)
 				local response = type(responses) == "table" and responses[#responses] or nil
 				if err_code ~= 0 then
 					result.ok = false
+					result.err_code = err_code
 					result.err = string.format("transfer failed (%s): %s", tostring(err_code), tostring(err_msg))
 				elseif type(response) ~= "table" or type(response.code) ~= "number" then
 					result.ok = false
@@ -148,7 +202,7 @@ function http.request(req, callback)
 				result = { ok = false, err = "done handler: " .. tostring(result) }
 			end
 			if not result.ok then
-				log.warn("%s %s: %s", method, req.path, result.err)
+				failed(method, req, result.err)
 			end
 			callback(result)
 		end)
@@ -167,13 +221,14 @@ function http.request(req, callback)
 		end
 	end)
 	if not started then
-		log.warn("%s %s: %s", method, req.path, err)
+		failed(method, req, err)
 		callback({ ok = false, err = err })
 	end
 	return started
 end
 
--- A long-lived GET whose body is handed over chunk by chunk.
+-- A long-lived GET whose body is handed over chunk by chunk. `req` as for
+-- http.request, plus headers (extra request headers).
 -- `handlers`:
 --   on_headers(code, headers)  once per response; return true to abort
 --   on_chunk(data)             each body chunk

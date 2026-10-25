@@ -52,7 +52,7 @@ present.
 | `HUE_SCENE_FORGET` | scene → bridge | `rid?`, `device_id` | `Forget This Scene` action |
 | `HUE_SCENE_CONFIGURE` | bridge → scene | `rid`, `name`, `group_name`, `group_type` (`room`/`zone`/`bridge_home`), `id_v1?`, `auto_dynamic` (`true`/`false`), `state` (`linked`/`gone`), `gone_since?` | at creation, hello, every resync where something changed, re-link |
 | `HUE_SCENE_STATE` | bridge → scene | `rid`, `active` (`inactive`/`static`/`dynamic_palette`), `reason` (`event`/`resync`/`hello`/`recall`) | every scene status the bridge learns; `recall` right after the PUT succeeded carries the requested state so the switch settles even if the event is missed |
-| `HUE_SCENE_FORGOTTEN` | bridge → scene | `rid`, `name?` | after Forget |
+| `HUE_SCENE_FORGOTTEN` | bridge → scene | `rid`, `name?` | after Forget; since 2026-10-25 (#47 F8) also in answer to the hello of a device that was forgotten, until Link Devices links it |
 | `DEV_RELOAD` | bridge → scene | `tree` = `scene`, `version`, `files` | dev builds (§6) |
 
 A scene device buffers CONFIGURE/STATE/FORGOTTEN before late init, as the
@@ -71,8 +71,9 @@ lines to the bridge) and `HUE_DUMP` (bridge → scene, dumped its state; removed
   capabilities `dimmer` False, `on_off` True, `set_level` False,
   `ramp_level` False, `supports_target` True, `supports_color*` False,
   `reduced_als_support` True, `buttons_are_virtual` True,
-  `hide_proxy_properties` True; connections 5001 (LIGHT_V2 provider) and 1
-  (`HUE_BRIDGE` consumer) copied from `hue_light`. Superseded
+  `hide_proxy_properties` True (False since 2026-10-25, #59); connections
+  5001 (LIGHT_V2 provider) and 1 (`HUE_BRIDGE` consumer) copied from
+  `hue_light`. Superseded
   (2026-10-22/23): the Top, Bottom and Toggle Button Link connections
   200–202, `has_leds` and `hold_rates` (`docs/keypad-design.md`) and, since
   build 160, `dimmer`, `set_level` and `ramp_level` True
@@ -166,6 +167,19 @@ project for you to delete", "Recall failed: HTTP 404 (scene gone?)".
 Attention items: "1 scene missing from the bridge: Relax (device 2061,
 since …) (Re-link Scene or Forget Scene)", "1 unbound scene device: …",
 name differences counted together with the lights' ("… names differ …").
+
+Added 2026-10-25 (#47, contract `docs/review-leftovers-design.md`):
+- **Forgotten devices** (F8): `sc:forget` records the device under the
+  persisted key `hue_scene_forgotten`. A hello from a device recorded there
+  is answered with `HUE_SCENE_FORGOTTEN` again and never adopts it, so
+  connecting it again leaves it released; `Link Devices` links it to the
+  scene it remembers. Forgotten light devices are
+  unchanged: they are adopted again when reconnected.
+- **Recall window** (F9): the first recall of a scene goes out at once; a
+  recall of the same scene within 300 ms waits and the latest parameters
+  win, so a burst of taps makes two PUTs.
+- **Resync callers** (F2): every caller of `sc:resync(done)` that arrives
+  while one runs is kept, and each `done` is called once.
 
 ## 5. Bridge `driver.lua` / `driver.xml` (coordinator)
 

@@ -486,6 +486,9 @@ describe("bridge.zone_lights", function()
 			Z:add(LIVING, nil, done)
 			c4.sent = {}
 			c4.bindings = {}
+			-- A light stays bound: the list is a table, the group devices are not
+			-- in it (an answer of nil would be unknown, issue #48 item 14).
+			c4:Bind(15, 1, 4242, 1, "HUE_BRIDGE")
 			now = T0 + 20
 			local r = Z:reconcile()
 			assert.same({ DOWNSTAIRS, LIVING }, r.unbound)
@@ -520,9 +523,44 @@ describe("bridge.zone_lights", function()
 			Z = new_zone_lights({ project = { devices = function() return {} end } })
 			Z:load()
 			c4.bindings = {}
+			c4:Bind(15, 1, 4242, 1, "HUE_BRIDGE")  -- known: the list is a table without the group device
 			local r = Z:reconcile()
 			assert.same({ DOWNSTAIRS }, r.unbound)
 			assert.same({}, r.tombstoned)
+		end)
+
+		-- Issue #48 item 14: GetBoundConsumerDevices answering nil is unknown.
+		it("changes nothing while the bound-device lookup answers nil, and adopts nobody on it", function()
+			add_downstairs()
+			Z:add(LIVING, nil, done)
+			fake.delete_device(2002)
+			c4.bindings = {}
+			assert.is_nil(C4:GetBoundConsumerDevices(15, 1), "the fake answers nil when nothing is bound, as the SDK says")
+			c4.sent = {}
+			assert.same({ unbound = {}, relinked = {}, tombstoned = {} }, Z:reconcile())
+			assert.equal("linked", Z:entry(DOWNSTAIRS).state)
+			assert.equal("linked", Z:entry(LIVING).state, "not tombstoned on an unknown list")
+			assert.equal(0, #c4.sent)
+			assert.is_true(saw_log("zone_lights: reconcile skipped: the bound-device lookup answered no list"))
+			assert.is_false(saw_log("is not bound to this bridge"))
+			assert.equal("No zone light devices are bound to this bridge", Z:link_devices())
+			assert.is_false(Z:hello({ rid = GARAGE, device_id = "2099", kind = "group" }))
+			assert.is_nil(Z:entry(GARAGE))
+			assert.is_true(saw_log("device 2099 announced " .. GARAGE .. ", but the bound-device list is unknown; not adopted"))
+			Z.ctx.project.bound = function() error("boom") end
+			assert.equal("Not linked: the bound-device lookup failed (see the Lua output)", Z:link_devices())
+		end)
+
+		-- Issue #48 item 13: Director may not list the device just created.
+		it("leaves the device Add Zone Light just created alone in the reconcile after the click", function()
+			resync()
+			Z.ctx.project.bound = function() return {} end
+			Z.ctx.project.devices = function() return { [9999] = { deviceName = "Somebody else's" } } end
+			Z:add(DOWNSTAIRS, GARAGE_ROOM, done)
+			assert.same({ ok = true, text = "Added Downstairs (zone) to Garage (device 2001)" }, last_result())
+			assert.equal("linked", Z:entry(DOWNSTAIRS).state, "neither unbound nor tombstoned")
+			assert.is_false(saw_log("was deleted in Composer while the bridge was not watching"))
+			assert.same({ DOWNSTAIRS }, Z:reconcile().tombstoned, "the next reconcile judges it (Director still lagging)")
 		end)
 	end)
 
@@ -560,6 +598,20 @@ describe("bridge.zone_lights", function()
 			assert.equal(1, feed(F.events.scene_recalled), "the Downstairs level rides in the recall's batch")
 			assert.same({ rid = DOWNSTAIRS, brightness = "56.69", reason = "event" }, c4.sent[1].params)
 			assert.equal(56.69, Z.group_state[G_LIVING].brightness, "the other groups are cached all the same")
+		end)
+
+		-- Issue #45: an id that is not a resource id reaches no cache.
+		it("ignores a grouped_light item whose id is not a resource id", function()
+			add_downstairs()
+			c4.sent = {}
+			for _, kind in ipairs({ "add", "update", "delete" }) do
+				assert.equal(0, Z:on_container({ type = kind, data = { { id = "a/b", type = "grouped_light",
+					owner = { rid = DOWNSTAIRS, rtype = "zone" }, on = { on = false } } } }), kind)
+			end
+			assert.is_nil(Z.group_state["a/b"])
+			assert.is_nil(Z.gone_grouped["a/b"])
+			assert.equal(G_DOWNSTAIRS, Z.owners[DOWNSTAIRS], "the zone keeps its own grouped_light")
+			assert.same({}, c4.sent)
 		end)
 
 		it("caches a grouped_light event before any GET and tells the device, online the first time", function()
@@ -873,6 +925,28 @@ describe("bridge.zone_lights", function()
 			assert.is_true(saw_log("devices 2098 and 2096 both announce"))
 		end)
 
+		-- Code analysis 2026-10-22 R11, as the lights'.
+		it("takes a hello's name, kind and model only when they are strings", function()
+			resync()
+			c4:Bind(15, 1, 2099, 1, "HUE_BRIDGE")
+			assert.is_true(Z:hello({ rid = "vanished", device_id = "2099", name = { "junk" }, kind = "group" }))
+			assert.is_nil(Z:entry("vanished").name)
+			assert.same({ rid = "vanished", kind = "group" }, Z.announced[2099])
+			Z:hello({ rid = "other", device_id = "2098", name = 7, kind = {}, model = true })
+			assert.same({ rid = "other" }, Z.announced[2098])
+			assert.truthy(Z:attention():find("^1 zone light missing from the bridge: vanished %(device 2099"))
+		end)
+
+		it("keeps at most 200 hellos before load() and drops the rest with a warning", function()
+			for i = 1, 202 do
+				Z:hello({ rid = DOWNSTAIRS, device_id = tostring(3000 + i), kind = "group" })
+			end
+			assert.equal(200, #Z.early_hellos)
+			assert.equal(200, zone_lights.EARLY_HELLOS_MAX)
+			assert.is_true(saw_log("zone_lights: HUE_HELLO from device 3201 before the registry was loaded: dropped "
+				.. "(200 waiting)"))
+		end)
+
 		it("queues a hello that arrives before load() and answers it from configure_all()", function()
 			c4.persist.hue_zone_lights = { [DOWNSTAIRS] = { device_id = 2001, name = "Downstairs", state = "linked" } }
 			assert.is_false(Z:hello({ rid = DOWNSTAIRS, device_id = "2001", kind = "group" }))
@@ -1057,6 +1131,31 @@ describe("bridge.zone_lights", function()
 			assert.equal(0, #c4.renamed)
 			assert.equal("1 zone light name differs from the Composer names: Downstairs is Garage Lights in Hue "
 				.. "(Adopt Hue Names or Accept Names As They Are)", Z:attention(), "the device keeps its name; Attention says so")
+		end)
+
+		-- Code analysis 2026-10-22 R5: a stale `announced` made false conflicts.
+		it("forgets what the device announced when it is re-linked or tombstoned", function()
+			add_downstairs()
+			Z:hello({ rid = DOWNSTAIRS, device_id = "2001", kind = "group" })
+			assert.equal(DOWNSTAIRS, Z.announced[2001].rid)
+			feed(F.events.zone_deleted)
+			assert.is_true((Z:relink("2001", GARAGE)))
+			assert.is_nil(Z.announced[2001])
+			-- A restored device announcing the old rid is no conflict with device 2001.
+			c4:Bind(15, 1, 2099, 1, "HUE_BRIDGE")
+			assert.is_true(Z:hello({ rid = DOWNSTAIRS, device_id = "2099", kind = "group" }))
+			assert.equal(2099, Z:entry(DOWNSTAIRS).device_id)
+			assert.is_false(saw_log("both announce"))
+			-- Deleted in Composer while the bridge was not watching.
+			fake.project.devices[2099] = nil
+			c4.bindings = {}
+			c4:Bind(15, 1, 2001, 1, "HUE_BRIDGE")
+			assert.same({ DOWNSTAIRS }, Z:reconcile().tombstoned)
+			assert.is_nil(Z.announced[2099])
+			-- A goodbye that names the rid alone.
+			Z:hello({ rid = GARAGE, device_id = "2001", kind = "group" })
+			assert.truthy(Z:goodbye({ rid = GARAGE }))
+			assert.is_nil(Z.announced[2001])
 		end)
 
 		it("refuses bad arguments, unknown devices, held groups, a light rid and groups not on the bridge", function()
@@ -1430,6 +1529,48 @@ describe("bridge.zone_lights", function()
 			assert.equal("Down‚ stairs (zone; 2 lights)", items[2])
 			assert.equal(4, #items)
 			no_commas(items)
+		end)
+	end)
+
+	-- Issue #58 (docs/zone-light-design.md Decision 7): the bridge clamps a
+	-- zone light's PUTs to the members' common colour temperature range too.
+	describe("limits (issue #58)", function()
+		it("gives the group queue the members' intersected CT range, exactly as the device's CONFIGURE", function()
+			add_downstairs()
+			Z:add(LIVING, nil, done)
+			Z:add(GARAGE, GARAGE_ROOM, done)
+			-- Downstairs: Garage White (white) and Living Room Lamp (153-500).
+			assert.same({ min_dim = 1, mirek_min = 153, mirek_max = 500 }, Z:limits(G_DOWNSTAIRS))
+			-- Living Room: Hallway Ambiance (153-454) and Living Room Lamp (153-500).
+			assert.same({ min_dim = 1, mirek_min = 153, mirek_max = 454 }, Z:limits(G_LIVING))
+			for id, grouped in pairs({ [2001] = G_DOWNSTAIRS, [2002] = G_LIVING, [2003] = G_GARAGE }) do
+				local configure = sent_to(id, "HUE_CONFIGURE")[1].params
+				local limits = Z:limits(grouped)
+				assert.equal(configure.mirek_min, limits.mirek_min and tostring(limits.mirek_min), id)
+				assert.equal(configure.mirek_max, limits.mirek_max and tostring(limits.mirek_max), id)
+				assert.equal(configure.min_dim, tostring(limits.min_dim), id)
+			end
+			-- Garage: Garage White alone, no CT member: no range, the queue keeps its defaults.
+			assert.same({ min_dim = 1 }, Z:limits(G_GARAGE))
+			assert.are_not.equal(Z:limits(G_LIVING), Z:limits(G_LIVING), "a fresh table each call")
+		end)
+
+		it("is nil for a grouped_light no zone light owns, or a group whose members are unknown", function()
+			add_downstairs()
+			assert.is_nil(Z:limits(G_LIVING), "the Living Room has no zone light")
+			assert.is_nil(Z:limits(F.grouped_light_rids.home))
+			assert.is_nil(Z:limits("nope"))
+			assert.is_nil(Z:limits(nil))
+			assert.is_nil(Z:limits(""))
+			Z.registry[DOWNSTAIRS].caps = nil  -- adopted before its group was ever seen: nothing known of the members
+			assert.is_nil(Z:limits(G_DOWNSTAIRS))
+		end)
+
+		it("follows the members: a membership change narrows the range", function()
+			add_downstairs()
+			feed(F.events.zone_children)  -- Hallway Ambiance (153-454) joins Downstairs
+			assert.same({ min_dim = 1, mirek_min = 153, mirek_max = 454 }, Z:limits(G_DOWNSTAIRS))
+			assert.equal("454", c4.sent[#c4.sent].params.mirek_max, "the CONFIGURE says the same")
 		end)
 	end)
 end)

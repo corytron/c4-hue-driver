@@ -814,6 +814,48 @@ describe("Hue Scene driver", function()
 			state(env, "static")
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
+
+		-- docs/review-leftovers-design.md #49: the bridge's Add Scene binds a
+		-- device it has just created, so OnBindingChanged can come before late init.
+		it("holds a bridge binding that arrives before late init and greets through it once late init has run", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			stub_attribs(c4)
+			c4.persist.hue_rid = "s1"
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			assert.equal(0, #c4.calls_to("UpdateProperty"), "nothing touches Director before late init")
+			assert.equal(0, #c4.calls_to("SendToProxy"))
+			assert.equal(0, #c4.sent)
+
+			-- Director's lookup does not show the binding yet at late init.
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_HELLO", params = { rid = "s1", device_id = "2061" } } },
+				c4.sent)
+			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
+			assert.same({}, delays(c4), "the binding ended the re-checks late init started")
+		end)
+
+		it("greets once when late init already sees the binding that arrived before it", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			stub_attribs(c4)
+			c4.persist.hue_rid = "s1"
+			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal(1, #messages(c4, "HUE_SCENE_HELLO"))
+			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
+		end)
+
+		it("applies an unbind that arrived before late init after it", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			stub_attribs(c4)
+			c4.persist.hue_rid = "s1"
+			env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+			assert.equal(0, #c4.calls_to("UpdateProperty"))
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+			assert.equal(0, #c4.sent)
+		end)
 	end)
 
 	describe("OnDriverRemovedFromProject", function()
@@ -857,6 +899,162 @@ describe("Hue Scene driver", function()
 			end
 			assert.has_no.errors(function() env.OnDriverRemovedFromProject() end)
 			assert.equal(0, #messages(c4, "HUE_SCENE_GOODBYE"))
+		end)
+
+		it("stops the Driver Version looks on destroy", function()
+			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+			stub_attribs(c4)
+			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+			c4.config_info.version = ""
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ 5000 }, delays(c4), "the second look")
+			env.OnDriverDestroyed("DIT_LOADED")
+			assert.same({}, delays(c4))
+		end)
+	end)
+
+	-- docs/review-leftovers-design.md #49: a command that never reaches the
+	-- bridge (SendToDevice raising) closes the proxy's CHANGING with the
+	-- unchanged state, and the error is logged.
+	describe("a command the bridge never gets", function()
+		local SCENE_COMMANDS = { HUE_SCENE_RECALL = true, HUE_SCENE_OFF = true, HUE_SCENE_LEVEL = true,
+			HUE_SCENE_DIM = true }
+
+		-- From here on SendToDevice raises for the commands in `which` (every
+		-- scene command by default); returns the commands it was asked to send.
+		local function failing(c4, which)
+			local tried = {}
+			local original = c4.SendToDevice
+			c4.SendToDevice = function(self, id, command, ...)
+				if (which or SCENE_COMMANDS)[command] then
+					tried[#tried + 1] = command
+					error("Director says no")
+				end
+				return original(self, id, command, ...)
+			end
+			return tried
+		end
+
+		-- LIGHT_BRIGHTNESS_CURRENT of every CHANGED, in order.
+		local function changed(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		it("ON closes its CHANGING with the unchanged level, logs, and leaves nothing pending", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			local env, c4 = known_scene("inactive")
+			local tried = failing(c4)
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ "HUE_SCENE_RECALL" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ 0 }, changed(c4))
+			assert.same({}, delays(c4), "no fallback")
+			local logged = false
+			for _, line in ipairs(lines) do
+				if line:find("^%[ERROR%] Hue Scene: HUE_SCENE_RECALL to the bridge failed: .*Director says no") then
+					logged = true
+				end
+			end
+			assert.is_true(logged)
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ "HUE_SCENE_RECALL", "HUE_SCENE_RECALL" }, tried, "still off, so TOGGLE recalls")
+		end)
+
+		it("OFF closes with the level the scene shows and keeps it held on", function()
+			local env, c4 = known_scene("static")
+			local tried = failing(c4)
+			env.ReceivedFromProxy(5001, "OFF", {})
+			assert.same({ "HUE_SCENE_OFF" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 0 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ 100 }, changed(c4))
+			assert.is_true(c4.persist.held_on)
+			assert.same({}, delays(c4))
+			state(env, "inactive", { reason = "event" })
+			assert.same({ 100 }, changed(c4), "still held: an inactive report leaves the tile on")
+		end)
+
+		it("a slider move closes with the level the scene shows and leaves nothing pending", function()
+			local env, c4 = known_scene("static")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", level = "57" })
+			c4.calls = {}
+			local tried = failing(c4)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30", RATE = "500" })
+			assert.same({ "HUE_SCENE_LEVEL" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 57, LIGHT_BRIGHTNESS_TARGET = 30, RATE = 500 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ 57 }, changed(c4))
+			assert.same({ 1000 }, delays(c4), "the level reports' window only, no 1.5 s fallback")
+		end)
+
+		it("a hold on a lit scene whose dim fails closes at its level; the release sends no stop", function()
+			local env, c4 = known_scene("static")
+			local tried = failing(c4)
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time: the dim up fails
+			assert.same({ "HUE_SCENE_DIM" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ 100 }, changed(c4))
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.same({ "HUE_SCENE_DIM" }, tried, "no stop for a dim that never started")
+			assert.same({ 1000 }, delays(c4), "the click guard alone: the hold's CHANGING is closed already")
+		end)
+
+		it("a hold from off whose recall fails leaves the scene off and not held, the LEDs off", function()
+			local env, c4 = known_scene("inactive")
+			local proxy = capture_proxy(c4)
+			local tried = failing(c4)
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time: the recall at 1 % fails
+			assert.same({ "HUE_SCENE_RECALL" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ 0 }, changed(c4))
+			assert.same({}, with_command(proxy, "MATCH_LED_STATE"), "the LEDs never went on")
+			assert.is_false(c4.persist.held_on)
+			assert.same({}, delays(c4), "no dim 600 ms later")
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.same({ "HUE_SCENE_RECALL" }, tried)
+		end)
+
+		it("a hold from off whose later dim fails sends no stop; the level reports close the hold", function()
+			local env, c4 = known_scene("inactive")
+			local tried = failing(c4, { HUE_SCENE_DIM = true })
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time: the recall at 1 % goes out
+			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+			c4.fire_timers() -- 600 ms later: the dim up fails
+			assert.same({ "HUE_SCENE_DIM" }, tried)
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "1" })
+			assert.same({ 1 }, changed(c4))
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.same({ "HUE_SCENE_DIM" }, tried, "no stop for a dim that never started")
+		end)
+
+		it("a time-based scene whose start fails closes at 0 with nothing to follow", function()
+			local env, c4 = smart_scene("inactive")
+			local tried = failing(c4)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "800" })
+			assert.same({ "HUE_SCENE_RECALL" }, tried)
+			assert.same({ 0 }, changed(c4))
+			assert.same({}, delays(c4), "no fallback, nothing to follow")
+		end)
+
+		it("a time-based scene's level that cannot follow its start closes with the look the slot has", function()
+			local env, c4 = smart_scene("inactive")
+			local tried = failing(c4, { HUE_SCENE_LEVEL = true })
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "800" })
+			state(env, "active", { reason = "event" })
+			assert.same({}, changed(c4), "the move is to close the transaction")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "100" })
+			assert.same({ "HUE_SCENE_LEVEL" }, tried)
+			assert.same({ 100 }, changed(c4))
+			assert.same({}, delays(c4))
 		end)
 	end)
 
@@ -974,7 +1172,7 @@ describe("Hue Scene driver", function()
 			assert.equal("True", capability("reduced_als_support"))
 			assert.equal("False", capability("advanced_scene_support"))
 			assert.equal("True", capability("buttons_are_virtual"))
-			assert.equal("True", capability("hide_proxy_properties"))
+			assert.equal("False", capability("hide_proxy_properties"), "the proxy's own settings are shown (#59)")
 			assert.truthy(xml:find('<proxy proxybindingid="5001" name="Hue Scene" image_source="c4z" '
 				.. 'small_image="images/devices_sm/hue_scene_16.png" large_image="images/devices_lg/hue_scene_32.png">'
 				.. 'light_v2</proxy>', 1, true))

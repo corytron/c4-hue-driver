@@ -310,6 +310,24 @@ describe("bridge.groups", function()
 			assert.same({ room = 2, zone = 2, bridge_home = 1 }, g:counts())
 		end)
 
+		-- Issue #45: a group's rid and its grouped_light rid end up in request
+		-- paths (scene recall, the group queue's PUTs).
+		it("takes no group whose id is not a resource id, from a GET or an add item", function()
+			for _, id in ipairs({ "a/b", "x?y=1", "", { "null" } }) do
+				local item = room_item("evil", "Evil")
+				item.id = id
+				assert.is_false(g:apply(item, "add"), tostring(id))
+			end
+			local fresh = groups.new()
+			assert.same({ room = 1, zone = 0, bridge_home = 0 }, fresh:absorb({ room_item("a/b", "Evil"), items(F.room)[1] }))
+			assert.same({ items(F.room)[1].id }, rids(fresh:groups()))
+			assert.same({ room = 2, zone = 2, bridge_home = 1 }, g:counts())
+			local zone = room_item("room-9", "Study")
+			zone.services = { { rid = "../x", rtype = "grouped_light" } }
+			assert.is_true(g:apply(zone, "add"))
+			assert.is_nil(g:group("room-9").grouped_light_rid, "a grouped_light rid that is not a resource id is not taken")
+		end)
+
 		it("takes a device into a room on a room update, and absorbs a bridge_home update", function()
 			-- bridge_home still lists Kitchen Strip's device, but a room now claims it: rooms win.
 			assert.is_true(g:apply({ id = F.group_rids.garage, type = "room",

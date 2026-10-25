@@ -157,7 +157,9 @@ every registered light, and `HUE_CONFIGURE` first at startup.
   on the dotted address; `done(result)`. On 429 or 5xx: retry after
   `BACKOFF_MS = 500` doubling to 8 s; on 4xx other than 429: drop and log.
   (As built, a transport error without an HTTP code is retried the same
-  way.) Added later: a `dim` field for Hue's relative dim, with an optional
+  way. Superseded 2026-10-25, #43: retries end 30 s after the pending
+  state's last update (`commands.MAX_AGE_S`), with one warning, and "not
+  paired" and "key rejected" are not retried at all.) Added later: a `dim` field for Hue's relative dim, with an optional
   `delta`, and a second instance for grouped_light PUTs with the same
   constants (`docs/keypad-design.md`, "Queue support";
   `docs/scenes-design.md` §5).

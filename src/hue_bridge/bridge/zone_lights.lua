@@ -63,6 +63,8 @@ zone_lights.DIM_MAX_DURATION = 6000000
 zone_lights.DIM_DEFAULT_DURATION = 5000
 -- The group types a device can stand for (Decision 1: never the bridge_home).
 zone_lights.GROUP_TYPES = { zone = true, room = true }
+-- Hellos kept before load(), as the lights' and the driver's early queues.
+zone_lights.EARLY_HELLOS_MAX = 200
 
 -- ctx fields (all but http optional; lights, group_set and group_dim should be given):
 --   http(req, cb)            req = { path, method, body }; the driver adds ip and key; cb(result)
@@ -126,9 +128,9 @@ function zone_lights.new(ctx)
 		last_configure = {},       -- rid → signature of the last HUE_CONFIGURE sent
 		color_sent = {},           -- rid → signature of the colour last sent in HUE_STATE ("" for none)
 		online_sent = {},          -- rid → the `online` text last sent
-		announced = {},            -- device_id → { rid, name, kind } from HUE_HELLO, for Link Devices
+		announced = {},            -- device_id → { rid, name, kind, model } from HUE_HELLO (strings or nil), for Link Devices
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id }
-		early_hellos = {},         -- hellos received before load(), answered after configure_all()
+		early_hellos = {},         -- hellos received before load() (EARLY_HELLOS_MAX), answered after configure_all()
 		loaded = false,
 		synced = false,            -- a GET /grouped_light has succeeded (the groups' on/off and level are known)
 		dirty = false,
@@ -154,25 +156,20 @@ function zone_lights:protect(what, fn, ...)
 	return ok, err
 end
 
+-- The caps of an entry as numbers and booleans, min_dim 1 when missing (a
+-- group's min_dim is always 1, Decision 7); bridge.util holds the one copy.
 local function copy_caps(caps)
-	if type(caps) ~= "table" then
-		return nil
-	end
-	return {
-		has_color = caps.has_color == true or caps.has_color == "true",
-		has_cct = caps.has_cct == true or caps.has_cct == "true",
-		mirek_min = tonumber(caps.mirek_min),
-		mirek_max = tonumber(caps.mirek_max),
-		min_dim = tonumber(caps.min_dim) or 1,
-	}
+	return util.copy_caps(caps, 1)
 end
+local same_caps = util.same_caps
 
-local function same_caps(a, b)
-	if a == nil or b == nil then
-		return a == b
+-- A hello's `name`, `kind` or `model`: a non-empty string, else nil (code
+-- analysis 2026-10-22 R11, as lights.lua).
+local function hello_text(value)
+	if type(value) == "string" and value ~= "" then
+		return value
 	end
-	return a.has_color == b.has_color and a.has_cct == b.has_cct and a.mirek_min == b.mirek_min
-		and a.mirek_max == b.mirek_max and a.min_dim == b.min_dim
+	return nil
 end
 
 -- "zone" / "room" for a known group type, nil otherwise.
@@ -694,7 +691,7 @@ function zone_lights:adopt(device_id, rid, hello, how)
 	local group = self:group_of(rid)
 	local fields = self:fields_from_group(group)
 	fields.device_id = device_id
-	fields.name = fields.name or hello.name
+	fields.name = fields.name or hello_text(hello.name)
 	local entry, err = self.reg:add(rid, fields)
 	if not entry then
 		self.ctx.log.warn("zone_lights: could not adopt device %d for %s: %s", device_id, tostring(rid), tostring(err))
@@ -733,13 +730,19 @@ function zone_lights:hello(a, b)
 	local device_id = util.positive(params.device_id)
 	if not (self.loaded or self.synced) then
 		if rid or device_id then
-			self.early_hellos[#self.early_hellos + 1] = params
+			if #self.early_hellos < zone_lights.EARLY_HELLOS_MAX then
+				self.early_hellos[#self.early_hellos + 1] = params
+			else
+				self.ctx.log.warn("zone_lights: HUE_HELLO from device %s before the registry was loaded: dropped (%d waiting)",
+					tostring(params.device_id), #self.early_hellos)
+			end
 		end
 		return false
 	end
 	if device_id then
 		-- `model` marks a light's hello: Link Devices leaves such a device to the lights' module.
-		self.announced[device_id] = { rid = rid, name = params.name, kind = params.kind, model = params.model }
+		self.announced[device_id] = { rid = rid, name = hello_text(params.name), kind = hello_text(params.kind),
+			model = hello_text(params.model) }
 	end
 
 	local entry = rid and self.registry[rid] or nil
@@ -765,9 +768,14 @@ function zone_lights:hello(a, b)
 		return false  -- a bare device, or not a group device: Link Devices or the lights' module
 	end
 
-	local bound = self.project:bound_set()
+	local bound, why = self.project:bound_set()
 	if not bound or not bound[device_id] then
-		self.ctx.log.info("zone_lights: device %d announced %s but is not bound; not adopted", device_id, rid)
+		if why == "unknown" then
+			self.ctx.log.info("zone_lights: device %d announced %s, but the bound-device list is unknown; not adopted",
+				device_id, rid)
+		else
+			self.ctx.log.info("zone_lights: device %d announced %s but is not bound; not adopted", device_id, rid)
+		end
 		return false
 	end
 	for other_id, h in pairs(self.announced) do
@@ -812,6 +820,7 @@ function zone_lights:goodbye(params)
 	self.last_configure[rid] = nil
 	self.color_sent[rid], self.online_sent[rid] = nil, nil
 	self.conflicts[rid] = nil
+	self.announced[entry.device_id] = nil  -- also when the goodbye named the rid alone (R5)
 	self:clear_conflicts_for(entry.device_id)
 	self:mark()
 	self:flush()
@@ -860,11 +869,19 @@ end
 -- Reconciliation ---------------------------------------------------------------
 
 -- Step 1, the project side: the bound set and the hue_light devices in the
--- project. Saves unless `no_save`.
-function zone_lights:reconcile(no_save)
-	local bound = self.project:bound_set()
+-- project. Saves unless `no_save`. A bound-device lookup that failed, or
+-- answered no table (nil: unknown, issue #48 item 14), changes nothing;
+-- `created` (optional, a set { [rid] = true }) names the entries the
+-- caller's batch has just created, left as they are (item 13), as
+-- lights:reconcile does.
+function zone_lights:reconcile(no_save, created)
+	local bound, why = self.project:bound_set()
 	if not bound then
-		self.ctx.log.warn("zone_lights: reconcile skipped: the bound-device lookup failed")
+		-- Unknown is expected while nothing is registered (a new install):
+		-- debug then, a warning while there are entries it cannot judge.
+		local note = (why == "unknown" and self:count() == 0) and self.ctx.log.debug or self.ctx.log.warn
+		note("zone_lights: reconcile skipped: the bound-device lookup %s",
+			why == "unknown" and "answered no list" or "failed")
 		return { unbound = {}, relinked = {}, tombstoned = {} }
 	end
 	local infos = self.project:devices_of(zone_lights.LIGHT_DRIVER)
@@ -875,7 +892,13 @@ function zone_lights:reconcile(no_save)
 			present[id] = true
 		end
 	end
-	local r = self.reg:reconcile({ bound = bound, present = present })
+	-- A tombstone keeps no device id; the device's announced rid goes with
+	-- its entry (code analysis 2026-10-22 R5, as lights.lua).
+	local device_of = {}
+	for rid, entry in pairs(self.registry) do
+		device_of[rid] = entry.device_id
+	end
+	local r = self.reg:reconcile({ bound = bound, present = present, skip = created })
 	if #r.unbound + #r.relinked + #r.tombstoned > 0 then
 		self:mark()
 	end
@@ -883,6 +906,9 @@ function zone_lights:reconcile(no_save)
 		local tomb = self.reg:tombstones()[rid] or {}
 		self.last_configure[rid] = nil
 		self.conflicts[rid] = nil
+		if device_of[rid] then
+			self.announced[device_of[rid]] = nil
+		end
 		self.ctx.log.warn("zone_lights: %s was deleted in Composer while the bridge was not watching; Add Zone Light "
 			.. "lists it as deleted", tostring(tomb.name or rid))
 	end
@@ -1044,7 +1070,10 @@ end
 -- remembers that it is gone until it is seen again). `carried[grouped_rid]`
 -- collects the field names an update or add carried, for the STATE.
 function zone_lights:on_grouped_light_item(item, kind, carried)
-	local grouped = item.id
+	local grouped = hue_model.resource_id(item.id)
+	if grouped == nil then
+		return  -- not a resource id: nothing a group device could show (issue #45)
+	end
 	if kind == "delete" then
 		local st = self.group_state[grouped]
 		self.group_state[grouped] = nil
@@ -1271,6 +1300,31 @@ function zone_lights:on_container(container)
 	local sent = self:refresh_all(carried, not all and touched or nil)
 	self:flush()
 	return sent
+end
+
+-- The group queue's limits for a grouped_light (Decision 7, issue #58): the
+-- bridge clamps a zone light's PUTs to its members' common colour
+-- temperature range, not only the device side. { min_dim = 1, mirek_min,
+-- mirek_max } exactly as the owning device's HUE_CONFIGURE carries them (the
+-- entry's caps: hue_model.group_caps over the members, the intersection of
+-- the CT-capable members' ranges, kept current by refresh_entry); both
+-- bounds nil when no member has a range (the queue then uses its defaults).
+-- nil when no registered group owns the grouped_light (a scene's group
+-- without a zone light) or the members are unknown (no caps recorded). A
+-- fresh table each call: driver.lua keeps the last one it gave the queue.
+function zone_lights:limits(grouped_light_rid)
+	if type(grouped_light_rid) ~= "string" or grouped_light_rid == "" then
+		return nil
+	end
+	for rid, entry in pairs(self.registry) do
+		if self:grouped_light_of(rid) == grouped_light_rid then
+			if type(entry.caps) ~= "table" then
+				return nil
+			end
+			return { min_dim = 1, mirek_min = tonumber(entry.caps.mirek_min), mirek_max = tonumber(entry.caps.mirek_max) }
+		end
+	end
+	return nil
 end
 
 -- Commands from the group devices ---------------------------------------------------
@@ -1575,7 +1629,7 @@ function zone_lights:add(a, b, c)
 	local label = self:group_label(group)
 	self:create_device({ group = group, room_id = room_id, room_name = room_name }, function(created, _, err)
 		self.adding = false
-		self:reconcile(true)
+		self:reconcile(true, created[1] and { [group.rid] = true } or nil)
 		self:flush()
 		local text
 		if created[1] then
@@ -1639,6 +1693,8 @@ function zone_lights:relink(device_id, new_rid)
 	self.color_sent[new_rid], self.online_sent[new_rid] = nil, nil
 	self.conflicts[old_rid], self.conflicts[new_rid] = nil, nil
 	self:clear_conflicts_for(device_id)
+	-- The device announced the old rid; its next hello says the new one (R5).
+	self.announced[device_id] = nil
 	self:push(new_rid, "resync", true)
 	self:flush()
 	local text = string.format("Re-linked device %d (was %s) to %s %s", device_id, old_name, group.type,
@@ -1741,9 +1797,12 @@ function zone_lights:link_devices(skip_ids)
 			skip[tonumber(k) or k] = true
 		end
 	end
-	local bound = self.project:bound_set()
+	local bound, why = self.project:bound_set()
 	if not bound then
-		return "Not linked: the bound-device lookup failed (see the Lua output)"
+		if why ~= "unknown" then
+			return "Not linked: the bound-device lookup failed (see the Lua output)"
+		end
+		bound = {}  -- unknown (nil answered): nothing to adopt either way
 	end
 	local present = self.project:devices_of(zone_lights.LIGHT_DRIVER)
 	local ids, total = {}, 0

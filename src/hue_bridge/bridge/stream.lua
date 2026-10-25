@@ -4,7 +4,10 @@
 -- each Hue "container" to the owner. Reconnects with backoff whenever the
 -- transfer ends, and a watchdog reconnects if nothing at all arrives for a
 -- while. Every reconnect is reported through on_status so the owner can
--- resync state with a full GET.
+-- resync state with a full GET. A 401 or 403 is the bridge refusing the
+-- application key: every reconnect would present the same key, so the
+-- stream stops for good instead and tells the owner once, through
+-- on_key_rejected (issue #44).
 --
 -- Two rules, both from the spike on OS 3.4.2 (docs/design.md, Event stream):
 --
@@ -21,11 +24,26 @@
 --    generation check at the top of every callback does for an abandoned
 --    transfer. drop_transfer still calls Cancel() for the case where it works.
 --
--- The watchdog is one timer per connection: armed when the headers arrive,
--- it notes the clock on every chunk instead of being cancelled and re-created
--- per chunk (two Director calls per event). When it fires it reconnects if
--- nothing arrived for the whole period, else it is re-armed for what remains
--- of the period after the last chunk.
+-- The watchdog is one timer per connection, armed when the transfer starts
+-- (so a transfer that never answers is restarted too) and again for a full
+-- period when the headers arrive. Events and keepalive comments feed it: it
+-- notes the clock instead of being cancelled and re-created per event (two
+-- Director calls each). Bytes that make neither do not count, so a connected
+-- stream that delivers nothing usable is restarted all the same [code
+-- analysis 2026-10-22, L3]. When it fires it reconnects if nothing fed it
+-- for the whole period, else it is re-armed for what remains of the period
+-- after the last feed.
+--
+-- An abandoned transfer (a watchdog reconnect, an oversized line) is not
+-- ended by Cancel() (rule 2): it lives on until its next callback, which
+-- returns true. That callback's chunk is its last, and its events reach the
+-- owner at most once [code analysis 2026-10-22, L1]:
+--  * only that one chunk, should Director deliver more after the abort;
+--  * only while the stream runs and its current transfer is not connected:
+--    a connected transfer receives the same events itself, and the resync
+--    after its connect covers anything older;
+--  * and the current transfer skips an event an abandoned one delivered (the
+--    same SSE id), which it carries too when it reached the bridge first.
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -39,6 +57,18 @@ stream.DEFAULT_TIMEOUT = 3600       -- seconds; the transfer's total lifetime
 stream.DEFAULT_WATCHDOG = 600       -- seconds of silence before reconnecting
 stream.BACKOFF_MIN = 1              -- seconds
 stream.BACKOFF_MAX = 60
+
+-- Director runs at most four C4:url transfers at once: on 2026-10-25 (OS
+-- 3.4.2, dev build 276) three abandoned stream transfers plus the live one
+-- were open and every other transfer, to the bridge and to another host
+-- alike, timed out until a bridge event let the abandoned ones abort
+-- [verified: hardware, docs/design.md "Concurrent transfers"]. An abandoned
+-- transfer stays open until its next callback or its own timeout (rule 2),
+-- and the bridge sends no keepalive, so in a quiet house every watchdog
+-- reconnect used to leave one more open. The watchdog therefore starts a
+-- new transfer only while fewer than MAX_ABANDONED abandoned ones may still
+-- be open: at most two stream transfers, two left for commands.
+stream.MAX_ABANDONED = 1
 
 -- opts:
 --   connection()    returns { ip, key, stream_ip } or nil when not paired;
@@ -57,6 +87,18 @@ stream.BACKOFF_MAX = 60
 --                                   rewrite (count and clock), so the owner
 --                                   can coalesce those writes
 --   on_connected()                  stream is up; resync state here
+--   abandoned       a list shared by successive stream objects (the driver
+--                   rebuilds the stream on a property change): the abandoned
+--                   transfers that may still be open, { gen, owner, expires_ms }
+--   on_key_rejected(code)           the bridge answered the stream with 401 or
+--                                   403; called once, after the stream has
+--                                   stopped itself. It runs inside OnHeaders,
+--                                   so it must not start a transfer (rule 1)
+--
+-- stats (all builds): containers, events, keepalives, reconnects (every
+-- reconnect scheduled since stream.new), last_event, connected_since,
+-- started (the clock text of the first connect since stream.new, kept across
+-- reconnects), last_error, address.
 function stream.new(opts)
 	return setmetatable({
 		opts = opts,
@@ -65,13 +107,17 @@ function stream.new(opts)
 		transfer = nil,
 		parser = nil,
 		watchdog = nil,
-		last_data = nil,            -- ms clock of the last chunk, for the watchdog
-		fed_since_arm = false,      -- a chunk arrived since the watchdog was (re)armed
+		last_data = nil,            -- ms clock of the last event or keepalive, for the watchdog
+		fed_since_arm = false,      -- an event or keepalive arrived since the watchdog was (re)armed
 		connected_timer = nil,      -- defers on_connected out of OnHeaders
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
+		abandoned = opts.abandoned or {}, -- see MAX_ABANDONED
+		transfer_expires_ms = nil,  -- when the current transfer's own timeout ends it
+		abandoned_ids = nil,        -- SSE ids an abandoned transfer delivered (see the header)
 		stats = { containers = 0, events = 0, keepalives = 0, reconnects = 0,
 			last_event = nil, connected_since = nil, last_error = nil,
+			started = nil,          -- clock() of the first connect, kept across reconnects
 			address = nil },        -- the address spelling the current/last transfer used
 	}, stream)
 end
@@ -92,6 +138,36 @@ local function now_ms()
 		return ms
 	end
 	return os.time() * 1000
+end
+
+-- The abandoned transfers that may still be open: those whose own timeout
+-- has not passed and that have not called back since (a callback aborts
+-- them, see connect). Expired ones are pruned.
+function stream:open_abandoned()
+	local now, kept = now_ms(), {}
+	for _, z in ipairs(self.abandoned) do
+		if z.expires_ms > now then
+			kept[#kept + 1] = z
+		end
+	end
+	for i = #self.abandoned, 1, -1 do
+		self.abandoned[i] = nil
+	end
+	for i, z in ipairs(kept) do
+		self.abandoned[i] = z
+	end
+	return #kept
+end
+
+-- An abandoned transfer called back (and is aborted by its answer): it is
+-- no longer open.
+function stream:forget_abandoned(gen)
+	for i = #self.abandoned, 1, -1 do
+		local z = self.abandoned[i]
+		if z.owner == self and z.gen == gen then
+			table.remove(self.abandoned, i)
+		end
+	end
 end
 
 function stream:status(text, per_event)
@@ -128,6 +204,15 @@ function stream:arm_watchdog(delay_ms)
 				return self:arm_watchdog(remaining)
 			end
 		end
+		local open = self:open_abandoned()
+		if open >= stream.MAX_ABANDONED then
+			-- A quiet house, most likely: the transfer that the previous
+			-- watchdog abandoned is still open too. Another one would bring
+			-- Director towards its four-transfer limit and stall commands.
+			log.info("event stream: no data for %d s; not reconnecting while %d earlier transfer(s) may still be "
+				.. "open (Director runs at most four at once)", seconds, open)
+			return self:arm_watchdog()
+		end
 		log.warn("event stream: no data for %d s, reconnecting", seconds)
 		self.stats.last_error = "watchdog: no data for " .. seconds .. " s"
 		self:drop_transfer()
@@ -145,6 +230,10 @@ function stream:drop_transfer()
 	if self.transfer then
 		self.transfer:Cancel()
 		self.transfer = nil
+		-- Cancel() does not end a streaming transfer (rule 2): it stays open
+		-- until its next callback or its own timeout.
+		self.abandoned[#self.abandoned + 1] = { gen = self.generation - 1, owner = self,
+			expires_ms = self.transfer_expires_ms or (now_ms() + (self.opts.timeout or stream.DEFAULT_TIMEOUT) * 1000) }
 	end
 end
 
@@ -156,12 +245,15 @@ function stream:start()
 	self:connect()
 end
 
-function stream:stop()
+-- Stop until the next start(): no reconnect. `text` is the status to show
+-- (default "Stopped").
+function stream:stop(text)
 	self:cancel_timer("retry_timer")
 	self:drop_transfer()
 	self.state = "stopped"
 	self.stats.connected_since = nil
-	self:status("Stopped")
+	self.abandoned_ids = nil
+	self:status(text or "Stopped")
 end
 
 function stream:running()
@@ -190,6 +282,13 @@ function stream:connect()
 		log.info("event stream: connecting to %s", conn.ip)
 	end
 
+	-- Armed now, not only when the headers arrive: a transfer that never
+	-- answers is restarted after the watchdog period too (see the header).
+	-- Before the transfer starts, so a start that fails at once (on_done -2)
+	-- cancels it again.
+	self:arm_watchdog()
+	self.transfer_expires_ms = now_ms() + (self.opts.timeout or stream.DEFAULT_TIMEOUT) * 1000
+	local last_chunk_seen = false -- this transfer's, once it is abandoned
 	self.transfer = http.stream({
 		ip = host,
 		key = conn.key,
@@ -198,32 +297,41 @@ function stream:connect()
 		timeout = self.opts.timeout or stream.DEFAULT_TIMEOUT,
 	}, {
 		on_headers = function(code)
-			if gen ~= self.generation then return true end
+			if gen ~= self.generation then
+				self:forget_abandoned(gen)
+				return true
+			end
 			return self:handle_headers(code)
 		end,
 		on_chunk = function(data)
 			if gen ~= self.generation then
 				-- An abandoned transfer: Cancel() did not end it, and the
-				-- replacement stream is queued behind it, so the events in
-				-- this chunk would otherwise be lost. Deliver them, then abort
-				-- by returning true.
-				if self.state ~= "stopped" then
-					for _, event in ipairs(parser:feed(data)) do
-						self:handle_event(event)
-					end
+				-- events in this chunk may reach the owner no other way (the
+				-- replacement may still be connecting, or queued behind it).
+				-- Deliver them at most once (see the header), then abort by
+				-- returning true; any later chunk is dropped.
+				if not last_chunk_seen then
+					last_chunk_seen = true
+					self:deliver_abandoned(parser, data)
 				end
+				self:forget_abandoned(gen)
 				return true
 			end
 			self:handle_chunk(data)
 		end,
 		on_done = function(err_code, err_msg, code)
-			if gen ~= self.generation then return end
+			if gen ~= self.generation then
+				return self:forget_abandoned(gen)
+			end
 			self:handle_done(err_code, err_msg, code)
 		end,
 	})
 end
 
 function stream:handle_headers(code)
+	if code == 401 or code == 403 then
+		return self:key_rejected(code)
+	end
 	if code ~= 200 then
 		self.stats.last_error = "HTTP " .. tostring(code)
 		log.warn("event stream: rejected with HTTP %s", tostring(code))
@@ -232,6 +340,7 @@ function stream:handle_headers(code)
 	self.state = "connected"
 	self.backoff = stream.BACKOFF_MIN
 	self.stats.connected_since = clock()
+	self.stats.started = self.stats.started or self.stats.connected_since
 	self:arm_watchdog()
 	self:status("Connected since " .. self.stats.connected_since)
 	-- Deferred: this runs inside OnHeaders, and the owner issues a resync GET
@@ -250,19 +359,86 @@ function stream:handle_headers(code)
 	return false
 end
 
-function stream:handle_chunk(data)
-	self.last_data = now_ms()
-	self.fed_since_arm = true
-	local before = self.parser.comments
-	for _, event in ipairs(self.parser:feed(data)) do
-		self:handle_event(event)
+-- The bridge refused the application key: a 401 or 403 on the stream
+-- request. The house Bridge Pro answers an unknown key with 403 and an HTML
+-- body [verified: hardware 2026-10-25, docs/review-leftovers-design.md #44];
+-- a revoked key is an unknown key to it [assumed]. The stream stops for good
+-- (no reconnect timer, until start()), says so, and tells the owner once.
+-- This runs inside OnHeaders: the transfer ends by the true returned from
+-- there, as every refused stream request always did (rule 2; SDK
+-- 35_url/_9-OnHeaders), so it is not Cancel()ed from inside its own
+-- callback, and the owner's callback is pcall'd so that true is returned
+-- whatever it does.
+function stream:key_rejected(code)
+	self.stats.last_error = string.format("key rejected (HTTP %s)", tostring(code))
+	log.warn("event stream: the bridge rejected the application key (HTTP %s); stopped, no reconnect",
+		tostring(code))
+	self.transfer = nil -- ended by the true returned below
+	self:stop(string.format("Stopped: key rejected (HTTP %s)", tostring(code)))
+	if self.opts.on_key_rejected then
+		local ok, err = pcall(self.opts.on_key_rejected, code)
+		if not ok then
+			log.error("event stream: on_key_rejected failed: %s", tostring(err))
+		end
 	end
-	self.stats.keepalives = self.stats.keepalives + (self.parser.comments - before)
+	return true
+end
+
+function stream:handle_chunk(data)
+	local before = self.parser.comments
+	local events = self.parser:feed(data)
+	local keepalives = self.parser.comments - before
+	self.stats.keepalives = self.stats.keepalives + keepalives
+	-- Only an event or a keepalive feeds the watchdog (see the header), and
+	-- before the events are handled, so an owner callback that raises cannot
+	-- leave a live stream looking silent.
+	if #events > 0 or keepalives > 0 then
+		self.last_data = now_ms()
+		self.fed_since_arm = true
+	end
+	for _, event in ipairs(events) do
+		self:deliver(event)
+	end
 	if self.parser.overflowed then
 		self.stats.last_error = "oversized line in stream"
 		log.warn("event stream: oversized line, reconnecting")
 		self:drop_transfer()
 		self:schedule_reconnect()
+	end
+end
+
+-- An event of the current transfer. One that an abandoned transfer already
+-- delivered (the same id) is skipped, once; the first event that is not one
+-- of those shows the current transfer is past them, and the list goes.
+function stream:deliver(event)
+	local seen = self.abandoned_ids
+	if seen then
+		if event.id and seen[event.id] then
+			seen[event.id] = nil
+			return
+		end
+		self.abandoned_ids = nil
+	end
+	self:handle_event(event)
+end
+
+-- The last chunk of an abandoned transfer (see the header), read with that
+-- transfer's own parser. Its events reach the owner only while the stream
+-- runs and its current transfer is not connected, and only those no other
+-- abandoned transfer delivered before; their ids are kept for deliver().
+function stream:deliver_abandoned(parser, data)
+	if self.state == "stopped" or self.state == "connected" then
+		return
+	end
+	for _, event in ipairs(parser:feed(data)) do
+		local seen = self.abandoned_ids
+		if not (event.id and seen and seen[event.id]) then
+			if event.id then
+				self.abandoned_ids = seen or {}
+				self.abandoned_ids[event.id] = true
+			end
+			self:handle_event(event)
+		end
 	end
 end
 
@@ -287,8 +463,13 @@ function stream:handle_event(event)
 			self.opts.on_container(container, event)
 		end
 	end
-	self:status(string.format("Connected since %s, %d containers, last %s",
-		tostring(self.stats.connected_since), self.stats.containers, self.stats.last_event), true)
+	-- The per-event text only while connected: an abandoned transfer's last
+	-- chunk can arrive while the current one is still connecting or waiting
+	-- (it used to write "Connected since nil" then [code analysis 2026-10-22, L1]).
+	if self.state == "connected" then
+		self:status(string.format("Connected since %s, %d containers, last %s",
+			tostring(self.stats.connected_since), self.stats.containers, self.stats.last_event), true)
+	end
 end
 
 function stream:handle_done(err_code, err_msg, code)

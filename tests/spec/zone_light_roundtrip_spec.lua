@@ -120,7 +120,13 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 			http = http_ctx,
 			now = function() return now end,
 			lights = L,
+			-- As driver.lua's group_set hook: the zone's limits go to the queue
+			-- first (issue #58, docs/zone-light-design.md Decision 7).
 			group_set = function(rid, fields)
+				local limits = Z:limits(rid)
+				if limits then
+					Q:limits(rid, limits)
+				end
 				Q:set(rid, fields)
 				return true
 			end,
@@ -328,5 +334,28 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.is_nil(bc4.persist.hue_zone_light_tombstones[F.group_rids.garage])
 		assert.equal(2002, bc4.persist.hue_zone_lights[F.group_rids.garage].device_id)
 		assert.equal("Garage Lights", bc4.added[2].name, "a room light is named <Room> Lights")
+	end)
+
+	-- Issue #58: the bridge clamps a zone light's colour temperature to the
+	-- members' common range, as the device's own Kelvin range already does.
+	it("clamps a colour temperature to the range the zone's members share", function()
+		Z:resync()
+		answer_grouped_light_get()
+		Z:add(F.group_rids.downstairs, nil, function() end)
+		bc4.sent = {}
+		event(F.events.zone_children)  -- Hallway Ambiance (153-454) joins: the shared range is 153-454
+		assert.equal("454", sent_params(bc4, "HUE_CONFIGURE").mirek_max, "the device's own range")
+		-- Three PUTs fit the group queue's burst.
+		local function set_mirek(mirek)
+			bridge.ExecuteCommand("HUE_SET", { rid = F.group_rids.downstairs, device_id = tostring(DEVICE_ID),
+				mirek = tostring(mirek) })
+			local put, body = flush_put()
+			assert.equal(GROUPED .. F.grouped_light_rids.downstairs, put.url)
+			answer_put(put)
+			return body.color_temperature.mirek
+		end
+		assert.equal(454, set_mirek(500), "a programming command beyond the shared range")
+		assert.equal(153, set_mirek(100))
+		assert.equal(300, set_mirek(300))
 	end)
 end)
