@@ -50,7 +50,6 @@ local FORGOTTEN_INSTRUCTION = "Delete this device in Composer, or bind it again 
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaTimer, assume = fn }
-local color_params_logged = false
 
 -- The plumbing both device drivers share (common/device.lua): properties and
 -- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
@@ -612,16 +611,12 @@ local function pick(params, names)
 	return nil
 end
 
+-- A Navigator's colour pick arrives as LIGHT_COLOR_TARGET_MODE 0 with X and
+-- Y, a temperature pick as mode 1 with the temperature's X and Y, and RATE
+-- [verified: hardware 2026-10-22, the one-time parameter log this driver
+-- carried until 2026-10-25, checklist D.10]; the other spellings in
+-- COLOR_KEYS are kept for other proxy versions [assumed].
 dispatch.proxy["SET_COLOR_TARGET"] = function(_, params)
-	if not color_params_logged then
-		color_params_logged = true
-		local parts = {}
-		for k, v in pairs(params) do
-			parts[#parts + 1] = tostring(k) .. "=" .. tostring(v)
-		end
-		table.sort(parts)
-		log.always("first SET_COLOR_TARGET params: %s", table.concat(parts, " "))
-	end
 	set_color(pick(params, COLOR_KEYS.x), pick(params, COLOR_KEYS.y),
 		pick(params, COLOR_KEYS.mode), pick(params, COLOR_KEYS.rate))
 end

@@ -994,22 +994,13 @@ describe("Hue Light driver", function()
 			assert.same({ rid = "l1", x = "0.4", y = "0.35", rate = "100" }, last_sent(c4).params)
 		end)
 
-		it("logs every param of the first one received, once", function()
-			local lines = {}
-			log.sink = function(line) lines[#lines + 1] = line end
-			local env = lit_light()
-			local params = { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35", LIGHT_COLOR_TARGET_COLOR_MODE = "0" }
-			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", params)
-			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", params)
-			local hits = 0
-			for _, line in ipairs(lines) do
-				if line:find("first SET_COLOR_TARGET params:", 1, true) then
-					hits = hits + 1
-					assert.truthy(line:find("LIGHT_COLOR_TARGET_X=0.4", 1, true))
-					assert.truthy(line:find("LIGHT_COLOR_TARGET_COLOR_MODE=0", 1, true))
-				end
-			end
-			assert.equal(1, hits)
+		it("takes a temperature pick as the Navigator sends it: LIGHT_COLOR_TARGET_MODE 1", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_MODE = "1", LIGHT_COLOR_TARGET_RATE = "0",
+				LIGHT_COLOR_TARGET_X = "0.317097", LIGHT_COLOR_TARGET_Y = "0.327069" })
+			local params = last_sent(c4).params
+			assert.truthy(params.mirek, "a temperature pick becomes a colour temperature")
+			assert.is_nil(params.x)
 		end)
 
 		it("stores the colour while off, closes with CHANGED, and sends it with the next turn-on", function()
