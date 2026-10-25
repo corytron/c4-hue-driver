@@ -21,6 +21,20 @@ A personal project for one Control4 home. It is not affiliated with, endorsed
 by or supported by Snap One (Control4) or Signify (Philips Hue); see
 [License, trademarks and provenance](#license-trademarks-and-provenance).
 
+## Download
+
+The three drivers of the latest release; install all three, from the same
+release:
+
+- [**hue_bridge.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_bridge.c4z): Hue Bridge
+- [**hue_light.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_light.c4z): Hue Light
+- [**hue_scene.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_scene.c4z): Hue Scene
+
+Their checksums are in [`SHA256SUMS.txt`](https://github.com/corytron/c4-hue-driver/releases/latest/download/SHA256SUMS.txt); the
+[release page](https://github.com/corytron/c4-hue-driver/releases/latest)
+has the release notes and the provenance attestations. How to install them:
+[Install in Composer Pro](#install-in-composer-pro).
+
 ## What it does
 
 - **Lights.** Each Hue light you import becomes a Control4 light (the
