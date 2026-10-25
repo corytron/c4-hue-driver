@@ -5,9 +5,12 @@ the single page of the present; every other note keeps its history as
 written, with dated "Superseded" or "Current" lines where behaviour changed
 later, and where a note and `status.md` disagree about the present,
 `status.md` and the code win. The owner's manual itself is not here but in
-the driver: `src/hue_bridge/www/documentation.html` (the Hue Bridge's
-Documentation tab in Composer), with a one-page summary for each device type
-in `src/hue_light/www/` and `src/hue_scene/www/`.
+the driver: [`src/hue_bridge/www/documentation.html`](../src/hue_bridge/www/documentation.html)
+(the Hue Bridge's Documentation tab in Composer), with a one-page summary for
+each device type in [`src/hue_light/www/`](../src/hue_light/www/documentation.html)
+and [`src/hue_scene/www/`](../src/hue_scene/www/documentation.html). What each
+release changed is in [`CHANGELOG.md`](../CHANGELOG.md); the working rules of
+the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
 
 ## Start here
 
@@ -136,6 +139,10 @@ are dated research; what was built from them is in the contracts and
   desired state of the house, the GitHub Deployment as the observed state,
   the drift issue, `tools/deploy.py`, and what is automatic, offered or
   never without a click.
+- [`changelog-design.md`](changelog-design.md): the contract of the
+  changelog (2026-10-25, #255): `CHANGELOG.md`'s format, `tools/changelog.py`
+  (check, the release notes, the Documentation tab's Changelog chapter, the
+  stamp), and where each release's entry appears.
 - [`doc-accuracy-design.md`](doc-accuracy-design.md): the contract of the
   documentation accuracy pass of 2026-10-25 (#231): every document a reader
   sees, checked against the drivers at build 316, and who checked which.
@@ -187,3 +194,7 @@ in the contracts, the issues and `status.md`.
   the read-only diff and efficiency review of the same branch against the
   refactor's rule that no owner-visible behaviour changes, with differential
   harnesses run outside the repository.
+- [`reviews/doc-accuracy-review-2026-10-25.md`](reviews/doc-accuracy-review-2026-10-25.md):
+  the documentation accuracy pass (#231) at build 316: every document a
+  reader sees against the drivers, finding by finding, with the corrections
+  applied under `doc-accuracy-design.md`.

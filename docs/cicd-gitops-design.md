@@ -82,6 +82,8 @@ runner):
 | `workflows` | `actionlint` then `zizmor --min-severity medium .github/workflows` | `.github/workflows/*.yml` |
 | `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` then `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=<refs>`: on the VM `--all`, the history of every local ref (branches, tags, stashes, remote-tracking refs), because a stale tag or branch can hold history that never reached GitHub and a `--tags` or `--mirror` push would publish it (security review 2026-10-25, finding 14); in CI (`GITHUB_ACTIONS=true`) `HEAD`, the history a pull request publishes (its `fetch-depth: 0` checkout also holds every other branch and tag, whose findings are not the pull request's) | tree and history |
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
+| `changelog` | `python3 tools/changelog.py check --file CHANGELOG.md` | `CHANGELOG.md` against `docs/changelog-design.md` |
+| `links` | `python3 tools/check_links.py` | every link in every tracked Markdown file and in the three Documentation tabs resolves (files and heading anchors); `--unlinked` lists the documents `README.md` does not reach, for the owner's decision on what the front page links (never a failure) |
 
 `tools/setup-checks.sh` installs what the VM lacks into `~/.local/bin`
 without `sudo`. `ruff`, `zizmor` and `shellcheck-py` come from
@@ -119,7 +121,8 @@ Four jobs; **their `name:` strings are the required status checks on
    (§5.2) uploaded with the packages.
 3. `Tooling checks (shell, Python, XML, workflows)`: `tools/setup-checks.sh`
    then `tools/check.sh --strict --only shell python-lint python-test xml
-   powershell workflows house`. Needs `pwsh` (present on ubuntu-latest).
+   powershell workflows house changelog links` (`changelog` since
+   2026-10-25, #255; `links` since 2026-10-25, #263). Needs `pwsh` (present on ubuntu-latest).
 4. `Secrets and private data`: full-depth checkout, `tools/setup-checks.sh`,
    `tools/check.sh --strict --only secrets`.
 
