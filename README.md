@@ -205,7 +205,7 @@ chapters 3 to 7 and 9 are the long version of this list.
    **Pair Bridge** on the **Actions** tab (Hue accepts a pairing for about 30
    seconds after the press). Status goes *Pairing: contacting
    bridge*, *Pairing: found Hue Bridge Pro (BSB003) ..., requesting key*,
-   **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware fill
+   *Checking the bridge at ... before anything is sent*, **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware fill
    in, Event Stream reads *Connected since ...*, Lights reads for example *47
    on bridge, 0 imported, 47 new, ...*, Attention lists the new lights, and
    Room Mappings is filled by a one-time automatic **Map Rooms By Name**.
