@@ -286,15 +286,18 @@ src/hue_light/     the light driver (light_v2 proxy; also zone and room lights)
 src/hue_scene/     the scene driver (light_v2 proxy, a dimmer)
 tests/             busted specs, the fake DriverWorks runtime, invented Hue resources
 tools/             build.sh; check.sh (every check, as CI runs it) and setup-checks.sh (its
-                   tools); deploy.py (the house: release download and verification, the
-                   deployment record, the brief) and labels_sync.py, with their unit tests in
+                   tools, the Python ones hash-pinned in requirements-checks.txt); deploy.py
+                   (the house: release download and verification, the deployment record, the
+                   brief), labels_sync.py and code_scanning_issue.py (the one issue listing
+                   the open code scanning alerts), with their unit tests in
                    tests/; the dev loop (devserver.py, devctl.py, regress.sh); Composer
                    automation (composer/Composer.psm1); the icon and CA-bundle generators
 deploy/            house.yaml: the desired state of the author's house (release, build, stream
                    settings); the observed state is a GitHub Deployment, see below
 docs/              design notes, feature contracts, research, checklists (see docs/README.md)
-.github/           the workflows (CI, Release, drift, labels, Scorecard, Dependabot
-                   auto-merge), the labels, the issue and pull request templates
+.github/           the workflows (CI, Release, drift, labels, Scorecard, code scanning
+                   triage, Dependabot auto-merge), the labels, the issue and pull request
+                   templates
 ```
 
 ## How a change reaches the house
