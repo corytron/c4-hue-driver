@@ -38,6 +38,8 @@ PR that says which.
 | `.github/release.yml`, `.github/dependabot.yml`, `.gitleaks.toml`, `.github/zizmor.yml`, `.github/actionlint.yaml` (if needed) | agent workflows | release-note categories, update schedule, scan rules, linter settings |
 | `tools/deploy.py`, `tools/labels_sync.py`, `tools/tests/test_*.py`, lint fixes in the existing `tools/*.py` | agent **tooling** | the deploy and drift tool, label sync, their unit tests |
 | `tools/check.sh`, `tools/setup-checks.sh`, `README.md`, `CONTRIBUTING.md`, `docs/release-checklist.md`, `docs/README.md`, `SECURITY.md` | agent **checks-and-docs** | one check script for VM and CI, its installer, the documents |
+| `tools/requirements-checks.txt` | coordinator (#222) | hash-pinned Python check tools (§3) |
+| `.github/workflows/code-scanning-triage.yml`, `tools/code_scanning_issue.py`, `tools/tests/test_code_scanning_issue.py` | coordinator (#222) | the one code scanning issue (§4.6) |
 
 Everything else in the checkout is edited by others at the same time. No
 agent runs `git`; the coordinator integrates and commits on the branch
@@ -78,15 +80,18 @@ runner):
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
 
 `tools/setup-checks.sh` installs what the VM lacks into `~/.local/bin`
-without `sudo`: `ruff`, `zizmor` and `shellcheck-py` with `python3 -m pip
-install --user --break-system-packages`, `actionlint` and `gitleaks` as
-pinned release binaries whose sha256 the script carries and verifies (the
-versions on the VM today: ruff 0.17.2, zizmor 1.31.1, actionlint 1.7.12,
-gitleaks 8.30.1; `shellcheck-py` latest 0.10.x). CI runs the same script
-(ubuntu-latest has `shellcheck` and `pwsh` already; the script skips what
-is present). It prints each tool's version at the end. `python3 -m pip`
-may be missing on a runner: fall back to `pipx` or `uv` only if present,
-otherwise fail with a clear line.
+without `sudo`. `ruff`, `zizmor` and `shellcheck-py` come from
+`tools/requirements-checks.txt`, which pins each by version and by the
+sha256 of every file PyPI has for it; they are installed one at a time with
+`python3 -m pip install --require-hashes --no-deps --only-binary=:all:
+--user --break-system-packages`, so pip refuses an unlisted hash, any
+dependency and any source build. `actionlint` and `gitleaks` are pinned
+release binaries whose sha256 the script carries and verifies. Today:
+ruff 0.17.2, zizmor 1.31.1, shellcheck-py 0.10.0.1, actionlint 1.7.12,
+gitleaks 8.30.1. CI runs the same script (ubuntu-latest has `shellcheck`
+and `pwsh` already; the script skips what is present). It prints each
+tool's version at the end. Without `python3 -m pip` it fails with a clear
+line: the hash check is pip's, so there is no `pipx` or `uv` fallback.
 
 ## 4. CI: `.github/workflows/ci.yml`
 
@@ -126,6 +131,26 @@ security-events: write, id-token: write, contents: read, actions: read`;
 The README gets the Scorecard badge next to the CI badge. CodeQL default
 setup (Python and Actions) is enabled by the coordinator through the API,
 not a workflow file.
+
+### 4.6 The code scanning issue
+
+CodeQL default setup and `scorecard.yml` analyse every push to `main`.
+`.github/workflows/code-scanning-triage.yml` (push to `main`, daily 07:41
+UTC, dispatch; `contents: read`, `security-events: read`,
+`vulnerability-alerts: read`, `issues: write`; concurrency group
+`code-scanning-triage`, never cancelled) runs `tools/code_scanning_issue.py`,
+on a push with `--wait-for $GITHUB_SHA`. It waits up to 30 minutes until
+every tool and category that analysed the three previous commits has
+analysed this one; a newer push ends the wait and leaves the issue to the
+newer run. Then it keeps exactly one open issue labelled `security`, "Code
+scanning: N open alert(s) on main": created when alerts exist and none is
+open; title and table updated, with one comment naming what is new and
+gone, when the set changes; refreshed silently when only details change;
+closed with a comment when none remain. It never dismisses, never touches
+closed issues, never opens a second, and ignores other `security` issues
+(recognised by a body marker and the exact title). `GITHUB_TOKEN` cannot
+read secret scanning alerts; the issue says so, and the coordinator checks
+them with `gh api`.
 
 ## 5. Releases: `.github/workflows/release.yml`
 
@@ -422,7 +447,9 @@ over: once from the VM, once from the workflow finding nothing to do.
   of ours would be run against a Dependabot PR with secrets it needs, it
   isn't: our workflows need none.)
 - `.github/dependabot.yml`: `github-actions` weekly grouped (as today) with
-  the label `dependencies`; add `pip` only if a requirements file appears.
+  the label `dependencies`, and `pip` for `/tools`
+  (`tools/requirements-checks.txt`), weekly, grouped, label `dependencies`;
+  reviewed, not auto-merged.
 
 ## 9. Automation decisions (edge cases before automation)
 
@@ -437,6 +464,7 @@ over: once from the VM, once from the workflow finding nothing to do.
 | Labels | automatic create/update; delete forbidden | a deleted label loses its history on issues |
 | Dependabot | automatic PRs; auto-merge for action pins only | CI gates them; everything else is reviewed |
 | Scorecard, CodeQL | automatic, read-only reports | |
+| Code scanning issue | automatic open/update/close of one `security` issue; never dismisses an alert, never reopens or edits closed issues, never a second | a record, not an actor; a dismissal is a decision with a reason |
 
 Corner cases decided: the tag moves while a deployment is `in_progress` →
 `deploy.py start` of the new build refuses until `done`/`failed`/`--supersede`;
