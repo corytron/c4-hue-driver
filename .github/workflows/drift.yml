@@ -45,7 +45,20 @@ jobs:
           ref: main
           persist-credentials: false
 
+      # deploy.py exits 3 when desired and observed differ: that is the report
+      # this run exists to make, not an error of the run (the deploy issue
+      # carries the state). 1 is an error: GitHub unreachable, a bad
+      # house.yaml, a release without a manifest.
       - name: Reconcile and keep the deploy issue current
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/deploy.py drift --issue
+        run: |
+          set +e
+          python3 tools/deploy.py drift --issue
+          rc=$?
+          set -e
+          case "$rc" in
+            0) echo "in sync" ;;
+            3) echo "drift: the deploy issue carries the state" ;;
+            *) exit "$rc" ;;
+          esac
