@@ -23,6 +23,12 @@ local function quiet()
 	log.sink = function() end
 end
 
+-- A signed dev loop command, as tools/devctl.py run queues it: the
+-- development handlers answer nothing else (docs/dev-loop.md).
+local function signed(command, params)
+	return require("common.devloop").execute(command, params)
+end
+
 local function paired_driver(extra)
 	local props = { ["Bridge IP Address"] = "192.0.2.10" }
 	for k, v in pairs(extra or {}) do props[k] = v end
@@ -413,7 +419,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection", Host = "192.00.2.10" })
+		signed("Test Connection", { Host = "192.00.2.10" })
 		local t = c4.last_transfer()
 		assert.equal("https://192.00.2.10/clip/v2/resource/bridge", t.url)
 		assert.equal("abc123", t.headers["hue-application-key"])
@@ -598,7 +604,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Hue Request", Method = "put",
+		signed("Hue Request", { Method = "put",
 			Path = "/clip/v2/resource/light/abc", Body = '{"metadata":{"name":"Desk"}}', Host = "192.00.002.10" })
 		local t = c4.last_transfer()
 		assert.equal("PUT", t.method)
@@ -608,7 +614,7 @@ describe("Hue Bridge driver", function()
 		t:respond(200, '{"data":[{"rid":"abc","rtype":"light"}],"errors":[]}')
 		assert.truthy(lines[#lines]:find("Hue Request PUT /clip/v2/resource/light/abc via 192.00.002.10: HTTP 200", 1, true))
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Hue Request", Path = "/clip/v2/resource/light" })
+		signed("Hue Request", { Path = "/clip/v2/resource/light" })
 		c4.last_transfer():respond(200, '{"data":[{"id":"l1","type":"light","metadata":{"name":"Desk"}},'
 			.. '{"id":"l2","type":"light","metadata":{"name":"Hall"}}],"errors":[]}')
 		assert.truthy(lines[#lines]:find("2 items: l1=Desk; l2=Hall", 1, true))
@@ -636,7 +642,7 @@ describe("Hue Bridge driver", function()
 		end)
 
 		it("Proxy Command sends a light_v2 command to the light's proxy by name", function()
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "desk lamp",
+			signed("Proxy Command", { Light = "desk lamp",
 				Command = "SET_BRIGHTNESS_TARGET", LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
 			local m = c4.sent[#c4.sent]
 			assert.equal(2005, m.id)
@@ -647,14 +653,14 @@ describe("Hue Bridge driver", function()
 
 		it("Proxy Command reports an unknown light", function()
 			local before = #c4.sent
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "nope" })
+			signed("Proxy Command", { Light = "nope" })
 			assert.equal(before, #c4.sent)
 			assert.truthy(lines[#lines]:find("no registered light, zone light or scene matches", 1, true))
 		end)
 
 		it("Lights Report lists the registry and the owner-facing texts", function()
 			local before = #lines
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Lights Report" })
+			signed("Lights Report", {})
 			local text = table.concat(lines, "\n", before + 1)
 			assert.truthy(text:find("Lights Report: 1 registered", 1, true))
 			assert.truthy(text:find("Attention: ", 1, true))

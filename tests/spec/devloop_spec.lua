@@ -1486,6 +1486,71 @@ describe("common.devloop", function()
 			assert.is_nil(r.error)
 		end)
 
+		-- Security review 2026-10-25, finding 9: the bridge's development
+		-- commands are not in its dispatch table; only a signed command runs them.
+		it("execute runs the bridge's signed handler of that name instead of ExecuteCommand", function()
+			start_synced()
+			local seen, through_entry = {}, {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(through_entry, command) end)
+			devloop.set_signed_commands({ Hue_Request = function(params) table.insert(seen, params) end })
+			server.commands = {
+				{ id = 1, type = "execute", command = "Hue Request", params = { Path = "/clip/v2/resource/light" } },
+				{ id = 2, type = "execute", command = "LUA_ACTION", params = { ACTION = "Hue  Request", Method = "GET" } },
+				{ id = 3, type = "execute", command = "Connection Test", params = { Target = "Bridge" } },
+			}
+			tick()
+			assert.same({ { Path = "/clip/v2/resource/light" }, { Method = "GET" } }, seen,
+				"named as common/dispatch.lua names commands; LUA_ACTION unwrapped and its ACTION dropped")
+			assert.same({ "Connection Test" }, through_entry, "anything else goes to ExecuteCommand")
+			assert.same({ "command_done", "command_done", "command_done" }, events())
+		end)
+
+		it("finds the signed handlers the running code set, a reload's included", function()
+			start_synced()
+			devloop.set_signed_commands({ Probe_Call = function() table.insert(calls(), "probe v1") end })
+			server.commands = { { id = 1, type = "execute", command = "Probe Call" } }
+			tick()
+			server.version = "v2"
+			server.files["driver.lua"] = DRIVER_SRC .. "\nrequire('common.devloop').set_signed_commands("
+				.. "{ Probe_Call = function() table.insert(DEVLOOP_TEST_CALLS, 'probe v2') end })"
+			server.commands = { { id = 2, type = "execute", command = "Probe Call" } }
+			tick()
+			local probes = {}
+			for _, call in ipairs(calls()) do
+				if call:find("^probe") then probes[#probes + 1] = call end
+			end
+			assert.same({ "probe v1", "probe v2" }, probes)
+		end)
+
+		it("reports a failing signed handler, says so and runs the next command", function()
+			start_synced()
+			local ran = {}
+			devloop.set_signed_commands({
+				Probe_Call = function() error("probe broke") end,
+				Hue_Request = function() table.insert(ran, "Hue Request") end,
+			})
+			server.commands = { { id = 1, type = "execute", command = "Probe Call" },
+				{ id = 2, type = "execute", command = "Hue Request" } }
+			tick()
+			assert.truthy(server.reports[1].error:find("probe broke", 1, true))
+			assert.equal(1, printed_count("devloop: signed command Probe_Call failed: "))
+			assert.same({ "Hue Request" }, ran)
+			assert.is_nil(server.reports[2].error)
+		end)
+
+		it("runs no signed handler from a command list that does not verify", function()
+			start_synced()
+			local seen = {}
+			devloop.set_signed_commands({ Probe_Call = function() table.insert(seen, "probe") end })
+			server.unsigned.commands = true
+			server.commands = { { id = 1, type = "execute", command = "Probe Call" } }
+			tick()
+			server.unsigned.commands = nil
+			server.keys.commands = OTHER_KEY
+			tick()
+			assert.same({}, seen)
+		end)
+
 		it("set_property updates the property and calls OnPropertyChanged", function()
 			start_synced()
 			local seen
@@ -1653,6 +1718,84 @@ describe("common.devloop", function()
 			tick()
 			assert.equal("devloop: started against http://devvm:8080", server.logs[1].lines[1].line)
 			assert.truthy(server.logs[1].lines[2].line:find("^devloop: reloading to version v1"))
+		end)
+
+		-- Security review 2026-10-25, finding 9: the bridge's redactor keeps the
+		-- application key out of every line that leaves the controller.
+		it("runs every line through the bridge's redactor before it is buffered", function()
+			start_synced()
+			devloop.set_redactor(function(line) return (line:gsub("s3cret", "<key>")) end)
+			print("key s3cret in a line")
+			assert.same({ "key <key> in a line" }, buffered())
+			assert.equal("key s3cret in a line", printed[#printed], "Composer's own output is left alone")
+			tick()
+			assert.equal("key <key> in a line", server.logs[1].lines[1].line)
+		end)
+
+		it("redacts again on the way out, so a line buffered before the key was known leaves without it", function()
+			start_synced()
+			local key -- what the bridge knows: nothing until its late init
+			devloop.set_redactor(function(line)
+				if not key then return line end
+				return (line:gsub(key, "<key>"))
+			end)
+			print("early s3cret")
+			assert.same({ "early s3cret" }, buffered())
+			key = "s3cret"
+			tick()
+			assert.equal("early <key>", server.logs[1].lines[1].line)
+			assert.same({}, buffered(), "shipped and gone")
+		end)
+
+		it("withholds a line the redactor fails on, drops one it keeps nothing of, and never raises", function()
+			start_synced()
+			devloop.set_redactor(function(line)
+				if line:find("boom", 1, true) then error("redactor broke") end
+				if line:find("drop", 1, true) then return nil end
+				if line:find("number", 1, true) then return 42 end
+				return line
+			end)
+			assert.has_no.errors(function()
+				print("boom s3cret")
+				print("drop this")
+				print("a number")
+				print("fine")
+			end)
+			tick()
+			local shipped = {}
+			for _, entry in ipairs(server.logs[1].lines) do shipped[#shipped + 1] = entry.line end
+			assert.same({ devloop.WITHHELD, devloop.WITHHELD, "fine" }, shipped)
+			-- The loop's own messages go through capture without print's pcall.
+			devloop.set_redactor(function() error("redactor broke") end)
+			assert.has_no.errors(function() devloop.stop() end)
+			assert.same({ devloop.WITHHELD }, buffered(), "devloop: stopped, withheld")
+		end)
+
+		it("does not hand the redactor a line it printed itself", function()
+			start_synced()
+			local seen = 0
+			devloop.set_redactor(function(line)
+				seen = seen + 1
+				print("the redactor speaks")
+				return line
+			end)
+			print("outer")
+			assert.same({ devloop.WITHHELD, "outer" }, buffered())
+			assert.equal(1, seen)
+		end)
+
+		it("redacts the error text of a report", function()
+			start_synced()
+			devloop.set_redactor(function(line) return (line:gsub("s3cret", "<key>")) end)
+			devloop.set_signed_commands({ Probe_Call = function() error("saw s3cret") end })
+			server.commands = { { id = 1, type = "execute", command = "Probe Call" } }
+			tick()
+			assert.truthy(last_report().error:find("saw <key>", 1, true))
+			for _, r in ipairs(server.reports) do assert.is_false(holds(r, "s3cret")) end
+			for _, body in ipairs(server.logs) do
+				for _, entry in ipairs(body.lines) do assert.is_nil(entry.line:find("s3cret", 1, true)) end
+			end
+			assert.truthy(#server.logs > 0)
 		end)
 
 		it("snapshots shadowed property values even when Properties lags", function()
@@ -1856,30 +1999,36 @@ describe("common.devloop", function()
 end)
 
 
--- Finding 15 of the security review: the development requests send the
--- application key only to spellings of the bridge's own address.
+-- The development requests, security reviews 2026-10-24 (finding 15) and
+-- 2026-10-25 (findings 9 and 10): the application key goes only to
+-- spellings of the bridge's own address, on paths that keep it there, once
+-- the bridge's identity is verified; the requests, probes and proxy
+-- commands answer signed dev loop commands only; Probe Call keeps off the
+-- credential store; the loop's redactor keeps the key out of shipped lines.
 describe("bridge/devtools.lua development requests", function()
 	local log = require("common.log")
 
 	local IP = "10.0.2.143"
 	local IP_PATTERN = (IP:gsub("%.", "%%."))
 	local CHECK_URL = "https://10.00.02.143/clip/v2/resource/bridge"
+	local IDENTITY = '{"bridgeid":"%s","modelid":"BSB003","name":"Hue","swversion":"1968096020","apiversion":"1.68.0"}'
+	local BRIDGE_RESOURCE = '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe123abc"}]}'
 	local env, c4, lines, real_sink
 
-	-- The identity check, then the self-check via the check spelling.
-	local function answer_identity()
+	-- The identity check, answered with the paired bridge id unless told otherwise.
+	local function answer_identity(bridgeid)
 		local t = c4.last_transfer()
 		assert(t and t.url == "https://" .. IP .. "/api/0/config",
 			"expected the identity check, got " .. tostring(t and t.url))
-		t:respond(200, '{"bridgeid":"001788FFFE123ABC","modelid":"BSB003","name":"Hue","swversion":"1968096020",'
-			.. '"apiversion":"1.68.0"}')
+		t:respond(200, string.format(IDENTITY, bridgeid or "001788FFFE123ABC"))
 	end
 
+	-- The identity check, then the self-check via the check spelling.
 	local function answer_check()
 		answer_identity()
 		local t = c4.last_transfer()
 		assert(t and t.url == CHECK_URL, "expected the self-check, got " .. tostring(t and t.url))
-		t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe123abc"}]}')
+		t:respond(200, BRIDGE_RESOURCE)
 	end
 
 	-- A dev build of the bridge (common.devloop is on the test path, so
@@ -1893,10 +2042,44 @@ describe("bridge/devtools.lua development requests", function()
 		if answer ~= false then answer_check() end
 	end
 
+	-- A Composer action, or what any driver in the project sends with
+	-- C4:SendToDevice dressed as one.
 	local function action(name, params)
 		params = params or {}
 		params.ACTION = name
 		env.ExecuteCommand("LUA_ACTION", params)
+	end
+
+	-- A signed dev loop command, as tools/devctl.py run queues it: what
+	-- common/devloop.lua runs once the command list verified.
+	local function signed(name, params)
+		return require("common.devloop").execute(name, params or {})
+	end
+
+	-- `fn()` with a release build's modules: no common.devloop, hence no
+	-- bridge/devtools.lua. Returns what `fn` returns.
+	local function as_release(fn)
+		package.loaded["common.devloop"] = nil
+		package.preload["common.devloop"] = function() error("module 'common.devloop' not found") end
+		local ok, result = pcall(fn)
+		package.preload["common.devloop"] = nil
+		package.loaded["common.devloop"] = nil
+		assert(ok, result)
+		return result
+	end
+
+	-- The <command> of every action in a DEV-ONLY block of the bridge's
+	-- driver.xml: what Composer itself sends to a dev build.
+	local function dev_only_commands()
+		local file = assert(io.open("src/hue_bridge/driver.xml"))
+		local xml = file:read("*a")
+		file:close()
+		local names = {}
+		for block in xml:gmatch("<!%-%- DEV%-ONLY BEGIN.-<!%-%- DEV%-ONLY END %-%->") do
+			for command in block:gmatch("<command>(.-)</command>") do names[#names + 1] = command end
+		end
+		table.sort(names)
+		return names
 	end
 
 	before_each(function()
@@ -1907,6 +2090,13 @@ describe("bridge/devtools.lua development requests", function()
 
 	after_each(function()
 		log.sink = real_sink
+		-- The loop's state outlives a driver load (_G.__DEVLOOP): leave no
+		-- handler or redactor of this spec's bridge behind.
+		local loop = package.loaded["common.devloop"]
+		if type(loop) == "table" and loop.set_signed_commands then
+			loop.set_signed_commands(nil)
+			loop.set_redactor(nil)
+		end
 	end)
 
 	it("knows the spellings altaddr writes, and nothing else", function()
@@ -1934,34 +2124,105 @@ describe("bridge/devtools.lua development requests", function()
 		end
 	end)
 
+	it("puts only Composer's DEV-ONLY actions and HUE_LOG into the dispatch table", function()
+		local function command_names()
+			paired(false)
+			local names = {}
+			for name in pairs(require("common.dispatch").commands) do names[name] = true end
+			return names
+		end
+		local release = as_release(command_names)
+		local dev = command_names()
+		local added = {}
+		for name in pairs(dev) do
+			if not release[name] then added[#added + 1] = name end
+		end
+		table.sort(added)
+		assert.same({ "Check CA Pinning", "Connection Test", "Reload Credentials" }, dev_only_commands())
+		local expected = { "HUE_LOG" }
+		for _, command in ipairs(dev_only_commands()) do expected[#expected + 1] = (command:gsub("%s+", "_")) end
+		table.sort(expected)
+		assert.same(expected, added)
+	end)
+
+	it("answers the development commands for signed dev loop commands only", function()
+		paired()
+		local transfers, sent, logged = #c4.transfers, #c4.sent, #lines
+		for _, name in ipairs({ "Hue Request", "Probe Call", "Proxy Command", "Lights Report", "Probe Project",
+			"Probe Errors", "Probe Scenes" }) do
+			local params = { Method = "DELETE", Path = "/clip/v2/resource/light/x", Fn = "GetDeviceID", Light = "x",
+				Command = "ON" }
+			env.ExecuteCommand(name, params) -- C4:SendToDevice from any driver in the project
+			action(name, params)             -- the same, dressed as a Composer action
+		end
+		assert.equal(transfers, #c4.transfers, "no request went out")
+		assert.equal(sent, #c4.sent, "no proxy command, no probe message")
+		assert.equal(logged, #lines, "no handler ran")
+
+		-- Test Connection with a Host from anywhere but the loop is Composer's
+		-- action, on the dotted address.
+		action("Test Connection", { Host = "10.000.2.143" })
+		assert.equal("https://" .. IP .. "/clip/v2/resource/bridge", c4.last_transfer().url)
+		c4.last_transfer():respond(200, BRIDGE_RESOURCE)
+
+		signed("Hue Request", { Method = "DELETE", Path = "/clip/v2/resource/light/x" })
+		local t = c4.last_transfer()
+		assert.equal("DELETE", t.method)
+		assert.equal("https://" .. IP .. "/clip/v2/resource/light/x", t.url, "a signed command runs it")
+	end)
+
 	it("sends Hue Request to a spelling of the bridge address", function()
 		paired()
 		for _, host in ipairs({ "10.00.002.143", IP }) do
-			action("Hue Request", { Path = "/clip/v2/resource/light", Host = host })
+			signed("Hue Request", { Path = "/clip/v2/resource/light", Host = host })
 			local t = c4.last_transfer()
 			assert.equal("https://" .. host .. "/clip/v2/resource/light", t.url)
 			assert.equal("abc123", t.headers["hue-application-key"])
 			t:respond(200, '{"errors":[],"data":[]}')
 		end
-		action("Hue Request", { Path = "/clip/v2/resource/light", Host = " " })
+		signed("Hue Request", { Path = "/clip/v2/resource/light", Host = " " })
 		assert.equal("https://" .. IP .. "/clip/v2/resource/light", c4.last_transfer().url, "the dotted address by default")
+		c4.last_transfer():respond(200, '{"errors":[],"data":[]}')
+		signed("Hue Request", { Path = "" })
+		assert.equal("https://" .. IP .. "/clip/v2/resource/bridge", c4.last_transfer().url, "the bridge resource by default")
 	end)
 
 	it("refuses Hue Request to any other host, saying why and sending nothing", function()
 		paired()
 		local before = #c4.transfers
 		for _, host in ipairs({ "192.0.2.7", "10.0.2.0143", "evil.example", "10.0.2.143:8443" }) do
-			action("Hue Request", { Method = "PUT", Path = "/clip/v2/resource/light/x", Body = "{}", Host = host })
+			signed("Hue Request", { Method = "PUT", Path = "/clip/v2/resource/light/x", Body = "{}", Host = host })
 			assert.equal(string.format('Hue Bridge: Hue Request: Host "%s" refused: not a spelling of the bridge address %s',
 				host, IP), lines[#lines])
 		end
 		assert.equal(before, #c4.transfers)
 	end)
 
+	it("refuses a Hue Request Path that could leave the bridge's host, saying why and sending nothing", function()
+		paired()
+		local before = #c4.transfers
+		for _, path in ipairs({ "@203.0.113.9/clip/v2/resource/bridge", ".example.net/clip/v2/resource/bridge",
+			":8443/clip/v2/resource/bridge", "clip/v2/resource/bridge", " /clip/v2/resource/bridge",
+			"/clip/v2/resource/bridge@203.0.113.9", "/clip/v2\\resource\\bridge", "/clip/v2/resource#bridge",
+			"/clip/v2/resource /bridge", "/clip/v2/resource\tbridge", "/clip/v2/resource\nbridge" }) do
+			signed("Hue Request", { Method = "DELETE", Path = path })
+			assert.truthy(lines[#lines]:find('^Hue Bridge: Hue Request: Path ".*" refused: it must .*; nothing is sent$'),
+				lines[#lines])
+		end
+		assert.equal(before, #c4.transfers)
+		signed("Hue Request", { Path = "@203.0.113.9/clip/v2/resource/bridge" })
+		assert.equal('Hue Bridge: Hue Request: Path "@203.0.113.9/clip/v2/resource/bridge" refused: it must start '
+			.. 'with "/"; nothing is sent', lines[#lines])
+		signed("Hue Request", { Path = "/clip/v2/resource/bridge#x" })
+		assert.equal('Hue Bridge: Hue Request: Path "/clip/v2/resource/bridge#x" refused: it must hold no "@", "\\", '
+			.. '"#", white space or control characters; nothing is sent', lines[#lines])
+		assert.equal(before, #c4.transfers)
+	end)
+
 	it("holds Hue Request until the bridge identity is verified", function()
 		paired(false)
 		local before = #c4.transfers
-		action("Hue Request", { Path = "/clip/v2/resource/light" })
+		signed("Hue Request", { Path = "/clip/v2/resource/light" })
 		assert.equal("Hue Bridge: Hue Request: bridge identity not verified yet; see Status", lines[#lines])
 		assert.equal(before, #c4.transfers)
 	end)
@@ -1969,26 +2230,129 @@ describe("bridge/devtools.lua development requests", function()
 	it("fails an unknown method in http.lua, with the reason in the result line", function()
 		paired()
 		local before = #c4.transfers
-		action("Hue Request", { Method = "PATCH", Path = "/clip/v2/resource/light/x", Body = "{}" })
+		signed("Hue Request", { Method = "PATCH", Path = "/clip/v2/resource/light/x", Body = "{}" })
 		assert.equal(before, #c4.transfers, "no transfer started")
 		assert.truthy(lines[#lines]:find("^Hue Bridge: Hue Request PATCH /clip/v2/resource/light/x via " .. IP_PATTERN
 			.. ": could not start transfer: .*unsupported method PATCH"), lines[#lines])
 	end)
 
+	it("refuses Probe Call on the credential store without naming it, and reads nothing", function()
+		paired()
+		local deleted_all = false
+		c4.PersistDeleteAll = function() deleted_all = true end
+		local reads, writes = #c4.calls_to("PersistGetValue"), #c4.calls_to("PersistSetValue")
+		local deletes = #c4.calls_to("PersistDeleteValue")
+		for _, case in ipairs({
+			{ "PersistGetValue", '["hue_app_key", true]' },
+			{ "PersistGetValue", '["HUE_APP_KEY", true]' },
+			{ "PersistGetValue", '[" hue_app_key\\u0000tail", true]' },
+			{ "PersistGetValue", '["hue_bridge_id"]' },
+			{ "PersistSetValue", '["hue_app_key", "0000", true]' },
+			{ "PersistSetValue", '["hue_bridge_ip", "203.0.113.9"]' },
+			{ "PersistDeleteValue", '["hue_app_key"]' },
+			{ "PersistDeleteAll", "" },
+			{ "PersistGetValue", "[]" },
+		}) do
+			signed("Probe Call", { Fn = case[1], Args = case[2] })
+			local line = lines[#lines]
+			assert.truthy(line:find("^Hue Bridge: Probe Call: C4%." .. case[1] .. " refused: .*; nothing was called$"), line)
+			assert.is_nil(line:lower():find("hue_", 1, true), "no store name in the line: " .. line)
+		end
+		assert.equal(reads, #c4.calls_to("PersistGetValue"), "nothing read, not even to learn the names")
+		assert.equal(writes, #c4.calls_to("PersistSetValue"))
+		assert.equal(deletes, #c4.calls_to("PersistDeleteValue"))
+		assert.is_false(deleted_all)
+		assert.equal("abc123", c4.persist.hue_app_key)
+		assert.equal(c4, rawget(_G, "C4"), "the real C4 is back")
+		for _, line in ipairs(lines) do assert.is_nil(line:find("abc123", 1, true), line) end
+
+		-- Any other entry is probed like anything else.
+		signed("Probe Call", { Fn = "PersistGetValue", Args = '["hue_lights"]' })
+		assert.truthy(lines[#lines]:find('^Hue Bridge: C4:PersistGetValue%(%["hue_lights"%]%) 1/1: '), lines[#lines])
+		assert.equal(reads + 1, #c4.calls_to("PersistGetValue"))
+	end)
+
+	it("refuses every Persist call when the credential store's names cannot be read", function()
+		paired()
+		local credentials = require("bridge.credentials")
+		local load = credentials.load
+		credentials.load = function() return {} end -- asks the store for nothing
+		local ok, err = pcall(signed, "Probe Call", { Fn = "PersistGetValue", Args = '["hue_lights"]' })
+		credentials.load = load
+		assert(ok, err)
+		assert.equal("Hue Bridge: Probe Call: C4.PersistGetValue refused: the credential store's names could not be "
+			.. "read; nothing was called", lines[#lines])
+	end)
+
+	it("gives the dev loop a redactor that replaces the application key the driver holds", function()
+		paired()
+		local devloop = require("common.devloop")
+		assert.equal("got <key>, then <key> again", devloop.redacted("got abc123, then abc123 again"))
+		assert.equal("nothing to hide", devloop.redacted("nothing to hide"))
+	end)
+
+	it("holds Connection Test against the bridge until the bridge identity is verified", function()
+		paired(false)
+		local before, status = #c4.transfers, env.Properties["Status"]
+		action("Connection Test", { Target = "Bridge" })
+		assert.equal("Hue Bridge: Connection Test: bridge identity not verified yet; nothing is sent (see Status)",
+			lines[#lines])
+		assert.equal(before, #c4.transfers)
+		assert.equal(status, env.Properties["Status"], "Status keeps what the identity check says")
+
+		-- A different bridge at the address: still nothing, and Status says why.
+		answer_identity("001788FFFE456DEF")
+		before = #c4.transfers
+		action("Connection Test", { Target = "Bridge" })
+		assert.equal(before, #c4.transfers)
+		assert.truthy(env.Properties["Status"]:find("reports ID 001788fffe456def", 1, true), env.Properties["Status"])
+	end)
+
+	it("holds Test Connection with a Host until the bridge identity is verified", function()
+		paired(false)
+		local before = #c4.transfers
+		signed("Test Connection", { Host = "10.000.2.143" })
+		assert.equal("Hue Bridge: Test Connection: bridge identity not verified yet; see Status", lines[#lines])
+		assert.equal(before, #c4.transfers, "nothing sent, not even a second identity check")
+	end)
+
 	it("refuses Test Connection to another host and runs it on a spelling of the bridge address", function()
 		paired()
 		local before = #c4.transfers
-		action("Test Connection", { Host = "192.0.2.7" })
+		signed("Test Connection", { Host = "192.0.2.7" })
 		assert.equal(before, #c4.transfers)
 		assert.equal("Test Connection refused: Host is not a spelling of the bridge address", env.Properties["Status"])
 		assert.equal('Hue Bridge: Test Connection: Host "192.0.2.7" refused: not a spelling of the bridge address ' .. IP,
 			lines[#lines])
 
-		action("Test Connection", { Host = "10.000.2.143" })
+		signed("Test Connection", { Host = "10.000.2.143" })
 		local t = c4.last_transfer()
 		assert.equal("https://10.000.2.143/clip/v2/resource/bridge", t.url)
 		assert.equal("abc123", t.headers["hue-application-key"])
-		t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe123abc"}]}')
+		t:respond(200, BRIDGE_RESOURCE)
 		assert.truthy(env.Properties["Status"]:find("^Test OK: HTTP 200 via 10.000.2.143"))
+	end)
+
+	it("prints a device's HUE_LOG message as one line, whatever it holds", function()
+		paired()
+		env.ExecuteCommand("HUE_LOG", { rid = "rid-1\nx", line = "[INFO] Hue Light: one\nHue Bridge: Test OK\r\tforged" })
+		assert.equal("Hue Bridge: [rid-1 x] [INFO] Hue Light: one Hue Bridge: Test OK  forged", lines[#lines])
+	end)
+
+	it("leaves the development commands out when the running loop predates signed commands", function()
+		package.loaded["common.devloop"] = nil
+		-- An older common/devloop.lua, the one module a reload never replaces.
+		package.preload["common.devloop"] = function() return { start = function() end, stop = function() end } end
+		local ok, err = pcall(function()
+			paired()
+			local dispatch = require("common.dispatch")
+			assert.is_function(dispatch.commands["Connection_Test"])
+			assert.is_function(dispatch.commands["HUE_LOG"])
+			assert.is_nil(dispatch.commands["Hue_Request"])
+			assert.equal(1, count_containing(lines, "the running common/devloop.lua predates signed commands"))
+		end)
+		package.preload["common.devloop"] = nil
+		package.loaded["common.devloop"] = nil
+		assert(ok, err)
 	end)
 end)

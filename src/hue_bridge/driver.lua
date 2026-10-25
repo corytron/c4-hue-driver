@@ -1851,8 +1851,9 @@ log.set_prefix("Hue Bridge")
 dispatch.install(_G)
 
 -- Dev builds: the development handlers, with what they need handed over
--- explicitly (bridge/devtools.lua). Registered last, so Test Connection's
--- dev variant (the Host param) replaces the handler above.
+-- explicitly (bridge/devtools.lua). Composer's DEV-ONLY actions and
+-- HUE_LOG join the dispatch table; the rest, Test Connection's Host
+-- variant included, answer signed dev loop commands only.
 if devtools then
 	devtools.install({
 		state = state,

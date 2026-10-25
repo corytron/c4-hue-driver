@@ -94,7 +94,11 @@ Ids increase monotonically across server restarts (persisted in
 `commands.json`). A command stays in the queue until the driver reports
 `command_done` for it, then moves to a bounded done list; so a driver that
 starts fresh and asks `after=0` receives only unacknowledged commands.
-`execute` goes through the driver's `ExecuteCommand(command, params)`;
+`execute` runs the bridge's development command of that name when it has
+one (the table it hands to `devloop.set_signed_commands`, named the way
+`common/dispatch.lua` names commands, so `Hue Request` finds `Hue_Request`
+and `LUA_ACTION` is unwrapped to its `ACTION`), else the driver's
+`ExecuteCommand(command, params)`, which serves Composer's actions;
 `set_property` does `C4:UpdateProperty(name, value)` followed by
 `OnPropertyChanged(name)`; `reload` forgets refused versions and re-runs the
 reload sequence on the current bridge version (it does not re-forward the
@@ -203,15 +207,44 @@ Without the token, or with a wrong one: 401.
   Every step is `pcall`ed; a failure posts `reload_failed` and the loop keeps
   polling, so the next pushed version retries. Only a verified bundle ever
   reaches this sequence.
+- Signed commands: the bridge's development commands (`Hue Request`, `Probe
+  Call`, `Probe Project`, `Probe Errors`, `Probe Scenes`, `Proxy Command`,
+  `Lights Report`, and `Test Connection` with a `Host`) are not in its
+  dispatch table. `bridge/devtools.lua` hands them to
+  `devloop.set_signed_commands(handlers)`, keyed by dispatch name, at every
+  load of `driver.lua`, a reload's included; `devloop.execute(command,
+  params)` runs a verified `execute` command through that table first and
+  through the global `ExecuteCommand` otherwise, looking both up as the
+  command runs. A reload that fails before `devtools.install` keeps the
+  previous table, as it keeps the previous `ExecuteCommand`. A handler that
+  raises is said (`devloop: signed command <name> failed: <error>`) and
+  reported in `command_done`; the next command runs. Why: "Security",
+  "Development commands" below.
 - Log capture: wrap `_G.print` once (keeping the original for Composer) so
   everything the driver prints is buffered and shipped; keep at most 500
   lines, dropping the oldest. The loop's own messages use the original print
   and are also buffered.
+- Redaction: every line passes the redactor the bridge installs with
+  `devloop.set_redactor(fn)` (`fn(line)` returns what of the line may leave
+  the controller; nil keeps nothing) when it is buffered, and again when it
+  is shipped, so a line buffered before the redactor knew the key (a
+  reload's new code learns it only at its late init) leaves without it too.
+  A redactor that raises, or answers anything but a string or nil, withholds
+  the line: `devloop: a log line was withheld (the redactor failed on it)`
+  stands in its place. A line the redactor prints itself is withheld the
+  same way instead of being handed back to it. The `error` text of a report
+  passes the redactor as well. The bridge's redactor replaces the
+  application key it holds with `<key>`; until the bridge installs one,
+  lines pass unchanged. The redactor is kept across a reload until the new
+  code installs its own. Composer's own output (the original print) is not
+  redacted. `devloop.redacted(line)` gives the verdict, for the specs.
 - Properties snapshot: a copy of the `Properties` table. If `C4` is a Lua
   table, also wrap `C4.UpdateProperty` once to shadow values the driver sets
   itself; report `type(C4)` in the sandbox facts either way.
 - Nothing in the loop ever prints or reports the Hue application key, the
-  dev key or a MAC it computed to check one it received.
+  dev key or a MAC it computed to check one it received; the redactor
+  (above) keeps the application key out of every shipped line, whatever
+  printed it.
 
 ### Light and scene devices
 
@@ -317,7 +350,9 @@ on 2026-10-24). Returning to the loop: "Current state" at the top.
 Dev builds only. A release build carries no `common/devloop.lua`, no
 `bridge/devtools.lua` and no dev key, and `tools/build.sh` refuses to package
 one that does. This section is the design that closes issue #52 (findings 13
-to 16 of `docs/reviews/security-2026-10-24.md`).
+to 16 of `docs/reviews/security-2026-10-24.md`), with the development
+command rules of issue #217 (findings 9 and 10 of
+`docs/reviews/security-2026-10-25.md`).
 
 The loop runs over plain HTTP on the LAN: anything on the LAN can read it,
 and anything that can answer as the VM's address can alter it. Nothing on
@@ -375,8 +410,9 @@ signed, and the key never crosses the wire.
   "commands"}`. The bridge runs nothing from an answer that does not verify
   or carries another nonce, so a recorded answer cannot be replayed; within
   a load, a command id must also be above the last one run. Signed commands
-  cover `set_property` (`Dev Server`, `Bridge IP Address`, ...) and the
-  development actions (`Probe Call`, `Hue Request`, ...) alike.
+  cover `set_property` (`Dev Server`, `Bridge IP Address`, ...) and
+  Composer's actions alike, and they are the only way to the development
+  commands (`Probe Call`, `Hue Request`, ...; "Development commands" below).
 - **`DEV_RELOAD` (finding 14).** The bridge forwards a light or scene bundle
   unchanged: the signed payload and its MAC. The device verifies them with
   its own baked key and loads only a payload signed for its own tree
@@ -402,6 +438,57 @@ signed, and the key never crosses the wire.
   controller expected is never logged or reported: it would let whoever
   answers as the server sign a payload of their choosing.
 
+### Development commands (findings 9 and 10 of 2026-10-25)
+
+`docs/reviews/security-2026-10-25.md`; contract
+`docs/security-fixes-design.md` §2.
+
+- **Out of the dispatch table.** `ExecuteCommand` has no sender parameter
+  [verified: `5_director_command/_1-ExecuteCommand` in the DriverWorks API
+  docs], so whatever sits in the bridge's dispatch table, any driver in the
+  project can run with `C4:SendToDevice`. In a dev build that table gets
+  only what Composer itself sends, the actions of the DEV-ONLY block of
+  `src/hue_bridge/driver.xml` (`Connection Test`, `Reload Credentials`,
+  `Check CA Pinning`) and the `Dev Server` property, plus `HUE_LOG`. The
+  rest runs only for a signed `execute` command (above). Composer's `Test
+  Connection` is the driver's own handler; another driver that sends it
+  with a `Host` gets the dotted address.
+- **`HUE_LOG` stays reachable.** The light and scene devices send their log
+  lines with `C4:SendToDevice` (`devloop.forward_logs`), which arrives
+  through `ExecuteCommand`, so the handler must stay in the table. All it
+  does is print one line under the sender's name; control characters
+  become spaces, so a message cannot forge further lines of the shipped
+  log.
+- **`Hue Request`** takes `Host` only as a spelling of the bridge's address
+  (finding 15 of 2026-10-24, below) and `Path` only when it starts with
+  `/` and holds no `@`, `\`, `#`, white space or other control character,
+  since `bridge/http.lua` joins `https://`, the host and the path:
+  `@203.0.113.9/...`, `.example.net/...` or `:8443/...` would carry the key
+  to another host or port. Anything else is refused (`Hue Request: Path
+  "<path>" refused: ...; nothing is sent`). An empty `Path` means the
+  bridge resource.
+- **The identity check first.** `Hue Request`, `Connection Test` against
+  the bridge and `Test Connection` with a `Host` send nothing while the
+  bridge identity check has not passed (`bridge identity not verified yet`;
+  Status keeps what the check said). `Test Connection` without a `Host`
+  runs the check itself before its keyed request (`driver.lua`).
+- **`Probe Call`** refuses a `Persist` call that names an entry of the
+  credential store, or names none (`PersistDeleteAll` would delete them
+  with everything else) [the persistence calls: section `26.5_persistence`
+  of the DriverWorks API docs]. The names come from
+  `bridge/credentials.lua` at run time, are compared loosely (case,
+  padding, a NUL ending the string) and are never logged; when they cannot
+  be read, every `Persist` call is refused. Any other entry can still be
+  probed.
+- **Redaction.** The bridge's redactor replaces the application key in
+  every shipped line and every reported error text (above), so even a
+  probe that printed it would not put it on the wire.
+- **An older loop.** `common/devloop.lua` is the one module a reload never
+  replaces: code pushed to a bridge whose loop predates signed commands
+  leaves the development commands out and says so once per load (`the
+  running common/devloop.lua predates signed commands`). Install a dev
+  `.c4z` made from the same commit as the server.
+
 ### What the server checks
 
 - It listens on one address, both listeners: `--bind`, by default this
@@ -422,7 +509,11 @@ signed, and the key never crosses the wire.
 - **Reading (finding 16).** Bundles (public source), reports (every
   property: bridge address and id, counts, names) and log lines cross the
   LAN in clear. None of it is secret: the Hue application key is never in a
-  property, a log line, a report or a bundle, and neither is the dev key.
+  property, a report or a bundle, the redactor takes it out of every
+  shipped line and reported error, and the dev key is in none of them. A
+  `Hue Request` that creates a new key (`POST /api` with the link button
+  pressed) logs that new key in its summary: the redactor knows only the
+  key the driver holds.
 - **Withholding.** Anything that can answer as the VM can stop reloads and
   commands: a denial of service, nothing more.
 - **Rollback.** A bundle the developer signed earlier can be replayed; the
@@ -451,13 +542,15 @@ signed, and the key never crosses the wire.
   (`Host "<x>" refused: not a spelling of the bridge address <ip>`) and
   nothing is sent, so the application key goes only to the bridge's
   address. `Hue Request` also waits, like every request of the driver, for
-  the bridge identity check (`bridge identity not verified yet`). The other
-  development handlers stay dev-only: `Probe Call` (any `C4` method),
-  `Proxy Command`, `Lights Report` (radio MAC addresses) and
-  `Connection Test` against the `Diagnostic Server` (unverified TLS, no key)
-  are reachable from the server only through signed commands. Like every
-  `ExecuteCommand`, any driver in the project can still send them (the
-  DriverWorks trust model, finding 9).
+  the bridge identity check (`bridge identity not verified yet`). `Probe
+  Call` (any `C4` method but the credential store's `Persist` calls),
+  `Proxy Command`, `Lights Report` (radio MAC addresses) and the other
+  development commands answer signed commands only ("Development
+  commands" above). What any driver in the project can still send through
+  `ExecuteCommand` is Composer's own actions, `Connection Test` against
+  the `Diagnostic Server` (unverified TLS, no key) among them, and
+  `HUE_LOG`, one log line each (the DriverWorks trust model, finding 9 of
+  2026-10-24).
 
 Never install a dev build as the production driver.
 
@@ -498,7 +591,8 @@ Never install a dev build as the production driver.
   Host=<a padded spelling of the bridge address that nothing else uses>`
   generates one event per call without touching the light itself; rename
   back afterwards. (`Hue Request`, the `Probe` actions, `Proxy Command` and
-  `Lights Report` exist only in dev builds.)
+  `Lights Report` exist only in dev builds, and answer only signed
+  commands: `devctl.py run`.)
 - Edits to `tools/devserver.py` need a server restart. Kill it with a pattern
   that does not appear in your own command line (`pkill -f "devserver[.]p[y]"`)
   and start it in a separate command, or the shell kills itself.
