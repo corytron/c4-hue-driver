@@ -204,6 +204,19 @@ jobs:
           print(f"manifest.json: build {m['build']}, {tag}, commit {m['commit'][:12]}")
           PY
 
+      # The release's notes are written from CHANGELOG.md on every run
+      # (docs/changelog-design.md): the template .github/release-notes.md with
+      # this build's changes (the Unreleased entry) and the earlier builds of
+      # the version. A release whose Unreleased entry is empty fails here.
+      - name: Write the release notes from CHANGELOG.md
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          python3 -I tools/changelog.py notes --file CHANGELOG.md --template .github/release-notes.md \
+            --version "${TAG#v}" --build "$(git rev-list --count HEAD)" --date "$(date -u +%F)" \
+            > build/release-notes.md
+          cat build/release-notes.md
+
       - name: Hand the packages and the release files to the publish job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -214,6 +227,7 @@ jobs:
             build/hue_scene.c4z
             build/SHA256SUMS.txt
             build/manifest.json
+            build/release-notes.md
           if-no-files-found: error
 
   publish:
@@ -284,8 +298,8 @@ jobs:
         run: |
           cd build
           listing="$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')"
-          if [[ "$listing" != "SHA256SUMS.txt hue_bridge.c4z hue_light.c4z hue_scene.c4z manifest.json " ]]; then
-            echo "::error::The build job handed over something other than the five release files: $listing"
+          if [[ "$listing" != "SHA256SUMS.txt hue_bridge.c4z hue_light.c4z hue_scene.c4z manifest.json release-notes.md " ]]; then
+            echo "::error::The build job handed over something other than the five release files and the notes: $listing"
             exit 1
           fi
           sha256sum --check --strict SHA256SUMS.txt
@@ -425,16 +439,24 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           build="$(python3 -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
+          # Title and notes come from CHANGELOG.md through the notes file: the
+          # first heading reads '## <version> "<codename>" (build N)', the
+          # title is its text without the build. Both are set on every run,
+          # so a moved tag never leaves notes written for an earlier build.
+          title="$(sed -nE '1s/^## (.*) \(build [0-9]+\)$/\1/p' build/release-notes.md)"
+          if [[ -z "$title" ]]; then
+            echo "::error::build/release-notes.md does not start with the release heading"
+            exit 1
+          fi
           existed=true
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             existed=false
-            # Title without the v ("1.0" for v1.0); the codename is edited in by
-            # hand once per major version and never touched here again. The
-            # generated notes are appended to this first paragraph.
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "${TAG#v}" --generate-notes \
-              --notes "Build ${build}: the integer the three drivers show as **Driver Version** in Composer. Download all three \`.c4z\` files; they must come from the same build. Install or update them in place through Composer's *Add or Update Driver or Agent...* (see the README). \`SHA256SUMS.txt\` and \`manifest.json\` describe the files; \`attestations.sigstore.json\` is their signed build provenance, and \`hue-drivers.intoto.jsonl\` the same provenance as in-toto JSON lines."
+              --title "$title" --notes-file build/release-notes.md
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file build/release-notes.md
           fi
+          echo "build $build: title $title, notes from CHANGELOG.md"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             build/hue_bridge.c4z build/hue_light.c4z build/hue_scene.c4z \
             build/SHA256SUMS.txt build/manifest.json build/attestations.sigstore.json \
@@ -442,43 +464,3 @@ jobs:
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json name,tagName,url,assets \
             --jq '"\(.name) (\(.tagName)) \(.url): " + ([.assets[].name] | join(", "))'
           echo "existed=$existed" >> "$GITHUB_OUTPUT"
-
-      # A moved tag has just replaced the files of a release whose notes were
-      # written for an earlier build (build 316 needed a hand edit). One narrow
-      # edit keeps them current: when the first heading of the notes ends in
-      # "(build N)", N becomes this run's build. Nothing else in the notes
-      # changes; a "New in build N" section and the like stay the
-      # coordinator's to edit (docs/release-checklist.md). The notes are read
-      # and written as JSON through gh api, never through the shell, and
-      # tools/tests/test_release_notes.py runs this script.
-      - name: Name this build in the first heading of the notes (a release that existed)
-        if: steps.release.outputs.existed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          build="$(python3 -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
-          python3 - "$build" "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/notes.json" <<'PY'
-          import json, re, sys
-          build, source, target = sys.argv[1:4]
-          with open(source, encoding="utf-8") as f:
-              body = json.load(f).get("body") or ""
-          # The first ATX heading line; only a "(build N)" that ends it changes.
-          heading = re.search(r"^ {0,3}#{1,6}[ \t].*$", body, re.MULTILINE)
-          shape = heading and re.fullmatch(r"(.*\(build )([0-9]+)(\)[ \t]*\r?)", heading.group(0))
-          if not shape:
-              print("The first heading of the notes does not end in (build N): the notes stay as they are")
-          elif shape.group(2) == build:
-              print(f"The first heading of the notes names build {build} already")
-          else:
-              notes = body[: heading.start()] + shape.group(1) + build + shape.group(3) + body[heading.end() :]
-              with open(target, "w", encoding="utf-8") as f:
-                  json.dump({"body": notes}, f)
-              print(f"The first heading of the notes: build {shape.group(2)} -> {build}")
-          PY
-          if [[ -f "$RUNNER_TEMP/notes.json" ]]; then
-            release_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/release.json")"
-            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
-              --input "$RUNNER_TEMP/notes.json" --silent
-          fi

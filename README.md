@@ -120,7 +120,9 @@ Take the release marked **Latest** on the
 (<https://github.com/corytron/c4-hue-driver/releases/latest> always points at
 it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
 codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
-Every release is built and attached by the repository's Release workflow,
+What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
+release's notes on GitHub and the end of each driver's Documentation tab
+repeat. Every release is built and attached by the repository's Release workflow,
 never by hand, and carries seven files:
 
 - `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`: the three drivers.
