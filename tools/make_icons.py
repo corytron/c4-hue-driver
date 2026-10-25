@@ -72,8 +72,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def out_path(driver, name, size):
     sub = "devices_sm" if size == 16 else "devices_lg"
-    return os.path.join(REPO_ROOT, "src", driver, "www", "images", sub,
-                        "%s_%d.png" % (name, size))
+    return os.path.join(REPO_ROOT, "src", driver, "www", "images", sub, "%s_%d.png" % (name, size))
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +80,7 @@ def out_path(driver, name, size):
 # the number of master pixels per target pixel, and all geometry arguments
 # are in target pixels so the same drawing code serves both sizes.
 # --------------------------------------------------------------------------
+
 
 def _clamp(v):
     return 0 if v < 0 else 255 if v > 255 else int(v)
@@ -94,8 +94,7 @@ def _box(S, x0, y0, x1, y1):
 def rrect(S, box, radius, value=255):
     """L mask of a rounded rectangle; box/radius in target pixels."""
     m = Image.new("L", (MASTER, MASTER), 0)
-    ImageDraw.Draw(m).rounded_rectangle(_box(S, *box), radius=radius * S,
-                                        fill=value)
+    ImageDraw.Draw(m).rounded_rectangle(_box(S, *box), radius=radius * S, fill=value)
     return m
 
 
@@ -146,9 +145,12 @@ def lin_grad(S, p0, p1):
     gx.putdata(xs)
     gy = Image.new("L", (1, MASTER))
     gy.putdata(ys)
-    return ImageChops.add(gx.resize((MASTER, MASTER), Image.Resampling.NEAREST),
-                          gy.resize((MASTER, MASTER), Image.Resampling.NEAREST),
-                          1.0, -256)
+    return ImageChops.add(
+        gx.resize((MASTER, MASTER), Image.Resampling.NEAREST),
+        gy.resize((MASTER, MASTER), Image.Resampling.NEAREST),
+        1.0,
+        -256,
+    )
 
 
 def radial(S, centre, r_px, inner=0.0):
@@ -201,8 +203,7 @@ def light_map(H, S, d_px):
     """Directional derivative of the height map along the light (top-left
     to bottom-right), centred on 128: >128 faces the light."""
     d = max(1, round(d_px * S))
-    return ImageChops.subtract(ImageChops.offset(H, -d, -d),
-                               ImageChops.offset(H, d, d), 1.0, 128)
+    return ImageChops.subtract(ImageChops.offset(H, -d, -d), ImageChops.offset(H, d, d), 1.0, 128)
 
 
 def shade(img, H, S, d_px=0.2, gain_hi=1.6, gain_lo=1.6, mask=None):
@@ -211,8 +212,7 @@ def shade(img, H, S, d_px=0.2, gain_hi=1.6, gain_lo=1.6, mask=None):
 
 def specular(img, H, S, d_px, strength, gloss_mask, power=3, soften=0.0):
     L = light_map(H, S, d_px)
-    lut = [_clamp(255 * strength * max(0.0, (v - 128) / 127.0) ** power)
-           for v in range(256)]
+    lut = [_clamp(255 * strength * max(0.0, (v - 128) / 127.0) ** power) for v in range(256)]
     spec = ImageChops.multiply(L.point(lut), gloss_mask)
     spec = blur(spec, soften, S)
     white = solid((255, 255, 255, 0))
@@ -230,8 +230,7 @@ def grain(img, S, amount, seed, mask=None):
     """Matte-plastic grain, seeded so the output never changes."""
     rng = random.Random(seed)
     n = MASTER * MASTER
-    noise = Image.frombytes("L", (MASTER, MASTER),
-                            bytes(rng.getrandbits(8) for _ in range(n)))
+    noise = Image.frombytes("L", (MASTER, MASTER), bytes(rng.getrandbits(8) for _ in range(n)))
     noise = blur(noise, 0.03, S)
     return modulate(img, noise, amount, amount, mask)
 
@@ -245,9 +244,9 @@ def stroke(S, box, radius, width_px, c0, c1, alpha, p0, p1):
     """A gradient-coloured outline, c0 at p0 to c1 at p1, drawn just inside
     the rounded box (width in target pixels)."""
     outer = rrect(S, box, radius)
-    inner = rrect(S, (box[0] + width_px, box[1] + width_px,
-                      box[2] - width_px, box[3] - width_px),
-                  max(radius - width_px, 0.1))
+    inner = rrect(
+        S, (box[0] + width_px, box[1] + width_px, box[2] - width_px, box[3] - width_px), max(radius - width_px, 0.1)
+    )
     ring = ImageChops.subtract(outer, inner)
     col = grad_fill(ring, c0, c1, S, p0, p1)
     if alpha != 1.0:
@@ -259,10 +258,8 @@ def add_height(H, mask, amount, r_px, S):
     """Add (or subtract) a blurred mask to the height map."""
     m = blur(mask, r_px, S) if r_px else mask
     if amount >= 0:
-        return ImageChops.add(H, m.point([_clamp(v * amount / 255.0)
-                                          for v in range(256)]))
-    return ImageChops.subtract(H, m.point([_clamp(v * -amount / 255.0)
-                                           for v in range(256)]))
+        return ImageChops.add(H, m.point([_clamp(v * amount / 255.0) for v in range(256)]))
+    return ImageChops.subtract(H, m.point([_clamp(v * -amount / 255.0) for v in range(256)]))
 
 
 def hsv(h, s, v):
@@ -274,14 +271,14 @@ def hsv(h, s, v):
 # Finishing: master -> target size.
 # --------------------------------------------------------------------------
 
+
 def finish(master, size, sharpen, contrast, gamma):
     out = master.resize((size, size), Image.Resampling.LANCZOS)
     if sharpen:
         radius, percent = sharpen
         # Sharpen premultiplied so transparent neighbours (black, alpha 0)
         # cannot ring dark fringes into the edge pixels.
-        out = out.convert("RGBa").filter(
-            ImageFilter.UnsharpMask(radius, percent, 0)).convert("RGBA")
+        out = out.convert("RGBa").filter(ImageFilter.UnsharpMask(radius, percent, 0)).convert("RGBA")
     if contrast != 1.0:
         out = ImageEnhance.Contrast(out).enhance(contrast)
     if gamma != 1.0:
@@ -308,34 +305,46 @@ GLYPH = (108, 108, 112)
 REMOTE_RIM_TL, REMOTE_RIM_BR = (214, 214, 218), (140, 140, 144)
 
 # Scene: the four buttons glow in a hue sweep (top to bottom).
-SCENE_HUES = [0.07, 0.30, 0.55, 0.80]   # amber, green, azure, violet
+SCENE_HUES = [0.07, 0.30, 0.55, 0.80]  # amber, green, azure, violet
 
 
 def dimmer_geometry(size):
     """Whole-pixel layout per size. Button rows are (y0, y1) exclusive."""
     if size == 32:
         return dict(
-            plate=(5, 1, 26, 30), plate_r=2.0,
-            remote=(11, 5, 20, 26), remote_r=1.4,
+            plate=(5, 1, 26, 30),
+            plate_r=2.0,
+            remote=(11, 5, 20, 26),
+            remote_r=1.4,
             grooves=[10, 15, 20],
             buttons=[(5, 10), (11, 15), (16, 20), (21, 26)],
             cx=15.5,
             shadow=(0.9, 1.2, 1.1, 0.45),
             remote_shadow=(0.45, 0.7, 0.55, 0.42),
-            rim=1.0, rim_tl=(200, 200, 204), rim_br=(98, 98, 102),
-            remote_rim=0.5, remote_rim_alpha=0.8, groove_alpha=0.8,
+            rim=1.0,
+            rim_tl=(200, 200, 204),
+            rim_br=(98, 98, 102),
+            remote_rim=0.5,
+            remote_rim_alpha=0.8,
+            groove_alpha=0.8,
             glyphs=True,
         )
     return dict(
-        plate=(3, 0, 13, 15), plate_r=1.5,
-        remote=(5, 2, 11, 13), remote_r=1.0,
+        plate=(3, 0, 13, 15),
+        plate_r=1.5,
+        remote=(5, 2, 11, 13),
+        remote_r=1.0,
         grooves=[4, 7, 10],
         buttons=[(2, 4), (5, 7), (8, 10), (11, 13)],
         cx=8.0,
         shadow=(0.8, 1.0, 0.9, 0.5),
         remote_shadow=(0.4, 0.6, 0.45, 0.45),
-        rim=1.0, rim_tl=(178, 178, 182), rim_br=(96, 96, 100),
-        remote_rim=0.4, remote_rim_alpha=0.6, groove_alpha=1.0,
+        rim=1.0,
+        rim_tl=(178, 178, 182),
+        rim_br=(96, 96, 100),
+        remote_rim=0.4,
+        remote_rim_alpha=0.6,
+        groove_alpha=1.0,
         glyphs=False,
     )
 
@@ -350,19 +359,20 @@ def draw_glyphs(S, g):
     # "I": a 1 px bar, three pixels tall, in the top button.
     y0, y1 = rows[0]
     cy = (y0 + y1) / 2.0
-    d.rounded_rectangle(_box(S, cx - 0.5, cy - 1.5, cx + 0.5, cy + 1.5),
-                        radius=0.2 * S, fill=255)
+    d.rounded_rectangle(_box(S, cx - 0.5, cy - 1.5, cx + 0.5, cy + 1.5), radius=0.2 * S, fill=255)
 
     def sun(cy, disc_r, ray_in, ray_out, ray_w, rays=8):
-        d.ellipse(_box(S, cx - disc_r, cy - disc_r, cx + disc_r, cy + disc_r),
-                  fill=255)
+        d.ellipse(_box(S, cx - disc_r, cy - disc_r, cx + disc_r, cy + disc_r), fill=255)
         for i in range(rays):
             a = 2 * math.pi * i / rays
-            d.line([((cx + math.cos(a) * ray_in) * S,
-                     (cy + math.sin(a) * ray_in) * S),
-                    ((cx + math.cos(a) * ray_out) * S,
-                     (cy + math.sin(a) * ray_out) * S)],
-                   fill=255, width=max(1, round(ray_w * S)))
+            d.line(
+                [
+                    ((cx + math.cos(a) * ray_in) * S, (cy + math.sin(a) * ray_in) * S),
+                    ((cx + math.cos(a) * ray_out) * S, (cy + math.sin(a) * ray_out) * S),
+                ],
+                fill=255,
+                width=max(1, round(ray_w * S)),
+            )
 
     y0, y1 = rows[1]
     sun((y0 + y1) / 2.0, disc_r=0.62, ray_in=1.0, ray_out=1.75, ray_w=0.42)
@@ -373,8 +383,7 @@ def draw_glyphs(S, g):
     y0, y1 = rows[3]
     cy = (y0 + y1) / 2.0
     r = 1.45
-    d.ellipse(_box(S, cx - r, cy - r, cx + r, cy + r), outline=255,
-              width=max(1, round(0.6 * S)))
+    d.ellipse(_box(S, cx - r, cy - r, cx + r, cy + r), outline=255, width=max(1, round(0.6 * S)))
     return glyph
 
 
@@ -383,26 +392,25 @@ def render_dimmer(size, scene):
     g = dimmer_geometry(size)
     px0, py0, px1, py1 = g["plate"]
     rx0, ry0, rx1, ry1 = g["remote"]
-    far = (px1 + 2, py1 + 2)            # the gradient's dark end
-    near = (px0 - 2, py0 - 2)           # the lit end
+    far = (px1 + 2, py1 + 2)  # the gradient's dark end
+    near = (px0 - 2, py0 - 2)  # the lit end
 
     plate_m = rrect(S, g["plate"], g["plate_r"])
     remote_m = rrect(S, g["remote"], g["remote_r"])
     groove_m = Image.new("L", (MASTER, MASTER), 0)
     for gy in g["grooves"]:
-        groove_m = ImageChops.lighter(
-            groove_m, rect(S, (rx0 + 0.35, gy, rx1 - 0.35, gy + 1)))
+        groove_m = ImageChops.lighter(groove_m, rect(S, (rx0 + 0.35, gy, rx1 - 0.35, gy + 1)))
     groove_m = ImageChops.multiply(groove_m, remote_m)
     button_m = ImageChops.subtract(remote_m, groove_m)
 
     # ---- height map ----
     H = Image.new("L", (MASTER, MASTER), 0)
-    H = add_height(H, plate_m, 140, 0.6, S)       # plate with a soft bevel
-    H = add_height(H, remote_m, 60, 0.3, S)       # remote proud of the plate
-    for y0, y1 in g["buttons"]:                   # gentle pillow per button
+    H = add_height(H, plate_m, 140, 0.6, S)  # plate with a soft bevel
+    H = add_height(H, remote_m, 60, 0.3, S)  # remote proud of the plate
+    for y0, y1 in g["buttons"]:  # gentle pillow per button
         bm = ImageChops.multiply(rrect(S, (rx0, y0, rx1, y1), 0.8), remote_m)
         H = add_height(H, bm, 14, 1.2, S)
-    H = add_height(H, groove_m, -34, 0.18, S)     # grooves cut in
+    H = add_height(H, groove_m, -34, 0.18, S)  # grooves cut in
 
     # ---- albedo ----
     img = solid((0, 0, 0, 0))
@@ -441,20 +449,28 @@ def render_dimmer(size, scene):
     obj = plate_m
     img = shade(img, H, S, d_px=0.22, gain_hi=1.4, gain_lo=1.5, mask=obj)
     img = occlusion(img, H, S, r_px=0.6, gain=1.1, mask=obj)
-    img = specular(img, H, S, d_px=0.3, strength=0.9, gloss_mask=remote_m,
-                   power=2.5, soften=0.08)
+    img = specular(img, H, S, d_px=0.3, strength=0.9, gloss_mask=remote_m, power=2.5, soften=0.08)
     # A soft broad highlight across the top of the remote: glossy plastic
     # reflecting the room.
-    hot = ImageChops.multiply(
-        radial(S, ((rx0 + rx1) / 2.0 - 1.0, ry0 + 1.5), 5.0), remote_m)
+    hot = ImageChops.multiply(radial(S, ((rx0 + rx1) / 2.0 - 1.0, ry0 + 1.5), 5.0), remote_m)
     img = over(img, layer(hot, (255, 255, 255, 0), 0.22))
 
     # ---- outlines ----
-    img = over(img, stroke(S, g["remote"], g["remote_r"], g["remote_rim"],
-                           REMOTE_RIM_TL, REMOTE_RIM_BR, g["remote_rim_alpha"],
-                           near, far))
-    img = over(img, stroke(S, g["plate"], g["plate_r"], g["rim"],
-                           g["rim_tl"], g["rim_br"], 0.95, near, far))
+    img = over(
+        img,
+        stroke(
+            S,
+            g["remote"],
+            g["remote_r"],
+            g["remote_rim"],
+            REMOTE_RIM_TL,
+            REMOTE_RIM_BR,
+            g["remote_rim_alpha"],
+            near,
+            far,
+        ),
+    )
+    img = over(img, stroke(S, g["plate"], g["plate_r"], g["rim"], g["rim_tl"], g["rim_br"], 0.95, near, far))
     return img
 
 
@@ -484,11 +500,10 @@ def scene_glow(S, g, plate_m, remote_m):
     col.putdata(data)
     col = col.resize((MASTER, MASTER), Image.Resampling.NEAREST).convert("RGBA")
     # Falloff: the remote silhouette grown and blurred, minus the remote.
-    halo = blur(rrect(S, (rx0 - 0.6, ry0 - 0.6, rx1 + 0.6, ry1 + 0.6),
-                      g["remote_r"] + 0.6), 1.3, S)
+    halo = blur(rrect(S, (rx0 - 0.6, ry0 - 0.6, rx1 + 0.6, ry1 + 0.6), g["remote_r"] + 0.6), 1.3, S)
     halo = ImageChops.lighter(
-        halo, blur(rrect(S, (rx0 - 0.3, ry0 - 0.3, rx1 + 0.3, ry1 + 0.3),
-                         g["remote_r"] + 0.3), 0.5, S))
+        halo, blur(rrect(S, (rx0 - 0.3, ry0 - 0.3, rx1 + 0.3, ry1 + 0.3), g["remote_r"] + 0.3), 0.5, S)
+    )
     halo = ImageChops.multiply(halo, ImageChops.subtract(plate_m, remote_m))
     halo = halo.point([_clamp(v * 0.95) for v in range(256)])
     col.putalpha(halo)
@@ -500,11 +515,10 @@ def scene_buttons(S, g, button_m):
     core towards the centre, like a backlit key."""
     rx0, _ry0, rx1, _ry1 = g["remote"]
     out = solid((0, 0, 0, 0))
-    for (y0, y1), h in zip(g["buttons"], SCENE_HUES):
+    for (y0, y1), h in zip(g["buttons"], SCENE_HUES, strict=False):
         bm = ImageChops.multiply(rrect(S, (rx0, y0, rx1, y1), 0.6), button_m)
         base = layer(bm, hsv(h, 0.68, 1.0) + (0,), 0.92)
-        core = radial(S, ((rx0 + rx1) / 2.0, (y0 + y1) / 2.0),
-                      max((rx1 - rx0) * 0.55, 1.2))
+        core = radial(S, ((rx0 + rx1) / 2.0, (y0 + y1) / 2.0), max((rx1 - rx0) * 0.55, 1.2))
         core = ImageChops.multiply(core, bm)
         base = over(base, layer(core, hsv(h, 0.30, 1.0) + (0,), 0.85))
         fade = ImageChops.multiply(lin_grad(S, (0, y0), (0, y1)), bm)
@@ -512,10 +526,8 @@ def scene_buttons(S, g, button_m):
         out = over(out, base)
     # Bloom: the lit buttons spill a little light over the grooves and the
     # remote's edge, so they read as emitters rather than paint.
-    bloom = out.convert("RGBa").filter(
-        ImageFilter.GaussianBlur(0.45 * S)).convert("RGBA")
-    bloom.putalpha(bloom.getchannel("A").point(
-        [_clamp(v * 0.55) for v in range(256)]))
+    bloom = out.convert("RGBa").filter(ImageFilter.GaussianBlur(0.45 * S)).convert("RGBA")
+    bloom.putalpha(bloom.getchannel("A").point([_clamp(v * 0.55) for v in range(256)]))
     return over(bloom, out)
 
 
@@ -532,17 +544,19 @@ LED_BLUE = (96, 176, 255)
 def bridge_geometry(size):
     if size == 32:
         return dict(
-            body=(3, 5, 29, 26), r=3.0,
-            leds=[((11, 22, 13, 24), LED_WHITE), ((15, 22, 17, 24), LED_BLUE),
-                  ((19, 22, 21, 24), LED_WHITE)],
-            halo=1.9, rim=1.0,
+            body=(3, 5, 29, 26),
+            r=3.0,
+            leds=[((11, 22, 13, 24), LED_WHITE), ((15, 22, 17, 24), LED_BLUE), ((19, 22, 21, 24), LED_WHITE)],
+            halo=1.9,
+            rim=1.0,
             shadow=(0.9, 1.3, 1.3, 0.5),
         )
     return dict(
-        body=(1, 3, 15, 14), r=1.8,
-        leds=[((5, 11, 6, 12), LED_WHITE), ((7, 11, 8, 12), LED_BLUE),
-              ((9, 11, 10, 12), LED_WHITE)],
-        halo=1.2, rim=1.0,
+        body=(1, 3, 15, 14),
+        r=1.8,
+        leds=[((5, 11, 6, 12), LED_WHITE), ((7, 11, 8, 12), LED_BLUE), ((9, 11, 10, 12), LED_WHITE)],
+        halo=1.2,
+        rim=1.0,
         shadow=(0.7, 1.0, 0.9, 0.55),
     )
 
@@ -569,27 +583,28 @@ def render_bridge(size):
 
     # Glossy top: a broad environment reflection in the upper-left and a
     # sharper diagonal sheen band across the upper third.
-    env = ImageChops.multiply(radial(S, (bx0 + 2, by0 + 1), (bx1 - bx0) * 0.8),
-                              body_m)
+    env = ImageChops.multiply(radial(S, (bx0 + 2, by0 + 1), (bx1 - bx0) * 0.8), body_m)
     img = over(img, layer(env, (255, 255, 255, 0), 0.16))
     band = Image.new("L", (MASTER, MASTER), 0)
     h = by1 - by0
     ImageDraw.Draw(band).polygon(
-        [((bx0 - 1) * S, (by0 + h * 0.22) * S),
-         ((bx1 + 1) * S, (by0 + h * 0.05) * S),
-         ((bx1 + 1) * S, (by0 + h * 0.30) * S),
-         ((bx0 - 1) * S, (by0 + h * 0.50) * S)], fill=255)
+        [
+            ((bx0 - 1) * S, (by0 + h * 0.22) * S),
+            ((bx1 + 1) * S, (by0 + h * 0.05) * S),
+            ((bx1 + 1) * S, (by0 + h * 0.30) * S),
+            ((bx0 - 1) * S, (by0 + h * 0.50) * S),
+        ],
+        fill=255,
+    )
     band = ImageChops.multiply(blur(band, 0.9, S), body_m)
     img = over(img, layer(band, (255, 255, 255, 0), 0.20))
 
     # Lighting: bevel highlight on the lit edges, shadow on the far ones.
     img = shade(img, H, S, d_px=0.25, gain_hi=1.3, gain_lo=1.2, mask=body_m)
-    img = specular(img, H, S, d_px=0.3, strength=0.75, gloss_mask=body_m,
-                   power=2.0, soften=0.1)
+    img = specular(img, H, S, d_px=0.3, strength=0.75, gloss_mask=body_m, power=2.0, soften=0.1)
     # Rim: lighter all round so the near-black slab has a silhouette on
     # white, brightest where the light hits.
-    img = over(img, stroke(S, g["body"], g["r"], g["rim"],
-                           BRIDGE_RIM_TL, BRIDGE_RIM_BR, 0.9, near, far))
+    img = over(img, stroke(S, g["body"], g["r"], g["rim"], BRIDGE_RIM_TL, BRIDGE_RIM_BR, 0.9, near, far))
 
     # Status LEDs: halo, then the pixel-aligned core.
     for box, colour in g["leds"]:
@@ -599,8 +614,7 @@ def render_bridge(size):
     for box, colour in g["leds"]:
         core = rrect(S, box, (box[2] - box[0]) * 0.45)
         img = over(img, layer(core, colour + (0,), 1.0))
-        glint = rrect(S, (box[0] + 0.15, box[1] + 0.1, box[2] - 0.45,
-                          box[3] - 0.55), 0.3)
+        glint = rrect(S, (box[0] + 0.15, box[1] + 0.1, box[2] - 0.45, box[3] - 0.55), 0.3)
         img = over(img, layer(glint, (255, 255, 255, 0), 0.6))
     return img
 
@@ -630,8 +644,7 @@ def build_all():
     for driver, name, size, fn in jobs:
         master = fn()
         sharpen, contrast, gamma = FINISH[size]
-        out.append((driver, name, size, master,
-                    finish(master, size, sharpen, contrast, gamma)))
+        out.append((driver, name, size, master, finish(master, size, sharpen, contrast, gamma)))
     return out
 
 
@@ -639,9 +652,10 @@ def save(img, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     img.save(path, format="PNG", dpi=DPI, optimize=True)
     check = Image.open(path)
-    print("wrote %s (%dx%d, %s, dpi=%s)" % (
-        os.path.relpath(path, REPO_ROOT), check.width, check.height,
-        check.mode, check.info.get("dpi")))
+    print(
+        "wrote %s (%dx%d, %s, dpi=%s)"
+        % (os.path.relpath(path, REPO_ROOT), check.width, check.height, check.mode, check.info.get("dpi"))
+    )
 
 
 def inspection_sheet(results, out_dir):
@@ -650,25 +664,23 @@ def inspection_sheet(results, out_dir):
     cell = 32 * 8
     cols = len(results)
     row_h = sum(32 * s for s in scales) + pad * (len(scales) + 1)
-    sheet = Image.new("RGB", (cols * (cell + pad) + pad, row_h * 2 + pad),
-                      (255, 255, 255))
+    sheet = Image.new("RGB", (cols * (cell + pad) + pad, row_h * 2 + pad), (255, 255, 255))
     d = ImageDraw.Draw(sheet)
     for bi, bg in enumerate(((255, 255, 255), (240, 240, 240))):
         y_top = bi * row_h + pad
         d.rectangle((0, bi * row_h, sheet.width, (bi + 1) * row_h), fill=bg)
-        for ci, (driver, name, size, master, icon) in enumerate(results):
+        for ci, (_driver, name, size, _master, icon) in enumerate(results):
             x = pad + ci * (cell + pad)
             y = y_top
             d.text((x, y - 10), "%s %d" % (name, size), fill=(90, 90, 90))
             for s in scales:
-                big = icon.resize((size * s, size * s),
-                                  Image.Resampling.NEAREST)
+                big = icon.resize((size * s, size * s), Image.Resampling.NEAREST)
                 sheet.paste(big, (x, y + pad), big)
                 y += 32 * s + pad
     path = os.path.join(out_dir, "icons_v2_sheet.png")
     sheet.save(path)
     print("wrote", path)
-    for driver, name, size, master, icon in results:
+    for _driver, name, size, master, _icon in results:
         mp = os.path.join(out_dir, "icons_v2_master_%s_%d.png" % (name, size))
         master.save(mp)
         print("wrote", mp)
@@ -679,7 +691,7 @@ def main(argv):
     if len(argv) >= 3 and argv[1] == "--inspect":
         inspect = argv[2]
     results = build_all()
-    for driver, name, size, master, icon in results:
+    for driver, name, size, _master, icon in results:
         save(icon, out_path(driver, name, size))
     if inspect:
         os.makedirs(inspect, exist_ok=True)

@@ -2,57 +2,57 @@
   {
     "name": "bug",
     "color": "d73a4a",
-    "description": "The driver does something wrong"
+    "description": "Something does not work as the manual or a contract says"
   },
   {
     "name": "enhancement",
     "color": "a2eeef",
-    "description": "A new capability or a change in behaviour"
+    "description": "New behaviour or an improvement to existing behaviour"
   },
   {
     "name": "documentation",
     "color": "0075ca",
-    "description": "The manual, the README or the design notes"
+    "description": "The manual, the docs folder, the README"
   },
   {
     "name": "hardware",
-    "color": "fbca04",
-    "description": "Needs a controller or a bridge to verify"
+    "color": "e99695",
+    "description": "Needs the controller, a bridge, a keypad or a phone to close"
   },
   {
     "name": "composer",
     "color": "1d76db",
-    "description": "Composer Pro behaviour: properties, actions, Driver menu, Restart Director"
+    "description": "Composer Pro: properties, actions, pickers, Director behaviour"
   },
   {
     "name": "hue-api",
-    "color": "e99695",
-    "description": "The bridge's CLIP v2 API, the event stream or its rate limits"
+    "color": "fbca04",
+    "description": "Hue bridge CLIP v2 API, event stream, bridge models"
   },
   {
     "name": "security",
     "color": "b60205",
-    "description": "The application key, TLS or the development loop"
+    "description": "Hardening, secrets, TLS, trust boundaries"
   },
   {
     "name": "good first issue",
     "color": "7057ff",
-    "description": "Small and self-contained; a good first contribution"
+    "description": "Small and self-contained; a newcomer could take it"
   },
   {
     "name": "question",
     "color": "d876e3",
-    "description": "Needs more information or a decision"
+    "description": "A decision or an answer is needed before work starts"
   },
   {
     "name": "wontfix",
     "color": "ffffff",
-    "description": "Not going to happen; the comment says why"
+    "description": "Decided against; kept for the record"
   },
   {
     "name": "release",
     "color": "0e8a16",
-    "description": "Release preparation, build numbers and the Releases page"
+    "description": "Releasing and publishing: checklists, history, GitHub settings"
   },
   {
     "name": "ci",

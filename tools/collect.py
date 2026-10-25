@@ -8,6 +8,7 @@ GET /  lists what has arrived. Names are reduced to [A-Za-z0-9._-], one path
 segment under the given sub-folder, so nothing can escape --dir. LAN use for a
 session only; stop it when the round is over (docs/documentation-plan.md).
 """
+
 import argparse
 import os
 import re

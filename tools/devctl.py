@@ -18,6 +18,7 @@ the VM the server runs on.
 Exit codes: 0 success, 1 error (server unreachable, bad arguments), 2 timeout.
 Standard library only.
 """
+
 import argparse
 import json
 import os
@@ -39,6 +40,7 @@ class DevctlError(Exception):
 # Talking to the server
 # ---------------------------------------------------------------------------
 
+
 def api(server, method, path, body=None):
     """One request to the server. Returns the decoded JSON reply (None for 204)."""
     data = None
@@ -52,15 +54,17 @@ def api(server, method, path, body=None):
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace").strip()
-        raise DevctlError("%s %s -> HTTP %d %s" % (method, path, exc.code, detail))
+        raise DevctlError("%s %s -> HTTP %d %s" % (method, path, exc.code, detail)) from exc
     except (urllib.error.URLError, OSError) as exc:
-        raise DevctlError("devserver not reachable at %s (%s)" % (server, exc.reason if hasattr(exc, "reason") else exc))
+        raise DevctlError(
+            "devserver not reachable at %s (%s)" % (server, exc.reason if hasattr(exc, "reason") else exc)
+        ) from exc
     if not raw:
         return None
     try:
         return json.loads(raw.decode("utf-8"))
     except ValueError as exc:
-        raise DevctlError("%s %s returned something that is not JSON (%s)" % (method, path, exc))
+        raise DevctlError("%s %s returned something that is not JSON (%s)" % (method, path, exc)) from exc
 
 
 def enqueue(args, command):
@@ -73,6 +77,7 @@ def enqueue(args, command):
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
+
 
 def short(version):
     return version[:12] if isinstance(version, str) and version else "-"
@@ -96,7 +101,7 @@ def describe(command):
     return "#%s %s" % (command.get("id"), kind)
 
 
-LABEL_WIDTH = 22   # fits "running_light_version"
+LABEL_WIDTH = 22  # fits "running_light_version"
 
 
 def row(label, value):
@@ -126,29 +131,41 @@ def print_properties(properties):
 # Subcommands
 # ---------------------------------------------------------------------------
 
+
 def cmd_status(args):
     st = api(args.server, "GET", "/status")
     running, local = st.get("running_version"), st.get("local_version")
-    row("running_version", "%s  (%s)" % (short(running),
-                                         version_note(running, local, "reload", "driver has not reported yet")))
+    row(
+        "running_version",
+        "%s  (%s)" % (short(running), version_note(running, local, "reload", "driver has not reported yet")),
+    )
     row("local_version", short(local))
-    if "local_light_version" in st:   # a server from before the light tree has neither field
+    if "local_light_version" in st:  # a server from before the light tree has neither field
         running_light, local_light = st.get("running_light_version"), st.get("local_light_version")
-        row("running_light_version", "%s  (%s)" % (short(running_light),
-                                                   version_note(running_light, local_light, "forward",
-                                                                "bridge has not forwarded yet")))
+        row(
+            "running_light_version",
+            "%s  (%s)"
+            % (
+                short(running_light),
+                version_note(running_light, local_light, "forward", "bridge has not forwarded yet"),
+            ),
+        )
         row("local_light_version", short(local_light))
     if "local_scene_version" in st:
         running_scene, local_scene = st.get("running_scene_version"), st.get("local_scene_version")
-        row("running_scene_version", "%s  (%s)" % (short(running_scene),
-                                                   version_note(running_scene, local_scene, "forward",
-                                                                "bridge has not forwarded yet")))
+        row(
+            "running_scene_version",
+            "%s  (%s)"
+            % (
+                short(running_scene),
+                version_note(running_scene, local_scene, "forward", "bridge has not forwarded yet"),
+            ),
+        )
         row("local_scene_version", short(local_scene))
     pinned = st.get("pinned") or {}
     if any(pinned.values()):
         trees = ", ".join("%s at %s" % (name, short(pinned[name])) for name in sorted(pinned) if pinned[name])
-        live = [short(st.get(key)) for key in ("live_version", "live_light_version", "live_scene_version")
-                if key in st]
+        live = [short(st.get(key)) for key in ("live_version", "live_light_version", "live_scene_version") if key in st]
         row("pinned", "%s  (live tree: %s)" % (trees, " / ".join(live)))
     row("last_seen", ago(st.get("last_seen"), st.get("server_time")))
     row("last_event", st.get("last_event") or "-")
@@ -276,16 +293,19 @@ def cmd_log(args):
 
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Control the hue_bridge dev loop (docs/dev-loop.md).")
-    parser.add_argument("--server", default=DEFAULT_SERVER, help="devserver plain-HTTP base URL (default %s)" % DEFAULT_SERVER)
+    parser.add_argument(
+        "--server", default=DEFAULT_SERVER, help="devserver plain-HTTP base URL (default %s)" % DEFAULT_SERVER
+    )
     sub = parser.add_subparsers(dest="cmd", metavar="command")
     sub.required = True
 
     sub.add_parser("status", help="show versions, last contact and properties").set_defaults(func=cmd_status)
 
     p = sub.add_parser("run", help="queue an ExecuteCommand action")
-    p.add_argument("command", help="action name, e.g. \"Connection Test\"")
+    p.add_argument("command", help='action name, e.g. "Connection Test"')
     p.add_argument("params", nargs="*", help="parameters as Key=Value")
     p.set_defaults(func=cmd_run)
 
@@ -296,7 +316,9 @@ def main():
 
     sub.add_parser("reload", help="queue a reload of the running code").set_defaults(func=cmd_reload)
 
-    p = sub.add_parser("pin", help="serve src/ as it is now until unpin or the next pin (controller ignores later edits)")
+    p = sub.add_parser(
+        "pin", help="serve src/ as it is now until unpin or the next pin (controller ignores later edits)"
+    )
     p.add_argument("--tree", choices=["bridge", "light", "scene"], help="pin one tree only (default both)")
     p.set_defaults(func=cmd_pin)
     p = sub.add_parser("unpin", help="serve the live tree again")
