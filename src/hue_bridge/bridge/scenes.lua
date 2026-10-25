@@ -4,10 +4,15 @@
 -- drivers current (resync, stream items, hello), the recall and off commands,
 -- and the owner-facing actions, texts and pickers of docs/scenes-design.md §4.
 -- It mirrors bridge/lights.lua shape for shape (docs/import-design.md §1 rules,
--- §3 states, §5 reconciliation) with "scene" in place of "light".
+-- §3 states, §5 reconciliation) with "scene" in place of "light". The
+-- lifecycle the three modules share (configuration and state plumbing,
+-- hello, goodbye, bindings, the project reconcile, the busy flags and
+-- resyncs, room resolution, creation, names, Attention, pickers, re-link,
+-- forget, Link Devices) is bridge/owner.lua's since issue #56; this module
+-- gives it its words, options and hooks.
 --
 -- Every C4 call goes through ctx so the module runs on plain tables in specs;
--- each ctx field defaults to the real call, as lights.lua does, so the driver
+-- each ctx field defaults to the real call (owner.defaults), so the driver
 -- only has to supply `http`, `lights` and `group_off`. The project calls
 -- (ctx.project.*) are pcall-wrapped: a failed lookup reads as "unknown".
 --
@@ -46,16 +51,16 @@
 -- the devices Forget Scene let go (FORGOTTEN_KEY), written first and only
 -- when they changed.
 
-local log = require("common.log")
 local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
 local groups = require("bridge.groups")
-local lights = require("bridge.lights")   -- ids_from / dump only: the AddDevice callback shapes
 local util = require("bridge.util")
 local project = require("bridge.project")
+local owner = require("bridge.owner")
 
 local scenes = {}
 scenes.__index = scenes
+setmetatable(scenes, { __index = owner })  -- the shared lifecycle (bridge/owner.lua)
 
 scenes.SCENES_KEY = "hue_scenes"
 scenes.TOMBSTONES_KEY = "hue_scene_tombstones"
@@ -99,6 +104,51 @@ scenes.SMART_STATES = { active = true, inactive = true }
 scenes.SMART_ACTIVATE = "activate"
 scenes.SMART_DEACTIVATE = "deactivate"
 
+-- What bridge/owner.lua reads for this module: the log tag and the words its
+-- shared texts take here.
+scenes.TAG = "scenes"
+scenes.WORDS = {
+	held = "scene",                       -- "its registered scene is <rid>"
+	stranger = "an unregistered device",  -- a HUE_SCENE_GOODBYE the module does not hold
+	goodbye_tail = "Add Scene lists it as deleted, Add All Scenes Of Room skips it",
+	add_action = "Add Scene",
+	busy_job = "adding scenes",
+	busy_resync = "resyncing scenes",
+	kind = "scene",
+	unbound_kind = "unbound scene device",
+	relink_or_forget = "Re-link Scene or Forget Scene",
+	forget_action = "Forget Scene",
+	name_kind = "Hue scene name",
+	hue_names = "Hue scene names",
+	device_noun = "scene device",
+	name_difference = "scene name difference",
+	no_relink = "(no gone or unbound scene devices)",
+	no_forget = "(no registered scenes)",
+	callback_kind = "scene ",
+	created_noun = "scenes",
+	registered = "scene",                 -- "device 2061 is not a registered scene"
+	relink_target = "a scene",            -- "pick a device and a scene"
+	requester = "scene device",           -- "the scene device named no device"
+	forget_tail = "; the Hue scene is listed under Add Scene again",
+	link_noun = "scene devices",          -- "No scene devices are bound to this bridge"
+	link_many = "Hue scenes",
+	link_one = "Hue scene's",
+	link_none = "Hue scene",
+}
+scenes.DEVICE_DRIVER = scenes.SCENE_DRIVER
+scenes.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Scene's flag first
+scenes.MESSAGES = { configure = "HUE_SCENE_CONFIGURE", hello = "HUE_SCENE_HELLO", goodbye = "HUE_SCENE_GOODBYE",
+	forgotten = "HUE_SCENE_FORGOTTEN" }
+-- bridge/owner.lua's options: none (its header lists the divergences: no
+-- early-hello cap, the hello's name and kind kept as sent, no R5).
+scenes.OPTIONS = {}
+-- The fields a refresh clears when the scene's record no longer supplies
+-- them (owner:refresh_fields, analysis R9; #56): a time-based scene has no
+-- id_v1, so one an entry kept from an ordinary scene goes. The group's
+-- name and type are not among them: a group the cache lacks is unknown, and
+-- the entry's copy is what CONFIGURE carries meanwhile.
+scenes.REFRESH_CLEARS = { "id_v1" }
+
 -- ctx fields (all but http optional; lights and group_off should be given):
 --   http(req, cb)            req = { path, method, body }; the driver adds ip and key; cb(result)
 --   send(id, cmd, params)    C4:SendToDevice(id, cmd, params)
@@ -107,7 +157,7 @@ scenes.SMART_DEACTIVATE = "deactivate"
 --   persist_get / persist_set               C4:PersistGetValue / SetValue
 --   bridge_id                number; default C4:GetDeviceID()
 --   now, log                 os.time / common.log look-alikes
---   project                  the project calls of docs/import-design.md §13 (defaults as lights.lua)
+--   project                  the project calls of docs/import-design.md §13 (defaults: bridge.project)
 --   lights                   the bridge.lights instance: its live `groups` cache, `reg:room_mapping()`,
 --                            `groups_loaded`
 --   group_off(grouped_light_rid)   the coalesced grouped_light off of driver.lua (§5)
@@ -119,23 +169,7 @@ scenes.SMART_DEACTIVATE = "deactivate"
 function scenes.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "scenes.new: ctx.http is required")
-	ctx.send = ctx.send or function(id, command, params)
-		C4:SendToDevice(id, command, params)
-	end
-	ctx.add_device = ctx.add_device or function(driver, room_id, name, cb)
-		C4:AddDevice(driver, room_id, name, cb)
-	end
-	ctx.bind = ctx.bind or function(bridge_id, device_id)
-		C4:Bind(bridge_id, scenes.BINDING, device_id, scenes.BINDING, scenes.BINDING_CLASS)
-	end
-	ctx.persist_get = ctx.persist_get or function(name)
-		return C4:PersistGetValue(name)
-	end
-	ctx.persist_set = ctx.persist_set or function(name, value)
-		C4:PersistSetValue(name, value)
-	end
-	ctx.log = ctx.log or log
-	ctx.now = ctx.now or os.time
+	owner.defaults(ctx, scenes)  -- send, add_device, bind, persistence, log, now, the project calls
 	ctx.set_timer = ctx.set_timer or function(delay_ms, fn)
 		return C4:SetTimer(delay_ms, fn)
 	end
@@ -151,7 +185,6 @@ function scenes.new(ctx)
 		ctx.log.warn("scenes: no group_set in ctx; grouped_light %s not set", tostring(grouped_light_rid))
 		return false
 	end
-	project.defaults(ctx, scenes.BINDING)
 
 	local reg = registry.new({
 		persist_get = ctx.persist_get, persist_set = ctx.persist_set, now = ctx.now, log = ctx.log,
@@ -186,24 +219,12 @@ function scenes.new(ctx)
 		configured_once = false,
 		adding = false,            -- Add Scene / Add All Scenes Of Room running
 		resyncing = false,
-		resync_pending = {},       -- the done callbacks waiting for the next resync, each called once by it
+		resync_pending = nil,      -- the done callbacks waiting for the next resync, each called once by it
 		device_info_logged = false,
 	}, scenes)
 end
 
--- Helpers ------------------------------------------------------------------
-
-function scenes:bridge_id()
-	return self.ctx.bridge_id or C4:GetDeviceID()
-end
-
-function scenes:protect(what, fn, ...)
-	local ok, err = pcall(fn, ...)
-	if not ok then
-		self.ctx.log.error("scenes: %s failed: %s", what, tostring(err))
-	end
-	return ok, err
-end
+-- Helpers (bridge_id, protect and the rest of the plumbing are bridge/owner.lua's) ------
 
 local function round2(n)
 	return math.floor(n * 100 + 0.5) / 100
@@ -313,12 +334,13 @@ function scenes:load_forgotten()
 	end
 end
 
--- Write FORGOTTEN_KEY when it changed. It goes before the registry (flush,
--- save): a crash between the two writes then leaves a forgotten device
--- marked and still registered, which its hello heals, rather than gone from
--- the registry and unmarked, which a late hello would re-adopt (the order
--- registry:save keeps for its tombstones).
-function scenes:save_forgotten()
+-- (owner hook) Write FORGOTTEN_KEY when it changed. It goes before the
+-- registry (owner's flush and save call this first): a crash between the
+-- two writes then leaves a forgotten device marked and still registered,
+-- which its hello heals, rather than gone from the registry and unmarked,
+-- which a late hello would re-adopt (the order registry:save keeps for its
+-- tombstones).
+function scenes:persist_extra()
 	if not self.forgotten_dirty then
 		return
 	end
@@ -328,24 +350,6 @@ function scenes:save_forgotten()
 		out[tostring(id)] = { rid = record.rid, name = record.name, kind = record.kind, at = record.at }
 	end
 	self.ctx.persist_set(scenes.FORGOTTEN_KEY, out)
-end
-
-function scenes:mark()
-	self.dirty = true
-end
-
-function scenes:flush()
-	self:save_forgotten()
-	if self.dirty then
-		self.dirty = false
-		self.reg:save()
-	end
-end
-
-function scenes:save()
-	self:save_forgotten()
-	self.dirty = false
-	self.reg:save()
 end
 
 -- Forget Scene let device `device_id` go (docs/review-leftovers-design.md,
@@ -369,26 +373,7 @@ function scenes:clear_forgotten(device_id)
 	return true
 end
 
--- A copy of the registry entry, or nil.
-function scenes:entry(rid)
-	local entry = rid ~= nil and self.registry[rid] or nil
-	if not entry then
-		return nil
-	end
-	local out = {}
-	for k, v in pairs(entry) do
-		out[k] = v
-	end
-	return out
-end
-
-function scenes:count()
-	local n = 0
-	for _ in pairs(self.registry) do
-		n = n + 1
-	end
-	return n
-end
+-- entry(rid) (a copy of the registry entry) and count() are bridge/owner.lua's.
 
 -- Scenes seen on the bridge (the catalogue).
 function scenes:bridge_count()
@@ -450,13 +435,7 @@ function scenes:groups_loaded()
 	return (l and l.groups_loaded) == true
 end
 
-function scenes:room_mapping(group_rid)
-	local l = self.ctx.lights
-	if group_rid and l and l.reg then
-		return l.reg:room_mapping(group_rid)
-	end
-	return nil
-end
+-- room_mapping (the lights' registry holds the mappings) is bridge/owner.lua's.
 
 -- Raw name and type of a group: the cache first, else what `fallback` (an
 -- entry or a catalogue record) remembers. The third value says whether the
@@ -574,27 +553,20 @@ function scenes:scenes_of_group(group_rid, smart)
 	return list
 end
 
--- The Control4 room a scene goes to when the owner names none: its group's
--- mapping. Returns room_id, room_name or nil, reason.
-function scenes:default_room(scene, rooms)
+-- The room an add goes to (owner: default_room, room_for_add): the mapping
+-- of the scene's group ("not in a Hue room" for none or the bridge_home),
+-- and the scene's name in the refusal.
+function scenes:room_group_of(scene)
 	local group_rid = scene.group_rid
 	local _, gtype = self:group_info(group_rid, scene)
 	if not group_rid or gtype == "bridge_home" then
 		return nil, "not in a Hue room"
 	end
-	local label = self:group_label(group_rid, scene)
-	local mapping = self:room_mapping(group_rid)
-	if not mapping or not mapping.c4_room_id then
-		return nil, "Hue room " .. label .. " not mapped"
-	end
-	local name = rooms[mapping.c4_room_id]
-	if not name then
-		if next(rooms) == nil then
-			return mapping.c4_room_id, mapping.c4_room_name or ("room " .. tostring(mapping.c4_room_id))
-		end
-		return nil, "Hue room " .. label .. " mapped to a Control4 room that no longer exists"
-	end
-	return mapping.c4_room_id, name
+	return group_rid, self:group_label(group_rid, scene)
+end
+
+function scenes.add_label(_self, scene)
+	return util.sanitise(name_of(scene))
 end
 
 -- Fetching and absorbing -------------------------------------------------------------
@@ -722,14 +694,7 @@ function scenes:refresh_entry(rid)
 	if is_smart(entry) and not is_smart(scene) then
 		fields.kind = registry.CLEAR
 	end
-	local delta = {}
-	for k, v in pairs(fields) do
-		if entry[k] ~= v then
-			delta[k] = v
-		end
-	end
-	if next(delta) then
-		self.reg:update(rid, delta)
+	if self:refresh_fields(rid, fields, scenes.REFRESH_CLEARS) then
 		changed = true
 	end
 	return changed
@@ -851,24 +816,7 @@ function scenes:state_known(rid)
 	return self.synced or self.catalogue[rid] ~= nil
 end
 
-function scenes:send_configure(rid)
-	local entry = self.registry[rid]
-	if not entry then
-		return false
-	end
-	local params = self:configure_params(rid, entry)
-	self.last_configure[rid] = util.signature(params)
-	self.ctx.send(entry.device_id, "HUE_SCENE_CONFIGURE", params)
-	return true
-end
-
-function scenes:configure_changed(rid)
-	local entry = self.registry[rid]
-	if not entry then
-		return false
-	end
-	return self.last_configure[rid] ~= util.signature(self:configure_params(rid, entry))
-end
+-- send_configure and configure_changed are bridge/owner.lua's.
 
 -- HUE_SCENE_STATE with the given status (default: the current one).
 function scenes:send_state(rid, reason, active)
@@ -1068,22 +1016,9 @@ function scenes:send_other_active(rid)
 	return #others
 end
 
--- CONFIGURE (when asked for, or when it changed) then STATE. The state is
--- sent only once a GET has told us something (or the catalogue has the
--- scene): before that a guessed "inactive" would turn a lit scene's tile off
--- (state_known).
-function scenes:push(rid, reason, with_configure)
-	if not self.registry[rid] then
-		return false
-	end
-	if with_configure or self:configure_changed(rid) then
-		self:send_configure(rid)
-	end
-	if not self:state_known(rid) then
-		return false
-	end
-	return self:send_state(rid, reason)
-end
+-- push (CONFIGURE when asked for or changed, then STATE once state_known:
+-- before a GET a guessed "inactive" would turn a lit scene's tile off) is
+-- bridge/owner.lua's.
 
 -- A scene that left the bridge: CONFIGURE with state "gone", STATE inactive.
 function scenes:announce_gone(rid, reason)
@@ -1096,33 +1031,10 @@ function scenes:announce_gone(rid, reason)
 	return true
 end
 
--- Bridge startup, before any GET: CONFIGURE to every registered, bound scene
--- from the persisted entry, then the hellos that waited for load().
-function scenes:configure_all()
-	local n = 0
-	for _, rid in ipairs(self.reg:rids()) do
-		if self.registry[rid].state ~= "unbound" and self:send_configure(rid) then
-			n = n + 1
-		end
-	end
-	self.configured_once = true
-	local queued = self.early_hellos
-	self.early_hellos = {}
-	for _, h in ipairs(queued) do
-		self:protect("early hello", self.hello, self, h.rid, h.params)
-	end
-	return n
-end
+-- configure_all and clear_conflicts_for are bridge/owner.lua's.
 
-function scenes:clear_conflicts_for(device_id)
-	for rid, c in pairs(self.conflicts) do
-		if c.holder == device_id or c.claimant == device_id then
-			self.conflicts[rid] = nil
-		end
-	end
-end
-
--- Configuration and (once something is known) the status.
+-- (owner hook) Configuration and, once something is known, the status and
+-- the group's on/off and level.
 function scenes:answer_hello(rid)
 	if self:state_known(rid) then
 		local answered = self:push(rid, "hello", true)
@@ -1144,105 +1056,64 @@ function scenes:send_group_known(rid)
 	return fields ~= nil and self:send_group(rid, fields) or false
 end
 
--- Register a bound device for a rid the registry lacks (auto-adopt, Link
--- Devices). The kind is the catalogue's; for a rid neither catalogue has,
--- the one the device announced (HUE_SCENE_HELLO `kind`), and the entry is
--- gone once a GET of that kind has succeeded. Returns the entry or nil.
-function scenes:adopt(device_id, rid, hello, how)
-	local scene = self:record_of(rid)
-	local fields = self:fields_from_scene(scene)
-	fields.device_id = device_id
-	fields.name = fields.name or hello.name
-	if not scene and hello.kind == scenes.SMART_KIND then
-		fields.kind = scenes.SMART_KIND
-	end
-	local entry, err = self.reg:add(rid, fields)
-	if not entry then
-		self.ctx.log.warn("scenes: could not adopt device %d for %s: %s", device_id, tostring(rid), tostring(err))
-		return nil
-	end
-	self:clear_forgotten(device_id)  -- Link Devices brought a forgotten device back
-	self:mark()
-	if not scene and (is_smart(entry) and self.smart_synced or not is_smart(entry) and self.synced) then
-		self.reg:set_state(rid, "gone")
-	end
-	self.ctx.log.always("scenes: adopted %s%s (device %d) %s", tostring(entry.name or rid),
-		is_smart(entry) and " (time-based)" or "", device_id, how)
-	return entry
+-- adopt and hello (HUE_SCENE_HELLO { rid?, device_id, name?, kind? }: the
+-- lights' rules, §4 of import-design) are bridge/owner.lua's; these are the
+-- hooks they take. `kind` ("scene" / "smart_scene", what the device
+-- persisted beside its rid) only matters when the device is adopted for a
+-- rid neither catalogue has; otherwise the registry's kind is the truth and
+-- the answer's CONFIGURE carries it.
+
+function scenes:fields_of(record)
+	return self:fields_from_scene(record)
 end
 
--- HUE_SCENE_HELLO { rid?, device_id, name?, kind? }: the same rules as
--- lights:hello (§4 of import-design). `kind` ("scene" / "smart_scene", what
--- the device persisted beside its rid) only matters when the device is
--- adopted for a rid neither catalogue has; otherwise the registry's kind is
--- the truth and the answer's CONFIGURE carries it. Returns true when answered.
-function scenes:hello(rid, params)
-	params = params or {}
-	if type(rid) ~= "string" or rid == "" then
-		rid = nil
+-- What a device's hello adds to an adoption: its name (as sent) when no
+-- catalogue has the rid, and the kind it announced.
+function scenes:hello_fields(fields, hello, rid)
+	fields.name = fields.name or hello.name
+	if not self:record_of(rid) and hello.kind == scenes.SMART_KIND then
+		fields.kind = scenes.SMART_KIND
 	end
-	local device_id = util.positive(params.device_id)
-	if not (self.loaded or self.synced) then
-		if rid or device_id then
-			self.early_hellos[#self.early_hellos + 1] = { rid = rid, params = params }
-		end
-		return false
-	end
-	local remembered = device_id and self.forgotten[device_id] or nil
-	if remembered then
-		if not self.reg:by_device(device_id) then
-			return self:refuse_forgotten(device_id, rid, remembered)
-		end
-		-- Registered again after all (a crash between the two writes of a
-		-- forget): the registry is the truth and the mark is stale.
-		self:clear_forgotten(device_id)
-		self:flush()
-	end
-	if device_id then
-		self.announced[device_id] = { rid = rid, name = params.name, kind = params.kind }
-	end
+end
 
-	local entry = rid and self.registry[rid] or nil
-	if entry then
-		if device_id and entry.device_id ~= device_id then
-			self.conflicts[rid] = { holder = entry.device_id, claimant = device_id }
-			self.ctx.log.warn("scenes: device %d claims %s, which device %d holds; nothing changed (see Attention)",
-				device_id, self:entry_label(rid, entry), entry.device_id)
-			return false
-		end
-		return self:answer_hello(rid)
+-- The "gone" rule: a GET of the entry's kind has succeeded.
+function scenes:fetched(rid)
+	if is_smart(self.registry[rid]) then
+		return self.smart_synced
 	end
-	if not device_id then
-		return false
-	end
-	local held_rid = self.reg:by_device(device_id)
-	if held_rid then
-		self.ctx.log.info("scenes: device %d said hello with %s; its registered scene is %s", device_id, tostring(rid),
-			held_rid)
-		return self:answer_hello(held_rid)
-	end
-	if not rid then
-		return false  -- a bare device: Link Devices matches it by name
-	end
+	return self.synced
+end
 
-	local bound = self.project:bound_set()
-	if not bound or not bound[device_id] then
-		self.ctx.log.info("scenes: device %d announced %s but is not bound; not adopted", device_id, rid)
+function scenes.adopted_label(_self, rid, entry)
+	return tostring(entry.name or rid) .. (is_smart(entry) and " (time-based)" or "")
+end
+
+-- A registered device is never a forgotten one (Link Devices or an add
+-- brought it back).
+function scenes:registered(device_id)
+	self:clear_forgotten(device_id)
+end
+
+-- What a hello leaves in `announced`, for Link Devices.
+function scenes.announcement(_self, rid, params)
+	return { rid = rid, name = params.name, kind = params.kind }
+end
+
+-- A hello from a device Forget Scene let go is refused (refuse_forgotten),
+-- unless the device is registered again after all (a crash between the two
+-- writes of a forget): the registry is the truth and the mark is stale.
+function scenes:refuse_hello(device_id, rid)
+	local remembered = self.forgotten[device_id]
+	if not remembered then
 		return false
 	end
-	for other_id, h in pairs(self.announced) do
-		if other_id ~= device_id and h.rid == rid then
-			self.conflicts[rid] = { holder = other_id, claimant = device_id }
-			self.ctx.log.warn("scenes: devices %d and %d both announce %s; neither adopted (see Attention)", other_id,
-				device_id, rid)
-			return false
-		end
+	if not self.reg:by_device(device_id) then
+		self:refuse_forgotten(device_id, rid, remembered)
+		return true
 	end
-	if not self:adopt(device_id, rid, params, "from its own persisted rid") then
-		return false
-	end
+	self:clear_forgotten(device_id)
 	self:flush()
-	return self:answer_hello(rid)
+	return false
 end
 
 -- The hello of a device Forget Scene let go (#47 F8): told
@@ -1257,134 +1128,23 @@ function scenes:refuse_forgotten(device_id, rid, remembered)
 	return false
 end
 
--- HUE_SCENE_GOODBYE { rid?, device_id }: the device is being deleted in
--- Composer; the entry becomes a tombstone. Returns the tombstone or nil.
-function scenes:goodbye(params)
-	params = params or {}
-	local device_id = util.positive(params.device_id)
-	local rid = device_id and self.reg:by_device(device_id) or nil
-	if not rid and type(params.rid) == "string" and self.registry[params.rid] then
-		local entry = self.registry[params.rid]
-		if not device_id or entry.device_id == device_id then
-			rid = params.rid
-		end
-	end
-	if device_id then
-		self.announced[device_id] = nil
-	end
-	if not rid then
-		self.ctx.log.debug("scenes: HUE_SCENE_GOODBYE from an unregistered device (%s, %s)", tostring(params.device_id),
-			tostring(params.rid))
-		if self:clear_forgotten(device_id) then
-			self:flush()  -- a forgotten device leaving the project takes its mark along
-		end
-		return nil
-	end
-	local entry = self.registry[rid]
-	local label = self:entry_label(rid, entry)
-	local tomb = self.reg:tombstone(rid)
-	self.last_configure[rid] = nil
-	self.conflicts[rid] = nil
-	self:clear_conflicts_for(entry.device_id)
-	self:mark()
-	self:flush()
-	self.ctx.log.always("scenes: %s (device %d) was deleted in Composer; Add Scene lists it as deleted, "
-		.. "Add All Scenes Of Room skips it", label, entry.device_id)
-	return tomb
-end
-
--- OnBindingChanged for the bridge's binding 1, as lights:on_binding_changed.
-function scenes:on_binding_changed(binding, class, bound, other_id)
-	if tonumber(binding) ~= scenes.BINDING then
-		return false
-	end
-	if class ~= nil and class ~= scenes.BINDING_CLASS then
-		return false
-	end
-	local device_id = util.positive(other_id)
-	if not device_id then
-		return false
-	end
-	local rid, entry = self.reg:by_device(device_id)
-	if not rid then
-		return false  -- a light, or a scene device its hello or Link Devices adopts
-	end
-	local changed = false
-	if bound == false or bound == "false" then
-		if entry.state == "linked" and self.reg:set_state(rid, "unbound") then
-			changed = true
-			self.ctx.log.warn("scenes: %s (device %d) was unbound from the bridge", self:entry_label(rid, entry), device_id)
-		end
-	elseif bound == true or bound == "true" then
-		if entry.state == "unbound" and self.reg:set_state(rid, "linked") then
-			changed = true
-			self.ctx.log.info("scenes: %s (device %d) is bound again", self:entry_label(rid, entry), device_id)
-			self:answer_hello(rid)
-		end
-	end
-	if changed then
-		self:mark()
+-- goodbye (HUE_SCENE_GOODBYE { rid?, device_id }: the entry becomes a
+-- tombstone) and on_binding_changed are bridge/owner.lua's. A device that is
+-- not registered takes its forgotten mark along when it leaves the project.
+function scenes:goodbye_unregistered(device_id)
+	if self:clear_forgotten(device_id) then
 		self:flush()
 	end
-	return changed
 end
 
 -- Reconciliation (§5) ------------------------------------------------------------
 
--- Step 1, the project side: the bound set and the hue_scene devices in the
--- project. `created` (optional, rids) are the entries the caller's batch
--- has just made: they are left as they are, since Director may not list a
--- device AddDevice has just created, or its new binding, yet, and this must
--- not mislabel what it just made (code analysis 2026-10-22 item 13, #48).
--- Conflicts and forgotten marks whose devices left the project go too.
--- Saves unless `no_save`.
-function scenes:reconcile(no_save, created)
-	local bound, why = self.project:bound_set()
-	if not bound then
-		-- A failed lookup, or an answer that is no list (bridge/project.lua:
-		-- unknown, #48 item 14), which is expected while nothing is imported.
-		local note = (why == "unknown" and self:count() == 0) and self.ctx.log.debug or self.ctx.log.warn
-		note("scenes: reconcile skipped: the bound-device lookup %s", why == "unknown" and "answered no list" or "failed")
-		return { unbound = {}, relinked = {}, tombstoned = {} }
-	end
-	local infos = self.project:devices_of(scenes.SCENE_DRIVER)
-	local present = nil
-	if infos then
-		present = {}
-		for id in pairs(infos) do
-			present[id] = true
-		end
-	end
-	local skip = nil
-	for _, rid in ipairs(created or {}) do
-		skip = skip or {}
-		skip[rid] = true
-	end
-	local r = self.reg:reconcile({ bound = bound, present = present, skip = skip })
-	if #r.unbound + #r.relinked + #r.tombstoned > 0 then
-		self:mark()
-	end
-	for _, rid in ipairs(r.tombstoned) do
-		local tomb = self.reg:tombstones()[rid] or {}
-		self.last_configure[rid] = nil
-		self.conflicts[rid] = nil
-		self.ctx.log.warn("scenes: %s was deleted in Composer while the bridge was not watching; Add Scene lists it "
-			.. "as deleted", tostring(tomb.name or rid))
-	end
-	for _, rid in ipairs(r.unbound) do
-		local entry = self.registry[rid]
-		self.ctx.log.warn("scenes: %s (device %d) is not bound to this bridge", self:entry_label(rid, entry),
-			entry.device_id)
-	end
-	for _, rid in ipairs(r.relinked) do
-		self:answer_hello(rid)
-	end
+-- Step 1, the project side (the bound set and the hue_scene devices in the
+-- project), is bridge/owner.lua's reconcile. Conflicts and forgotten marks
+-- whose devices left the project go after it.
+function scenes:reconcile_done(present)
 	self:prune_conflicts(present)
 	self:prune_forgotten(present)
-	if not no_save then
-		self:flush()
-	end
-	return r
 end
 
 -- A claim (two devices on one scene, `conflicts`) ends once fewer than two
@@ -1490,60 +1250,15 @@ end
 
 -- Resync ---------------------------------------------------------------------
 
--- After every stream connect (the coordinator runs it after lights:resync so
--- the group cache is fresh) and from Refresh Scenes. done(ok, err, sent,
--- grouped_light): the fourth value is the /grouped_light body's data array
--- when that GET succeeded (nil otherwise), for the zone lights' resync to
--- take instead of fetching the same records again. A resync asked for while
--- one (or an add) runs waits for it, and one more resync then answers every
--- caller that waited, each once: a connect's chain (the zone lights' resync
--- and the rows' refresh) is not lost to a Refresh Scenes click that came
--- after it (code analysis 2026-10-22, F2; #47).
-function scenes:resync(done)
-	done = done or function() end
-	self:expire_stale_busy()
-	if self.resyncing or self.adding then
-		self.resync_pending[#self.resync_pending + 1] = done
-		return
-	end
-	self.resyncing, self.resyncing_since = true, os.time()
-	self:fetch_all(function(res, err)
-		local sent = 0
-		local ok, e = true, nil
-		if res then
-			ok, e = pcall(function()
-				self:absorb(res)
-				sent = self:settle("resync", not self.configured_once)
-			end)
-			if not ok then
-				self.ctx.log.error("scenes: resync failed: %s", tostring(e))
-			end
-		end
-		self.resyncing = false
-		if not res then
-			self:protect("resync done", done, false, err)
-		elseif not ok then
-			self:protect("resync done", done, false, tostring(e))
-		else
-			self:protect("resync done", done, true, nil, sent, res.grouped_light)
-		end
-		self:run_pending_resync()
-	end)
-end
-
--- The resync the waiting callers asked for: one, whose done answers each of
--- them in the order they asked (each pcall-wrapped on its own).
-function scenes:run_pending_resync()
-	local pending = self.resync_pending
-	if #pending == 0 then
-		return
-	end
-	self.resync_pending = {}
-	self:resync(function(...)
-		for _, done in ipairs(pending) do
-			self:protect("resync done", done, ...)
-		end
-	end)
+-- resync (after every stream connect, the coordinator running it after
+-- lights:resync so the group cache is fresh, and from Refresh Scenes) is
+-- bridge/owner.lua's: done(ok, err, sent, grouped_light), the fourth value
+-- the /grouped_light body's data array when that GET succeeded (nil
+-- otherwise), for the zone lights' resync to take instead of fetching the
+-- same records again; every caller that waited is answered once (code
+-- analysis 2026-10-22, F2; #47).
+function scenes.resync_extra(_self, res)
+	return res.grouped_light
 end
 
 -- Event fan-out --------------------------------------------------------------
@@ -2267,19 +1982,9 @@ end
 
 -- Device creation ---------------------------------------------------------------
 
--- A guard whose callback never came back would read Busy for ever and park
--- every resync [code analysis 2026-10-22, F1]: it expires instead.
-local BUSY_MAX = 90
-
-function scenes:expire_stale_busy()
-	for _, flag in ipairs({ "adding", "resyncing" }) do
-		local since = self[flag .. "_since"]
-		if self[flag] and since and os.time() - since > BUSY_MAX then
-			self.ctx.log.warn("scenes: %s stuck for %d s; cleared", flag, os.time() - since)
-			self[flag] = false
-		end
-	end
-end
+-- The busy flags (expire_stale_busy, busy_text) and the AddDevice chain
+-- (create: one at a time, each bound, registered and saved at once, then
+-- told) are bridge/owner.lua's.
 
 -- Per-rid generation of the latest recall or off; a callback compares.
 function scenes:next_recall_gen(rid)
@@ -2287,120 +1992,7 @@ function scenes:next_recall_gen(rid)
 	return self.recall_gen[rid]
 end
 
-function scenes:busy_text()
-	self:expire_stale_busy()
-	if self.adding then
-		return "Busy: adding scenes; try again in a moment"
-	elseif self.resyncing then
-		return "Busy: resyncing scenes; try again in a moment"
-	end
-	return nil
-end
-
--- One AddDevice per job, one at a time, each bound, registered (saved at
--- once) and told its configuration and state. jobs = { { scene, room_id,
--- room_name } ... }; finish(created, failed, err) as lights:create_lights.
-function scenes:create_scenes(jobs, finish)
-	local total, i, created, failed = #jobs, 0, {}, {}
-	local add_next
-
-	local function on_added(job, device_id, info)
-		local scene = job.scene
-		if not self.device_info_logged then
-			self.device_info_logged = true
-			self.ctx.log.always("AddDevice callback for scene %s: deviceId=%s info=%s", tostring(scene.name),
-				tostring(device_id), lights.dump(info))
-		end
-		device_id = tonumber(device_id)
-		if not device_id or device_id <= 0 then
-			self.ctx.log.error("scenes: AddDevice failed for %s (deviceId %s); skipped", tostring(scene.name),
-				tostring(device_id))
-			failed[#failed + 1] = scene
-			return
-		end
-		local ids = lights.ids_from(info)
-		if ids.protocol and ids.protocol ~= device_id then
-			self.ctx.log.always("AddDevice for %s: binding protocol id %d rather than deviceId %d", tostring(scene.name),
-				ids.protocol, device_id)
-			device_id = ids.protocol
-		end
-		self.ctx.bind(self:bridge_id(), device_id)
-		local fields = self:fields_from_scene(scene)
-		fields.device_id = device_id
-		fields.proxy_id = ids.proxy
-		fields.created_room_id = job.room_id
-		local entry, err = self.reg:add(scene.rid, fields)
-		if not entry then
-			self.ctx.log.error("scenes: AddDevice created device %d for %s but the registry refused it: %s", device_id,
-				tostring(scene.name), tostring(err))
-			failed[#failed + 1] = scene
-			return
-		end
-		self:clear_forgotten(device_id)  -- a registered device is never a forgotten one
-		self:save()
-		created[#created + 1] = { scene = scene, device_id = device_id, room_name = job.room_name }
-		self.ctx.log.info("scenes: added %s to %s (device %d, %d of %d)", tostring(scene.name), tostring(job.room_name),
-			device_id, i, total)
-		self:push(scene.rid, "resync", true)
-	end
-
-	local function step()
-		local ok, err = pcall(add_next)
-		if not ok then
-			self.ctx.log.error("scenes: adding scenes failed: %s", tostring(err))
-			finish(created, failed, tostring(err))
-		end
-	end
-
-	add_next = function()
-		i = i + 1
-		local job = jobs[i]
-		if not job then
-			return finish(created, failed)
-		end
-		local name = self:creation_name(job.scene)
-		self.ctx.log.info("scenes: adding %s to %s (%d of %d)", tostring(name), tostring(job.room_name), i, total)
-		self.ctx.add_device(scenes.SCENE_DRIVER, job.room_id, name, function(device_id, info)
-			self:protect("register " .. tostring(name), on_added, job, device_id, info)
-			step()
-		end)
-	end
-
-	step()
-end
-
--- The rids a create_scenes batch registered (its `created` list), for the
--- reconcile that follows it to leave alone.
-function scenes.created_rids(created)
-	local rids = {}
-	for _, c in ipairs(created or {}) do
-		rids[#rids + 1] = c.scene.rid
-	end
-	return rids
-end
-
 -- Actions (§4) -------------------------------------------------------------------
-
--- Resolve the room an add goes to. Returns room_id, room_name or nil, text.
-function scenes:room_for_add(scene, room_id, rooms)
-	room_id = util.positive(room_id)
-	if room_id then
-		local room_name = rooms[room_id]
-		if room_name then
-			return room_id, room_name
-		end
-		if next(rooms) ~= nil then
-			return nil, string.format("Not added: Control4 room %d no longer exists", room_id)
-		end
-		return room_id, "room " .. tostring(room_id)
-	end
-	local id, why = self:default_room(scene, rooms)
-	if not id then
-		return nil, string.format("Not added: %s: %s; pick a room, or Set Room Mapping first", util.sanitise(name_of(scene)),
-			why)
-	end
-	return id, why
-end
 
 -- Add Scene: one AddDevice into room_id, or into the mapped room of the
 -- scene's group when nil; refuses when neither exists. A tombstone for the
@@ -2436,9 +2028,9 @@ function scenes:add_scene(rid, room_id, done)
 
 	self.adding, self.adding_since = true, os.time()
 	local label = util.sanitise(name_of(scene))
-	self:create_scenes({ { scene = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
+	self:create({ { record = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.adding = false
-		self:reconcile(true, scenes.created_rids(created))
+		self:reconcile(true, owner.created_set(created))
 		self:flush()
 		local text
 		if created[1] then
@@ -2504,7 +2096,7 @@ function scenes:add_all_of_group(group_rid, done)
 			deleted[#deleted + 1] = string.format("%s (deleted %s)", util.sanitise(name_of(scene)),
 				util.date_of(tomb.deleted_at))
 		else
-			jobs[#jobs + 1] = { scene = scene, room_id = room_id, room_name = room_name }
+			jobs[#jobs + 1] = { record = scene, room_id = room_id, room_name = room_name }
 		end
 	end
 
@@ -2513,7 +2105,7 @@ function scenes:add_all_of_group(group_rid, done)
 		if #created > 0 then
 			local names = {}
 			for _, c in ipairs(created) do
-				names[#names + 1] = string.format("%s (device %d)", util.sanitise(name_of(c.scene)), c.device_id)
+				names[#names + 1] = string.format("%s (device %d)", util.sanitise(name_of(c.record)), c.device_id)
 			end
 			parts[#parts + 1] = string.format("Added %s of %s to %s: %s", util.plural(#created, "scene"), label, room_name,
 				table.concat(names, ", "))
@@ -2543,9 +2135,9 @@ function scenes:add_all_of_group(group_rid, done)
 	end
 
 	self.adding, self.adding_since = true, os.time()
-	self:create_scenes(jobs, function(created, failed, err)
+	self:create(jobs, function(created, failed, err)
 		self.adding = false
-		self:reconcile(true, scenes.created_rids(created))
+		self:reconcile(true, owner.created_set(created))
 		self:flush()
 		local text = summary(created, failed, err)
 		self.ctx.log.always("scenes: %s", text)
@@ -2555,97 +2147,42 @@ function scenes:add_all_of_group(group_rid, done)
 	return true
 end
 
--- Re-link Scene: the entry keeps its device, proxy, programming and name and
--- swaps the rid; the device hears its new configuration and state. Either
--- kind to either kind: the entry takes the new scene's kind and CONFIGURE
--- carries it (docs/smart-scenes-design.md Decision 12). ok, text.
-function scenes:relink(device_id, new_rid)
-	local busy = self:busy_text()
-	if busy then
-		return false, busy
-	end
-	device_id = util.positive(device_id)
-	if not device_id or type(new_rid) ~= "string" or new_rid == "" then
-		return false, "Not re-linked: pick a device and a scene"
-	end
-	local old_rid, entry = self.reg:by_device(device_id)
-	if not old_rid then
-		return false, string.format("Not re-linked: device %d is not a registered scene", device_id)
-	end
-	local holder = self.registry[new_rid]
-	if holder then
-		if holder.device_id == device_id then
-			return false, string.format("Not re-linked: device %d is already linked to %s", device_id,
-				self:entry_label(new_rid, holder))
-		end
-		return false, string.format("Not re-linked: %s is already linked to device %d", self:entry_label(new_rid, holder),
-			holder.device_id)
-	end
-	local scene = self:record_of(new_rid)
-	if not scene then
-		return false, string.format("Not re-linked: scene %s is not on the bridge (Refresh Scenes and try again)",
-			tostring(new_rid))
-	end
-	local old_label = self:entry_label(old_rid, entry)
-	local fields = self:fields_from_scene(scene)
-	fields.name_dismissed = registry.CLEAR
-	fields.kind = fields.kind or registry.CLEAR
-	local relinked, err = self.reg:relink(old_rid, new_rid, fields)
-	if not relinked then
-		return false, "Not re-linked: " .. tostring(err)
-	end
-	self:mark()
-	self.last_configure[old_rid] = nil
-	self.conflicts[old_rid], self.conflicts[new_rid] = nil, nil
-	self:clear_conflicts_for(device_id)
-	self:push(new_rid, "resync", true)
-	self:flush()
-	local text = string.format("Re-linked device %d (was %s) to %s", device_id, old_label, self:scene_label(scene))
-	self.ctx.log.always("scenes: %s", text)
-	return true, text
+-- Re-link Scene, Forget Scene, HUE_SCENE_FORGET and Link Devices are
+-- bridge/owner.lua's (relink, forget, forget_request, link_devices); these
+-- are the hooks they take. A re-link goes from either kind to either kind:
+-- the entry takes the new scene's kind and CONFIGURE carries it
+-- (docs/smart-scenes-design.md Decision 12).
+function scenes:relink_fields(fields)
+	fields.kind = fields.kind or self.reg.CLEAR
 end
 
--- The unimported scenes of either kind whose Hue name, base name (a
--- time-based one's) or creation name matches one of `names`.
-function scenes:match_unimported_by_name(names)
-	local wanted = {}
-	for _, name in ipairs(names) do
-		if name ~= nil and util.norm(name) ~= "" then
-			wanted[util.norm(name)] = true
-		end
-	end
-	local out = {}
-	for _, scene in ipairs(self:unimported_scenes()) do
-		if wanted[util.norm(scene.name)] or wanted[util.norm(name_of(scene))]
-			or wanted[util.norm(self:creation_name(scene))] then
-			out[#out + 1] = scene
-		end
-	end
-	return out
+function scenes.relink_refusal(_self, _device_id, new_rid)
+	return string.format("Not re-linked: scene %s is not on the bridge (Refresh Scenes and try again)",
+		tostring(new_rid))
 end
 
--- Link Devices (scenes): every bound hue_scene device the registry lacks is
--- adopted by the rid it announced, else by an exact, unique name match
--- (Composer name or announced name) against the unimported scenes. Only
--- hue_scene devices count: the bound set also holds the lights, so it is cut
--- down to the project's hue_scene devices, or to the devices that said
--- HUE_SCENE_HELLO when the project lookup is unavailable. A device Forget
--- Scene let go is a candidate like any other (the owner's click is the way
--- back, #47 F8), by the rid it had. Returns the text.
-function scenes:link_devices()
-	local busy = self:busy_text()
-	if busy then
-		return busy
-	end
-	local bound, why = self.project:bound_set()
-	if not bound and why == "unknown" then
-		-- Director answers nil when nothing is bound [verified: API 32/_3]; an
-		-- action that only adds may read it so (bridge/project.lua).
-		bound = {}
-	end
-	if not bound then
-		return "Not linked: the bound-device lookup failed (see the Lua output)"
-	end
+-- "Kitchen: Relax": how Link Devices and Re-link name a scene record.
+function scenes:record_label(scene)
+	return self:scene_label(scene)
+end
+
+-- Forget Scene remembers the device (FORGOTTEN_KEY): a later hello from it,
+-- whether its unbind failed or it was bound again, is answered
+-- HUE_SCENE_FORGOTTEN and never adopted; Link Devices brings it back (#47
+-- F8). The name it is told is a time-based scene's base name.
+function scenes:forgot(rid, entry, device_id, told)
+	self:remember_forgotten(device_id, rid, told, entry)
+end
+
+function scenes.told_name(_self, entry)
+	return is_smart(entry) and name_of(entry) or entry.name
+end
+
+-- Link Devices' candidates: only hue_scene devices count. The bound set also
+-- holds the lights, so it is cut down to the project's hue_scene devices, or
+-- to the devices that said HUE_SCENE_HELLO when the project lookup is
+-- unavailable. Returns the ids the registry lacks and how many there are.
+function scenes:link_candidates(bound)
 	local present = self.project:devices_of(scenes.SCENE_DRIVER)
 	local ids, total = {}, 0
 	for id in pairs(bound) do
@@ -2658,235 +2195,37 @@ function scenes:link_devices()
 			end
 		end
 	end
-	table.sort(ids)
-	if #ids == 0 then
-		if total == 0 then
-			return "No scene devices are bound to this bridge"
-		end
-		return string.format("All %d bound scene devices are registered", total)
-	end
-
-	local names, shared = {}, {}
-	for _, id in ipairs(ids) do
-		names[id] = self.project:display_name(id)
-		if names[id] then
-			shared[util.norm(names[id])] = (shared[util.norm(names[id])] or 0) + 1
-		end
-	end
-
-	local linked, problems = {}, {}
-	for _, id in ipairs(ids) do
-		local hello = self.announced[id] or self.forgotten[id] or {}
-		local composer = names[id] or ("device " .. tostring(id))
-		local rid = hello.rid
-		local who = string.format("%s (device %d)", composer, id)
-		if rid and self.registry[rid] then
-			local holder = self.registry[rid]
-			self.conflicts[rid] = { holder = holder.device_id, claimant = id }
-			problems[#problems + 1] = string.format("%s announces %s, which device %d holds (Forget Scene on one of them)",
-				who, self:entry_label(rid, holder), holder.device_id)
-		elseif rid then
-			local entry = self:adopt(id, rid, hello, "from its own persisted rid (Link Devices)")
-			if entry then
-				local record = self:record_of(rid)
-				linked[#linked + 1] = string.format("%s to %s by its rid%s", who,
-					record and self:scene_label(record) or self:entry_label(rid, entry),
-					record and "" or (entry.state == "gone" and " (not on the bridge: marked gone)" or ""))
-				self:answer_hello(rid)
-			else
-				problems[#problems + 1] = string.format("%s: could not register %s (see the Lua output)", who, rid)
-			end
-		elseif names[id] and shared[util.norm(names[id])] > 1 then
-			problems[#problems + 1] = string.format("%s: %d bound devices share that name; rename one in Composer and run "
-				.. "Link Devices again", who, shared[util.norm(names[id])])
-		else
-			local matches = self:match_unimported_by_name({ composer, hello.name })
-			if #matches == 1 then
-				local scene = matches[1]
-				local entry = self:adopt(id, scene.rid, hello, "by its name (Link Devices)")
-				if entry then
-					linked[#linked + 1] = string.format("%s to %s by name", who, self:scene_label(scene))
-					self:answer_hello(scene.rid)
-				else
-					problems[#problems + 1] = string.format("%s: could not register %s (see the Lua output)", who, scene.rid)
-				end
-			elseif #matches > 1 then
-				problems[#problems + 1] = string.format("%s: %d unimported Hue scenes have that name; rename the device in "
-					.. "Composer to one Hue scene's exact name and run Link Devices again", who, #matches)
-			else
-				problems[#problems + 1] = string.format("%s: no unimported Hue scene has that name; rename the device in "
-					.. "Composer to the Hue scene's exact name and run Link Devices again", who)
-			end
-		end
-	end
-	self:flush()
-	local parts = {}
-	if #linked > 0 then
-		parts[#parts + 1] = string.format("Linked %s: %s", util.plural(#linked, "scene device"), table.concat(linked, ", "))
-	end
-	if #problems > 0 then
-		parts[#parts + 1] = string.format("not linked %d: %s", #problems, table.concat(problems, "; "))
-	end
-	local text = table.concat(parts, "; ")
-	self.ctx.log.always("scenes: %s", text)
-	return text
+	return ids, total
 end
 
--- Forget Scene: the entry goes, the device is unbound and told
--- HUE_SCENE_FORGOTTEN, and stays in the project for the owner to delete; the
--- scene is listed under Add Scene again. The device is remembered
--- (FORGOTTEN_KEY): a later hello from it, whether its unbind failed or it was
--- bound again, is answered HUE_SCENE_FORGOTTEN and never adopted; Link
--- Devices brings it back (#47 F8). Returns ok, text.
-function scenes:forget(device_id)
-	local busy = self:busy_text()
-	if busy then
-		return false, busy
-	end
-	device_id = util.positive(device_id)
-	if not device_id then
-		return false, "Not forgotten: pick a device first"
-	end
-	local rid, entry = self.reg:by_device(device_id)
-	if not rid then
-		return false, string.format("Not forgotten: device %d is not a registered scene", device_id)
-	end
-	local label = self:entry_label(rid, entry)
-	local told = is_smart(entry) and name_of(entry) or entry.name
-	self.reg:forget(rid)
-	self:mark()
-	self:remember_forgotten(device_id, rid, told, entry)
-	self.last_configure[rid] = nil
-	self.conflicts[rid] = nil
-	self:clear_conflicts_for(device_id)
-	self.announced[device_id] = nil
-	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = told })
-	local ok, err = self.project:call("unbind", device_id)
-	if not ok then
-		self.ctx.log.warn("scenes: unbind of device %d failed: %s", device_id, tostring(err))
-	end
-	self:flush()
-	local text = string.format("Forgot %s (device %d): unbound and left in the project for you to delete; "
-		.. "the Hue scene is listed under Add Scene again", label, device_id)
-	self.ctx.log.always("scenes: %s", text)
-	return true, text
+-- A device Forget Scene let go is a candidate like any other (the owner's
+-- click is the way back, #47 F8), by the rid it had.
+function scenes:link_hello(id)
+	return self.announced[id] or self.forgotten[id] or {}
 end
 
--- HUE_SCENE_FORGET { rid?, device_id } from a scene device's Forget This
--- Scene action. Returns ok, text.
-function scenes:forget_request(params)
-	params = params or {}
-	local device_id = util.positive(params.device_id)
-	if not device_id and type(params.rid) == "string" and self.registry[params.rid] then
-		device_id = self.registry[params.rid].device_id
-	end
-	if not device_id then
-		return false, "Not forgotten: the scene device named no device"
-	end
-	if not self.reg:by_device(device_id) then
-		self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = params.rid, name = params.name })
-		self.announced[device_id] = nil
-		return false, string.format("Not forgotten: device %d is not a registered scene (told it so)", device_id)
-	end
-	return self:forget(device_id)
+function scenes:linked_label(rid, entry)
+	local record = self:record_of(rid)
+	return record and self:scene_label(record) or self:entry_label(rid, entry),
+		record and "" or (entry.state == "gone" and " (not on the bridge: marked gone)" or "")
 end
 
--- The Composer name a linked scene device should carry: the creation name
--- ("<Zone> <Scene>" for a zone scene), from the live group cache.
-function scenes:expected_name(_rid, entry)
-	return self:creation_name(entry)
-end
-
--- Linked entries whose Composer name differs from the expected name and
--- whose difference the owner has not accepted: { rid, entry, current, expected }...
-function scenes:name_differences()
+-- The unimported scenes of either kind whose Hue name, base name (a
+-- time-based one's) or creation name is wanted (norm'd names).
+function scenes:unimported_named(wanted)
 	local out = {}
-	for _, rid in ipairs(self.reg:rids("linked")) do
-		local entry = self.registry[rid]
-		local expected = self:expected_name(rid, entry)
-		if entry.name and entry.name ~= "" and entry.name_dismissed ~= expected then
-			local current = self.project:display_name(entry.proxy_id or entry.device_id)
-			if current and current ~= expected then
-				out[#out + 1] = { rid = rid, entry = entry, current = current, expected = expected }
-			end
+	for _, scene in ipairs(self:unimported_scenes()) do
+		if wanted[util.norm(scene.name)] or wanted[util.norm(name_of(scene))]
+			or wanted[util.norm(self:creation_name(scene))] then
+			out[#out + 1] = scene
 		end
 	end
 	return out
 end
 
--- Adopt Hue Names (scenes): RenameDevice(proxy_id, expected name) for every
--- linked scene device whose Composer name differs. Returns the text.
-function scenes:adopt_hue_names()
-	local busy = self:busy_text()
-	if busy then
-		return busy
-	end
-	local renamed, skipped = {}, {}
-	for _, rid in ipairs(self.reg:rids("linked")) do
-		local entry = self.registry[rid]
-		if entry.name and entry.name ~= "" then
-			local expected = self:expected_name(rid, entry)
-			local current = self.project:display_name(entry.proxy_id or entry.device_id)
-			if current and current ~= expected then
-				if not entry.proxy_id then
-					skipped[#skipped + 1] = string.format("%s (device %d): no proxy id known", current, entry.device_id)
-				else
-					local ok, err = self.project:call("rename", entry.proxy_id, expected)
-					if ok then
-						renamed[#renamed + 1] = string.format("%s → %s (device %d)", current, expected, entry.device_id)
-						if entry.name_dismissed ~= nil then
-							self.reg:update(rid, { name_dismissed = registry.CLEAR })
-							self:mark()
-						end
-					else
-						skipped[#skipped + 1] = string.format("%s (device %d): rename failed: %s", current, entry.device_id,
-							tostring(err))
-					end
-				end
-			end
-		end
-	end
-	self:flush()
-	local text
-	if #renamed == 0 and #skipped == 0 then
-		text = "No Composer names differ from the Hue scene names"
-	else
-		local parts = {}
-		if #renamed > 0 then
-			parts[#parts + 1] = string.format("Renamed %s: %s", util.plural(#renamed, "scene device"),
-				table.concat(renamed, ", "))
-		end
-		if #skipped > 0 then
-			parts[#parts + 1] = string.format("not renamed %d: %s", #skipped, table.concat(skipped, ", "))
-		end
-		text = table.concat(parts, "; ")
-	end
-	self.ctx.log.always("scenes: %s", text)
-	return text
-end
-
--- Accept Names As They Are (scenes): every current difference is recorded.
-function scenes:accept_names()
-	local busy = self:busy_text()
-	if busy then
-		return busy
-	end
-	local accepted = {}
-	for _, d in ipairs(self:name_differences()) do
-		self.reg:update(d.rid, { name_dismissed = d.expected })
-		self:mark()
-		accepted[#accepted + 1] = string.format("%s (Hue: %s)", d.current, d.expected)
-	end
-	self:flush()
-	local text
-	if #accepted == 0 then
-		text = "No Composer names differ from the Hue scene names"
-	else
-		text = string.format("Accepted %s: %s", util.plural(#accepted, "scene name difference"), table.concat(accepted, ", "))
-	end
-	self.ctx.log.always("scenes: %s", text)
-	return text
-end
+-- The names trio is bridge/owner.lua's: expected_name is the creation name
+-- ("<Zone> <Scene>" for a zone scene, from the live group cache);
+-- name_differences, adopt_hue_names, accept_names.
 
 -- Texts ---------------------------------------------------------------------------
 
@@ -2917,74 +2256,19 @@ function scenes:summary()
 	return table.concat(parts, ", ")
 end
 
--- The Attention items (driver.lua joins them after the lights'): missing
--- scenes, unbound scene devices, two devices claiming one scene, name
--- differences.
-function scenes:attention_items()
-	local items = {}
-
-	local gone = self.reg:rids("gone")
-	if #gone > 0 then
-		local names = {}
-		for _, rid in ipairs(gone) do
-			local entry = self.registry[rid]
-			names[#names + 1] = string.format("%s (device %d, since %s)", self:entry_label(rid, entry), entry.device_id,
-				util.date_of(entry.gone_since))
-		end
-		items[#items + 1] = string.format("%s missing from the bridge: %s (Re-link Scene or Forget Scene)",
-			util.plural(#gone, "scene"), util.some(names, scenes.MAX_NAMED))
+-- The Attention items (driver.lua joins them after the lights') are
+-- bridge/owner.lua's: missing scenes, unbound scene devices, two devices
+-- claiming one scene, name differences. A claimed scene reads "scene
+-- Relax" (its entry), "scene Kitchen: Relax" (unimported) or its rid.
+function scenes:conflict_label(rid)
+	local entry = self.registry[rid]
+	local label = tostring(rid)
+	if entry then
+		label = self:entry_label(rid, entry)
+	elseif self:record_of(rid) then
+		label = self:scene_label(self:record_of(rid))
 	end
-
-	local unbound = self.reg:rids("unbound")
-	if #unbound > 0 then
-		local names = {}
-		for _, rid in ipairs(unbound) do
-			local entry = self.registry[rid]
-			names[#names + 1] = string.format("%s (device %d)", self:entry_label(rid, entry), entry.device_id)
-		end
-		items[#items + 1] = string.format("%s: %s (bind it to this bridge in Composer, or Forget Scene)",
-			util.plural(#unbound, "unbound scene device"), util.some(names, scenes.MAX_NAMED))
-	end
-
-	local conflict_rids = {}
-	for rid in pairs(self.conflicts) do
-		conflict_rids[#conflict_rids + 1] = rid
-	end
-	table.sort(conflict_rids)
-	for _, rid in ipairs(conflict_rids) do
-		local c = self.conflicts[rid]
-		local entry = self.registry[rid]
-		local label = tostring(rid)
-		if entry then
-			label = self:entry_label(rid, entry)
-		elseif self:record_of(rid) then
-			label = self:scene_label(self:record_of(rid))
-		end
-		items[#items + 1] = string.format("2 devices claim Hue scene %s: %d and %d (Forget Scene on one of them)", label,
-			c.holder, c.claimant)
-	end
-
-	local diffs = self:name_differences()
-	if #diffs > 0 then
-		local names = {}
-		for _, d in ipairs(diffs) do
-			names[#names + 1] = string.format("%s is %s in Hue", d.current, d.expected)
-		end
-		items[#items + 1] = string.format("%d Hue scene name%s differ%s from the Composer names: %s "
-			.. "(Adopt Hue Names or Accept Names As They Are)", #diffs, #diffs == 1 and "" or "s",
-			#diffs == 1 and "s" or "", util.some(names, scenes.MAX_NAMED))
-	end
-
-	return items
-end
-
--- The items joined, or "None".
-function scenes:attention()
-	local items = self:attention_items()
-	if #items == 0 then
-		return "None"
-	end
-	return table.concat(items, "; ")
+	return "scene " .. label
 end
 
 -- Pickers (§4): { text, value } arrays, value a string; one explanatory
@@ -3128,38 +2412,12 @@ function scenes:entry_picker_label(rid, entry)
 		.. (is_smart(entry) and " (time-based)" or "")
 end
 
--- Re-link's Device: the gone and unbound entries.
-function scenes:picker_relink_devices()
-	local list = {}
-	for _, state in ipairs({ "gone", "unbound" }) do
-		for _, rid in ipairs(self.reg:rids(state)) do
-			local entry = self.registry[rid]
-			-- Labelled like Forget Scene's picker, group first, so the two read alike.
-			list[#list + 1] = { text = string.format("%s (device %d, %s since %s)", self:entry_picker_label(rid, entry),
-				entry.device_id, state, util.short_date_of(entry[state .. "_since"])), value = tostring(entry.device_id) }
-		end
-	end
-	if #list == 0 then
-		return util.empty_list("(no gone or unbound scene devices)")
-	end
-	return list
-end
-
--- Forget Scene's Device: every entry, as "Kitchen: Relax (device 2061)".
-function scenes:picker_forget_devices()
-	local list = {}
-	for _, rid in ipairs(self.reg:rids()) do
-		local entry = self.registry[rid]
-		local text = string.format("%s (device %d)", self:entry_picker_label(rid, entry), entry.device_id)
-		if entry.state ~= "linked" then
-			text = text .. " " .. entry.state
-		end
-		list[#list + 1] = { text = text, value = tostring(entry.device_id) }
-	end
-	if #list == 0 then
-		return util.empty_list("(no registered scenes)")
-	end
-	return list
+-- (owner hook) How the device pickers (owner: picker_relink_devices, the
+-- gone and unbound entries; picker_forget_devices, every entry) name a
+-- registered scene: "Kitchen: Relax (device 2061)", group first, so the two
+-- read alike.
+function scenes:device_text(rid, entry, rest)
+	return string.format("%s (device %d%s)", self:entry_picker_label(rid, entry), entry.device_id, rest or "")
 end
 
 -- Lists (the drop-down properties) ----------------------------------------------

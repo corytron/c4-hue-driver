@@ -104,16 +104,18 @@ local follow = nil           -- what follows a time-based scene's start from off
 
 -- The plumbing both device drivers share (common/device.lua): properties and
 -- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
--- for bridge messages that arrive before late init, the keypad LEDs and
--- Button Links, the binding re-check, the goodbye, and in dev builds the dev
--- loop's log forwarding and DEV_RELOAD (docs/scenes-design.md §6). The hooks
--- it asks of this driver (is_on, button_action, on_bridge_found) are set
--- below, with their functions.
+-- for bridge messages that arrive before late init, the keypad (LEDs, Button
+-- Links, settings, the press machine), the binding re-check, the goodbye, and
+-- in dev builds the dev loop's log forwarding and DEV_RELOAD
+-- (docs/scenes-design.md §6). Its hooks (is_on, on_bridge_found, on_click,
+-- on_hold, on_finish, on_end_hold) are set below.
 local dev = device.new({
 	prefix = LOG_PREFIX,
 	tree = "scene", -- the dev loop's name for this driver's source tree
 	bridge = function() return bridge end,
 	rid = function() return st.rid end,
+	noun = "scene",
+	settings = { "hold_up", "hold_down" }, -- driver.xml declares hold_rates
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
@@ -1122,79 +1124,32 @@ dispatch.proxy["ON"] = function() turn_on(0) end
 dispatch.proxy["OFF"] = function() turn_off(0) end
 
 -- Keypad buttons -------------------------------------------------------------
--- A tap of the top button recalls, of the bottom button turns the group off,
--- of the toggle button toggles. A hold dims the scene's group relatively, so
--- its colours and per-light differences stay: top (or toggle while off) up,
--- bottom (or toggle while on) down; holding top while off recalls the scene
--- at 1 % first. Every BUTTON_ACTION is echoed as the proxy requires
--- [verified: proxy-protocol reference, light_v2 BUTTON_ACTION]; behaviour:
--- docs/keypad-design.md, "Scene device".
-local BUTTON_TOP, BUTTON_BOTTOM = 0, 1
-local ACT_RELEASE, ACT_PRESS, ACT_CLICK = device.ACT_RELEASE, device.ACT_PRESS, device.ACT_CLICK
-local HOLD_AFTER_MS = 400       -- a press still down after this is a hold
-local RECALL_DIM_AFTER_MS = 600 -- hold from off: the dim follows the 1 % recall this much later
-local CLICK_GUARD_MS = 1000     -- a click this soon after a hold's release on that button is ignored
-local SETTING_KEYS = { hold_up = "hold_rate_up", hold_down = "hold_rate_down" }
-local SETTING_DEFAULTS = { hold_up = 5000, hold_down = 5000 }
-local settings = {}
-local hold = nil  -- { button, timer, held, dim_sent } while a button is down
-local guard = nil -- { button, timer } for CLICK_GUARD_MS after a hold's release
+-- What a tap and a hold do to a scene; the press / click / release machine
+-- and the proxy's hold rates are common/device.lua's. A tap of the top button
+-- recalls, of the bottom button turns the group off, of the toggle button
+-- toggles. A hold dims the scene's group relatively, so its colours and
+-- per-light differences stay; holding top while off recalls at 1 % first. A
+-- hold's record carries changing (the proxy heard the hold's CHANGING) and
+-- dim_sent (a dim went out: the release stops it). docs/keypad-design.md.
+local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
+local setting = dev.setting
 
-local function setting(name)
-	return tonumber(settings[name]) or SETTING_DEFAULTS[name]
-end
-
-local function load_settings()
-	for name, key in pairs(SETTING_KEYS) do
-		settings[name] = tonumber(C4:PersistGetValue(key))
-	end
-end
-
-local function save_setting(name, value)
-	value = tonumber(value)
-	if not value then
-		return log.warn("%s without a number", SETTING_KEYS[name])
-	end
-	settings[name] = value
-	C4:PersistSetValue(SETTING_KEYS[name], value)
-end
-
-local function end_hold()
-	if hold and hold.timer then
-		hold.timer:Cancel()
-	end
-	-- A time-based scene this hold started: its dim follows only while held.
-	if hold and follow and follow.hold == hold then
-		cancel_follow()
-	end
-	hold = nil
-end
-
-local function disarm_guard()
-	if guard then
-		guard.timer:Cancel()
-		guard = nil
-	end
-end
-
-local function arm_guard(button)
-	disarm_guard()
-	local g = { button = button }
-	g.timer = C4:SetTimer(CLICK_GUARD_MS, function()
-		if guard == g then
-			guard = nil
-		end
-	end)
-	guard = g
-end
-
-local function button_click(button)
+function dev.on_click(button)
 	if button == BUTTON_TOP then
 		turn_on(0)
 	elseif button == BUTTON_BOTTOM then
 		turn_off(0)
 	else
 		dispatch.proxy["TOGGLE"]()
+	end
+end
+
+-- A press that ends: a time-based scene this hold started has its dim
+-- follow only while the button is held (docs/smart-scenes-design.md,
+-- Decision 4).
+function dev.on_end_hold(h)
+	if follow and follow.hold == h then
+		cancel_follow()
 	end
 end
 
@@ -1236,7 +1191,7 @@ local function start_smart_hold(h, duration)
 		return report_unchanged(0)
 	end
 	arm_follow({ kind = "dim", hold = h, go = function()
-		if hold ~= h or not h.held or blocker() then
+		if not dev.holding(h) or not h.held or blocker() then
 			return false
 		end
 		h.dim_sent = send_dim("up", duration)
@@ -1244,20 +1199,14 @@ local function start_smart_hold(h, duration)
 	end })
 end
 
--- The hold timer fired with the button still down. A hold from here makes an
--- ordinary scene held on (a keypad recall or dim, the on rule). A dim or
--- recall that never reaches the bridge (logged) leaves the scene as it was,
--- not held by this hold, and closes the hold's CHANGING with the unchanged
--- state; the dim that follows a recall that did go out is then just not
--- sent (no stop at the release), and the bridge's level reports close the
--- hold as they do after any recall.
-local function start_hold(h)
-	h.held = true
-	local on = effective_on()
-	local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
-	if not up and not on then
-		return log.debug("hold: dimming down a scene that is off does nothing")
-	end
+-- A hold began (the machine chose the direction; down from off does
+-- nothing). A hold from here makes an ordinary scene held on (a keypad
+-- recall or dim, the on rule). A dim or recall that never reaches the bridge
+-- (logged) leaves the scene as it was, not held by this hold, and closes the
+-- hold's CHANGING with the unchanged state; the dim that follows a recall
+-- that did go out is then just not sent (no stop at the release), and the
+-- bridge's level reports close the hold as they do after any recall.
+function dev.on_hold(h, up, on)
 	if not ready("hold") then
 		return
 	end
@@ -1295,24 +1244,16 @@ local function start_hold(h)
 		return failed(0)
 	end
 	update_leds()
-	h.timer = C4:SetTimer(RECALL_DIM_AFTER_MS, function()
-		if hold ~= h then
-			return
-		end
-		h.timer = nil
-		if bridge and st.rid then
-			h.dim_sent = send_dim("up", duration)
-		end
+	dev.dim_after_on(h, function()
+		h.dim_sent = send_dim("up", duration)
 	end)
 end
 
--- Release (or release-as-click) after a hold: stop a dim that was sent, close
--- the hold's CHANGING with the bridge's next level report (or the cached
--- level after LEVEL_FALLBACK_MS), and ignore the click some keypads send
--- after it.
-local function finish_hold()
-	local h = hold
-	end_hold()
+-- Release (or release-as-click) after a hold: stop a dim that was sent and
+-- close the hold's CHANGING with the bridge's next level report (or the
+-- cached level after LEVEL_FALLBACK_MS). The machine has armed the click
+-- guard.
+function dev.on_finish(h)
 	if h.dim_sent and bridge and st.rid then
 		send_dim("stop")
 	end
@@ -1322,46 +1263,7 @@ local function finish_hold()
 			report_brightness()
 		end }, LEVEL_FALLBACK_MS)
 	end
-	arm_guard(h.button)
 end
-
-local function button_action(button, action)
-	if action == ACT_PRESS then
-		end_hold()
-		local h = { button = button }
-		h.timer = C4:SetTimer(HOLD_AFTER_MS, function()
-			if hold == h then
-				h.timer = nil
-				start_hold(h)
-			end
-		end)
-		hold = h
-	elseif action == ACT_CLICK then
-		if hold and hold.held then
-			finish_hold()
-		elseif guard and guard.button == button then
-			end_hold()
-			log.debug("click on button %d right after a hold ignored", button)
-		else
-			end_hold()
-			button_click(button)
-		end
-	elseif action == ACT_RELEASE then
-		if hold and hold.held then
-			finish_hold()
-		else
-			end_hold()
-		end
-	end
-end
-
--- The proxy's own route (BUTTON_ACTION on the proxy binding, echoed) and the
--- Button Link bindings (DO_PUSH / DO_RELEASE / DO_CLICK on 200, 201, 202)
--- both end here (common/device.lua).
-dev.button_action = button_action
-
-dispatch.proxy["SET_HOLD_RATE_UP"] = function(_, params) save_setting("hold_up", params.RATE) end
-dispatch.proxy["SET_HOLD_RATE_DOWN"] = function(_, params) save_setting("hold_down", params.RATE) end
 
 -- Legacy commands that old programming may still send: the slider's path.
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_target(params.LEVEL, params.TIME) end
@@ -1387,7 +1289,7 @@ local schedule_recheck, cancel_recheck = dev.schedule_recheck, dev.cancel_rechec
 function OnDriverLateInit()
 	recall_as_hidden = nil -- Recall As is shown or hidden again at every late init
 	load_identity()
-	load_settings()
+	dev.load_settings()
 	dev.load_colors()
 	load_held()
 	dispatch.replay_properties(Properties)
@@ -1448,8 +1350,6 @@ end
 function OnDriverDestroyed()
 	settle()
 	cancel_follow()
-	end_hold()
-	disarm_guard()
-	dev.cancel_timers() -- the binding re-check and the Driver Version looks
+	dev.cancel_timers() -- a keypad press and the click guard, the binding re-check, the Driver Version looks
 	close_level_window()
 end

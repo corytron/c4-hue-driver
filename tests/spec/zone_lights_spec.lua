@@ -228,16 +228,19 @@ describe("bridge.zone_lights", function()
 			assert.equal("GET /clip/v2/resource/grouped_light: malformed response", last_result().text)
 		end)
 
-		it("runs a resync requested during a resync once more afterwards, latest done wins", function()
+		-- #56 (docs/review-leftovers-design.md §5): until 2026-10-25 the latest
+		-- waiting done replaced the others, as the lights' and the scenes' did
+		-- before #47 F2.
+		it("runs a resync requested during a resync once more afterwards, answering every caller that waited once", function()
 			Z:resync(function() done(true, "first") end)
 			Z:resync(function() done(true, "second") end)
 			Z:resync(function() done(true, "third") end)
 			answer_get()
-			assert.equal("first", last_result().text)
+			assert.same({ "first" }, texts(results))
 			assert.equal(2, #c4.transfers, "the pending resync started")
 			answer_get()
-			assert.equal("third", last_result().text)
-			assert.equal(2, #results)
+			assert.same({ "first", "second", "third" }, texts(results))
+			assert.equal(2, #c4.transfers, "one resync for the two that waited")
 		end)
 
 		it("takes the grouped_light items another module fetched and skips its own GET", function()

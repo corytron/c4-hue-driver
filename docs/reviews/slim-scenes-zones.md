@@ -203,3 +203,45 @@ keeps driver.lua (rows 7, 19, 24) and runs `luacheck`, `busted` and the build be
   unrelated events free (zone_lights.lua:1269-1378).
 - Would not touch: the recall generation and `still_current` check in scenes.lua:1737-1746 and 2115-2120 (the
   code-analysis item 4 fix), together with the `smart_fresh`/`state_known` gates it sits beside.
+
+## Done: rows 12–18 and 25–26 (2026-10-25, issue #56)
+
+`src/hue_bridge/bridge/owner.lua` (new) holds the lifecycle the three registry-owning modules carried three
+times: configuration and state plumbing, hello / goodbye / binding changes, the project-side reconcile, the busy
+flags and pending resyncs, room resolution, device creation, the names trio, the Attention items, the relink and
+forget pickers, and Re-link / Forget / Link Devices. `scenes.lua`, `zone_lights.lua` and `lights.lua` sit on it as
+a mixin (§4 Q7: `setmetatable(module, { __index = owner })`; chosen because driver.lua and the specs keep calling
+the same method names on the same objects and an override is just a method of the module, where plain functions
+would cost a forwarding line per method and module) and give it their words (`WORDS`, `MESSAGES`), their options
+(`OPTIONS`) and hooks. Each divergence between the copies (row 15 and §4 Q11 among them) was listed and decided
+before the merge; the list is the header of owner.lua (P1–P4, F1–F9, B1–B4, R1–R2, K1–K2, C1–C6, N1–N4, A1–A4,
+X1–X3, L1), and every module keeps today's behaviour behind the option, word or hook named there. Q11: clearing
+`announced` for a stranger's goodbye stays per module (`OPTIONS.goodbye_keeps_strangers`, zone lights);
+`zone_lights:hello(params)` and `add`'s table form stay the module's API (a wrapper and an argument check).
+Rows 25–26, high risk, merged without a behaviour change (hooks `link_candidates`, `link_hello`, `link_rid`,
+`linked_label`, `relink_refusal`, `forget_label` and friends).
+
+| File | Lines before | Lines after | Code lines before | Code lines after |
+|---|---|---|---|---|
+| `bridge/owner.lua` (new) | — | 1579 | — | 1091 |
+| `bridge/scenes.lua` | 3241 | 2499 | 2539 | 1821 |
+| `bridge/zone_lights.lua` | 2257 | 1569 | 1820 | 1139 |
+| `bridge/lights.lua` | 2827 | 1905 | 2265 | 1427 |
+| `bridge/registry.lua` | 618 | 618 | 428 | 428 |
+| **Total** | 8943 | 8170 (−773) | 7052 | 5906 (−1146) |
+
+Code lines leave out blank and comment-only lines; owner.lua's header (the divergence list, about 190 lines) is
+most of the difference between the two totals.
+
+Behaviour: no owner-visible change apart from the four the contract names (docs/review-leftovers-design.md §5):
+the zone lights answer every waiting resync caller once; a zone deleted in Hue while its AddDevice is pending is
+marked gone when the AddDevice answers; the zone lights give the registry their field schema
+(`zone_lights.ENTRY_FIELDS`); and a refresh clears a field whose value became nil (analysis R9;
+`REFRESH_CLEARS`: for the lights after a full GET only, `id_v1` for the scenes and the zone lights). Each has a spec
+in `tests/spec/owner_spec.lua`, checked by switching the change off. One existing spec changed:
+`zone_lights_spec` "runs a resync requested during a resync once more afterwards", which pinned the single-slot
+behaviour §5 item 1 replaces. Checked beyond the specs: a trace of every log line (all levels) and every C4 call
+of the whole suite, before and after, is identical except one ordering in Adopt Hue Names (the scenes and zone
+lights now read all Composer names before the first rename, as the lights did; the renames and texts are the
+same), and a scratch scenario over the Link Devices / Re-link / Forget branches the specs do not reach gives the
+same output byte for byte. Rows 1–11 and 19–24 are not part of #56.
