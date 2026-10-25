@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
 """Dev-loop server for the hue_bridge dev build. The contract is docs/dev-loop.md.
 
-Two listeners share one handler:
+Two listeners share one handler, both on one address (--bind; by default this
+VM's LAN address, never every address unless --bind 0.0.0.0 says so):
   plain HTTP (--port, default 8080)     the dev loop: /manifest /bundle /file
-                                        /commands /log /report /status /admin/enqueue
+                                        /commands /log /report /status /admin/*
   TLS        (--tls-port, default 8443) the same endpoints, plus the C4:url
                                         connection experiment points here:
                                         /stream (endless text/event-stream) and /ping
 The TLS certificate is self-signed, generated with openssl into --cert-dir on
 first run; the driver talks to it in "insecure" mode, so its contents don't matter.
 
-Two served trees (published path -> file), each exactly the layout
+Three served trees (published path -> file), each exactly the layout
 tools/build.sh stages for that driver; /manifest, /bundle and /file take
-?tree=bridge (the default) or ?tree=light:
+?tree=bridge (the default), ?tree=light or ?tree=scene:
   bridge: src/hue_bridge/**/*.lua, **/*.xml, certs/*  ->  driver.lua, bridge/http.lua, certs/x.pem
   light:  src/hue_light/**/*.lua, **/*.xml, certs/*   ->  driver.lua, light/state.lua
-  both:   src/common/*.lua                            ->  common/log.lua
-A tree's version is sha1 over, in sorted published-path order,
-path + "\\0" + contents. It is recomputed on every /manifest and /bundle.
-Only the bridge driver talks to this server; it forwards the light tree to
-its bound light drivers itself (docs/dev-loop.md).
+  scene:  src/hue_scene/**/*.lua, **/*.xml, certs/*   ->  driver.lua, scene/...
+  all:    src/common/*.lua                            ->  common/log.lua
+A file named devkey.lua is never served. A tree's version is sha1 over, in
+sorted published-path order, path + "\\0" + contents. It is recomputed on every
+/manifest and /bundle. Only the bridge driver talks to this server; it forwards
+the light and scene trees to its bound devices itself (docs/dev-loop.md).
+
+Security (docs/dev-loop.md, "Security"): the dev key, 64 lowercase hex
+characters in ~/.config/c4-hue-driver/devkey (0600; C4_HUE_DEVKEY_FILE or
+--key-file name another file; created on first run, never printed), keys
+HMAC-SHA256 over "c4-hue-devloop/1\\n<label>\\n<data>". /bundle and /commands
+answer "<mac>\\n<payload>", signed under "bundle" and "commands" (the latter over
+the driver's nonce too); tools/build.sh --dev bakes the same key into the dev
+packages, which check every bundle and command list before using it. /status
+and /admin/* want the header X-Devloop-Token, the "admin-token" MAC of
+nothing, which tools/devctl.py derives from the key file.
 
 State lives under --state-dir (default build/dev, gitignored):
   driver.log     one "HH:MM:SS.mmm <line>" per shipped log line (echoed to
@@ -27,24 +39,35 @@ State lives under --state-dir (default build/dev, gitignored):
   reports.jsonl  one JSON object per /report, with "received" (unix time) added
   commands.json  {"next_id": N, "commands": [pending...], "done": [ids]}; loaded
                  at startup so ids keep increasing across restarts
+  server.json    {"url": ..., "tls_url": ..., "pid": ...} while the server runs;
+                 tools/devctl.py finds the server through it
 
 Console output: every connection open is logged with client address and, on
 TLS, protocol/cipher/ALPN; that is what the connection experiment reads off the
 console. Each request line is logged too. --quiet drops the connection and
 request lines on the plain listener (the dev loop polls every 3 s) and the
-heartbeat report summaries; LOG lines, other reports and errors stay.
+heartbeat report summaries; LOG lines, other reports, refusals and errors stay.
 
-Usage: tools/devserver.py [--port 8080] [--tls-port 8443] [--bind 0.0.0.0]
-                          [--root DIR] [--cert-dir DIR] [--state-dir DIR] [--quiet]
+Usage: tools/devserver.py [--port 8080] [--tls-port 8443] [--bind ADDRESS]
+                          [--key-file FILE] [--root DIR] [--cert-dir DIR]
+                          [--state-dir DIR] [--quiet]
+       tools/devserver.py --ensure-key [--key-file FILE]
+                          create the key if missing, check it, print its path
 Standard library only.
 """
 
 import argparse
 import datetime
 import hashlib
+import hmac
 import json
 import os
+import re
+import secrets
+import signal
+import socket
 import ssl
+import stat
 import subprocess
 import sys
 import threading
@@ -78,6 +101,133 @@ def now():
 
 
 # ---------------------------------------------------------------------------
+# The dev key and what it signs (docs/dev-loop.md, "Security")
+# ---------------------------------------------------------------------------
+
+KEY_FILE_ENV = "C4_HUE_DEVKEY_FILE"
+KEY_RE = re.compile(r"[0-9a-f]{64}")
+KEY_MODULE = "devkey.lua"  # what tools/build.sh --dev bakes into a package; never served
+DOMAIN = b"c4-hue-devloop/1\n"
+TOKEN_HEADER = "X-Devloop-Token"
+NONCE_RE = re.compile(r"[0-9a-f]{16,64}")
+SIGNED_TYPE = "application/x-c4hue-signed"  # "<mac>\n<JSON payload>"
+
+
+class DevKeyError(Exception):
+    """The dev key file is missing, too open or malformed. The message never holds the key."""
+
+
+def default_key_file(environ=None):
+    """$C4_HUE_DEVKEY_FILE, else $XDG_CONFIG_HOME/c4-hue-driver/devkey, else
+    ~/.config/c4-hue-driver/devkey: outside the repository."""
+    environ = os.environ if environ is None else environ
+    explicit = environ.get(KEY_FILE_ENV)
+    if explicit:
+        return os.path.abspath(os.path.expanduser(explicit))
+    config = environ.get("XDG_CONFIG_HOME")
+    if not config or not os.path.isabs(config):
+        config = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(config, "c4-hue-driver", "devkey")
+
+
+def load_key(path):
+    """The key as bytes: its 64 hex characters, which are what keys the HMAC
+    (on the controller too, as ASCII). Refuses a file group or others can
+    read, and anything but 64 lowercase hex characters."""
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        raise DevKeyError(
+            "no dev key at %s: start tools/devserver.py once, or run tools/devserver.py --ensure-key" % path
+        ) from None
+    if mode & 0o077:
+        raise DevKeyError(
+            "%s can be read by others (mode %03o): chmod 600 it, or delete it for a new key" % (path, mode)
+        )
+    with open(path, "r", encoding="ascii", errors="replace") as f:
+        text = f.read().strip()
+    if not KEY_RE.fullmatch(text):
+        raise DevKeyError("%s does not hold 64 lowercase hex characters: delete it for a new key" % path)
+    return text.encode("ascii")
+
+
+def ensure_key(path):
+    """Create the key file if it is missing: 32 random bytes as hex, 0600, in
+    a 0700 directory. Returns (key, created)."""
+    created = False
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass  # created by another process meanwhile
+        else:
+            with os.fdopen(fd, "w", encoding="ascii") as f:
+                f.write(secrets.token_hex(32) + "\n")
+            created = True
+    return load_key(path), created
+
+
+def mac(key, label, data):
+    """HMAC-SHA256 with the key over DOMAIN + label + "\\n" + data, lowercase hex."""
+    return hmac.new(key, DOMAIN + label.encode("ascii") + b"\n" + data, hashlib.sha256).hexdigest()
+
+
+def fingerprint(key):
+    """16 hex characters that name a key without revealing it."""
+    return mac(key, "fingerprint", b"")[:16]
+
+
+def admin_token(key):
+    """What /status and /admin/* want in X-Devloop-Token."""
+    return mac(key, "admin-token", b"")
+
+
+def envelope(key, label, payload_obj):
+    """A signed answer: "<mac>\\n<payload>", the MAC over the payload's exact
+    bytes (compact JSON, ASCII only)."""
+    payload = json.dumps(payload_obj, separators=(",", ":")).encode("ascii")
+    return mac(key, label, payload).encode("ascii") + b"\n" + payload
+
+
+# ---------------------------------------------------------------------------
+# The address to listen on
+# ---------------------------------------------------------------------------
+
+# TEST-NET-2 (RFC 5737). Connecting a UDP socket sends nothing: the kernel
+# only picks the route, and so the source address, it would use.
+ROUTE_PROBE = ("198.51.100.1", 9)
+
+
+def lan_address(probe=ROUTE_PROBE):
+    """This VM's LAN address: the source address of its default route. None
+    when there is none (no route, or only loopback)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(probe)
+            address = s.getsockname()[0]
+    except OSError:
+        return None
+    if not address or address == "0.0.0.0" or address.startswith("127."):
+        return None
+    return address
+
+
+def choose_bind(requested, detect=None):
+    """The address both listeners bind: --bind when given (0.0.0.0 only then),
+    else the LAN address (`detect`, default lan_address, looked up when
+    called); None when that cannot be found."""
+    if requested:
+        return requested
+    return (detect or lan_address)()
+
+
+def url_host(bind):
+    """Where a client on this VM reaches a listener bound to `bind`."""
+    return "127.0.0.1" if bind in ("0.0.0.0", "") else bind
+
+
+# ---------------------------------------------------------------------------
 # The served tree
 # ---------------------------------------------------------------------------
 
@@ -97,14 +247,15 @@ class Tree:
 
     def files(self):
         """Return {published_path: absolute_path}. Published paths are relative
-        with forward slashes, e.g. "driver.lua", "bridge/http.lua", "common/log.lua"."""
+        with forward slashes, e.g. "driver.lua", "bridge/http.lua", "common/log.lua".
+        A devkey.lua is never among them."""
         out = {}
         for dirpath, dirnames, filenames in os.walk(self.driver):
             dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
             rel_dir = os.path.relpath(dirpath, self.driver)
             in_certs = rel_dir.split(os.sep)[0] == "certs"
             for name in filenames:
-                if name.startswith("."):
+                if name.startswith(".") or name == KEY_MODULE:
                     continue
                 if not (in_certs or name.endswith(".lua") or name.endswith(".xml")):
                     continue
@@ -113,7 +264,7 @@ class Tree:
         if os.path.isdir(self.common):
             for name in os.listdir(self.common):
                 full = os.path.join(self.common, name)
-                if name.endswith(".lua") and os.path.isfile(full):
+                if name.endswith(".lua") and name != KEY_MODULE and os.path.isfile(full):
                     out["common/" + name] = full
         return out
 
@@ -180,6 +331,9 @@ class State:
         self.last_event = None
         self.last_error = None  # text of the most recent report that carried "error"
         self.properties = {}
+        self.driver_key_fingerprint = None  # what the bridge's last report named
+        self.reported_key = False  # whether any report has said which key the driver has
+        self.warned_fingerprint = None  # the driver fingerprint last warned about
         self._load_commands()
 
     def _load_commands(self):
@@ -217,6 +371,26 @@ class State:
                 self.running_light_version = light_version
             if isinstance(scene_version, str) and scene_version:
                 self.running_scene_version = scene_version
+
+    def note_fingerprint(self, reported, ours):
+        """Record the key fingerprint a report carried (None: the driver has no
+        key). Returns a warning line the first time it differs from ours."""
+        with self.lock:
+            self.reported_key = True
+            self.driver_key_fingerprint = reported if isinstance(reported, str) else None
+            if self.driver_key_fingerprint == ours or self.driver_key_fingerprint == self.warned_fingerprint:
+                return None
+            self.warned_fingerprint = self.driver_key_fingerprint
+        if self.driver_key_fingerprint is None:
+            return (
+                "WARNING the driver reports no dev key (a build without one, or from before signing): it can use "
+                "no bundle or command from this server; install a dev build made from this commit"
+            )
+        return (
+            "WARNING the driver's dev key (fingerprint %s) is not this server's (%s): it refuses every bundle "
+            "and command; install a dev build made with this key, or start the server with that build's key"
+            % (self.driver_key_fingerprint, ours)
+        )
 
     def enqueue(self, command):
         with self.lock:
@@ -280,6 +454,10 @@ class State:
             summary += " lv=%s" % report["light_version"][:12]
         if isinstance(report.get("scene_version"), str):
             summary += " sv=%s" % report["scene_version"][:12]
+        if isinstance(report.get("tree"), str):
+            summary += " tree=%s" % report["tree"]
+        if isinstance(report.get("refused_version"), str):
+            summary += " refused=%s" % report["refused_version"][:12]
         if isinstance(report.get("elapsed_ms"), (int, float)):
             summary += " %dms" % report["elapsed_ms"]
         if isinstance(report.get("properties"), dict):
@@ -312,6 +490,8 @@ class State:
                 "pending_commands": list(self.commands),
                 "done_commands": list(self.done),
                 "last_done_id": self.done[-1] if self.done else None,
+                "driver_key_fingerprint": self.driver_key_fingerprint,
+                "driver_reported_key": self.reported_key,
                 "server_time": now(),
             }
 
@@ -357,6 +537,11 @@ def validate_command(body):
     if kind == "reload":
         return {"type": "reload"}, None
     return None, "unknown type %r (execute, set_property or reload)" % (kind,)
+
+
+def developer_path(path):
+    """The endpoints only the developer calls: they want the admin token."""
+    return path == "/status" or path.startswith("/admin/")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -437,7 +622,33 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_text(404, "not found\n")
             return
+        if developer_path(url.path) and not self.authorised(method, url.path):
+            return
         getattr(self, name)(parse_qs(url.query))
+
+    def authorised(self, method, path):
+        """Whether the request carries the admin token; if not, a 401 has been
+        sent and one DENY line logged (without the value presented)."""
+        given = self.headers.get(TOKEN_HEADER)
+        if given is not None and hmac.compare_digest(
+            given.encode("utf-8", "replace"), self.server.admin_token.encode("ascii")
+        ):
+            return True
+        self.close_connection = True  # the body was not read
+        log(
+            "DENY  %s:%d  %s %s: %s"
+            % (
+                self.client_address[0],
+                self.client_address[1],
+                method,
+                path,
+                "no admin token" if given is None else "wrong admin token",
+            )
+        )
+        self.send_json(
+            {"error": "admin token missing or wrong; tools/devctl.py sends it (docs/dev-loop.md, Security)"}, 401
+        )
+        return False
 
     # -- replies ------------------------------------------------------------
 
@@ -456,6 +667,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_text(self, status, text, allow=None):
         self.send_body(status, text.encode("utf-8"), "text/plain; charset=utf-8", allow)
+
+    def send_signed(self, label, payload_obj):
+        self.send_body(200, envelope(self.server.key, label, payload_obj), SIGNED_TYPE)
 
     def send_no_content(self):
         self.send_response(204)
@@ -493,8 +707,8 @@ class Handler(BaseHTTPRequestHandler):
     # -- dev-loop endpoints -------------------------------------------------
 
     def tree_from(self, query):
-        """The tree a request names (?tree=bridge|light, default bridge), or
-        None after a 400 has been sent."""
+        """The tree a request names (?tree=bridge|light|scene, default bridge),
+        or None after a 400 has been sent."""
         name = query.get("tree", ["bridge"])[0]
         tree = self.server.trees.get(name)
         if tree is None:
@@ -510,13 +724,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"version": version, "tree": tree.name, "files": sorted(contents), "server_time": now()})
 
     def get_bundle(self, query):
+        """The tree's files, signed (label "bundle"): the driver checks the MAC
+        before it decodes anything."""
         tree = self.tree_from(query)
         if tree is None:
             return
         version, contents = tree.snapshot()
         self.server.state.touch()
         files = {path: data.decode("utf-8", "replace") for path, data in contents.items()}
-        self.send_json({"version": version, "tree": tree.name, "files": files})
+        self.send_signed("bundle", {"version": version, "tree": tree.name, "files": files})
 
     def get_file(self, query):
         tree = self.tree_from(query)
@@ -535,14 +751,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_body(200, data, "text/plain; charset=utf-8")
 
     def get_commands(self, query):
+        """The pending commands after `after`, signed (label "commands")
+        together with the nonce the driver sent, so an answer recorded once
+        cannot be replayed to it."""
         raw = query.get("after", ["0"])[0]
         try:
             after = int(raw)
         except ValueError:
             self.send_bad_request("after must be an integer")
             return
+        nonce = query.get("nonce", [""])[0]
+        if not NONCE_RE.fullmatch(nonce):
+            self.send_bad_request(
+                "nonce must be 16 to 64 lowercase hex characters "
+                "(a dev build from before signing? install one made from this commit)"
+            )
+            return
         self.server.state.touch()
-        self.send_json({"commands": self.server.state.commands_after(after)})
+        self.send_signed("commands", {"nonce": nonce, "commands": self.server.state.commands_after(after)})
 
     def get_status(self, query):
         trees = self.server.trees
@@ -555,6 +781,7 @@ class Handler(BaseHTTPRequestHandler):
         status["live_version"] = trees["bridge"].read()[0]
         status["live_light_version"] = trees["light"].read()[0]
         status["live_scene_version"] = trees["scene"].read()[0]
+        status["key_fingerprint"] = self.server.key_fingerprint
         self.send_json(status)
 
     def post_log(self, query):
@@ -578,6 +805,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bad_request(err)
             return
         self.server.state.touch(body.get("version"), body.get("light_version"), body.get("scene_version"))
+        warning = self.server.state.note_fingerprint(body.get("key_fingerprint"), self.server.key_fingerprint)
+        if warning:
+            log(warning)
         summary = self.server.state.add_report(body)
         if body["event"] != "heartbeat" or not self.server.quiet:
             log(summary)
@@ -598,8 +828,8 @@ class Handler(BaseHTTPRequestHandler):
         return {name: (tree.pinned[0] if tree.pinned else None) for name, tree in self.server.trees.items()}
 
     def post_pin(self, query):
-        """Pin both trees (or ?tree=bridge|light) to their content right now;
-        the controller keeps that version until unpin or the next pin."""
+        """Pin every tree (or ?tree=bridge|light|scene) to its content right
+        now; the controller keeps that version until unpin or the next pin."""
         names = query.get("tree") or list(self.server.trees)
         for name in names:
             tree = self.server.trees.get(name)
@@ -651,15 +881,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class DevServer(ThreadingHTTPServer):
-    """One listener. The handler reaches the shared trees and state via self.server."""
+    """One listener. The handler reaches the shared trees, state and key via self.server."""
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, trees, state, tls_context=None, quiet=False):
+    def __init__(self, address, trees, state, key, tls_context=None, quiet=False):
         super().__init__(address, Handler)
         self.trees = trees  # {name: Tree}
         self.state = state
+        self.key = key  # the dev key's 64 hex characters, as bytes
+        self.admin_token = admin_token(key)
+        self.key_fingerprint = fingerprint(key)
         self.tls_context = tls_context
         self.quiet = quiet
 
@@ -720,12 +953,46 @@ def ensure_cert(cert_dir):
     return crt, key
 
 
-def main():
-    default_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+def write_server_file(state_dir, url, tls_url):
+    """build/dev/server.json: where tools/devctl.py finds this server."""
+    path = os.path.join(state_dir, "server.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"url": url, "tls_url": tls_url, "pid": os.getpid(), "started": now()}, f)
+    os.replace(tmp, path)
+    return path
+
+
+def remove_server_file(path):
+    """Remove server.json if it is still this process's."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            ours = json.load(f).get("pid") == os.getpid()
+        if ours:
+            os.remove(path)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def build_parser(default_root):
     parser = argparse.ArgumentParser(description="Dev-loop server for the hue_bridge dev build (docs/dev-loop.md).")
     parser.add_argument("--port", type=int, default=8080, help="plain HTTP port (default 8080)")
     parser.add_argument("--tls-port", type=int, default=8443, help="TLS port (default 8443)")
-    parser.add_argument("--bind", default="0.0.0.0", help="address to listen on (default all)")
+    parser.add_argument(
+        "--bind",
+        default=None,
+        help="address both listeners bind (default: this VM's LAN address; 0.0.0.0 only when given here)",
+    )
+    parser.add_argument(
+        "--key-file",
+        default=None,
+        help="the dev key (default $%s, else ~/.config/c4-hue-driver/devkey; created on first run)" % KEY_FILE_ENV,
+    )
+    parser.add_argument(
+        "--ensure-key",
+        action="store_true",
+        help="only create the key file if missing, check it and print its path (tools/build.sh --dev)",
+    )
     parser.add_argument(
         "--root", default=default_root, help="repo root, the directory containing tools/ (default: detected)"
     )
@@ -747,7 +1014,26 @@ def main():
         "Offer 'h2,http/1.1' to learn whether a client asks for HTTP/2: the server "
         "cannot speak h2, so such a connection fails, but its OPEN line shows alpn=h2.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def ensure_key_main(key_file):
+    """--ensure-key: the path on stdout (for tools/build.sh), the rest on stderr."""
+    try:
+        key, created = ensure_key(key_file)
+    except (DevKeyError, OSError) as exc:
+        sys.exit("devserver: %s" % exc)
+    sys.stderr.write("dev key %s%s, fingerprint %s\n" % (key_file, " (created)" if created else "", fingerprint(key)))
+    print(key_file)
+
+
+def main(argv=None):
+    default_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    args = build_parser(default_root).parse_args(argv)
+    key_file = os.path.abspath(os.path.expanduser(args.key_file)) if args.key_file else default_key_file()
+    if args.ensure_key:
+        ensure_key_main(key_file)
+        return
 
     root = os.path.abspath(args.root)
     if not os.path.isdir(os.path.join(root, "src", "hue_bridge")):
@@ -755,31 +1041,50 @@ def main():
     cert_dir = args.cert_dir or os.path.join(root, "build", "diag")
     state_dir = args.state_dir or os.path.join(root, "build", "dev")
 
+    try:
+        key, created = ensure_key(key_file)
+    except (DevKeyError, OSError) as exc:
+        sys.exit("devserver: %s" % exc)
+    bind = choose_bind(args.bind)
+    if not bind:
+        sys.exit("devserver: could not find this VM's LAN address (no default route?); pass --bind <address>")
+
     trees = {name: Tree(root, name) for name in TREES}
     state = State(state_dir)
     try:
-        crt, key = ensure_cert(cert_dir)
+        crt, cert_key = ensure_cert(cert_dir)
     except (OSError, subprocess.CalledProcessError) as exc:
         sys.exit("could not create a certificate in %s: %s" % (cert_dir, exc))
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(crt, key)
+    ctx.load_cert_chain(crt, cert_key)
     ctx.set_alpn_protocols([p.strip() for p in args.alpn.split(",") if p.strip()])
 
-    plain = DevServer((args.bind, args.port), trees, state, quiet=args.quiet)
-    tls = DevServer((args.bind, args.tls_port), trees, state, tls_context=ctx, quiet=args.quiet)
+    plain = DevServer((bind, args.port), trees, state, key, quiet=args.quiet)
+    tls = DevServer((bind, args.tls_port), trees, state, key, tls_context=ctx, quiet=args.quiet)
+    url = "http://%s:%d" % (url_host(bind), plain.server_address[1])
+    tls_url = "https://%s:%d" % (url_host(bind), tls.server_address[1])
 
+    log("dev key %s%s, fingerprint %s" % (key_file, " (created)" if created else "", fingerprint(key)))
+    if os.path.exists(os.path.join(root, "src", "common", KEY_MODULE)):
+        log("WARNING src/common/%s exists: it is never served; delete it (tools/build.sh refuses to run)" % KEY_MODULE)
     for name in TREES:
         version, contents = trees[name].snapshot()
         log("serving %s tree: %d files from %s, version %s" % (name, len(contents), trees[name].driver, version))
     log("state in %s: %d pending command(s), next id %d" % (state_dir, len(state.commands), state.next_id))
-    log("listening on http://%s:%d and https://%s:%d" % (args.bind, args.port, args.bind, args.tls_port))
+    if bind == "0.0.0.0":
+        log("WARNING listening on every address (--bind 0.0.0.0)")
+    log("listening on %s and %s (Dev Server = %s:%d)" % (url, tls_url, url_host(bind), plain.server_address[1]))
+    server_file = write_server_file(state_dir, url, tls_url)
 
+    # SIGTERM (pkill) ends the server like Ctrl-C, so server.json goes too.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     threading.Thread(target=tls.serve_forever, name="tls", daemon=True).start()
     try:
         plain.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        remove_server_file(server_file)
         tls.shutdown()
         tls.server_close()
         plain.server_close()
