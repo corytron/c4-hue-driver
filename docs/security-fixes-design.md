@@ -43,15 +43,23 @@ for the coordinator, not into the file.
 
 ### bridge/stream.lua (stream-http)
 
-- Every new transfer, not only the watchdog's, waits while
-  `self:open_abandoned() >= stream.MAX_ABANDONED`: `connect()` sets the
+- Open stream transfers, live plus abandoned, never exceed
+  `stream.MAX_ABANDONED + 1` (two today). The watchdog keeps its check
+  (`open_abandoned() >= MAX_ABANDONED`: it abandons a live transfer before
+  opening one). Every other new transfer waits while
+  `self:open_abandoned() >= stream.MAX_ABANDONED + 1`: `connect()` sets the
   status to `Waiting for an earlier stream transfer to close` and tries again
-  after the current backoff, without opening a transfer. This covers start
+  after the current backoff, without opening a transfer. A single
+  Disconnect/Connect therefore reconnects at once next to one abandoned
+  transfer; a second restart within that window waits (diff review
+  2026-10-25 row 1). This covers start
   after stop (Disconnect, then Connect Event Stream), `restart_stream` in the
   driver (a new stream object shares `opts.abandoned`), an address change and
   the oversized-line reconnect.
 - Every path that gives up an open transfer records it with `drop_transfer`
-  (so it counts as abandoned): stop, the oversized line, the watchdog.
+  (so it counts as abandoned): stop, the oversized line, the watchdog. On the
+  oversized line the chunk callback also returns true, so Director aborts
+  that transfer.
 - After a transfer that ended in an overflow, the next 200 does not reset the
   backoff to 1 s; the doubled backoff stays until a transfer delivers an
   event normally.
@@ -84,9 +92,18 @@ conclusive answer.
 - `util.display_name(text)`: a name fit for a Composer device name or a plain
   property row. `nil` or a non-string becomes `""` (numbers via `tostring`);
   control characters (`%c`) are removed; leading and trailing white space
-  trimmed; at most `util.NAME_MAX = 64` bytes, cut on a UTF-8 character
-  boundary (never in the middle of a multi-byte sequence). Commas are kept
-  (they matter only in picker lists, which keep `util.sanitise`).
+  trimmed; at most `util.NAME_MAX = 100` UTF-8 characters (counted by their
+  lead bytes: every byte outside 0x80-0xBF), cut before a character, never
+  inside one. Text that is not UTF-8 is also bounded by `util.NAME_MAX_BYTES
+  = 400` bytes (100 UTF-8 characters never exceed it), cut by backing over
+  at most three continuation bytes. Why characters: no genuine Hue name comes
+  near 100 (Hue allows 32; the longest name the bridge builds, a zone scene's
+  "<Zone> <Scene>", has 65), so no real name is cut, and a hostile one is
+  still bounded. Idempotent, and linear in the length (the trailing trim
+  counts blanks from the end: the pattern `%s+$` is quadratic in an inner run
+  of blanks). Commas are kept (they matter only in picker lists, which keep
+  `util.sanitise`). `util.name_key(text)` is `util.norm` of it, for the name
+  matches. The same function covers the light's Model row.
 
 ### Dev builds (dev-surface)
 

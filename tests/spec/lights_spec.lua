@@ -1331,6 +1331,72 @@ describe("bridge.lights", function()
 		end)
 	end)
 
+	-- Security review 2026-10-25 finding 8: AddDevice and the light's Hue Name
+	-- and Hue Room rows get display names (util.display_name); the registry
+	-- keeps Hue's own. bridge/owner_spec.lua has the upgrade cases.
+	describe("names that reach Control4 (security review 2026-10-25 finding 8)", function()
+		-- Garage White and its room called at length, with control characters,
+		-- in an app paired with the bridge (JSON string contents) ...
+		local LIGHT = "Garage\\tWhite\\n" .. string.rep(" over the bench", 8)
+		local ROOM = "Garage\\n" .. string.rep(" and workshop", 9)
+		-- ... as the registry keeps them ...
+		local LIGHT_RAW = "Garage\tWhite\n" .. string.rep(" over the bench", 8)
+		local ROOM_RAW = "Garage\n" .. string.rep(" and workshop", 9)
+		-- ... and as Control4 gets them: no control characters, 100 characters at most.
+		local LIGHT_SHOWN = "GarageWhite" .. string.rep(" over the bench", 5) .. " over the benc"
+		local ROOM_SHOWN = "Garage" .. string.rep(" and workshop", 7) .. " an"
+
+		local function named_gets()
+			return {
+				light = replace(F.light, '"name":"Garage White"', '"name":"' .. LIGHT .. '"'),
+				device = replace(F.device, '"name":"Garage White"', '"name":"' .. LIGHT .. '"'),
+				room = replace(F.room, '"name":"Garage"', '"name":"' .. ROOM .. '"'),
+			}
+		end
+
+		it("adds and configures the light under display names", function()
+			resync(named_gets())
+			L:add_light(F.rids.garage, GARAGE_ROOM, done)
+			assert.is_true(last_result().ok)
+			assert.equal(LIGHT_SHOWN, c4.added[1].name)
+			local configure = sent_to(ID.garage, "HUE_CONFIGURE")[1].params
+			assert.equal(LIGHT_SHOWN, configure.name)
+			assert.equal(ROOM_SHOWN, configure.hue_room)
+			local entry = L:entry(F.rids.garage)
+			assert.same({ LIGHT_RAW, ROOM_RAW }, { entry.name, entry.hue_room }, "the registry keeps Hue's names")
+		end)
+
+		it("configures the model the bridge reports as a display name too", function()
+			resync({ device = replace(F.device, '"product_name":"Hue white lamp"', '"product_name":"Hue white\\tlamp\\n"') })
+			L:add_light(F.rids.garage, GARAGE_ROOM, done)
+			assert.equal("Hue whitelamp", sent_to(ID.garage, "HUE_CONFIGURE")[1].params.model)
+			assert.equal("Hue white\tlamp\n", L:entry(F.rids.garage).model, "the registry keeps the bridge's")
+		end)
+
+		it("names a light after its own name when its device's name has nothing to show", function()
+			resync()
+			L.devices[F.device_rids.garage].name = {}  -- how the controller decodes a JSON null
+			L:add_light(F.rids.garage, GARAGE_ROOM, done)
+			assert.equal("Garage White", c4.added[1].name)
+			L.devices[F.device_rids.hallway].name = "\n"
+			L:add_light(F.rids.hallway, GARAGE_ROOM, done)
+			assert.equal("Hallway Ambiance", c4.added[2].name)
+		end)
+
+		it("does not list a light an older build created under the raw name", function()
+			resync(named_gets())
+			L:add_light(F.rids.garage, GARAGE_ROOM, done)
+			local proxy = fake.project.devices[ID.garage].proxy_id
+			L.registry[F.rids.garage].proxy_id = proxy
+			c4:RenameDevice(proxy, LIGHT_RAW)  -- what an older build's AddDevice was given
+			c4.renamed = {}
+			assert.same({}, L:name_differences())
+			assert.is_nil(L:attention():find("differ", 1, true))
+			assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
+			assert.same({}, c4.renamed)
+		end)
+	end)
+
 	describe("room mappings", function()
 		it("set_room_mapping maps rooms and zones, re-maps, removes, and refuses bad input", function()
 			resync()

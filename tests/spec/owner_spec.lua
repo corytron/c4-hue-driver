@@ -319,6 +319,172 @@ describe("bridge.owner", function()
 		end)
 	end)
 
+	-- Security review 2026-10-25 finding 8: a Hue name reaches AddDevice and
+	-- RenameDevice only as util.display_name, and the name comparisons run
+	-- both sides through it, so the devices an older build created under raw
+	-- names stay as they are (the cases at owner:name_differences). Through the
+	-- lights, whose expected name is the Hue name itself.
+	describe("names that reach Control4 (security review 2026-10-25 finding 8)", function()
+		-- 127 characters: a light named at length by a hostile peer (Hue itself
+		-- allows 32).
+		local LONG = "Garage White " .. string.rep("over the workbench ", 6)
+		-- Its display name: the first 100 characters.
+		local SHOWN = "Garage White" .. string.rep(" over the workbench", 4) .. " over the wo"
+		local names, renamed, added
+
+		-- The project: Composer names by device or proxy id; renames are
+		-- recorded and applied.
+		local function named_project()
+			local p = project_calls()
+			p.display_name = function(id) return names[id] end
+			p.rename = function(id, name)
+				renamed[#renamed + 1] = { id = id, name = name }
+				names[id] = name
+			end
+			return p
+		end
+
+		-- The lights' GET bodies with Garage White's light and device both
+		-- called `json_name` in Hue (JSON string contents: escapes allowed).
+		local function named(json_name)
+			return { light = replace(F.light, '"name":"Garage White"', '"name":"' .. json_name .. '"'),
+				device = replace(F.device, '"name":"Garage White"', '"name":"' .. json_name .. '"') }
+		end
+
+		-- The lights after a full GET of named(json_name); AddDevice answers
+		-- 2001, 2002, ... and records each call in `added`.
+		local function lights_named(json_name)
+			return new_lights({ project = named_project(), add_device = function(driver, room_id, name, cb)
+				added[#added + 1] = { driver = driver, room_id = room_id, name = name }
+				cb(2000 + #added, nil)
+			end }, named(json_name))
+		end
+
+		before_each(function()
+			names, renamed, added = {}, {}, {}
+		end)
+
+		it("creates a device under the display name of its Hue name; the registry keeps Hue's", function()
+			local util = require("bridge.util")
+			assert.equal(SHOWN, util.display_name(LONG))
+			assert.same({ 127, 100 }, { #LONG, #SHOWN })
+			local L = lights_named(LONG)
+			local result
+			L:add_light(F.rids.garage, GARAGE_ROOM, function(ok, text) result = { ok, text } end)
+			assert.same({ { driver = "hue_light.c4z", room_id = GARAGE_ROOM, name = SHOWN } }, added)
+			assert.is_true(result[1])
+			assert.equal(LONG, L.registry[F.rids.garage].name)
+			assert.is_true(saw_log("lights: adding " .. SHOWN .. " to Garage (1 of 1)"))
+
+			added, store = {}, {}  -- a fresh bridge: the first one saved its entry
+			L = lights_named("Garage\\tWhite\\n")
+			L:add_light(F.rids.garage, GARAGE_ROOM, function() end)
+			assert.equal("GarageWhite", added[1].name, "control characters go")
+		end)
+
+		it("creates a device whose Hue name has nothing to show as Hue light, and never renames it", function()
+			local L = lights_named("\\n\\t ")
+			L:add_light(F.rids.garage, GARAGE_ROOM, function() end)
+			assert.equal("Hue light", added[1].name)
+			names[2001] = "Workbench"  -- AddDevice gave no proxy id: the protocol device is compared
+			assert.same({}, L:name_differences(true), "nothing to rename to")
+			assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
+			assert.same({}, renamed)
+		end)
+
+		it("leaves an older device under its raw name alone: nothing listed, renamed or accepted", function()
+			for _, raw in ipairs({ { LONG, LONG }, { "Garage\\tWhite\\n", "Garage\tWhite\n" } }) do
+				names, renamed, store = {}, {}, {}
+				local L = lights_named(raw[1])
+				register(L, F.rids.garage, 2001)
+				assert.equal(raw[2], L.registry[F.rids.garage].name)
+				names[3001] = raw[2]  -- what an older build's AddDevice was given
+				assert.same({}, L:name_differences(), raw[2])
+				assert.same({}, L:name_differences(true), "nor for Adopt Hue Names")
+				assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
+				assert.equal("No Composer names differ from the Hue names", L:accept_names())
+				assert.same({}, renamed)
+				assert.is_nil(L.registry[F.rids.garage].name_dismissed)
+				assert.equal(raw[2], names[3001], "its raw name stays until the owner renames it")
+			end
+		end)
+
+		it("keeps a difference an older build accepted under the raw expected name accepted", function()
+			local L = lights_named(LONG)
+			register(L, F.rids.garage, 2001, { name_dismissed = LONG })
+			names[3001] = "Workbench"
+			assert.same({}, L:name_differences())
+			local all = L:name_differences(true)
+			assert.equal(1, #all, "Adopt Hue Names still renames accepted differences, as always")
+			assert.same({ "Workbench", SHOWN }, { all[1].current, all[1].expected })
+		end)
+
+		it("lists a Hue rename to a long name, and Adopt Hue Names renames to its display name", function()
+			local L = lights_named("Garage White")
+			register(L, F.rids.garage, 2001)
+			names[3001] = "Garage White"
+			assert.same({}, L:name_differences())
+			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light", metadata = { name = LONG } } } })
+			assert.equal(LONG, L.registry[F.rids.garage].name)
+			local diffs = L:name_differences()
+			assert.equal(1, #diffs)
+			assert.same({ "Garage White", SHOWN }, { diffs[1].current, diffs[1].expected })
+			assert.same({}, renamed, "an event renames nothing")
+			assert.equal("Renamed 1 device: Garage White → " .. SHOWN .. " (device 2001)", L:adopt_hue_names())
+			assert.same({ { id = 3001, name = SHOWN } }, renamed)
+			assert.same({}, L:name_differences(true), "the display name then compares equal")
+			-- A Hue rename past the 100th character, or in control characters only, shows nowhere: not listed.
+			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
+				metadata = { name = LONG .. "s\n" } } } })
+			assert.same({}, L:name_differences())
+			-- A Hue rename with a control character is renamed to without it.
+			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
+				metadata = { name = "Garage\tLamp" } } } })
+			assert.equal("Renamed 1 device: " .. SHOWN .. " → GarageLamp (device 2001)", L:adopt_hue_names())
+			assert.same({ id = 3001, name = "GarageLamp" }, renamed[2])
+		end)
+
+		it("leaves an owner's rename to the owner: listed until accepted, renamed by nothing else", function()
+			local L = lights_named(LONG)
+			register(L, F.rids.garage, 2001)
+			bound[2001] = "Hue Light"
+			names[3001] = "Workbench"
+			local diffs = L:name_differences()
+			assert.equal(1, #diffs)
+			assert.same({ "Workbench", SHOWN }, { diffs[1].current, diffs[1].expected })
+			-- An event and a resync's absorb and settle rename nothing.
+			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light", on = { on = true } } } })
+			L:absorb(resources(named(LONG)))
+			L:settle("resync")
+			assert.same({}, renamed)
+			assert.equal("Accepted 1 name difference: Workbench (Hue: " .. SHOWN .. ")", L:accept_names())
+			assert.equal(SHOWN, L.registry[F.rids.garage].name_dismissed)
+			assert.same({}, L:name_differences())
+			assert.same({}, renamed)
+			assert.equal("Workbench", names[3001])
+		end)
+
+		it("Link Devices links a device named after the display name of a long Hue name, as one under the raw name",
+			function()
+				for _, composer in ipairs({ SHOWN, LONG }) do
+					names, bound, store = { [2050] = composer }, { [2050] = "Hue Light" }, {}
+					local L = lights_named(LONG)
+					local text = L:link_devices()
+					local head = "Linked 1 device: " .. composer .. " (device 2050) to "
+					assert.equal(head, text:sub(1, #head))
+					assert.truthy(text:find(" by name", 1, true))
+					assert.equal(2050, L.registry[F.rids.garage].device_id)
+				end
+				-- Both at once cannot both be that light: neither is linked by name.
+				names, store = { [2050] = SHOWN, [2051] = LONG }, {}
+				bound = { [2050] = "Hue Light", [2051] = "Hue Light" }
+				local L = lights_named(LONG)
+				local text = L:link_devices()
+				assert.truthy(text:find("2 bound devices share that name", 1, true))
+				assert.is_nil(L.registry[F.rids.garage])
+			end)
+	end)
+
 	-- §5 item 4: code analysis 2026-10-22 R9 (the refresh half).
 	describe("a refresh clears a field whose value became nil", function()
 		it("lights: a full GET clears the MAC and the device name the bridge no longer reports; an event does not",
