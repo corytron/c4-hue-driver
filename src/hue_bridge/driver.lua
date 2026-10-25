@@ -510,8 +510,9 @@ local function attention_text()
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
 
--- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`, `Last
--- Action`): Composer clips a value at about 75 characters, so the row shows
+-- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`; `Last
+-- Action` is word-wrapped onto its own rows instead, #68): Composer clips a
+-- value at about 75 characters, so the row shows
 -- a summary and the drop-down every item on a line of its own. The list is
 -- comma-delimited, so a comma in any text becomes "‚". A pick in Composer
 -- changes nothing: the row snaps back to the summary (list_rows remembers

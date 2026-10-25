@@ -1,20 +1,25 @@
 # Composer checklist
 
 What only Composer, a Navigator, a keypad or the Hue app can show, as steps
-for the owner. Every step describes what the current build (160) does. A
-**Done** line under a step says when it was checked on the house and what it
-showed; **Open** means it has not been checked yet. What runs on the house
-and what is open overall is `docs/status.md`; the engineering record behind
-each result is `docs/design.md`.
+for the owner. Every step describes what build 316 does (its texts checked
+against the code on 2026-10-25, issue #231); where build 316 differs from
+the build a step was first written for, a dated note says so. A **Done**
+line under a step says when it was checked on the house and what it
+showed, in the words of that day; **Open** means it has not been checked
+yet. What runs on the house and what is open overall is `docs/status.md`;
+the engineering record behind each result is `docs/design.md`.
 
 ## Before you start
 
-- **Release builds only.** The house has run release builds (no dev loop,
-  no Lua command window) since build 116 on 2026-10-22. The developer builds
-  them with `tools/build.sh`; the Windows Claude session downloads the three
-  files of one build from the VM (checksums checked) and installs them
-  (step 1). A development build goes on the house only when the developer
-  asks for a test, and the release files replace it afterwards.
+- **Release builds.** Release builds (no dev loop, no Lua command window)
+  ran on the house from build 116 (2026-10-22) to build 259 (2026-10-24).
+  Since build 259 (2026-10-24, 23:11) a release reaches the house from
+  GitHub (`docs/release-checklist.md`, "Deploy to the house"): `tools/deploy.py
+  start` writes the brief, and the Windows Claude session downloads the
+  three files of the release from their GitHub URLs (checksums checked)
+  and installs them (step 1). A development build goes on the house only
+  when the developer asks for a test (dev build 309 since 2026-10-25 03:24,
+  for issue #40), and a release replaces it afterwards (issue #228).
 - **Capability changes need a reboot.** If an install makes Composer ask
   "Restart Director?", answer Yes, but it does not restart Director: the
   devices keep their old capabilities until you reboot the controller from
@@ -24,7 +29,8 @@ each result is `docs/design.md`.
   command of its own.
 - **Logs.** A device's Lua output is in its **Lua** tab in Composer. When a
   step asks for it, set that device's `Debug Mode` to On first and back to
-  Off afterwards. Nothing is shipped to the VM any more.
+  Off afterwards. A release build ships nothing to the VM; a development
+  build ships the bridge's log to the dev server (`docs/dev-loop.md`).
 - A quoted property or result text is the exact text to expect; `<…>`
   stands for a value that varies. Where a step does not quote, paste what
   you see.
@@ -36,6 +42,14 @@ deleted in Composer on 2026-10-22 and remembered as deleted); the "Bedside
 Lights Switch" bound to Shine's Top and Bottom Button Links; the "Floor Lamp
 Switch" bound to nothing. Steps that need a light start with Add Light
 (step 21).
+
+The house on 2026-10-25 (`docs/status.md`): dev build 309 on all five Hue
+devices since 03:24; besides Shine, a second Hue Scene device, "Golden
+hours" (device 1164, the Master Bedroom's time-of-day scene, created
+2026-10-24), and two zone lights made with Add Zone Light on 2026-10-24,
+"Bedside Lights" (device 1166, the Hue zone of the two bedside lamps) and
+"Master Bedroom Lights" (device 1168, the whole room); still no Hue Light
+device for a single lamp, and the switches bound as above.
 
 ## A. Install and update
 
@@ -49,16 +63,25 @@ Switch" bound to nothing. Steps that need a light start with Add Light
    device by hand. A right-click "Update Driver" is only for reloading the
    same version ("Versions are equal. Do you want to overwrite…?").
    - **Done** for every build since 84 (2026-10-21), the last being 160
-     (2026-10-24), through the Windows session.
+     (2026-10-24), through the Windows session; since then builds 184 to
+     259 on 2026-10-24 (259 the first from a GitHub release through
+     `tools/deploy.py`, round 34) and dev builds 276, 284 and 309 on
+     2026-10-25 (`docs/composer-remote.md`, History).
 2. The update is **in place**. Never delete and re-add the bridge: a re-added
    bridge has a new device id and an empty store, so the pairing and every
    device link are lost. Expect on the bridge within a minute: `Status`
-   "Paired"; `Event Stream` "Connected since <HH:MM:SS>"; `Attention` "None";
-   `Lights` "47 on bridge, 0 imported, 0 new, 0 missing, 0 unbound, 47
-   deleted" (the house today); `Scenes` "<n> on bridge, 1 imported, 0
-   missing, 0 unbound, <d> deleted" (126 scenes on the bridge on
-   2026-10-24). `Dev Server` and `Diagnostic Server` may still hold old
-   values; a release build ignores `Dev Server`.
+   "Paired"; `Event Stream` "Connected since <HH:MM:SS>" (with ", <n>
+   containers, last <HH:MM:SS>" once events arrive, and the reconnect count
+   after a reconnect); `Attention` "None"; `Lights` "47 on bridge, 0
+   imported, 0 new, 0 missing, 0 unbound, 47 deleted" (the house today);
+   `Scenes` "<n> + <m> time-based on bridge, <k> imported, <d> deleted"
+   ("<g> missing" and "<u> unbound" appear only when not zero; 126 + 15 on
+   the bridge and 2 imported on 2026-10-25); `Zone Lights` "7 zones, 16
+   rooms on bridge; 2 imported". Corrected 2026-10-25: this step was written
+   when `Scenes` read "<n> on bridge, 1 imported, 0 missing, 0 unbound, <d>
+   deleted" and a release build still showed the `Dev Server` and
+   `Diagnostic Server` rows; the release builds of 1.0 and later have
+   neither row.
    - **Done 2026-10-22** (production build 116 over dev build 84): the
      pairing, the registry and `Debug Mode` kept, the stream back 8 s after
      the install.
@@ -85,7 +108,9 @@ Switch" bound to nothing. Steps that need a light start with Add Light
      Light (Hue color lamp)"; `Hue Light ID` "#<n> (<first 8 hex digits>…)";
      `Hue Name`, `Model` and `Hue Room` filled; `Online` "Online" while the
      bulb has power; `Driver Version` the build. No rows for click or hold
-     rates, the On preset or button LED colours (step 35).
+     rates, the On preset or button LED colours (step 35). Superseded
+     (2026-10-25, #59): those settings of the light_v2 proxy now show above
+     the driver's rows (step 35).
    - Connections: its "Hue Bridge" input already connected, `Connected To`
      "Hue Bridge->Hue Lights"; under Control Outputs the Top, Bottom and
      Toggle Button Links.
@@ -126,9 +151,10 @@ rooms (step 20). Moving a device never touches its binding.
 10. A colour bulb offers a colour wheel and a colour temperature control, a
     white-ambiance bulb only the temperature, a white-only bulb neither. Pick
     a colour, then a temperature: the bulb follows each. Paste the
-    temperature range offered (the bulb's own, roughly 2000–6500 K) and the
-    line "first SET_COLOR_TARGET params: …" from the light's Lua tab (it is
-    written whatever `Debug Mode` says). **Done 2026-10-25 from the record:**
+    temperature range offered (the bulb's own, roughly 2000–6500 K). (Until
+    2026-10-25 the step also asked for the line "first SET_COLOR_TARGET
+    params: …" from the light's Lua tab; build 316 no longer writes it.)
+    **Done 2026-10-25 from the record:**
     the driver's own lines of 2026-10-22 show both kinds of pick from the
     phone on colour bulbs, a colour as `LIGHT_COLOR_TARGET_MODE=0` with X and
     Y, a temperature as mode 1 (e.g. X 0.317 Y 0.327, sent to Hue as mirek
@@ -151,23 +177,30 @@ rooms (step 20). Moving a device never touches its binding.
     stayed connected. A single light's queue (ten a second) was not run: the
     house has no Hue Light device; its pacing is pinned by `commands_spec`.
 
-## E. The dev loop (not in use on the house)
+## E. The dev loop (on the house only for a test)
 
-Since build 116 (2026-10-22) the house runs release builds, so nothing here
-applies unless the developer installs a development build for a test. With
-one, the developer pushes Lua to the bridge and its devices from the VM
-(`docs/dev-loop.md`), reads the bridge's log there, and runs the dev-only
-actions (`Hue Request`, `Probe Call`, `Lights Report` and the other probes,
-which release builds do not have); a light's or scene's reload line appears
+The house runs release builds, so nothing here applies unless the developer
+installs a development build for a test (dev builds 276, 284 and 309 on
+2026-10-25; `docs/status.md` says what runs now). With one, the developer
+pushes Lua to the bridge and its devices from the VM (`docs/dev-loop.md`),
+reads the bridge's log there, and runs the development commands (`Hue
+Request`, `Probe Call`, `Lights Report` and the other probes; since #217,
+2026-10-25, through signed dev-loop commands only) and the three DEV-ONLY
+actions Composer shows on a dev build (`Connection Test`, `Reload
+Credentials`, `Check CA Pinning`); a light's or scene's reload line appears
 only in its own Lua tab.
 
 - Stream address rotation: after each reconnect `Event Stream` shows
   "Connected since" within seconds, and `Stream Address` shows a different
   spelling of the bridge address than before, "<spelling> (own queue,
-  rotating over <k> spellings; commands use <bridge address>)". The release
-  build rotates the same way at every reconnect. **Done 2026-10-21** (dev
-  loop, PR #6): two reloads took the second and third spelling and
-  connected 200 and 160 ms after the attempt.
+  spelling <i> of <k>)" ("(own queue, the only spelling)" when the address
+  has no octet below 8 to pad, "<address> (shared queue with commands:
+  <reason>)" when the stream cannot have its own). The release build
+  rotates the same way at every reconnect. **Done 2026-10-21** (dev loop,
+  PR #6): two reloads took the second and third spelling and connected 200
+  and 160 ms after the attempt; the row then read "<spelling> (own queue,
+  rotating over <k> spellings; commands use <bridge address>)", reworded
+  for Composer's column since.
 
 ## F. Controller restart and a long run
 
@@ -194,16 +227,24 @@ only in its own Lua tab.
 
 ## G. Rooms and lifecycle (the import-ui build, 2026-10-21)
 
-All of this is in the current build. Verified through the dev loop on
+All of this is in build 316 too. Verified through the dev loop on
 2026-10-21: six resource GETs per resync, the one-time room auto-map (9 Hue
 rooms matched Control4 rooms by name), Room Audit and Map Rooms By Name.
 Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
 
 16. Bridge Properties: `Attention` ("None" when nothing needs you), `Last
-    Action` (the result of your last click), `Room Mappings` ("Dining →
-    Dining; Foyer → Foyer; …; Basement Hallway → (unmapped); …") and
-    `Lights` ("47 on bridge, 0 imported, 0 new, 0 missing, 0 unbound, 47
-    deleted" today). The arrows must render as arrows. **Done 2026-10-21**
+    Action` (the result of your last click, continued on `Last Action (2)`
+    to `(6)` when long), `Room Mappings` and `Lights` ("47 on bridge, 0
+    imported, 0 new, 0 missing, 0 unbound, 47 deleted" today). Since
+    2026-10-24 `Room Mappings`, `Lights`, `Scenes` and `Zone Lights` are
+    drop-downs (`docs/status.md`, "Composer properties fit the column"):
+    the row shows the summary and the list every item, and a pick snaps
+    back to the summary. `Room Mappings` reads "<n> Hue rooms and zones;
+    <u> unmapped (open the list to read)", and its list holds one "<Hue
+    room> → <Control4 room>" line each ("Dining → Dining", "Basement
+    Hallway → (unmapped)", a zone ending "(zone)"). When this step was
+    checked, `Room Mappings` was one line ("Dining → Dining; Foyer → Foyer;
+    …"). The arrows must render as arrows. **Done 2026-10-21**
     (`Attention` "None"; `Room Mappings` with 9 mapped rooms, 7 unmapped
     rooms and 7 unmapped zones; `Lights` "47 on bridge, 47 imported, 0 new, 0
     missing, 0 unbound, 0 deleted"; arrows intact).
@@ -211,19 +252,23 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
     "#<n> (<8 hex digits>…)", `Last Action`; its Actions tab: Adopt Hue Name
     above Forget This Light. **Done 2026-10-21** (Left Bedside Light: "Master
     Bedroom", "#46 (e0e51794…)").
-18. The bridge's Actions tab, top to bottom: Pair Bridge, Add Light, Import
-    All New Lights, Re-link Device To Light, Link Devices, Forget Light,
+18. The bridge's Actions tab, top to bottom, on a release build (22
+    actions): Pair Bridge, Add Light, Import All New Lights, Add Zone Light,
+    Re-link Device To Light, Re-link Zone Light, Link Devices, Forget Light,
     Adopt Hue Names, Accept Names As They Are, Set Room Mapping, Map Rooms By
     Name, Room Audit, Add Scene, Add All Scenes Of Room, Re-link Scene,
     Forget Scene, Refresh Scenes, Test Connection, Connect Event Stream,
-    Disconnect Event Stream, Connection Test, Reload Credentials, Check CA
-    Pinning, Forget Pairing. Click **Add Light**: a dialog with two pickers.
+    Disconnect Event Stream, Forget Pairing; a development build has
+    Connection Test, Reload Credentials and Check CA Pinning before Forget
+    Pairing (25). Click **Add Light**: a dialog with two pickers.
     `Light` lists the lights without a device, those deleted in Composer
     last as "<name> [<Hue room>] #<n> (deleted from Composer <date>)" (today
     all 47), or "(every light on the bridge is imported)" when there is
     none; `Room` lists "(mapped room)" then your rooms as "<Floor> / <Room>".
     Cancel. **Done 2026-10-21** (the dialog and lists render, the 23 actions
-    in this order); **2026-10-22** the `Light` list held all 47 as deleted.
+    of that development build in order, before Add Zone Light and Re-link
+    Zone Light existed); **2026-10-22** the `Light` list held all 47 as
+    deleted.
 19. **Set Room Mapping**: pick a Hue room without a Control4 twin and the
     Control4 room it should default to, OK: `Last Action` "Mapped <Hue room>
     → <room>" and `Room Mappings` updated. **Done 2026-10-21/22** ("Mapped
@@ -238,7 +283,8 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
     lights instead (2026-10-22).
 21. **Delete and re-add** (the tombstone flow), which is also how any light
     comes back. Delete a light device in Composer: within seconds `Lights`
-    ends "…, 1 deleted" and `Attention` says nothing (a Composer delete is
+    ends "…, <d> deleted" with `<d>` one higher ("…, 1 deleted" when
+    nothing else is) and `Attention` says nothing (a Composer delete is
     deliberate). Then **Add Light**: pick the light (listed with "(deleted
     from Composer <date>)") and pick "(mapped room)" or a room explicitly
     (the dialog remembers your last values), OK: `Last Action` "Added <name>
@@ -254,10 +300,12 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
     names: Downlight Four is Downlight 4 in Hue (Adopt Hue Names or Accept
     Names As They Are)". **Adopt Hue Names** renames it back: `Last Action`
     "Renamed 1 device: Downlight Four → Downlight 4 (device <id>) | Scenes:
-    No Composer names differ from the Hue scene names". Rename it again and
-    click **Accept Names As They Are**: `Attention` drops the item. **Done in
-    part 2026-10-21** (a rename raised the `Attention` item within seconds);
-    Adopt and Accept on a real difference are **open**.
+    No Composer names differ from the Hue scene names | Zone lights: No
+    Composer names differ from the Hue zone and room names" (the zone
+    lights' part since build 196). Rename it again and click **Accept Names
+    As They Are**: `Attention` drops the item. **Done in part 2026-10-21** (a
+    rename raised the `Attention` item within seconds); Adopt and Accept on
+    a real difference are **open**.
 23. **The bare "Hue Light" device** (one added by hand). **Done 2026-10-22**
     (device 1034, bound from a development build with `C4:Bind` because
     Composer's drag cannot be automated): `Status` "Bound; waiting for the
@@ -285,18 +333,25 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
 device. Verified through the dev loop on 2026-10-21: the scene catalogue GET
 at every resync, recall and status events, the bridge's scene actions.
 
-25. Bridge Properties: `Scenes` "<n> on bridge, <m> imported, 0 missing, 0
-    unbound, <d> deleted" once the stream has done its first full read
-    ("<m> imported" alone before). The Actions tab has Add Scene, Add All
+25. Bridge Properties: `Scenes` "<n> + <t> time-based on bridge, <m>
+    imported, <d> deleted" once the stream has done its first full read
+    ("<m> imported" alone before; "<t>" is "?" until the time-based scenes
+    are read; "<g> missing" and "<u> unbound" appear only when not zero).
+    Written when it read "<n> on bridge, <m> imported, 0 missing, 0
+    unbound, <d> deleted"; reworded 2026-10-24 (time-based scenes, build
+    180, and Composer's column). The Actions tab has Add Scene, Add All
     Scenes Of Room, Re-link Scene, Forget Scene and Refresh Scenes between
     Room Audit and Test Connection. **Done 2026-10-21** (the scene actions
     run from Composer).
 26. **Add Scene**: the `Scene` list holds every scene without a device as
     "<Room>: <Scene>", zones as "<Zone> (zone): <Scene>", dynamic ones ending
-    " (dynamic)", grouped by room, those deleted in Composer last; `Room`
-    offers "(mapped room)" first. A zone scene with "(mapped room)" while the
-    zone is unmapped: "Not added: Nightlight: Hue room Bedside Lights (zone)
-    not mapped; pick a room, or Set Room Mapping first". With a room picked:
+    " (dynamic)", grouped by room, those deleted in Composer last; since
+    build 180 a room's or zone's time-based scenes come first in its group
+    as "<Room>: <name> (time-based)", and an ordinary scene a schedule uses
+    ends " (in <schedule>)". `Room` offers "(mapped room)" first. A zone
+    scene with "(mapped room)" while the zone is unmapped: "Not added:
+    Nightlight: Hue room Bedside Lights (zone) not mapped; pick a room, or
+    Set Room Mapping first". With a room picked:
     "Added <scene> to <room> (device <id>)" and a dimmer tile (a switch
     before build 160), named like the scene for a room scene ("Shine") or
     with the zone's name in front for a zone scene ("Bedside Lights
@@ -314,7 +369,11 @@ at every resync, recall and status events, the bridge's scene actions.
 28. The scene's Properties: `Status` "Hue scene <scene> in <room>" ("Hue
     scene Shine in Master Bedroom"; a zone ends "(zone)"), `Hue Scene`, `Hue
     Room`, `Hue Scene ID` "#<id> (<8 hex digits>…)", `Recall As` "As set in
-    Hue", `Online` "Online", and no rate or LED colour rows (step 35).
+    Hue", `Online` "Online", and no rate or LED colour rows (step 35;
+    superseded 2026-10-25, #59: the proxy's hold rates and LED colours now
+    show). A time-based scene has no `Recall As` row and reads "Hue
+    time-based scene <name> in <room>; now <slot> (from <HH:MM>)" or "…;
+    not running".
     Change `Recall As` to "Static", click the row's **Set** button, tap ON:
     the scene is set once instead of played (with the bridge's `Debug Mode`
     On, its Lua tab shows the recall "as static"). Actions: Adopt Hue Name
@@ -322,11 +381,15 @@ at every resync, recall and status events, the bridge's scene actions.
     recall went out as static) and **2026-10-22** ("Static" → "As set in
     Hue" through the Set button).
 29. **Add All Scenes Of Room** with a mapped room that has scenes: "Added <k>
-    scenes of <room> to <room>: <scene> (device <id>), …", one tile each; run
-    again: "No new scenes in <room> (<k> on bridge, <k> imported)". **Done
+    scenes of <Hue room> to <room>: <scene> (device <id>), …", one tile
+    each; run again: "No new scenes in <Hue room> (<k> on bridge, <k>
+    imported)", or "No new scenes in <Hue room> (<n> scenes and <t>
+    time-based on bridge, <k> imported)" where the room has time-based
+    scenes (they are added too, after the ordinary ones). **Done
     2026-10-21** on Patio (Ibiza and Lily; the second run "No new scenes in
     Patio (2 on bridge, 2 imported)").
-30. Delete a scene device in Composer: `Scenes` ends "…, 1 deleted"; Add
+30. Delete a scene device in Composer: `Scenes` ends "…, <d> deleted" with
+    `<d>` one higher ("…, 1 deleted" when nothing else is); Add
     Scene lists it last as "<Room>: <Scene> (deleted from Composer <date>)"
     and re-adding works; Add All Scenes Of Room skips it: "Added no scenes;
     skipped 1 deleted in Composer (Add Scene re-creates one): <scene>
@@ -377,8 +440,20 @@ Setup (done for Shine on the Bedside Lights Switch):
     Superseded (2026-10-25, #59): the drivers now declare
     `hide_proxy_properties` False. After the install and the owner's
     controller reboot, a Hue Light lists the On preset, click and hold rates
-    and LED colours and a Hue Scene its hold rate and LED colours; change a
-    hold rate once and see it on a keypad (#59's hardware check).
+    and LED colours and a Hue Scene its hold rate and LED colours (the
+    scene declares no click rates and no On preset); the defaults above
+    stay until you change one. A change reaches the driver at once, and the
+    driver answers with the value in use, so Composer keeps showing it; a
+    value out of range (preset 1–100 %, rates 0–86400000 ms) is not taken.
+    Change a hold rate once and see it on a keypad (#59's hardware check).
+    **Done 2026-10-25 except on a keypad** (dev builds of the night, after
+    the reboot; `docs/design.md`, "Hardware pass of 2026-10-25 night"): the
+    proxy's settings page appeared above the driver's "Advanced Properties"
+    on light (a zone light) and scene devices; a field commits on Enter and
+    arrives as `SET_HOLD_RATE_DOWN RATE=2000`, and a hold down from 3 % then
+    went out over 40 ms; Composer kept the value once the drivers answered
+    with the bare value (rounds 41 and 42, `common/device.lua`). **Open**: a
+    changed rate on a physical keypad.
 
 A Hue Scene on the keypad (Shine):
 
@@ -397,7 +472,11 @@ A Hue Scene on the keypad (Shine):
     turns off the scene. **Done 2026-10-23** (build 154: hold-to-dim works).
 38. With the room off, hold top: Shine starts at its dimmest (1 %), the LEDs
     show on at once, and it brightens until you let go. Hold bottom while
-    off: nothing happens. **Open.**
+    off: nothing happens. **Done in part 2026-10-25** through Shine's Lua
+    command window (dev build 284; `docs/design.md`, "Hardware pass of
+    2026-10-25 night"): a top hold from off, released at 800 ms, recalled
+    Shine at 1 % and sent no dim, and a bottom tap turned the room off.
+    **Open**: a longer hold, the LEDs, a physical keypad.
 
 A Hue Light on a keypad (needs a light; the Floor Lamp Switch is free):
 
@@ -405,7 +484,8 @@ A Hue Light on a keypad (needs a light; the Floor Lamp Switch is free):
     light's Top and Bottom Button Links as in step 34.
 40. Tap top: the light goes to 100 % (the On preset) over 250 ms, from off
     or from any lower level, and the top LED lights. Tap bottom: off over
-    250 ms, and the bottom LED lights.
+    250 ms, and the bottom LED lights. (100 % and 250 ms are the defaults;
+    since #59 they are the light's own On preset and click rates, step 35.)
 41. With the light on, hold top: it brightens until you let go (the full
     range in about 5 s) and stays at the level reached; the tile settles on
     the level Hue reports, or on the driver's estimate a second later. Hold
@@ -419,6 +499,13 @@ A Hue Light on a keypad (needs a light; the Floor Lamp Switch is free):
       Hue's own relative dim, and the light has driven the keypad LEDs, only
       since 2026-10-23, and no Hue Light device has been in the project
       since.
+    - **Done in part 2026-10-25** on a zone light (a Hue Light device of
+      kind group) through its Lua command window (dev build 284;
+      `docs/design.md`, "Hardware pass of 2026-10-25 night"): a top hold
+      from off, released at 800 ms, turned it on at 1 % (one PUT) and sent
+      no dim; a bottom hold with a click 100 ms after the release sent dim
+      down and stop, and the click was ignored; a bottom tap turned it off
+      over the proxy's click rate (0.75 s on that device).
 
 The scene dimmer (Shine):
 
