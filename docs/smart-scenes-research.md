@@ -280,3 +280,194 @@ event items. Bridge time zone `EST5EDT`.
   Deleting the zone deletes its grouped_light. All test resources removed.
 - **V8** (Whole House "Golden hours 3", a dynamic target) not run (it would
   switch the whole house).
+
+## 8. Test plan 2026-10-25
+
+What is left of #40 and how each point gets its answer. Every change to
+the house below is covered by the owner's standing approval; probe lights
+stay at 1 % unless a step says otherwise. Rids are read at run time and
+never written here: `<gh4>` is the Master Bedroom's Golden hours 4
+(`smart_scene`), `<room>` the Master Bedroom room, `<lamp>` one of its
+lights. Results go into §7 and `docs/status.md`; a defect becomes its own
+issue.
+
+Common to all: a dev build on the house and `tools/devserver.py` running
+(`docs/dev-loop.md`); the bridge's `Debug Mode` On for the duration
+(`tools/devctl.py set "Debug Mode" On`, Off afterwards), because its
+`info` lines name every activate ("scenes: activate …"), deactivate ("off
+for … deactivate, then its group off"), dim ("scenes: dim … down") and
+level move; `tools/devctl.py log -f` in a terminal.
+
+### (a) The keypad on a time-based scene (Decisions 3 to 5)
+
+Not tried by the owner yet. First through the Lua command window of the
+"Golden hours" device (1164), worked by the Windows session as round 40
+did for Shine. No keypad is bound to it (the Bedside Lights Switch drives
+Shine), so the chunk calls the driver's entry point with the binding ids a
+bound keypad uses (200 top, 201 bottom) in a keypad's order: `DO_PUSH`,
+`DO_RELEASE`, then `DO_CLICK` 100 ms after the release, as in round 40
+(`common/device.lua` treats a press still down after 400 ms as a hold and
+ignores a click within 1 s of a hold's release). `C4:SetTimer(ms, fn)`
+[verified: SDK `34_timer/_1-SetTimer.md`]. Define it once (a Director
+restart or a driver update drops it; then define it again):
+
+```lua
+c4hue_press = function(binding, ms) -- 200 top, 201 bottom; ms the button is held
+  ReceivedFromProxy(binding, "DO_PUSH", {})
+  C4:SetTimer(ms, function() ReceivedFromProxy(binding, "DO_RELEASE", {}) end)
+  C4:SetTimer(ms + 100, function() ReceivedFromProxy(binding, "DO_CLICK", {}) end)
+  print(string.format("c4hue_press %d held %d ms", binding, ms))
+end
+```
+
+Then one line per step, starting from off, about 10 s apart. After each:
+the device's Status and Lua Output pane (Windows), the shipped log (VM),
+and Hue's `state`, which `tools/smart_scene_probe.py watch --smart <gh4>
+--light <lamp> --until <end>` prints every 20 s for the whole round.
+
+| Step | Lua | Expected |
+|---|---|---|
+| a1 tap top | `c4hue_press(200, 150)` | "scenes: activate"; `active`; Status "…; now <slot> (from <start>)"; the room in the slot's look |
+| a2 hold bottom | `c4hue_press(201, 1500)` | dim down, stop at the release; still `active` (V11), Status unchanged, the level lower |
+| a3 hold top | `c4hue_press(200, 1500)` | dim up, stop at the release; still `active` |
+| a4 tap bottom | `c4hue_press(201, 150)` | deactivate, then the room off; `inactive`; "…; not running" |
+| a5 hold top from off | `c4hue_press(200, 3000)` | activate; the dim up follows once the room reports on with a level (1.9 s after the press at the latest: 400 ms to the hold, `FOLLOW_MS` 1500) and stops at the release; still `active` |
+| a6 tap bottom | `c4hue_press(201, 150)` | off |
+| a7 short hold top from off | `c4hue_press(200, 800)` | activate only: released before the follow, so no dim; the slot's own level |
+| a8 tap bottom | `c4hue_press(201, 150)` | off, as found |
+
+The keypad LEDs cannot be seen this way. The owner's own pass (his hands):
+the Windows session binds the Bedside Lights Switch's top and bottom
+buttons to Golden hours' Top and Bottom Button Links instead of Shine's
+(Connections), the owner taps and holds and watches the LEDs (top lit while
+the schedule runs), then the buttons go back to Shine.
+
+### (b) Recall As after a cross-kind re-link (Decision 12)
+
+That `C4:SetPropertyAttribs("Recall As", 0)` shows the row again is
+assumed. Re-link Scene's `Device` list in Composer offers only gone and
+unbound devices (`bridge/owner.lua`, `picker_relink_devices`), so the
+action goes through the dev loop, whose `ExecuteCommand` takes any
+registered device:
+
+1. Arise's rid: Golden hours 4's slot 0 target (`GET
+   /clip/v2/resource/smart_scene/<gh4>`, V2). Arise is not imported, so
+   the re-link is not refused.
+2. `tools/devctl.py run "Re-link Scene" Device=1164 Scene=<arise>`:
+   `Last Action` "Re-linked device 1164 (was Golden hours) to Master
+   Bedroom: Arise".
+3. Composer, device "Golden hours" (Windows session): the **Recall As**
+   row is back with its last value, Status "Hue scene Arise in Master
+   Bedroom". Read it at once, and again after selecting another device
+   and coming back: Composer drops attribute changes that arrive together
+   with text updates (the `Last Action` rows, build 247). The bridge's
+   `Attention` may list the name difference meanwhile.
+4. `tools/devctl.py run "Re-link Scene" Device=1164 Scene=<gh4>`: the row
+   hidden again, Status "Hue time-based scene Golden hours in Master
+   Bedroom; …", `Attention` clear.
+
+Shown at once: Decision 12 verified. Shown only after re-selecting the
+device: a Composer refresh, noted in `docs/design.md` (the device could
+send the attribute again later, as `Last Action` does). Never shown: a
+defect, its own issue.
+
+### (c) A dim before a slot boundary, then the advance (the owner's question 5)
+
+The 16:00 boundary of Golden hours 4 (slot 1, Shine), as scheduled for
+this afternoon. Nothing else in the Master Bedroom from 15:40 to 16:10: a
+schedule created there (d) would end Golden hours 4 (V10).
+
+1. 15:45: `tools/smart_scene_probe.py watch --smart <gh4> --light <lamp>
+   --until 16:06` prints state, slot and the lamp every 20 s.
+2. 15:50: start it as a tile does: `tools/devctl.py run "Proxy Command"
+   Light=1164 Command=ON`. Expect `active`, slot 0 (Arise, from 07:00).
+3. 15:53: dim it from Control4 on the slider's path (`HUE_SCENE_LEVEL`, a
+   relative group move): `tools/devctl.py run "Proxy Command" Light=1164
+   Command=SET_LEVEL LEVEL=<about half the lamp's level>`. Expect still
+   `active`, slot 0, the lamp lower.
+4. 15:59 to 16:01: slot 1 at 16:00 or up to 60 s before it (the
+   transition, §1.2); then the lamp at Shine's own level, not the dimmed
+   one (Decision 6); Status "…; now Shine (from 16:00)"; the tile on.
+5. 16:05: `… Command=OFF` (deactivate, then the room off), as found.
+
+Step 4 is the answer to question 5. No slot change, or `inactive` after the
+dim, is a finding for the contract (Decisions 2 and 6).
+
+### (d) Do API-made schedules run their slot changes?
+
+The throwaway of 2026-10-24 (§7, "Slot advance") differed from every
+app-made schedule in more than its origin [verified: hardware, the shipped
+log of 2026-10-24 11:23 to 11:34 and `GET /smart_scene` of 2026-10-25
+01:20]: one weekday (saturday) where the app's carry all seven in one week
+entry; two slots 8, later 12, minutes apart where the app's have six
+covering the day (its 00:00 slot comes last, after 22:00);
+`transition_duration` 5000 where the app's have 60000. It was created
+already active, activated at 11:25:03 and again at 11:29:24 after slot B
+moved, and still read slot 0 at 11:28:51 and at 11:32:54.
+
+`tools/smart_scene_probe.py` (`--help`; every request through the dev
+loop, never to the bridge directly) makes a probe in one room: two scenes
+at 1 % warm white (A 2200 K, B 2700 K, so a slot change also shows in a
+light's mirek) and a smart scene "c4-hue probe" with slot A from the
+current minute and slot B `--minutes` later on today's weekday,
+`transition_duration` 60000; it activates it as the driver's ON does,
+reads `active_timeslot`, both scenes' `status.active` and one light every
+20 s, prints a verdict, and deletes all three (a GET answering 404 confirms
+each), turning off again the lights that were off before. It refuses a
+level above 5 % without `--allow-bright` and lights that are on without
+`--allow-on`, and saves its ids in `build/dev/smart_scene_probe.json` after
+every step.
+
+1. When and where: away from (c), for example 16:15, in the Master Bedroom
+   with its lights off (the owner's room for checks, §6 answer 7), limited
+   to one lamp: `tools/smart_scene_probe.py run --room <room> --light
+   <lamp> --minutes 3 --brightness 1` (or `create`, `activate`, `watch`,
+   `cleanup` one at a time). That the bridge takes a room scene holding
+   only some of the room's lights is [assumed]; if it refuses, nothing is
+   made, and the same run without `--light` takes every light of the room.
+   A new schedule there ends Golden hours 4 if it runs (V10) and the room's
+   scene devices hear `other_active`; the probe's scenes are listed in Add
+   Scene while they exist; nothing is imported.
+2. Advances (verdict "slot B started", scene B `static`, the lamp at mirek
+   370): API-made schedules run, and the earlier miss came from its shape.
+   §7 says so; nothing changes in the driver.
+3. No advance: run again in the app's shape, `--days all --minutes 30`
+   (every weekday, and a slot as long as the app's shortest [community:
+   Hueblog 2022-12-20]). Advances then: the shape (one weekday or a short
+   slot) was the cause. Still none: API-made schedules do not run their
+   slot changes on this bridge (firmware 2071524040). The driver only plays
+   schedules made in the app, so nothing changes in it; §7 and the manual
+   say so.
+
+### (e) V8, the whole-house dynamic scene
+
+Recommendation: **do not run V8 on Whole House.** It would recall the
+current slot's scene on every light in the house and leave them there
+(deactivate leaves the lights as they are, V7), with no way back but
+setting each room by hand. Its question, whether a schedule plays an
+`auto_dynamic` slot scene dynamically (§1.3), can be answered in one room:
+Golden hours 6 (Basement Hallway, a room) plays Storybook from sunset, and
+that Storybook is `auto_dynamic`; Golden hours 3 (Whole House) has Shine
+and Unwind `auto_dynamic`; no other schedule on the bridge has an
+`auto_dynamic` slot scene [verified: hardware, `GET /smart_scene` and
+`GET /scene` of 2026-10-25 01:20].
+
+- When: after sunset (about 18:00 this week [assumed: the bridge's own
+  sunset time]) and before 20:00, with the hallway empty. `GET
+  /clip/v2/resource/smart_scene/<gh6>` first: `active_timeslot` slot 2
+  says Storybook is the current slot (tracked while inactive, §1.1), and
+  its target is `<storybook>`.
+- Steps: `tools/smart_scene_probe.py watch --smart <gh6> --light <hallway
+  light> --until <now + 4 min>` in one terminal; `tools/devctl.py run "Hue
+  Request" Method=PUT Path=/clip/v2/resource/smart_scene/<gh6>
+  Body='{"recall":{"action":"activate"}}'`; 5 s later `GET
+  /clip/v2/resource/scene/<storybook>`; then the same PUT with
+  `deactivate` and `PUT /clip/v2/resource/grouped_light/<hallway group>`
+  with `{"on":{"on":false}}`, as found.
+- Reading: `status.active` "dynamic_palette" (and the light's xy moving
+  between polls) means a schedule honours `auto_dynamic`, so a time-based
+  device looks dynamic while such a slot plays; "static" means it does not.
+  Either way the contract stays (Recall As stays hidden on time-based
+  devices); §1.3 and §7 get the fact.
+- V8 itself only if the owner asks to see it, at a time he picks while he
+  is at home.
