@@ -31,6 +31,10 @@ updates:
     directory: /tools
     schedule:
       interval: weekly
+    # The same week's grace as the actions: these tools run in CI with the
+    # repository checked out (reviewed, never auto-merged, all the same).
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
     groups:
