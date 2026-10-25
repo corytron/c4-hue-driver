@@ -246,6 +246,42 @@ describe("light.state", function()
 			assert.equal("ct", st.color_mode, "an explicit mode wins")
 		end)
 
+		-- docs/reviews/efficiency-2026-10-24.md R10: a one-entry memo of mirek -> xy.
+		it("converts a colour temperature once while the mirek stays the same", function()
+			local st = color_bulb()
+			local calls = 0
+			local convert = c4.ColorCCTtoXY
+			c4.ColorCCTtoXY = function(self, k)
+				calls = calls + 1
+				return convert(self, k)
+			end
+			st.color_mode, st.mirek = "ct", 370
+			local x1, y1, mode = state.to_proxy_color(st)
+			local x2, y2 = state.to_proxy_color(st)
+			assert.equal(1, calls, "two calls with the same mirek compute once")
+			assert.same({ x1, y1, state.MODE_CCT }, { x2, y2, mode })
+			local ex, ey = convert(c4, 1000000 / 370)
+			assert.same({ ex, ey }, { x1, y1 }, "the controller's conversion, unchanged")
+
+			st.mirek = 250
+			local x3 = state.to_proxy_color(st)
+			assert.equal(2, calls)
+			assert.are_not.equal(x1, x3)
+			st.mirek = 370
+			assert.equal(x1, (state.to_proxy_color(st)))
+			assert.equal(3, calls, "one entry: the mirek before last is converted again")
+
+			-- A ct-mode HUE_STATE that keeps the mirek: the view before and after
+			-- the merge, and the report, convert nothing more.
+			state.apply_hue(st, { on = "true", brightness = "40", mirek = "370", color_mode = "ct" })
+			state.to_proxy_color(st)
+			assert.equal(3, calls)
+			-- One that moves it converts the new mirek once.
+			state.apply_hue(st, { mirek = "300", color_mode = "ct" })
+			state.to_proxy_color(st)
+			assert.equal(4, calls)
+		end)
+
 		it("does not flag colour when a full report in ct mode carries a slightly different xy", function()
 			local st = color_bulb()
 			state.apply_hue(st, { mirek = "370", x = "0.44", y = "0.40", color_mode = "ct" })

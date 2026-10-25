@@ -66,7 +66,7 @@ local dev = device.new({
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
-local update_leds, LINK_BUTTON = dev.update_leds, device.LINK_BUTTON
+local update_leds, LINK_BUTTON, send = dev.update_leds, device.LINK_BUTTON, dev.send
 
 -- Identity and status texts ------------------------------------------------
 
@@ -337,6 +337,10 @@ local function ready(command)
 	return true
 end
 
+-- True when the target went to the bridge. When the send fails
+-- (common/device.lua logs why) nothing changed: the proxy hears CHANGED with
+-- the level its CHANGING came from, and a colour kept for the next turn-on
+-- keeps waiting for it.
 local function set_brightness(target, rate)
 	target, rate = tonumber(target), tonumber(rate) or 0
 	if not target then
@@ -345,13 +349,19 @@ local function set_brightness(target, rate)
 	if not ready("brightness target") then
 		return
 	end
+	local current = state.to_proxy_brightness(st) or 0
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = state.to_proxy_brightness(st) or 0,
+		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = target,
 		RATE = rate,
 	})
+	local stored = st.pending_color
 	local params = state.from_brightness_target(st, target, rate)
-	C4:SendToDevice(bridge, "HUE_SET", params)
+	if not send("HUE_SET", params) then
+		st.pending_color = stored
+		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = current })
+		return false
+	end
 	arm("brightness", rate, function()
 		log.debug("brightness target %s unconfirmed after %d ms; assuming it", tostring(target), rate + FALLBACK_MS)
 		local changed = state.apply_hue(st, params)
@@ -360,6 +370,7 @@ local function set_brightness(target, rate)
 			report_color() -- the turn-on carried a colour stored while off
 		end
 	end)
+	return true
 end
 
 local function set_color(x, y, mode, rate)
@@ -382,7 +393,12 @@ local function set_color(x, y, mode, rate)
 	})
 	local params, why = state.from_color_target(st, x, y, mode, rate)
 	if params then
-		C4:SendToDevice(bridge, "HUE_SET", params)
+		if not send("HUE_SET", params) then
+			-- Nothing reached the bridge (logged): the proxy hears the colour
+			-- the light still has, when one is known, as for an ignored target.
+			report_color()
+			return
+		end
 		arm("color", rate, function()
 			log.debug("colour target unconfirmed after %d ms; assuming it", rate + FALLBACK_MS)
 			state.apply_hue(st, params)
@@ -716,7 +732,10 @@ end
 -- grouped dimming_delta on the light), stopped by the release, as the scene
 -- does; the proxy hears CHANGING toward the end of the range over the hold
 -- rate scaled by the distance, and a 100 ms tick keeps an estimate of the
--- level for the stop and its fallback (docs/keypad-design.md).
+-- level for the stop and its fallback (docs/keypad-design.md). A dim that
+-- never reaches the bridge (logged) moves nothing: the tick stops, the
+-- release has nothing to stop, and the proxy hears the level the hold began
+-- at.
 local function start_ramp(h, up, from)
 	local to = up and 100 or 1
 	local full = setting(up and "hold_up" or "hold_down")
@@ -741,8 +760,12 @@ local function start_ramp(h, up, from)
 		RATE = duration,
 	})
 	log.debug("hold: dim %s from %d over %d ms", up and "up" or "down", from, duration)
-	C4:SendToDevice(bridge, "HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
-		duration = string.format("%d", duration) })
+	if not send("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
+		duration = string.format("%d", duration) }) then
+		h.timer:Cancel()
+		h.timer, h.ramping = nil, false
+		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = from })
+	end
 end
 
 -- The hold timer fired with the button still down: top (or toggle while
@@ -761,7 +784,9 @@ local function start_hold(h)
 	if on then
 		return start_ramp(h, up, state.to_proxy_brightness(st) or 1)
 	end
-	set_brightness(1, 0)
+	if not set_brightness(1, 0) then
+		return -- the turn-on never reached the bridge (logged): nothing to dim up from
+	end
 	h.timer = C4:SetTimer(RAMP_AFTER_ON_MS, function()
 		if hold ~= h then
 			return
@@ -776,8 +801,10 @@ end
 -- Release (or release-as-click) after a hold: stop the dim at Hue, which
 -- keeps the level it reached; `level` is the estimate, for the bridge to
 -- write should Hue refuse the stop. The proxy hears the bridge's next
--- report, or the estimate after the fallback time. The click some keypads
--- send after a hold is ignored for a moment.
+-- report, or the estimate after the fallback time, also when the stop
+-- itself never reaches the bridge (logged; Hue then dims on to the end of
+-- the range and reports it). The click some keypads send after a hold is
+-- ignored for a moment.
 local function finish_hold()
 	local h = hold
 	end_hold()
@@ -786,7 +813,7 @@ local function finish_hold()
 		return
 	end
 	local level = math.floor(h.level + 0.5)
-	C4:SendToDevice(bridge, "HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
+	send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
 	arm("brightness", 0, function()
 		log.debug("dim stop unconfirmed after %d ms; assuming %d %%", FALLBACK_MS, level)
 		state.apply_hue(st, { on = "true", brightness = tostring(level) })
@@ -874,11 +901,15 @@ function OnDriverLateInit()
 	if not bridge then
 		schedule_recheck(1)
 	end
+	-- Last: a binding change Director delivered before late init acts now
+	-- (common/device.lua), against the binding state read above.
+	dev.replay_bindings()
 end
 
 -- Control bindings only: the bridge binding, and the Button Links, where a
--- newly bound keypad gets the LED state; the proxy's binding is not one.
-function OnBindingChanged(idBinding, _, bound, otherDevice)
+-- newly bound keypad gets the LED state; the proxy's binding is not one. A
+-- call before late init waits for it (common/device.lua).
+OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice)
 	if LINK_BUTTON[idBinding] then
 		if bound then
 			update_leds(true)
@@ -898,7 +929,7 @@ function OnBindingChanged(idBinding, _, bound, otherDevice)
 		refresh_status()
 		report_online()
 	end
-end
+end)
 
 -- Composer is deleting this device: tell the bridge, so it tombstones the
 -- entry instead of fanning state out to a dead id (common/device.lua).
@@ -912,5 +943,5 @@ function OnDriverDestroyed()
 	settle("color")
 	end_hold()
 	disarm_guard()
-	cancel_recheck()
+	dev.cancel_timers() -- the binding re-check and the Driver Version looks
 end

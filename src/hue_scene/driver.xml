@@ -129,7 +129,7 @@
 		<supports_color_correlated_temperature>False</supports_color_correlated_temperature>
 		<supports_broadcast_scenes>False</supports_broadcast_scenes>
 		<supports_multichannel_scenes>False</supports_multichannel_scenes>
-		<hide_proxy_properties>True</hide_proxy_properties>
+		<hide_proxy_properties>False</hide_proxy_properties>
 		<hide_proxy_events>False</hide_proxy_events>
 		<reduced_als_support>True</reduced_als_support>
 		<advanced_scene_support>False</advanced_scene_support>

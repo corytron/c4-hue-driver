@@ -30,11 +30,16 @@
 --
 -- The instance: devloop (the module; nil in release builds), flush_log(),
 -- prop(), notify(), device_id(), result(), bound_bridge(), proxy_id(),
--- after_late_init(), late_init(), show_driver_version(), load_colors(),
--- update_leds(), link_button(), schedule_recheck(), cancel_recheck() and
+-- send(), after_late_init(), late_init(), binding_changed(),
+-- replay_bindings(), show_driver_version(), load_colors(), update_leds(),
+-- link_button(), schedule_recheck(), cancel_recheck(), cancel_timers() and
 -- goodbye(). It registers the Driver_Version and Debug_Mode property
 -- handlers, the proxy's BUTTON_ACTION, DO_PUSH, DO_RELEASE, DO_CLICK,
 -- REQUEST_BUTTON_COLORS and SET_BUTTON_COLOR, and DEV_RELOAD in dev builds.
+--
+-- OnDriverLateInit in both drivers: read the binding (bound_bridge), then
+-- late_init() (the buffered bridge messages), greet, and replay_bindings()
+-- last; OnDriverDestroyed calls cancel_timers().
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -208,6 +213,26 @@ function device.new(opts)
 		return tonumber((next(bound)))
 	end
 
+	-- A command to the bound bridge that follows a *_CHANGING notify (or ends
+	-- what one began) goes through here, protected: whatever makes the call
+	-- raise [assumed possible: the API documents no error and returns None,
+	-- API 32/_19; a missing id returned nil silently on OS 3.4.2,
+	-- docs/design.md], the handler still gets to tell the proxy CHANGED
+	-- instead of ending in dispatch's error line, or a timer's, with the
+	-- proxy waiting on its CHANGING (docs/code-analysis-2026-10-22.md item
+	-- 15). True when the call went through; false once the error is logged,
+	-- and the driver then reports the unchanged state.
+	function dev.send(command, params)
+		local target = get_bridge()
+		local ok, err = pcall(function()
+			C4:SendToDevice(target, command, params)
+		end)
+		if not ok then
+			log.error("%s to the bridge failed: %s", command, tostring(err))
+		end
+		return ok
+	end
+
 	-- Driver Version and Debug Mode -----------------------------------------
 
 	-- Director answers the version lookup with nothing at the first init of a
@@ -231,12 +256,23 @@ function device.new(opts)
 	-- of a device created by AddDevice the replay of the properties reaches
 	-- no Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168],
 	-- so late init writes the row itself and looks again twice while it is
-	-- empty.
+	-- empty. The pending look is tracked: cancel_timers() (OnDriverDestroyed)
+	-- stops it, and a late init run again starts over instead of adding a
+	-- second chain.
+	local version_timer = nil
+
 	local function show_driver_version(attempt)
+		if version_timer then
+			version_timer:Cancel()
+			version_timer = nil
+		end
 		local v = driver_version()
 		prop("Driver Version", v)
 		if v == "" and attempt < 3 then
-			C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+			version_timer = C4:SetTimer(5000 * attempt, function()
+				version_timer = nil
+				show_driver_version(attempt + 1)
+			end)
 		end
 	end
 	dev.show_driver_version = show_driver_version
@@ -279,6 +315,58 @@ function device.new(opts)
 			local ok, err = pcall(m.handler, m.params)
 			if not ok then
 				log.error("buffered %s failed: %s", m.name, tostring(err))
+			end
+		end
+	end
+
+	-- OnBindingChanged before late init: the bridge's import binds a device it
+	-- has just created, so Director can call it while the driver is still
+	-- initialising, where UpdateProperty and SendToProxy are not yet safe
+	-- [verified: API 22/_25.2; the race: docs/code-analysis-2026-10-22.md
+	-- item 15]. binding_changed(handler) wraps the driver's handler: before
+	-- late init the latest call per binding waits (an older one for the same
+	-- binding says nothing the latest does not), and replay_bindings(), the
+	-- last step of OnDriverLateInit, hands those calls over in arrival order;
+	-- from late init on, calls pass straight through.
+	local early_bindings = {} -- { id, handler, args, n }: the latest call per binding, in arrival order
+
+	function dev.binding_changed(handler)
+		return function(...)
+			if late_init_done then
+				return handler(...)
+			end
+			local id, _, bound, other = ...
+			for i = #early_bindings, 1, -1 do
+				if early_bindings[i].id == id then
+					table.remove(early_bindings, i)
+				end
+			end
+			early_bindings[#early_bindings + 1] = { id = id, handler = handler, args = { ... }, n = select("#", ...) }
+			log.debug("OnBindingChanged on binding %s (%s, device %s) before late init; applied after it",
+				tostring(id), bound and "bound" or "unbound", tostring(other))
+		end
+	end
+
+	-- Late init has read the bridge binding itself and greeted what it found,
+	-- so a waiting call that says the bridge binding is bound to that same
+	-- bridge would only greet it twice: it is dropped. What late init could
+	-- not see (a binding Director's lookup does not show yet, an unbind, a
+	-- keypad on a Button Link) reaches the handler.
+	function dev.replay_bindings()
+		local queued = early_bindings
+		early_bindings = {}
+		for _, call in ipairs(queued) do
+			local _, _, bound, other = unpack(call.args, 1, call.n)
+			local known = get_bridge()
+			if tonumber(call.id) == BRIDGE_BINDING and bound and known and known == tonumber(other) then
+				log.debug("bridge binding to device %d from before late init: greeted already", known)
+			else
+				log.debug("applying OnBindingChanged on binding %s from before late init", tostring(call.id))
+				local ok, err = pcall(call.handler, unpack(call.args, 1, call.n))
+				if not ok then
+					log.error("OnBindingChanged on binding %s from before late init failed: %s", tostring(call.id),
+						tostring(err))
+				end
 			end
 		end
 	end
@@ -462,6 +550,19 @@ function device.new(opts)
 		end)
 	end
 	dev.schedule_recheck = schedule_recheck
+
+	-- OnDriverDestroyed: the timers this module arms (the Driver Version looks
+	-- and the binding re-check) stop with the driver. Harmless on the
+	-- controller, where the Lua state goes with the device, but after a
+	-- dev-loop reload a stray look would still write the row
+	-- (docs/reviews/slim-device-drivers.md §4 question 5).
+	function dev.cancel_timers()
+		if version_timer then
+			version_timer:Cancel()
+			version_timer = nil
+		end
+		dev.cancel_recheck()
+	end
 
 	-- Composer delete -------------------------------------------------------
 
