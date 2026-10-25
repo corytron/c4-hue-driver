@@ -4,7 +4,7 @@
 # docs/cicd-gitops-design.md, section 6. Flat key: value lines only.
 environment: house
 release: v1.0        # the GitHub release whose assets are installed
-build: 316           # the build number its packages carry (Driver Version in Composer)
+build: 329           # the build number its packages carry (Driver Version in Composer)
 drivers: hue_bridge hue_light hue_scene
 stream_timeout_s: 3600
 stream_watchdog_s: 600
