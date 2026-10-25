@@ -776,7 +776,9 @@ function fake.last_action(env)
 	for i = 2, 6 do
 		local name = string.format("Last Action (%d)", i)
 		local value = env.Properties[name]
-		if value and value ~= "" and env.C4.property_attribs[name] ~= 1 then
+		-- A row with text counts (the driver hides emptied rows a moment later,
+		-- so a non-empty row is what the owner reads).
+		if value and value ~= "" then
 			parts[#parts + 1] = value
 		end
 	end

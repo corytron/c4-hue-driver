@@ -159,6 +159,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)"
 		assert.equal(added .. "; " .. skipped, fake.last_action(bridge))
 		assert.is_true(#bridge.Properties["Last Action"] <= 72, "the row itself fits the column")
+		fire_fast_timers(bridge, 400) -- the rows' visibility batch
 		assert.equal(0, bc4.property_attribs["Last Action (2)"], "a continuation row shown")
 		assert.equal(1, bc4.property_attribs["Last Action (6)"], "an unused row hidden")
 		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Add Light or Import All New Lights)",
