@@ -1222,3 +1222,61 @@ next bridge event. Dev-loop reloads still leave one abandoned transfer each
 (a reload starts a new Lua module in the same state and cannot know the old
 one's), so repeated reloads in a quiet house can still reach the limit; a
 bridge event drains them.
+
+## Hardware pass of 2026-10-25 night (dev builds 276 and 284, OS 3.4.2)
+
+Run from the VM through the signed dev loop (`Proxy Command`, `Hue Request`)
+and the devices' Lua command windows (Composer round 38 and 40); every
+bedroom light kept at 1–3 % at the owner's request.
+
+- **Commands into a light_v2 proxy with `SendToDevice`:** `ON`, `OFF`,
+  `SET_LEVEL` and `RAMP_TO_LEVEL` work (known); `SET_COLOR_TARGET` is
+  forwarded to the driver but always with `LIGHT_COLOR_TARGET_MODE=0`,
+  whatever mode was sent, so a temperature cannot be injected that way
+  (round 38: a direct `ReceivedFromProxy` with mode 1 arrives as 1). A
+  Navigator temperature pick arrives with `LIGHT_COLOR_TARGET_MODE=1` and a
+  colour pick with 0 (the driver's own "first SET_COLOR_TARGET params"
+  lines, 2026-10-22). Lua code typed into a device's Lua window cannot
+  replace `C4` methods (`C4` is userdata).
+- **Zone light (Bedside Lights):** a 1 % level from off is one grouped_light
+  PUT and both lamps read 1.19 %; a colour pick is one xy PUT; a temperature
+  pick (mode 1) is one `color_temperature` PUT (mirek 366 for 2700 K) and Hue
+  reports the lamps in ct mode; a colour set while off is stored and goes
+  out with the turn-on in the same PUT; a change made in Hue reaches both
+  zone and room devices and the scene devices' group level within a second.
+- **Issue #39:** OFF on the room light (Master Bedroom Lights) is one
+  grouped_light PUT and Shine and Golden hours report off with level 0. A
+  member added to the zone in Hue reaches the live device as a new
+  configuration (`light_count` 3, then 2 after the restore) within seconds;
+  every bulb in this house has colour and colour temperature (mirek 153–500
+  or 50–1000), so no capability change can be produced here. A slider burst
+  of 50 targets in 5 s on the zone made 9 grouped_light PUTs (a burst of 3,
+  then one a second, the latest value winning) and no 429.
+- **Issue #65:** during that drag the bridge sent 10 event containers in
+  about 7 s, at most 2 a second.
+- **Issue #41:** a 1 % level on Shine from off recalled the scene with a
+  brightness override: both lamps at 1.19 % in the scene's own colours. The
+  boot path of the binding re-check is not visible in the shipped log (the
+  dev loop starts at late init); after the reboot every device was bound
+  and configured within seconds and none logged "still not bound".
+- **Issue #59, after the controller reboot:** the light_v2 proxy's own
+  settings page appears in Composer above the driver's "Advanced
+  Properties" on light and scene devices (default on brightness, click
+  rates, hold ramp rates, LED colours, and colour on mode on lights). A
+  field commits on Enter and arrives as, for example, `SET_HOLD_RATE_DOWN
+  RATE=2000`; a hold down from 3 % then went out with a 40 ms duration
+  (2000 × 2 %). The drivers did not answer with the notification the proxy
+  stores (`HOLD_RATE_DOWN` and its siblings), so Composer kept showing the
+  old value and an edit back to it sent nothing; fixed 2026-10-25
+  (`common/device.lua` reports every setting at late init and after every
+  change).
+- **Keypad (dev build 284, the shared state machine of #57), through the
+  Lua windows:** a hold of the top button from off released at 800 ms turns
+  the zone on at 1 % (one PUT) and sends no dim; a hold down then a click
+  100 ms after the release sends dim down and stop, and the click is
+  ignored; a bottom tap is OFF with the proxy's click rate (0.75 s); on
+  Shine a hold from off recalls the scene at 1 % and sends no dim, and a
+  bottom tap turns the room off.
+- **Capability changes:** Composer asks "Restart Director?" once per driver
+  whose capabilities changed ("hue_light.c4z requires a Director restart
+  after update…", then the same for hue_scene.c4z).
