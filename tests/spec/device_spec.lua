@@ -760,8 +760,8 @@ describe("common.device", function()
 			local lines = capture_log()
 			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "fast" })
 			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", {})
-			assert.same({ "[WARN] Hue Test: hold_rate_up without a number",
-				"[WARN] Hue Test: preset_level without a number" }, lines)
+			assert.same({ '[WARN] Hue Test: hold_rate_up "fast" is not a number; kept 7000',
+				"[WARN] Hue Test: preset_level without a value; kept 60" }, lines)
 			assert.same({ 60, 1500, 500, 7000, 3000 }, all(), "unchanged")
 		end)
 
@@ -784,7 +784,30 @@ describe("common.device", function()
 			assert.same({ 5001, "5000" }, proxied(c4, "HOLD_RATE_DOWN")[2])
 			assert.same({ 5001, "60" }, proxied(c4, "PRESET_LEVEL")[2])
 			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "fast" })
-			assert.equal(1, #proxied(c4, "HOLD_RATE_UP"), "a refused value is not reported")
+			assert.same({ 5001, "5000" }, proxied(c4, "HOLD_RATE_UP")[2], "a refused value: the one kept")
+		end)
+
+		-- Issue #234: a value that is not a number was dropped without an
+		-- answer, so Composer went on showing what had been typed.
+		it("answers a value that is not a number with the value kept, as one out of range (#234)", function()
+			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "click_up", "hold_down" } })
+			c4.persist.click_rate_up = 1500
+			dev.load_settings()
+			c4.calls = {}
+			local lines = capture_log()
+			dispatch.received_from_proxy(5001, "SET_CLICK_RATE_UP", { RATE = "1.5 s" })
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "" })
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_DOWN", {})
+			assert.same({ { 5001, "1500" } }, proxied(c4, "CLICK_RATE_UP"))
+			assert.same({ { 5001, "100" } }, proxied(c4, "PRESET_LEVEL"))
+			assert.same({ { 5001, "5000" } }, proxied(c4, "HOLD_RATE_DOWN"))
+			assert.same({ 1500, 100, 5000 }, { dev.setting("click_up"), dev.setting("preset"), dev.setting("hold_down") })
+			assert.equal(0, #c4.calls_to("PersistSetValue"), "nothing stored")
+			assert.same({
+				'[WARN] Hue Test: click_rate_up "1.5 s" is not a number; kept 1500',
+				'[WARN] Hue Test: preset_level "" is not a number; kept 100',
+				"[WARN] Hue Test: hold_rate_down without a value; kept 5000",
+			}, lines)
 		end)
 
 		it("refuses a setting out of range, from the proxy and at load, and tells the proxy the value kept", function()

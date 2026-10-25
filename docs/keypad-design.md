@@ -59,7 +59,16 @@ findings".
   the settings until the bare form replaced it).
 - Ranges: preset 1 to 100, rates 0 to 86 400 000 ms. A value outside them is
   refused: from the proxy, the value kept is reported back; persisted, it is
-  deleted, warned about once, and the default used.
+  deleted, warned about once, and the default used. Current (2026-10-25,
+  #234): a value from the proxy that is not a number is refused the same
+  way, with the value kept reported back.
+- Colour on mode (#234): `SET_COLOR_ON_MODE {PRESET ID}` sets the proxy's
+  own setting; a driver takes part only by declaring `color_on_mode_preset`,
+  `_previous` or `_fade` (static capabilities) and then handling
+  `UPDATE_COLOR_ON_MODE` and `UPDATE_COLOR_PRESET`, and no notification
+  confirms it [verified: proxy reference, What's New in 3.3.2 and those
+  commands]. The Hue Light declares none, so it neither handles nor uses it;
+  its manual says so.
 
 ## Driver behaviour
 
@@ -81,7 +90,7 @@ Hue Light (`src/hue_light/driver.lua`):
 | click top | brightness target = On preset over click rate up |
 | click bottom | target 0 over click rate down |
 | click toggle | off → preset over click up; on → 0 over click down |
-| hold (timer fired before the release) | Current (since 2026-10-23, "Light parity"): `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing. Originally (2026-10-22): a timed brightness target to the end of the range, and held bottom while off turned the light on dimmed |
+| hold (timer fired before the release) | Current (since 2026-10-23, "Light parity"): `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance (since 2026-10-25, #232: the proxy's ramp only, `HUE_DIM` carries the whole rate; "Light parity"); a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing. Originally (2026-10-22): a timed brightness target to the end of the range, and held bottom while off turned the light on dimmed |
 | release after hold | Current: `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop). Originally: the estimate written as the brightness |
 | release-as-click after a ramp started | same as stop; a click on the same button within 1 s after a hold's release is ignored |
 
@@ -308,6 +317,18 @@ LEDs following Shine and the dimmer were verified
   hold down followed by a click 100 ms after the release sent dim down and
   stop and ignored the click. A single light's `HUE_DIM` is still not
   seen.
+- Current (2026-10-25, #232, #234): `HUE_DIM` up or down carries the whole
+  hold rate, at most 6 000 000 ms (the bound the bridge holds zone and scene
+  holds to), and the bridge asks for the whole range, so Hue dims at 100 %
+  per hold rate from any level; the proxy's CHANGING and the 100 ms
+  estimate keep the share of the rate the distance takes, the same speed.
+  Until then `HUE_DIM` carried that share with the whole range, so a hold
+  from 50 % ran Hue at twice the tile's speed. The whole range rather than
+  the distance left: a zone light's lamps below its average still reach the
+  end while the button is held, and the start still skips the bridge's
+  request bucket (`commands.urgent`). That Hue keeps the speed and stops at
+  the end of the range is assumed until the hold on the house that #232
+  asks for.
 
 ### Queue support (`src/hue_bridge/bridge/commands.lua`)
 
