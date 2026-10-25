@@ -449,6 +449,19 @@ describe("Hue Bridge driver", function()
 		assert.truthy(env.Properties["Status"]:find("^Pinning check passed"))
 	end)
 
+	-- Issue #239: it used to read "example.com unreachable" for every inconclusive answer.
+	it("Check CA Pinning names the transfer's error in Status when the answer is inconclusive", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_check(c4)
+
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Check CA Pinning" })
+		c4.last_transfer():respond(200, "<html>")
+		c4.last_transfer():done(28, "Timeout was reached")
+		assert.equal("Pinning check inconclusive: example.com failed with the bundle for a reason other than its "
+			.. "certificate (transfer failed (28): Timeout was reached)", env.Properties["Status"])
+	end)
+
 	it("Connection Test against the bridge pauses the driver's stream and restores it", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
