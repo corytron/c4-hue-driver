@@ -16,6 +16,10 @@ listed.
 - The manual says what to do when a device's Documentation tab still shows
   the page of the build before right after an update: select the device
   again (#260).
+- The top of the project's GitHub page links the changelog, the current
+  state, the design notes, the contributing guide, the security policy, the
+  code of conduct and the license, and every link in the project's
+  documents is checked on each change (#263).
 
 ## 1.0 "Cassian", build 359 (2026-10-25)
 

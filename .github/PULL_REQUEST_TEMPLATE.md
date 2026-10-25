@@ -12,8 +12,9 @@
 
 ## How it was tested
 
-- [ ] `tools/check.sh` passes: lint, specs, shell, Python, XML, workflows, secrets and the
-      house's desired state (CI runs the same script with `--strict`)
+- [ ] `tools/check.sh` passes: lint, specs, shell, Python, XML, workflows, secrets, the
+      house's desired state, the changelog and the links (CI runs the same script
+      with `--strict`)
 - [ ] A change of behaviour comes with a spec
 - [ ] `tools/build.sh` builds the three `.c4z` files
 - [ ] On hardware: <!-- Control4 OS version, Composer Pro version, bridge model, what you
@@ -37,3 +38,6 @@
       has a line under `## Unreleased` in `CHANGELOG.md`, written for the people who
       install and use the drivers, with the issue number (`docs/changelog-design.md`).
 - [ ] **Status.** `docs/status.md` is updated if what runs or what is open changed.
+- [ ] **Documents.** For a new document: decided whether visitors of the project page
+      would find it useful, and if so the README links it (a design note goes in
+      `docs/README.md`).

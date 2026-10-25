@@ -3,7 +3,13 @@
 [![CI](https://github.com/corytron/c4-hue-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/corytron/c4-hue-driver/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/corytron/c4-hue-driver/badge)](https://scorecard.dev/viewer/?uri=github.com/corytron/c4-hue-driver)
 [![Latest release](https://img.shields.io/github/v/release/corytron/c4-hue-driver)](https://github.com/corytron/c4-hue-driver/releases/latest)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-blue)](CHANGELOG.md)
 [![License](https://img.shields.io/github/license/corytron/c4-hue-driver)](LICENSE)
+
+**Documents:** [Changelog](CHANGELOG.md) · [Current state](docs/status.md) ·
+[Design notes](docs/README.md) ·
+[Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) ·
+[Code of conduct](CODE_OF_CONDUCT.md) · [License](LICENSE) and [notice](NOTICE)
 
 An independent Control4 DriverWorks driver that works with Philips Hue bridges
 over the bridge's local CLIP v2 API. Three `.c4z` drivers, **Hue Bridge**,
@@ -347,7 +353,9 @@ tests/             busted specs (spec/), the fake DriverWorks runtime (helpers/)
 tools/             build.sh; check.sh (every check, as CI runs it) and setup-checks.sh (its
                    tools, the Python ones hash-pinned in requirements-checks.txt); deploy.py
                    (the house: release download and verification, the deployment record, the
-                   brief); labels_sync.py; code_scanning_issue.py (the one issue listing the
+                   brief); changelog.py (CHANGELOG.md: its check, the release notes, the
+                   Documentation tabs' list); check_links.py (the links check);
+                   labels_sync.py; code_scanning_issue.py (the one issue listing the
                    open code scanning alerts); gh-discussion.py (reports to Discussions); the
                    unit tests of the Python tools in tests/; the dev loop (devserver.py,
                    devctl.py, regress.sh, smart_scene_probe.py); the Windows session's
@@ -363,8 +371,10 @@ docs/              design notes, feature contracts, research, reviews, checklist
                    release-note categories, the issue and pull request templates, CODEOWNERS
 ```
 
-At the top level: `LICENSE` and `NOTICE`, `CONTRIBUTING.md`, `SECURITY.md`,
-`CODE_OF_CONDUCT.md`, `CLAUDE.md` (the working rules of the AI sessions that
+At the top level: [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE),
+[`CHANGELOG.md`](CHANGELOG.md), [`CONTRIBUTING.md`](CONTRIBUTING.md),
+[`SECURITY.md`](SECURITY.md), [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md),
+[`CLAUDE.md`](CLAUDE.md) (the working rules of the AI sessions that
 build and test the drivers) and the settings of luacheck (`.luacheckrc`),
 busted (`.busted`), ruff (`ruff.toml`) and gitleaks (`.gitleaks.toml`).
 
