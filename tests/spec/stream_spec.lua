@@ -178,10 +178,10 @@ describe("bridge.stream", function()
 	it("aborts on a non-200 response and reports it", function()
 		s:start()
 		local t = c4.last_transfer()
-		t:respond_headers(401, {})
+		t:respond_headers(500, {})
 		assert.is_true(t.cancelled)
 		t:done(-1, nil)
-		assert.equal("HTTP 401", s.stats.last_error)
+		assert.equal("HTTP 500", s.stats.last_error)
 		assert.equal("waiting", s.state)
 	end)
 
@@ -344,5 +344,279 @@ describe("bridge.stream", function()
 		s:start()
 		assert.equal("192.0.2.10", s.stats.address)
 		assert.equal("https://192.0.2.10/eventstream/clip/v2", c4.last_transfer().url)
+	end)
+
+	-- Issue #44: the house Bridge Pro answers an unknown key with 403 (an HTML
+	-- body); a reconnect would present the same key again.
+	describe("key rejected (401 or 403)", function()
+		local rejected, state_then
+
+		before_each(function()
+			rejected, state_then = {}, nil
+			s = new_stream({ on_key_rejected = function(code)
+				table.insert(rejected, code)
+				state_then = s.state
+			end })
+		end)
+
+		for _, code in ipairs({ 401, 403 }) do
+			it("stops for good on a " .. code .. ", records it and tells the owner once", function()
+				s:start()
+				local t = c4.last_transfer()
+				t:respond_headers(code, { ["content-type"] = "text/html" })
+				assert.is_true(t.cancelled, "the callback returned true: the transfer is aborted")
+				assert.equal("stopped", s.state)
+				assert.is_false(s:running())
+				assert.equal("key rejected (HTTP " .. code .. ")", s.stats.last_error)
+				assert.equal("Stopped: key rejected (HTTP " .. code .. ")", seen.status[#seen.status])
+				assert.same({ code }, rejected)
+				assert.equal("stopped", state_then, "told after the stream has stopped itself")
+				assert.same({}, timer_delays(), "no reconnect timer, no watchdog")
+
+				-- What Director still delivers for the aborted transfer changes nothing.
+				t.cancelled = false
+				t:chunk("<html><body>unauthorized user</body></html>")
+				t:done(-1, nil)
+				assert.equal("stopped", s.state)
+				assert.same({ code }, rejected, "once")
+				assert.equal(0, c4.fire_timers())
+				assert.equal(1, #c4.transfers, "no second attempt with the same key")
+				assert.equal(0, s.stats.reconnects)
+			end)
+		end
+
+		it("still reconnects on any other refusal", function()
+			for _, code in ipairs({ 404, 500, 503 }) do
+				s = new_stream({ on_key_rejected = function(c) table.insert(rejected, c) end })
+				s:start()
+				local t = c4.last_transfer()
+				t:respond_headers(code, {})
+				t:done(-1, nil)
+				assert.equal("waiting", s.state, "HTTP " .. code)
+				assert.equal("HTTP " .. code, s.stats.last_error)
+				assert.truthy(seen.status[#seen.status]:find("Reconnecting in", 1, true))
+				s:stop()
+			end
+			assert.same({}, rejected)
+		end)
+
+		it("connects again on start() (after the owner pairs again) and reports a new rejection", function()
+			s:start()
+			c4.last_transfer():respond_headers(403, {})
+			s:start()
+			assert.equal(2, #c4.transfers)
+			assert.equal("connecting", s.state)
+			c4.last_transfer():respond_headers(403, {})
+			assert.same({ 403, 403 }, rejected, "once per rejection")
+		end)
+
+		it("aborts the transfer even when the owner's callback raises", function()
+			s = new_stream({ on_key_rejected = function() error("boom") end })
+			s:start()
+			local t = c4.last_transfer()
+			t:respond_headers(403, {})
+			assert.is_true(t.cancelled)
+			assert.equal("stopped", s.state)
+		end)
+
+		it("is not reported for an abandoned transfer", function()
+			s:start()
+			local t = c4.last_transfer()
+			s:drop_transfer()
+			s:schedule_reconnect()
+			t:respond_headers(403, {})
+			assert.is_true(t.cancelled)
+			assert.same({}, rejected)
+			assert.equal("waiting", s.state)
+		end)
+	end)
+
+	-- Code analysis 2026-10-22, L1: an abandoned transfer's last chunk reaches
+	-- the owner at most once.
+	describe("an abandoned transfer's last chunk", function()
+		local function event(id)
+			return "id: " .. id .. "\ndata: " .. CONTAINER .. "\n\n"
+		end
+
+		-- A connected stream whose transfer is abandoned (as by the watchdog)
+		-- and replaced; Cancel() had no effect on the old one. Returns the old
+		-- transfer and the replacement (nil while waiting).
+		local function abandon(connect_replacement)
+			s:start()
+			local old = open_ok()
+			fire_deferrals()
+			s:drop_transfer()
+			s:schedule_reconnect()
+			old.cancelled = false
+			local new
+			if connect_replacement then
+				assert.equal(1, c4.fire_timers(), "the retry timer")
+				new = c4.last_transfer()
+				assert.are_not.equal(old, new)
+			end
+			return old, new
+		end
+
+		it("is delivered once while the stream waits, and nothing after it", function()
+			local old = abandon(false)
+			assert.equal("waiting", s.state)
+			local statuses = #seen.status
+			old:chunk(event("9:0"))
+			assert.is_true(old.cancelled, "aborted")
+			assert.equal(1, #seen.containers)
+			assert.equal(1, s.stats.containers, "counted, since the owner got it")
+			assert.equal(statuses, #seen.status, "no per-event text while not connected (it read 'Connected since nil')")
+
+			old.cancelled = false -- Director ignored the abort
+			old:chunk(event("10:0"))
+			assert.is_true(old.cancelled)
+			assert.equal(1, #seen.containers, "only the last chunk, once")
+		end)
+
+		it("is skipped while the replacement is connected, which carries the same events", function()
+			local old, new = abandon(true)
+			new:respond_headers(200, {})
+			assert.equal("connected", s.state)
+			local statuses = #seen.status
+			old:chunk(event("9:0"))
+			assert.is_true(old.cancelled)
+			assert.equal(0, #seen.containers)
+			assert.equal(0, s.stats.events)
+			assert.equal(statuses, #seen.status)
+
+			new:chunk(event("9:0"))
+			assert.equal(1, #seen.containers, "delivered by the replacement, once")
+		end)
+
+		it("is not delivered again by the replacement when it reached the bridge first", function()
+			local old, new = abandon(true)
+			assert.equal("connecting", s.state)
+			old:chunk(event("9:0"))
+			assert.equal(1, #seen.containers, "delivered while the replacement connects")
+
+			new:respond_headers(200, {})
+			new:chunk(event("9:0") .. event("10:0"))
+			assert.equal(2, #seen.containers)
+			assert.equal("10:0", seen.containers[2][2].id, "9:0 skipped, 10:0 delivered")
+			new:chunk(event("11:0"))
+			assert.equal(3, #seen.containers)
+		end)
+
+		it("from two abandoned transfers is delivered once", function()
+			s:start()
+			local first = open_ok()
+			s:drop_transfer()
+			s:schedule_reconnect()
+			c4.fire_timers() -- reconnect
+			local second = open_ok()
+			s:drop_transfer()
+			s:schedule_reconnect()
+			assert.equal("waiting", s.state)
+			first.cancelled, second.cancelled = false, false
+			first:chunk(event("9:0"))
+			second:chunk(event("9:0"))
+			assert.equal(1, #seen.containers)
+			assert.is_true(second.cancelled)
+		end)
+
+		it("is dropped once the stream is stopped", function()
+			local old = abandon(false)
+			s:stop()
+			old:chunk(event("9:0"))
+			assert.equal(0, #seen.containers)
+		end)
+	end)
+
+	-- Code analysis 2026-10-22, L3: the watchdog runs from the connect, and
+	-- only events and keepalives count as signs of life.
+	describe("watchdog from the connect", function()
+		it("restarts a transfer that never answers", function()
+			s:start()
+			local t = c4.last_transfer()
+			assert.equal("connecting", s.state)
+			assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays(), "armed at connect")
+			assert.equal(1, c4.fire_timers())
+			assert.is_true(t.cancelled)
+			assert.equal("waiting", s.state)
+			assert.truthy(s.stats.last_error:find("no data for " .. stream.DEFAULT_WATCHDOG .. " s", 1, true))
+
+			-- Headers arriving late on the abandoned transfer are refused.
+			t.cancelled = false
+			t:respond_headers(200, {})
+			assert.is_true(t.cancelled)
+			assert.equal("waiting", s.state)
+		end)
+
+		it("restarts a connected stream whose chunks carry no event and no keepalive", function()
+			s:start()
+			local t = open_ok()
+			fire_deferrals()
+			assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays(), "re-armed for a full period at the headers")
+			c4.now_ms = c4.now_ms + 100 * 1000
+			t:chunk("\n")                   -- a blank line: no event
+			t:chunk('data: {"partial')      -- an event that never completes
+			c4.now_ms = c4.now_ms + (stream.DEFAULT_WATCHDOG - 100) * 1000
+			assert.equal(1, c4.fire_timers())
+			assert.is_true(t.cancelled, "not fed: restarted at the end of the period")
+			assert.equal("waiting", s.state)
+			assert.equal(0, #seen.containers)
+		end)
+
+		it("is fed by an event", function()
+			s:start()
+			local t = open_ok()
+			fire_deferrals()
+			c4.now_ms = c4.now_ms + 100 * 1000
+			t:chunk("id: 1:0\ndata: " .. CONTAINER .. "\n\n")
+			c4.now_ms = c4.now_ms + (stream.DEFAULT_WATCHDOG - 100) * 1000
+			assert.equal(1, c4.fire_timers())
+			assert.equal("connected", s.state)
+			assert.same({ 100 * 1000 }, timer_delays(), "re-armed for what remains after the event")
+		end)
+
+		it("leaves no watchdog behind when the transfer cannot start", function()
+			require("bridge.http").ca = nil -- http.stream fails at once (on_done -2)
+			s:start()
+			assert.equal("waiting", s.state)
+			assert.same({ stream.BACKOFF_MIN * 1000 }, timer_delays(), "only the retry timer")
+		end)
+	end)
+
+	-- Issue #65: the reconnect counter and the first connect, in every build.
+	describe("stats", function()
+		it("keep the clock of the first connect across reconnects and count the reconnects", function()
+			local real_date = os.date
+			local clock_text = "23:11:46"
+			rawset(os, "date", function(fmt, ...)
+				if fmt == "%H:%M:%S" then
+					return clock_text
+				end
+				return real_date(fmt, ...)
+			end)
+			finally(function() rawset(os, "date", real_date) end)
+
+			assert.is_nil(s.stats.started)
+			assert.equal(0, s.stats.reconnects)
+			s:start()
+			assert.is_nil(s.stats.started, "not before the stream is up")
+			open_ok()
+			fire_deferrals()
+			assert.equal("23:11:46", s.stats.started)
+			assert.equal("23:11:46", s.stats.connected_since)
+
+			clock_text = "23:40:02"
+			c4.last_transfer():done(28, "Operation timed out")
+			assert.equal(1, s.stats.reconnects)
+			assert.equal(1, c4.fire_timers(), "the retry timer")
+			open_ok()
+			assert.equal("23:40:02", s.stats.connected_since)
+			assert.equal("23:11:46", s.stats.started, "kept across reconnects")
+
+			s:stop()
+			s:start()
+			open_ok()
+			assert.equal("23:11:46", s.stats.started, "and across a stop and a start")
+			assert.equal(1, s.stats.reconnects, "a stop and a start is not a reconnect")
+		end)
 	end)
 end)

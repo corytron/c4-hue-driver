@@ -24,8 +24,13 @@
 --
 -- Pending state is the single source of truth per light. A PUT that fails
 -- with 429, 5xx or a transport error is folded back under whatever arrived
--- since (latest wins) and flushed again after a growing backoff; any other
--- 4xx drops the state, since repeating a rejected body cannot help.
+-- since (latest wins) and flushed again after a growing backoff, for at most
+-- MAX_AGE_S from the state's last change: after that it is dropped with one
+-- warning, so a bridge that comes back never replays minutes-old slider
+-- positions over what was set meanwhile (issue #43). Any other 4xx drops the
+-- state, since repeating a rejected body cannot help, and so do the two
+-- answers no retry can mend, "not paired" and "key rejected": the driver
+-- gives them at once, without a request, until the owner pairs again.
 --
 -- The owner supplies `send(rid, body, done)` (an http.request PUT) and may
 -- supply `now()` (a millisecond clock) for tests. Everything that runs later,
@@ -43,7 +48,13 @@ commands.RATE_PER_SEC = 10           -- Hue guidance for /resource/light
 commands.BURST = 10                  -- token bucket capacity
 commands.BACKOFF_MS = 500            -- first retry delay, doubled per consecutive failure
 commands.BACKOFF_MAX_MS = 8000
+commands.MAX_AGE_S = 30              -- a failing state is retried this long after its last change, then dropped
 commands.DEFAULT_LIMITS = { min_dim = 1, mirek_min = 153, mirek_max = 500 }
+
+-- Answers that no retry can mend: bridge_request (hue_bridge/driver.lua)
+-- gives them at once, without a request, while the driver has no key or the
+-- bridge has refused it. The pending state ends there (issue #43).
+local FINAL_ERRORS = { ["not paired"] = true, ["key rejected"] = true }
 
 local NUMERIC_FIELDS = { "brightness", "x", "y", "mirek", "rate" }
 
@@ -91,6 +102,8 @@ end
 --                          again after burst/rate_per_sec seconds of quiet
 --   level_of(rid)          current brightness or nil, the start of a refused
 --                          dim stop's fallback estimate
+--   label                  what a rid is, for log lines (default "light"; the
+--                          grouped_light queue passes "grouped_light")
 function commands.new(opts)
 	local rate = tonumber(opts.rate_per_sec) or commands.RATE_PER_SEC
 	local burst = tonumber(opts.burst) or commands.BURST
@@ -100,9 +113,10 @@ function commands.new(opts)
 		send = assert(opts.send, "commands.new needs opts.send"),
 		now = opts.now or default_now,
 		level_of = opts.level_of,  -- rid -> current brightness or nil (start of a dim's fallback estimate)
+		label = opts.label or "light",
 		rate = rate,                -- tokens per second
 		burst = burst,              -- token bucket capacity
-		lights = {},                -- rid -> { pending, timer, timer_kind, inflight, failures, limits }
+		lights = {},                -- rid -> { pending, timer(_kind), inflight, failures, limits, updated_at, final_err }
 		generation = 0,
 		tokens = burst,
 		refilled_at = nil,          -- ms of the last refill; nil until the first take
@@ -284,6 +298,7 @@ function commands:set(rid, fields)
 		light.pending = {}
 	end
 	merge(light.pending, fields or {})
+	light.updated_at = self.now() -- the retries' age counts from here
 	if light.timer_kind == "retry" or (light.timer_kind == "wait" and not commands.urgent(light.pending)) then
 		return
 	end
@@ -339,7 +354,7 @@ function commands:flush(rid)
 		light.dim_stop_at = self.now()
 	end
 	if log.enabled("debug") then
-		log.debug("PUT light %s: %s", tostring(rid), C4:JsonEncode(body))
+		log.debug("PUT %s %s: %s", self.label, tostring(rid), C4:JsonEncode(body))
 	end
 
 	local gen = self.generation
@@ -384,28 +399,62 @@ local function retriable(result)
 	return result.code == nil or result.code == 429 or result.code >= 500
 end
 
+-- End a light's state: whatever was pending goes, with its timer.
+function commands:drop(light)
+	cancel_timer(light)
+	light.pending = nil
+	light.failures = 0
+	self.counters.dropped = self.counters.dropped + 1
+end
+
 function commands:on_done(rid, light, result)
 	local sent = light.inflight
 	light.inflight = nil
 	if result.ok then
 		light.failures = 0
+		light.final_err = nil
+	elseif FINAL_ERRORS[result.err] then
+		-- Not paired, or the key refused: nothing gets through until the owner
+		-- pairs again, and a state kept until then would be stale. The newer
+		-- fields that arrived meanwhile go too. One warning per rid and
+		-- condition: a slider dragged meanwhile would warn at every step.
+		self:drop(light)
+		if light.final_err ~= result.err then
+			light.final_err = result.err
+			log.warn("%s %s: %s, dropping the command (no retry)", self.label, tostring(rid), tostring(result.err))
+		else
+			log.debug("%s %s: %s, dropping the command (no retry)", self.label, tostring(rid), tostring(result.err))
+		end
+		return
 	elseif retriable(result) then
 		light.failures = light.failures + 1
 		local delay = math.min(commands.BACKOFF_MS * 2 ^ (light.failures - 1), commands.BACKOFF_MAX_MS)
+		local now = self.now()
+		local age = now - (light.updated_at or now)
+		if age + delay > commands.MAX_AGE_S * 1000 then
+			-- The retry would go out more than MAX_AGE_S after the owner last
+			-- changed this state: by then it is stale (issue #43).
+			self:drop(light)
+			log.warn("%s %s: %s; dropping the command, last changed %d s ago (retries stop after %d s)",
+				self.label, tostring(rid), tostring(result.err), math.floor(age / 1000 + 0.5), commands.MAX_AGE_S)
+			return
+		end
 		-- Newer fields win over the ones that failed.
 		light.pending = merge(copy(sent), light.pending or {})
 		self.counters.retried = self.counters.retried + 1
-		log.warn("light %s: %s, retrying in %d ms (attempt %d)", tostring(rid), tostring(result.err), delay, light.failures)
+		log.warn("%s %s: %s, retrying in %d ms (attempt %d)", self.label, tostring(rid), tostring(result.err), delay,
+			light.failures)
 		self:arm(rid, light, delay, "retry")
 		return
 	else
 		light.failures = 0
 		self.counters.dropped = self.counters.dropped + 1
-		log.warn("light %s: %s, dropping the command", tostring(rid), tostring(result.err))
+		log.warn("%s %s: %s, dropping the command", self.label, tostring(rid), tostring(result.err))
 		if sent and sent.dim == "stop" then
 			local level = self:stop_fallback(light, sent)
 			if level then
-				log.warn("light %s: the bridge refused the dim stop; setting %d %% instead", tostring(rid), level)
+				log.warn("%s %s: the bridge refused the dim stop; setting %d %% instead", self.label, tostring(rid),
+					level)
 				light.pending = merge(light.pending or {}, { brightness = level })
 			end
 		end
