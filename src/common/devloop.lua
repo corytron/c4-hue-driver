@@ -45,7 +45,8 @@
 -- Public API:
 --   devloop.start(host_port)  idempotent for the same host; a different host
 --                             restarts; an empty host stops
---   devloop.stop()
+--   devloop.stop()            (start and stop called while a command from the
+--                             server runs act once its command_done is sent)
 --   devloop.running()         -> bool
 --   devloop.version()         -> version of the code last loaded, or nil
 --                                while the .c4z's own code is running
@@ -110,6 +111,8 @@ if not S then
 		loader = nil,            -- our package.loaders entry
 		signed_commands = nil,   -- the bridge's development commands (set_signed_commands)
 		redactor = nil,          -- the bridge's log line filter (set_redactor)
+		holding = false,         -- a command runs: start/stop only note where the loop should end up
+		held = nil,              -- that note: the host:port to move to, "" to stop (run_command acts on it)
 	}
 	rawset(_G, "__DEVLOOP", S)
 end
@@ -891,27 +894,52 @@ function devloop.execute(command, params)
 	return (not ok) and tostring(err) or nil
 end
 
+-- A command can stop the loop or move it to another server: devctl.py set
+-- "Dev Server" "" (or another host:port) reaches the bridge's property
+-- handler, which calls devloop.stop() (or devloop.start(host)). Stopping
+-- there and then would drop the command's own command_done report, and the
+-- server would keep the command pending for ever [issue #239]. So while
+-- `fn` runs the command, stop() and start() only note where the loop should
+-- end up (S.held: the host, "" to stop), and run_command acts on the note
+-- once the report has left. `fn` returns nil or the error text; so does
+-- this, and a raise becomes the error text.
+local function holding(fn)
+	S.holding, S.held = true, nil
+	local ok, err = pcall(fn)
+	S.holding = false
+	if not ok then return tostring(err) end
+	return err
+end
+
 local function run_command(cmd, done)
 	local started = now_ms()
 	local function complete(err)
 		S.last_command_id = math.max(S.last_command_id, tonumber(cmd.id) or 0)
-		report("command_done", { command_id = cmd.id, error = err, elapsed_ms = now_ms() - started }, done)
+		local extra = { command_id = cmd.id, error = err, elapsed_ms = now_ms() - started }
+		local held = S.held
+		S.held = nil
+		if held == nil then return report("command_done", extra, done) end
+		-- The command stopped the loop or moved it. Its report is on its way
+		-- to the server it came from (the transfer has started; the loop's
+		-- stop or move drops only its reply); the rest of the list stays
+		-- queued there for the loop's next start.
+		report("command_done", extra)
+		devloop.start(held)
 	end
 	-- Entry points are looked up at call time: a reload replaces them.
 	if cmd.type == "execute" then
-		complete(devloop.execute(cmd.command, cmd.params))
+		complete(holding(function() return devloop.execute(cmd.command, cmd.params) end))
 	elseif cmd.type == "set_property" then
 		local name = tostring(cmd.name)
 		local value = cmd.value == nil and "" or tostring(cmd.value)
-		local ok, err = pcall(function()
+		complete(holding(function()
 			C4:UpdateProperty(name, value)
 			-- Director updates Properties before OnPropertyChanged; do the same.
 			local props = rawget(_G, "Properties")
 			if type(props) == "table" then props[name] = value end
 			local fn = rawget(_G, "OnPropertyChanged")
 			if type(fn) == "function" then fn(name) end
-		end)
-		complete(not ok and tostring(err) or nil)
+		end))
 	elseif cmd.type == "reload" then
 		-- Also a way to retry a refused version at once (a key fixed on the
 		-- server, say): the next tick fetches it again.
@@ -1054,6 +1082,11 @@ end
 -- Public API ------------------------------------------------------------------
 
 function devloop.stop()
+	-- Called by a command the loop runs: its report goes first (holding).
+	if S.holding then
+		S.held = ""
+		return
+	end
 	if S.timer then
 		pcall(function() S.timer:Cancel() end)
 		S.timer = nil
@@ -1076,6 +1109,12 @@ function devloop.start(host_port)
 	if host_port == "" then
 		devloop.stop()
 		return false
+	end
+	-- Called by a command the loop runs: its report goes first (holding).
+	-- The same host as now cancels a stop the command asked for before.
+	if S.holding then
+		if S.timer and S.host == host_port then S.held = nil else S.held = host_port end
+		return true
 	end
 	if S.timer and S.host == host_port then return true end
 	devloop.stop()

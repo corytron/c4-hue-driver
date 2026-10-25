@@ -159,8 +159,12 @@ Once per new controller OS version, before a build is called good on it:
    replaces the system store rather than adding to it, which the release
    build's own check (section 2, line 7) cannot tell apart. The action needs
    the controller to reach the internet; `Pinning check inconclusive:
-   example.com unreachable` (the text of every inconclusive answer; the Lua
-   output says why) proves nothing, so run it again once it can. `Pinning
+   example.com unreachable with the system CAs (<the transfer's error>)` or
+   `Pinning check inconclusive: example.com failed with the bundle for a
+   reason other than its certificate (<the transfer's error>)` proves
+   nothing, so run it again once it can (until issue #239 every
+   inconclusive answer read `example.com unreachable`, whatever the cause;
+   dev builds from that fix on name the request and its error). `Pinning
    check FAILED: public CAs are trusted too; see Lua output` stops the
    release: open an issue, since keyed requests would accept any publicly
    trusted certificate at the bridge's address. Note the OS version and the
@@ -219,11 +223,17 @@ development here is finished.
    file.
 4. Once per major version the coordinator edits the codename into the
    release title (`1.0 "Cassian"`); the workflow never changes an existing
-   title or its notes. It writes the build number into the notes only when
-   it creates the release, so after a run for a moved tag the coordinator
-   edits the notes to the new build (`manifest.json` names it), as for
-   build 316 on 2026-10-25. Check the release page: seven assets, the build
-   number in the notes.
+   title. It writes the build number into the notes when it creates the
+   release, and for a moved tag it keeps one line of the existing notes
+   current (issue #239, after the hand edit build 316 needed on
+   2026-10-25): when the notes' first heading ends in `(build N)`, as
+   `## 1.0 "Cassian" (build 329)` does, N becomes the run's build
+   (`manifest.json` names it), and the step's log says what it did.
+   Nothing else in the notes changes: a "New in build N" section or any
+   other text that names a build is the coordinator's to edit after the
+   run, and so is the heading itself when it does not end that way. Check
+   the release page: seven assets, the build number in the first heading
+   and wherever else the notes name it.
 5. Nothing is built on the VM for an install: the house gets these same
    files, downloaded from the release by `tools/deploy.py start` (next
    section).

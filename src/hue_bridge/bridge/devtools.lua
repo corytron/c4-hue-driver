@@ -531,13 +531,8 @@ end
 
 local function check_ca_pinning()
 	ctx.prop("Status", "Checking CA pinning against " .. pinning.PUBLIC_HOST)
-	pinning.check(http.ca, function(verdict)
-		local text = {
-			pinned = "Pinning check passed: only Signify-signed certificates are trusted",
-			not_pinned = "Pinning check FAILED: public CAs are trusted too; see Lua output",
-			inconclusive = "Pinning check inconclusive: " .. pinning.PUBLIC_HOST .. " unreachable",
-		}
-		ctx.prop("Status", text[verdict] or verdict)
+	pinning.check(http.ca, function(verdict, detail)
+		ctx.prop("Status", pinning.status(verdict, detail))
 	end)
 end
 

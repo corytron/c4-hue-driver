@@ -14,6 +14,8 @@ the server uses (~/.config/c4-hue-driver/devkey, or $C4_HUE_DEVKEY_FILE, or
   devctl.py reload                               queue a reload of the current code
   devctl.py wait <id> [--timeout 60]             block until the driver reports the
                                                  command done, then show properties
+                                                 (a Dev Server change also ends when
+                                                 the bridge goes quiet, see cmd_wait)
   devctl.py pin / unpin [--tree T]               serve src/ as it is now / live again
   devctl.py log [-n 50] [-f]                     show / follow the shipped driver log
 
@@ -27,6 +29,7 @@ Standard library only.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -39,6 +42,14 @@ import devserver  # noqa: E402
 
 EXIT_OK, EXIT_ERROR, EXIT_TIMEOUT = 0, 1, 2
 DEFAULT_STATE = os.path.join(os.path.dirname(TOOLS), "build", "dev")
+
+# A running loop asks the server something every POLL_S seconds (devloop.INTERVAL_MS); QUIET_S of
+# silence after the bridge took a Dev Server change means its loop stopped or moved (issue #239,
+# cmd_wait).
+POLL_S = 3
+QUIET_S = 20
+# Lua's %s, the white space common/dispatch.lua turns into "_" when it names a property handler.
+LUA_SPACE = re.compile(r"[ \t\n\v\f\r]+")
 
 
 class DevctlError(Exception):
@@ -288,8 +299,41 @@ def cmd_unpin(args):
     return EXIT_OK
 
 
+def changes_dev_server(command):
+    """Whether a queued command sets the bridge's Dev Server property, which stops the dev loop
+    (an empty value) or moves it to another server. A loop whose common/devloop.lua predates
+    issue #239 stops or moves before it reports command_done, so the server never hears of it."""
+    return (
+        isinstance(command, dict)
+        and command.get("type") == "set_property"
+        and LUA_SPACE.sub("_", str(command.get("name") or "")) == "Dev_Server"
+    )
+
+
+def is_time(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def silent_for(st):
+    """Seconds since the bridge last asked the server anything, by the server's clock; None if never."""
+    if not is_time(st.get("last_seen")):
+        return None
+    now = st.get("server_time") if is_time(st.get("server_time")) else time.time()
+    return max(0.0, now - st["last_seen"])
+
+
 def cmd_wait(args):
+    """Poll /status until the driver reports command `id` done.
+
+    A Dev Server change that is still pending also ends the wait, with exit 0 and a note on stderr,
+    once the bridge has been in touch after the change was queued (so it received it) and silent for
+    QUIET_S since: a loop whose common/devloop.lua predates issue #239 stops or moves without
+    reporting it. The queue time is not known here; a contact from one poll interval before the
+    wait's first look on counts, since `devctl.py wait $(devctl.py set ...)` looks within a second
+    of queueing. A wait begun later cannot tell a loop that stopped from a bridge that is down, and
+    times out with a hint instead."""
     deadline = time.monotonic() + args.timeout
+    since = None  # server time from which a contact counts as after the queueing
     while True:
         st = call(args, "GET", "/status")
         done = st.get("done_commands")
@@ -300,9 +344,30 @@ def cmd_wait(args):
         if finished:
             print_properties(st.get("properties") or {})
             return EXIT_OK
+        if since is None:
+            since = (st["server_time"] if is_time(st.get("server_time")) else time.time()) - POLL_S
+        pending = {c.get("id"): c for c in st.get("pending_commands") or [] if isinstance(c, dict)}
+        command = pending.get(args.id)
+        dev_server = changes_dev_server(command)
+        silent = silent_for(st)
+        heard = is_time(st.get("last_seen")) and st["last_seen"] >= since
+        if dev_server and heard and silent >= QUIET_S:
+            sys.stderr.write(
+                "devctl: %s treated as done: the bridge took it and has been silent for %ds since, so its loop "
+                "stopped or moved without reporting it (a common/devloop.lua from before issue #239). It stays "
+                "queued on this server, where a loop that starts fresh finds it again "
+                '(docs/dev-loop.md, "Gotchas learned on hardware").\n' % (describe(command), silent)
+            )
+            return EXIT_OK
         if time.monotonic() >= deadline:
-            pending = [c.get("id") for c in st.get("pending_commands") or []]
-            state = "still pending" if args.id in pending else "not pending and not done; was it ever queued?"
+            state = "still pending" if command is not None else "not pending and not done; was it ever queued?"
+            if dev_server and silent is None:
+                state += "; the bridge has not been in touch since the server started"
+            elif dev_server and silent >= QUIET_S:
+                state += (
+                    "; the bridge has been silent for %ds: if this command stopped its loop before the wait began, "
+                    "a common/devloop.lua from before issue #239 never reports it (docs/dev-loop.md)" % silent
+                )
             sys.stderr.write("timed out after %gs waiting for command %d (%s)\n" % (args.timeout, args.id, state))
             return EXIT_TIMEOUT
         time.sleep(1)
