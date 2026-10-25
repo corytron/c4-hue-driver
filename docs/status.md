@@ -20,8 +20,11 @@ cut by the Release workflow and carry `manifest.json` and provenance
 attestations; `deploy/house.yaml` is the desired state of the house and the
 GitHub environment [`house`](https://github.com/corytron/c4-hue-driver/deployments/house)
 records every install (`tools/deploy.py`); a drift workflow keeps one
-issue labelled `deploy` open while they differ. The Composer click stays
-with the Windows session: the controller has no install API.
+issue labelled `deploy` open while they differ (a run that finds drift is a
+green run since PR #210). The Composer click stays with the Windows
+session: the controller has no install API. OpenSSF Scorecard's first
+score was 6.2 (the misses are single-maintainer ones: no code reviews, one
+contributor, no CII badge).
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -29,13 +32,20 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Recorded on GitHub**: deployment 7307525952 on the environment `house`
-  (build 247, v1.0, installed 2026-10-24 21:04, recorded 2026-10-25 with
-  `tools/deploy.py record`) is the observed state; `deploy/house.yaml` says
-  v1.0 build 247, so `python3 tools/deploy.py status` reports "in sync".
-  The Environments page is the authority on what the house runs from now
-  on; the build details below are the history.
-- **Build 247** (no dev loop), on all three drivers (installed 2026-10-24
+- **Build 259 = release 1.0 "Cassian"** (re-cut 2026-10-25 from the merge of
+  PR #205 with `manifest.json` and provenance attestations), installed
+  2026-10-25 23:11 through the GitOps flow: PR #207 set `deploy/house.yaml`,
+  the drift workflow opened issue #208, `tools/deploy.py start` verified the
+  release assets and created deployment 7307903445 on the environment
+  `house`, the Windows Composer session installed from the GitHub release
+  URLs (round 34: all five devices on Driver Version 259, no Restart
+  Director, bridge Paired, stream connected), and `tools/deploy.py done`
+  recorded success and closed the issue. Driver code and XML are identical
+  to build 247. `python3 tools/deploy.py status` reports "in sync". The
+  Environments page is the authority on what the house runs; the build
+  details below are the history. Build 247 is recorded there as deployment
+  7307525952 (installed 2026-10-24 21:04, before the tool existed).
+- **Build 247** (superseded by 259 above; no dev loop), on all three drivers (installed 2026-10-24
   21:04; release 1.0 "Cassian" is build 237 plus PRs #69, #70 and #130:
   `Last Action` word-wrapped at 72 characters onto read-only rows `Last
   Action (2)` to `(6)` that are shown only while used, their visibility sent

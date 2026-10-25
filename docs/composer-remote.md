@@ -194,3 +194,9 @@ and the bridge id out. Rounds 31–33 settled the Last Action rows (a
 read-only list is a disabled combo box; Composer drops attribute changes
 that arrive with text updates, so the rows' visibility is sent later) and
 set the bridge's Debug Mode back to Off after the dev build had left it On.
+Round 34 (2026-10-25) was the first install through the GitOps flow
+(`docs/cicd-gitops-design.md`): the packages came from the GitHub release
+URLs named in the brief `tools/deploy.py start` wrote, were hash-checked
+with `Get-FileHash`, and all five Hue devices read Driver Version 259
+afterwards; the result went back to GitHub as a deployment on the
+environment `house` with `tools/deploy.py done`.
