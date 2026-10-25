@@ -1,6 +1,9 @@
 -- Issue #53: the release build's own pinning check. A request to the bridge
 -- with a decoy CA bundle must fail certificate verification; an HTTP answer
--- means the configured bundle does not decide.
+-- means the configured bundle does not decide. Security review 2026-10-25,
+-- finding 3: the Director version on which the check answered pinned is
+-- remembered, so the driver can accept an inconclusive answer on that version
+-- only.
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -134,6 +137,159 @@ describe("bridge.tlscheck", function()
 		log.sink = function(line) lines[#lines + 1] = line end
 		check(function(t) t:done(60, "SSL certificate problem: unable to get local issuer certificate") end)
 		assert.same({}, lines)
+	end)
+
+	it("remembers nothing by itself, whatever the verdict: the driver calls remember_pinned", function()
+		check(function(t) t:done(60, "SSL certificate problem: unable to get local issuer certificate") end)
+		check(function(t) t:respond(200, "{}") end)
+		check(function(t) t:done(28, "Timeout was reached") end)
+		assert.same({}, c4.persist)
+	end)
+
+	-- The calls the fake recorded under `name` (c4.calls), in order.
+	local function calls_named(name)
+		local out = {}
+		for _, call in ipairs(c4.calls) do
+			if call.name == name then out[#out + 1] = call end
+		end
+		return out
+	end
+
+	describe("director_version", function()
+		it("is C4:GetVersionInfo().version as a string", function()
+			assert.equal("3.4.2.746094", tlscheck.director_version())
+			c4.director_version = "4.0.1.123456"
+			assert.equal("4.0.1.123456", tlscheck.director_version(), "read afresh at every call")
+			assert.equal(2, #calls_named("GetVersionInfo"))
+		end)
+
+		it("turns a number into a string and trims white space", function()
+			c4.director_version = 3.4
+			assert.equal("3.4", tlscheck.director_version())
+			c4.director_version = " 3.4.2.746094\n"
+			assert.equal("3.4.2.746094", tlscheck.director_version())
+		end)
+
+		it("is nil when the controller answers nothing, raises or lacks the call", function()
+			c4.director_version = nil
+			assert.is_nil(tlscheck.director_version(), "GetVersionInfo answered nil")
+
+			c4.GetVersionInfo = function() error("GetVersionInfo failed") end
+			assert.is_nil(tlscheck.director_version(), "a raise stays inside")
+
+			c4.GetVersionInfo = nil
+			assert.is_nil(tlscheck.director_version(), "no such call")
+
+			rawset(_G, "C4", nil)
+			assert.is_nil(tlscheck.director_version(), "no C4 at all")
+		end)
+
+		it("is nil for an odd answer: not a table, no version, an empty or non-text version", function()
+			for _, answer in ipairs({ "3.4.2.746094", 3, true, {}, { buildtype = "RELEASE" }, { version = "" },
+				{ version = "   " }, { version = true }, { version = { "3.4.2" } } }) do
+				c4.GetVersionInfo = function() return answer end
+				assert.is_nil(tlscheck.director_version())
+			end
+		end)
+	end)
+
+	describe("remember_pinned", function()
+		it("persists the running version, unencrypted, under tls_pinned_on", function()
+			assert.equal("tls_pinned_on", tlscheck.STORE_NAME)
+			assert.equal("3.4.2.746094", tlscheck.remember_pinned())
+			assert.equal("3.4.2.746094", c4.persist.tls_pinned_on)
+			local writes = calls_named("PersistSetValue")
+			assert.equal(1, #writes)
+			assert.same({ "tls_pinned_on", "3.4.2.746094", false }, writes[1].args, "no secret: not encrypted")
+		end)
+
+		it("replaces the version an earlier OS answered on", function()
+			c4.persist.tls_pinned_on = "3.4.2.700000"
+			tlscheck.remember_pinned()
+			assert.equal("3.4.2.746094", c4.persist.tls_pinned_on)
+		end)
+
+		it("stores nothing when the version cannot be read", function()
+			c4.director_version = nil
+			assert.is_nil(tlscheck.remember_pinned())
+			c4.GetVersionInfo = function() error("GetVersionInfo failed") end
+			assert.is_nil(tlscheck.remember_pinned())
+			assert.same({}, c4.persist)
+			assert.same({}, calls_named("PersistSetValue"))
+			assert.is_false(tlscheck.pinned_before())
+		end)
+
+		it("does not raise when the store does; the run still remembers, with a warning", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			c4.PersistSetValue = function() error("database unavailable") end
+			local version
+			assert.has_no.errors(function() version = tlscheck.remember_pinned() end)
+			assert.equal("3.4.2.746094", version)
+			assert.is_true(tlscheck.pinned_before())
+			assert.equal(1, #lines)
+			assert.truthy(lines[1]:find("could not store the Director version 3.4.2.746094", 1, true), lines[1])
+		end)
+	end)
+
+	describe("pinned_before", function()
+		it("is false on a controller where the check never answered pinned", function()
+			assert.is_false(tlscheck.pinned_before())
+		end)
+
+		it("is true when an earlier run persisted the running version", function()
+			c4.persist.tls_pinned_on = "3.4.2.746094"
+			assert.is_true(tlscheck.pinned_before())
+			local reads = calls_named("PersistGetValue")
+			assert.equal(1, #reads)
+			assert.same({ "tls_pinned_on", false }, reads[1].args)
+		end)
+
+		it("is false after a Director update, until the new version answers pinned", function()
+			c4.persist.tls_pinned_on = "3.4.2.746094"
+			c4.director_version = "4.0.0.100001"
+			assert.is_false(tlscheck.pinned_before())
+			tlscheck.remember_pinned()
+			assert.is_true(tlscheck.pinned_before())
+			c4.director_version = "3.4.2.746094"
+			assert.is_false(tlscheck.pinned_before(), "going back is another version again")
+		end)
+
+		it("is false when the running version cannot be read, whatever is stored", function()
+			c4.persist.tls_pinned_on = "3.4.2.746094"
+			c4.director_version = nil
+			assert.is_false(tlscheck.pinned_before())
+			c4.GetVersionInfo = function() return { version = "" } end
+			assert.is_false(tlscheck.pinned_before())
+			c4.GetVersionInfo = function() error("GetVersionInfo failed") end
+			assert.is_false(tlscheck.pinned_before())
+		end)
+
+		it("is false for a stored value that is empty, not text, or unreadable", function()
+			for _, value in ipairs({ "", " ", true, 3.4, { "3.4.2.746094" } }) do
+				c4.persist.tls_pinned_on = value
+				assert.is_false(tlscheck.pinned_before(), tostring(value))
+			end
+			c4.persist.tls_pinned_on = "3.4.2.746094"
+			c4.PersistGetValue = function() error("database unavailable") end
+			assert.is_false(tlscheck.pinned_before())
+		end)
+
+		it("is true right after remember_pinned, before the store returns the value", function()
+			tlscheck.remember_pinned()
+			c4.persist.tls_pinned_on = nil -- PersistGetValue lagging the write (docs/design.md "Storage")
+			assert.is_true(tlscheck.pinned_before())
+		end)
+
+		it("forgets this run's answer at the next start: only the store carries it over", function()
+			tlscheck.remember_pinned()
+			c4.persist.tls_pinned_on = nil
+			package.loaded["bridge.tlscheck"] = nil
+			tlscheck = require("bridge.tlscheck")
+			assert.is_false(tlscheck.pinned_before())
+			c4.persist.tls_pinned_on = "3.4.2.746094"
+			assert.is_true(tlscheck.pinned_before())
+		end)
 	end)
 
 	describe("the decoy bundle", function()
