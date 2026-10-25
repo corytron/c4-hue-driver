@@ -67,6 +67,15 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
   drag sends only the latest value) and paced at Hue's limits: about ten light
   commands a second, one grouped command a second.
 
+### What it looks like in Composer Pro
+
+The bridge's actions, adding a Hue zone as one light, and a scene device
+(example names; the pictures are the manual's, `src/hue_bridge/www/img/`):
+
+<img src="src/hue_bridge/www/img/bridge-actions.png" width="380" alt="The Hue Bridge driver's Actions tab"> <img src="src/hue_bridge/www/img/add-zone-light.png" width="380" alt="Add Zone Light with the Group list open">
+
+<img src="src/hue_bridge/www/img/scene-properties.png" width="600" alt="A Hue Scene device's Properties page">
+
 ## What you need
 
 - A Control4 controller on **OS 3.3.0 or newer** (the `minimum_os_version` of
