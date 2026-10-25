@@ -281,6 +281,52 @@ event items. Bridge time zone `EST5EDT`.
 - **V8** (Whole House "Golden hours 3", a dynamic target) not run (it would
   switch the whole house).
 
+## 7b. Check results on the house bridge (2026-10-25 09:57–11:00, dev build 309 running main's code, Master Bedroom)
+
+Daytime levels; the room holds just the two bedside lamps. Keypad steps
+through Golden hours' and Shine's Lua windows (Windows session, rounds 47
+to 47c); everything else through the dev loop.
+
+- **Tile (Golden hours, device 1164).** ON → "scenes: activate", the
+  bridge reports the slot "Arise" (from 07:00), both lamps at 100 %;
+  SET_LEVEL 30 → one `dimming_delta` down 70 on the room's grouped_light,
+  lamps at 29.6 %; OFF → deactivate, then the room off, `inactive`.
+- **(a) Keypad on a time-based scene (Decisions 3 to 5), a1–a8.** Every
+  step does what the plan expects: tap top activates ("now Arise (from
+  07:00)"), tap bottom deactivates and turns the room off ("not running"),
+  a hold from off activates and then dims up, a short hold from off (0.8 s)
+  activates only. The scene stays `active` through holds. **Defect found:**
+  every hold ran to the end of the range in about a second. A 1.1 s hold
+  down from 100 % left the lamps at 0 %, on Golden hours, on Shine (an
+  ordinary scene) and on the Bedside Lights zone light from 50 %. Measured
+  directly: on a grouped_light, Hue ignores `dynamics.duration` for
+  `dimming_delta` and the release's `stop` comes too late; on a single
+  light it honours both (#249). The keypad LEDs still need the owner's own
+  pass.
+- **(c) A dim before a slot boundary.** Not answerable with an API-made
+  schedule (below): the probe dimmed to 15 % from the room's tile at
+  10:12:42 kept 15 % while slot A stayed active, but slot B never came. The
+  question stays with the app-made Golden hours, dimmed shortly before one
+  of its own boundaries (16:00 Shine, or sunset).
+- **(d) Do API-made schedules run their slot changes?**
+  Not seen to. `tools/smart_scene_probe.py` in the Master Bedroom at 30 %,
+  slot A starting at once:
+  - slot B 4 minutes later, today's weekday only, a dim to 15 % before it:
+    still slot A 3 minutes after B was due;
+  - slot B 3 minutes later on every weekday, no dim: still slot A 3 minutes
+    after B was due;
+  - slot B 30 minutes later on every weekday (the app's own spacing):
+    stopped after 5 minutes at the owner's request (no test may wait longer
+    than about a minute), before B was due.
+  With the 8-minute throwaway of 2026-10-24, three API-made schedules never
+  advanced, while the app-made Golden hours did at 16:00 that day. Whether
+  slots minutes apart are the cause or API-made schedules never advance is
+  **parked for the next major release** (#40, milestone 2.0), together with
+  (b), (c) and (e). The probe's resources were deleted after each run (404
+  confirmed) and both lamps restored to their pre-night state, off.
+- **(b) Recall As after a cross-kind re-link** and **(e) V8**: not run
+  today.
+
 ## 8. Test plan 2026-10-25
 
 What is left of #40 and how each point gets its answer. Every change to
