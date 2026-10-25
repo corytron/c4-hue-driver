@@ -1,13 +1,72 @@
 [
-  { "name": "bug", "color": "d73a4a", "description": "The driver does something wrong" },
-  { "name": "enhancement", "color": "a2eeef", "description": "A new capability or a change in behaviour" },
-  { "name": "documentation", "color": "0075ca", "description": "The manual, the README or the design notes" },
-  { "name": "hardware", "color": "fbca04", "description": "Needs a controller or a bridge to verify" },
-  { "name": "composer", "color": "1d76db", "description": "Composer Pro behaviour: properties, actions, Driver menu, Restart Director" },
-  { "name": "hue-api", "color": "e99695", "description": "The bridge's CLIP v2 API, the event stream or its rate limits" },
-  { "name": "security", "color": "b60205", "description": "The application key, TLS or the development loop" },
-  { "name": "good first issue", "color": "7057ff", "description": "Small and self-contained; a good first contribution" },
-  { "name": "question", "color": "d876e3", "description": "Needs more information or a decision" },
-  { "name": "wontfix", "color": "ffffff", "description": "Not going to happen; the comment says why" },
-  { "name": "release", "color": "0e8a16", "description": "Release preparation, build numbers and the Releases page" }
+  {
+    "name": "bug",
+    "color": "d73a4a",
+    "description": "The driver does something wrong"
+  },
+  {
+    "name": "enhancement",
+    "color": "a2eeef",
+    "description": "A new capability or a change in behaviour"
+  },
+  {
+    "name": "documentation",
+    "color": "0075ca",
+    "description": "The manual, the README or the design notes"
+  },
+  {
+    "name": "hardware",
+    "color": "fbca04",
+    "description": "Needs a controller or a bridge to verify"
+  },
+  {
+    "name": "composer",
+    "color": "1d76db",
+    "description": "Composer Pro behaviour: properties, actions, Driver menu, Restart Director"
+  },
+  {
+    "name": "hue-api",
+    "color": "e99695",
+    "description": "The bridge's CLIP v2 API, the event stream or its rate limits"
+  },
+  {
+    "name": "security",
+    "color": "b60205",
+    "description": "The application key, TLS or the development loop"
+  },
+  {
+    "name": "good first issue",
+    "color": "7057ff",
+    "description": "Small and self-contained; a good first contribution"
+  },
+  {
+    "name": "question",
+    "color": "d876e3",
+    "description": "Needs more information or a decision"
+  },
+  {
+    "name": "wontfix",
+    "color": "ffffff",
+    "description": "Not going to happen; the comment says why"
+  },
+  {
+    "name": "release",
+    "color": "0e8a16",
+    "description": "Release preparation, build numbers and the Releases page"
+  },
+  {
+    "name": "ci",
+    "color": "0e8a16",
+    "description": "Workflows, checks and the development tooling"
+  },
+  {
+    "name": "deploy",
+    "color": "1d76db",
+    "description": "The house installation: drift between deploy/house.yaml and the recorded deployment"
+  },
+  {
+    "name": "dependencies",
+    "color": "0366d6",
+    "description": "Dependabot updates of pinned actions"
+  }
 ]

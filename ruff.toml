@@ -1,0 +1,6 @@
+# Python lint for tools/ (docs/cicd-gitops-design.md, section 2). Run: ruff check tools; ruff format --check tools
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "B"]
