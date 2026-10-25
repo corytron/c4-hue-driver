@@ -9,6 +9,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A new release of an action is proposed only 7 days after it was
+    # published, not after GitHub's default 3 (security review 2026-10-25,
+    # finding 13): the pins merge without a human look and the Release
+    # workflow runs the same actions, so a compromised release gets a week to
+    # be noticed and withdrawn first. GitHub Actions takes default-days only
+    # (no semver-*-days); security updates are never delayed by a cooldown.
+    # The packager commit and the luarocks versions in ci.yml and release.yml
+    # are no Dependabot ecosystem: they move by hand
+    # (docs/cicd-gitops-design.md, section 5.5).
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
     groups:

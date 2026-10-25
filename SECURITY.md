@@ -63,13 +63,25 @@ directly is the Hue API's own threat model, not this driver's.
   branch protection, token permissions, signed releases) on every push to
   `main` and weekly:
   <https://scorecard.dev/viewer/?uri=github.com/corytron/c4-hue-driver>.
-- **Build provenance.** The Release workflow builds the packages and signs a
-  provenance attestation for each; the bundle is also attached to the
-  release as `attestations.sigstore.json`. Verify a download with
-  `gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver`
-  (GitHub CLI 2.49 or newer; repeat per package) and its checksum against
-  `SHA256SUMS.txt`. A package that fails either check was not built by this
-  repository's workflow: do not install it, and report it.
+- **Build provenance.** The Release workflow builds the packages in one job,
+  with read-only access, and signs a provenance attestation for each in a
+  second job that runs no third-party code; the bundle is also attached to
+  the release as `attestations.sigstore.json`, and its in-toto envelope as
+  `hue-drivers.intoto.jsonl`. Verify a download, once per package, with
+
+  ```sh
+  gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver \
+    --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml
+  ```
+
+  and its checksum against `SHA256SUMS.txt`. Use GitHub CLI 2.102.0 or
+  newer: `--signer-workflow` is what makes the Release workflow the only
+  accepted signer (without it, any workflow of the repository would do), and
+  older versions either lack it or match only the start of the workflow's
+  path. `tools/deploy.py start` runs the same command for each package
+  before an install of the house and refuses a package that fails it. A
+  package that fails either check was not built by this repository's Release
+  workflow: do not install it, and report it.
 
 ## What to expect
 

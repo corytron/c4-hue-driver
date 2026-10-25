@@ -5,9 +5,9 @@ updated 2026-10-25 for the CI/CD and GitOps setup (`docs/cicd-gitops-design.md`:
 one check script, releases cut by the Release workflow, the house deployed
 through `tools/deploy.py`). The owner's rule: after any code change that is
 more than a text, test for functional regressions on the dev loop **and** on
-the real system before the code is called good. Three passes, in this order;
-every line is a check with its expected result, and the result goes into
-`docs/status.md`.
+the real system before the code is called good. Three passes, in this order
+(and section 4 once after each controller OS upgrade); every line is a check
+with its expected result, and the result goes into `docs/status.md`.
 
 ## 0. On this VM
 
@@ -17,8 +17,10 @@ every line is a check with its expected result, and the result goes into
   tools` clean, `busted tests` green (the count is in `docs/status.md`), the
   shell and Python tooling clean, every `driver.xml` well-formed, the
   workflows clean under actionlint and zizmor, gitleaks clean over the tree
-  and the history, `deploy/house.yaml` valid. `tools/setup-checks.sh` first
-  if a tool is missing.
+  and the history of every local branch and tag (on the VM the check reads
+  `git log --all`, so a stale ref holding old history fails it until it is
+  removed), `deploy/house.yaml` valid. `tools/setup-checks.sh` first if a
+  tool is missing.
 - `tools/build.sh` (release) and `tools/build.sh --dev`: the release
   `hue_bridge.c4z` has 22 actions and no `Dev Server`, `Diagnostic Server`,
   `Connection Test`, `Reload Credentials`, `Check CA Pinning`; no
@@ -93,9 +95,13 @@ reboots the controller). Read:
    chapter list (and the three device pages).
 6. The Lua tab of a device during the install: no `[ERROR]` line.
 7. The bridge's `Attention` does not read `TLS check failed: …` and
-   `Status` reads `Paired`: the TLS self-check found the controller using
-   the driver's certificate bundle (#53; the manual's chapter 12, "The TLS
-   check"). After a controller OS upgrade this line is the pinning check.
+   `Status` reads `Paired`. What the TLS self-check proves (#53; the
+   manual's chapter 12, "The TLS check"; `docs/design.md`, "TLS self-check
+   in release builds"): the configured bundle is consulted, and the
+   bridge's chain is not trusted without it. It cannot tell a controller
+   that replaces its system store with the bundle from one that adds the
+   bundle to it, so after a controller OS upgrade this line is not the
+   pinning check: section 4 is.
 
 ## 3. The owner, on the phone and keypads
 
@@ -106,6 +112,28 @@ reboots the controller). Read:
 3. Golden hours tile: ON starts the schedule (Status "now <slot>"), OFF
    stops it and turns the room off.
 4. Keypad taps and holds on whichever device the switch is bound to.
+
+## 4. After a controller OS upgrade
+
+Once per new controller OS version, before a build is called good on it:
+
+1. Install the three `--dev` files as in section 1 and run the bridge's
+   `Check CA Pinning` action once. `Status` must read `Pinning check passed:
+   only Signify-signed certificates are trusted`: a public-CA site
+   (example.com) was refused with the driver's bundle, so the bundle
+   replaces the system store rather than adding to it, which the release
+   build's own check (section 2, line 7) cannot tell apart. The action needs
+   the controller to reach the internet; `Pinning check inconclusive: …`
+   proves nothing, so run it again once it can. `Pinning check FAILED:
+   public CAs are trusted too` stops the release: open an issue, since keyed
+   requests would accept any publicly trusted certificate at the bridge's
+   address. Note the OS version and the result in `docs/status.md`, then
+   install the release files again (section 2). After the upgrade, a
+   `Status` of `TLS check inconclusive (…): nothing is sent; checking again
+   in 30 s` means the new Director version is not proven yet: the driver
+   accepts an inconclusive answer only on a version that has answered
+   `pinned` before, and it checks again every 30 s until it gets a
+   conclusive answer.
 
 A build passes when every line reads as expected; anything else goes to
 `docs/status.md` "Open" with the build number, and the release waits.
@@ -131,21 +159,28 @@ here is finished.
 
 1. Merge the code into `main`. Nothing is edited for the release itself.
 2. Start the Release workflow: on the repository's Actions page, **Release ▸
-   Run workflow**, enter the version (`1.0`, `1.1`, ...). The workflow tags
-   `main`'s head as `v<version>` itself, force-moving an existing tag, and
-   builds in the same run. Pushing the tag by hand (`git tag -f -a vX.Y -m
-   "X.Y" <commit on main>`, `git push --force origin vX.Y`) starts the same
-   build; a tag that is not on `main` is refused.
-3. The workflow lints, tests and builds, then attaches to the release of the
-   tag, creating it when missing with the title `<version>` and generated
-   notes whose first paragraph names the build number and the install rule:
+   Run workflow**, enter the version (`1.0`, `1.1`, ...). The workflow builds
+   `main`'s head and, once the packages are built and attested, tags it
+   `v<version>` itself, force-moving an existing tag, in the same run (a run
+   that fails earlier leaves the tag where it was). Pushing the tag by hand
+   (`git tag -f -a vX.Y -m "X.Y" <commit on main>`, `git push --force origin
+   vX.Y`) starts the same build; a tag that is not on `main` is refused.
+3. The workflow's build job lints, tests and builds with read-only access
+   and pinned tools (contract §5.4 and §5.5); its publish job, which runs no
+   third-party code, checks what the build job handed over, signs the
+   provenance and attaches to the release of the tag, creating it when
+   missing with the title `<version>` and generated notes whose first
+   paragraph names the build number and the install rule:
    `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`, `SHA256SUMS.txt`,
    `manifest.json` (contract §5.2: tag, version, build, commit, build time,
-   each package's sha256 and size) and `attestations.sigstore.json`, the
-   signed build provenance. A run for a moved tag replaces every file.
+   each package's sha256 and size), `attestations.sigstore.json`, the
+   signed build provenance, and `hue-drivers.intoto.jsonl`, the same
+   provenance as in-toto JSON lines. A run for a moved tag replaces every
+   file.
 4. Once per major version the coordinator edits the codename into the
    release title (`1.0 "Cassian"`); the workflow never changes an existing
-   title. Check the release page: six assets, the build number in the notes.
+   title. Check the release page: seven assets, the build number in the
+   notes.
 5. Nothing is built on the VM for an install: the house gets these same
    files, downloaded from the release by `tools/deploy.py start` (next
    section).
@@ -177,11 +212,17 @@ automatic, since the controller has no install API. After the release exists:
    `SHA256SUMS.txt` and the three packages from the release into
    `build/release/<tag>/`, verifies every sha256 against both files, that
    the manifest's build is the file's and its commit the tag's, and that
-   GitHub holds a provenance attestation for each package (presence and
-   subject only; the VM's `gh` is too old to verify the signature, and the
-   brief says so), creates the Deployment with status `in_progress`, and
-   writes `build/release/<tag>/BRIEF.md` and `deployment.json`. A build the
-   release does not carry is refused.
+   each package's provenance attestation verifies with `gh attestation
+   verify <file> --repo corytron/c4-hue-driver --signer-workflow
+   corytron/c4-hue-driver/.github/workflows/release.yml`, so the Release
+   workflow and nothing else signed it, creates the Deployment with status
+   `in_progress`, and writes `build/release/<tag>/BRIEF.md` (which names
+   the signer and the gh that checked it) and `deployment.json`. A build
+   the release does not carry, and a package whose attestation fails, are
+   refused. The check needs gh 2.102.0 or newer: the VM's apt `gh` 2.46 has
+   no `gh attestation`, and `start` refuses until a current gh is
+   installed. `--no-attestation` is only for a release cut before
+   attestations existed; it never passes an attestation that fails.
 4. **Send the brief.** `BRIEF.md` goes to the Windows Composer session as it
    is (`docs/composer-remote.md`): the three GitHub download URLs, each
    file's sha256, the PowerShell that fetches them into
