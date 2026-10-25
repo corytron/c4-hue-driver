@@ -675,6 +675,11 @@ def open_deploy_issues(repo):
         ]
     )
     issues = json.loads(out) if out.strip() else []
+    # Only the drift issue itself, recognised by the title issue_title()
+    # gives it: another issue that merely carries the label (a tooling bug
+    # about deploys, say) is never edited or closed. Seen on 2026-10-25:
+    # `done` closed #237, which only shared the label.
+    issues = [issue for issue in issues if DEPLOY_ISSUE_TITLE.match(issue.get("title") or "")]
     return sorted(issues, key=lambda issue: issue["number"])
 
 
@@ -695,6 +700,9 @@ def comment_issue(repo, number, body):
 
 def close_issue(repo, number, comment):
     run_gh(["issue", "close", str(number), "--repo", repo, "--comment", comment])
+
+
+DEPLOY_ISSUE_TITLE = re.compile(r"^Deploy v\d+\.\d+ \(build \d+\) to the house$")
 
 
 def issue_title(tag, build):

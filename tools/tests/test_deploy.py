@@ -1282,6 +1282,25 @@ class DriftIssueTest(DeployCase):
         self.assertEqual(self.gh.issues[second["number"]]["title"], "Deploy v1.0 (build 241) to the house")
         self.assertIn("second open deploy issue", err)
 
+    def test_other_issues_with_the_label_are_never_touched(self):
+        # 2026-10-25: `done` closed #237, a tooling bug that only shared the
+        # deploy label.
+        other = self.gh.add_issue("deploy.py accepts a watchdog below driver.xml's minimum")
+        drift = self.gh.add_issue(self.TITLE)
+        self.gh.add_deployment("v1.0", 252, ["success"])
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.gh.issues[drift["number"]]["state"], "closed")
+        self.assertEqual(self.gh.issues[other["number"]]["state"], "open")
+        self.assertEqual(self.gh.issues[other["number"]]["comments"], [])
+
+    def test_drift_with_only_another_labelled_issue_opens_its_own(self):
+        other = self.gh.add_issue("Some other deploy-labelled issue")
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 3)
+        self.assertEqual(self.gh.issues[other["number"]]["title"], "Some other deploy-labelled issue")
+        self.assertEqual(len(self.gh.calls_matching("issue", "create")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
