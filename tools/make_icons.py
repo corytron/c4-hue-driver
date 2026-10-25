@@ -689,3 +689,5 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
+
+# Automated fix for issue #123: The grouped_light queue ran at the lights' ten requests a second although Hue asks for one
