@@ -59,9 +59,28 @@ findings".
   the settings until the bare form replaced it).
 - Ranges: preset 1 to 100, rates 0 to 86 400 000 ms. A value outside them is
   refused: from the proxy, the value kept is reported back; persisted, it is
-  deleted, warned about once, and the default used.
+  deleted, warned about once, and the default used. Current (2026-10-25,
+  #234): a value from the proxy that is not a number is refused the same
+  way, with the value kept reported back.
+- Colour on mode (#234): `SET_COLOR_ON_MODE {PRESET ID}` sets the proxy's
+  own setting; a driver takes part only by declaring `color_on_mode_preset`,
+  `_previous` or `_fade` (static capabilities) and then handling
+  `UPDATE_COLOR_ON_MODE` and `UPDATE_COLOR_PRESET`, and no notification
+  confirms it [verified: proxy reference, What's New in 3.3.2 and those
+  commands]. The Hue Light declares none, so it neither handles nor uses it;
+  its manual says so.
 
 ## Driver behaviour
+
+Current (2026-10-25, build 316, #57): the press / click / release machine
+with its timers (400 ms hold, 600 ms dim after the turn-on at 1 %, 1 s
+click guard), the keypad settings and their notifications, the LEDs and
+the button colours are one module shared by both drivers,
+`src/common/device.lua` (`device.new`: `button_action`, `dim_after_on`,
+`load_settings`, `update_leds`). Each driver keeps what a tap and a hold
+do, through the hooks `dev.on_click`, `dev.on_hold` and `dev.on_finish`.
+The light takes the preset, click and hold settings, the scene the hold
+rates only.
 
 Hue Light (`src/hue_light/driver.lua`):
 
@@ -71,7 +90,7 @@ Hue Light (`src/hue_light/driver.lua`):
 | click top | brightness target = On preset over click rate up |
 | click bottom | target 0 over click rate down |
 | click toggle | off → preset over click up; on → 0 over click down |
-| hold (timer fired before the release) | Current (since 2026-10-23, "Light parity"): `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance; a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing. Originally (2026-10-22): a timed brightness target to the end of the range, and held bottom while off turned the light on dimmed |
+| hold (timer fired before the release) | Current (since 2026-10-23, "Light parity"): `HUE_DIM up` (top, or toggle while off) or `down` (bottom, or toggle while on) with the hold rate scaled by the distance (since 2026-10-25, #232: the proxy's ramp only, `HUE_DIM` carries the whole rate; "Light parity"); a 100 ms tick keeps an estimate of the level. Held top/toggle while off: on at 1 % first, `HUE_DIM up` 600 ms later; held bottom while off: nothing. Originally (2026-10-22): a timed brightness target to the end of the range, and held bottom while off turned the light on dimmed |
 | release after hold | Current: `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop). Originally: the estimate written as the brightness |
 | release-as-click after a ramp started | same as stop; a click on the same button within 1 s after a hold's release is ignored |
 
@@ -96,6 +115,8 @@ Superseded (2026-10-23): the scene declares `hold_rates` (min 1000) and
 
 Specs in `tests/spec/light_driver_spec.lua` and `scene_driver_spec.lua`
 (tap, preset, hold and release, echo notifications, persisted rates).
+Current (2026-10-25, build 316): the shared machine has its own spec,
+`tests/spec/device_spec.lua`.
 Hardware: bind a switch's buttons to a light's Button Links in Composer's
 Connections (a drag; by hand), tap and hold; the manual's chapter "Using
 the lights from Control4" describes the setup.
@@ -193,6 +214,13 @@ through dims from its own buttons".
 `ctx.group_dim(rid, body)` → `state.group_queue:set(rid, body)` (returns
 true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
 `state.scenes:dim(params)`.
+Current (2026-10-25, build 316): `group_dim` hands the queue the fields
+`{ dim, delta, rate, level }` taken from the body, and the queue builds
+the PUT ("Queue support" below); the group queue sends one request a
+second with a burst of 3, and a hold's start and stop skip that bucket
+(`src/hue_bridge/driver.lua:new_group_queue`,
+`src/hue_bridge/bridge/commands.lua:urgent`; `docs/zone-light-design.md`
+Decision 9).
 
 ### Scene device (`src/hue_scene/driver.lua`)
 
@@ -217,6 +245,11 @@ true when queued); `dispatch.commands["HUE_SCENE_DIM"]` →
   `hold_rates` True, `hold_rate_min` 1000. Since the dimmer a hold also
   sends the proxy `LIGHT_BRIGHTNESS_CHANGING` toward 100 or 1 at its start
   and settles on the group's level reports after the release.
+  Current (2026-10-25, build 316): a time-based scene held from off is
+  started instead, and the dim up follows once the bridge reports its
+  group on with a level (1.5 s at the latest) while the button is still
+  down (`docs/smart-scenes-design.md` Decision 4;
+  `src/hue_scene/driver.lua:start_smart_hold`).
 - A click arriving within 1 s after a hold's release on the same button is
   ignored (some keypads may send it).
 
@@ -277,6 +310,25 @@ LEDs following Shine and the dimmer were verified
 - Not verified on hardware: the light's `HUE_DIM` hold and LEDs (the house
   has no Hue Light device now, and `docs/status.md` lists holds and LEDs as
   verified on a scene only).
+  2026-10-25 (dev build 284, `docs/design.md` "Hardware pass of 2026-10-25
+  night"): the light driver's hold path ran on a zone light, a Hue Light
+  device whose `HUE_DIM` the bridge sends to its room or zone: a top hold
+  from off released at 800 ms turned it on at 1 % and sent no dim, and a
+  hold down followed by a click 100 ms after the release sent dim down and
+  stop and ignored the click. A single light's `HUE_DIM` is still not
+  seen.
+- Current (2026-10-25, #232, #234): `HUE_DIM` up or down carries the whole
+  hold rate, at most 6 000 000 ms (the bound the bridge holds zone and scene
+  holds to), and the bridge asks for the whole range, so Hue dims at 100 %
+  per hold rate from any level; the proxy's CHANGING and the 100 ms
+  estimate keep the share of the rate the distance takes, the same speed.
+  Until then `HUE_DIM` carried that share with the whole range, so a hold
+  from 50 % ran Hue at twice the tile's speed. The whole range rather than
+  the distance left: a zone light's lamps below its average still reach the
+  end while the button is held, and the start still skips the bridge's
+  request bucket (`commands.urgent`). That Hue keeps the speed and stops at
+  the end of the range is assumed until the hold on the house that #232
+  asks for.
 
 ### Queue support (`src/hue_bridge/bridge/commands.lua`)
 

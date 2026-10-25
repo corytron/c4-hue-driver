@@ -67,6 +67,6 @@
   {
     "name": "dependencies",
     "color": "0366d6",
-    "description": "Dependabot updates of pinned actions"
+    "description": "Dependabot updates of pinned actions and check tools"
   }
 ]

@@ -9,7 +9,7 @@ note the user friendly name along with the Bridge Model in the properties."
 
 | Fact | Status |
 | --- | --- |
-| `GET /api/0/config` needs no key and answers `name` (the bridge's own name from the Hue app), `modelid`, `swversion` (a number such as `1968096020`), `apiversion` (`1.68.0`), `bridgeid`. The driver already reads it at pairing (`bridge/pairing.lua`) and before every keyed request (`verify_identity` in `driver.lua`). | verified on the house Bridge Pro |
+| `GET /api/0/config` needs no key and answers `name` (the bridge's own name from the Hue app), `modelid`, `swversion` (a number such as `1968096020`), `apiversion` (`1.68.0`), `bridgeid`. The driver already reads it at pairing (`bridge/pairing.lua`) and before every keyed request (`verify_identity` in `driver.lua`). Current (2026-10-25, build 316): once per start and per address change, before the first keyed request, which also waits for the TLS self-check (`hue_bridge/driver.lua:verify_identity`, `tls_gate`). | verified on the house Bridge Pro |
 | Model ids: `BSB001` the round first-generation bridge (no HTTPS CLIP v2, discontinued 2020), `BSB002` the square version 2 bridge, `BSB003` the Hue Bridge Pro. | BSB003 verified on the house; the others from Signify's public material [assumed] |
 | CLIP v2 (`/clip/v2/...`, the event stream) exists from bridge software `1948086000` on; the first-generation bridge never had it. Time-of-day (smart) scenes and `dimming_delta` came later and are discovered at run time: a failed `/smart_scene` GET leaves the Scenes row at `? time-based` and the pickers without them, and a refused `stop` falls back to a level write. | the threshold from Signify's developer notes [assumed]; the fallbacks verified in specs |
 | A device that is not a Hue bridge answers `/api/0/config` with an error, with no JSON, or with JSON without `bridgeid`; a Hue bridge of another generation answers with its `modelid`. | assumed |
@@ -40,6 +40,9 @@ note the user friendly name along with the Bridge Model in the properties."
    Firmware` (the firmware label). All three are filled at pairing and
    refreshed at every start and address change by the identity check, so
    a firmware update shows after the next start.
+   Current (2026-10-25, build 316): `Bridge Name` shows the name through
+   `util.display_name` (control characters removed, trimmed, at most 100
+   characters; #217) (`hue_bridge/driver.lua:show_bridge_info`).
 4. **The identity check** (`verify_identity`) also refuses a bridge whose
    model is not supported, even when its id matches: Status "Bridge at <ip>
    is a Hue Bridge v1, round (BSB001): no CLIP v2 API; nothing is sent",
@@ -48,3 +51,48 @@ note the user friendly name along with the Bridge Model in the properties."
 5. Manual: chapter 3 "What you need" (supported bridges, the minimum
    firmware, keep the bridge updated), chapter 4 (the new Status texts),
    chapter 5 (the three rows), chapter 12 (the refusals); README likewise.
+
+## Pairing another bridge (#236)
+
+Decided 2026-10-25 (issue #236, item 1). The lights', scenes' and zone
+lights' registries hold the resource ids of the bridge they were imported
+from, and the stored bridge id names that bridge; the lifecycle tables
+(`docs/edge-cases-ux.md` "Bridge replaced", `docs/zone-light-design.md` §4)
+expected a refusal until Forget Pairing, but build 316's `Pair Bridge`
+compared no ids. `Pair Bridge` now compares the id `/api/0/config` reports
+with the stored one, before anything else and before any key is asked for:
+
+| Case | Id at the address | Decision |
+| --- | --- | --- |
+| Nothing stored (a new bridge device, or after Forget Pairing) | any | Allowed; the model and firmware refusals (Decision 2) still apply |
+| The same bridge re-paired: a new key after a key rejection, a factory reset, or simply again | the stored id | Allowed: the new key replaces the old one, the key-rejected lock ends, the registries stay |
+| The same bridge at a new address | the stored id | Allowed, as above |
+| The same bridge reset and restored from its own Hue backup (the id belongs to the hardware) | the stored id | Allowed, as above |
+| A different bridge at the same address (a replacement plugged in where the old one was) | another id | Refused until Forget Pairing |
+| A different bridge after an address change (the identity check already sends it nothing) | another id | Refused until Forget Pairing |
+| The paired bridge's setup moved to new hardware (the Hue app's transfer, or its backup restored onto another bridge) | another id; `replacesbridgeid` may name the old one [assumed] | Refused until Forget Pairing; adopting a replacement by `replacesbridgeid` stays "later" (`docs/import-design.md` §2) |
+| The key unreadable after a restore while the id is still stored (Status reads `Not paired`) | compared with the stored id | The same id allowed, another refused until Forget Pairing |
+
+- **Refused** means: no key is asked for (the link button press is not
+  used up), nothing is stored, and the stream, the stored key, the
+  key-rejected lock and the Bridge Model, Name and Firmware rows stay as
+  they are. Status (with the driver's "Pairing failed: " prefix): `Bridge
+  at <ip> reports ID <new id>, expected <stored id>; run Forget Pairing
+  first to pair with another bridge`.
+- **Nothing is automatic and nothing new is offered.** Forget Pairing is
+  the click that lets the registries' bridge go. Pairing with another
+  bridge afterwards works as before: after the first full read every entry
+  whose rid the new bridge lacks is gone (Re-link, Forget) and the new
+  bridge's other lights are new; entries whose rids survived a transfer stay
+  linked.
+- Forget Pairing clicked while the identity check is in flight: its late
+  answer is dropped (it raised a Lua error on the missing credentials
+  before), and a bridge paired afterwards is checked afresh even if the old
+  bridge's TLS check passed meanwhile; the identity check runs again after
+  every pairing that changes the bridge id, and after any pairing while it
+  had not passed.
+- Code: `bridge/pairing.lua:other_bridge`, called by `pairing.pair`, whose
+  third argument is the stored id; `hue_bridge/driver.lua` `Pair_Bridge`
+  passes `state.creds.bridge_id`, whether or not the key is still there, and
+  its `on_paired` resets the identity state; `verify_identity` drops an
+  answer once nothing is paired.

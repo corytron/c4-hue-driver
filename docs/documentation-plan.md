@@ -80,6 +80,10 @@ Required chapters, in this order:
    (Adopt Hue Names / Accept Names As They Are); what has no counterpart
    (Hue zones as controllable devices, motion sensors, entertainment,
    several bridges, smart scenes).
+   Current (2026-10-25, build 316): two of these have counterparts now:
+   Hue rooms and zones as zone lights (Add Zone Light,
+   `docs/zone-light-design.md`) and time-based ("smart") scenes as Hue
+   Scene devices (`docs/smart-scenes-design.md`).
 3. **Installation**: the three `.c4z` files, Driver ▸ "Add or Update Driver
    or Agent…" (multi-select), adding the Hue Bridge to a room, what the
    first Properties page looks like, that updates are done the same way
@@ -99,6 +103,14 @@ Required chapters, in this order:
    Watchdog (s). Say which are read-only, which the owner edits, which
    are for the developer only (Diagnostic Server, Dev Server, Debug Mode,
    Stream Address) and should be left alone.
+   Current (2026-10-25, build 316): a release build shows Driver Version,
+   Debug Mode, Status, Bridge IP Address, Bridge ID, Bridge Model, Bridge
+   Name, Bridge Firmware, Event Stream, Lights, Attention, Last Action and
+   Last Action (2) to (6), Room Mappings, Scenes, Zone Lights, Stream
+   Address, Events Received, Last Event, Stream Timeout (s) and Stream
+   Watchdog (s); Diagnostic Server and Dev Server are in the DEV-ONLY
+   block of `src/hue_bridge/driver.xml`, which `tools/build.sh` strips
+   from release builds.
 6. **Rooms first**: Room Mappings, Map Rooms By Name, Set Room Mapping
    (Hue Room picker, Room picker, "(no mapping)"), what "(unmapped)" and
    "(Control4 room gone)" mean, zones in the list, Room Audit and why the
@@ -125,6 +137,11 @@ Required chapters, in this order:
    Scene, Refresh Scenes, a scene deleted or renamed in Hue, programming
    with scenes in Composer (they are lights: Advanced Lighting Scenes and
    programming can turn them on and off).
+   Current (2026-10-25, build 316): a Hue Scene is a dimmer since build
+   160 (`docs/scene-dimmer-design.md`); the Scene picker also lists
+   time-based scenes, first in their room or zone ("<Room>: <name>
+   (time-based)"), and marks a scene a schedule plays ("(in
+   <schedule>)") (`src/hue_bridge/bridge/scenes.lua:picker_scenes`).
 10. **Hue Light device**: its Properties and two actions; colour and
     colour temperature appear only when the bulb supports them; Online.
 11. **Troubleshooting**: a table of `Status`, `Attention` and `Last Action`
@@ -132,6 +149,10 @@ Required chapters, in this order:
     (Test Connection, Connection Test with Target Bridge / Diagnostic
     Server, Connect / Disconnect Event Stream, Reload Credentials, Check
     CA Pinning) in one paragraph each, marked "normally not needed".
+    Current (2026-10-25, build 316): Connection Test, Reload Credentials
+    and Check CA Pinning are DEV-ONLY actions of
+    `src/hue_bridge/driver.xml`, absent from release builds, which the
+    Composer manuals describe (`docs/doc-accuracy-design.md` §1).
 12. **Limits and what is not supported**, and a one-page **quick
     reference** of all actions with one line each.
 
@@ -202,6 +223,11 @@ files in `src/hue_bridge/www/img/`, each shown once in the manual; all
 date from 2026-10-22 and none shows the later keypad or dimmer features
 (the module's `Save-*Shot` and `Send-DocShot`, `docs/composer-remote.md`,
 do the cropping and upload).
+Current (2026-10-25, build 316): 22 files. `tree-bridge.png` left the
+manual and the repository on 2026-10-24 (build 231, PR #34, #158: it
+showed the house's device inventory), and `bridge-properties.png` was
+redacted to the placeholder bridge id; the retake on a demo project is #61
+(`docs/screenshots-plan.md`).
 
 ## 6. Icons
 
@@ -297,6 +323,12 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
    octet, so the text is "(own queue, no second spelling to rotate; …)";
    an address with no octet below 8 reads "(shared queue with commands: no
    octet below 8 to pad; stream timeout capped at 60 s)".
+   Current (2026-10-25, build 316): the row reads "<address> (own queue,
+   the only spelling)" or "(own queue, spelling N of M)", and without an
+   octet below 8 "<address> (shared queue with commands: no octet below 8
+   to pad)"; the 60 s cap is in the log line only
+   (`src/hue_bridge/driver.lua:stream_address_text`,
+   `choose_stream_address`).
 6. "HTTP 401" everywhere becomes "HTTP 401 or 403" (the code prints the
    code it gets; Hue documents 403 for a revoked key).
 7. Import skip label carries the tag: "Vanity 3 #92 (deleted 2026-10-22)".
@@ -341,6 +373,8 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
 15. Chapter 3 adds update and rollback (same "Add or Update" route with an
     older build; untested), and how to tell a release from a development
     build (`Dev Server` is ignored by a release).
+    Current (2026-10-25, build 316): a release build has no `Dev Server`
+    row at all (`tools/build.sh` strips the DEV-ONLY block).
 16. `Set Room Mapping` gets the same "the dialog remembers the last values;
     check both rows" warning as Add Light.
 17. Chapter 9 lists the scene device's `Driver Version` and `Debug Mode`.
@@ -348,6 +382,8 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
     device's protocol id; Composer's tree shows the proxy id, one higher.
 19. `Connection Test` can hold the command connection for up to five
     minutes; say so.
+    Current (2026-10-25, build 316): Connection Test is a dev-build
+    action.
 20. Troubleshooting rows for: "Busy: resyncing scenes; try again in a
     moment", "Import failed: …", "Scene refresh failed: …", "Not added:
     pick a Hue room first", "Not re-linked: pick a device and a scene", the
@@ -364,6 +400,11 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
     marked gone)" texts, Attention's "unbound scene device" and "2 devices
     claim Hue scene …", and the scene Status texts (Not bound / Bound;
     waiting / Forgotten).
+    Current (2026-10-25, build 316): "Pinning check FAILED …", "Stored
+    credentials readable but differ from memory …", "Set the Diagnostic
+    Server property first (host:port)" and `Event Stream` "Stopped" after
+    Connection Test come from dev-build actions only
+    (`src/hue_bridge/bridge/devtools.lua`).
 21. Scenes: `Link Devices` matches a scene device by the plain scene name;
     OFF on a scene of an empty zone reports off without a request;
     `Recall As` and a programmed ramp (the ramp becomes the recall

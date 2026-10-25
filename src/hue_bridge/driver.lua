@@ -58,6 +58,8 @@ local state = {
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
 	key_rejected = nil,  -- HTTP code (401/403) once the bridge refused the key; cleared by Pair Bridge or a new address
 	tls_verdict = nil,   -- the TLS self-check's answer for this start and address (bridge/tlscheck.lua)
+	identity_ok = nil,   -- true once the identity check (with the TLS check) passed for this address; false when it failed
+	identity_text = nil, -- the Status text of the identity check's failure, kept for refresh_status (#236)
 	attention_sent = nil, -- the Attention text last written, so an unchanged one is not written again
 	limits_sent = {},    -- light rid -> the limits last given to the command queue
 	stream_started_at = nil, -- "MM-DD HH:MM" of the stream's first connect since the driver started
@@ -133,6 +135,12 @@ local function paired()
 	return credentials.paired(state.creds)
 end
 
+-- The Status row from the driver's state. "Paired" is the normal state, and
+-- it means that keyed requests go out: never while the identity check (with
+-- the TLS check it waits for) has failed or has not passed yet for this
+-- address (#236). A failure keeps the check's own text (identity_status
+-- below); a check still running reads "Checking the bridge at <ip> before
+-- anything is sent".
 local function refresh_status()
 	if not state.ip then
 		prop("Status", "Enter the bridge IP address")
@@ -142,10 +150,21 @@ local function refresh_status()
 		prop("Status", string.format("Key rejected by the bridge (HTTP %d): re-pair with Pair Bridge", state.key_rejected))
 	elseif state.tls_verdict == "not_pinned" then
 		prop("Status", "TLS check failed: nothing is sent (see Attention)")
+	elseif state.identity_ok ~= true then
+		prop("Status", state.identity_text
+			or string.format("Checking the bridge at %s before anything is sent", state.ip))
 	else
 		prop("Status", "Paired")
 	end
 	prop("Bridge ID", paired() and state.creds.bridge_id or "")
+end
+
+-- A Status text of the identity check or of the TLS check it waits for: shown
+-- now and kept while the check has not passed, so that refresh_status (a
+-- Bridge IP Address set again, say) shows it instead of "Paired" (#236).
+local function identity_status(text)
+	state.identity_text = text
+	prop("Status", text)
 end
 
 -- What the stream needs to connect, or nil when it can't.
@@ -227,6 +246,31 @@ local function stream_address_text(spelling)
 	return string.format("%s (own queue, the only spelling)", spelling)
 end
 
+-- Why the event stream may not connect now, or nil: keyed_refusal's reasons,
+-- then an identity check (with the TLS check) that has not passed.
+local function stream_refusal()
+	local refusal = keyed_refusal()
+	if refusal == nil and state.identity_ok ~= true then
+		refusal = "bridge identity not verified yet"
+	end
+	return refusal
+end
+
+-- The Event Stream row while the feed waits for something other than the
+-- stream itself: no pairing, no address, a refusal, or the identity check.
+-- Late init and an address change write it, so the row never keeps a text
+-- from before a restart or from the old address while the check is pending
+-- or failing (#236); the stream's own texts replace it once it starts.
+local function show_stream_waiting()
+	if not connection() then
+		return prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")
+	end
+	local refusal = stream_refusal()
+	if refusal then
+		prop("Event Stream", "Not connected: " .. refusal)
+	end
+end
+
 -- What the stream connects with. The stream calls this for every attempt,
 -- so each connection gets the next spelling. Every path that starts the
 -- stream checks first; this is the last guard for a path added later (diff
@@ -234,10 +278,7 @@ end
 -- failed TLS check, or with a rejected key. The second value is the stream's
 -- status text.
 local function stream_connection()
-	local refusal = keyed_refusal()
-	if refusal == nil and state.identity_ok ~= true then
-		refusal = "bridge identity not verified yet"
-	end
+	local refusal = stream_refusal()
 	if refusal and refusal ~= "not paired" then
 		log.warn("event stream not connected: %s", refusal)
 		return nil, "Not connected: " .. refusal
@@ -510,8 +551,9 @@ local function attention_text()
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
 
--- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`, `Last
--- Action`): Composer clips a value at about 75 characters, so the row shows
+-- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`; `Last
+-- Action` is word-wrapped onto its own rows instead, #68): Composer clips a
+-- value at about 75 characters, so the row shows
 -- a summary and the drop-down every item on a line of its own. The list is
 -- comma-delimited, so a comma in any text becomes "‚". A pick in Composer
 -- changes nothing: the row snaps back to the summary (list_rows remembers
@@ -791,6 +833,7 @@ local function tls_gate(gen, ip, done)
 			log.warn("TLS check: the bridge at %s was accepted with a decoy CA bundle (%s); nothing keyed is sent",
 				ip, tostring(detail))
 			refresh_status()
+			show_stream_waiting() -- "Not connected: TLS check failed", as Connect Event Stream would say
 			C4:UpdateProperty("Attention", TLS_ATTENTION)
 			state.attention_sent = TLS_ATTENTION
 			return done(false)
@@ -806,7 +849,7 @@ local function tls_gate(gen, ip, done)
 				tostring(detail))
 			return done(true)
 		end
-		prop("Status", string.format("TLS check inconclusive (%s): nothing is sent; checking again in %d s",
+		identity_status(string.format("TLS check inconclusive (%s): nothing is sent; checking again in %d s",
 			tostring(detail), IDENTITY_RETRY_MS / 1000))
 		log.warn("TLS check inconclusive (%s) on a Director version that has not answered pinned: nothing keyed is "
 			.. "sent; again in %d s", tostring(detail), IDENTITY_RETRY_MS / 1000)
@@ -837,6 +880,9 @@ local function verify_identity(purpose, callback)
 		if ip ~= state.ip or gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
 		end
+		if not paired() then
+			return -- Forget Pairing overtook the check (#236: the step before pairing another bridge)
+		end
 		local cfg = r.ok and type(r.json) == "table" and r.json or nil
 		local reported = cfg and config.normalise_bridge_id(cfg.bridgeid) or nil
 		if cfg and reported then
@@ -845,7 +891,7 @@ local function verify_identity(purpose, callback)
 			-- A model id this driver cannot use (none at all is let through).
 			if cfg.modelid and not config.model_supported(cfg.modelid) then
 				state.identity_ok = false
-				prop("Status", string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip,
+				identity_status(string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip,
 					config.model_label(cfg.modelid)))
 				log.warn("bridge at %s is %s: no request is sent", ip, config.model_label(cfg.modelid))
 				return answer_identity(false)
@@ -860,18 +906,21 @@ local function verify_identity(purpose, callback)
 				if retry then
 					return again() -- Status already says why
 				end
+				if trusted then
+					state.identity_text = nil
+				end
 				refresh_status()
 				answer_identity(trusted)
 			end)
 		end
 		state.identity_ok = false
 		if reported then
-			prop("Status", string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
+			identity_status(string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
 				.. "is corrected", ip, reported, state.creds.bridge_id))
 			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
 			return answer_identity(false)
 		end
-		prop("Status", string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
+		identity_status(string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
 			tostring(r.ok and "no bridge id in the answer" or r.err), IDENTITY_RETRY_MS / 1000))
 		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
 		again()
@@ -974,11 +1023,24 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		log.warn("ignoring bridge IP %q: %s", value, err)
 	end
 	local changed = ip ~= state.ip
+	-- Whether the feed is wanted at a new address, from what it did at the
+	-- old one (read before the old address's state is dropped below):
+	-- running, stopped only while the address was invalid, never started
+	-- because the identity check had not passed, about to start (its address
+	-- check had not answered), or stopped by a rejected key, a stop the new
+	-- address ends (#236). A feed the owner stopped with Disconnect Event
+	-- Stream stays stopped.
+	local wanted = (state.stream and state.stream:running()) or state.stream_paused_by_address
+		or state.identity_ok ~= true or state.stream_ip == nil or state.key_rejected ~= nil
 	state.ip = ip
 	if changed then
+		-- Everything learnt about the old address goes; the checks run afresh,
+		-- and until they pass Status does not read "Paired" (#236).
 		state.address_gen = state.address_gen + 1
 		state.key_rejected = nil
 		state.tls_verdict = nil
+		state.identity_ok = nil
+		state.identity_text = nil
 	end
 	refresh_status()
 	if changed and state.late_init_done then
@@ -988,18 +1050,16 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
-			-- Running now, stopped only while the address was invalid, or
-			-- never started because the identity check failed: a corrected
-			-- address brings the feed back by itself.
-			local was_running = (state.stream and state.stream:running()) or state.stream_paused_by_address
-				or state.identity_ok ~= true
 			state.stream_paused_by_address = nil
-			state.identity_ok = nil
 			if state.stream then state.stream:stop() end
-			choose_stream_address(function() restart_stream(was_running) end)
+			-- The feed comes back by itself once the bridge at the new address
+			-- passes the identity check; until then the row says so.
+			if wanted then
+				show_stream_waiting()
+			end
+			choose_stream_address(function() restart_stream(wanted) end)
 		else
 			state.stream_paused_by_address = (state.stream and state.stream:running()) or nil
-			state.identity_ok = nil
 			restart_stream()
 		end
 	end
@@ -1029,6 +1089,10 @@ dispatch.commands["Pair_Bridge"] = function()
 			return true
 		end
 	end
+	-- The stored bridge id: another bridge is refused until Forget Pairing
+	-- (docs/bridge-compat-design.md, "Pairing another bridge (#236)"). It is
+	-- kept when the key is not, so it counts while Status reads "Not paired".
+	local paired_id = state.creds and state.creds.bridge_id
 	pairing.pair(state.ip, {
 		on_probed = function(info)
 			if stale() then return end
@@ -1042,19 +1106,30 @@ dispatch.commands["Pair_Bridge"] = function()
 		end,
 		on_paired = function(creds)
 			if stale() then return end
+			local previous_id = state.creds and state.creds.bridge_id
 			-- Use the in-memory result: the store writes on its own thread
 			-- and may not return the value yet.
 			state.creds = creds
 			state.key_rejected = nil
+			-- The identity check runs afresh (choose_stream_address below) unless it
+			-- passed for this very bridge: a failure text (an unreachable bridge,
+			-- say) is stale now that the bridge answered, and a check of the bridge
+			-- paired before (a late answer after Forget Pairing) proves nothing for
+			-- this one. Status reads "Checking the bridge ..." meanwhile.
+			if state.identity_ok ~= true or previous_id ~= creds.bridge_id then
+				state.identity_ok = nil
+				state.identity_text = nil
+			end
 			prop("Bridge Model", config.model_label(creds.model))
 			refresh_status()
+			show_stream_waiting() -- not "Not paired" while the new pairing's checks run
 			choose_stream_address(function() restart_stream(true) end)
 		end,
 		on_error = function(message)
 			if stale() then return end
 			prop("Status", "Pairing failed: " .. message)
 		end,
-	})
+	}, paired_id)
 end
 
 -- GET /clip/v2/resource/bridge with the key via `host` (the dotted address;
@@ -1696,6 +1771,7 @@ end
 
 dispatch.commands["Forget_Pairing"] = function()
 	state.identity_ok = nil
+	state.identity_text = nil
 	reset_identity_check()
 	state.stream:stop()
 	credentials.clear()
@@ -1903,10 +1979,12 @@ function OnDriverLateInit()
 	replay_early_commands()
 	register_probe_events()
 	refresh_status()
+	-- A true Event Stream text until the stream starts (#236): the row may
+	-- still hold its text from before the restart while the identity or TLS
+	-- check is pending or failing.
+	show_stream_waiting()
 	if connection() then
 		choose_stream_address(function() restart_stream(true) end)
-	else
-		prop("Event Stream", paired() and "Waiting for IP address" or "Not paired")
 	end
 	-- Dev builds: the dev loop starts last, so a reload pushed through it
 	-- sees a fully initialised driver.

@@ -1414,6 +1414,19 @@ describe("Hue Scene driver", function()
 			assert.same({ { BUTTON_ID = 1, ACTION = 1 }, { BUTTON_ID = 1, ACTION = 0 } }, notifies(c4, "BUTTON_ACTION"))
 		end)
 
+		-- Issue #234: common/device.lua dropped such a value without an answer.
+		it("answers a hold rate that is not a number with the rate kept, and holds at that rate (#234)", function()
+			local env, c4 = known_scene("static")
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "3000" })
+			c4.calls = {}
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "slow" })
+			assert.same({ "3000" }, notifies(c4, "HOLD_RATE_DOWN"), "Composer shows the rate in use again")
+			assert.equal(3000, c4.persist.hold_rate_down)
+			env.ReceivedFromProxy(201, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			assert.same({ rid = "s1", device_id = "2061", direction = "down", duration = "3000" }, dims(c4)[1])
+		end)
+
 		it("reads persisted hold rates at late init; toggle held while on dims down, while off up", function()
 			local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
 			c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")

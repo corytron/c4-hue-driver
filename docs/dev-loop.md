@@ -9,40 +9,60 @@ build, only `driver.xml` changes need Composer again (a capability change
 also needs the owner's controller reboot, `docs/composer-remote.md` rule 10).
 
 Dev builds only: `tools/build.sh --dev` includes `src/common/devloop.lua` in
-all three drivers, with the dev key baked in as `common/devkey.lua`; release
-builds contain neither. The controller acts only on what that key signed
-("Security" below). The loop is inert until the bridge's `Dev Server`
-property holds a `host:port`. Light and scene devices have no such property:
-they only react to what the bridge forwards.
+all three drivers, with the dev key baked in as `common/devkey.lua`, ships
+the bridge's development modules (`bridge/devtools.lua`,
+`bridge/conntest.lua`, `bridge/pinning.lua`), keeps the DEV-ONLY blocks of
+the bridge's `driver.xml` and allows Composer's Lua command window (dp3
+`--allowexecute`); release builds contain none of it. The controller acts
+only on what that key signed ("Security" below). The loop is inert until
+the bridge's `Dev Server` property holds a `host:port`. Light and scene
+devices have no such property: they only react to what the bridge forwards.
 
-**Current state (2026-10-24): not in use.** The house has run production
-builds since 2026-10-22 (build 116 first, build 160 now). Release builds
-carry no `common/devloop.lua`, so nothing on the controller polls this VM
-and no property can turn the loop on. To return to the loop: start
-`tools/devserver.py` (it listens on this VM's LAN address and creates the
-dev key on its first run), build with `tools/build.sh --dev` (the packages
-carry that key) and install the three dev `.c4z` through the same route as a
-release (`docs/status.md`, "How builds reach the house"; `CLAUDE.md`,
-Deploy), keeping in mind that a dev package is as secret as the key it
-carries ("Security"). The `--dev` flag changes only the Lua that is packed,
-not `driver.xml`. Build from a commit after the installed one (the version
-is the commit count, so Composer sees an update); unless that commit changes
-`<capabilities>`, no reboot should be needed (the dev → release switch of
-2026-10-22 needed none). The bridge's `Dev Server` property kept its last
-value through the release builds (they ignore it), so the loop starts at the
-dev build's late init; check that it holds the `host:port` the server
-prints (set it with the row's Set button if not). Leaving again is the
-release install described under "Leaving the loop" below.
+**Current state (2026-10-25): in use for a hardware test.** The house ran
+release builds from 2026-10-22 (build 116) to 2026-10-24 (build 259); since
+2026-10-25 03:24 it runs dev build 309 for the checks of issue #40, and the
+release install of issue #228 ends the loop again. `docs/status.md`, "What
+runs on the house", is the authority on this. A release build carries no
+`common/devloop.lua`, so nothing on the controller polls this VM and no
+property can turn the loop on.
+
+To return to the loop: start `tools/devserver.py` (it listens on this VM's
+LAN address and creates the dev key on its first run), then build with
+`tools/build.sh --dev` (the packages carry that key) from a commit after
+the installed one (the version is the commit count, so Composer sees an
+update). Install the three dev `.c4z` the way `CLAUDE.md` (Deploy)
+describes an install that bypasses `tools/deploy.py`: served from
+`build/release/` with `python3 -I -m http.server 8090 --bind 0.0.0.0
+--directory build/release` for the duration of the download only, briefed
+to the Windows session with their sha256, and recorded afterwards with
+`python3 tools/deploy.py record --tag <release tag> --build <N> --at <ISO
+time with offset> --note "..." --no-manifest` (`--commit <sha>` names the
+commit; deployment 7310056842 recorded dev build 309 this way). A dev
+package is as secret as the key it carries ("Security"). `--dev` changes
+the Lua that is packed and keeps the DEV-ONLY properties and actions of
+`driver.xml`, which a release strips; neither touches `<capabilities>`, so
+no reboot is needed unless the commit itself changes them (the dev →
+release switch of 2026-10-22 and the dev install of 2026-10-25 03:24
+needed none). A release build's `driver.xml` has no `Dev Server` row;
+whether Director gives the re-declared row its old value back is not
+recorded, so after the install check that the bridge's `Dev Server` holds
+the `host:port` the server prints, and have it set with the row's Set
+button if not (`docs/composer-remote.md`, rule 7). The loop starts at the
+dev build's late init. Leaving again is the release install described
+under "Leaving the loop" below.
 
 ## Pieces
 
-- `tools/devserver.py`: the server on the VM. Plain HTTP (default port 8080)
-  for the dev loop, plus a TLS listener (default 8443, self-signed) that
-  keeps the connection-experiment endpoints `/stream` and `/ping` alive.
-  Both listen on one address, by default this VM's LAN address. It signs
-  every bundle and command list with the dev key, and wants the admin token
-  on `/status` and `/admin/*`. Serves three trees, each exactly the layout
-  its `.c4z` has:
+- `tools/devserver.py`: the server on the VM. Plain HTTP (`--port`, default
+  8080) for the dev loop, plus a TLS listener (`--tls-port`, default 8443,
+  self-signed) that answers the same endpoints and keeps the
+  connection-experiment endpoints `/stream` and `/ping` alive. Both listen
+  on one address, by default this VM's LAN address. It signs every bundle
+  and command list with the dev key, and wants the admin token on `/status`
+  and `/admin/*`. Serves three trees, each a driver's `.lua` and `.xml`
+  files and its `certs/` under the paths its `.c4z` uses (a module the
+  bundle lacks, such as `common/build_version.lua`, still loads from the
+  installed package):
   - `tree=bridge` (the default): `src/hue_bridge` with `src/common` mounted
     as `common/`.
   - `tree=light`: `src/hue_light` with `src/common` mounted as `common/`.
@@ -50,13 +70,20 @@ release install described under "Leaving the loop" below.
     (added with the scenes feature, `docs/scenes-design.md` §6).
   A file named `devkey.lua` is never served.
 - `tools/devctl.py`: CLI for the developer: queue actions, set properties,
-  force a reload, pin or unpin the trees, show status (every tree), tail
-  the log. It derives the admin token from the dev key file and finds the
-  server through `build/dev/server.json`.
+  force a reload, wait for a queued command, pin or unpin the trees, show
+  status (every tree), tail the log. It derives the admin token from the
+  dev key file and finds the server through `build/dev/server.json`; `log`
+  reads `build/dev/driver.log` directly and needs neither.
 - `src/common/devloop.lua`: the driver side, in all three drivers. The
-  bridge runs the polling loop; a light or scene device only uses
-  `devloop.apply_forwarded` from its `DEV_RELOAD` handler, which applies
-  only a bundle signed for its own tree.
+  bridge runs the polling loop; a light or scene device only registers the
+  `DEV_RELOAD` handler `devloop.reload_handler` builds (it calls
+  `devloop.apply_forwarded`, which applies only a bundle signed for its own
+  tree) and the `HUE_LOG` log sink of `devloop.forward_logs`
+  (`common/device.lua`).
+- `src/hue_bridge/bridge/devtools.lua`: the bridge's development handlers
+  (the `Dev Server` property, the three DEV-ONLY actions, `HUE_LOG`, and
+  the signed-only commands of "Development commands" below) and the
+  redactor; `driver.lua` loads it only when `common/devloop.lua` is there.
 - The dev key: `~/.config/c4-hue-driver/devkey` on the VM, outside the
   repository, and `common/devkey.lua` inside each dev package ("Security").
 
@@ -89,7 +116,8 @@ unknown. Paths are confined to the served tree.
 `{"nonce": "<as sent>", "commands": [ {"id": 7, "type": "execute", "command": "Connection Test", "params": {"Target": "Bridge"}},
                                       {"id": 8, "type": "set_property", "name": "Stream Timeout (s)", "value": "60"},
                                       {"id": 9, "type": "reload"} ]}`
-A missing or malformed `nonce` is a 400.
+A missing or malformed `nonce` is a 400, and so is an `after` that is not
+an integer.
 Ids increase monotonically across server restarts (persisted in
 `commands.json`). A command stays in the queue until the driver reports
 `command_done` for it, then moves to a bounded done list; so a driver that
@@ -99,8 +127,9 @@ one (the table it hands to `devloop.set_signed_commands`, named the way
 `common/dispatch.lua` names commands, so `Hue Request` finds `Hue_Request`
 and `LUA_ACTION` is unwrapped to its `ACTION`), else the driver's
 `ExecuteCommand(command, params)`, which serves Composer's actions;
-`set_property` does `C4:UpdateProperty(name, value)` followed by
-`OnPropertyChanged(name)`; `reload` forgets refused versions and re-runs the
+`set_property` does `C4:UpdateProperty(name, value)`, sets
+`Properties[name]` as Director does, then calls `OnPropertyChanged(name)`;
+`reload` forgets refused versions and re-runs the
 reload sequence on the current bridge version (it does not re-forward the
 light tree; touch a file under `src/hue_light` or `src/common` for that).
 
@@ -112,15 +141,18 @@ The server appends `HH:MM:SS.mmm <line>` to `driver.log` and echoes to stdout.
 `light_version` / `scene_version` are the tree versions the bridge last
 fetched and forwarded (recorded even when no device of that kind was bound
 to receive them); absent until the first forward. Events: `startup` (loop started; includes `sandbox`
-facts: `_VERSION`, `jit.version` if any, and the `type()` of `loadstring`,
-`load`, `setfenv`, `package.loaders`, `C4` and `bit`, the HMAC in use
+facts: `_VERSION`, `jit.version` if any, and the `type()` of `jit`,
+`loadstring`, `load`, `setfenv`, `package`, `package.loaders`, `C4` and
+`bit`, the HMAC in use
 (`hmac`: `C4:HMAC` or `Lua (<why>)`), plus the driver version from
-`C4:GetDriverConfigInfo("version")`), `reload` (new code running),
+`C4:GetDriverConfigInfo("version")`), `reload` (new code running; its
+`error` carries the text of an `OnDriverDestroyed` that failed),
 `reload_failed` (error text; old code may be half torn down), `refused`
 (a bundle did not verify: `tree`, `refused_version`, `error`; once per
-version), `command_done` (with `command_id`), `heartbeat` (at most once
-every 30 s, properties only; also right after a new light or scene version
-is forwarded, so `/status` catches up at once).
+version), `command_done` (with `command_id`, `elapsed_ms` and, when the
+command failed, its redacted `error`), `heartbeat` (at the end of a tick
+when no report went out for 30 s, properties only; also right after a new
+light or scene version is forwarded, so `/status` catches up at once).
 
 `GET /status` (admin token) → `{"running_version": ..., "local_version": ..., "running_light_version": ..., "local_light_version": ..., "running_scene_version": ..., "local_scene_version": ..., "pinned": {...}, "last_seen": <unix>, "server_time": <unix>, "last_event": ..., "last_error": ..., "properties": {...}, "pending_commands": [...], "done_commands": [ids], "last_done_id": N, "key_fingerprint": "<the server's>", "driver_key_fingerprint": "<last reported, or null>", "driver_reported_key": <whether any report said yet>}`
 (plus `live_version`, `live_light_version` and `live_scene_version`, what
@@ -139,12 +171,28 @@ Without the token, or with a wrong one: 401.
 
 ### Bridge
 
-- `devloop.start(host_port)` is called from `OnDriverLateInit` of a dev build
-  when the `Dev Server` property is set. Calling it again with the same host
+- `devloop.start(host_port)` is called at the end of the bridge's
+  `OnDriverLateInit` in a dev build when the `Dev Server` property is set
+  (`devtools.late_init`), and again whenever the row changes after late
+  init; an emptied row stops the loop. Calling it again with the same host
   is a no-op; with a different host it restarts; `devloop.stop()` stops. A
   package without a dev key still starts (and says once that it will refuse
   every bundle and command), so the log and the reports still reach the
   server.
+- A command that stops or moves the loop reports first (issue #239).
+  `devctl.py set "Dev Server" ""`, or another `host:port`, reaches the
+  row's handler, which calls `devloop.stop()` (or `devloop.start(host)`)
+  while the command runs. During an `execute` or `set_property` command
+  both only note where the loop should end up (the last call wins; the
+  host it already polls cancels a stop); once the command is done its
+  `command_done` report starts towards the server the command came from,
+  and then the loop stops or moves. The rest of that command list stays
+  queued on that server for the loop's next start there, and nothing more
+  of that tick goes to it: no log flush, no heartbeat (the lines still
+  buffered leave with the loop's next tick, to whichever server it then
+  polls). Before the fix the loop stopped first, its report could not
+  start, and the server kept the command pending for ever; a bridge gets
+  the fix only with a dev `.c4z` install ("Gotchas" below).
 - State lives in a global (`_G.__DEVLOOP`) so a reload cannot lose the loop,
   and `package.loaded["common.devloop"]` is never cleared by a reload. The
   dev key is not in that global: it lives in a local of the module.
@@ -158,9 +206,12 @@ Without the token, or with a wrong one: 401.
   `GET /commands?after=<last id>&nonce=<fresh>`, verify, and run each
   command in order, reporting `command_done` after each with a properties
   snapshot; then flush the log buffer with `POST /log`; then a heartbeat if
-  one is due. Never start a `C4:url` transfer from inside another transfer's
-  `OnHeaders` or `OnBodyChunk` callback (Director fails it with curl error
-  2); timers and `OnDone` callbacks are safe.
+  one is due. A tick that finds the previous chain still in flight is
+  skipped, and after ten such ticks that chain is abandoned (its callbacks
+  are dropped). An unreachable server is said once per change. Never start
+  a `C4:url` transfer from inside another transfer's `OnHeaders` or
+  `OnBodyChunk` callback (Director fails it with curl error 2); timers and
+  `OnDone` callbacks are safe.
 - A bundle that does not verify, or is signed for another tree, is refused:
   `devloop: bridge bundle <version> refused: signature mismatch` (once per
   version) and a `refused` report; nothing is torn down. That version is
@@ -204,9 +255,12 @@ Without the token, or with a wrong one: 401.
   `package.loaders[1]` that serves modules from the bundle (`a.b` →
   `a/b.lua`); run `loadstring(bundle["driver.lua"], "=driver.lua")`; then
   `OnDriverInit("DIT_UPDATING")` and `OnDriverLateInit("DIT_UPDATING")`.
-  Every step is `pcall`ed; a failure posts `reload_failed` and the loop keeps
-  polling, so the next pushed version retries. Only a verified bundle ever
-  reaches this sequence.
+  Every step is `pcall`ed. An `OnDriverDestroyed` that fails is said and the
+  reload goes on (the `reload` report carries its text); any later failure
+  posts `reload_failed` and the loop keeps polling. The version is recorded
+  before anything can fail, so a failed version is not loaded again: the
+  next pushed version, or a `reload` command, retries. Only a verified
+  bundle ever reaches this sequence.
 - Signed commands: the bridge's development commands (`Hue Request`, `Probe
   Call`, `Probe Project`, `Probe Errors`, `Probe Scenes`, `Proxy Command`,
   `Lights Report`, and `Test Connection` with a `Host`) are not in its
@@ -215,11 +269,13 @@ Without the token, or with a wrong one: 401.
   load of `driver.lua`, a reload's included; `devloop.execute(command,
   params)` runs a verified `execute` command through that table first and
   through the global `ExecuteCommand` otherwise, looking both up as the
-  command runs. A reload that fails before `devtools.install` keeps the
-  previous table, as it keeps the previous `ExecuteCommand`. A handler that
-  raises is said (`devloop: signed command <name> failed: <error>`) and
-  reported in `command_done`; the next command runs. Why: "Security",
-  "Development commands" below.
+  command runs (so a signed `Test Connection` always takes the development
+  handler, with a `Host` or without). A reload that fails before
+  `devtools.install` keeps the previous table, as it keeps the previous
+  `ExecuteCommand`. A handler that raises is said (`devloop: signed command
+  <name> failed: <error>`, `<name>` the dispatch name) and reported in
+  `command_done`; the next command runs. Why: "Security", "Development
+  commands" below.
 - Log capture: wrap `_G.print` once (keeping the original for Composer) so
   everything the driver prints is buffered and shipped; keep at most 500
   lines, dropping the oldest. The loop's own messages use the original print
@@ -233,11 +289,13 @@ Without the token, or with a wrong one: 401.
   the line: `devloop: a log line was withheld (the redactor failed on it)`
   stands in its place. A line the redactor prints itself is withheld the
   same way instead of being handed back to it. The `error` text of a report
-  passes the redactor as well. The bridge's redactor replaces the
-  application key it holds with `<key>`; until the bridge installs one,
-  lines pass unchanged. The redactor is kept across a reload until the new
-  code installs its own. Composer's own output (the original print) is not
-  redacted. `devloop.redacted(line)` gives the verdict, for the specs.
+  passes the redactor as well. The bridge's redactor (`redact_key` in
+  `bridge/devtools.lua`, installed with the signed commands) replaces the
+  application key the driver holds at that moment with `<key>`, by plain
+  search; until the bridge installs one, lines pass unchanged. The redactor
+  is kept across a reload until the new code installs its own. Composer's
+  own output (the original print) is not redacted. `devloop.redacted(line)`
+  gives the verdict, for the specs.
 - Properties snapshot: a copy of the `Properties` table. If `C4` is a Lua
   table, also wrap `C4.UpdateProperty` once to shadow values the driver sets
   itself; report `type(C4)` in the sandbox facts either way.
@@ -292,14 +350,25 @@ tools/devctl.py pin                  # serve src/ as it is now; later edits wait
 tools/devctl.py unpin                # back to live reloads
 ```
 
-The server's first lines say where it listens (`http://<LAN address>:8080`:
-the `Dev Server` value is that `host:port`) and the dev key's fingerprint,
-which `build.sh --dev` prints too. `devctl.py` finds the server through
-`build/dev/server.json`; `--server URL` overrides it.
+The server's first lines name the dev key's fingerprint (which `build.sh
+--dev` prints too) and where it listens: `listening on http://<LAN
+address>:8080 and https://<LAN address>:8443 (Dev Server = <LAN
+address>:8080)`, the last part being the bridge's `Dev Server` value.
+`devctl.py` finds the server through `build/dev/server.json`; `--server
+URL` overrides it.
+
+`tools/regress.sh [--server URL]` runs the scripted part of
+`docs/release-checklist.md` §1 through `devctl.py`: `Test Connection`,
+`Refresh Scenes`, `Room Audit`, `Link Devices`, `Adopt Hue Names`, `Accept
+Names As They Are` and `Lights Report`, then a scan of the shipped log for
+errors, and exits with the number of failed checks. It creates and deletes
+nothing, but `Adopt Hue Names` renames a device whose Composer name differs
+and `Link Devices` registers a bound device the bridge lacks, as those
+actions always do.
 
 Pin while several agents edit `src/` at once: the controller then only
-reloads to states the coordinator has checked (`luacheck src tests` and
-`busted tests` green), each pushed by a fresh `pin`. `status` shows a
+reloads to states the coordinator has checked (`tools/check.sh --only
+lua-lint lua-test` green), each pushed by a fresh `pin`. `status` shows a
 `pinned` line with the pinned versions and what the live trees have become.
 
 `devctl.py status` shows every tree, running against local:
@@ -319,14 +388,28 @@ last_seen              2s ago
 `running_light_version` and `running_scene_version` read `bridge has not
 forwarded yet` until the bridge's first forward after its loop starts.
 Each pair is omitted when the server predates that tree. `dev_key` reads
-`DIFFERS` when the installed dev build was made with another key: the
-controller then refuses everything the server signs.
+`DIFFERS` when the installed dev build was made with another key, and
+`DRIVER HAS NONE` when it carries no key: the controller then refuses
+everything the server signs.
 
 `run`, `set` and `reload` print the bare id so `devctl.py wait $(devctl.py run …)`
-works. The server takes `--quiet` to drop per-request connection lines on
-the plain listener, `--bind` to listen elsewhere, `--key-file` for another
-key, and `--state-dir`/`--cert-dir`/`--root` to relocate its files;
-`devctl.py` takes `--key-file` and `--state-dir` likewise.
+works; `wait` gives up after `--timeout` seconds (default 60) with exit
+code 2. A `Dev Server` change is the one command `wait` may also end
+without a report, for a loop that predates issue #239 and never sends one:
+once the bridge has been in touch after the change was queued (a contact
+up to 3 s before the wait's first look counts, so `devctl.py wait
+$(devctl.py set "Dev Server" "")` works) and silent for 20 s since, it
+says the command is treated as done and exits 0. A wait begun after the
+bridge had already gone quiet cannot tell a stopped loop from a bridge
+that is down; it times out with a hint. `pin` and `unpin` take `--tree
+bridge|light|scene` (default: all three); `log` takes `-n`/`--lines`
+(default 50), `-f`/`--follow` and `--file`. The server takes `--quiet` to
+drop the plain listener's connection and request lines and the heartbeat
+summaries, `--port` and `--tls-port`, `--bind` to listen elsewhere,
+`--key-file` for another key, `--state-dir`/`--cert-dir`/`--root` to
+relocate its files, `--alpn` for the protocols its TLS listener offers, and
+`--ensure-key` ("The dev key" below); `devctl.py` takes `--server`,
+`--key-file` and `--state-dir`.
 `C4_HUE_DEVKEY_FILE` names another key file for all three tools.
 
 ### Leaving the loop (production)
@@ -334,16 +417,22 @@ key, and `--state-dir`/`--cert-dir`/`--root` to relocate its files;
 A release build (`tools/build.sh` without `--dev`) ships no
 `common/devloop.lua` and no key; every driver requires the loop with
 `pcall`, so the same `driver.lua` starts without it and the bridge simply
-never contacts this VM again. Before installing one:
-`devctl.py set "Debug Mode" Off` (the property survives the update), then
-follow the Deploy line in `CLAUDE.md` (HTTP server on 8090, Windows session
-downloads and runs "Add or Update Driver or Agent…" for all three files).
-`devctl.py status` then shows `last_seen` growing; stop `devserver.py` and
-the HTTP server. The dev build's `Dev Server` and `Diagnostic Server`
-properties stay declared in `driver.xml` and keep their last values; the
-release code ignores them. Done for the first time on 2026-10-22 (version
-116 over dev build 84); the house has stayed on release builds since (160
-on 2026-10-24). Returning to the loop: "Current state" at the top.
+never contacts this VM again. Since build 259 (2026-10-24) a production
+install is a GitHub release, never a VM build; a dev build (such as 309, on
+the house since 2026-10-25) goes around `tools/deploy.py` and is recorded
+with `deploy.py record --no-manifest`. Before installing a release:
+`devctl.py set "Debug Mode" Off` (the property survives the update, and
+`deploy/house.yaml` wants it Off), then the GitOps install of
+`docs/release-checklist.md`, "Deploy to the house" (`tools/deploy.py
+start`, its brief to the Windows session, `tools/deploy.py done`).
+`devctl.py status` then shows `last_seen` growing; stop `devserver.py`.
+A release's `driver.xml` has no DEV-ONLY block, so the `Dev Server` and
+`Diagnostic Server` rows and the `Connection Test`, `Reload Credentials`
+and `Check CA Pinning` actions leave Composer (release checklist §2, lines
+2 and 3). Done for the first time on 2026-10-22 (version 116 over dev
+build 84); the house then stayed on release builds until the dev builds of
+2026-10-25 (276, 284 and 309). Returning to the loop: "Current state" at
+the top.
 
 ## Security
 
@@ -421,19 +510,22 @@ signed, and the key never crosses the wire.
   the old unsigned form is refused the same way, with the running code
   untouched: `devloop: light reload refused: signature mismatch` in the
   device's Lua output and `light reload refused (...)` forwarded to the
-  bridge. The check is inside `devloop.apply_forwarded`, which the handler
-  `common/device.lua` registers calls, so the registration is unchanged.
+  bridge. The check is inside `devloop.apply_forwarded`, which the
+  `DEV_RELOAD` handler `common/device.lua` registers
+  (`devloop.reload_handler`) calls, so the registration is unchanged.
 - **Which HMAC.** `C4:HMAC("SHA256", key, data, { return_encoding = "HEX",
   key_encoding = "NONE", data_encoding = "NONE" })` [verified: DriverWorks
   API docs, Encryption interface, `HMAC` and `GetSupportedDigests`, both
   available from 1.6.0; the Safe Usage table allows them before late init].
-  How it behaves on OS 3.4.2 is [assumed], so at first use the loop checks
-  it against RFC 4231 test case 2 and falls back to the pure-Lua
-  HMAC-SHA256 in `devloop.lua` when `C4:HMAC` is missing, raises or answers
-  wrong (measured under PUC Lua 5.1 on the VM: about 0.4 MB/s, 1.7 s for
-  the 0.6 MB bridge bundle, 0.35 s for a light bundle; on the controller it
-  is slower [assumed]; the specs pin it to the RFC 4231 and FIPS 180
-  vectors). The startup report's `sandbox.hmac` says which one runs.
+  At first use the loop checks it against RFC 4231 test case 2 and falls
+  back to the pure-Lua HMAC-SHA256 in `devloop.lua` when `C4:HMAC` is
+  missing, raises or answers wrong (measured under PUC Lua 5.1 on the VM:
+  about 0.4 MB/s, 1.7 s for the 0.6 MB bridge bundle, 0.35 s for a light
+  bundle; on the controller it is slower [assumed]; the specs pin it to the
+  RFC 4231 and FIPS 180 vectors). On OS 3.4.2 `C4:HMAC` exists and passes
+  that test, so the loop uses it [verified: hardware 2026-10-25, dev build
+  276; `docs/design.md`, "Hardware facts of the 2026-10-25 dev pass"]. The
+  startup report's `sandbox.hmac` says which one runs.
 - A received MAC is compared over its full length, and the MAC the
   controller expected is never logged or reported: it would let whoever
   answers as the server sign a payload of their choosing.
@@ -446,13 +538,16 @@ signed, and the key never crosses the wire.
 - **Out of the dispatch table.** `ExecuteCommand` has no sender parameter
   [verified: `5_director_command/_1-ExecuteCommand` in the DriverWorks API
   docs], so whatever sits in the bridge's dispatch table, any driver in the
-  project can run with `C4:SendToDevice`. In a dev build that table gets
+  project can run with `C4:SendToDevice`. A dev build adds to that table
   only what Composer itself sends, the actions of the DEV-ONLY block of
   `src/hue_bridge/driver.xml` (`Connection Test`, `Reload Credentials`,
-  `Check CA Pinning`) and the `Dev Server` property, plus `HUE_LOG`. The
-  rest runs only for a signed `execute` command (above). Composer's `Test
-  Connection` is the driver's own handler; another driver that sends it
-  with a `Host` gets the dotted address.
+  `Check CA Pinning`) and the `Dev Server` property, plus `HUE_LOG`
+  (`devtools.install`). The rest runs only for a signed `execute` command
+  (above): `Hue Request`, `Probe Project`, `Probe Errors`, `Probe Scenes`,
+  `Probe Call`, `Proxy Command`, `Lights Report` and `Test Connection`'s
+  `Host` variant. Composer's `Test Connection` is the driver's own handler,
+  which takes no parameters; another driver that sends it with a `Host`
+  gets the dotted address.
 - **`HUE_LOG` stays reachable.** The light and scene devices send their log
   lines with `C4:SendToDevice` (`devloop.forward_logs`), which arrives
   through `ExecuteCommand`, so the handler must stay in the table. All it
@@ -461,7 +556,7 @@ signed, and the key never crosses the wire.
   log.
 - **`Hue Request`** takes `Host` only as a spelling of the bridge's address
   (finding 15 of 2026-10-24, below) and `Path` only when it starts with
-  `/` and holds no `@`, `\`, `#`, white space or other control character,
+  `/` and holds no `@`, `\`, `#`, white space or control characters,
   since `bridge/http.lua` joins `https://`, the host and the path:
   `@203.0.113.9/...`, `.example.net/...` or `:8443/...` would carry the key
   to another host or port. Anything else is refused (`Hue Request: Path
@@ -475,19 +570,21 @@ signed, and the key never crosses the wire.
 - **`Probe Call`** refuses a `Persist` call that names an entry of the
   credential store, or names none (`PersistDeleteAll` would delete them
   with everything else) [the persistence calls: section `26.5_persistence`
-  of the DriverWorks API docs]. The names come from
-  `bridge/credentials.lua` at run time, are compared loosely (case,
-  padding, a NUL ending the string) and are never logged; when they cannot
-  be read, every `Persist` call is refused. Any other entry can still be
-  probed.
+  of the DriverWorks API docs]: `Probe Call: C4.<Fn> refused: <why>;
+  nothing was called`. A `Persist` call is any method whose name starts
+  with `Persist`, in any case. The names come from `bridge/credentials.lua`
+  at run time, are compared loosely (case, padding, a NUL ending the
+  string) and are never logged; when they cannot be read, every `Persist`
+  call is refused. Any other entry can still be probed.
 - **Redaction.** The bridge's redactor replaces the application key in
   every shipped line and every reported error text (above), so even a
   probe that printed it would not put it on the wire.
 - **An older loop.** `common/devloop.lua` is the one module a reload never
   replaces: code pushed to a bridge whose loop predates signed commands
-  leaves the development commands out and says so once per load (`the
-  running common/devloop.lua predates signed commands`). Install a dev
-  `.c4z` made from the same commit as the server.
+  leaves the development commands and the redactor out and says so once
+  per load (`dev loop: the running common/devloop.lua predates signed
+  commands; ...`). Install a dev `.c4z` made from the same commit as the
+  server.
 
 ### What the server checks
 
@@ -503,6 +600,7 @@ signed, and the key never crosses the wire.
 - Unauthenticated by design: `/manifest` (a hint, see above), `/file` (the
   repository's own source), `/ping` and `/stream` (the connection
   experiment), and the controller's `POST /log` and `POST /report`.
+  `/bundle` and `/commands` want no token either: they are signed.
 
 ### What is left
 
@@ -534,7 +632,7 @@ signed, and the key never crosses the wire.
   one), restart `devserver.py`, install the new dev build. Installing a
   release build ends the loop, and the old key's use with it.
 - `Dev Server` stays empty when the loop is not in use; a release build
-  ignores it anyway.
+  has no such row.
 - **Development handlers (finding 15).** `Hue Request` and
   `Test Connection` take `Host` only as a spelling of the bridge's own
   address as `bridge/altaddr.lua` writes them (an octet below 8 with up to
@@ -562,8 +660,13 @@ Never install a dev build as the production driver.
   the driver is torn down, the broken code fails to come up, and the bridge
   (or every light) is dead until the next consistent save. Write whole files
   at once; when a change spans several files, make it in one save per file
-  without pausing between them, or stop the loop first
-  (`devctl.py set "Dev Server" ""`) and start it again when done.
+  without pausing between them, or `devctl.py pin` first and pin again once
+  the tree is consistent. `devctl.py set "Dev Server" ""` stops the loop
+  altogether: the bridge then polls nothing, so only Composer can start it
+  again (the `Dev Server` row and its Set button). Its `command_done` is
+  the last thing the loop sends (issue #239, "Driver-side behaviour"
+  above), so `devctl.py wait` returns as for any command; with a loop from
+  before that fix see the next point.
 - `common/devloop.lua` is the one module a reload never replaces, so an edit
   to it reaches the controller only through a Director restart or a fresh
   `.c4z` install; the bundle carries the new file, but the running copy is
@@ -578,7 +681,17 @@ Never install a dev build as the production driver.
   forward happens. The same holds for the signing: a dev build from before
   issue #52 neither signs nor verifies, and a server from after it refuses
   to talk to it (`nonce` 400s, bundles it cannot read); install a dev build
-  made from the same commit as the server.
+  made from the same commit as the server. And for the report a `Dev
+  Server` change now sends before the loop stops or moves (issue #239): it
+  reaches a bridge only with a dev `.c4z` made from that fix on, since no
+  reload replaces the running loop. A loop from before it stops first, so
+  the command stays pending on the server (`devctl.py wait` then ends on
+  the bridge's silence, "Developer workflow" above), and a loop that later
+  starts fresh (a Director restart or a dev install; it asks `after=0`)
+  receives it again and empties the row once more; a loop with the fix
+  then reports it. To avoid that second stop, take the leftover out before
+  starting the loop again: stop `devserver.py`, delete the command from
+  `commands` in `build/dev/commands.json`, start the server.
 - Director's `C4:JsonEncode` writes Lua arrays as objects with string keys
   even with `encodeArrays = true`; the server accepts both shapes.
 - Every reload restarts the event stream, and the abandoned transfer lives
@@ -586,13 +699,21 @@ Never install a dev build as the production driver.
   After several reloads several zombies are open; they drain one per
   bridge event. (Since the stream address rotation of 2026-10-21 a new
   stream no longer waits behind them, `docs/design.md`, "Stream address
-  rotation".) `devctl.py run "Hue Request" Method=PUT
-  Path=/clip/v2/resource/light/<id> Body='{"metadata":{"name":"X"}}'
-  Host=<a padded spelling of the bridge address that nothing else uses>`
-  generates one event per call without touching the light itself; rename
-  back afterwards. (`Hue Request`, the `Probe` actions, `Proxy Command` and
-  `Lights Report` exist only in dev builds, and answer only signed
-  commands: `devctl.py run`.)
+  rotation".) Within one load the stream keeps at most two transfers open
+  (`stream.MAX_ABANDONED + 1`, `Waiting for an earlier stream transfer to
+  close` meanwhile), but a reload cannot see its predecessor's, and
+  Director runs at most four `C4:url` transfers at once across all hosts:
+  three reloads within fifteen minutes on a quiet night left three zombies
+  plus the live stream, and every other request, the dev loop's own
+  included, timed out until the bridge's next event (verified 2026-10-25,
+  `docs/design.md`, "Concurrent transfers"). Space reloads out on a quiet
+  house. While a transfer is still free, `devctl.py run "Hue Request"
+  Method=PUT Path=/clip/v2/resource/light/<id>
+  Body='{"metadata":{"name":"X"}}' Host=<a padded spelling of the bridge
+  address that nothing else uses>` generates one event per call without
+  touching the light itself; rename back afterwards. (`Hue Request`, the
+  `Probe` commands, `Proxy Command` and `Lights Report` exist only in dev
+  builds, and answer only signed commands: `devctl.py run`.)
 - Edits to `tools/devserver.py` need a server restart. Kill it with a pattern
   that does not appear in your own command line (`pkill -f "devserver[.]p[y]"`)
   and start it in a separate command, or the shell kills itself.

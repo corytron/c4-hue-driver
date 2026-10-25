@@ -56,6 +56,11 @@ for the coordinator, not into the file.
   after stop (Disconnect, then Connect Event Stream), `restart_stream` in the
   driver (a new stream object shares `opts.abandoned`), an address change and
   the oversized-line reconnect.
+  Current (2026-10-25, build 316): the text is the constant
+  `stream.WAITING`, which `stream:wait_for_close` shows (state `waiting`,
+  one info line per wait); the cap is checked before `opts.connection()`,
+  so the driver's address rotation moves on only for a transfer that opens
+  (`src/hue_bridge/bridge/stream.lua:wait_for_close`, `connect`).
 - Every path that gives up an open transfer records it with `drop_transfer`
   (so it counts as abandoned): stop, the oversized line, the watchdog. On the
   oversized line the chunk callback also returns true, so Director aborts
@@ -81,6 +86,11 @@ Unchanged: `tlscheck.run(ip, callback(verdict, detail))`. New:
   Does nothing when the version is unknown.
 - `tlscheck.pinned_before()`: true only when the persisted version equals
   `tlscheck.director_version()` and both are non-empty.
+  Current (2026-10-25, build 316): also true when `remember_pinned()`
+  stored the running version earlier in the same run (`PersistGetValue`
+  may not return a value written moments before); `director_version()`
+  trims the text and turns a number into its string
+  (`src/hue_bridge/bridge/tlscheck.lua:pinned_before`).
 
 Rationale (finding 3): pinning is a property of the OS, not of the network.
 An `inconclusive` answer is accepted only on a Director version that has
@@ -117,19 +127,44 @@ conclusive answer.
   Composer can send: those named in the DEV-ONLY block of
   `src/hue_bridge/driver.xml`, which the coordinator owns and does not change
   unless the agent asks.
+  Current (2026-10-25, build 316): `HUE_LOG` stays in `dispatch.commands`
+  next to the three DEV-ONLY actions: the devices' forwarded log lines
+  arrive through `ExecuteCommand`, and it only prints one line, control
+  characters turned into spaces. The Host variant of `Test Connection`
+  moved to the signed table. The hook is
+  `devloop.set_signed_commands(handlers)`, and `devloop.execute(command,
+  params)` runs one signed `execute` command: the table's handler by
+  dispatch name, else the driver's `ExecuteCommand`
+  (`src/common/devloop.lua:execute`,
+  `src/hue_bridge/bridge/devtools.lua:install`).
 - `Probe Call` refuses `PersistGetValue`, `PersistSetValue` and
   `PersistDeleteValue` (any `Persist*`) whose first argument names one of the
   credential store's names (read them from `bridge/credentials.lua`, do not
   copy the strings into a log or a doc).
+  Current (2026-10-25, build 316): it also refuses a `Persist*` call whose
+  first argument is not a string (`PersistDeleteAll` would take the
+  credentials with everything else), and every `Persist*` call while the
+  store's names cannot be read; names compare loosely (case, padding, a
+  NUL) (`src/hue_bridge/bridge/devtools.lua:persist_refusal`).
 - The dev loop redacts the application key from every captured log line,
   through a hook the bridge installs (`devloop.set_redactor(fn)`, where
   `fn(line)` returns the line to keep). The bridge's redactor replaces the
   current key with `<key>`.
+  Current (2026-10-25, build 316): `fn(line)` returns what may leave, nil
+  for nothing; a redactor that raises or answers anything else withholds
+  the line (`devloop.WITHHELD`). Lines pass it when buffered and again
+  when shipped, and so do the error texts of the loop's reports
+  (`src/common/devloop.lua:redacted`).
 - `Hue Request` accepts a Path only when it starts with `/` and holds none of
   `@`, `\`, `#` or white space. `Connection Test` with the bridge target, and
   the dev `Test Connection` with a Host, wait for the identity check like
   `Hue Request` does. The dev `Test Connection` hands over to the driver's
   `ctx.test_connection(host)`, which the coordinator gates (§3).
+  Current (2026-10-25, build 316): control characters are refused too,
+  and "wait" means refuse: until the identity check has passed, each of
+  the three logs why and sends nothing; nothing is queued
+  (`src/hue_bridge/bridge/devtools.lua:path_refusal`, `hue_request`,
+  `connection_test`, `test_connection`).
 
 ## 3. Driver decisions (coordinator)
 
@@ -140,6 +175,10 @@ conclusive answer.
   `restart_stream` and `Connect Event Stream` refuse on any of them.
   `test_connection` refuses on the first two only: it is the one way to show
   the key works again (below).
+  Current (2026-10-25, build 316): the stream's `connection()` callback
+  applies the same refusal, and the identity check, as a last guard and
+  shows `Not connected: <reason>` (diff review 2026-10-25 row 6;
+  `src/hue_bridge/driver.lua:stream_connection`).
 - **Test Connection waits for the identity check** (finding 1). While
   `state.identity_ok ~= true` it runs `verify_identity` first and sends the
   keyed GET only from its success callback, so a different bridge id comes
@@ -186,9 +225,18 @@ conclusive answer.
   corytron/c4-hue-driver/.github/workflows/release.yml` and refuses on
   failure; `--no-attestation` stays for releases cut before attestations.
   `SECURITY.md` prints the same command.
+  Current (2026-10-25, build 316): with `--format json`, only on gh
+  2.102.0 or newer, and every verified signer is checked again
+  (`tools/deploy.py:verify_attestation`, `require_gh_for_verify`;
+  `docs/cicd-gitops-design.md` §7).
 - Dependabot: `cooldown` of 7 days for the GitHub Actions ecosystem where
   Dependabot supports it (verify against GitHub's documentation and say
   which), else the actions `release.yml` uses stay out of auto-merge.
+  Current (2026-10-25, build 316): `cooldown: default-days: 7` on both
+  ecosystems of `.github/dependabot.yml` (`github-actions`, which takes
+  `default-days` only, and `pip`); security updates are not delayed, and
+  `dependabot-auto-merge.yml` still enables auto-merge for
+  `github-actions` updates only.
 - `tools/check.sh secrets` scans every local ref (`--log-opts=--all`) when run
   locally; CI keeps scanning HEAD.
 - `docs/release-checklist.md`: the TLS line says what the check proves

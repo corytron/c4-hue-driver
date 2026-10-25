@@ -9,10 +9,14 @@ running inside the Claude desktop app **on the Windows VM** acts as the
 coordinator's hands in Composer, driven by messages from the coordinator's
 session.
 
-**Current state (2026-10-24):** in use since 2026-10-21, 33 rounds so far
-(history at the end). The house runs production builds, so the dev loop is
-off and Composer is where results are read (rule 13); installs follow
-`docs/status.md`, "How builds reach the house".
+**Current state (2026-10-25):** in use since 2026-10-21; round 43 (2026-10-25
+03:24, dev build 309 for the checks of issue #40) is the last one recorded
+(history at the end; `docs/status.md`). A release install follows
+`docs/release-checklist.md`, "Deploy to the house": `tools/deploy.py start`
+writes the brief the session works from ("Workflow" below). While a dev
+build runs, the dev loop's shipped log is the coordinator's view
+(`docs/dev-loop.md`); with a release build, Composer is where results are
+read (rule 13).
 
 ## How it is wired
 
@@ -28,8 +32,10 @@ coordinator session (Ubuntu VM, this repo)   --SendMessage over Remote Control--
   message for the owner's approval, depending on its permission mode.
 - The Windows session has no computer-use tools. It works through
   **PowerShell 5.1** (UI Automation: `UIAutomationClient` /
-  `UIAutomationTypes`, `SendInput` via P/Invoke where a pattern is
-  missing), Git Bash, and a `Read` tool that renders PNG files it saved.
+  `UIAutomationTypes` to read; to act, since Composer offers no patterns,
+  mouse input through `SetCursorPos` and `mouse_event` via P/Invoke and
+  keys through `SendKeys`), Git Bash, and a `Read` tool that renders PNG
+  files it saved.
   No Python is installed on the VM and none is needed.
 - Composer Pro is a WinForms application
   (`WindowsForms10.Window.8.app…`): its controls are exposed to UI
@@ -44,7 +50,8 @@ coordinator session (Ubuntu VM, this repo)   --SendMessage over Remote Control--
   itself usually covers Composer on that screen.
 - The Windows VM runs under KVM on the owner's NAS, on the same LAN as the
   controller and this VM; it can reach the dev server's port and port 8090
-  here (builds to install, screenshots to upload).
+  here (dev and test builds to install, screenshots to upload). Release
+  packages come from the GitHub release URLs instead.
 
 ## Rules for the Windows session
 
@@ -72,7 +79,14 @@ behalf, not the owner.
    `Get-ComposerDialog` before every Enter and Cancel anything unexpected.
    **Every click** goes through `Invoke-SafeClick`, which refuses unless
    the intended top-level window is in the foreground and contains the
-   point (round 18c). Learned the hard way on 2026-10-21: an ALT tap left
+   point (round 18c). Since 2026-10-25 (#239) that holds for every helper
+   of the module too: `Invoke-ElementClick` and the tab, tree, picker,
+   rename and property clicks go through `Invoke-SafeClick` with their
+   target's top-level window (`Get-ComposerRootWindow`), and
+   `Invoke-MouseDrag` checks both points first (`Assert-SafePoint`) and
+   releases at the start point if the window loses the foreground
+   mid-drag. `Invoke-MouseClick` is called from `Invoke-SafeClick` alone.
+   Learned the hard way on 2026-10-21: an ALT tap left
    Composer's File menu in keyboard mode and the Enter meant for the rename
    editor opened **File ▸ Clear Project**'s confirmation; the session
    cancelled it and nothing was lost, but the project must be backed up
@@ -98,8 +112,9 @@ behalf, not the owner.
    around it.
 10. **Capability changes need a controller reboot.** Composer has no
     Director restart command. A build that changes `<capabilities>`
-    (`has_leds`, hold rates, `dimmer`) makes Composer ask "Restart
-    Director?"; Yes does **not** restart Director, the devices keep the old
+    (`has_leds`, hold rates, `dimmer`, `hide_proxy_properties`) makes
+    Composer ask "Restart Director?", once per driver whose capabilities
+    changed; Yes does **not** restart Director, the devices keep the old
     capabilities and code until the owner reboots the controller, and a
     per-device Update Driver ("Versions are equal", overwrite) does not
     help while Director's copy is stale. Builds that change only Lua or
@@ -129,21 +144,24 @@ behalf, not the owner.
 
 `tools/composer/Composer.psm1` is the PowerShell module the Windows
 session grows as it works (it develops and tests it there, then sends it
-back for the repo). The repo copy was refreshed on 2026-10-24 from the
-session's own file (54 functions); it is not run on this VM. Composer
-exposes no UIA patterns, so the module reads through UIA and acts through
-real mouse and keyboard input at the reported rectangles.
+back for the repo). The repo copy was last refreshed from the session's
+own file on 2026-10-25 (#239: every click checked), and holds 58 functions; it is
+not run on this VM, but CI's `powershell` check runs PSScriptAnalyzer over
+it and `Shots.ps1` (`tools/check.sh`). Composer exposes no UIA patterns,
+so the module reads through UIA and acts through real mouse and keyboard
+input at the reported rectangles.
 
 | Purpose | Functions |
 | --- | --- |
-| Window, focus, input | `Get-ComposerProcess`, `Get-ComposerMainHandle`, `Get-ComposerWindow`, `Get-ComposerTopWindows`, `Show-Composer`, `Show-AnyWindow` (foreground without ALT), `Get-ComposerFocus`, `Invoke-SafeClick` (rule 5), `Invoke-MouseClick`, `Invoke-MouseDrag`, `Move-MouseAway`, `Invoke-ElementClick`, `Send-Keys`, `Send-KeysTo` (keys only into the expected window) |
-| Reading | `Find-ComposerElements`, `Get-ComposerElementInfo`, `Get-ComposerTree`, `Get-ComposerProperties`, `Get-ComposerProperty`, `Get-ComposerBridgeStatus`, `Format-BridgeStatus` |
+| Window, focus, input | `Get-ComposerProcess`, `Get-ComposerMainHandle`, `Get-ComposerWindow`, `Get-ComposerTopWindows`, `Show-Composer`, `Show-AnyWindow` (foreground without ALT), `Get-ComposerFocus`, `Invoke-SafeClick` (rule 5), `Assert-SafePoint`, `Get-ComposerRootWindow`, `Invoke-MouseClick` (from `Invoke-SafeClick` only), `Invoke-MouseDrag` (both points checked), `Move-MouseAway`, `Invoke-ElementClick`, `Send-Keys`, `Send-KeysTo` (keys only into the expected window) |
+| Reading | `Find-ComposerElements`, `Get-ComposerElementInfo`, `Get-ComposerTree`, `Get-ComposerProperties`, `Get-ComposerProperty`, `Get-ComposerBridgeStatus`, `Format-BridgeStatus`, `Get-ComboItems` (a combo box's item count and selection; Composer's combos refuse their texts cross-process), `Get-ComboListItemsMsaa` (the texts of a dropped list through MSAA) |
 | Tabs and actions | `Get-ComposerTabControl`, `Select-ComposerTab`, `Set-ComposerTabOffset`, `Get-ComposerActions`, `Invoke-ComposerAction` |
 | Dialogs and pickers | `Get-ComposerDialog`, `Wait-ComposerDialog`, `Get-ComposerDialogText`, `Close-ComposerDialog`, `Confirm-ComposerDialog`, `Get-ListViewItems`, `Get-ListViewItemScreenPoint`, `Get-ComposerPickerItems`, `Open-ComposerPicker`, `Get-ComposerParameterValues`, `Select-ComposerPickerItem`, `Set-ComposerActionParameter` |
 | Devices in the tree | `Get-ComposerTreeHandle`, `Get-ComposerDevices`, `Select-ComposerDevice`, `Get-ComposerSelectedDevice`, `Rename-ComposerDevice`, `Get-ComposerTreeEditor`, `Request-ComposerDeviceDelete` (opens the prompt, never confirms) |
 | Properties | `Set-ComposerProperty` (edits the row and clicks Set, rule 7) |
 | Checks | `Get-ComposerBaseline`, `Assert-ComposerUnchanged` (rule 6) |
-| Screenshots | `Save-ComposerShot`, `Save-ScreenShot`, `Save-RegionShot`, `Save-ElementShot`, `Save-PropertyRowShot` (unscaled crops for the manual, round 12), `Send-DocShot` (PUT to `tools/collect.py` on this VM) |
+| Screenshots | `Save-ComposerShot`, `Save-ScreenShot`, `Save-RegionShot`, `Save-ElementShot`, `Save-PropertyRowShot` (unscaled crops for the manual, round 12), `Send-DocShot` (PUT `/img/<name>` to `tools/collect.py` on this VM, port 8090) |
+| Manual pictures (`tools/composer/Shots.ps1`, dot-sourced after the module; #61, `docs/screenshots-plan.md`) | `Initialize-Shots` (the `raw\`, `doc\` and `hold\` folders), `Get-HouseTerms` (the house's names for the deny check, in memory only), `Save-PaneShot` (captures one pane, dialog or row, a window by its visible frame; refuses a crop that shows the title bar, the status bar or the tree), `Get-TextRegions`, `Set-TextReplacement` (paints a neutral text in the measured font), `Save-ShotResult` (to `doc\`, or to `hold\` with the reasons), `Invoke-ShotPlan`, `Export-ShotPlanFromDoc`, `Export-ShotTexts` (the per-picture text list) |
 
 Connections cannot be made with synthesized input (two drag attempts
 started no OLE drag); a binding is made from the bridge with `C4:Bind`
@@ -160,15 +178,29 @@ in a dev build, or by the owner (`docs/design.md`, Composer UI).
    records findings in `docs/design.md` and `docs/status.md`, and
    continues.
 
-Installing a build: the coordinator serves the three `.c4z` from
-`build/release/` on port 8090 and puts their sha256 in the brief; the
-session downloads them, checks the hashes, installs all three at once with
-Driver ▸ "Add or Update Driver or Agent…" (approval per rule 8) and reads
-every device's `Driver Version` (`CLAUDE.md`, Deploy).
+Installing a release (since 2026-10-24, round 34): `tools/deploy.py start`
+writes `build/release/<tag>/BRIEF.md` (`docs/release-checklist.md`,
+"Deploy to the house") and the coordinator sends it as it is: the three
+GitHub download URLs and their sha256, the PowerShell that fetches them
+into `C:\c4-hue\drivers\<tag>\` and checks them with `Get-FileHash`, the
+Composer steps, what to read back, and the standing-approval sentence. The
+session installs all three at once with Driver ▸ "Add or Update Driver or
+Agent…", in place (approval per rule 8), and reads back every device's
+`Driver Version` and the bridge's `Stream Timeout (s)`, `Stream Watchdog
+(s)`, `Debug Mode`, `Status` and `Attention`; the coordinator records the
+result with `tools/deploy.py done` or `failed`. A dev build or a
+feature-branch test build is the exception (`CLAUDE.md`, Deploy): the
+coordinator serves the three `.c4z` from `build/release/` on port 8090
+(`python3 -I -m http.server 8090 --bind 0.0.0.0 --directory
+build/release`, stopped afterwards), puts their sha256 in the brief, and
+records the install with `tools/deploy.py record --no-manifest`.
 
 The Composer checklist (`docs/composer-checklist.md`) remains the list of
-things to verify; its steps are now briefs for the Windows session, with
-the owner's approval sought for the destructive ones.
+things to verify; its steps are briefs for the Windows session. The brief
+names the steps that are hard to undo (rule 2) and the standing approval
+covers them (rule 8); only what needs the owner's hands (a controller
+reboot from System Manager, rule 9; a keypad, a lamp, the phone) waits for
+him.
 
 ## History
 
@@ -194,9 +226,37 @@ and the bridge id out. Rounds 31–33 settled the Last Action rows (a
 read-only list is a disabled combo box; Composer drops attribute changes
 that arrive with text updates, so the rows' visibility is sent later) and
 set the bridge's Debug Mode back to Off after the dev build had left it On.
-Round 34 (2026-10-25) was the first install through the GitOps flow
+Round 34 (2026-10-24, 23:11 local; GitHub dates the deployment
+2026-10-25 UTC) was the first install through the GitOps flow
 (`docs/cicd-gitops-design.md`): the packages came from the GitHub release
 URLs named in the brief `tools/deploy.py start` wrote, were hash-checked
 with `Get-FileHash`, and all five Hue devices read Driver Version 259
 afterwards; the result went back to GitHub as a deployment on the
-environment `house` with `tools/deploy.py done`.
+environment `house` with `tools/deploy.py done`. Rounds 35 to 43
+(2026-10-25) served the night's hardware pass on dev builds 276 and 284
+(rounds 38 and 40 worked the devices' Lua command windows: `docs/design.md`,
+"Hardware pass of 2026-10-25 night"; rounds 41 and 42 showed that the
+light_v2 proxy stores a keypad setting the driver reports as a bare value
+and reads the documented table form as 0, `common/device.lua`), and round
+43 installed dev build 309 for the checks of issue #40 (03:24, no reboot;
+`docs/status.md`).
+
+## Done 2026-10-25: every click through Invoke-SafeClick (#239)
+
+The Windows session changed its `Composer.psm1` and sent it back; the repo
+copy is that file, with the VM's address in `Send-DocShot`'s default
+replaced by the placeholder 192.0.2.7. New: `Get-ComposerRootWindow` (the
+top-level window of a handle or of a UIA element through its nearest
+ancestor with a handle) and `Assert-SafePoint` (the rectangle and
+foreground check, split out of `Invoke-SafeClick`). The tab, tree, picker,
+rename and property clicks and `Invoke-ElementClick` go through
+`Invoke-SafeClick` with their target's top-level window; `Invoke-MouseDrag`
+takes `-Hwnd` (default Composer's main window), checks both points before
+pressing and, if the window loses the foreground mid-drag, releases at the
+start point and throws. Checked on the Windows VM: the parser finds no
+error, the file is ASCII only, all 58 functions import, and with the desktop
+disconnected a tab click and a drag both refuse without clicking.
+PSScriptAnalyzer runs in CI. `Close-ComposerDialog`'s Escape goes through
+`Send-KeysTo -ExpectedHwnd <dialog> -Within` (new: focus on any control
+inside that top-level window, which must be in the foreground); raw
+`Send-Keys` remains only inside `Send-KeysTo`.

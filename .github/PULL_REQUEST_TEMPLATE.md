@@ -2,7 +2,7 @@
 
 ## What
 
-<!-- The change in a sentence or two. Link the issue if there is one. -->
+<!-- The change in a sentence or two, and "Closes #N" for the issue it fixes. -->
 
 ## Why
 
@@ -12,8 +12,9 @@
 
 ## How it was tested
 
-- [ ] `luacheck src tests tools` is clean
-- [ ] `busted tests` is green; a change of behaviour comes with a spec
+- [ ] `tools/check.sh` passes: lint, specs, shell, Python, XML, workflows, secrets and the
+      house's desired state (CI runs the same script with `--strict`)
+- [ ] A change of behaviour comes with a spec
 - [ ] `tools/build.sh` builds the three `.c4z` files
 - [ ] On hardware: <!-- Control4 OS version, Composer Pro version, bridge model, what you
       clicked and what you saw; or "not run on a controller", which is fine if said -->
@@ -29,6 +30,7 @@
       CONTRIBUTING.md.
 - [ ] **No third-party text.** Nothing from Snap One's SDK repositories or documentation,
       nothing from Signify's login-walled developer pages.
-- [ ] **Manual.** `src/hue_bridge/www/documentation.html` is updated if a property text,
-      a `Last Action` result or an `Attention` line changed.
+- [ ] **Manual.** `src/hue_bridge/www/documentation.html`, and the Hue Light or Hue Scene
+      page (`documentation.html` under `src/hue_light/www/` or `src/hue_scene/www/`), are
+      updated if a property text, a `Last Action` result or an `Attention` line changed.
 - [ ] **Status.** `docs/status.md` is updated if what runs or what is open changed.

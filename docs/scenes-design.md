@@ -32,14 +32,14 @@ present.
 | --- | --- |
 | Device | `hue_scene.c4z`: light_v2 proxy with `dimmer` False (a switch), consumer binding 1 class `HUE_BRIDGE` like a light. Never a `hue_light` with its proxy flipped [verified: FUND 14/_2]. Superseded (2026-10-23): a dimmer since build 160 (same driver, same proxy type); see `docs/scene-dimmer-design.md`. |
 | Creation | Only `Add Scene` (one) or `Add All Scenes Of Room` (every unimported scene of one room/zone). Nothing from events, imports or resyncs: Hue keeps ~7 default scenes per room. |
-| Name | Room scene: `<Scene>` in the mapped room (Q2). Zone scene: `<Zone> <Scene>`. Set once; `Adopt Hue Name` afterwards. |
+| Name | Room scene: `<Scene>` in the mapped room (Q2). Zone scene: `<Zone> <Scene>`. Set once; `Adopt Hue Name` afterwards. Current (2026-10-25, build 316): a display name (`util.display_name`: control characters removed, trimmed, at most 100 characters; "Hue scene" when nothing is left), a time-based scene's base name in place of `<Scene>` (`src/hue_bridge/bridge/owner.lua:new_device_name`, `src/hue_bridge/bridge/scenes.lua:creation_name`). |
 | Room | The scene's group's mapping (`hue_rooms`), or the `Room` picked; refused when neither exists (as `Add Light`). |
 | ON | `PUT /clip/v2/resource/scene/<rid> {"recall":{"action":<A>}}`, `A` from the device's `Recall As`: "As set in Hue" → `active` (default, Q7), "Static" → `static`, "Dynamic" → `dynamic_palette`. A `RATE` from the proxy becomes `recall.duration` (ms) [assumed field, confirm once; the bridge accepted `duration` 750 with HTTP 200 on 2026-10-21, the transition itself was not measured]. |
-| OFF | The scene's group `grouped_light` off, one PUT per group coalesced within a second (Q6; group limit ~1/s). A scene whose group has no grouped_light (empty zone) reports OFF without a PUT. Correction (2026-10-24, as built): the group queue coalesces per grouped_light through the queue's 80 ms debounce and one PUT in flight, and its token bucket is the lights' 10/s with burst 10; no 1/s limit is enforced (`src/hue_bridge/bridge/commands.lua` 36–37, `src/hue_bridge/driver.lua` `new_group_queue`). |
+| OFF | The scene's group `grouped_light` off, one PUT per group coalesced within a second (Q6; group limit ~1/s). A scene whose group has no grouped_light (empty zone) reports OFF without a PUT. Correction (2026-10-24, as built): the group queue coalesces per grouped_light through the queue's 80 ms debounce and one PUT in flight, and its token bucket is the lights' 10/s with burst 10; no 1/s limit is enforced (`src/hue_bridge/bridge/commands.lua` 36–37, `src/hue_bridge/driver.lua` `new_group_queue`). Current (2026-10-25, build 316): the group queue's bucket is one request a second with a burst of 3, and a keypad hold's start and stop skip it (`docs/zone-light-design.md` Decision 9; `src/hue_bridge/driver.lua:new_group_queue`, `src/hue_bridge/bridge/commands.lua:urgent`). |
 | State | ON while the bridge's `status.active` is `static` or `dynamic_palette`, OFF when `inactive`; from `scene` stream items and from the resync's `GET /scene`. Reported as `LIGHT_BRIGHTNESS_CHANGED` 100 / 0 (a switch). Superseded (2026-10-23): on from any activation until the group turns off, another scene of the group becomes active, or the device turns it off (`held_on`, persisted); the level reported is the group's brightness; see `docs/scene-dimmer-design.md`, Behaviour. |
 | Lifecycle | Same states and texts as lights (§3 of import-design): gone (scene deleted in Hue: Status explains, ON logs a warning and reports OFF at once), unbound, tombstone (device deleted in Composer: bulk add skips, `Add Scene` re-creates), re-link, forget, auto-adopt on hello. Scene devices are never removed automatically. |
-| Smart scenes | Not in v1: counted in the log, never listed. (Still so on 2026-10-24; a draft for listing them awaits the owner's answers in `docs/smart-scenes-research.md`.) |
-| Catalogue | `GET /scene` once per resync (after the lights' six GETs) and on `Refresh Scenes`; kept compact in memory: `{ rid, name, group_rid, id_v1, status, auto_dynamic, speed }` — `actions`/`palette` are dropped at decode time [assumed: a 351 KB decode is fine on the controller; it was in `Hue Request`]. Stream `scene` items update it (`add`/`update`/`delete`). As built, the scene step of a resync is three GETs: `/scene`, `/smart_scene` (counted only) and, since the keypad feature, `/grouped_light` (each group's on/off and level). |
+| Smart scenes | Not in v1: counted in the log, never listed. (Still so on 2026-10-24; a draft for listing them awaits the owner's answers in `docs/smart-scenes-research.md`.) Current (2026-10-25, build 316): time-based scenes are Hue Scene devices with a kind since build 180 (`docs/smart-scenes-design.md`). |
+| Catalogue | `GET /scene` once per resync (after the lights' six GETs) and on `Refresh Scenes`; kept compact in memory: `{ rid, name, group_rid, id_v1, status, auto_dynamic, speed }` — `actions`/`palette` are dropped at decode time [assumed: a 351 KB decode is fine on the controller; it was in `Hue Request`]. Stream `scene` items update it (`add`/`update`/`delete`). As built, the scene step of a resync is three GETs: `/scene`, `/smart_scene` (counted only) and, since the keypad feature, `/grouped_light` (each group's on/off and level). Current (2026-10-25, build 316): `/smart_scene` fills the time-based catalogue, which a failed GET leaves as it was (`src/hue_bridge/bridge/scenes.lua:fetch_all`, `absorb`). |
 
 ## 2. Messages (bridge ⇄ scene device; all values strings)
 
@@ -63,6 +63,16 @@ Added later: `HUE_SCENE_DIM`, `HUE_SCENE_GROUP` and the recall's
 `HUE_SCENE_LEVEL` and `HUE_SCENE_GROUP`'s `level`
 (`docs/scene-dimmer-design.md`); in dev builds `HUE_LOG` (a device's log
 lines to the bridge) and `HUE_DUMP` (bridge → scene, dumped its state; removed 2026-10-24, nothing sent it).
+
+Current (2026-10-25, build 316): `HUE_SCENE_HELLO` and
+`HUE_SCENE_CONFIGURE` carry `kind`; CONFIGURE and STATE carry a
+time-based scene's `slot_name` and `slot_start`, and its STATE's `active`
+is `active` or `inactive` (`docs/smart-scenes-design.md`, Messages).
+CONFIGURE's `name` and `group_name` are display names
+(`src/hue_bridge/bridge/scenes.lua:configure_params`). `DEV_RELOAD`
+carries `tree`, `version`, `bundle` (the signed payload) and `mac`, and
+the device checks the signature with its own package's key before it
+runs anything (`src/common/devloop.lua:apply_forwarded`).
 
 ## 3. Scene device (`src/hue_scene/`)
 
@@ -109,6 +119,13 @@ lines to the bridge) and `HUE_DUMP` (bridge → scene, dumped its state; removed
   device in Composer, or bind it again and use Link Devices"; unbound "Not
   bound to a Hue Bridge"; before the bridge answers "<name>" from the
   persisted copy or "Bound; waiting for the bridge".
+  Current (2026-10-25, build 316): a configured scene without a group
+  label reads "Hue scene <name> in (no room)"; a time-based scene device
+  hides `Recall As`, and its Status reads "Hue time-based scene <name> in
+  <group label>; now <slot scene> (from <start>)", "…; running" while
+  the slot is unknown, "…; not running" while inactive
+  (`docs/smart-scenes-design.md` Decisions 12 and 13;
+  `src/hue_scene/driver.lua:smart_status`, `refresh_status`).
 
 ## 4. Bridge side (`src/hue_bridge/bridge/scenes.lua`, new)
 
@@ -123,6 +140,11 @@ Entry fields: `device_id, proxy_id, name, group_rid, group_type, id_v1,
 state, gone_since, unbound_since, created_room_id, created_at,
 name_dismissed, recall_as?` (the device owns `Recall As`; the bridge only
 caches what the device reported in its hello, for the report).
+Current (2026-10-25, build 316): no `recall_as`: the hello carries
+`rid`, `device_id`, `name` and `kind`, and the bridge keeps no Recall As;
+entries also carry `group_name`, `auto_dynamic` and, for a time-based
+scene, `kind` (`src/hue_bridge/bridge/scenes.lua:fields_from_scene`,
+`src/hue_scene/driver.lua:hello_params`).
 
 ```lua
 local scenes = require("bridge.scenes")
@@ -156,6 +178,21 @@ sc:picker_relink_devices() / sc:picker_forget_devices() -> as the lights' picker
 sc:count() / sc:entry(rid) (its `.device_id`; `device_for(rid)` was removed 2026-10-24)
 ```
 
+Current (2026-10-25, build 316): the shared methods (`hello`, `goodbye`,
+`forget_request`, `on_binding_changed`, `resync`, `relink`, `forget`,
+`link_devices`, `adopt_hue_names`, `accept_names`, `attention_items`, the
+relink and forget pickers, `count`, `entry`, `save`) are
+`src/hue_bridge/bridge/owner.lua`'s since #56, and `scenes.lua` inherits
+them. `sc:resync` reads `/smart_scene` as the time-based catalogue and
+`/grouped_light` for the groups' on/off and level. `sc:summary()` reads
+"125 + 15 time-based on bridge, 3 imported, 0 deleted", with "N missing"
+and "N unbound" only when not zero. The Scene picker lists the
+time-based scenes too, first in their group ("Kitchen: Golden hours
+(time-based)"), and marks a scene a schedule plays ("(in Golden
+hours)"); the Hue Room picker adds ", N time-based" and ", N imported"
+to the count (`src/hue_bridge/bridge/scenes.lua:summary`,
+`picker_scenes`, `picker_groups`).
+
 Texts follow the lights' wording with "scene" in place of "light":
 "Added Relax to Kitchen (device 2061)", "Added 7 scenes of Kitchen: …;
 skipped 1 deleted in Composer: …", "Not added: Relax: Hue room Kitchen not
@@ -163,6 +200,12 @@ mapped; pick a room, or Set Room Mapping first", "Not added: Relax is
 already imported (device 2061)", "Re-linked device 2061 (was Relax) to
 Kitchen: Bright", "Forgot Relax (device 2061): unbound and left in the
 project for you to delete", "Recall failed: HTTP 404 (scene gone?)".
+Current (2026-10-25, build 316): Add All Scenes Of Room reads "Added 7
+scenes of Kitchen to <room>: Relax (device 2061), …; skipped 1 deleted
+in Composer (Add Scene re-creates one): …", and Forget Scene ends "…;
+the Hue scene is listed under Add Scene again"
+(`src/hue_bridge/bridge/scenes.lua:add_all_of_group`,
+`src/hue_bridge/bridge/owner.lua:forget`).
 
 Attention items: "1 scene missing from the bridge: Relax (device 2061,
 since …) (Re-link Scene or Forget Scene)", "1 unbound scene device: …",
@@ -199,6 +242,12 @@ limits 1/s) backs `group_off`. Correction (2026-10-24, as built): the
 queue has its own bucket but the same constants as the lights' (80 ms
 debounce, one PUT in flight per group, 10/s, burst 10); no 1/s limit is
 configured. It also backs `group_dim` and `group_set`.
+Current (2026-10-25, build 316): one request a second with a burst of 3
+again (§1, OFF). `Scenes` is a DYNAMIC_LIST: the row shows
+`sc:summary()`, the drop-down `sc:list_items()`, one line per scene on
+the bridge, and a pick puts the row back
+(`src/hue_bridge/driver.lua:show_module_list`, `list_pick`). The zone
+lights take the same routes (`docs/zone-light-design.md`).
 
 ## 6. Dev loop, build, fake
 

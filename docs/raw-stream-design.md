@@ -114,6 +114,9 @@ only documented way out is `VERIFY_MODE = "none"` for the stream: the stream
 is read-only (a spoofed stream could feed false state, never issue commands)
 and all commands stay on the verified `C4:url` path. That fallback must be
 an explicit, logged decision, not a silent default.
+Current (2026-10-25, build 316): the driver also checks the bridge id
+without the key at every start and address change, before any keyed
+request (`hue_bridge/driver.lua:verify_identity`).
 
 **Error reporting.** The docs say nothing about how a missing CA file or a
 failed handshake reaches Lua. Expect no error at `NetPortOptions`/`NetConnect`
@@ -285,6 +288,11 @@ all five network calls "NO"]**.
   once test 5 confirms promptness, since each cycle costs a resync GET.
   `Stream Timeout (s)` no longer means anything: remove it from `driver.xml`
   or repurpose it as an optional maximum stream age (0 = never).
+  Current (2026-10-25, build 316): on `C4:url` the watchdog default is
+  600 s already (`stream.DEFAULT_WATCHDOG`; `Stream Watchdog (s)` 60–3600),
+  and the watchdog opens no new transfer while an abandoned one may still
+  be open (`bridge/stream.lua:arm_watchdog`, `stream.MAX_ABANDONED`;
+  `docs/design.md`, "Concurrent transfers").
 - **IP change**: `Bridge_IP_Address` handler already calls
   `restart_stream()`; the new netconn `open()` does `NetDisconnect`,
   `SetBindingAddress(6001, new_ip)`, `NetConnect`.
@@ -298,7 +306,12 @@ all five network calls "NO"]**.
 - **Key revoked**: HTTP 401/403 on the stream. Keep reconnecting with
   backoff capped at 60 s as now, but put "key rejected, re-pair" in the
   status property; the resync GET will report the same and the pairing
-  code owns recovery.
+  code owns recovery. Current (2026-10-25, build 316): on `C4:url` a 401 or
+  403 stops the stream for good (`Event Stream`:
+  `Stopped: key rejected (HTTP <code>)`), and keyed requests are refused
+  until Pair Bridge, an address change or a Test Connection answered 200 by
+  the paired bridge (`bridge/stream.lua:key_rejected`,
+  `hue_bridge/driver.lua:key_rejected`; #44, #217).
 - **Interaction with commands**: none by construction; `bridge/http.lua`
   keeps using `C4:url` with `ssl_cabundle`. The caveat in `docs/dev-loop.md`
   (no `C4:url` transfer may start inside another transfer's

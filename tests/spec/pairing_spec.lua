@@ -96,6 +96,69 @@ describe("bridge.pairing", function()
 		assert.is_nil(events[2][2]:find("Pairing failed", 1, true), events[2][2])
 	end)
 
+	-- Issue #236, item 3: the driver prefixes "Pairing failed: ", so the
+	-- module's own text must not carry a "Pairing ... failed" of its own.
+	it("reports a key request that got no usable answer once, without a pairing prefix of its own", function()
+		pairing.pair("10.0.2.143", handlers())
+		c4.transfers[1]:respond(200, CONFIG)
+		c4.transfers[2]:done(7, "Couldn't connect to server")
+		assert.equal("error", events[2][1])
+		assert.equal("No usable answer to the key request: transfer failed (7): Couldn't connect to server", events[2][2])
+		assert.is_nil(events[2][2]:find("Pairing", 1, true), events[2][2])
+		assert.is_nil(c4.persist.hue_app_key)
+	end)
+
+	-- Issue #236, item 1 (docs/bridge-compat-design.md, "Pairing another
+	-- bridge (#236)"): the stored bridge id decides before any key is asked for.
+	describe("with a stored bridge id", function()
+		local PAIRED, OTHER = "001788fffe123abc", "001788fffe456def"
+		local function config_of(id)
+			return '{"name":"Hue","swversion":"1968096020","apiversion":"1.68.0","bridgeid":"' .. id:upper()
+				.. '","modelid":"BSB003"}'
+		end
+
+		it("refuses another bridge before showing it or asking it for a key, and stores nothing", function()
+			pairing.pair("10.0.2.143", handlers(), PAIRED)
+			c4.transfers[1]:respond(200, config_of(OTHER))
+			assert.same({ { "error", "Bridge at 10.0.2.143 reports ID 001788fffe456def, expected 001788fffe123abc; "
+				.. "run Forget Pairing first to pair with another bridge" } }, events)
+			assert.equal(1, #c4.transfers, "no key requested")
+			assert.equal(0, #c4.calls_to("PersistSetValue"), "nothing stored")
+		end)
+
+		it("pairs the same bridge again with a new key, whatever the case of the stored id", function()
+			for _, stored in ipairs({ PAIRED, PAIRED:upper() }) do
+				events = {}
+				local before = #c4.transfers
+				pairing.pair("10.0.2.143", handlers(), stored)
+				c4.transfers[before + 1]:respond(200, config_of(PAIRED))
+				assert.equal("probed", events[1][1])
+				c4.transfers[before + 2]:respond(200, '[{"success":{"username":"newkey"}}]')
+				assert.equal("paired", events[2][1])
+				assert.same({ key = "newkey", bridge_id = PAIRED, ip = "10.0.2.143", model = "BSB003" }, events[2][2])
+			end
+		end)
+
+		it("pairs any bridge when no id is stored", function()
+			for _, stored in ipairs({ false, "" }) do
+				events = {}
+				local before = #c4.transfers
+				pairing.pair("10.0.2.143", handlers(), stored or nil)
+				c4.transfers[before + 1]:respond(200, config_of(OTHER))
+				assert.equal("probed", events[1][1])
+				assert.equal(before + 2, #c4.transfers, "the key is requested")
+			end
+		end)
+
+		it("leaves the refusals of the model and the firmware to a bridge it may pair", function()
+			pairing.pair("10.0.2.143", handlers(), PAIRED)
+			c4.transfers[1]:respond(200, '{"bridgeid":"001788FFFE123ABC","modelid":"BSB001","swversion":"1935074050"}')
+			assert.equal("probed", events[1][1])
+			assert.truthy(events[2][2]:find("^This is a Hue Bridge v1, round %(BSB001%)"), events[2][2])
+			assert.is_nil(pairing.other_bridge("10.0.2.143", { bridge_id = PAIRED }, PAIRED))
+		end)
+	end)
+
 	it("rejects a config response without a valid bridge ID", function()
 		pairing.pair("192.0.2.10", handlers())
 		c4.transfers[1]:respond(200, '{"name":"Not a bridge"}')

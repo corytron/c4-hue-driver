@@ -1233,15 +1233,16 @@ describe("Hue Light driver", function()
 			assert.equal("1500", tostring(messages(c4, "HUE_SET")[1].params.rate))
 		end)
 
-		it("a held top button dims up with HUE_DIM over the scaled hold rate; the release stops at the estimate", function()
+		it("a held top button dims up with HUE_DIM over the hold rate; the release stops at the estimate", function()
 			local env, c4 = lit_light() -- on at 40 %
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
 			assert.equal(0, #c4.sent, "nothing until the hold timer")
 			c4.fire_timers() -- the 400 ms hold timer: the ramp starts
-			assert.same({ { rid = "l1", direction = "up", duration = "3000" } }, dims(c4), "60 % of 5000 ms")
+			assert.same({ { rid = "l1", direction = "up", duration = "5000" } }, dims(c4),
+				"the whole range over the whole hold rate")
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 3000 } },
-				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "the tile: the 60 % left over 60 % of 5000 ms")
 			for _ = 1, 10 do c4.fire_timers() end -- ten 100 ms ticks: about a third of the way
 			c4.sent = {}
 			c4.calls = {}
@@ -1269,10 +1270,59 @@ describe("Hue Light driver", function()
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "1" })
 			c4.fire_timers()
-			assert.same({ { rid = "l1", direction = "down", duration = "1950" } }, dims(c4), "39 % of 5000 ms")
+			assert.same({ { rid = "l1", direction = "down", duration = "5000" } }, dims(c4), "the whole range")
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 1, RATE = 1950 } },
-				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "the tile: 39 % of 5000 ms")
 			assert.equal(0, #messages(c4, "HUE_SET"))
+		end)
+
+		-- Issue #232: Hue was sent the tile's share of the hold rate with the
+		-- whole range (the bridge always asks for brightness_delta 100,
+		-- commands.body), so from 50 % it ran at twice the tile's speed.
+		it("a hold from 50 % moves Hue at the tile's speed, the whole range per hold rate (#232)", function()
+			for _, case in ipairs({
+				{ button = "0", direction = "up", duration = "5000", to = 100, rate = 2500, level = "70" },
+				{ button = "1", direction = "down", duration = "5000", to = 1, rate = 2450, level = "30" },
+				{ button = "0", hold_rate = "2000", direction = "up", duration = "2000", to = 100, rate = 1000,
+					level = "100" },
+			}) do
+				local env, c4 = load_light({ rid = "l1" })
+				configure(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "50", online = "true" })
+				if case.hold_rate then
+					env.ReceivedFromProxy(5001, "SET_HOLD_RATE_UP", { RATE = case.hold_rate })
+				end
+				c4.calls, c4.sent = {}, {}
+				env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = case.button, ACTION = "1" })
+				c4.fire_timers() -- the hold time
+				local dim = dims(c4)[1]
+				local changing = notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1]
+				assert.same({ rid = "l1", direction = case.direction, duration = case.duration }, dim)
+				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 50, LIGHT_BRIGHTNESS_TARGET = case.to, RATE = case.rate },
+					changing)
+				local hue_per_ms = 100 / tonumber(dim.duration)
+				local tile_per_ms = math.abs(case.to - 50) / changing.RATE
+				assert.is_true(math.abs(hue_per_ms - tile_per_ms) < 1e-9,
+					string.format("Hue %.4f %%/ms, the tile %.4f %%/ms", hue_per_ms, tile_per_ms))
+				for _ = 1, 10 do c4.fire_timers() end -- ten 100 ms ticks: one second
+				env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = case.button, ACTION = "0" })
+				assert.same({ rid = "l1", direction = "stop", level = case.level }, dims(c4)[2],
+					"the estimate after a second, where Hue is at that speed")
+			end
+		end)
+
+		-- Issue #234: a light's hold had no upper bound, while the bridge holds a
+		-- zone light's and a scene's to 6 000 000 ms.
+		it("takes a hold rate above 6 000 000 ms as 6 000 000, for Hue and the tile alike (#234)", function()
+			local env, c4 = lit_light() -- on at 40 %
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_UP", { RATE = "86400000" })
+			assert.same({ "86400000" }, notifies(c4, "HOLD_RATE_UP"), "a valid setting, kept and shown as set")
+			c4.calls, c4.sent = {}, {}
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			assert.same({ { rid = "l1", direction = "up", duration = "6000000" } }, dims(c4))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 3600000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "60 % of the bound")
 		end)
 
 		it("a release-as-click after a hold stops the dim instead of tapping", function()
@@ -1308,7 +1358,7 @@ describe("Hue Light driver", function()
 			assert.equal(0, #dims(c4))
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "1" })
 			c4.fire_timers() -- 600 ms later
-			assert.same({ { rid = "l1", direction = "up", duration = "4950" } }, dims(c4))
+			assert.same({ { rid = "l1", direction = "up", duration = "5000" } }, dims(c4))
 			env.ReceivedFromProxy(200, "DO_RELEASE", {})
 			assert.equal("stop", dims(c4)[2].direction)
 		end)
@@ -1591,8 +1641,8 @@ describe("Hue Light driver", function()
 				color_correlated_temperature_min = 2000,
 				color_correlated_temperature_max = 6530,
 			} }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "the union of the members, as for a bulb")
-			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group" },
-				c4.persist)
+			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group",
+				hue_group_type = "zone" }, c4.persist)
 		end)
 
 		it("labels a room the same way", function()
@@ -1627,6 +1677,27 @@ describe("Hue Light driver", function()
 				"the persisted model stands in for the type until the bridge answers")
 			assert.equal(ZONE_RID, env.Properties["Hue Light ID"])
 			assert.equal("", env.Properties["Online"])
+		end)
+
+		-- Issue #234: the group type was not persisted, so after a restart a
+		-- room device spoke of a "group light", and Adopt Hue Name gave it the
+		-- room's bare name, until the bridge configured it again.
+		it("persists the group type, so after a restart its texts and Adopt Hue Name need no configure (#234)", function()
+			local first, c4 = load_light({ rid = ROOM_RID })
+			configure_group(first, ROOM)
+			assert.equal("room", c4.persist.hue_group_type)
+
+			local env, c42 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c42:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c42.persist.hue_rid, c42.persist.hue_name = ROOM_RID, "Master Bedroom"
+			c42.persist.hue_model, c42.persist.hue_kind, c42.persist.hue_group_type = "Hue room", "group", "room"
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal(1, #messages(c42, "HUE_HELLO"), "greeted; the bridge has not answered yet")
+			assert.equal("Hue room Master Bedroom", env.Properties["Status"])
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			assert.same({ { proxy_of(LIGHT_ID), "Master Bedroom Lights" } }, c42.calls_to("RenameDevice"))
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
+			assert.equal("Asked the bridge to forget this room light; its answer sets Status", fake.last_action(env))
 		end)
 
 		it("applies a configure buffered before late init, and the hello carries the kind it delivered", function()
@@ -1667,12 +1738,14 @@ describe("Hue Light driver", function()
 			-- light (contract §7 Q11): no kind, no group fields, state gone.
 			configure_group(env, ZONE, { state = "gone", gone_since = "1761000000" }, { "kind", "group_type", "light_count" })
 			assert.equal("group", c4.persist.hue_kind)
+			assert.is_nil(c4.persist.hue_group_type, "the stored type follows the one the device shows")
 			assert.equal("Group deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; re-link or Forget",
 				env.Properties["Status"])
 			assert.equal("Hue zone", env.Properties["Model"])
 
 			configure_group(env, ZONE, { kind = "entertainment" })
 			assert.equal("group", c4.persist.hue_kind)
+			assert.equal("zone", c4.persist.hue_group_type)
 			assert.equal("Hue zone Bedside Lights (2 lights)", env.Properties["Status"])
 			local warned = false
 			for _, line in ipairs(lines) do
@@ -1794,8 +1867,8 @@ describe("Hue Light driver", function()
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
 			assert.equal(0, #c4.sent)
-			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group" },
-				c4.persist, "the identity stays, so binding the device again lets Link Devices adopt it")
+			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group",
+				hue_group_type = "zone" }, c4.persist, "the identity stays, so binding the device again lets Link Devices adopt it")
 
 			c4.calls = {}
 			configure_group(env, ZONE)
@@ -1837,7 +1910,10 @@ describe("Hue Light driver", function()
 			local env, c4 = lit_zone() -- on at 40 %
 			env.ReceivedFromProxy(200, "DO_PUSH", {})
 			c4.fire_timers() -- the hold time
-			assert.same({ { rid = ZONE_RID, direction = "up", duration = "3000" } }, dims(c4))
+			assert.same({ { rid = ZONE_RID, direction = "up", duration = "5000" } }, dims(c4),
+				"the whole range over the hold rate, as a light (#232)")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 3000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "the tile over its share, at the same speed")
 			env.ReceivedFromProxy(200, "DO_RELEASE", {})
 			assert.equal("stop", dims(c4)[2].direction)
 			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, brightness = "47", reason = "event" })

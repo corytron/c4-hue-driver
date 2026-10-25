@@ -1378,10 +1378,25 @@ function lights:unimported_named(wanted)
 end
 
 -- The names trio is bridge/owner.lua's (name_differences, adopt_hue_names,
--- accept_names): the name a linked light's device should carry is the Hue
--- name the registry caches, and Adopt Hue Names renames to it [Q 10].
-function lights.expected_name(_self, _rid, entry)
-	return entry.name
+-- accept_names). The name a linked light's device should carry is its
+-- creation name (owner:expected_name, creation_name above: the Hue device's
+-- name for the only light of its device, else the light's own name), and
+-- Adopt Hue Names renames to it [Q 10]. Until #236 it was the light's own
+-- name, so a light imported under its device's other name was listed as a
+-- difference at once. These names agree as well, so the change reports no
+-- rename that did not happen in Hue:
+--   - the light's own name: what earlier builds compared with, what their
+--     Adopt Hue Names renamed to and Accept Names As They Are recorded, and
+--     what the light device's own Adopt Hue Name renames to (its Hue Name
+--     row);
+--   - the device name the registry cached, while this run has not read the
+--     bridge's devices: right after a start the creation name falls back to
+--     the light's own name, not knowing whether the device has other lights.
+function lights:agreeing_names(_rid, entry)
+	if self.devices[entry.device_rid] then
+		return { entry.name }
+	end
+	return { entry.name, entry.device_name }
 end
 
 -- The label of a Hue group for mapping texts: the cached group's, or the

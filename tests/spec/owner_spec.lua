@@ -424,7 +424,13 @@ describe("bridge.owner", function()
 			register(L, F.rids.garage, 2001)
 			names[3001] = "Garage White"
 			assert.same({}, L:name_differences())
-			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light", metadata = { name = LONG } } } })
+			-- A rename in the Hue app: the device's name, and the light's own
+			-- name following it [assumed, docs/edge-cases-hue.md §1].
+			local function renamed_in_hue(name)
+				L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+					metadata = { name = name } }, { id = F.rids.garage, type = "light", metadata = { name = name } } } })
+			end
+			renamed_in_hue(LONG)
 			assert.equal(LONG, L.registry[F.rids.garage].name)
 			local diffs = L:name_differences()
 			assert.equal(1, #diffs)
@@ -434,12 +440,10 @@ describe("bridge.owner", function()
 			assert.same({ { id = 3001, name = SHOWN } }, renamed)
 			assert.same({}, L:name_differences(true), "the display name then compares equal")
 			-- A Hue rename past the 100th character, or in control characters only, shows nowhere: not listed.
-			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
-				metadata = { name = LONG .. "s\n" } } } })
+			renamed_in_hue(LONG .. "s\n")
 			assert.same({}, L:name_differences())
 			-- A Hue rename with a control character is renamed to without it.
-			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
-				metadata = { name = "Garage\tLamp" } } } })
+			renamed_in_hue("Garage\tLamp")
 			assert.equal("Renamed 1 device: " .. SHOWN .. " → GarageLamp (device 2001)", L:adopt_hue_names())
 			assert.same({ id = 3001, name = "GarageLamp" }, renamed[2])
 		end)
@@ -483,6 +487,121 @@ describe("bridge.owner", function()
 				assert.truthy(text:find("2 bound devices share that name", 1, true))
 				assert.is_nil(L.registry[F.rids.garage])
 			end)
+	end)
+
+	-- Issue #236, item 6: a light is compared with its creation name (the Hue
+	-- device's name for the only light of its device), as AddDevice named it
+	-- and as the scenes and zone lights are compared. The light's own name,
+	-- which earlier builds compared with, renamed to and accepted against,
+	-- agrees too: the change reports no rename that did not happen in Hue.
+	describe("lights compared with their creation name (#236)", function()
+		local names, renamed
+
+		local function named_project()
+			local p = project_calls()
+			p.display_name = function(id) return names[id] end
+			p.rename = function(id, name)
+				renamed[#renamed + 1] = { id = id, name = name }
+				names[id] = name
+			end
+			return p
+		end
+
+		-- Garage White's device is called "Garage Device" in Hue; the light
+		-- keeps its own name, Garage White. Registered as device 2001 (proxy 3001).
+		local function lights_device_named(extra)
+			local L = new_lights({ project = named_project() },
+				{ device = replace(F.device, '"name":"Garage White"', '"name":"Garage Device"') })
+			register(L, F.rids.garage, 2001, extra)
+			return L
+		end
+
+		before_each(function()
+			names, renamed = {}, {}
+		end)
+
+		it("does not list a device under its creation name, the Hue device's name", function()
+			local L = lights_device_named()
+			assert.equal("Garage Device", L:creation_name(L:record_of(F.rids.garage)))
+			names[3001] = "Garage Device"
+			assert.same({}, L:name_differences(true))
+			assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
+			assert.equal("No Composer names differ from the Hue names", L:accept_names())
+			assert.same({}, renamed)
+			assert.is_nil(L.registry[F.rids.garage].name_dismissed)
+		end)
+
+		it("leaves a device an older build renamed to the light's own name alone", function()
+			local L = lights_device_named()
+			names[3001] = "Garage White"  -- an earlier Adopt Hue Names, or the light's own Adopt Hue Name
+			assert.same({}, L:name_differences(true))
+			assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
+			assert.same({}, renamed)
+		end)
+
+		it("keeps a difference accepted against the light's own name accepted; Adopt Hue Names renames to the "
+			.. "creation name", function()
+			local L = lights_device_named({ name_dismissed = "Garage White" })  -- what an older build recorded
+			names[3001] = "Workbench"
+			assert.same({}, L:name_differences())
+			local all = L:name_differences(true)
+			assert.equal(1, #all)
+			assert.same({ "Workbench", "Garage Device" }, { all[1].current, all[1].expected })
+			assert.equal("Renamed 1 device: Workbench → Garage Device (device 2001)", L:adopt_hue_names())
+			assert.same({ { id = 3001, name = "Garage Device" } }, renamed)
+		end)
+
+		it("lists an owner's rename against the creation name, and a rename of the Hue device after it is accepted",
+			function()
+				local L = lights_device_named()
+				names[3001] = "Workbench"
+				local diffs = L:name_differences()
+				assert.equal(1, #diffs)
+				assert.same({ "Workbench", "Garage Device" }, { diffs[1].current, diffs[1].expected })
+				assert.equal("Accepted 1 name difference: Workbench (Hue: Garage Device)", L:accept_names())
+				assert.equal("Garage Device", L.registry[F.rids.garage].name_dismissed)
+				assert.same({}, L:name_differences())
+				L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+					metadata = { name = "Bench Lamp" } } } })
+				diffs = L:name_differences()
+				assert.equal(1, #diffs, "the Hue name the device is compared with changed")
+				assert.equal("Bench Lamp", diffs[1].expected)
+				assert.same({}, renamed, "an event renames nothing")
+			end)
+
+		it("before this run has read the devices: the cached device name agrees, the light's own name is the target",
+			function()
+				local L = lights.new(ctx({ project = named_project() }))
+				L:load()
+				-- The entry as a run before the restart saved it; no GET yet.
+				assert.truthy(L.reg:add(F.rids.garage, { device_id = 2001, proxy_id = 3001, name = "Garage White",
+					device_name = "Garage Device", device_rid = F.device_rids.garage }))
+				names[3001] = "Garage Device"
+				assert.same({}, L:name_differences(true), "no difference reported before the devices are read")
+				names[3001] = "Workbench"
+				local diffs = L:name_differences()
+				assert.equal(1, #diffs)
+				assert.equal("Garage White", diffs[1].expected)
+				-- Once read: the device's name.
+				L:absorb(resources({ device = replace(F.device, '"name":"Garage White"', '"name":"Garage Device"') }))
+				assert.equal("Garage Device", L:name_differences()[1].expected)
+			end)
+
+		it("compares a light of a device with several lights with the light's own name only", function()
+			-- The Living Room device ("Living Room Lamp") also owns Hallway Ambiance.
+			local device = replace(F.device, '{"rid":"' .. F.rids.living .. '","rtype":"light"}',
+				'{"rid":"' .. F.rids.living .. '","rtype":"light"},{"rid":"' .. F.rids.hallway .. '","rtype":"light"}')
+			local L = new_lights({ project = named_project() },
+				{ device = device, light = replace(F.light, F.device_rids.hallway, F.device_rids.living) })
+			register(L, F.rids.hallway, 2002)
+			assert.equal("Hallway Ambiance", L:creation_name(L:record_of(F.rids.hallway)))
+			names[3002] = "Hallway Ambiance"
+			assert.same({}, L:name_differences(true))
+			names[3002] = "Living Room Lamp"  -- the device's name: another light's
+			local diffs = L:name_differences()
+			assert.equal(1, #diffs)
+			assert.equal("Hallway Ambiance", diffs[1].expected)
+		end)
 	end)
 
 	-- §5 item 4: code analysis 2026-10-22 R9 (the refresh half).

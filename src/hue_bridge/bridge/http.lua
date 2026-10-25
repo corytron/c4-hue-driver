@@ -197,8 +197,9 @@ function http.request(req, callback)
 	end
 
 	local url = http.url(req.ip, req.path)
-	-- encodeArrays = true: Director's JsonEncode writes Lua arrays as objects
-	-- by default; Hue bodies with arrays (e.g. children lists) need real ones.
+	-- encodeArrays = true is passed, but Director's JsonEncode was seen to
+	-- write Lua arrays as objects even so (docs/design.md, "C4:url
+	-- transfer scheduling on OS 3.4.2"); no body the drivers send holds an array, so nothing depends on it.
 	local data = req.body and C4:JsonEncode(req.body, false, true) or nil
 	local headers = headers_for(req.key, data and { ["Content-Type"] = "application/json" } or nil)
 

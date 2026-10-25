@@ -9,6 +9,9 @@ bedroom, for instance." Style and precedents: `docs/smart-scenes-design.md`
 (a kind in an existing driver), `docs/scenes-design.md` and
 `docs/import-design.md` §1 (the three rules), `src/hue_bridge/bridge/lights.lua`
 and `scenes.lua` (the lifecycle code this copies).
+Current (2026-10-25, build 316): that lifecycle code is shared since #56:
+`bridge/owner.lua` holds it once for the lights, the scenes and the zone
+lights.
 
 ## 1. Problem
 
@@ -33,10 +36,10 @@ LEDs, two-way state, and the same lifecycle handling as a light.
 | light_v2: `dimmer`, `supports_color`, `supports_color_correlated_temperature`, the CCT min/max and `supports_target` are dynamic capabilities, changed at run time with the `DYNAMIC_CAPABILITIES_CHANGED` notify; the two colour flags must travel in one notify. `hide_proxy_properties` is not dynamic (on OS 3.x; the proxy reference's "What's New in 4.2.1" makes it dynamic from OS 4.2.1). | verified (`~/c4-tools/reference/docs-driverworks-proxyprotocol-lightv2/source/includes/5_light_v2_capabilities/_5-DIMMER.md`, `_30-SUPPORTSCOLOR.md`, `_31-SUPPORTSCOLORCORRELATEDTEMPERATURE.md`, `_8.4-COLORCORRELATEDTEMPERATUREMAX.md`, `_38-HIDEPROXYPROPERTIES.md`; `35_Light_v2_protocol_notifications…/_8-DYNAMICCAPABILITIESCHANGED.md`) |
 | The Hue Light driver already sends that notify on every `HUE_CONFIGURE` from `has_color`/`has_cct`/mirek bounds, and the colour controls appeared on the house's lights that way. A later change of the flags on a live device is documented ("capabilities that change during runtime") but not yet seen on the house. | verified / assumed (`src/hue_light/driver.lua` `HUE_CONFIGURE`, `src/hue_light/light/caps.lua`; `docs/status.md`) |
 | Add Light = `lights:add_light` → `owner:create`: `C4:AddDevice("hue_light.c4z", room_id, name, cb)`, then `C4:Bind(bridge, 1, protocol_id, 1, "HUE_BRIDGE")`, registry entry, `HUE_CONFIGURE` + `HUE_STATE`. AddDevice is for user-initiated use only. | verified (`src/hue_bridge/bridge/lights.lua`; `~/c4-tools/reference/docs-driverworks-api/source/includes/9_helper/_0.1-AddDevice.md`, `_1-bind.md`) |
-| A zone scene's Control4 room: the zone's entry in `hue_rooms` (Set Room Mapping lists zones too), else the `Room` picked, else refused "Not added: <scene>: Hue room <Zone> (zone) not mapped; pick a room, or Set Room Mapping first". Zone scenes are named "<Zone> <Scene>". | verified (`scenes.lua` `room_for_add`, `default_room`, `creation_name`; `lights.lua` `set_room_mapping`, `picker_hue_rooms`) |
-| `C4:GetDevices({C4iNames="hue_light.c4z"})` returns every device of that driver (used by Link Devices and the reconcile to tell lights from scene devices); `GetBoundConsumerDevices` values are the driver `<name>`, not the Composer name. | verified (`lights.lua` `project_lights`, `link_devices`; `docs/design.md` "Project APIs") |
+| A zone scene's Control4 room: the zone's entry in `hue_rooms` (Set Room Mapping lists zones too), else the `Room` picked, else refused "Not added: <scene>: Hue room <Zone> (zone) not mapped; pick a room, or Set Room Mapping first". Zone scenes are named "<Zone> <Scene>". | verified (`owner.lua` `room_for_add`, `default_room` (in `scenes.lua` until #56); `scenes.lua` `creation_name`; `lights.lua` `set_room_mapping`, `picker_hue_rooms`) |
+| `C4:GetDevices({C4iNames="hue_light.c4z"})` returns every device of that driver (used by Link Devices and the reconcile to tell lights from scene devices); `GetBoundConsumerDevices` values are the driver `<name>`, not the Composer name. | verified (`lights.lua` `project_lights`, `link_candidates`, with `link_devices` in `owner.lua` since #56; `docs/design.md` "Project APIs") |
 | Adding properties or actions to the bridge's `driver.xml` (it has no `<capabilities>`) and Lua changes take effect with an ordinary "Add or Update Driver"; only a `<capabilities>` change needs the controller reboot. | verified (`docs/status.md` "How builds reach the house"; import-ui and scenes installs, `docs/import-design.md` §2) |
-| A deleted device sends `HUE_GOODBYE {rid, device_id}` from `OnDriverRemovedFromProject`; the bridge tombstones the entry; Add Light lists it "(deleted from Composer <date>)" and clears the tombstone. | verified (`src/hue_light/driver.lua`, `lights.lua` `goodbye`, `registry.lua`; hardware 2026-10-22) |
+| A deleted device sends `HUE_GOODBYE {rid, device_id}` from `OnDriverRemovedFromProject`; the bridge tombstones the entry; Add Light lists it "(deleted from Composer <date>)" and clears the tombstone. | verified (`src/hue_light/driver.lua`, `owner.lua` `goodbye` (in `lights.lua` until #56), `registry.lua`; hardware 2026-10-22) |
 | Hardware (2026-10-24): zone Bedside Lights rid b90ea7b4…, grouped_light 75952a96…, lights Left e0e51794… and Right 686ec9ba…, inside room Master Bedroom (grouped_light 7104cbc3…); two time-based and several ordinary scenes on the zone; the Bedside Lights Switch's buttons are bound to Shine. | verified (`docs/status.md`, research §7) |
 
 ## 2. Design choice: a kind in `hue_light`, not a new driver
@@ -125,7 +128,10 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    light queue stays at 10/10. A slider drag settles to one PUT a second
    (the proxy's `LIGHT_BRIGHTNESS_CHANGING` animates meanwhile), a hold's
    start and stop and a tap after a hold go out at once. Closes the open item
-   in `docs/status.md`.
+   in `docs/status.md`. Verified 2026-10-25 (`docs/design.md`, "Hardware pass
+   of 2026-10-25 night"): 50 slider targets in 5 s on the zone made 9
+   grouped_light PUTs (a burst of 3, then one a second, the latest value
+   winning), and no 429.
 10. **Scenes of the same group** need no new message: both device kinds read
     the same grouped_light events on the bridge. What the owner sees: group
     slider or hold while a scene plays → both tiles show the same level, the
@@ -159,7 +165,7 @@ the project is the owner's; nothing is lost by waiting (import-design §1).
 | Group turned on/off/dimmed/recoloured in the Hue app or by a Hue switch | `HUE_STATE` from the grouped_light event and the member events; LEDs follow | — | — |
 | A scene of the group played | Decision 10 | — | — |
 | Bridge restored from a backup onto the same bridge | Resync: rids kept → nothing; rids changed → entries `gone`, groups listed as new | `Link Devices` (exact name), `Re-link` | Re-linking by name on its own |
-| Bridge replaced / re-paired | As lights: `Pair Bridge` refuses a different bridge id until `Forget Pairing`; afterwards every entry `gone`, every group new | `Link Devices`, `Re-link`, `Forget` | Silent matching |
+| Bridge replaced / re-paired | As lights: `Pair Bridge` refuses a different bridge id until `Forget Pairing`; afterwards every entry `gone`, every group new. Current (2026-10-25, #236): as decided, `Pair Bridge` refuses a bridge whose id differs from the stored one until `Forget Pairing` (`bridge/pairing.lua:other_bridge`, `docs/bridge-compat-design.md` "Pairing another bridge"); the identity check sends nothing to such a bridge either (`hue_bridge/driver.lua:verify_identity`) | `Link Devices`, `Re-link`, `Forget` | Silent matching |
 
 ### Control4 side
 
@@ -207,6 +213,13 @@ Device name at creation: zone → `metadata.name` verbatim; room → "<Room>
 Lights". `expected_name` for Attention and `Adopt Hue Name(s)` apply the same
 rule, so a room device named "Master Bedroom Lights" is not reported as
 differing. Names are set once; afterwards the Composer name is the owner's.
+Current (2026-10-25, build 316): AddDevice gets the `util.display_name` of
+that name, or "Hue zone light" when nothing of it can be shown;
+`HUE_CONFIGURE` `name` and `hue_room` and `HUE_FORGOTTEN` `name` are
+display names too, and the names are compared as display names, Link
+Devices' match trimmed and case-insensitive (`util.name_key`)
+(`bridge/owner.lua:new_device_name`, `name_differences`, `forget`;
+`bridge/zone_lights.lua:configure_params`; #217).
 
 ### Composer properties
 
@@ -231,7 +244,9 @@ light missing from the bridge: Bedside Lights (device 1180, since …)
 with the lights'). `Last Action` texts: "Added Bedside Lights (zone) to
 Master Bedroom (device 1180)", "Forgot Bedside Lights (zone, device 1180):
 unbound and left in the project for you to delete", "Re-linked device 1180
-(was Bedside Lights) to zone Reading Nook".
+(was Bedside Lights) to zone Reading Nook". Current (2026-10-25, build 316):
+with the separate actions of §8 the missing item ends "(Re-link Zone Light
+or Forget Light)" (`zone_lights.WORDS`, `relink_or_forget`).
 
 Pickers: `HueLightList` = lights' list + zone-light list (coordinator joins;
 the "(every light on the bridge is imported)" placeholder appears only when
@@ -344,6 +359,11 @@ and both scene devices.
   `adopt_hue_names`, `accept_names`, `summary`, `attention_items`,
   `picker_groups`, `picker_relink_devices`, `picker_forget_devices`,
   `entry(rid)` (its `.device_id`; `device_for` was removed 2026-10-24), `device_ids()`, `is_group(rid)`.
+  Current (2026-10-25, build 316): the entry also keeps `no_lights`; these
+  fields (`zone_lights.ENTRY_FIELDS` with `registry.OWN_FIELDS`) are the
+  schema the registry is given, so any other persisted field is dropped at
+  load (#56); the lifecycle methods are `bridge/owner.lua`'s, shared with
+  the lights and the scenes.
 - **Model and fixtures** `src/hue_bridge/bridge/hue_model.lua` +
   `tests/spec/hue_model_spec.lua`, `tests/fixtures/hue_resources.lua`:
   `hue_model.grouped_light(item)` → `{ rid, owner_rid, owner_type, on,
@@ -419,6 +439,10 @@ section, this section wins.
    devices after the lights' entries (the coordinator joins the lists). Reason:
    the owner's own words are "add the zone as a light"; a joined picker of
    70 entries would be hard to read; the lights' picker code stays untouched.
+   Current (2026-10-25, build 316): an empty group reads "Attic (zone, no
+   lights)", and when every group is imported the one entry reads "(every
+   zone and room on the bridge is imported)"
+   (`bridge/zone_lights.lua:picker_groups`).
 3. **No dev-build round before coding** (Q12, changed). The published CLIP v2
    reference lists `color` and `color_temperature` in the grouped_light PUT
    body (assumed until seen on the house), so the colour path is built as
@@ -443,3 +467,7 @@ section, this section wins.
    `Group` = `picker_groups()`), does it, and `Re-link Device To Light` stays
    lights-only. `Forget Light`'s `Device` picker lists the zone-light devices
    after the lights'. The cross-kind refusal of Q10 is therefore structural.
+   Current (2026-10-25, build 316): `Re-link Zone Light`'s `Device` list
+   holds the gone and unbound zone-light devices only, else "(no zone light
+   device is gone or unbound)" (`hue_bridge/driver.lua:RelinkZoneLightList`,
+   `bridge/owner.lua:picker_relink_devices`).
