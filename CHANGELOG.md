@@ -12,6 +12,8 @@ listed.
 
 ## Unreleased
 
+## 1.0 "Cassian", build 359 (2026-10-25)
+
 ### Added
 - A changelog: every release's notes on GitHub are written from
   `CHANGELOG.md`, and each driver's Documentation tab ends with the full
