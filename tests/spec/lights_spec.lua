@@ -1980,4 +1980,287 @@ describe("bridge.lights", function()
 			no_commas(items)
 		end)
 	end)
+
+	-- docs/review-leftovers-design.md, issue #45 (security review 2026-10-24
+	-- finding 5): ids that are not resource ids never reach the caches.
+	describe("resource ids (issue #45)", function()
+		it("drops a light or device whose id is not a resource id, from a GET and from an add event", function()
+			local doc = json.decode(F.light)
+			doc.data[1].id = "../config?x=1"
+			L:resync(done)
+			answer_gets({ light = json.encode(doc) })
+			assert.equal(3, L:bridge_count())
+			assert.is_nil(L.models["../config?x=1"])
+			assert.is_true(saw_log("hue_model: dropped a light item with id \"../config?x=1\": not a resource id"))
+			local function add(item)
+				return L:on_container({ type = "add", data = { item } })
+			end
+			assert.equal(0, add({ id = "a/b", type = "light", metadata = { name = "X" } }))
+			assert.equal(0, add({ id = { "null" }, type = "light" }))
+			assert.equal(3, L:bridge_count())
+			assert.equal(0, add({ id = "a b", type = "device", metadata = { name = "X" } }))
+			assert.is_nil(L.devices["a b"])
+			assert.same({ "Garage White [Garage] #4", "Hallway Ambiance [Living Room] #3", "Kitchen Strip #2" },
+				texts(L:picker_lights()))
+		end)
+	end)
+
+	-- Issue #48 (code analysis 2026-10-22 items 13, 14 and 18).
+	describe("hardening (issue #48)", function()
+		-- Item 13: Director may not list a device AddDevice has just created
+		-- (nor its binding) when the reconcile after the click runs.
+		it("the reconcile after an import or Add Light leaves the devices it just created alone (item 13)", function()
+			local bound, devices = L.ctx.project.bound, L.ctx.project.devices
+			-- An import's devices, all new to Director at once: it lists none of
+			-- them yet (another hue_light device makes the project lookup known).
+			L.ctx.project.bound = function() return {} end
+			L.ctx.project.devices = function() return { [9999] = { deviceName = "Somebody else's" } } end
+			L:import_new(done)
+			answer_gets()
+			assert.truthy(last_result().text:find("^Added 3 new lights"))
+			for _, rid in ipairs({ F.rids.garage, F.rids.hallway, F.rids.living }) do
+				assert.equal("linked", L.registry[rid].state, "neither unbound nor tombstoned")
+			end
+			assert.equal(0, L.reg:counts().tombstones)
+			assert.is_false(saw_log("was deleted in Composer while the bridge was not watching"))
+
+			-- Add Light, while Director's lists lag behind its AddDevice and Bind.
+			local lagging = { [ID.kitchen] = true }
+			L.ctx.project.bound = function()
+				local out = {}
+				for id, name in pairs(bound() or {}) do
+					if not lagging[id] then out[id] = name end
+				end
+				return out
+			end
+			L.ctx.project.devices = function(filter)
+				local out = {}
+				for id, info in pairs(devices(filter) or {}) do
+					if not lagging[id] then out[id] = info end
+				end
+				return out
+			end
+			L:add_light(F.rids.kitchen, LIVING_ROOM, done)
+			assert.equal("Added Kitchen Strip #2 to Living Room (device 2004)", last_result().text)
+			assert.equal("linked", L.registry[F.rids.kitchen].state)
+			assert.is_false(saw_log("Kitchen Strip was deleted in Composer while the bridge was not watching"))
+			-- The next reconcile judges it like any other entry (Director still lagging here).
+			assert.same({ unbound = {}, relinked = {}, tombstoned = { F.rids.kitchen } }, L:reconcile())
+		end)
+
+		-- Item 14: GetBoundConsumerDevices answering nil is unknown.
+		it("a bound-device lookup that answers nil unbinds, relabels and tombstones nothing (item 14)", function()
+			import_all()
+			fake.delete_device(ID.hallway)
+			c4.bindings = {}  -- the fake answers nil when nothing is bound, as the SDK documents
+			assert.is_nil(C4:GetBoundConsumerDevices(15, 1))
+			c4.sent = {}
+			assert.same({ unbound = {}, relinked = {}, tombstoned = {} }, L:reconcile())
+			for _, rid in ipairs({ F.rids.garage, F.rids.hallway, F.rids.kitchen, F.rids.living }) do
+				assert.equal("linked", L.registry[rid].state, rid)
+				assert.equal("linked", c4.persist.hue_lights[rid].state)
+			end
+			assert.equal(0, #c4.sent)
+			assert.is_false(saw_log("is not bound to this bridge"))
+			assert.is_true(saw_log("lights: reconcile skipped: the bound-device lookup answered no list"))
+			assert.equal("4 on bridge, 4 imported, 0 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			-- Link Devices finds nothing to adopt either way and says so as before.
+			assert.equal("No devices are bound to this bridge", L:link_devices())
+
+			-- An empty table is a known "nothing bound".
+			L.ctx.project.bound = function() return {} end
+			assert.same({ unbound = { F.rids.garage, F.rids.kitchen, F.rids.living }, relinked = {},
+				tombstoned = { F.rids.hallway } }, L:reconcile())
+		end)
+
+		it("a hello is not adopted while the bound-device list is unknown, and says why (item 14)", function()
+			import_all()
+			c4.persist.hue_lights = nil
+			L = new_lights()
+			L:load()
+			resync()
+			L.ctx.project.bound = function() return nil end
+			assert.is_false(L:hello(F.rids.garage, { device_id = tostring(ID.garage) }))
+			assert.is_nil(L.registry[F.rids.garage])
+			assert.is_true(saw_log("device 2001 announced " .. F.rids.garage
+				.. ", but the bound-device list is unknown; not adopted"))
+			L.ctx.project.bound = function() error("boom") end
+			assert.equal("Not linked: the bound-device lookup failed (see the Lua output)", L:link_devices())
+		end)
+
+		-- R5: a stale `announced` made false conflicts.
+		it("forgets what a device announced when it is re-linked or tombstoned (R5)", function()
+			import_all()
+			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
+			resync(replaced_bulb())
+			L:hello(F.rids.garage, { device_id = tostring(ID.garage) })
+			assert.equal(F.rids.garage, L.announced[ID.garage].rid)
+			assert.is_true((L:relink(ID.garage, REPLACED)))
+			assert.is_nil(L.announced[ID.garage])
+			-- A restored device announcing the old rid is no conflict with device 2001.
+			c4:AddDevice("hue_light.c4z", LIVING_ROOM, "Restored", function() end)  -- 2005
+			c4:Bind(15, 1, 2005, 1, "HUE_BRIDGE")
+			assert.is_true(L:hello(F.rids.garage, { device_id = "2005" }))
+			assert.equal(2005, L:device_for(F.rids.garage))
+			assert.equal("gone", L.registry[F.rids.garage].state, "its light is not on the bridge")
+			assert.is_false(saw_log("both announce"))
+
+			-- Deleted in Composer while the bridge was not watching.
+			L:hello(F.rids.hallway, { device_id = tostring(ID.hallway) })
+			assert.truthy(L.announced[ID.hallway])
+			fake.delete_device(ID.hallway)
+			assert.same({ F.rids.hallway }, L:reconcile().tombstoned)
+			assert.is_nil(L.announced[ID.hallway])
+
+			-- A goodbye that names the rid alone.
+			L:hello(F.rids.kitchen, { device_id = tostring(ID.kitchen) })
+			assert.truthy(L:goodbye({ rid = F.rids.kitchen }))
+			assert.is_nil(L.announced[ID.kitchen])
+		end)
+
+		-- R6: the AddDevice cannot be taken back; the device exists.
+		it("registers a light deleted on the bridge while its AddDevice was pending as gone, and tells it (R6)",
+			function()
+			resync()
+			local add_device = L.ctx.add_device
+			L.ctx.add_device = function(driver, room_id, name, cb)
+				-- The Hue app deletes the light while Composer creates the device.
+				L:on_container({ type = "delete", data = { { id = F.rids.kitchen, type = "light" } } })
+				return add_device(driver, room_id, name, cb)
+			end
+			c4.sent = {}
+			L:add_light(F.rids.kitchen, LIVING_ROOM, done)
+			assert.same({ ok = true, text = "Added Kitchen Strip #2 to Living Room (device 2001)" }, last_result())
+			local entry = L.registry[F.rids.kitchen]
+			assert.equal(2001, entry.device_id)
+			assert.equal("gone", entry.state)
+			assert.equal(T0, entry.gone_since)
+			assert.equal("gone", c4.persist.hue_lights[F.rids.kitchen].state)
+			assert.same({ "HUE_CONFIGURE@2001", "HUE_STATE@2001" }, commands_sent())
+			assert.equal("gone", c4.sent[1].params.state)
+			assert.equal("Kitchen Strip", c4.sent[1].params.name)
+			assert.same({ rid = F.rids.kitchen, online = "false", reason = "resync" }, c4.sent[2].params)
+			assert.is_true(saw_log("Kitchen Strip #2 (device 2001) was deleted on the bridge while its device was being "
+				.. "added; marked gone (Re-link Device To Light or Forget Light)"))
+			assert.equal("3 on bridge, 1 imported, 3 new, 1 missing, 0 unbound, 0 deleted", L:summary())
+			-- Its hello is answered with the gone configuration.
+			c4.sent = {}
+			assert.is_true(L:hello(nil, { device_id = "2001" }))
+			assert.same({ "HUE_CONFIGURE@2001" }, commands_sent())
+			assert.equal("gone", c4.sent[1].params.state)
+		end)
+
+		it("marks a linked entry whose light a synced run lacks gone when its device says hello (R6)", function()
+			import_all()
+			L.models[F.rids.kitchen] = nil  -- registered linked, the light gone: what R6 leaves behind
+			c4.sent = {}
+			assert.is_true(L:hello(F.rids.kitchen, { device_id = tostring(ID.kitchen) }))
+			assert.equal("gone", L.registry[F.rids.kitchen].state)
+			assert.same({ "HUE_CONFIGURE@2004", "HUE_STATE@2004" }, commands_sent())
+			assert.same({ rid = F.rids.kitchen, online = "false", reason = "hello" }, c4.sent[2].params)
+			assert.is_true(saw_log("Kitchen Strip #2 (device 2004) is no longer on the bridge; marked gone"))
+			-- Gone already: the next hello is an ordinary one.
+			c4.sent = {}
+			assert.is_true(L:hello(F.rids.kitchen, { device_id = tostring(ID.kitchen) }))
+			assert.same({ "HUE_CONFIGURE@2004" }, commands_sent())
+		end)
+
+		it("marks gone at its hello a device bound again after its light left the bridge", function()
+			import_all()
+			L:on_binding_changed(1, "HUE_BRIDGE", false, ID.garage)
+			assert.equal(0, L:on_container({ type = "delete", data = { { id = F.rids.garage, type = "light" } } }),
+				"an unbound device hears nothing")
+			assert.equal("unbound", L.registry[F.rids.garage].state)
+			L:on_binding_changed(1, "HUE_BRIDGE", true, ID.garage)
+			assert.equal("linked", L.registry[F.rids.garage].state)
+			c4.sent = {}
+			assert.is_true(L:hello(F.rids.garage, { device_id = tostring(ID.garage) }))  -- the light's own hello on binding
+			assert.equal("gone", L.registry[F.rids.garage].state)
+			assert.same({ "HUE_CONFIGURE@2001", "HUE_STATE@2001" }, commands_sent())
+			assert.equal("gone", c4.sent[1].params.state)
+		end)
+
+		-- R9: lights.ENTRY_FIELDS is the schema; anything else goes at load.
+		it("drops the persisted entry fields this build no longer has at load (R9)", function()
+			c4.persist.hue_lights = { [F.rids.living] = { device_id = 2003, name = "L", model = "LCA001", hue_room = "Kitchen",
+				mac_address = "m", room_name = "Old", c4_room = 7, caps = { has_color = true } } }
+			L:load()
+			assert.same({ device_id = 2003, name = "L", model = "LCA001", hue_room = "Kitchen", mac_address = "m",
+				caps = { has_color = true, has_cct = false }, state = "linked" }, L:entry(F.rids.living))
+			assert.is_true(saw_log(F.rids.living .. ": dropped c4_room, room_name, which this build no longer keeps"))
+			L:save()
+			assert.is_nil(c4.persist.hue_lights[F.rids.living].room_name)
+		end)
+
+		-- R11: SendToDevice delivers strings; anything else is a misbehaving driver.
+		it("takes a hello's name and model only when they are strings (R11)", function()
+			c4:AddDevice("hue_light.c4z", LIVING_ROOM, "Hallway", function() end)  -- 2001
+			c4:Bind(15, 1, 2001, 1, "HUE_BRIDGE")
+			L:load()
+			assert.is_true(L:hello(F.rids.hallway, { device_id = "2001", name = { "junk" }, model = 7 }))
+			assert.same({ device_id = 2001, state = "linked", created_at = T0 }, L.registry[F.rids.hallway])
+			assert.same({ rid = F.rids.hallway }, L.announced[2001])
+			assert.same({ rid = F.rids.hallway, has_color = "false", has_cct = "false" }, c4.sent[#c4.sent].params)
+			assert.equal("None", L:attention())
+			assert.same({ "? #" .. F.rids.hallway:sub(1, 8) .. " (device 2001)" }, texts(L:picker_forget_devices()))
+		end)
+
+		it("keeps at most 200 hellos before load() and drops the rest with a warning", function()
+			for i = 1, 203 do
+				L:hello(nil, { device_id = tostring(3000 + i) })
+			end
+			assert.equal(lights.EARLY_HELLOS_MAX, #L.early_hellos)
+			assert.equal(200, lights.EARLY_HELLOS_MAX)
+			assert.is_true(saw_log("HUE_HELLO from device 3201 before the registry was loaded: dropped (200 waiting)"))
+			assert.is_true(saw_log("HUE_HELLO from device 3203 before the registry was loaded: dropped (200 waiting)"))
+			assert.equal(3001, tonumber(L.early_hellos[1].params.device_id), "the first ones are kept")
+		end)
+	end)
+
+	-- Issue #47 F2 (lights half; docs/reviews/diff-review-2026-10-24.md row 2(b)).
+	describe("pending resyncs (issue #47)", function()
+		it("runs one more resync for every request that waited and calls each done once", function()
+			import_all()
+			local got = {}
+			L:resync(function(ok) got[#got + 1] = "first " .. tostring(ok) end)
+			L:resync(function(ok) got[#got + 1] = "second " .. tostring(ok) end)
+			L:resync(function() error("a broken done") end)
+			L:resync(function(ok, _, sent) got[#got + 1] = "fourth " .. tostring(ok) .. " " .. tostring(sent) end)
+			answer_gets()
+			assert.same({ "first true" }, got)
+			answer_gets()
+			assert.same({ "first true", "second true", "fourth true 4" }, got, "each once, a failing one in between")
+			assert.is_true(saw_log("lights: resync done failed: "))
+			assert.equal(18, #c4.transfers, "the import's six GETs, then two resyncs: one for the three that waited")
+			assert.is_nil(L.resync_pending)
+		end)
+	end)
+
+	-- Issue #50 R6 (docs/reviews/efficiency-2026-10-24.md): the texts count
+	-- new lights without sorting them; Attention sorts only to name them.
+	describe("refresh cost (issue #50)", function()
+		it("summary counts the new lights without sorting; attention sorts only when there are some", function()
+			resync()
+			local sorted = 0
+			local unimported = L.unimported_models
+			L.unimported_models = function(...)
+				sorted = sorted + 1
+				return unimported(...)
+			end
+			assert.equal("4 on bridge, 0 imported, 4 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal(0, sorted)
+			assert.truthy(L:attention():find("^4 new lights on the bridge: Garage White %[Garage%] #4, "))
+			assert.equal(1, sorted)
+			L.unimported_models = nil
+			import_all()
+			L.unimported_models = function(...)
+				sorted = sorted + 1
+				return unimported(...)
+			end
+			sorted = 0
+			assert.equal("None", L:attention())
+			assert.equal(0, sorted)
+			assert.equal(0, L:new_count())
+		end)
+	end)
 end)

@@ -35,12 +35,14 @@ local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
 local groups = require("bridge.groups")
 local util = require("bridge.util")
+local project = require("bridge.project")
 
 -- The pure helpers every bridge module shares (bridge.util; sanitise keeps
 -- the comma rule of CUSTOM_SELECT lists). util.some takes lights.MAX_NAMED.
 local positive, norm, sanitise = util.positive, util.norm, util.sanitise
 local date_of, short_date_of, plural = util.date_of, util.short_date_of, util.plural
 local signature, has_field, empty_list = util.signature, util.has_field, util.empty_list
+local copy_caps, same_caps = util.copy_caps, util.same_caps
 
 local lights = {}
 lights.__index = lights
@@ -52,6 +54,13 @@ lights.BINDING = 1
 lights.BINDING_CLASS = "HUE_BRIDGE"
 lights.OFFLINE_NAG_S = 24 * 3600              -- Attention nags about lights offline this long [Q 8]
 lights.MAX_NAMED = 3                          -- names listed per Attention item before "+n more"
+lights.EARLY_HELLOS_MAX = 200                 -- hellos kept before load(), as the driver's early queue
+
+-- The registry entry fields this module persists besides the registry's own
+-- (registry.OWN_FIELDS): docs/import-design.md §3. Any other persisted field
+-- is dropped at load (code analysis 2026-10-22 R9, issue #48).
+lights.ENTRY_FIELDS = { "name", "device_name", "model", "caps", "device_rid", "mac_address", "service_id", "id_v1",
+	"hue_room_rid", "hue_room", "name_dismissed" }
 
 -- The six serial GETs of a resync (§5). Small on the house bridge: rooms,
 -- zones and bridge_home are 18 KB together [verified: hardware 2026-10-21];
@@ -109,37 +118,16 @@ function lights.new(ctx)
 	end
 	ctx.log = ctx.log or log
 	ctx.now = ctx.now or os.time
-	ctx.project = ctx.project or {}
-	local project = ctx.project
-	-- [verified: hardware, docs/design.md "Project APIs"] for every shape below.
-	project.rooms = project.rooms or function()
-		return C4:GetDevicesByC4iName("roomdevice.c4i")
-	end
-	project.hierarchy = project.hierarchy or function()
-		return C4:GetProjectHierarchy()
-	end
-	project.devices = project.devices or function(filter)
-		return C4:GetDevices(filter)
-	end
-	project.bound = project.bound or function()
-		return C4:GetBoundConsumerDevices(C4:GetDeviceID(), lights.BINDING)
-	end
-	project.unbind = project.unbind or function(device_id)
-		C4:Unbind(device_id, lights.BINDING)
-	end
-	project.rename = project.rename or function(id, name)
-		C4:RenameDevice(id, name)
-	end
-	project.display_name = project.display_name or function(id)
-		return C4:GetDeviceDisplayName(id)
-	end
+	project.defaults(ctx, lights.BINDING)  -- the project calls default to the real C4 calls (bridge.project)
 
 	local reg = registry.new({
 		persist_get = ctx.persist_get, persist_set = ctx.persist_set, now = ctx.now, log = ctx.log,
+		fields = lights.ENTRY_FIELDS,
 	})
 	return setmetatable({
 		ctx = ctx,
 		reg = reg,
+		project = project.new(ctx, "lights"),  -- the pcall-wrapped project calls (bridge.project)
 		registry = reg:entries(),  -- rid → entry, the live table (identity kept across load())
 		groups = groups.new(),     -- rooms, zones, bridge_home from the last GET (memory only)
 		models = {},               -- rid → normalised light, from the last GET (memory only)
@@ -147,10 +135,10 @@ function lights.new(ctx)
 		macs = {},                 -- device rid → zigbee mac_address (memory only)
 		last_configure = {},       -- rid → signature of the last HUE_CONFIGURE sent, to send it again only on change
 		offline_since = {},        -- rid → ctx.now() when the light was first seen offline (memory only)
-		announced = {},            -- device_id → { rid, name, model } from HUE_HELLO, for Link Devices
+		announced = {},            -- device_id → { rid, name, model } from HUE_HELLO, for Link Devices (strings or nil)
 		announced_new = {},        -- rid → true once a new light was logged
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id } (two devices, one rid)
-		early_hellos = {},         -- HUE_HELLOs received before load(), answered after configure_all()
+		early_hellos = {},         -- HUE_HELLOs received before load() (EARLY_HELLOS_MAX), answered after configure_all()
 		foreign_logged = {},       -- rid → true once an entry held by another module's device was logged
 		loaded = false,
 		synced = false,            -- a full GET has succeeded (new/missing counts mean something)
@@ -159,7 +147,7 @@ function lights.new(ctx)
 		configured_once = false,
 		importing = false,
 		resyncing = false,
-		resync_pending = nil,      -- a done callback to run a second resync for
+		resync_pending = nil,      -- the done callbacks of the resync to run once the current job ends (a list)
 		device_info_logged = false,
 		automapped = false,        -- the one-time Map Rooms By Name has run, or its persisted flag was seen
 		skip_cache = nil,          -- inside on_container(): false, then the skip set at its first use; nil outside
@@ -363,6 +351,16 @@ local function by_name(a, b)
 	return tostring(a.rid) < tostring(b.rid)
 end
 
+-- by_name's order over rows whose keys were computed once ({ key = the
+-- lower-cased name, rid = the rid as text }): one :lower() per row instead
+-- of two per comparison (docs/reviews/efficiency-2026-10-24.md R6).
+local function by_row_key(a, b)
+	if a.key ~= b.key then
+		return a.key < b.key
+	end
+	return a.rid < b.rid
+end
+
 -- "#12" from Hue's v1 id ("/lights/12"), else the first 8 hex of the rid:
 -- the stable number the owner also sees in the Hue app and the dev log.
 local function v1_tag(id_v1, rid)
@@ -375,29 +373,9 @@ end
 
 -- Registry access ---------------------------------------------------------------
 
-local function copy_caps(caps)
-	if type(caps) ~= "table" then
-		return nil
-	end
-	return {
-		has_color = caps.has_color == true or caps.has_color == "true",
-		has_cct = caps.has_cct == true or caps.has_cct == "true",
-		mirek_min = tonumber(caps.mirek_min),
-		mirek_max = tonumber(caps.mirek_max),
-		min_dim = tonumber(caps.min_dim),
-	}
-end
-
-local function same_caps(a, b)
-	if a == nil or b == nil then
-		return a == b
-	end
-	return a.has_color == b.has_color and a.has_cct == b.has_cct and a.mirek_min == b.mirek_min
-		and a.mirek_max == b.mirek_max and a.min_dim == b.min_dim
-end
-
--- Read the persisted registry (v1 entries upgrade in place, see
--- bridge.registry) and normalise the caps as before. Returns the entries table.
+-- Read the persisted registry (v1 entries upgrade in place, fields outside
+-- lights.ENTRY_FIELDS dropped, see bridge.registry) and normalise the caps as
+-- before. Returns the entries table.
 function lights:load()
 	self.reg:load()
 	for rid, entry in pairs(self.registry) do
@@ -492,36 +470,16 @@ end
 
 -- Project access ----------------------------------------------------------------
 
--- ok, result of one ctx.project call; a raised error is logged and read as
--- "unknown" by every caller.
-function lights:project_call(name, ...)
-	local ok, result = pcall(self.ctx.project[name], ...)
-	if not ok then
-		self.ctx.log.warn("lights: project.%s failed: %s", name, tostring(result))
-		return false, nil
-	end
-	return true, result
-end
-
--- { [room_id] = name } with numeric ids; empty when unknown.
-function lights:project_rooms()
-	local _, raw = self:project_call("rooms")
-	local out = {}
-	if type(raw) == "table" then
-		for id, name in pairs(raw) do
-			local n = tonumber(id)
-			if n and name ~= nil then
-				out[n] = tostring(name)
-			end
-		end
-	end
-	return out
-end
+-- The project reads go through self.project (bridge.project, shared with the
+-- scenes and the zone lights since 2026-10-25): call(name, ...) for one
+-- pcall-wrapped call, rooms(), bound_set() (nil, "unknown" for a lookup that
+-- answered no table: issue #48 item 14), devices_of(driver_file) and
+-- display_name(id). Only the floors are the lights' own.
 
 -- room_id → floor name from the project hierarchy: nested nodes keyed by
 -- location id, numeric types 4 floor and 8 room [verified: hardware OS 3.4.2].
 function lights:room_floors()
-	local _, tree = self:project_call("hierarchy")
+	local _, tree = self.project:call("hierarchy")
 	local out = {}
 	local function walk(node, floor, depth)
 		if type(node) ~= "table" or depth > 8 then
@@ -544,50 +502,13 @@ function lights:room_floors()
 	return out
 end
 
--- { [device_id] = true } of the devices bound to the bridge's binding 1; nil
--- when the lookup failed (GetBoundConsumerDevices returns nil when nothing is
--- bound [verified: API 32/_3], which is an empty set, not a failure).
-function lights:project_bound_set()
-	local ok, raw = self:project_call("bound")
-	if not ok then
-		return nil
-	end
-	local out = {}
-	if type(raw) == "table" then
-		for id in pairs(raw) do
-			out[tonumber(id) or id] = true
-		end
-	end
-	return out
-end
-
 -- The hue_light devices in the project as { [device_id] = GetDevices info },
 -- or nil when the call failed or returned nothing: unknown, never "deleted"
 -- (§5). Zone-light devices are among them (same driver); callers that choose
 -- candidates cut them out with skip_set(), callers that ask whether a device
 -- still exists do not (it does).
 function lights:project_lights()
-	local ok, raw = self:project_call("devices", { C4iNames = lights.LIGHT_DRIVER })
-	if not ok or type(raw) ~= "table" or next(raw) == nil then
-		return nil
-	end
-	local out = {}
-	for id, info in pairs(raw) do
-		out[tonumber(id) or id] = info
-	end
-	return out
-end
-
--- The Composer name of a device (protocol or proxy id), or nil.
-function lights:display_name(id)
-	if not id then
-		return nil
-	end
-	local ok, name = self:project_call("display_name", id)
-	if ok and name ~= nil and name ~= "" then
-		return tostring(name)
-	end
-	return nil
+	return self.project:devices_of(lights.LIGHT_DRIVER)
 end
 
 -- Model-derived views -----------------------------------------------------------
@@ -595,13 +516,17 @@ end
 -- Lights on the bridge without a registry entry, in name order (tombstoned
 -- ones included; see new_models()).
 function lights:unimported_models()
-	local list = {}
+	local rows = {}
 	for rid, model in pairs(self.models) do
 		if not self.registry[rid] then
-			list[#list + 1] = model
+			rows[#rows + 1] = { key = string.lower(tostring(model.name or "")), rid = tostring(model.rid), model = model }
 		end
 	end
-	table.sort(list, by_name)
+	table.sort(rows, by_row_key)
+	local list = {}
+	for i, row in ipairs(rows) do
+		list[i] = row.model
+	end
 	return list
 end
 
@@ -619,6 +544,18 @@ function lights:new_models()
 		end
 	end
 	return list
+end
+
+-- #new_models() without building or sorting the list: the Lights row and
+-- Attention count at every refresh (docs/reviews/efficiency-2026-10-24.md R6).
+function lights:new_count()
+	local tombs, n = self.reg:tombstones(), 0
+	for rid in pairs(self.models) do
+		if not self.registry[rid] and tombs[rid] == nil then
+			n = n + 1
+		end
+	end
+	return n
 end
 
 -- The gone entry a new light may be the replacement of: the same
@@ -808,13 +745,13 @@ end
 function lights:absorb(res)
 	local models = {}
 	for _, item in ipairs(res.light or {}) do
-		if type(item) == "table" and item.id ~= nil then
-			local model = hue_model.light(item)
-			local old = self.models[item.id]
+		local model = hue_model.light(item)  -- nil for junk, an id that is not a resource id included
+		if model then
+			local old = self.models[model.rid]
 			if old then
 				model.online = old.online
 			end
-			models[item.id] = model
+			models[model.rid] = model
 		end
 	end
 	self.models = models
@@ -1007,6 +944,53 @@ function lights:answer_hello(rid)
 	return self:send_configure(rid)
 end
 
+-- A linked entry whose light is not on the bridge (the caller has checked)
+-- is marked gone, as a delete event or a resync would have done, and its
+-- device is told (HUE_CONFIGURE state gone, then HUE_STATE online false);
+-- Re-link Device To Light and Forget Light stay its exits. `while_added`
+-- names the case of code analysis 2026-10-22 R6 (issue #48) in the log: the
+-- light was deleted in Hue while its AddDevice was pending, so the device
+-- exists for a light that does not. True when marked.
+function lights:mark_missing(rid, reason, while_added)
+	local entry = self.registry[rid]
+	if not entry or entry.state ~= "linked" or not self.reg:set_state(rid, "gone") then
+		return false
+	end
+	self:mark()
+	self:flush()
+	if while_added then
+		self.ctx.log.warn("lights: %s (device %d) was deleted on the bridge while its device was being added; marked "
+			.. "gone (Re-link Device To Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+	else
+		self.ctx.log.warn("lights: %s (device %d) is no longer on the bridge; marked gone "
+			.. "(Re-link Device To Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+	end
+	self:announce_gone(rid, reason)
+	return true
+end
+
+-- Answer the hello of a registered device. A linked entry whose light a
+-- synced run does not have is R6's (registered after its light's delete
+-- event went by), or one bound again after its light left the bridge: it is
+-- marked gone when its device says hello, rather than at the next resync.
+function lights:answer_device(rid)
+	local entry = self.registry[rid]
+	if entry and entry.state == "linked" and self.synced and not self.models[rid] then
+		return self:mark_missing(rid, "hello")
+	end
+	return self:answer_hello(rid)
+end
+
+-- A hello's `name` or `model` as the light sent it: a non-empty string, else
+-- nil (C4:SendToDevice delivers strings, so anything else is a misbehaving
+-- driver; code analysis 2026-10-22 R11).
+local function hello_text(value)
+	if type(value) == "string" and value ~= "" then
+		return value
+	end
+	return nil
+end
+
 -- Register a bound device for a rid the registry lacks (§4 auto-adopt, Link
 -- Devices). Fields from the model when it is known, else from what the light
 -- announced. A device another module owns is never adopted. Returns the
@@ -1020,8 +1004,8 @@ function lights:adopt(device_id, rid, hello, how)
 	local model = self.models[rid]
 	local fields = self:fields_from_model(model)
 	fields.device_id = device_id
-	fields.name = fields.name or hello.name
-	fields.model = fields.model or hello.model
+	fields.name = fields.name or hello_text(hello.name)
+	fields.model = fields.model or hello_text(hello.model)
 	local entry, err = self.reg:add(rid, fields)
 	if not entry then
 		self.ctx.log.warn("lights: could not adopt device %d for %s: %s", device_id, tostring(rid), tostring(err))
@@ -1040,7 +1024,9 @@ end
 -- persisted rid is stale after a re-link); a rid the registry lacks from
 -- exactly one bound device is adopted (§4); two devices claiming one rid
 -- change nothing and go to Attention. Before load() the hello waits for
--- configure_all(). Returns true when answered.
+-- configure_all() (at most EARLY_HELLOS_MAX of them; later ones are dropped
+-- with a warning, as the driver's own early queue does). Returns true when
+-- answered.
 function lights:hello(rid, params)
 	params = params or {}
 	if type(rid) ~= "string" or rid == "" then
@@ -1049,12 +1035,17 @@ function lights:hello(rid, params)
 	local device_id = positive(params.device_id)
 	if not (self.loaded or self.synced) then
 		if rid or device_id then
-			self.early_hellos[#self.early_hellos + 1] = { rid = rid, params = params }
+			if #self.early_hellos < lights.EARLY_HELLOS_MAX then
+				self.early_hellos[#self.early_hellos + 1] = { rid = rid, params = params }
+			else
+				self.ctx.log.warn("lights: HUE_HELLO from device %s before the registry was loaded: dropped (%d waiting)",
+					tostring(params.device_id), #self.early_hellos)
+			end
 		end
 		return false
 	end
 	if device_id then
-		self.announced[device_id] = { rid = rid, name = params.name, model = params.model }
+		self.announced[device_id] = { rid = rid, name = hello_text(params.name), model = hello_text(params.model) }
 	end
 
 	local entry = rid and self.registry[rid] or nil
@@ -1065,7 +1056,7 @@ function lights:hello(rid, params)
 				device_id, self:entry_label(rid, entry), entry.device_id)
 			return false
 		end
-		return self:answer_hello(rid)
+		return self:answer_device(rid)
 	end
 	if not device_id then
 		return false
@@ -1074,15 +1065,20 @@ function lights:hello(rid, params)
 	if held_rid then
 		self.ctx.log.info("lights: device %d said hello with %s; its registered light is %s", device_id,
 			tostring(rid), held_rid)
-		return self:answer_hello(held_rid)
+		return self:answer_device(held_rid)
 	end
 	if not rid then
 		return false  -- a bare light: Link Devices matches it by name
 	end
 
-	local bound = self:project_bound_set()
+	local bound, why = self.project:bound_set()
 	if not bound or not bound[device_id] then
-		self.ctx.log.info("lights: device %d announced %s but is not bound; not adopted", device_id, rid)
+		if why == "unknown" then
+			self.ctx.log.info("lights: device %d announced %s, but the bound-device list is unknown; not adopted",
+				device_id, rid)
+		else
+			self.ctx.log.info("lights: device %d announced %s but is not bound; not adopted", device_id, rid)
+		end
 		return false
 	end
 	for other_id, h in pairs(self.announced) do
@@ -1125,6 +1121,7 @@ function lights:goodbye(params)
 	local tomb = self.reg:tombstone(rid)
 	self.last_configure[rid] = nil
 	self.conflicts[rid] = nil
+	self.announced[entry.device_id] = nil  -- also when the goodbye named the rid alone (R5)
 	self:clear_conflicts_for(entry.device_id)
 	self:mark()
 	self:flush()
@@ -1180,11 +1177,18 @@ end
 -- project decide linked / unbound / tombstone per entry (bridge.registry
 -- holds the rules; a failed or empty GetDevices is "unknown"). Called by
 -- driver.lua at late init and here after every resync and import. Saves
--- unless `no_save` (the caller's batch does).
-function lights:reconcile(no_save)
-	local bound = self:project_bound_set()
+-- unless `no_save` (the caller's batch does). A bound-device lookup that
+-- failed, or answered no table (nil: unknown, issue #48 item 14), changes
+-- nothing. `created` (optional, a set { [rid] = true }) names the entries
+-- the caller's batch has just created: Director may not list their devices
+-- or bindings yet, so they are left as they are (item 13).
+function lights:reconcile(no_save, created)
+	local bound, why = self.project:bound_set()
 	if not bound then
-		self.ctx.log.warn("lights: reconcile skipped: the bound-device lookup failed")
+		-- Unknown is expected while nothing is registered (a new install):
+		-- debug then, a warning while there are entries it cannot judge.
+		local note = (why == "unknown" and self:count() == 0) and self.ctx.log.debug or self.ctx.log.warn
+		note("lights: reconcile skipped: the bound-device lookup %s", why == "unknown" and "answered no list" or "failed")
 		return { unbound = {}, relinked = {}, tombstoned = {} }
 	end
 	local infos = self:project_lights()
@@ -1195,7 +1199,13 @@ function lights:reconcile(no_save)
 			present[id] = true
 		end
 	end
-	local r = self.reg:reconcile({ bound = bound, present = present })
+	-- A tombstone keeps no device id; the device's announced rid goes with
+	-- its entry (code analysis 2026-10-22 R5).
+	local device_of = {}
+	for rid, entry in pairs(self.registry) do
+		device_of[rid] = entry.device_id
+	end
+	local r = self.reg:reconcile({ bound = bound, present = present, skip = created })
 	if #r.unbound + #r.relinked + #r.tombstoned > 0 then
 		self:mark()
 	end
@@ -1219,6 +1229,9 @@ function lights:reconcile(no_save)
 		local tomb = self.reg:tombstones()[rid] or {}
 		self.last_configure[rid] = nil
 		self.conflicts[rid] = nil
+		if device_of[rid] then
+			self.announced[device_of[rid]] = nil
+		end
 		self.ctx.log.warn("lights: %s was deleted in Composer while the bridge was not watching; Add Light lists it "
 			.. "as deleted", tostring(tomb.name or rid))
 	end
@@ -1314,7 +1327,7 @@ function lights:automap_once()
 	if self.automapped then
 		return false
 	end
-	if #self.groups:groups() == 0 or next(self:project_rooms()) == nil then
+	if #self.groups:groups() == 0 or next(self.project:rooms()) == nil then
 		return false
 	end
 	local text = self:map_rooms_by_name(true)
@@ -1342,13 +1355,15 @@ end
 -- After every stream connect: the six GETs, the reconciliation, then full
 -- HUE_STATE (reason "resync") to every registered light, with HUE_CONFIGURE
 -- first the first time or when it changed. done(ok, err, sent). A resync
--- requested while one (or an import) is running is run once more after it
--- (the latest done wins).
+-- requested while one (or an import) is running is run once more after it,
+-- and every done that waited hears that run's result, each once.
 function lights:resync(done)
 	done = done or function() end
 	self:expire_stale_busy()
 	if self.resyncing or self.importing then
-		self.resync_pending = done
+		local pending = self.resync_pending or {}
+		pending[#pending + 1] = done
+		self.resync_pending = pending
 		return
 	end
 	self.resyncing, self.resyncing_since = true, os.time()
@@ -1376,11 +1391,19 @@ function lights:resync(done)
 	end)
 end
 
+-- The resync asked for while a job ran: one more run for all of them. A
+-- single slot kept only the latest done, so a connect's done (the driver's
+-- row refresh rides on it) could be dropped by a second request (code
+-- analysis 2026-10-22 F2, issue #47).
 function lights:run_pending_resync()
 	local pending = self.resync_pending
 	self.resync_pending = nil
 	if pending then
-		self:resync(pending)
+		self:resync(function(...)
+			for _, done in ipairs(pending) do
+				self:protect("resync done", done, ...)
+			end
+		end)
 	end
 end
 
@@ -1392,6 +1415,9 @@ function lights:on_light_item(item, kind)
 	local entry, model = self.registry[rid], self.models[rid]
 	if kind == "add" then
 		local fresh = hue_model.light(item)
+		if not fresh then
+			return 0  -- an id that is not a resource id (hue_model logged it)
+		end
 		if model then
 			fresh.online = model.online
 		end
@@ -1482,7 +1508,9 @@ end
 function lights:on_device_item(item, kind)
 	if kind == "add" then
 		local parsed = hue_model.devices({ item })
-		self.devices[item.id] = parsed[item.id]
+		if parsed[item.id] then  -- nil for an id that is not a resource id
+			self.devices[item.id] = parsed[item.id]
+		end
 	elseif kind == "delete" then
 		self.devices[item.id] = nil
 		self.macs[item.id] = nil
@@ -1603,10 +1631,12 @@ end
 
 -- One AddDevice per job, one at a time (the next from the previous
 -- callback, so Director adds one driver at a time), each bound, registered
--- (saved at once) and told its configuration and state. jobs = { { model,
--- room_id, room_name } ... }; finish(created, failed, err) with created =
--- { { model, device_id, room_name } ... }, failed = { model ... }, err the
--- Lua error that stopped the run early, if any. The caller owns `importing`.
+-- (saved at once) and told its configuration and state; a light deleted on
+-- the bridge while its AddDevice was pending is registered gone (R6).
+-- jobs = { { model, room_id, room_name } ... }; finish(created, failed, err)
+-- with created = { { model, device_id, room_name } ... }, failed = { model
+-- ... }, err the Lua error that stopped the run early, if any. The caller
+-- owns `importing`.
 function lights:create_lights(jobs, finish)
 	local total, i, created, failed = #jobs, 0, {}, {}
 	local add_next
@@ -1647,7 +1677,13 @@ function lights:create_lights(jobs, finish)
 		created[#created + 1] = { model = model, device_id = device_id, room_name = job.room_name }
 		self.ctx.log.info("lights: added %s to %s (device %d, %d of %d)", tostring(model.name),
 			tostring(job.room_name), device_id, i, total)
-		self:push(model.rid, "resync", true)
+		if self.models[model.rid] then
+			self:push(model.rid, "resync", true)
+		else
+			-- Deleted on the bridge while the AddDevice was pending (R6): the
+			-- job's model was there when the job was made.
+			self:mark_missing(model.rid, "resync", true)
+		end
 	end
 
 	-- Each step is its own pcall so an error stops the run cleanly, with the
@@ -1675,6 +1711,15 @@ function lights:create_lights(jobs, finish)
 	end
 
 	step()
+end
+
+-- The rids of create_lights' `created`, as the set reconcile() leaves alone.
+local function created_rids(created)
+	local out = {}
+	for _, c in ipairs(created) do
+		out[c.model.rid] = true
+	end
+	return out
 end
 
 -- Actions (§6) -------------------------------------------------------------------
@@ -1705,7 +1750,7 @@ function lights:add_light(rid, room_id, done)
 			tostring(rid)))
 		return false
 	end
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local room_name
 	room_id = positive(room_id)
 	if room_id then
@@ -1732,7 +1777,7 @@ function lights:add_light(rid, room_id, done)
 	local label = self:light_label(model, false)
 	self:create_lights({ { model = model, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.importing = false
-		self:reconcile(true)
+		self:reconcile(true, created_rids(created))
 		self:flush()
 		local text
 		if created[1] then
@@ -1789,7 +1834,7 @@ function lights:import_fetched(res, finish)
 	self:absorb(res)
 	self:settle("resync", not self.configured_once)
 
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local jobs, unmapped, deleted = {}, {}, {}
 	for _, model in ipairs(self:unimported_models()) do
 		if self:is_tombstoned(model.rid) then
@@ -1843,7 +1888,7 @@ function lights:import_fetched(res, finish)
 	end
 
 	self:create_lights(jobs, function(created, failed, err)
-		self:reconcile(true)
+		self:reconcile(true, created_rids(created))
 		self:flush()
 		finish(err == nil and #failed == 0, summary(created, failed, err))
 	end)
@@ -1894,6 +1939,9 @@ function lights:relink(device_id, new_rid)
 	self.last_configure[old_rid] = nil
 	self.conflicts[old_rid], self.conflicts[new_rid] = nil, nil
 	self:clear_conflicts_for(device_id)
+	-- The rid the device announced is the old one; its next hello says the
+	-- new one (code analysis 2026-10-22 R5: a stale record made false conflicts).
+	self.announced[device_id] = nil
 	self:push(new_rid, "resync", true)
 	self:flush()
 	local text = string.format("Re-linked device %d (was %s) to %s", device_id, old_label, self:light_label(model))
@@ -1931,9 +1979,12 @@ function lights:link_devices(skip_ids)
 	if busy then
 		return busy
 	end
-	local bound = self:project_bound_set()
+	local bound, why = self.project:bound_set()
 	if not bound then
-		return "Not linked: the bound-device lookup failed (see the Lua output)"
+		if why ~= "unknown" then
+			return "Not linked: the bound-device lookup failed (see the Lua output)"
+		end
+		bound = {}  -- unknown (nil answered): nothing to adopt either way
 	end
 	-- Scene devices share binding 1 (docs/scenes-design.md) and zone-light
 	-- devices share the driver: only hue_light devices outside the skip set
@@ -1971,7 +2022,7 @@ function lights:link_devices(skip_ids)
 	-- light of that name; neither is matched by name.
 	local names, shared = {}, {}
 	for _, id in ipairs(ids) do
-		names[id] = self:display_name(id)
+		names[id] = self.project:display_name(id)
 		if names[id] then
 			shared[norm(names[id])] = (shared[norm(names[id])] or 0) + 1
 		end
@@ -2066,7 +2117,7 @@ function lights:forget(device_id)
 			label, device_id)
 	else
 		self:tell(device_id, "HUE_FORGOTTEN", { rid = rid, name = entry.name })
-		local ok, err = self:project_call("unbind", device_id)
+		local ok, err = self.project:call("unbind", device_id)
 		if not ok then
 			self.ctx.log.warn("lights: unbind of device %d failed: %s", device_id, tostring(err))
 		end
@@ -2107,7 +2158,7 @@ function lights:name_differences(include_dismissed)
 		local entry = self.registry[rid]
 		local hue = entry.name
 		if hue and hue ~= "" and (include_dismissed or entry.name_dismissed ~= hue) then
-			local current = self:display_name(entry.proxy_id or entry.device_id)
+			local current = self.project:display_name(entry.proxy_id or entry.device_id)
 			if current and current ~= hue then
 				out[#out + 1] = { rid = rid, entry = entry, current = current }
 			end
@@ -2130,7 +2181,7 @@ function lights:adopt_hue_names()
 		if not entry.proxy_id then
 			skipped[#skipped + 1] = string.format("%s (device %d): no proxy id known", current, entry.device_id)
 		else
-			local ok, err = self:project_call("rename", entry.proxy_id, hue)
+			local ok, err = self.project:call("rename", entry.proxy_id, hue)
 			if ok then
 				renamed[#renamed + 1] = string.format("%s → %s (device %d)", current, hue, entry.device_id)
 				if entry.name_dismissed ~= nil then
@@ -2238,7 +2289,7 @@ function lights:set_room_mapping(group_rid, room_id)
 	if not room_id then
 		return false, "Not mapped: pick a Control4 room or (no mapping)"
 	end
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local name = rooms[room_id]
 	if not name then
 		if next(rooms) ~= nil then
@@ -2274,7 +2325,7 @@ function lights:map_rooms_by_name(internal)
 	if #all == 0 then
 		return "Nothing mapped: no Hue rooms fetched yet (connect the event stream and try again)"
 	end
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	if next(rooms) == nil then
 		return "Nothing mapped: no Control4 rooms found in the project"
 	end
@@ -2369,7 +2420,7 @@ function lights:room_audit(extra)
 	if #checks == 0 then
 		return "Nothing to audit: no linked light is in a mapped Hue room"
 	end
-	local ok, raw = self:project_call("devices", { DeviceIds = table.concat(ids, ",") })
+	local ok, raw = self.project:call("devices", { DeviceIds = table.concat(ids, ",") })
 	if not ok or type(raw) ~= "table" or next(raw) == nil then
 		return "Room Audit unavailable: the project lookup returned nothing (see the Lua output)"
 	end
@@ -2377,7 +2428,7 @@ function lights:room_audit(extra)
 	for id, info in pairs(raw) do
 		infos[tonumber(id) or id] = info
 	end
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local lines, unknown = {}, 0
 	for _, c in ipairs(checks) do
 		local info = infos[c.device_id]
@@ -2424,7 +2475,7 @@ function lights:summary()
 	end
 	local c = self.reg:counts()
 	return string.format("%d on bridge, %d imported, %d new, %d missing, %d unbound, %d deleted", self:bridge_count(),
-		self:count(), #self:new_models(), c.gone, c.unbound, c.tombstones)
+		self:count(), self:new_count(), c.gone, c.unbound, c.tombstones)
 end
 
 -- The Attention property: one item per kind of thing waiting for the owner,
@@ -2432,7 +2483,8 @@ end
 function lights:attention()
 	local items = {}
 
-	local new = self:new_models()
+	-- Sorted (for the names) only when there is something new to name.
+	local new = self:new_count() > 0 and self:new_models() or {}
 	if #new > 0 then
 		local names = {}
 		for _, model in ipairs(new) do
@@ -2494,7 +2546,7 @@ function lights:attention()
 			#diffs == 1 and "s" or "", util.some(names, lights.MAX_NAMED))
 	end
 
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	if next(rooms) ~= nil then
 		local broken = {}
 		for group_rid, mapping in pairs(self.reg:room_mappings()) do
@@ -2566,7 +2618,7 @@ function lights:room_mapping_items()
 	if next(self.reg:room_mappings()) == nil then
 		return {}, 0
 	end
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local parts = {}
 	local unmapped = self:each_mapping_row(function(_, label, mapping)
 		parts[#parts + 1] = string.format("%s → %s", label, self:mapping_target(mapping, rooms))
@@ -2625,7 +2677,7 @@ end
 -- 2026-10-22]; tonumber() makes it nil, the mapping, like an empty Room), mode
 -- "mapping" with "(no mapping)" (value "none").
 function lights:picker_rooms(mode)
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local floors = self:room_floors()
 	local counts = {}
 	for _, name in pairs(rooms) do
@@ -2697,7 +2749,7 @@ end
 -- Set Room Mapping's Hue Room: rooms then zones, each with its mapping, then
 -- mappings whose Hue group was deleted (so they can be removed).
 function lights:picker_hue_rooms()
-	local rooms = self:project_rooms()
+	local rooms = self.project:rooms()
 	local list = {}
 	self:each_mapping_row(function(rid, label, mapping)
 		local target = self:mapping_target(mapping, rooms)
@@ -2733,8 +2785,11 @@ end
 function lights:list_items()
 	local tombs = self.reg:tombstones()
 	local rows = {}
+	-- The sort keys are lower-cased once per row, not twice per comparison
+	-- (docs/reviews/efficiency-2026-10-24.md R6).
 	local function row(room, name, suffix, rid)
-		rows[#rows + 1] = { room = tostring(room or "(no room)"), name = tostring(name or "?"), suffix = suffix,
+		room, name = tostring(room or "(no room)"), tostring(name or "?")
+		rows[#rows + 1] = { room = room, name = name, room_key = room:lower(), name_key = name:lower(), suffix = suffix,
 			rid = tostring(rid) }
 	end
 	for rid, model in pairs(self.models) do
@@ -2754,13 +2809,11 @@ function lights:list_items()
 		end
 	end
 	table.sort(rows, function(a, b)
-		local ar, br = a.room:lower(), b.room:lower()
-		if ar ~= br then
-			return ar < br
+		if a.room_key ~= b.room_key then
+			return a.room_key < b.room_key
 		end
-		local an, bn = a.name:lower(), b.name:lower()
-		if an ~= bn then
-			return an < bn
+		if a.name_key ~= b.name_key then
+			return a.name_key < b.name_key
 		end
 		return a.rid < b.rid
 	end)

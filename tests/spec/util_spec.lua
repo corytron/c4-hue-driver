@@ -23,6 +23,14 @@ describe("bridge.util", function()
 		assert.equal("7", util.sanitise(7))
 	end)
 
+	-- Issue #45 (security review 2026-10-24 finding 10).
+	it("sanitise drops control characters and keeps UTF-8 text", function()
+		assert.equal("DeskLamp", util.sanitise("Desk\nLamp"))
+		assert.equal("Desk Lamp", util.sanitise("Desk\t Lamp\r\0\127"))
+		assert.equal("Küche → Bad 2", util.sanitise("Küche → Bad 2"))
+		assert.equal("a b", util.sanitise("a,\nb"))
+	end)
+
 	it("dates read ? when unknown", function()
 		assert.equal("?", util.date_of(nil))
 		assert.equal("?", util.short_date_of(nil))
@@ -53,5 +61,36 @@ describe("bridge.util", function()
 		assert.is_true(util.has_field({ "on", "brightness" }, "on"))
 		assert.is_false(util.has_field({ "on" }, "x"))
 		assert.same({ { text = "(nothing)", value = "" } }, util.empty_list("(nothing)"))
+	end)
+
+	-- docs/reviews/diff-review-2026-10-24.md row 7 (issue #55).
+	it("has_field is false for a nil or non-table list", function()
+		assert.is_false(util.has_field(nil, "x"))
+		assert.is_false(util.has_field("on", "on"))
+	end)
+
+	-- Row 10: the one copy lights.lua and zone_lights.lua share.
+	it("copy_caps normalises a persisted caps block, with an optional min_dim default", function()
+		local stored = { has_color = "true", has_cct = true, mirek_min = "153", mirek_max = 454, min_dim = "0.2", extra = 1 }
+		assert.same({ has_color = true, has_cct = true, mirek_min = 153, mirek_max = 454, min_dim = 0.2 },
+			util.copy_caps(stored))
+		assert.same({ has_color = false, has_cct = false }, util.copy_caps({ has_color = "yes" }))
+		assert.same({ has_color = false, has_cct = false, min_dim = 1 }, util.copy_caps({}, 1), "the zone lights' default")
+		assert.equal(0.2, util.copy_caps(stored, 1).min_dim, "the default fills only a missing min_dim")
+		assert.is_nil(util.copy_caps(nil))
+		assert.is_nil(util.copy_caps("junk", 1))
+	end)
+
+	it("same_caps compares every field, and nil only with nil", function()
+		local a = util.copy_caps({ has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 1 })
+		assert.is_true(util.same_caps(a, util.copy_caps(a)))
+		for field, value in pairs({ has_color = false, has_cct = false, mirek_min = 154, mirek_max = 454, min_dim = 2 }) do
+			local b = util.copy_caps(a)
+			b[field] = value
+			assert.is_false(util.same_caps(a, b), field)
+		end
+		assert.is_true(util.same_caps(nil, nil))
+		assert.is_false(util.same_caps(nil, a))
+		assert.is_false(util.same_caps(a, nil))
 	end)
 end)

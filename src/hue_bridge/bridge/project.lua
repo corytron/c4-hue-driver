@@ -1,9 +1,10 @@
--- Project access shared by the registry-owning bridge modules (scenes.lua,
--- zone_lights.lua; lights.lua still carries its own copy): the project calls
--- of docs/import-design.md §13 with their defaults to the real C4 calls, and
--- the pcall-wrapped reads the modules make of them, every failed lookup
--- reading as "unknown". Until 2026-10-24 scenes.lua and zone_lights.lua each
--- carried a byte-identical copy (docs/reviews/slim-scenes-zones.md, row 6).
+-- Project access shared by the registry-owning bridge modules (lights.lua,
+-- scenes.lua, zone_lights.lua): the project calls of docs/import-design.md
+-- §13 with their defaults to the real C4 calls, and the pcall-wrapped reads
+-- the modules make of them, every failed lookup reading as "unknown". Until
+-- 2026-10-24 scenes.lua and zone_lights.lua each carried a byte-identical
+-- copy (docs/reviews/slim-scenes-zones.md, row 6), and lights.lua its own
+-- until 2026-10-25 (docs/reviews/diff-review-2026-10-24.md, row 10).
 -- driver.lua always passes its own `project_calls`; the defaults serve the
 -- specs and the round trips, which build the modules without a project table.
 
@@ -74,17 +75,28 @@ function project:rooms()
 end
 
 -- { [device_id] = true } of everything bound to the bridge's binding (lights,
--- scenes and group devices alike); nil when the lookup failed.
+-- scenes and group devices alike); an empty table answered means nothing is
+-- bound. nil, "failed" when the lookup raised; nil, "unknown" when it
+-- answered anything but a table. GetBoundConsumerDevices is documented to
+-- return nil when nothing is bound [verified: API 32/_3], but a nil read as
+-- "nothing bound" would let one transient nil at startup mark every entry
+-- unbound, so this build reads it as unknown: no reconcile step unbinds,
+-- relabels or reports "unbound" on it (code analysis 2026-10-22 item 14,
+-- issue #48) [assumed: what Director answers for a bridge with no bindings
+-- is still to be checked on hardware]. Actions that only add (Link Devices,
+-- a hello's adoption) may take "unknown" as nothing bound: they find
+-- nothing to adopt either way.
 function project:bound_set()
 	local ok, raw = self:call("bound")
 	if not ok then
-		return nil
+		return nil, "failed"
+	end
+	if type(raw) ~= "table" then
+		return nil, "unknown"
 	end
 	local out = {}
-	if type(raw) == "table" then
-		for id in pairs(raw) do
-			out[tonumber(id) or id] = true
-		end
+	for id in pairs(raw) do
+		out[tonumber(id) or id] = true
 	end
 	return out
 end

@@ -1,7 +1,7 @@
--- The project access the scenes and zone-light modules share: the defaults
--- to the real C4 calls and the pcall-wrapped reads, with the outputs the
--- modules' own copies produced before they were merged
--- (docs/reviews/slim-scenes-zones.md, row 6).
+-- The project access the lights, scenes and zone-light modules share: the
+-- defaults to the real C4 calls and the pcall-wrapped reads, with the outputs
+-- the modules' own copies produced before they were merged
+-- (docs/reviews/slim-scenes-zones.md, row 6; docs/reviews/diff-review-2026-10-24.md, row 10).
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -83,12 +83,15 @@ describe("bridge.project", function()
 			assert.same({}, view({ rooms = function() return nil end }):rooms())
 		end)
 
-		it("bound_set: a set of numeric ids, nil only when the lookup failed", function()
+		-- Issue #48 item 14: a nil answer is unknown, never "nothing bound";
+		-- an empty table still is.
+		it("bound_set: a set of numeric ids; nil and why when the lookup failed or answered no table", function()
 			local p = view({ bound = function() return { ["2001"] = "Hue Light", [2002] = "Hue Scene" } end })
 			assert.same({ [2001] = true, [2002] = true }, p:bound_set())
-			assert.same({}, view({ bound = function() return nil end }):bound_set(), "nothing bound is a known fact")
-			assert.same({}, view({ bound = function() return "junk" end }):bound_set())
-			assert.is_nil(view({ bound = function() error("boom") end }):bound_set())
+			assert.same({}, view({ bound = function() return {} end }):bound_set(), "an empty table: nothing bound")
+			assert.same({ nil, "unknown" }, { view({ bound = function() return nil end }):bound_set() })
+			assert.same({ nil, "unknown" }, { view({ bound = function() return "junk" end }):bound_set() })
+			assert.same({ nil, "failed" }, { view({ bound = function() error("boom") end }):bound_set() })
 		end)
 
 		it("devices_of: asks for the driver file, keys by numeric id, nil when failed or empty", function()

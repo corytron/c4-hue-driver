@@ -39,6 +39,13 @@
 -- Event-stream items have the same shapes with only the changed fields.
 -- A JSON null (mirek while mirek_valid is false) is treated like an absent
 -- field, whatever the decoder turns it into: only numbers count as numbers.
+--
+-- Every constructor keeps an item only when its `id` is a resource id
+-- (resource_id below); anything else is dropped with one debug line, since
+-- the rids the registries keep end up in request paths (recall, activate,
+-- the PUT queues) [security review 2026-10-24 finding 5, issue #45].
+
+local log = require("common.log")
 
 local hue_model = {}
 
@@ -74,6 +81,38 @@ local function text(value)
 		return value
 	end
 	return nil
+end
+
+-- A CLIP v2 resource id: letters, digits and "-" only, so nothing else can
+-- reach a request path ("?", "/", spaces, a table from a decoded JSON null);
+-- else nil. The bridge's ids are UUIDs [assumed: Signify's CLIP v2
+-- reference, which gives every id as one].
+local function resource_id(value)
+	if type(value) == "string" and value:find("^[%w%-]+$") then
+		return value
+	end
+	return nil
+end
+hue_model.resource_id = resource_id
+
+-- How a rejected id reads in the debug line: short, on one line.
+local function shown(value)
+	if type(value) == "string" then
+		return string.format("id \"%s\"", (value:sub(1, 40):gsub("%c", "?")))
+	elseif value == nil then
+		return "no id"
+	end
+	return "a " .. type(value) .. " id"
+end
+
+-- The item's id when it is a resource id, else nil after one debug line
+-- naming the kind of item dropped.
+local function item_id(item, what)
+	local id = resource_id(item.id)
+	if id == nil then
+		log.debug("hue_model: dropped a %s item with %s: not a resource id", what, shown(item.id))
+	end
+	return id
 end
 
 -- [assumed] Hue has no explicit "colour mode" field. color_temperature
@@ -190,15 +229,23 @@ function hue_model.update(light, item)
 	return changed
 end
 
--- One /clip/v2/resource/light item → the normalised light of the contract.
+-- One /clip/v2/resource/light item → the normalised light of the contract,
+-- or nil for an item that is not a table or whose id is not a resource id.
 -- `online` is not part of the resource; the registry owner sets it from
 -- zigbee_connectivity (nil until known). `id_v1` ("/lights/12") and
 -- `service_id` (0 for the only light of a device, 0/1/… on a multi-light
 -- device) are display and disambiguation data only; update() does not touch
 -- them, so an event never reports them as changed.
 function hue_model.light(item)
+	if type(item) ~= "table" then
+		return nil
+	end
+	local rid = item_id(item, "light")
+	if rid == nil then
+		return nil
+	end
 	local light = {
-		rid = item.id,
+		rid = rid,
 		id_v1 = text(item.id_v1),
 		device_rid = type(item.owner) == "table" and item.owner.rid or nil,
 		service_id = number(item.service_id),
@@ -242,11 +289,12 @@ end
 
 -- /clip/v2/resource/device items → device rid → { name, model, model_id,
 -- light_rids, zigbee_rid }. Devices without a light service (the bridge
--- itself, sensors) are kept with an empty light_rids.
+-- itself, sensors) are kept with an empty light_rids; an item whose id is
+-- not a resource id is left out.
 function hue_model.devices(items)
 	local out = {}
 	for _, item in ipairs(items or {}) do
-		if type(item) == "table" and item.id ~= nil then
+		if type(item) == "table" and item_id(item, "device") ~= nil then
 			local product = type(item.product_data) == "table" and item.product_data or {}
 			local device = {
 				name = type(item.metadata) == "table" and item.metadata.name or nil,
@@ -411,7 +459,8 @@ function hue_model.update_group(group, item)
 
 	if type(item.services) == "table" then
 		for _, service in ipairs(item.services) do
-			if type(service) == "table" and service.rtype == "grouped_light" and service.rid ~= nil then
+			-- The grouped_light rid ends up in the group queue's PUT path.
+			if type(service) == "table" and service.rtype == "grouped_light" and resource_id(service.rid) then
 				group.grouped_light_rid = service.rid
 				touched.grouped_light_rid = true
 			end
@@ -436,16 +485,20 @@ end
 -- contract (docs/import-design.md §13):
 --   { rid, type, name, children = { rid... }, child_rtype, child_rtypes = { [rid] = rtype },
 --     grouped_light_rid, id_v1 }
--- nil for an item of any other type. A room or zone without a name gets a
--- fallback like light(); bridge_home has no name (nil). `grouped_light_rid`
--- is nil for an empty zone, whose services array is empty [verified:
--- hardware 2026-10-21].
+-- nil for an item of any other type, or whose id is not a resource id. A
+-- room or zone without a name gets a fallback like light(); bridge_home has
+-- no name (nil). `grouped_light_rid` is nil for an empty zone, whose
+-- services array is empty [verified: hardware 2026-10-21].
 function hue_model.group(item)
-	if type(item) ~= "table" or item.id == nil or GROUP_CHILD_RTYPE[item.type] == nil then
+	if type(item) ~= "table" or GROUP_CHILD_RTYPE[item.type] == nil then
+		return nil
+	end
+	local rid = item_id(item, item.type)
+	if rid == nil then
 		return nil
 	end
 	local group = {
-		rid = item.id,
+		rid = rid,
 		type = item.type,
 		name = nil,
 		children = {},
@@ -536,15 +589,20 @@ end
 --     active ("inactive"|"static"|"dynamic_palette"|nil), last_recall, auto_dynamic (boolean),
 --     speed (number|nil) }
 -- nil for an item of any other type (a grouped_light sharing the container,
--- a smart_scene, a bare item without id or type). A nameless scene gets a
--- fallback name like light(); `id_v1` ("/scenes/<16 chars>") is display data
--- read once here, as for lights, so update_scene() never reports it.
+-- a smart_scene, a bare item without type) or whose id is not a resource id.
+-- A nameless scene gets a fallback name like light(); `id_v1`
+-- ("/scenes/<16 chars>") is display data read once here, as for lights, so
+-- update_scene() never reports it.
 function hue_model.scene(item)
-	if type(item) ~= "table" or item.id == nil or item.type ~= "scene" then
+	if type(item) ~= "table" or item.type ~= "scene" then
+		return nil
+	end
+	local rid = item_id(item, "scene")
+	if rid == nil then
 		return nil
 	end
 	local scene = {
-		rid = item.id,
+		rid = rid,
 		name = nil,
 		group_rid = nil,
 		group_type = nil,
@@ -803,16 +861,20 @@ end
 --     slots = { { days = { weekday... }, start ("07:00"|"sunset"|...|nil), target_rid }... },
 --     transition_duration (ms) }
 -- nil for an item of any other type (a scene or grouped_light sharing the
--- container), without a string id, or not a table. `slots` is always a list
--- (empty without week_timeslots), `metadata.image` is dropped, and a nameless
--- smart scene gets a fallback name like scene(); base_name is always
--- base_name(name).
+-- container), whose id is not a resource id, or not a table. `slots` is
+-- always a list (empty without week_timeslots), `metadata.image` is dropped,
+-- and a nameless smart scene gets a fallback name like scene(); base_name is
+-- always base_name(name).
 function hue_model.smart_scene(item)
-	if type(item) ~= "table" or text(item.id) == nil or item.type ~= "smart_scene" then
+	if type(item) ~= "table" or item.type ~= "smart_scene" then
+		return nil
+	end
+	local rid = item_id(item, "smart_scene")
+	if rid == nil then
 		return nil
 	end
 	local model = {
-		rid = item.id,
+		rid = rid,
 		name = nil,
 		base_name = nil,
 		group_rid = nil,
@@ -825,7 +887,7 @@ function hue_model.smart_scene(item)
 	}
 	hue_model.update_smart_scene(model, item)
 	if model.name == nil then
-		model.name = "Hue time-based scene " .. item.id
+		model.name = "Hue time-based scene " .. rid
 		model.base_name = hue_model.base_name(model.name)
 	end
 	return model
@@ -908,14 +970,19 @@ end
 
 -- One /clip/v2/resource/grouped_light item (a GET's, or a stream item) →
 --   { rid, owner_rid, owner_type ("room"|"zone"|"bridge_home"|nil), on (boolean|nil), brightness (number|nil) }
--- nil for an item without a string id, or of another type when it names one
--- (a light sharing the container). A bare update item (no owner block) has
--- nil owner fields: the caller resolves the owner through the group cache.
+-- nil for an item whose id is not a resource id, or of another type when it
+-- names one (a light sharing the container). A bare update item (no owner
+-- block) has nil owner fields: the caller resolves the owner through the
+-- group cache.
 function hue_model.grouped_light(item)
-	if type(item) ~= "table" or text(item.id) == nil or (item.type ~= nil and item.type ~= "grouped_light") then
+	if type(item) ~= "table" or (item.type ~= nil and item.type ~= "grouped_light") then
 		return nil
 	end
-	local model = { rid = item.id, owner_rid = nil, owner_type = nil, on = nil, brightness = nil }
+	local rid = item_id(item, "grouped_light")
+	if rid == nil then
+		return nil
+	end
+	local model = { rid = rid, owner_rid = nil, owner_type = nil, on = nil, brightness = nil }
 	hue_model.update_grouped_light(model, item)
 	return model
 end

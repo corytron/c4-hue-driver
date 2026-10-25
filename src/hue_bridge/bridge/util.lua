@@ -18,9 +18,14 @@ function util.norm(name)
 	return (tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
 end
 
--- A text with its commas turned into spaces (picker items are comma-delimited).
+-- A text with its commas turned into spaces (picker items are
+-- comma-delimited) and its control characters removed (`%c`: a newline or a
+-- tab in a Hue name would garble a Composer row). `%c` is ASCII only (bytes
+-- 0-31 and 127): LuaJIT, which runs the drivers (docs/design.md), classes
+-- characters without the locale, so UTF-8 text such as "→" or "ü" is kept.
 function util.sanitise(text)
-	return (tostring(text):gsub(",", " "))
+	local s = tostring(text):gsub(",", " ")
+	return (s:gsub("%c", ""))
 end
 
 -- A persisted timestamp is trusted only within this century: os.date
@@ -77,8 +82,10 @@ function util.signature(params)
 	return table.concat(parts, "\n")
 end
 
+-- True when the list `fields` holds `name`; false for a nil (or any other
+-- non-table) list, which a future caller may pass as "nothing changed".
 function util.has_field(fields, name)
-	for _, field in ipairs(fields) do
+	for _, field in ipairs(type(fields) == "table" and fields or {}) do
 		if field == name then
 			return true
 		end
@@ -89,6 +96,34 @@ end
 -- The one explanatory picker entry with value "" (nothing to pick).
 function util.empty_list(text)
 	return { { text = text, value = "" } }
+end
+
+-- A registry entry's capabilities as the command queue and HUE_CONFIGURE
+-- read them: booleans and numbers (a store an older build wrote may hold
+-- strings), nil for anything that is not a table. `min_dim_default` fills a
+-- missing min_dim (the zone lights' 1; the lights leave it nil). Until
+-- 2026-10-25 lights.lua and zone_lights.lua each carried a copy
+-- (docs/reviews/diff-review-2026-10-24.md, row 10).
+function util.copy_caps(caps, min_dim_default)
+	if type(caps) ~= "table" then
+		return nil
+	end
+	return {
+		has_color = caps.has_color == true or caps.has_color == "true",
+		has_cct = caps.has_cct == true or caps.has_cct == "true",
+		mirek_min = tonumber(caps.mirek_min),
+		mirek_max = tonumber(caps.mirek_max),
+		min_dim = tonumber(caps.min_dim) or min_dim_default,
+	}
+end
+
+-- True when two copy_caps() tables say the same (both nil counts as the same).
+function util.same_caps(a, b)
+	if a == nil or b == nil then
+		return a == b
+	end
+	return a.has_color == b.has_color and a.has_cct == b.has_cct and a.mirek_min == b.mirek_min
+		and a.mirek_max == b.mirek_max and a.min_dim == b.min_dim
 end
 
 return util
