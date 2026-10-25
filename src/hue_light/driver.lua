@@ -25,9 +25,11 @@ local FALLBACK_MS = 1000
 -- Prefix of every line this driver logs.
 local LOG_PREFIX = "Hue Light"
 
--- SET_COLOR_TARGET parameter names are [assumed] (the docs print them with
--- spaces, one with a "CIE 1931" suffix); the first one received is logged
--- in full so the dev loop can settle them. Each list is tried in order.
+-- SET_COLOR_TARGET parameter names: the docs print them with spaces, one with
+-- a "CIE 1931" suffix. The house's proxy sends the first spelling of each
+-- list [verified: hardware 2026-10-22, checklist D.10; see SET_COLOR_TARGET
+-- below]; the others are kept for other proxy versions [assumed]. Each list
+-- is tried in order.
 local COLOR_KEYS = {
 	x = { "LIGHT_COLOR_TARGET_X", "LIGHT_COLOR_TARGET_X_CIE_1931" },
 	y = { "LIGHT_COLOR_TARGET_Y", "LIGHT_COLOR_TARGET_Y_CIE_1931" },
