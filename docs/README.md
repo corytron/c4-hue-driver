@@ -51,6 +51,9 @@ of it is live.
   LEDs, decoupled Control4 switches.
 - [`documentation-plan.md`](documentation-plan.md): the Documentation tab in
   every driver, the manual's chapter plan and the Composer icons.
+- [`review-leftovers-design.md`](review-leftovers-design.md): the fixes for
+  the open findings of the reviews of 2026-10-22 and 2026-10-24 (#43–#65):
+  decisions, owner-visible texts and file owners, one branch and one PR.
 - [`raw-stream-design.md`](raw-stream-design.md): historical, never built: the
   event stream on a raw SSL network connection instead of `C4:url`. Kept as
   the documented alternative to the padded-address design in `design.md`.

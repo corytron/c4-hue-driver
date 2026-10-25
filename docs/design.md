@@ -109,6 +109,69 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
   returns lower case (`001788fffe100491`), `/api/0/config` upper case
   (`001788FFFE25B8F8`) **[verified]**.
 
+### TLS self-check in release builds (2026-10-25, #53)
+
+Pinning rests on one behaviour observed on OS 3.4.2: Director applies a
+relative `ssl_cabundle` from the driver's directory and fails closed when it
+cannot (above). Another OS release might ignore the option instead, which
+would widen trust to the system store while hostname checking is off, and
+until now only `Check CA Pinning` (dev builds) could notice. The release
+bridge driver now checks it by itself (`src/hue_bridge/bridge/tlscheck.lua`,
+`tests/spec/tlscheck_spec.lua`; contract `docs/review-leftovers-design.md`):
+
+- **When**: after the identity check (`GET /api/0/config`, no key) has
+  confirmed the paired bridge id and before the first keyed request of each
+  start and of each new bridge address.
+- **How**: one more `GET /api/0/config` to the bridge with `ssl_cabundle`
+  set to a decoy bundle, `certs/decoy_ca.pem` (a self-signed CA made for
+  this purpose, its private key discarded, so no certificate chains to it),
+  and `ssl_verify_peer` on. `tlscheck.run(ip, callback)` uses `bridge.http`
+  and the relative path, never the key.
+- **Verdicts**: the request fails certificate verification: `pinned`, the
+  expected answer. It succeeds: `not_pinned`, the controller is not using
+  the configured bundle, so keyed requests stop, `Status` reads `TLS check
+  failed: nothing is sent (see Attention)`, `Attention` reads `TLS check
+  failed: the controller accepted the bridge without its Signify roots;
+  keyed requests stopped (see the manual)` (the manual's chapter 12,
+  "The TLS check", asks the owner to report it as an issue), and the check
+  runs again at the next start. A timeout or connection error:
+  `inconclusive`, logged and asked again at the next identity check;
+  nothing is blocked.
+- **Why a decoy**: the check needs nothing but the bridge (no public site,
+  no internet access, no name resolution), and it exercises the very option
+  every keyed request relies on, on the controller that runs the driver, at
+  every start. It does not depend on the OS release: on OS 4.x (#53,
+  CLAUDE.md investigation 3) the first start after an upgrade reports by
+  itself whether pinning holds, without a dev build.
+- **Assumed** until the first release build with the check runs on the
+  house: that OS 3.4.2 refuses the decoy as it refused a public site with
+  the bundle in place (curl error 60, the CA probe above).
+- `Check CA Pinning` stays in dev builds; since #46 (L5) it answers
+  `inconclusive` rather than `pinned` when its second request fails for a
+  reason other than certificate verification (timeout, DNS, connection
+  refused).
+
+### A rejected key (2026-10-25, #44)
+
+- **[verified 2026-10-25 on the house Bridge Pro, software 2071524040]**: an
+  unknown application key gets **HTTP 403** on `GET
+  /clip/v2/resource/bridge` and on `/eventstream/clip/v2`, with an HTML
+  body, not JSON. A revoked key is an unknown key to the bridge **[assumed:
+  the same 403]**. The JSON `unauthorized user` body in
+  `docs/edge-cases-hue.md` is from the v1 API; CLIP v2 sends none on these
+  paths, so the driver goes by the status code alone.
+- **Behaviour.** Before: a non-200 answer to the stream request was an
+  abort, so a 401 or 403 was retried as an outage (every 60 s at most, with
+  the same key) and `Status` stayed `Paired` (security review 2026-10-24,
+  finding 8). Now a 401 or 403 on the event stream stops the stream (no
+  reconnect), and a keyed REST request answered 401 or 403 does the same:
+  `Status` reads `Key rejected by the bridge (HTTP <code>): re-pair with
+  Pair Bridge`, `Event Stream` reads `Stopped: key rejected (HTTP <code>)`,
+  and `bridge_request` answers `{ ok = false, err = "key rejected", code =
+  <code> }` at once for keyed requests until `Pair Bridge` succeeds or
+  `Bridge IP Address` changes. The command queues end such a pending state
+  without retrying (#43).
+
 ### Event stream
 
 - `GET /eventstream/clip/v2` with `Accept: text/event-stream` and the
@@ -268,8 +331,8 @@ replaces, so the two are on different Director queues.
   `padded(ip, 3)` (all 3-digit; `for_stream` was folded into it 2026-10-24), then the widths count down octet by octet:
   for `10.0.2.143` that is `10.000.002.143`, `10.000.02.143`, `10.000.2.143`,
   `10.00.002.143`, `10.00.2.143`, `10.0.002.143`, `10.0.02.143` (7). An
-  address with one paddable octet (`192.168.1.50`) has a one-entry family,
-  `192.168.001.50`: no rotation, today's behaviour, and the property says so.
+  address with one paddable octet (`198.51.100.5`) has a one-entry family,
+  `198.51.100.005`: no rotation, today's behaviour, and the property says so.
   No paddable octet: nil, single-queue fallback as before. Only forms
   measured on hardware are generated (2- and 3-digit padding, mixed per
   octet, see the scheduling notes); 4-digit padding would give one-octet
@@ -389,6 +452,12 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   PUTs go to `/clip/v2/resource/light/<rid>` on the dotted address, so they
   never queue behind the stream (see the option A decision above). On 429 or
   5xx: retry after 500 ms, doubling to 8 s; other 4xx: drop and log.
+  Superseded (2026-10-25, #43): a failure retried that way (a transport
+  error without an HTTP code too) is retried for at most 30 s from the
+  pending state's last update (`commands.MAX_AGE_S`), then dropped with one
+  warning naming its age and the last error; `not paired` and `key
+  rejected` end the pending state at once. The grouped_light queue follows
+  the same rules.
 - **Brightness and colour mapping.** Proxy → bridge:
   `SET_BRIGHTNESS_TARGET` **[verified: sample light driver]** with target 0 →
   `on=false`, otherwise `on=true, brightness=target`, `RATE` passed through;
@@ -439,7 +508,9 @@ preset **[assumed until a switch is bound on hardware]**.
 
 Superseded (2026-10-24): `hide_proxy_properties`, declared by both device
 drivers, keeps the preset, rate and LED colour settings out of Composer,
-so the defaults apply (same section below).
+so the defaults apply (same section below). Superseded (2026-10-25, #59):
+both now declare it False, so the settings show in Composer after the
+controller reboot the capability change needs.
 
 On hardware (builds 144 and 146): the Top, Bottom and Toggle Button Links
 are connections the driver declares (ids 200–202, BUTTON_LINK outputs),
@@ -535,6 +606,12 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   on, bottom lit while off). On OS 3.4.2 the capability is static (dynamic
   only from OS 4.2.1 **[verified: light_v2 proxy reference, "What's New in
   4.2.1"]**), so showing them is a capability change and needs a reboot.
+  Superseded (2026-10-25, #59): both device drivers declare
+  `hide_proxy_properties` False (the XML route, since the run-time switch
+  exists only from OS 4.2.1), so after the install the settings appear once
+  the owner has rebooted the controller from System Manager; the commands
+  they send reach the handlers above **[assumed until a setting is changed
+  on the house]**.
 - **Not yet seen on hardware:** the Hue-app side of the on rule and the
   level (a dim, the room off, another scene played in the Hue app), a slider
   move from off at a level, the absolute fallback, `held_on` across a
@@ -1031,6 +1108,11 @@ it.
   As built (2026-10-24): the grouped_light queue (scene OFF, holds, slider
   moves) is a second `bridge/commands.lua` queue with its own bucket at the
   same 10/s, burst 10; nothing enforces 1/s for groups.
+  Superseded (2026-10-24, zone lights, build 196): the grouped_light queue
+  runs at 1/s with a burst of 3 (`docs/zone-light-design.md` Decision 9);
+  since 2026-10-25 (#58) it also clamps a zone light's colour temperature to
+  the members' common range (Decision 7). Retries: the coalescer's rule
+  above (#43).
 - Rooms and zones are controlled through their `grouped_light` service.
   Scenes are recalled through `/resource/scene/{id}` **[verified: resources
   exist; recall body to be confirmed from the API reference]**.

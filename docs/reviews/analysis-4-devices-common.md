@@ -1,6 +1,6 @@
 # Analysis 4: devices + common (hue_light, hue_scene, common/dispatch, log, devloop)
 
-All paths relative to `/home/cory/projects/c4-hue-driver/src/`. L = hue_light/driver.lua, S = hue_light/light/state.lua, SC = hue_scene/driver.lua, DL = common/devloop.lua.
+All paths relative to the repository's `src/`. L = hue_light/driver.lua, S = hue_light/light/state.lua, SC = hue_scene/driver.lua, DL = common/devloop.lua.
 
 ## Security
 

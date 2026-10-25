@@ -32,15 +32,16 @@ optional.
   development machine, `001788fffe123abc` for a bridge id in documents and
   `001788fffe25b8f8` (Signify's own documentation example) in the test
   fixtures, and the RFC 5737 ranges (`192.0.2.0/24`, `198.51.100.0/24`,
-  `203.0.113.0/24`) for any other example address in code, tests and design
-  notes (the manual and the README may use home-network-looking examples
-  such as `192.168.1.50`). Screenshots are taken on a demo project with
-  invented names. Since 2026-10-25 these rules are enforced: the `secrets`
-  check runs `gitleaks` with the repository's rules (`.gitleaks.toml`) over
-  the working tree and the whole history, in CI on every pull request and
-  locally in `tools/check.sh`; the placeholders above are allowed, and
-  anything that looks like a key, a token, a private key or one of the
-  author's addresses fails the check.
+  `203.0.113.0/24`) for any other example address, in code, tests and
+  documents, the manual and the README included (the secrets check accepts
+  zero-padded spellings of `10.0.2.143` and of `192.0.2.x`, but in
+  `198.51.100.x` and `203.0.113.x` only of the last number). Screenshots
+  are taken on a demo project with invented names. Since 2026-10-25 these
+  rules are enforced: the `secrets` check runs `gitleaks` with the
+  repository's rules (`.gitleaks.toml`) over the working tree and the whole
+  history, in CI on every pull request and locally in `tools/check.sh`; the
+  placeholders above are allowed, and anything that looks like a key, a
+  token, a private key or one of the author's addresses fails the check.
 - **Logos, badges or trade dress** of Snap One or Signify, and any wording
   that suggests affiliation, certification or endorsement. "Works with
   Philips Hue" and "for Philips Hue" are the allowed phrasings.

@@ -21,7 +21,9 @@ Set `Debug Mode` to On before starting and keep the Lua output window open.
 2a. The CA question is settled (runs 4 and 5): the driver uses the bundle
    shipped in the archive. If `Status` ever shows "transfer failed (77)" or
    "(60)" against the bridge after an OS upgrade, run **Check CA Pinning**
-   and report its `Status` line.
+   and report its `Status` line. (Since 2026-10-25 release builds check
+   pinning by themselves at every start, #53: a failure shows in
+   `Attention` as "TLS check failed: …".)
 3. Actions → **Pair Bridge** *without* pressing the link button.
    - Expect `Bridge Model` = `BSB002` (or `BSB003` on a Bridge Pro) and
      `Status` = "Press the link button on the bridge, then run Pair Bridge

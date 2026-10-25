@@ -92,6 +92,10 @@ reboots the controller). Read:
 5. The Documentation tab opens and shows the manual's title and the
    chapter list (and the three device pages).
 6. The Lua tab of a device during the install: no `[ERROR]` line.
+7. The bridge's `Attention` does not read `TLS check failed: …` and
+   `Status` reads `Paired`: the TLS self-check found the controller using
+   the driver's certificate bundle (#53; the manual's chapter 12, "The TLS
+   check"). After a controller OS upgrade this line is the pinning check.
 
 ## 3. The owner, on the phone and keypads
 

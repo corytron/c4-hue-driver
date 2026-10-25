@@ -140,8 +140,9 @@ the lights from Control4" (§8 item 11) as chapter 11, and a Glossary.
 
 Every action and every property of the three drivers must appear at least
 once with its exact Composer name in bold. Field examples are written as
-the reader would type or pick them, e.g. "Bridge IP Address: 192.168.1.50"
-(use documentation addresses such as 192.168.1.50, never the house's).
+the reader would type or pick them, e.g. "Bridge IP Address: 10.0.2.143"
+(use the bridge placeholder or RFC 5737 documentation addresses, never the
+house's; until 2026-10-25 the manual used home-network-looking ones, #64).
 Corner cases are stated as "if … then the driver … and you …".
 
 ## 4. HTML rules (Composer's tab is an Internet Explorer control)
@@ -288,10 +289,10 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
    a valid one is set.
 4. Delete the troubleshooting item "Room Mappings says (deleted in Hue)
    for every room right after a restart" (fixed in code).
-5. 5 `Stream Address` example: 192.168.1.50 has one paddable octet, so the
-   text is "(own queue, no second spelling to rotate; …)"; an address with
-   no octet below 8 reads "(shared queue with commands: no octet below 8
-   to pad; stream timeout capped at 60 s)".
+5. 5 `Stream Address` example: the manual's address then had one paddable
+   octet, so the text is "(own queue, no second spelling to rotate; …)";
+   an address with no octet below 8 reads "(shared queue with commands: no
+   octet below 8 to pad; stream timeout capped at 60 s)".
 6. "HTTP 401" everywhere becomes "HTTP 401 or 403" (the code prints the
    code it gets; Hue documents 403 for a revoked key).
 7. Import skip label carries the tag: "Vanity 3 #92 (deleted 2026-10-22)".
@@ -326,7 +327,8 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
     disabled on Navigators; a tap during an outage shows the requested
     level after a second although the bulb did nothing, and the command is
     retried until the bridge is back, even hours later; a scene recall is
-    one request and is not retried.
+    one request and is not retried. (Superseded 2026-10-25, #43: a command
+    is retried for at most 30 s after its last change, then dropped.)
 14. 8.8 adds project restore from a Composer backup and controller
     replacement: what lives on the bridge device (key, registry,
     tombstones, mappings), what each device remembers, the expected steps
@@ -391,7 +393,9 @@ chapter structure of §3 and the HTML rules of §4; the code stays the truth.
     failed: …" doubled prefix; Room Audit's "All 1 linked lights" plural.
 
 **Not done**: verifying whether a revoked key answers 401 or 403 (needs the
-key revoked on the house bridge).
+key revoked on the house bridge). Since 2026-10-25 (#44): an unknown key
+gets 403 from the house Bridge Pro (`docs/design.md`, "A rejected key"); a
+revoked key is assumed to get the same.
 
 **Outcome**: the revision shipped in build 135 (2026-10-22 14:21); the
 Documentation tab then showed the 13 chapters and the

@@ -240,12 +240,16 @@ altogether.
    (`hue_light/driver.lua:675`, `hue_scene/driver.lua:994`) are the only
    timers `OnDriverDestroyed` does not track; harmless on the controller (the
    Lua state goes with the device) and at most a stray `UpdateProperty` after
-   a dev-loop reload. Track them (3 lines each) or leave?
+   a dev-loop reload. Track them (3 lines each) or leave? **Done
+   2026-10-25** (#49): the Driver Version timers are tracked and killed in
+   `OnDriverDestroyed` in both device drivers and the bridge.
 6. Not slimming: the device-side pre-late-init buffer (`hue_light/driver.lua:694`,
    `hue_scene/driver.lua:1056`) has no cap, where the bridge's hello queue
    keeps 200 (`docs/code-analysis-2026-10-22.md:40-46`). The window is one
    startup, the senders are the bridge's own configure/state per device; a
    cap of 50 would be three lines. For the hardening list, not this pass.
+   **Done 2026-10-24** on `release-prep` (security review finding 4): the
+   buffer is capped at 200 messages (`common/device.lua`).
 7. #5 drifts one log line: a shared `load_identity` gives the scene the
    light's "persisted kind %q is not one this build knows" warning
    (`hue_light/driver.lua:636`) where the scene is silent (955-957). Not an
