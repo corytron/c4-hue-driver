@@ -859,14 +859,28 @@ local function last_action_row(i)
 	return string.format("Last Action (%d)", i)
 end
 
--- Every continuation row's visibility, asserted in full each time: Composer
--- once showed row (3) without row (2) when both appeared together [hardware
--- 2026-10-24, build 243], so nothing depends on what was shown before, and
--- a one-shot timer asserts it once more shortly after.
+-- Every continuation row's visibility, asserted in full and only after the
+-- texts have landed: Composer dropped a show (build 243) and a hide (build
+-- 245) that arrived in the same burst as the rows' text updates [hardware
+-- 2026-10-24], so the visibility goes out as one batch 400 ms later and
+-- once more at 1.5 s; nothing depends on what was shown before.
 local function assert_last_action_rows()
 	for i = 2, LAST_ACTION_ROWS do
 		row_visible(last_action_row(i), last_action_shown[i] == true)
 	end
+end
+
+local function assert_last_action_rows_soon()
+	if last_action_timer then
+		last_action_timer:Cancel()
+	end
+	last_action_timer = C4:SetTimer(400, function()
+		assert_last_action_rows()
+		last_action_timer = C4:SetTimer(1500, function()
+			last_action_timer = nil
+			assert_last_action_rows()
+		end)
+	end)
 end
 
 local function last_action(text)
@@ -881,14 +895,7 @@ local function last_action(text)
 		prop(last_action_row(i), lines[i] or "")
 		last_action_shown[i] = lines[i] ~= nil
 	end
-	assert_last_action_rows()
-	if last_action_timer then
-		last_action_timer:Cancel()
-	end
-	last_action_timer = C4:SetTimer(400, function()
-		last_action_timer = nil
-		assert_last_action_rows()
-	end)
+	assert_last_action_rows_soon()
 	refresh_lights_props()
 end
 
@@ -900,6 +907,7 @@ local function settle_last_action_rows()
 		last_action_shown[i] = value ~= ""
 	end
 	assert_last_action_rows()
+	assert_last_action_rows_soon()
 end
 
 -- The lists are read-only in Composer; should a pick still arrive, the row
