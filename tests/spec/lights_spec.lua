@@ -1303,8 +1303,11 @@ describe("bridge.lights", function()
 			assert.equal("None", L:attention())
 			assert.equal("Garage White", c4.persist.hue_lights[F.rids.garage].name_dismissed)
 			assert.equal("No Composer names differ from the Hue names", L:accept_names())
-			-- A Hue rename makes the difference new again.
-			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
+			-- A Hue rename makes the difference new again: the Hue app renames
+			-- the device, and the light's own name follows [assumed,
+			-- docs/edge-cases-hue.md §1].
+			L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+				metadata = { name = "Garage Lamp" } }, { id = F.rids.garage, type = "light",
 				metadata = { name = "Garage Lamp" } } } })
 			assert.equal("1 Hue name differs from the Composer names: Garage is Garage Lamp in Hue "
 				.. "(Adopt Hue Names or Accept Names As They Are)", L:attention())
@@ -1328,6 +1331,52 @@ describe("bridge.lights", function()
 			L:on_container({ type = "update", data = { { id = F.rids.kitchen, type = "light",
 				metadata = { name = "Island" } } } })
 			assert.same({}, c4.renamed)
+		end)
+	end)
+
+	-- Issue #236, item 6: a light is compared with the name its device was
+	-- created with (the Hue device's name for the only light of its device),
+	-- so a fresh import is no difference even when Hue calls the device and
+	-- its light differently. bridge/owner_spec.lua has the upgrade cases.
+	describe("names after an import where the Hue device is called otherwise (#236)", function()
+		-- Garage White's device is called "Garage Device" in Hue; the light keeps "Garage White".
+		local function import_device_named()
+			L:import_new(done)
+			answer_gets({ device = replace(F.device, '"metadata":{"name":"Garage White"',
+				'"metadata":{"name":"Garage Device"') })
+			L:add_light(F.rids.kitchen, LIVING_ROOM, done)
+			assert.equal("Garage Device", c4.added[1].name)
+			assert.equal("Garage White", L.registry[F.rids.garage].name, "the registry keeps the light's own name")
+		end
+
+		it("lists no difference at once, and Adopt Hue Names renames nothing", function()
+			import_device_named()
+			assert.equal("None", L:attention())
+			assert.same({}, L:name_differences(true))
+			assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
+			assert.same({}, c4.renamed)
+		end)
+
+		it("lists a rename in Composer against the device's name, which Adopt Hue Names renames back to", function()
+			import_device_named()
+			local proxy = fake.project.devices[ID.garage].proxy_id
+			L.registry[F.rids.garage].proxy_id = proxy
+			c4:RenameDevice(proxy, "Garage")
+			c4.renamed = {}
+			assert.equal("1 Hue name differs from the Composer names: Garage is Garage Device in Hue "
+				.. "(Adopt Hue Names or Accept Names As They Are)", L:attention())
+			assert.equal("Renamed 1 device: Garage → Garage Device (device 2001)", L:adopt_hue_names())
+			assert.same({ { id = proxy, name = "Garage Device" } }, c4.renamed)
+			assert.equal("None", L:attention())
+		end)
+
+		it("lists a rename of the Hue device", function()
+			import_device_named()
+			L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+				metadata = { name = "Workbench" } } } })
+			assert.equal("1 Hue name differs from the Composer names: Garage Device is Workbench in Hue "
+				.. "(Adopt Hue Names or Accept Names As They Are)", L:attention())
+			assert.same({}, c4.renamed, "an event renames nothing")
 		end)
 	end)
 

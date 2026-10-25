@@ -108,10 +108,12 @@ describe("Hue Bridge driver", function()
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
 		c4.transfers[3]:respond(200, CONFIG)
 		c4.transfers[4]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
-		assert.equal("Paired", env.Properties["Status"])
+		-- Not "Paired" before the identity check has passed (#236).
+		assert.equal("Checking the bridge at 192.0.2.10 before anything is sent", env.Properties["Status"])
 		assert.equal("001788fffe25b8f8", env.Properties["Bridge ID"])
 
 		answer_identity(c4)
+		assert.equal("Paired", env.Properties["Status"])
 		local check = c4.transfers[6]
 		assert.equal(CHECK_URL, check.url, "self-check before the stream")
 		assert.equal("abc123", check.headers["hue-application-key"])
@@ -217,8 +219,9 @@ describe("Hue Bridge driver", function()
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
 		c4.transfers[1]:respond(200, CONFIG)
 		c4.transfers[2]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
-		assert.equal("Paired", env.Properties["Status"])
+		assert.equal("Checking the bridge at 192.0.2.10 before anything is sent", env.Properties["Status"])
 		answer_check(c4)
+		assert.equal("Paired", env.Properties["Status"])
 		assert.equal(STREAM_URL, c4.transfers[5].url)
 		assert.equal("abc123", c4.transfers[4].headers["hue-application-key"])
 	end)
@@ -226,8 +229,9 @@ describe("Hue Bridge driver", function()
 	it("self-checks then reconnects the stream on startup when already paired, and counts events", function()
 		local env, c4 = paired_driver({ ["Stream Timeout (s)"] = "900" })
 		env.OnDriverLateInit("DIT_STARTUP")
-		assert.equal("Paired", env.Properties["Status"])
+		assert.equal("Checking the bridge at 192.0.2.10 before anything is sent", env.Properties["Status"])
 		answer_check(c4)
+		assert.equal("Paired", env.Properties["Status"])
 		local s = c4.last_transfer()
 		assert.equal(STREAM_URL, s.url)
 		assert.equal(900, s.options.timeout, "configured timeout honoured in dual-queue mode")
@@ -1064,6 +1068,335 @@ describe("Hue Bridge driver", function()
 			answer_identity(c4)
 			assert.is_nil(last_to(c4, TEST_URL), "no test to the old address")
 			assert.is_nil(last_to(c4, "https://192.0.2.11/clip/v2/resource/bridge"), "nor to the new one")
+		end)
+	end)
+
+	-- Issue #236: pairing another bridge (docs/bridge-compat-design.md,
+	-- "Pairing another bridge (#236)"), Status while nothing is sent, the
+	-- pairing failure's prefix, the feed after a rejected key and a new
+	-- address, the Event Stream row after a restart, and a light imported
+	-- under its Hue device's other name. The paired bridge 001788fffe123abc
+	-- answers at 10.0.2.143; 001788fffe456def is another bridge.
+	describe("pairing and Status (#236)", function()
+		local IP, PAIRED, OTHER = "10.0.2.143", "001788fffe123abc", "001788fffe456def"
+		local CHECKING = "Checking the bridge at 10.0.2.143 before anything is sent"
+		local WAITING = "Not connected: bridge identity not verified yet"
+		local REFUSED = "Pairing failed: Bridge at 10.0.2.143 reports ID 001788fffe456def, expected 001788fffe123abc; "
+			.. "run Forget Pairing first to pair with another bridge"
+		local OTHER_AT_IP = "Bridge at 10.0.2.143 reports ID 001788fffe456def, expected 001788fffe123abc; nothing is "
+			.. "sent until the address is corrected"
+
+		local function config_of(id, name)
+			return '{"bridgeid":"' .. id:upper() .. '","modelid":"BSB003","name":"' .. (name or "Hue")
+				.. '","swversion":"1968096020","apiversion":"1.68.0"}'
+		end
+
+		-- Paired with PAIRED at IP; `props` adds or overrides properties.
+		local function house(props)
+			local all = { ["Bridge IP Address"] = IP }
+			for k, v in pairs(props or {}) do all[k] = v end
+			local env, c4 = fake.load_driver("hue_bridge", all)
+			c4.persist.hue_app_key = "abc123"
+			c4.persist.hue_bridge_id = PAIRED
+			return env, c4
+		end
+
+		-- Answer the newest transfer, which must be a request for `path`.
+		local function answer(c4, path, code, body)
+			local t = c4.last_transfer()
+			assert(t and t.url:find(path, 1, true), "expected a request for " .. path .. ", got " .. tostring(t and t.url))
+			t:respond(code, body)
+			return t
+		end
+
+		-- The unkeyed GET /api/0/config of the identity check or of a pairing,
+		-- answered by bridge `id` (default the paired one).
+		local function identity(c4, id, name)
+			local t = answer(c4, "/api/0/config", 200, config_of(id or PAIRED, name))
+			assert.is_nil(t.headers["hue-application-key"])
+			return t
+		end
+
+		-- The stream address self-check after a passed identity check.
+		local function self_check(c4)
+			return answer(c4, "/clip/v2/resource/bridge", 200, '{"errors":[],"data":[{"id":"x","type":"bridge",'
+				.. '"bridge_id":"' .. PAIRED .. '"}]}')
+		end
+
+		local function streaming(c4)
+			local t = c4.last_transfer()
+			return t ~= nil and t.url:find("/eventstream/clip/v2", 1, true) ~= nil and not t.cancelled
+		end
+
+		local function set_address(env, value)
+			env.Properties["Bridge IP Address"] = value
+			env.OnPropertyChanged("Bridge IP Address")
+		end
+
+		local function pair(env)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+		end
+
+		describe("Pair Bridge with another bridge (item 1)", function()
+			it("is refused until Forget Pairing, before anything is shown or asked for", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				self_check(c4)
+				local s = c4.last_transfer()
+				assert.is_true(streaming(c4))
+
+				-- A replacement bridge now answers at the address.
+				pair(env)
+				local n = #c4.transfers
+				identity(c4, OTHER, "Replacement")
+				assert.equal(REFUSED, env.Properties["Status"])
+				assert.equal(n, #c4.transfers, "no key requested")
+				assert.same({ "abc123", PAIRED }, { c4.persist.hue_app_key, c4.persist.hue_bridge_id }, "nothing stored")
+				assert.equal(PAIRED, env.Properties["Bridge ID"])
+				assert.equal("Hue", env.Properties["Bridge Name"], "the rows are not rewritten")
+				assert.is_false(s.cancelled, "the stream is left alone")
+
+				-- After Forget Pairing it pairs, and every later check expects it.
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing" })
+				pair(env)
+				identity(c4, OTHER, "Replacement")
+				answer(c4, "/api", 200, '[{"success":{"username":"otherkey"}}]')
+				assert.same({ "otherkey", OTHER }, { c4.persist.hue_app_key, c4.persist.hue_bridge_id })
+				assert.equal(CHECKING, env.Properties["Status"])
+				assert.equal(WAITING, env.Properties["Event Stream"])
+				identity(c4, OTHER, "Replacement")
+				assert.equal("Paired", env.Properties["Status"])
+				assert.equal(OTHER, env.Properties["Bridge ID"])
+				assert.equal("Replacement", env.Properties["Bridge Name"])
+			end)
+
+			it("lets Forget Pairing overtake the checks: no error, blank rows, the next bridge checked afresh", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP")
+				local check = c4.last_transfer()
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing" })
+				assert.has_no.errors(function() check:respond(200, config_of(OTHER, "Replacement")) end)
+				assert.equal("Not paired: press the link button, then run Pair Bridge", env.Properties["Status"])
+				assert.equal("", env.Properties["Bridge Name"])
+
+				-- A TLS check of the paired bridge that ends after Forget Pairing
+				-- proves nothing for the bridge paired next: it is checked afresh.
+				env, c4 = house()
+				c4.tls_ignores_cabundle = true
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				local decoy = c4.last_transfer()
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing" })
+				decoy:done(60, "SSL peer certificate or SSH remote key was not OK")  -- pinned
+				pair(env)
+				identity(c4, OTHER)
+				answer(c4, "/api", 200, '[{"success":{"username":"otherkey"}}]')
+				assert.equal(CHECKING, env.Properties["Status"])
+				identity(c4, OTHER)
+				assert.equal("Paired", env.Properties["Status"])
+			end)
+
+			it("is refused after an address change, and while the key is gone but the id is stored", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				self_check(c4)
+				set_address(env, "192.0.2.144")
+				identity(c4, OTHER)
+				assert.equal("Bridge at 192.0.2.144 reports ID 001788fffe456def, expected 001788fffe123abc; nothing is "
+					.. "sent until the address is corrected", env.Properties["Status"])
+				local n = #c4.transfers
+				pair(env)
+				identity(c4, OTHER)
+				assert.equal("Pairing failed: Bridge at 192.0.2.144 reports ID 001788fffe456def, expected "
+					.. "001788fffe123abc; run Forget Pairing first to pair with another bridge", env.Properties["Status"])
+				assert.equal(n + 1, #c4.transfers, "the probe only")
+				assert.equal(PAIRED, c4.persist.hue_bridge_id)
+
+				-- The key unreadable after a restore, the id still stored.
+				env, c4 = house()
+				c4.persist.hue_app_key = nil
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.equal("Not paired: press the link button, then run Pair Bridge", env.Properties["Status"])
+				pair(env)
+				identity(c4, OTHER)
+				assert.equal(REFUSED, env.Properties["Status"])
+				assert.equal(1, #c4.transfers, "the probe only")
+			end)
+
+			it("pairs the paired bridge again with a new key, at a new address too", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				-- The bridge moved to another address before the stream started.
+				set_address(env, "192.0.2.144")
+				identity(c4)
+				self_check(c4)
+				assert.is_true(streaming(c4))
+				pair(env)
+				identity(c4)
+				answer(c4, "/api", 200, '[{"success":{"username":"newkey"}}]')
+				assert.same({ "newkey", PAIRED, "192.0.2.144" }, { c4.persist.hue_app_key, c4.persist.hue_bridge_id,
+					c4.persist.hue_bridge_ip })
+				assert.equal("Paired", env.Properties["Status"], "the identity check had passed at this address")
+				self_check(c4)
+				assert.is_true(streaming(c4))
+				assert.equal("newkey", c4.last_transfer().headers["hue-application-key"])
+			end)
+		end)
+
+		describe("Status (item 2)", function()
+			it("keeps the identity check's text when the same address is set again", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.equal(CHECKING, env.Properties["Status"])
+				identity(c4, OTHER)
+				assert.equal(OTHER_AT_IP, env.Properties["Status"])
+				set_address(env, IP)
+				assert.equal(OTHER_AT_IP, env.Properties["Status"])
+				env.ExecuteCommand("HUE_SET", { rid = "l1", on = "true" })
+				c4.fire_timers()
+				for _, t in ipairs(c4.transfers) do
+					assert.is_nil(t.headers["hue-application-key"], "nothing is sent")
+				end
+			end)
+
+			it("keeps the texts of an unreachable bridge and of an inconclusive TLS check until the check passes",
+				function()
+					local env, c4 = house()
+					env.OnDriverLateInit("DIT_STARTUP")
+					c4.last_transfer():done(7, "Couldn't connect to server")
+					local text = "Bridge at 10.0.2.143 not reachable (transfer failed (7): Couldn't connect to server); "
+						.. "checking again in 30 s"
+					assert.equal(text, env.Properties["Status"])
+					set_address(env, IP)
+					assert.equal(text, env.Properties["Status"])
+					for _, timer in ipairs(c4.active_timers()) do
+						if timer.delay == 30000 then
+							timer.active = false
+							timer.callback(timer, 0)
+						end
+					end
+					identity(c4)
+					assert.equal("Paired", env.Properties["Status"])
+					set_address(env, IP)
+					assert.equal("Paired", env.Properties["Status"], "the normal state once the check has passed")
+
+					env, c4 = house()
+					c4.tls_ignores_cabundle = true
+					env.OnDriverLateInit("DIT_STARTUP")
+					identity(c4)
+					c4.last_transfer():done(28, "Timeout was reached")  -- the decoy request
+					text = "TLS check inconclusive (transfer failed (28): Timeout was reached): nothing is sent; checking "
+						.. "again in 30 s"
+					assert.equal(text, env.Properties["Status"])
+					set_address(env, IP)
+					assert.equal(text, env.Properties["Status"])
+				end)
+
+			it("reads Checking, not Paired, after an address change until the new address passes", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				self_check(c4)
+				assert.equal("Paired", env.Properties["Status"])
+				set_address(env, "192.0.2.144")
+				assert.equal("Checking the bridge at 192.0.2.144 before anything is sent", env.Properties["Status"])
+				identity(c4)
+				assert.equal("Paired", env.Properties["Status"])
+			end)
+		end)
+
+		it("a key request without an answer reads Pairing failed once (item 3)", function()
+			local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = IP })
+			env.OnDriverLateInit("DIT_STARTUP")
+			pair(env)
+			identity(c4)
+			c4.last_transfer():done(7, "Couldn't connect to server")
+			assert.equal("Pairing failed: No usable answer to the key request: transfer failed (7): Couldn't connect to "
+				.. "server", env.Properties["Status"])
+		end)
+
+		it("a new address after a rejected key brings the feed back once the identity check passes (item 4)", function()
+			local env, c4 = house()
+			env.OnDriverLateInit("DIT_STARTUP")
+			identity(c4)
+			self_check(c4)
+			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			assert.equal("Stopped: key rejected (HTTP 403)", env.Properties["Event Stream"])
+
+			set_address(env, "192.0.2.144")
+			assert.equal("Checking the bridge at 192.0.2.144 before anything is sent", env.Properties["Status"])
+			assert.equal(WAITING, env.Properties["Event Stream"])
+			identity(c4)
+			self_check(c4)
+			assert.is_true(streaming(c4), "the feed is back without a click")
+			assert.equal("https://192.000.002.144/eventstream/clip/v2", c4.last_transfer().url)
+			assert.equal("Paired", env.Properties["Status"])
+
+			-- A feed the owner disconnected stays off at a new address.
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
+			set_address(env, "192.0.2.145")
+			identity(c4)
+			self_check(c4)
+			assert.is_false(streaming(c4))
+			assert.equal("Stopped", env.Properties["Event Stream"])
+		end)
+
+		it("a new address while the feed is about to start brings it up there (item 4)", function()
+			local env, c4 = house()
+			env.OnDriverLateInit("DIT_STARTUP")
+			identity(c4)
+			-- The address check before the first stream has not answered yet.
+			assert.truthy(c4.last_transfer().url:find("/clip/v2/resource/bridge", 1, true))
+			set_address(env, "192.0.2.144")
+			identity(c4)
+			self_check(c4)
+			assert.is_true(streaming(c4))
+			assert.equal("https://192.000.002.144/eventstream/clip/v2", c4.last_transfer().url)
+		end)
+
+		it("late init writes a true Event Stream text while the identity or TLS check is pending or failing (item 5)",
+			function()
+				-- Director keeps the row's value across a restart.
+				local BEFORE = "Connected since 14:03:12, 128 containers, last 14:40:01"
+				local env, c4 = house({ ["Event Stream"] = BEFORE })
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.equal(WAITING, env.Properties["Event Stream"], "the check is pending")
+				identity(c4, OTHER)
+				assert.equal(WAITING, env.Properties["Event Stream"], "the check failed")
+
+				env, c4 = house({ ["Event Stream"] = BEFORE })
+				c4.tls_ignores_cabundle = true
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				identity(c4)  -- the decoy request, which this controller accepts
+				assert.equal("TLS check failed: nothing is sent (see Attention)", env.Properties["Status"])
+				assert.equal("Not connected: TLS check failed", env.Properties["Event Stream"])
+
+				env, c4 = house({ ["Event Stream"] = BEFORE })
+				env.OnDriverLateInit("DIT_STARTUP")
+				identity(c4)
+				self_check(c4)
+				assert.equal("Connecting", env.Properties["Event Stream"], "the stream's own texts once it starts")
+			end)
+
+		it("does not report a light imported under its Hue device's other name after a restart (item 6)", function()
+			local env, c4 = house()
+			local id
+			c4:AddDevice("hue_light.c4z", nil, "Desk Lamp", function(device_id) id = device_id end)
+			c4:Bind(c4.device_id, 1, id, 1, "HUE_BRIDGE")
+			-- Created under the Hue device's name; the light itself is called otherwise in Hue.
+			c4.persist.hue_lights = { ["rid-1"] = { device_id = id, name = "Hue color lamp 1", device_name = "Desk Lamp",
+				device_rid = "dev-1", model = "Hue color lamp", caps = {} } }
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("None", env.Properties["Attention"])
+			-- Composer renames both halves [verified: hardware]; the fake one id at a time.
+			c4:RenameDevice(id, "Reading Lamp")
+			c4:RenameDevice(fake.project.devices[id].proxy_id, "Reading Lamp")
+			env.OnSystemEvent("OnItemNameChanged")
+			assert.truthy(env.Properties["Attention"]:find("Reading Lamp is ", 1, true), env.Properties["Attention"])
 		end)
 	end)
 

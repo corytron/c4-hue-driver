@@ -165,7 +165,7 @@ the project is the owner's; nothing is lost by waiting (import-design §1).
 | Group turned on/off/dimmed/recoloured in the Hue app or by a Hue switch | `HUE_STATE` from the grouped_light event and the member events; LEDs follow | — | — |
 | A scene of the group played | Decision 10 | — | — |
 | Bridge restored from a backup onto the same bridge | Resync: rids kept → nothing; rids changed → entries `gone`, groups listed as new | `Link Devices` (exact name), `Re-link` | Re-linking by name on its own |
-| Bridge replaced / re-paired | As lights: `Pair Bridge` refuses a different bridge id until `Forget Pairing`; afterwards every entry `gone`, every group new. Current (2026-10-25, build 316): `Pair Bridge` compares no ids: it pairs with the bridge at the address and stores its id; until then the identity check sends nothing to a bridge whose id differs from the paired one (`bridge/pairing.lua:pair`, `hue_bridge/driver.lua:verify_identity`) | `Link Devices`, `Re-link`, `Forget` | Silent matching |
+| Bridge replaced / re-paired | As lights: `Pair Bridge` refuses a different bridge id until `Forget Pairing`; afterwards every entry `gone`, every group new. Current (2026-10-25, #236): as decided, `Pair Bridge` refuses a bridge whose id differs from the stored one until `Forget Pairing` (`bridge/pairing.lua:other_bridge`, `docs/bridge-compat-design.md` "Pairing another bridge"); the identity check sends nothing to such a bridge either (`hue_bridge/driver.lua:verify_identity`) | `Link Devices`, `Re-link`, `Forget` | Silent matching |
 
 ### Control4 side
 
