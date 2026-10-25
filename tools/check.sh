@@ -14,11 +14,13 @@
 #   lua-test     busted tests
 #   shell        shellcheck -S style tools/*.sh (and setup-vm.sh if present)
 #   python-lint  ruff check tools; ruff format --check tools
-#   python-test  python3 -m unittest discover -s tools/tests
+#   python-test  python3 -B -m unittest discover -s tools/tests (-B: no __pycache__,
+#                whose constant-folded test vectors the secrets tree scan would flag)
 #   xml          every src/*/driver.xml is well-formed (xml.etree, no xmllint)
 #   powershell   Invoke-ScriptAnalyzer over tools/composer (skipped without pwsh)
 #   workflows    actionlint; zizmor --min-severity medium .github/workflows
-#   secrets      gitleaks over the working tree and the current branch's whole history
+#   secrets      gitleaks over the working tree, then over the history of every
+#                local ref (git log --all) or, in GitHub Actions, of HEAD only
 #   house        python3 tools/deploy.py validate (deploy/house.yaml, offline)
 #
 # One line per check: "ok <name>", "FAIL <name>" followed by the output of the
@@ -88,7 +90,7 @@ check_python_test() {
 		echo "tools/tests/ does not exist: there are no Python unit tests to run"
 		return 1
 	fi
-	run python3 -m unittest discover -s tools/tests
+	run python3 -B -m unittest discover -s tools/tests
 }
 
 check_xml() {
@@ -121,6 +123,21 @@ check_workflows() {
 	return "$rc"
 }
 
+# Which history the secrets check reads. Run by hand, every local ref
+# (branches, tags, stashes and remote-tracking refs): a stale tag or branch
+# can hold history that never reached GitHub, and a `git push --tags` or
+# `--mirror` would publish it (security review 2026-10-25, finding 14). In CI
+# (GitHub Actions sets GITHUB_ACTIONS=true) the history of the checked-out
+# commit only: the full-depth checkout also holds every other branch and tag
+# of the repository, whose findings are not this change's.
+secrets_log_opts() {
+	if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+		echo HEAD
+	else
+		echo --all
+	fi
+}
+
 check_secrets() {
 	local rc=0
 	if [[ ! -f .gitleaks.toml ]]; then
@@ -128,7 +145,7 @@ check_secrets() {
 		return 1
 	fi
 	run gitleaks dir . --config .gitleaks.toml --no-banner --redact || rc=1
-	run gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=HEAD || rc=1
+	run gitleaks git . --config .gitleaks.toml --no-banner --redact "--log-opts=$(secrets_log_opts)" || rc=1
 	return "$rc"
 }
 

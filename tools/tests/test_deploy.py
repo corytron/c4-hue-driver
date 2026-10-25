@@ -98,6 +98,18 @@ def attestation_for(digest, name="hue_bridge.c4z", predicate="https://slsa.dev/p
     return {"attestations": [{"bundle": {"dsseEnvelope": envelope}, "repository_id": 1}]}
 
 
+def verified_result(repo=REPO, workflow=".github/workflows/release.yml", ref="refs/heads/main"):
+    """One entry of what `gh attestation verify --format json` prints (the fields deploy.py reads)."""
+    san = "https://github.com/%s/%s@%s" % (repo, workflow, ref)
+    return {
+        "attestation": {"bundle": {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"}},
+        "verificationResult": {
+            "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+            "signature": {"certificate": {"subjectAlternativeName": san, "sourceRepositoryRef": ref}},
+        },
+    }
+
+
 class FakeGh:
     """Stands in for deploy.run_gh: canned GitHub state, every call recorded.
 
@@ -119,6 +131,9 @@ class FakeGh:
         self.next_issue = 10
         self.clock = 0
         self.fail_once = None  # (method, path fragment): the next matching api call fails
+        self.version = "2.103.2"  # what `gh --version` names
+        self.verify_failures = {}  # digest -> gh's stderr when `gh attestation verify` refuses that package
+        self.verify_output = {}  # digest -> what `gh attestation verify` prints instead of one good result
 
     # -- plumbing ---------------------------------------------------------
 
@@ -127,6 +142,10 @@ class FakeGh:
         self.calls.append((args, input))
         if args[0] == "repo":
             return json.dumps({"nameWithOwner": self.repo})
+        if args[0] == "--version":
+            return "gh version %s (2026-10-23)\nhttps://github.com/cli/cli/releases/tag/v%s\n" % ((self.version,) * 2)
+        if args[0] == "attestation":
+            return self.attestation_verify(args)
         if args[0] == "api":
             return self.api(args, input)
         if args[0] == "release":
@@ -274,6 +293,25 @@ class FakeGh:
                 self._not_found(args)
             return json.dumps(self.attestations[digest])
         self._not_found(args)
+
+    # -- gh attestation verify ----------------------------------------------
+
+    def attestation_verify(self, args):
+        """gh attestation verify FILE --repo R --signer-workflow R/.github/workflows/release.yml --format json:
+        the file's digest decides the answer, as on GitHub."""
+        assert args[1] == "verify", args
+        assert args[args.index("--repo") + 1] == self.repo, args
+        assert args[args.index("--signer-workflow") + 1] == self.repo + "/.github/workflows/release.yml", args
+        assert args[args.index("--format") + 1] == "json", args
+        with open(args[2], "rb") as handle:
+            digest = sha(handle.read())
+        if digest in self.verify_failures:
+            raise deploy.GhError(args, 1, "", self.verify_failures[digest])
+        if digest not in self.attestations:
+            raise deploy.GhError(args, 1, "", "✗ No attestations found for subject sha256:%s" % digest)
+        if digest in self.verify_output:
+            return self.verify_output[digest]
+        return json.dumps([verified_result(self.repo)]) + "\n"
 
     # -- gh release download ----------------------------------------------
 
@@ -583,6 +621,15 @@ class GitHubReadsTest(DeployCase):
         with self.assertRaises(deploy.DeployError):
             deploy.attestation_check(REPO, "x.c4z", "2" * 64)
 
+    def test_gh_version(self):
+        self.assertEqual(deploy.gh_version(), (2, 103, 2))
+        self.gh.version = "2.46.0"
+        self.assertEqual(deploy.gh_version(), (2, 46, 0))
+        deploy.run_gh = lambda args, input=None: "gh version DEV\n"
+        with self.assertRaises(deploy.DeployError) as ctx:
+            deploy.gh_version()
+        self.assertIn("cannot read gh's version", str(ctx.exception))
+
     def test_tag_commit_annotated_and_lightweight(self):
         self.assertEqual(deploy.tag_commit(REPO, "v1.0"), COMMIT)
         self.assertTrue(self.gh.api_calls("GET", "git/tags/" + tag_object("v1.0")))
@@ -666,7 +713,7 @@ class StartTest(DeployCase):
         self.assertIn("Add or Update Driver or Agent", brief)
         self.assertIn("Never delete and re-add", brief)
         self.assertIn('Note from the coordinator: "changes <capabilities>: reboot the controller afterwards"', brief)
-        self.assertIn("presence and subject only", brief)
+        self.assertIn("--signer-workflow octo/hue/.github/workflows/release.yml", brief)
         self.assertIn("no LAN address and no bridge id", brief)
         self.assertNotIn("10.0.1.", brief)
         self.assertNotIn("hue_app_key", brief)
@@ -711,7 +758,120 @@ class StartTest(DeployCase):
         with open(self.release_file("BRIEF.md"), encoding="utf-8") as handle:
             brief = handle.read()
         self.assertIn("hue_scene.c4z: NO provenance attestation", brief)
-        self.assertIn("hue_bridge.c4z: provenance attestation present", brief)
+        self.assertIn("hue_bridge.c4z: provenance verified, signed by", brief)
+        # The two attested packages were still verified; the third has nothing to verify.
+        verified = [args[2] for args, _ in self.gh.calls_matching("attestation", "verify")]
+        self.assertEqual(verified, [self.release_file("hue_bridge.c4z"), self.release_file("hue_light.c4z")])
+
+    def read_brief(self):
+        with open(self.release_file("BRIEF.md"), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_start_verifies_each_package_against_the_release_workflow(self):
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 0, err)
+        calls = self.gh.calls_matching("attestation", "verify")
+        self.assertEqual([args[2] for args, _ in calls], [self.release_file(name) for name in deploy.PACKAGES])
+        policy = ["--repo", "octo/hue", "--signer-workflow", "octo/hue/.github/workflows/release.yml"]
+        for args, _ in calls:
+            self.assertEqual(args[3:], policy + ["--format", "json"])
+        signer = "https://github.com/octo/hue/.github/workflows/release.yml@refs/heads/main"
+        self.assertIn("attestation hue_light.c4z: verified (gh 2.103.2), signed by " + signer, out)
+        brief = self.read_brief()
+        for name in deploy.PACKAGES:
+            self.assertIn("- %s: provenance verified, signed by %s" % (name, signer), brief)
+        self.assertIn(
+            "Verified on the VM with gh 2.103.2: `gh attestation verify <file> --repo octo/hue --signer-workflow "
+            "octo/hue/.github/workflows/release.yml` for each package",
+            brief,
+        )
+
+    def test_start_refuses_an_attestation_another_workflow_signed(self):
+        digest = sha(PACKAGE_BYTES["hue_light.c4z"])
+        self.gh.verify_failures[digest] = (
+            "Loaded digest sha256:%s for file://hue_light.c4z\n✗ Verification failed\n"
+            'Error: verifying with issuer "sigstore.dev": certificate SAN '
+            "https://github.com/octo/hue/.github/workflows/scorecard.yml@refs/heads/main does not match" % digest
+        )
+        for extra in ((), ("--no-attestation",)):
+            with self.subTest(extra=extra):
+                code, out, err = self.run_main("start", *extra)
+                self.assertEqual(code, 1)
+                self.assertIn("hue_light.c4z: gh attestation verify refused it", err)
+                self.assertIn("the signer must be octo/hue/.github/workflows/release.yml", err)
+                self.assertIn("scorecard.yml", err)
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+        self.assertFalse(os.path.isfile(self.release_file("BRIEF.md")))
+
+    def test_start_refuses_a_gh_that_cannot_pin_the_signer(self):
+        for version in ("2.46.0", "2.101.0"):
+            with self.subTest(version=version):
+                self.gh.version = version
+                code, out, err = self.run_main("start", "--no-attestation")
+                self.assertEqual(code, 1)
+                self.assertIn("gh %s cannot check who signed the attestations" % version, err)
+                self.assertIn("needs gh 2.102.0 or newer", err)
+        self.assertEqual(self.gh.calls_matching("attestation"), [])
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+        self.gh.version = "2.102.0"
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 0, err)
+
+    def test_start_without_any_attestation_verifies_nothing(self):
+        self.gh.attestations.clear()
+        self.gh.version = "2.46.0"  # too old to verify, and there is nothing to verify
+        code, out, err = self.run_main("start", "--no-attestation")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.gh.calls_matching("--version"), [])
+        self.assertEqual(self.gh.calls_matching("attestation"), [])
+        brief = self.read_brief()
+        self.assertEqual(brief.count("NO provenance attestation"), 3)
+        self.assertIn("No package carries an attestation, so nothing was verified (--no-attestation).", brief)
+
+    def test_start_refuses_when_gh_verifies_nothing(self):
+        digest = sha(PACKAGE_BYTES["hue_bridge.c4z"])
+        for printed, reason in (
+            ("[]\n", "reported no verified attestation"),
+            ('{"verified": true}', "reported no verified attestation"),
+            ("✓ Verification succeeded!", "not JSON"),
+        ):
+            with self.subTest(printed=printed):
+                self.gh.verify_output[digest] = printed
+                code, out, err = self.run_main("start")
+                self.assertEqual(code, 1)
+                self.assertIn("hue_bridge.c4z: gh attestation verify", err)
+                self.assertIn(reason, err)
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+
+    def test_start_checks_the_signer_gh_reports(self):
+        """A gh that matched loosely (as 2.51 to 2.101 did) still cannot pass a lookalike signer."""
+        digest = sha(PACKAGE_BYTES["hue_scene.c4z"])
+        for result in (
+            verified_result(workflow=".github/workflows/release.yml.bak.yml"),
+            verified_result(workflow=".github/workflows/Release.yml"),
+            verified_result(workflow=".github/workflows/scorecard.yml"),
+            verified_result(repo="octo/hue-fork"),
+            {"verificationResult": {"signature": {}}},
+            "not an object",
+        ):
+            with self.subTest(result=result):
+                self.gh.verify_output[digest] = json.dumps([verified_result(), result])
+                code, out, err = self.run_main("start")
+                self.assertEqual(code, 1)
+                self.assertIn("hue_scene.c4z: a verified attestation names the signer", err)
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+        # A release cut from a pushed tag, and the owner's name in another case, are the same signer.
+        self.gh.verify_output[digest] = json.dumps(
+            [verified_result(ref="refs/tags/v1.0"), verified_result(repo="Octo/Hue")]
+        )
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 0, err)
+        self.assertIn(
+            "hue_scene.c4z: provenance verified, signed by "
+            "https://github.com/Octo/Hue/.github/workflows/release.yml@refs/heads/main, "
+            "https://github.com/octo/hue/.github/workflows/release.yml@refs/tags/v1.0",
+            self.read_brief(),
+        )
 
     def test_start_fails_on_attestation_subject_mismatch(self):
         digest = sha(PACKAGE_BYTES["hue_light.c4z"])

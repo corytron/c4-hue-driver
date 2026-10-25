@@ -23,6 +23,12 @@ local function quiet()
 	log.sink = function() end
 end
 
+-- A signed dev loop command, as tools/devctl.py run queues it: the
+-- development handlers answer nothing else (docs/dev-loop.md).
+local function signed(command, params)
+	return require("common.devloop").execute(command, params)
+end
+
 local function paired_driver(extra)
 	local props = { ["Bridge IP Address"] = "192.0.2.10" }
 	for k, v in pairs(extra or {}) do props[k] = v end
@@ -140,8 +146,21 @@ describe("Hue Bridge driver", function()
 		assert.equal(rotating("192.000.02.10", 2), env.Properties["Stream Address"])
 		assert.equal("192.000.02.10", c4.persist.hue_stream_spelling)
 
+		-- At most two stream transfers are open at once (stream.MAX_ABANDONED):
+		-- with the first still open, Disconnect and Connect abandon the second
+		-- and the third waits for one of them to close (security review
+		-- 2026-10-25, finding 5). The spelling moves on only for a transfer
+		-- that opens.
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+		assert.equal(second, c4.last_transfer(), "no third transfer while two may be open")
+		assert.equal("Waiting for an earlier stream transfer to close", env.Properties["Event Stream"])
+		assert.equal("192.000.02.10", c4.persist.hue_stream_spelling, "the spelling waits too")
+		-- The first one's next callback aborts it (the fake keeps a cancelled
+		-- transfer silent, so its end stands for that callback); the retry
+		-- then opens the third on the next spelling.
+		first:done(-1, nil)
+		c4.fire_timers()
 		assert.equal(STREAM_URL_3, c4.last_transfer().url)
 		local checks = 0
 		for _, t in ipairs(c4.transfers) do
@@ -400,7 +419,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection", Host = "192.00.2.10" })
+		signed("Test Connection", { Host = "192.00.2.10" })
 		local t = c4.last_transfer()
 		assert.equal("https://192.00.2.10/clip/v2/resource/bridge", t.url)
 		assert.equal("abc123", t.headers["hue-application-key"])
@@ -585,7 +604,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Hue Request", Method = "put",
+		signed("Hue Request", { Method = "put",
 			Path = "/clip/v2/resource/light/abc", Body = '{"metadata":{"name":"Desk"}}', Host = "192.00.002.10" })
 		local t = c4.last_transfer()
 		assert.equal("PUT", t.method)
@@ -595,7 +614,7 @@ describe("Hue Bridge driver", function()
 		t:respond(200, '{"data":[{"rid":"abc","rtype":"light"}],"errors":[]}')
 		assert.truthy(lines[#lines]:find("Hue Request PUT /clip/v2/resource/light/abc via 192.00.002.10: HTTP 200", 1, true))
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Hue Request", Path = "/clip/v2/resource/light" })
+		signed("Hue Request", { Path = "/clip/v2/resource/light" })
 		c4.last_transfer():respond(200, '{"data":[{"id":"l1","type":"light","metadata":{"name":"Desk"}},'
 			.. '{"id":"l2","type":"light","metadata":{"name":"Hall"}}],"errors":[]}')
 		assert.truthy(lines[#lines]:find("2 items: l1=Desk; l2=Hall", 1, true))
@@ -623,7 +642,7 @@ describe("Hue Bridge driver", function()
 		end)
 
 		it("Proxy Command sends a light_v2 command to the light's proxy by name", function()
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "desk lamp",
+			signed("Proxy Command", { Light = "desk lamp",
 				Command = "SET_BRIGHTNESS_TARGET", LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
 			local m = c4.sent[#c4.sent]
 			assert.equal(2005, m.id)
@@ -634,14 +653,14 @@ describe("Hue Bridge driver", function()
 
 		it("Proxy Command reports an unknown light", function()
 			local before = #c4.sent
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "nope" })
+			signed("Proxy Command", { Light = "nope" })
 			assert.equal(before, #c4.sent)
 			assert.truthy(lines[#lines]:find("no registered light, zone light or scene matches", 1, true))
 		end)
 
 		it("Lights Report lists the registry and the owner-facing texts", function()
 			local before = #lines
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Lights Report" })
+			signed("Lights Report", {})
 			local text = table.concat(lines, "\n", before + 1)
 			assert.truthy(text:find("Lights Report: 1 registered", 1, true))
 			assert.truthy(text:find("Attention: ", 1, true))
@@ -843,6 +862,195 @@ describe("Hue Bridge driver", function()
 			for item in tostring(c4.property_lists["Lights"] or ""):gmatch("[^,]+") do
 				assert.is_nil(item:find("%c"), item)
 			end
+		end)
+	end)
+
+	describe("security fixes (docs/security-fixes-design.md)", function()
+		local KEY_STATUS = "Key rejected by the bridge (HTTP 403): re-pair with Pair Bridge"
+		local TEST_URL = "https://192.0.2.10/clip/v2/resource/bridge"
+		local BRIDGE_OK = '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}'
+
+		local function keyed(c4, from)
+			local found = {}
+			for i = from or 1, #c4.transfers do
+				local t = c4.transfers[i]
+				if t.headers and t.headers["hue-application-key"] then
+					found[#found + 1] = t
+				end
+			end
+			return found
+		end
+
+		local function last_to(c4, url)
+			for i = #c4.transfers, 1, -1 do
+				if c4.transfers[i].url == url then
+					return c4.transfers[i]
+				end
+			end
+		end
+
+		-- Paired, TLS answered by a controller that ignores the decoy bundle,
+		-- so the decoy request lands in c4.transfers for the spec to answer.
+		local function at_decoy()
+			local env, c4 = paired_driver()
+			c4.tls_ignores_cabundle = true
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_identity(c4)
+			local decoy = c4.last_transfer()
+			assert.equal("certs/decoy_ca.pem", decoy.options.ssl_cabundle)
+			return env, c4, decoy
+		end
+
+		it("Test Connection waits for the identity check and reports a different bridge without the key", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			local identity = c4.last_transfer()
+			assert.truthy(identity.url:find("/api/0/config", 1, true))
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			assert.equal("Testing: checking the bridge identity first", env.Properties["Status"])
+			assert.equal(identity, c4.last_transfer(), "the test joins the identity check in flight")
+			answer_identity(c4, "001788FFFE456DEF")
+			assert.equal("Bridge at 192.0.2.10 reports ID 001788fffe456def, expected 001788fffe25b8f8; nothing is sent "
+				.. "until the address is corrected", env.Properties["Status"])
+			assert.same({}, keyed(c4), "no request carried the key")
+		end)
+
+		it("Test Connection sends the key once the identity check passes, and the stream's start is kept", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			answer_identity(c4)
+			local test = last_to(c4, TEST_URL)
+			assert.is_truthy(test, "the keyed test GET after the identity check")
+			test:respond(200, BRIDGE_OK)
+			assert.truthy(env.Properties["Status"]:find("^Test OK: HTTP 200 via 192.0.2.10"))
+			local check = last_to(c4, CHECK_URL)
+			assert.is_truthy(check, "the stream's pending start survived the test")
+			check:respond(200, BRIDGE_OK)
+			assert.equal(STREAM_URL, c4.last_transfer().url)
+		end)
+
+		it("Test Connection is refused after a failed TLS check, and nothing carries the key", function()
+			local env, c4, decoy = at_decoy()
+			decoy:respond(200, CONFIG)
+			assert.equal("TLS check failed: nothing is sent (see Attention)", env.Properties["Status"])
+			local count = #c4.transfers
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			assert.equal("Test refused: TLS check failed; nothing is sent (see Attention)", env.Properties["Status"])
+			assert.equal(count, #c4.transfers)
+			assert.same({}, keyed(c4))
+		end)
+
+		it("keeps a failed TLS verdict through Connect Event Stream and a new pairing", function()
+			local env, c4, decoy = at_decoy()
+			decoy:respond(200, CONFIG)
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+			assert.equal("Not connected: TLS check failed", env.Properties["Event Stream"])
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+			c4.last_transfer():respond(200, CONFIG)
+			c4.last_transfer():respond(200, '[{"success":{"username":"newkey","clientkey":"00"}}]')
+			c4.fire_timers()
+			assert.same({}, keyed(c4), "the verdict holds until the next start or address change")
+			assert.equal("TLS check failed: nothing is sent (see Attention)", env.Properties["Status"])
+		end)
+
+		it("blocks on an inconclusive TLS check until a conclusive one on a Director version never seen pinned", function()
+			local env, c4, decoy = at_decoy()
+			decoy:done(28, "Timeout was reached")
+			assert.equal("TLS check inconclusive (transfer failed (28): Timeout was reached): nothing is sent; checking "
+				.. "again in 30 s", env.Properties["Status"])
+			assert.same({}, keyed(c4))
+			assert.is_nil(c4.persist.tls_pinned_on)
+
+			c4.fire_timers()
+			answer_identity(c4)
+			local again = c4.last_transfer()
+			assert.equal("certs/decoy_ca.pem", again.options.ssl_cabundle, "asked again after 30 s")
+			again:done(60, "SSL peer certificate or SSH remote key was not OK")
+			assert.equal(c4.director_version, c4.persist.tls_pinned_on, "pinned is remembered for this version")
+			assert.equal(CHECK_URL, c4.last_transfer().url, "then the keyed self-check")
+			assert.equal("Paired", env.Properties["Status"])
+		end)
+
+		it("lets an inconclusive TLS check pass on a Director version that answered pinned before", function()
+			local env, c4 = paired_driver()
+			c4.tls_ignores_cabundle = true
+			c4.persist.tls_pinned_on = c4.director_version
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_identity(c4)
+			c4.last_transfer():done(28, "Timeout was reached")
+			assert.equal(CHECK_URL, c4.last_transfer().url)
+
+			local env2, c42 = paired_driver()
+			c42.tls_ignores_cabundle = true
+			c42.persist.tls_pinned_on = "3.3.0.100000"
+			env2.OnDriverLateInit("DIT_STARTUP")
+			answer_identity(c42)
+			c42.last_transfer():done(28, "Timeout was reached")
+			assert.same({}, keyed(c42), "another version (an upgraded OS) proves nothing")
+		end)
+
+		it("confirms a REST 401/403 with one GET of the bridge resource before it locks", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			local stream_t = c4.last_transfer()
+			stream_t:respond_headers(200, {})
+			local before = #c4.transfers
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh Scenes" })
+			local refused = c4.transfers[before + 1]
+			assert.is_truthy(refused, "a keyed module request")
+			refused:respond(403, "<html>forbidden</html>")
+			local confirm = c4.last_transfer()
+			assert.equal(TEST_URL, confirm.url, "one keyed GET of the bridge resource decides")
+			assert.are_not.equal(KEY_STATUS, env.Properties["Status"], "not locked by one refusal")
+			confirm:respond(200, BRIDGE_OK)
+			assert.are_not.equal(KEY_STATUS, env.Properties["Status"])
+			assert.is_false(stream_t.cancelled == true, "the stream keeps running")
+
+			before = #c4.transfers
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh Scenes" })
+			c4.transfers[before + 1]:respond(403, "<html>forbidden</html>")
+			c4.last_transfer():respond(403, "<html>forbidden</html>")
+			assert.equal(KEY_STATUS, env.Properties["Status"], "the bridge resource refused too: locked")
+		end)
+
+		it("a Test Connection that shows the key works clears the lock and starts the stream again", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			assert.equal(KEY_STATUS, env.Properties["Status"])
+			local count = #c4.transfers
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+			assert.equal("Not connected: key rejected", env.Properties["Event Stream"])
+			assert.equal(count, #c4.transfers, "Connect Event Stream presents no rejected key")
+
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			local test = c4.last_transfer()
+			assert.equal(TEST_URL, test.url, "the test may send the key while locked")
+			test:respond(200, BRIDGE_OK)
+			assert.truthy(env.Properties["Status"]:find("^Test OK"))
+			assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true), "the stream starts again")
+		end)
+
+		it("shows the bridge name without control characters", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			c4.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8","modelid":"BSB003","name":"Hue\\nBridge",'
+				.. '"swversion":"1968096020","apiversion":"1.68.0"}')
+			assert.equal("HueBridge", env.Properties["Bridge Name"])
+		end)
+
+		it("drops a Test Connection that waited for the identity check of an earlier address", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			env.Properties["Bridge IP Address"] = "192.0.2.11"
+			env.OnPropertyChanged("Bridge IP Address")
+			answer_identity(c4)
+			assert.is_nil(last_to(c4, TEST_URL), "no test to the old address")
+			assert.is_nil(last_to(c4, "https://192.0.2.11/clip/v2/resource/bridge"), "nor to the new one")
 		end)
 	end)
 

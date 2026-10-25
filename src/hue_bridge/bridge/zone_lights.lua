@@ -382,7 +382,8 @@ function zone_lights.group_label(_self, group)
 end
 
 -- Composer name at creation (§5 Naming): a zone's name verbatim, "<Room>
--- Lights" for a room. `record` is a cached group or an entry.
+-- Lights" for a room. `record` is a cached group or an entry. Raw:
+-- owner:new_device_name makes it a display name for AddDevice.
 function zone_lights.creation_name(_self, record)
 	local name = tostring(record.name or "?")
 	local gtype = record.type or record.group_type
@@ -453,14 +454,19 @@ end
 -- HUE_CONFIGURE params (§5 Messages): the light fields plus kind "group",
 -- group_type, light_count, no_lights, model, hue_room, id_v1, min_dim "1",
 -- and state "gone" + gone_since while gone (absent while linked, as the
--- lights' are). Every value a string.
+-- lights' are). Every value a string. The name and the group's label are
+-- display names: the device shows them in its Hue Name and Hue Room rows,
+-- and its own Adopt Hue Name renames to the name (security review
+-- 2026-10-25 finding 8). The registry keeps Hue's own.
 function zone_lights.configure_params(_self, rid, entry)
 	local extra = {}
 	if entry.state == "gone" then
 		extra.state = "gone"
 		extra.gone_since = entry.gone_since
 	end
-	return hue_model.group_configure_params(rid, entry, extra)
+	local params = hue_model.group_configure_params(rid, entry, extra)
+	params.name, params.hue_room = owner.shown(params.name), owner.shown(params.hue_room)
+	return params
 end
 
 -- The colour a registered group shows (Decision 8) and its signature for
@@ -1180,7 +1186,7 @@ function zone_lights:create_device(job, finish)
 		end
 	end
 
-	local name = self:creation_name(group)
+	local name = self:new_device_name(group)  -- a display name (finding 8)
 	self.ctx.log.info("zone_lights: adding %s to %s as %s", self:group_label(group), tostring(job.room_name), name)
 	local ok, err = pcall(self.ctx.add_device, zone_lights.LIGHT_DRIVER, job.room_id, name, function(device_id, info)
 		self:protect("register " .. tostring(name), on_added, device_id, info)
@@ -1366,12 +1372,13 @@ function zone_lights:record_label(group)
 end
 
 -- The unimported zones and rooms whose creation name (a zone's name, "<Room>
--- Lights") is wanted (norm'd names), zones first.
+-- Lights") is wanted (keys of util.name_key, as owner:match_unimported_by_name
+-- builds them), zones first.
 function zone_lights:unimported_named(wanted)
 	local out = {}
 	for _, gtype in ipairs({ "zone", "room" }) do
 		for _, group in ipairs(self:groups():groups(gtype)) do
-			if not self.registry[group.rid] and wanted[util.norm(self:creation_name(group))] then
+			if not self.registry[group.rid] and wanted[util.name_key(self:creation_name(group))] then
 				out[#out + 1] = group
 			end
 		end

@@ -141,6 +141,12 @@
 --      rename, as the lights did; each device is still read once, before its
 --      own rename, so the renames and the texts are the same.
 --   N4 the texts -> WORDS.hue_names, device_noun, name_difference.
+--   N5 (security review 2026-10-25 finding 8, not a divergence) every Hue
+--      name handed to Control4 is a util.display_name: new_device_name for
+--      AddDevice ("Hue " .. WORDS.kind when nothing of the creation name can
+--      be shown), name_differences' expected for RenameDevice, shown() for
+--      the forgotten message's name; the comparisons and the name matches run
+--      both sides through the same function (see name_differences).
 --   A1 the gone and unbound labels: entry_label, or the plain name (zone
 --      lights) -> entry_name (also the re-link text's "was").
 --   A2 the claimant label -> conflict_label; A3 the words -> WORDS.kind,
@@ -192,6 +198,15 @@ local util = require("bridge.util")
 local project = require("bridge.project")
 
 local owner = {}
+
+-- A name a message carries to a device, which shows it in a row (the
+-- forgotten message's): its display name, or nil when nothing of it can be
+-- shown (C4:SendToDevice drops an empty string anyway).
+local function shown(name)
+	local text = util.display_name(name)
+	return text ~= "" and text or nil
+end
+owner.shown = shown
 
 -- Every ctx field the module's caller leaves out defaults to the real C4
 -- call; `module` gives the binding (BINDING, BINDING_CLASS). Returns ctx.
@@ -1016,6 +1031,18 @@ function owner:added(rid)
 	return self:push(rid, "resync", true)
 end
 
+-- The name AddDevice gives the device of `record`: the module's creation
+-- name as a display name (finding 8), or "Hue light" / "Hue scene" / "Hue
+-- zone light" when nothing of it can be shown. The zone lights' own
+-- create_device names its device here too.
+function owner:new_device_name(record)
+	local name = util.display_name(self:creation_name(record))
+	if name == "" then
+		return "Hue " .. self.WORDS.kind
+	end
+	return name
+end
+
 -- One AddDevice per job, one at a time (the next from the previous
 -- callback, so Director adds one driver at a time), each registered by
 -- register_added and told by added(). jobs = { { record, room_id, room_name }
@@ -1051,8 +1078,8 @@ function owner:create(jobs, finish)
 		if not job then
 			return finish(created, failed)
 		end
-		local name = self:creation_name(job.record)
-		self.ctx.log.info("%s: adding %s to %s (%d of %d)", self.TAG, tostring(name), tostring(job.room_name), i, total)
+		local name = self:new_device_name(job.record)
+		self.ctx.log.info("%s: adding %s to %s (%d of %d)", self.TAG, name, tostring(job.room_name), i, total)
 		self.ctx.add_device(self.DEVICE_DRIVER, job.room_id, name, function(device_id, info)
 			self:protect("register " .. tostring(name), on_added, job, device_id, info)
 			step()
@@ -1076,9 +1103,11 @@ function owner:refresh_fields(rid, fields, clears)
 			delta[k] = v
 		end
 	end
-	for _, k in ipairs(clears or {}) do
-		if fields[k] == nil and entry[k] ~= nil then
-			delta[k] = self.reg.CLEAR
+	if clears then  -- most calls have none (an event's refresh): no empty table each time
+		for _, k in ipairs(clears) do
+			if fields[k] == nil and entry[k] ~= nil then
+				delta[k] = self.reg.CLEAR
+			end
 		end
 	end
 	if next(delta) then
@@ -1091,7 +1120,7 @@ end
 -- Names (docs/import-design.md §6, [Q 10]) --------------------------------------
 
 -- The Composer name a linked device should carry: its creation name (lights
--- override with the Hue name).
+-- override with the Hue name). Raw: name_differences makes it a display name.
 function owner:expected_name(_rid, entry)
 	return self:creation_name(entry)
 end
@@ -1099,14 +1128,42 @@ end
 -- Linked entries whose Composer name differs from the expected name:
 -- { rid, entry, current, expected }..., without the differences the owner has
 -- accepted unless `include_dismissed` (Adopt Hue Names renames those too).
+-- `expected` is a display name (finding 8): what Adopt Hue Names hands to
+-- RenameDevice and Accept Names As They Are records.
+--
+-- The Composer name, the expected name and the accepted one are compared as
+-- display names, because devices created before finding 8 carry the raw
+-- name AddDevice was given, and name_dismissed holds the raw expected name
+-- an older build accepted. Per case after the upgrade (decided 2026-10-25):
+--   - a name display_name leaves unchanged: compared exactly as before. That
+--     is every name a genuine bridge gives without control characters: Hue
+--     allows 32 characters (docs/edge-cases-hue.md §6), and the longest name
+--     built from them, a zone scene's "<Zone> <Scene>", has 65 of NAME_MAX;
+--   - an older device under a raw name display_name changes (control
+--     characters, or over NAME_MAX characters), its Hue name unchanged:
+--     equal, so it is not listed and Adopt Hue Names leaves it alone. Listing
+--     it would report a Hue rename that never happened; renaming it unasked
+--     is automation. Its raw name stays until the owner renames it;
+--   - a difference the owner accepted (name_dismissed raw or display): stays
+--     accepted until the Hue name changes;
+--   - a Hue rename, to a long name too: listed; Adopt Hue Names renames to
+--     the display name, which then compares equal;
+--   - an owner's rename: listed until accepted, as before, and renamed only
+--     by the owner's own Adopt Hue Names click (which renames accepted
+--     differences too, as always);
+--   - a difference past NAME_MAX characters or in control characters only:
+--     not listed, as no Composer name could show it;
+--   - a Hue name with nothing to show (only control characters or blanks):
+--     never listed or renamed, as there is nothing to rename to.
 function owner:name_differences(include_dismissed)
 	local out = {}
 	for _, rid in ipairs(self.reg:rids("linked")) do
 		local entry = self.registry[rid]
-		local expected = self:expected_name(rid, entry)
-		if entry.name and entry.name ~= "" and (include_dismissed or entry.name_dismissed ~= expected) then
+		local expected = util.display_name(self:expected_name(rid, entry))
+		if entry.name and entry.name ~= "" and expected ~= ""
+			and (include_dismissed or util.display_name(entry.name_dismissed) ~= expected) then
 			local current = self.project:display_name(entry.proxy_id or entry.device_id)
-			if current and current ~= expected then
+			if current and util.display_name(current) ~= expected then
 				out[#out + 1] = { rid = rid, entry = entry, current = current, expected = expected }
 			end
 		end
@@ -1398,7 +1455,7 @@ function owner:forget(device_id)
 		return false, string.format("Not forgotten: device %d is not a registered %s", device_id, self.WORDS.registered)
 	end
 	local label = self:forget_label(rid, entry, device_id)
-	local told = self:told_name(entry)
+	local told = shown(self:told_name(entry))
 	self.reg:forget(rid)
 	self:mark()
 	self:forgot(rid, entry, device_id, told)
@@ -1445,7 +1502,7 @@ function owner:forget_request(params)
 		return false, string.format("Not forgotten: the %s named no device", self.WORDS.requester)
 	end
 	if not self.reg:by_device(device_id) then
-		self:tell(device_id, self.MESSAGES.forgotten, { rid = params.rid, name = params.name })
+		self:tell(device_id, self.MESSAGES.forgotten, { rid = params.rid, name = shown(params.name) })
 		self.announced[device_id] = nil
 		return false, string.format("Not forgotten: device %d is not a registered %s (told it so)", device_id,
 			self.WORDS.registered)
@@ -1454,12 +1511,16 @@ function owner:forget_request(params)
 end
 
 -- The unimported records (unimported_named, the module's own candidate rule)
--- whose names match one of `names`, trimmed and case-insensitive.
+-- whose names match one of `names`, as util.name_key compares them (display
+-- names, trimmed and case-insensitive): a device created under the display
+-- name of a long Hue name matches that name (finding 8). `wanted` is keyed
+-- by name_key; the modules look their records' names up the same way.
 function owner:match_unimported_by_name(names)
 	local wanted = {}
 	for _, name in ipairs(names) do
-		if name ~= nil and util.norm(name) ~= "" then
-			wanted[util.norm(name)] = true
+		local key = util.name_key(name)
+		if key ~= "" then
+			wanted[key] = true
 		end
 	end
 	return self:unimported_named(wanted)
@@ -1513,7 +1574,8 @@ function owner:link_devices(skip_ids)
 	for _, id in ipairs(ids) do
 		names[id] = self.project:display_name(id)
 		if names[id] then
-			shared[util.norm(names[id])] = (shared[util.norm(names[id])] or 0) + 1
+			local key = util.name_key(names[id])
+			shared[key] = (shared[key] or 0) + 1
 		end
 	end
 
@@ -1538,9 +1600,9 @@ function owner:link_devices(skip_ids)
 			else
 				problems[#problems + 1] = string.format("%s: could not register %s (see the Lua output)", who, rid)
 			end
-		elseif names[id] and shared[util.norm(names[id])] > 1 then
+		elseif names[id] and shared[util.name_key(names[id])] > 1 then
 			problems[#problems + 1] = string.format("%s: %d bound devices share that name; rename one in Composer and run "
-				.. "Link Devices again", who, shared[util.norm(names[id])])
+				.. "Link Devices again", who, shared[util.name_key(names[id])])
 		else
 			local matches = self:match_unimported_by_name({ composer, hello.name })
 			if #matches == 1 then

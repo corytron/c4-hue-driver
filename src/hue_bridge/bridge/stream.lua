@@ -34,16 +34,23 @@
 -- for the whole period, else it is re-armed for what remains of the period
 -- after the last feed.
 --
--- An abandoned transfer (a watchdog reconnect, an oversized line) is not
--- ended by Cancel() (rule 2): it lives on until its next callback, which
--- returns true. That callback's chunk is its last, and its events reach the
--- owner at most once [code analysis 2026-10-22, L1]:
+-- An abandoned transfer (a watchdog reconnect, a stop, a rebuild of the
+-- stream by its owner) is not ended by Cancel() (rule 2): it lives on until
+-- its next callback, which returns true. That callback's chunk is its last,
+-- and its events reach the owner at most once [code analysis 2026-10-22, L1]:
 --  * only that one chunk, should Director deliver more after the abort;
 --  * only while the stream runs and its current transfer is not connected:
 --    a connected transfer receives the same events itself, and the resync
 --    after its connect covers anything older;
 --  * and the current transfer skips an event an abandoned one delivered (the
 --    same SSE id), which it carries too when it reached the bridge first.
+--
+-- Events are decoded and handed to the owner inside OnBodyChunk, each one
+-- under pcall: an event that raises (an owner callback, a container no
+-- bridge would send) costs that event and one warning per chunk, never the
+-- rest of the chunk or the overflow check after it. What Director does with
+-- an error raised in a C4:url callback is not documented [assumed: logged,
+-- and the transfer continues] [security review 2026-10-25, finding 6].
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -65,20 +72,34 @@ stream.BACKOFF_MAX = 60
 -- [verified: hardware, docs/design.md "Concurrent transfers"]. An abandoned
 -- transfer stays open until its next callback or its own timeout (rule 2),
 -- and the bridge sends no keepalive, so in a quiet house every watchdog
--- reconnect used to leave one more open. The watchdog therefore starts a
--- new transfer only while fewer than MAX_ABANDONED abandoned ones may still
--- be open: at most two stream transfers, two left for commands.
+-- reconnect used to leave one more open. So the stream keeps at most
+-- MAX_ABANDONED + 1 of its transfers open, live and abandoned together: two,
+-- which leaves two for commands. Every new transfer waits while that many
+-- may still be open (connect, whatever led there: a reconnect, a stop and a
+-- start, a rebuild by the owner, an address change), showing WAITING; the
+-- watchdog, which abandons a live transfer before it opens the next, goes
+-- ahead only while fewer than MAX_ABANDONED abandoned ones may be open
+-- [security review 2026-10-25, finding 5]. The list is shared by the
+-- stream objects an owner rebuilds (opts.abandoned).
 stream.MAX_ABANDONED = 1
 
+-- The status while a new transfer waits for an earlier one to close.
+stream.WAITING = "Waiting for an earlier stream transfer to close"
+
 -- opts:
---   connection()    returns { ip, key, stream_ip } or nil when not paired;
+--   connection()    returns { ip, key, stream_ip }, or nil and optionally a
+--                   reason when the stream may not connect: the reason is the
+--                   status to show (a full text, such as "Not connected: key
+--                   rejected"), "Not paired" when there is none. The stream
+--                   then stops (no transfer, no retry) until start();
 --                   stream_ip (optional) is the address spelling the stream
 --                   uses so that it has its own C4:url queue (bridge/altaddr).
---                   Called again for every connection attempt, so the owner
---                   may return a different stream_ip each time: the driver
---                   rotates over altaddr.stream_family so a new transfer never
---                   queues behind the abandoned one (docs/design.md, Stream
---                   address rotation)
+--                   Called again for every transfer the stream opens (not
+--                   while it waits for an earlier one to close, see connect),
+--                   so the owner may return a different stream_ip each time:
+--                   the driver rotates over altaddr.stream_family so a new
+--                   transfer never queues behind the abandoned one
+--                   (docs/design.md, Stream address rotation)
 --   timeout         seconds, see DEFAULT_TIMEOUT
 --   watchdog        seconds, see DEFAULT_WATCHDOG
 --   on_container(container, event)  one Hue event container (type, data, ...)
@@ -112,6 +133,8 @@ function stream.new(opts)
 		connected_timer = nil,      -- defers on_connected out of OnHeaders
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
+		hold_backoff = false,       -- an oversized line ended a transfer: keep the backoff (handle_headers)
+		cap_waiting = false,        -- connect() is waiting for an earlier transfer to close (wait_for_close)
 		abandoned = opts.abandoned or {}, -- see MAX_ABANDONED
 		transfer_expires_ms = nil,  -- when the current transfer's own timeout ends it
 		abandoned_ids = nil,        -- SSE ids an abandoned transfer delivered (see the header)
@@ -251,6 +274,7 @@ function stream:stop(text)
 	self:cancel_timer("retry_timer")
 	self:drop_transfer()
 	self.state = "stopped"
+	self.cap_waiting = false
 	self.stats.connected_since = nil
 	self.abandoned_ids = nil
 	self:status(text or "Stopped")
@@ -261,14 +285,23 @@ function stream:running()
 end
 
 function stream:connect()
-	local conn = self.opts.connection()
+	self:drop_transfer()
+	-- The cap (see MAX_ABANDONED) before connection(): the owner picks and
+	-- persists the next address spelling there, which must move on only for
+	-- a transfer that opens (bridge/altaddr, the driver's rotation).
+	local open = self:open_abandoned()
+	if open >= stream.MAX_ABANDONED + 1 then
+		return self:wait_for_close(open)
+	end
+	self.cap_waiting = false
+
+	local conn, reason = self.opts.connection()
 	if not conn then
 		self.state = "stopped"
-		self:status("Not paired")
+		self:status(reason or "Not paired")
 		return
 	end
 
-	self:drop_transfer()
 	local gen = self.generation
 	self.state = "connecting"
 	self.parser = sse.new()
@@ -317,7 +350,7 @@ function stream:connect()
 				self:forget_abandoned(gen)
 				return true
 			end
-			self:handle_chunk(data)
+			return self:handle_chunk(data)
 		end,
 		on_done = function(err_code, err_msg, code)
 			if gen ~= self.generation then
@@ -326,6 +359,25 @@ function stream:connect()
 			self:handle_done(err_code, err_msg, code)
 		end,
 	})
+end
+
+-- Too many stream transfers may still be open (see MAX_ABANDONED): open
+-- none, say so, and look again after the current backoff. The wait ends
+-- once an abandoned transfer calls back (it is aborted then and forgotten,
+-- see connect) or its own timeout passes (open_abandoned prunes it), at the
+-- latest the Stream Timeout after it was opened, when Director ends it
+-- itself; stop() ends the wait at once and leaves no timer.
+function stream:wait_for_close(open)
+	self.state = "waiting"
+	self.stats.connected_since = nil
+	local delay = self:next_delay()
+	-- At info once per wait, the retries that follow at debug.
+	local note = self.cap_waiting and log.debug or log.info
+	note("event stream: %d earlier stream transfer(s) may still be open (Director runs at most four C4:url "
+		.. "transfers at once); opening none, next try in %d s", open, delay)
+	self.cap_waiting = true
+	self:status(stream.WAITING)
+	self:retry_in(delay)
 end
 
 function stream:handle_headers(code)
@@ -338,7 +390,14 @@ function stream:handle_headers(code)
 		return true -- abort; handle_done will run with err_code -1
 	end
 	self.state = "connected"
-	self.backoff = stream.BACKOFF_MIN
+	-- A connection resets the backoff, except after a transfer that ended in
+	-- an oversized line: a peer that answers 200 and then overflows would be
+	-- reconnected every second otherwise. The doubled backoff stays until a
+	-- transfer delivers an event normally (handle_chunk) [security review
+	-- 2026-10-25, finding 5].
+	if not self.hold_backoff then
+		self.backoff = stream.BACKOFF_MIN
+	end
 	self.stats.connected_since = clock()
 	self.stats.started = self.stats.started or self.stats.connected_since
 	self:arm_watchdog()
@@ -384,10 +443,41 @@ function stream:key_rejected(code)
 	return true
 end
 
+-- Hand each event to fn(self, event) under pcall (see the header): one that
+-- raises is skipped, the rest of the chunk is delivered, and the caller's
+-- checks after the loop still run. One warning per chunk. With `gen`, the
+-- delivery ends once the generation moves on (an owner callback stopped or
+-- rebuilt the stream: the rest belongs to a transfer it gave up). Returns
+-- how many events fn reported as delivered normally (a true result).
+local function deliver_each(self, events, fn, gen)
+	local normal, failed, first = 0, 0, nil
+	for _, event in ipairs(events) do
+		if gen and gen ~= self.generation then
+			break
+		end
+		local ok, result = pcall(fn, self, event)
+		if not ok then
+			failed = failed + 1
+			first = first or result
+		elseif result then
+			normal = normal + 1
+		end
+	end
+	if failed > 0 then
+		log.warn("event stream: %d of %d event(s) in a chunk raised an error and were skipped; the first: %s",
+			failed, #events, tostring(first))
+	end
+	return normal
+end
+
+-- A chunk of the current transfer. Returns true to abort the transfer.
 function stream:handle_chunk(data)
-	local before = self.parser.comments
-	local events = self.parser:feed(data)
-	local keepalives = self.parser.comments - before
+	-- This transfer's own parser and generation: an owner callback below may
+	-- stop or rebuild the stream.
+	local parser, gen = self.parser, self.generation
+	local before = parser.comments
+	local events = parser:feed(data)
+	local keepalives = parser.comments - before
 	self.stats.keepalives = self.stats.keepalives + keepalives
 	-- Only an event or a keepalive feeds the watchdog (see the header), and
 	-- before the events are handled, so an owner callback that raises cannot
@@ -396,30 +486,47 @@ function stream:handle_chunk(data)
 		self.last_data = now_ms()
 		self.fed_since_arm = true
 	end
-	for _, event in ipairs(events) do
-		self:deliver(event)
+	local normal = deliver_each(self, events, stream.deliver, gen)
+	if gen ~= self.generation then
+		-- An owner callback stopped or rebuilt the stream: whatever gave this
+		-- transfer up counted it as abandoned, and like any abandoned one it
+		-- is aborted by its callback's answer.
+		return true
 	end
-	if self.parser.overflowed then
+	if parser.overflowed then
 		self.stats.last_error = "oversized line in stream"
-		log.warn("event stream: oversized line, reconnecting")
+		log.warn("event stream: oversized line; transfer aborted, reconnecting")
+		self.hold_backoff = true
 		self:drop_transfer()
 		self:schedule_reconnect()
+		-- Aborted here rather than left open until its timeout: Cancel()
+		-- does not end a streaming transfer (rule 2), a true returned from
+		-- OnBodyChunk does [verified: SDK 35_url/_7-OnBodyChunk; hardware,
+		-- rule 2]. drop_transfer counted it as abandoned until then; its
+		-- OnDone (errCode -1, SDK 35_url/_8-OnDone) forgets it.
+		return true
 	end
+	if normal > 0 and self.hold_backoff then
+		self.hold_backoff = false
+		self.backoff = stream.BACKOFF_MIN
+	end
+	return false
 end
 
 -- An event of the current transfer. One that an abandoned transfer already
 -- delivered (the same id) is skipped, once; the first event that is not one
 -- of those shows the current transfer is past them, and the list goes.
+-- Returns true when the event was delivered normally (handle_event).
 function stream:deliver(event)
 	local seen = self.abandoned_ids
 	if seen then
 		if event.id and seen[event.id] then
 			seen[event.id] = nil
-			return
+			return false
 		end
 		self.abandoned_ids = nil
 	end
-	self:handle_event(event)
+	return self:handle_event(event)
 end
 
 -- The last chunk of an abandoned transfer (see the header), read with that
@@ -430,38 +537,61 @@ function stream:deliver_abandoned(parser, data)
 	if self.state == "stopped" or self.state == "connected" then
 		return
 	end
-	for _, event in ipairs(parser:feed(data)) do
-		local seen = self.abandoned_ids
-		if not (event.id and seen and seen[event.id]) then
-			if event.id then
-				self.abandoned_ids = seen or {}
-				self.abandoned_ids[event.id] = true
-			end
-			self:handle_event(event)
-		end
-	end
+	deliver_each(self, parser:feed(data), stream.deliver_late)
 end
 
+-- One event of that last chunk (deliver_abandoned). The state is checked
+-- again for each event: an owner callback may have stopped the stream.
+function stream:deliver_late(event)
+	if self.state == "stopped" or self.state == "connected" then
+		return false
+	end
+	local seen = self.abandoned_ids
+	if event.id and seen and seen[event.id] then
+		return false
+	end
+	if event.id then
+		self.abandoned_ids = seen or {}
+		self.abandoned_ids[event.id] = true
+	end
+	return self:handle_event(event)
+end
+
+-- Decode one event and hand its containers to the owner. A container that
+-- is not a table (`data: [1]`) is skipped: the owner and the debug line
+-- below index it [security review 2026-10-25, finding 6]. Returns true when
+-- the event's data decoded to a table.
 function stream:handle_event(event)
 	self.stats.events = self.stats.events + 1
 	self.stats.last_event = clock()
 	local containers, err = http.decode(event.data)
 	if type(containers) ~= "table" then
-		log.warn("event stream: undecodable event %s: %s", tostring(event.id), tostring(err))
-		return
+		log.warn("event stream: undecodable event %s: %s", tostring(event.id),
+			tostring(err or ("a " .. type(containers) .. ", not a list")))
+		return false
 	end
+	local skipped = 0
 	for _, container in ipairs(containers) do
-		self.stats.containers = self.stats.containers + 1
-		if log.enabled("debug") then
-			local types = {}
-			for _, item in ipairs(container.data or {}) do
-				types[#types + 1] = tostring(item.type)
+		if type(container) ~= "table" then
+			skipped = skipped + 1
+		else
+			self.stats.containers = self.stats.containers + 1
+			if log.enabled("debug") then
+				local types = {}
+				if type(container.data) == "table" then
+					for _, item in ipairs(container.data) do
+						types[#types + 1] = type(item) == "table" and tostring(item.type) or type(item)
+					end
+				end
+				log.debug("event %s %s: %s", tostring(event.id), tostring(container.type), table.concat(types, ","))
 			end
-			log.debug("event %s %s: %s", tostring(event.id), tostring(container.type), table.concat(types, ","))
+			if self.opts.on_container then
+				self.opts.on_container(container, event)
+			end
 		end
-		if self.opts.on_container then
-			self.opts.on_container(container, event)
-		end
+	end
+	if skipped > 0 then
+		log.warn("event stream: event %s: skipped %d container(s) that are not objects", tostring(event.id), skipped)
 	end
 	-- The per-event text only while connected: an abandoned transfer's last
 	-- chunk can arrive while the current one is still connecting or waiting
@@ -470,6 +600,7 @@ function stream:handle_event(event)
 		self:status(string.format("Connected since %s, %d containers, last %s",
 			tostring(self.stats.connected_since), self.stats.containers, self.stats.last_event), true)
 	end
+	return true
 end
 
 function stream:handle_done(err_code, err_msg, code)
@@ -496,9 +627,20 @@ function stream:schedule_reconnect()
 	self.state = "waiting"
 	self.stats.connected_since = nil
 	self.stats.reconnects = self.stats.reconnects + 1
+	local delay = self:next_delay()
+	self:status(string.format("Disconnected: %s. Reconnecting in %d s", tostring(self.stats.last_error), delay))
+	self:retry_in(delay)
+end
+
+-- The current backoff in seconds, doubled (up to BACKOFF_MAX) for the next.
+function stream:next_delay()
 	local delay = self.backoff
 	self.backoff = math.min(self.backoff * 2, stream.BACKOFF_MAX)
-	self:status(string.format("Disconnected: %s. Reconnecting in %d s", tostring(self.stats.last_error), delay))
+	return delay
+end
+
+-- connect() again in `delay` seconds, unless start() or stop() comes first.
+function stream:retry_in(delay)
 	self:cancel_timer("retry_timer")
 	self.retry_timer = C4:SetTimer(delay * 1000, function()
 		self.retry_timer = nil

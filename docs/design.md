@@ -70,7 +70,8 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
 
 - HTTPS only, port 443. Signify forbids falling back to plain HTTP, and CLIP v2
   has never supported it **[verified]**. The driver has no HTTP code path.
-- REST calls: `C4:url()` with `ssl_cacerts` pointing at the bundled roots and
+- REST calls: `C4:url()` with `ssl_cabundle` naming the bundled roots (not
+  `ssl_cacerts`, which adds to the system store; "Certificates" below) and
   `ssl_verify_host=false`, since the certificate's CN is the bridge ID, not the
   IP **[verified API]**.
 - Keep consecutive requests on one connection; the bridge also supports TLS
@@ -109,15 +110,19 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
   returns lower case (`001788fffe100491`), `/api/0/config` upper case
   (`001788FFFE25B8F8`) **[verified]**.
 
-### TLS self-check in release builds (2026-10-25, #53)
+### TLS self-check in release builds (2026-10-25, #53; limits and blocking since #217)
 
 Pinning rests on one behaviour observed on OS 3.4.2: Director applies a
-relative `ssl_cabundle` from the driver's directory and fails closed when it
-cannot (above). Another OS release might ignore the option instead, which
-would widen trust to the system store while hostname checking is off, and
-until now only `Check CA Pinning` (dev builds) could notice. The release
-bridge driver now checks it by itself (`src/hue_bridge/bridge/tlscheck.lua`,
-`tests/spec/tlscheck_spec.lua`; contract `docs/review-leftovers-design.md`):
+relative `ssl_cabundle` from the driver's directory instead of the system
+store, and fails closed when it cannot (above); the SDK documents the same
+"instead of" **[verified: API 35_url/_12-SetOption]**. Another OS release
+might handle the option otherwise, and with hostname checking off a keyed
+request could then accept a certificate that does not chain to the Signify
+roots. Until #53 only `Check CA Pinning` (dev builds) could notice. The
+release bridge driver now checks by itself
+(`src/hue_bridge/bridge/tlscheck.lua`, `tests/spec/tlscheck_spec.lua`;
+contracts `docs/review-leftovers-design.md` and, for the limits and the
+blocking rule, `docs/security-fixes-design.md`):
 
 - **When**: after the identity check (`GET /api/0/config`, no key) has
   confirmed the paired bridge id and before the first keyed request of each
@@ -127,29 +132,82 @@ bridge driver now checks it by itself (`src/hue_bridge/bridge/tlscheck.lua`,
   this purpose, its private key discarded, so no certificate chains to it),
   and `ssl_verify_peer` on. `tlscheck.run(ip, callback)` uses `bridge.http`
   and the relative path, never the key.
-- **Verdicts**: the request fails certificate verification: `pinned`, the
-  expected answer. It succeeds: `not_pinned`, the controller is not using
-  the configured bundle, so keyed requests stop, `Status` reads `TLS check
-  failed: nothing is sent (see Attention)`, `Attention` reads `TLS check
-  failed: the controller accepted the bridge without its Signify roots;
-  keyed requests stopped (see the manual)` (the manual's chapter 12,
-  "The TLS check", asks the owner to report it as an issue), and the check
-  runs again at the next start. A timeout or connection error:
-  `inconclusive`, logged and asked again at the next identity check;
-  nothing is blocked.
+- **What a refusal proves**: the configured bundle is consulted, and the
+  bridge's chain is not trusted without it. A controller that ignored the
+  option while its own store trusted the bridge, skipped peer verification
+  when a bundle is named, or served the decoy request from a session the
+  real bundle verified would answer it: `not_pinned`.
+- **What it cannot prove** (security review 2026-10-25, finding 3):
+  - That the bundle *replaces* the system store. A controller that adds the
+    named file to the store, as `ssl_cacerts` does on OS 3.4.2 (above),
+    refuses the bridge's private Signify chain against store plus decoy just
+    as against the decoy alone, so it reads `pinned` while its keyed
+    requests would accept any publicly trusted certificate. Only a peer with
+    a public-CA certificate tells the two apart: `Check CA Pinning`, run once
+    in a dev build after every OS upgrade (`docs/release-checklist.md`). A
+    release that adds instead of replacing would break the documented
+    semantics **[assumed: none does]**.
+  - Anything against an active attacker. The decoy request is easy to
+    recognise on the wire (the first TLS handshake after the identity GET),
+    so whoever can drop it makes the check `inconclusive` at will.
+- **Verdicts and what the driver does** (`tls_gate` in
+  `src/hue_bridge/driver.lua`):
+  - `pinned` (the request fails certificate verification): the expected
+    answer. The driver records the running Director version,
+    `C4:GetVersionInfo().version` **[verified: API
+    5_director_command/_2-GetVersionInfo]**, in the persisted value
+    `tls_pinned_on` (`tlscheck.remember_pinned()`; unencrypted, it is no
+    secret), and keyed requests may go.
+  - `not_pinned` (it gets an HTTP answer, whatever the status): keyed
+    requests stop, `Status` reads `TLS check failed: nothing is sent (see
+    Attention)`, `Attention` reads `TLS check failed: the controller
+    accepted the bridge without its Signify roots; keyed requests stopped
+    (see the manual)` (the manual's chapter 12, "The TLS check", asks the
+    owner to report it as an issue). The verdict sticks until the next start
+    or address change (finding 2): a later check never lifts it, and every
+    keyed send refuses meanwhile (module requests, the stream address
+    self-check, the event stream, `Connect Event Stream`, `Test
+    Connection`).
+  - `inconclusive` (a timeout or connection error): pinning is a property of
+    the OS, not of the network, so this passes only on a Director version
+    that has answered `pinned` before (`tlscheck.pinned_before()`); it is
+    logged and asked again at the next identity check. On any other version
+    (the first start of a build with this rule, the first after an OS
+    update, a controller whose version cannot be read) nothing is sent,
+    `Status` reads `TLS check inconclusive (<detail>): nothing is sent;
+    checking again in 30 s`, and the identity check, and with it this
+    check, runs again every 30 s until an answer is conclusive.
+- **Test Connection** (finding 1): it carries the key, so it waits for the
+  identity check like every keyed request. While the current address's
+  identity is not confirmed it runs the identity check, and with it this
+  check, first (`Status`: `Testing: checking the bridge identity first`),
+  and sends its keyed `GET /clip/v2/resource/bridge` only once both passed,
+  waiting across the 30 s retries if need be; a different bridge id or a
+  failed TLS check ends it. A different bridge id therefore comes from the
+  unkeyed `/api/0/config`: `Status` reads `Bridge at <ip> reports ID <id>,
+  expected <id>; nothing is sent until the address is corrected`. The
+  identity check keeps one waiter per purpose (stream, test), so a test does
+  not drop the stream's pending start; an address change or `Forget Pairing`
+  drops them all. After `not_pinned` the test refuses: `Test refused: TLS
+  check failed; nothing is sent (see Attention)`. The comparison with the id
+  in the keyed answer stays. A rejected key does not stop it: it is the one
+  way to show that the key works again ("A rejected key", below).
 - **Why a decoy**: the check needs nothing but the bridge (no public site,
   no internet access, no name resolution), and it exercises the very option
   every keyed request relies on, on the controller that runs the driver, at
   every start. It does not depend on the OS release: on OS 4.x (#53,
   CLAUDE.md investigation 3) the first start after an upgrade reports by
-  itself whether pinning holds, without a dev build.
-- **Assumed** until the first release build with the check runs on the
-  house: that OS 3.4.2 refuses the decoy as it refused a public site with
-  the bundle in place (curl error 60, the CA probe above).
+  itself whether the configured bundle is consulted, without a dev build;
+  whether it replaces the store still takes the one `Check CA Pinning` run
+  above.
+- **Verified** 2026-10-25 on the house (dev build 276, which runs the same
+  check; "Hardware facts of the 2026-10-25 dev pass" below): OS 3.4.2
+  refuses the decoy with curl error 60, as it refused a public site with the
+  bundle in place (the CA probe above). Until then this was assumed.
 - `Check CA Pinning` stays in dev builds; since #46 (L5) it answers
   `inconclusive` rather than `pinned` when its second request fails for a
   reason other than certificate verification (timeout, DNS, connection
-  refused).
+  refused). It is the only test of the first limit above.
 
 ### A rejected key (2026-10-25, #44)
 
@@ -164,13 +222,30 @@ bridge driver now checks it by itself (`src/hue_bridge/bridge/tlscheck.lua`,
   abort, so a 401 or 403 was retried as an outage (every 60 s at most, with
   the same key) and `Status` stayed `Paired` (security review 2026-10-24,
   finding 8). Now a 401 or 403 on the event stream stops the stream (no
-  reconnect), and a keyed REST request answered 401 or 403 does the same:
+  reconnect), and a keyed REST request answered 401 or 403 does the same
+  (since #217 only once a second request confirms it, below):
   `Status` reads `Key rejected by the bridge (HTTP <code>): re-pair with
   Pair Bridge`, `Event Stream` reads `Stopped: key rejected (HTTP <code>)`,
   and `bridge_request` answers `{ ok = false, err = "key rejected", code =
   <code> }` at once for keyed requests until `Pair Bridge` succeeds or
   `Bridge IP Address` changes. The command queues end such a pending state
   without retrying (#43).
+- **Confirmed before the lock, and lifted by a test (#217, security review
+  2026-10-25, finding 4).** Whether CLIP v2 answers 403 to anything but an
+  unknown key is not known **[assumed: Signify's error list is behind a
+  login]**, and one refusal for another reason stopped the feed and every
+  command until someone pressed the link button. Now a 401 or 403 to a keyed
+  module request answers that request with `HTTP <code>` and sends one keyed
+  `GET /clip/v2/resource/bridge` (one at a time, however many refusals
+  arrive); only a 401 or 403 to that GET locks. The stream's 401/403, the
+  stream address self-check and `Test Connection` lock at once: they ask the
+  key-only endpoint or the bridge resource. While locked, `Connect Event
+  Stream` refuses too (`Event Stream`: `Not connected: key rejected`; after
+  `not_pinned`, `Not connected: TLS check failed`), so the rejected key is
+  not presented again, except by `Test Connection`, the one way to show that
+  the key works again: a 200 with the paired bridge id clears the lock, logs
+  it and starts the stream again, and `Status` reads the test's `Test OK:
+  …`. `Pair Bridge` and an address change clear it as before.
 
 ### Event stream
 
@@ -1183,8 +1258,11 @@ it.
 
 - **TLS self-check (#53):** the request with the decoy CA bundle failed with
   curl error 60 ("SSL peer certificate or SSH remote key was not OK"): the
-  controller honours `ssl_cabundle` and trust is pinned to the Signify
-  roots. No TLS session verified with the real bundle was reused.
+  controller honours `ssl_cabundle`, and with the CA probe's refusal of a
+  public site ("Certificates") trust is pinned to the Signify roots (the
+  decoy alone shows that the bundle is consulted, not that it replaces the
+  store: "TLS self-check in release builds"). No TLS session verified with
+  the real bundle was reused.
 - **HMAC (#52):** `C4:HMAC` exists on OS 3.4.2 and reproduces RFC 4231 test
   case 2, so the dev loop uses it rather than its Lua fallback.
 - **GetBoundConsumerDevices (#48):** a binding with nothing bound (the

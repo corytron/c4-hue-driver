@@ -1,20 +1,30 @@
 # Cut a release (docs/cicd-gitops-design.md, section 5). Two ways in:
 # - a pushed tag v1.0, v1.1, ...: the tag must point at a commit on main, or
-#   the job fails before building anything;
-# - "Run workflow" from main with the version (1.0, 1.1, ...): after lint and
-#   tests pass, the job tags main's head v<version>, moving the tag when it
-#   exists (later releases of the same spike move the tag,
-#   docs/release-checklist.md), pushes it, and builds in the same run, because
-#   a tag pushed with the workflow's own token starts no second workflow.
-# Then: build the three .c4z files, write SHA256SUMS.txt, check
-# build/manifest.json against the packages and the tag, sign a build-provenance
-# attestation for the packages (Sigstore, stored on GitHub), and attach the
-# packages, the checksums, the manifest and the attestation bundle to the
-# GitHub release of the tag. The release is created when it does not exist yet,
-# titled "<version>" with generated notes (categories: .github/release.yml) and
-# a first paragraph naming the build number and the install rule. A tag that
-# moves replaces every attached file (--clobber); an existing release's title
-# and notes are never touched (the coordinator edits the codename in by hand).
+#   the run fails before building anything;
+# - "Run workflow" from main with the version (1.0, 1.1, ...): the run builds
+#   main's head, then tags it v<version>, moving the tag when it exists (later
+#   releases of the same spike move the tag, docs/release-checklist.md), and
+#   pushes the tag, all in the same run, because a tag pushed with the
+#   workflow's own token starts no second workflow.
+# Two jobs, so that no third-party code runs where the write token or the
+# signing identity is (security review 2026-10-25, finding 11; section 5.4):
+# - build (contents: read, no id-token, no GH_TOKEN): lint and test with the
+#   pinned luarocks tools, build the three .c4z files with the pinned
+#   packager, write SHA256SUMS.txt, check build/manifest.json against the
+#   packages, this commit and the tag, and hand the five files over as a
+#   workflow artifact;
+# - publish (contents: write, id-token: write, attestations: write; nothing
+#   but actions/* pinned by SHA, git and gh): download and re-check those
+#   files, sign a build-provenance attestation for the packages (Sigstore,
+#   stored on GitHub), move or create the tag (dispatch only), and attach the
+#   packages, the checksums, the manifest, the attestation bundle and its
+#   in-toto envelope to the GitHub release of the tag. GH_TOKEN is set only on
+#   the two steps that push the tag or call gh.
+# The release is created when it does not exist yet, titled "<version>" with
+# generated notes (categories: .github/release.yml) and a first paragraph
+# naming the build number and the install rule. A tag that moves replaces
+# every attached file (--clobber); an existing release's title and notes are
+# never touched (the coordinator edits the codename in by hand).
 name: Release
 
 on:
@@ -29,22 +39,18 @@ on:
 
 permissions: {}
 
-# One release job at a time: the uploads of two tags must not interleave.
+# One release run at a time: the uploads of two tags must not interleave.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build, attest and attach the packages
+  build:
+    name: Lint, test and build the packages
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: write # push the tag (dispatch), create the release, upload its assets
-      id-token: write # Sigstore signing certificate for the attestation
-      attestations: write # store the attestation on GitHub
-    env:
-      GH_TOKEN: ${{ github.token }}
+      contents: read # check out the repository; this job can change nothing on GitHub
     steps:
       - name: Check out the repository with its full history and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,6 +59,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Runs before any third-party code: a refusal here ends the run, and
+      # the publish job needs this job.
       - name: Work out the tag and check that it is built from main
         id: tag
         env:
@@ -72,6 +80,13 @@ jobs:
                 exit 1
               fi
               tag="v$VERSION_INPUT"
+              # A local tag only, so that tools/build.sh names it in
+              # build/manifest.json; the publish job pushes the real one.
+              # Annotated, as that one will be: git describe prefers the
+              # newest annotated tag when another one is on the same commit.
+              git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                tag -f -a "$tag" -m "Release ${tag#v}" "$GITHUB_SHA"
               ;;
             push)
               tag="$REF_NAME"
@@ -91,41 +106,45 @@ jobs:
               ;;
           esac
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag from $GITHUB_SHA"
+          echo "Building $tag from $GITHUB_SHA"
 
-      - name: Install Lua 5.1, luarocks, luacheck, busted, dkjson and lxml
+      # The same pinned rocks as ci.yml (the reasons, and how to move a pin,
+      # are written there): every rock at an exact version, its dependencies
+      # included, with --deps-mode=none so that luarocks fetches nothing this
+      # list does not name. dp3/driverpackager.py imports lxml.
+      - name: Install Lua 5.1, luarocks, the pinned rocks and lxml
         run: |
           sudo apt-get update
           sudo apt-get install -y lua5.1 liblua5.1-0-dev luarocks python3-lxml
-          sudo luarocks --lua-version=5.1 install luacheck
-          sudo luarocks --lua-version=5.1 install busted
-          sudo luarocks --lua-version=5.1 install dkjson
+          rock() { sudo luarocks --lua-version=5.1 install --deps-mode=none "$1" "$2"; }
+          rock argparse 0.7.2-1
+          rock luafilesystem 1.9.0-1
+          rock luacheck 1.2.0-1
+          rock dkjson 2.11-1
+          rock lua_cliargs 3.0.2-1
+          rock luasystem 0.7.1-1
+          rock say 1.4.1-3
+          rock luassert 1.9.0-1
+          rock lua-term 0.8-1
+          rock penlight 1.15.0-1
+          rock mediator_lua 1.1.2-0
+          rock busted 2.3.0-1
 
       - name: Lint and test (luacheck, busted)
         run: tools/check.sh --strict --only lua-lint lua-test
 
-      # Only now, with lint and tests green, does the dispatch path move the
-      # tag. The checkout kept no credentials, so the push authenticates with
-      # the workflow's token in the same header actions/checkout would have
-      # configured. The tag ruleset must let GitHub Actions create and update
-      # v* tags (docs/cicd-gitops-design.md, section 5.3).
-      - name: Tag the head of main and push the tag (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      # The packager runs in Build, so it is pinned to a reviewed commit: the
+      # same commit as in ci.yml, where how to move it is written.
+      - name: Fetch Snap One's driver packager at the reviewed commit
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          PACKAGER_SHA: 16eef8beb70303606f066524cda516b2aa7ce38d
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f -a "$TAG" -m "Release ${TAG#v}" "$GITHUB_SHA"
-          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-            push --force origin "refs/tags/$TAG"
-          git fetch --tags --force origin
-          echo "$TAG now points at $(git rev-parse "$TAG^{commit}")"
-
-      - name: Clone Snap One's driver packager
-        run: git clone --depth 1 https://github.com/snap-one/drivers-driverpackager "$RUNNER_TEMP/drivers-driverpackager"
+          dir="$RUNNER_TEMP/drivers-driverpackager"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/snap-one/drivers-driverpackager
+          git -C "$dir" fetch -q --depth 1 origin "$PACKAGER_SHA"
+          git -C "$dir" checkout -q FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$PACKAGER_SHA"
 
       - name: Build
         run: DP3="$RUNNER_TEMP/drivers-driverpackager/dp3/driverpackager.py" tools/build.sh
@@ -183,15 +202,138 @@ jobs:
           print(f"manifest.json: build {m['build']}, {tag}, commit {m['commit'][:12]}")
           PY
 
+      - name: Hand the packages and the release files to the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hue-drivers-${{ steps.tag.outputs.tag }}-build
+          path: |
+            build/hue_bridge.c4z
+            build/hue_light.c4z
+            build/hue_scene.c4z
+            build/SHA256SUMS.txt
+            build/manifest.json
+          if-no-files-found: error
+
+  publish:
+    name: Attest the packages and publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # push the tag (dispatch), create the release, upload its assets
+      id-token: write # Sigstore signing certificate for the attestation
+      attestations: write # store the attestation on GitHub
+    steps:
+      # From the event itself, not from the build job's outputs: of what the
+      # build job's tools could have touched, this job takes only the files,
+      # and checks them below.
+      - name: Work out the tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              if [[ "$REF" != refs/heads/main ]]; then
+                echo "::error::Run this workflow from main, not from $REF_NAME: releases are built from main only"
+                exit 1
+              fi
+              tag="v$VERSION_INPUT"
+              ;;
+            push)
+              tag="$REF_NAME"
+              ;;
+            *)
+              echo "::error::Unexpected event $EVENT_NAME"
+              exit 1
+              ;;
+          esac
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags look like v1.0 (docs/release-checklist.md, Naming), not '$tag'"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag from $GITHUB_SHA"
+
+      # Only the dispatch path tags, and git needs the commit to tag it: this
+      # run's commit alone, checked out without credentials.
+      - name: Check out the commit to tag (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the files of the build job
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hue-drivers-${{ steps.tag.outputs.tag }}-build
+          path: build
+
+      # The build job ran third-party tools, so what it handed over is checked
+      # here with the runner's own tools before anything is signed: exactly
+      # the five files, every package as SHA256SUMS.txt and the manifest
+      # describe it, and a manifest naming this tag and this run's commit.
+      - name: Check the files before signing them
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          cd build
+          listing="$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')"
+          if [[ "$listing" != "SHA256SUMS.txt hue_bridge.c4z hue_light.c4z hue_scene.c4z manifest.json " ]]; then
+            echo "::error::The build job handed over something other than the five release files: $listing"
+            exit 1
+          fi
+          sha256sum --check --strict SHA256SUMS.txt
+          python3 - "$TAG" "$GITHUB_SHA" <<'PY'
+          import hashlib, json, sys
+          tag, commit = sys.argv[1], sys.argv[2]
+          names = ["hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"]
+          with open("SHA256SUMS.txt", encoding="utf-8") as f:
+              listed = sorted(line.split()[1] for line in f if line.strip())
+          with open("manifest.json", encoding="utf-8") as f:
+              m = json.load(f)
+          problems = []
+          if listed != names:
+              problems.append(f"SHA256SUMS.txt lists {listed}, not the three packages")
+          if m.get("schema") != 1:
+              problems.append("schema is not 1")
+          if m.get("tag") != tag or m.get("version") != tag[1:]:
+              problems.append(f"tag {m.get('tag')!r} / version {m.get('version')!r} is not {tag}")
+          if m.get("commit") != commit:
+              problems.append(f"commit {m.get('commit')!r} is not this run's {commit}")
+          if m.get("dev") is not False:
+              problems.append("dev is not false: a development build is never released")
+          if not isinstance(m.get("build"), int) or m["build"] <= 0:
+              problems.append(f"build {m.get('build')!r} is not a positive integer")
+          for name in names:
+              entry = (m.get("packages") or {}).get(name) or {}
+              with open(name, "rb") as f:
+                  data = f.read()
+              if entry.get("sha256") != hashlib.sha256(data).hexdigest() or entry.get("bytes") != len(data):
+                  problems.append(f"{name} differs from its entry in packages")
+          if problems:
+              sys.exit("build/manifest.json: " + "; ".join(problems))
+          print(f"checked: {tag}, build {m['build']}, commit {commit[:12]}")
+          PY
+
       # SLSA build provenance for the three packages, signed through Sigstore
-      # and stored on GitHub (verifiable with `gh attestation verify`). The
-      # bundle is also attached to the release as attestations.sigstore.json
-      # for verifiers without a recent gh and for Scorecard's Signed-Releases.
+      # with this job's identity (the certificate names
+      # .github/workflows/release.yml and this run's commit) and stored on
+      # GitHub, where `gh attestation verify --signer-workflow` and
+      # tools/deploy.py check it. The bundle is also attached to the release
+      # as attestations.sigstore.json for verifiers without a recent gh and
+      # for Scorecard's Signed-Releases.
       - name: Attest the build provenance of the packages
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: build/*.c4z
+          subject-path: |
+            build/hue_bridge.c4z
+            build/hue_light.c4z
+            build/hue_scene.c4z
 
       - name: Keep the attestation bundle next to the packages
         env:
@@ -201,19 +343,82 @@ jobs:
           test -s build/attestations.sigstore.json
           ls -l build/attestations.sigstore.json
 
+      # The same provenance as SLSA's in-toto JSON lines: the bundle's DSSE
+      # envelope (an in-toto v1 statement with the SLSA provenance v1 of all
+      # three packages), one compact JSON line per envelope. Scorecard's
+      # Signed-Releases check scores a release with an *.intoto.jsonl asset 10,
+      # with the Sigstore bundle alone 8. Checked first: the envelope must name
+      # exactly the three packages with their digests.
+      - name: Write the provenance as hue-drivers.intoto.jsonl
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, sys
+          names = ["hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"]
+          with open("build/attestations.sigstore.json", encoding="utf-8") as f:
+              text = f.read()
+          try:
+              bundles = [json.loads(text)]
+          except ValueError:
+              bundles = [json.loads(line) for line in text.splitlines() if line.strip()]
+          envelopes = [bundle["dsseEnvelope"] for bundle in bundles]
+          covered = {}
+          for envelope in envelopes:
+              if envelope.get("payloadType") != "application/vnd.in-toto+json":
+                  sys.exit(f"unexpected payloadType {envelope.get('payloadType')!r}")
+              statement = json.loads(base64.b64decode(envelope["payload"]))
+              if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+                  sys.exit(f"unexpected predicateType {statement.get('predicateType')!r}")
+              for subject in statement.get("subject") or []:
+                  covered[subject["name"]] = subject["digest"]["sha256"]
+          wanted = {}
+          for name in names:
+              with open(f"build/{name}", "rb") as f:
+                  wanted[name] = hashlib.sha256(f.read()).hexdigest()
+          if covered != wanted:
+              sys.exit(f"the provenance names {sorted(covered)}, not exactly the three packages and their digests")
+          with open("build/hue-drivers.intoto.jsonl", "w", encoding="utf-8") as f:
+              for envelope in envelopes:
+                  f.write(json.dumps(envelope, separators=(",", ":")) + "\n")
+          print(f"hue-drivers.intoto.jsonl: {len(envelopes)} envelope(s) for {', '.join(names)}")
+          PY
+
       - name: Keep the release files as a workflow artifact too
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hue-drivers-${{ steps.tag.outputs.tag }}
           path: |
-            build/*.c4z
+            build/hue_bridge.c4z
+            build/hue_light.c4z
+            build/hue_scene.c4z
             build/SHA256SUMS.txt
             build/manifest.json
             build/attestations.sigstore.json
+            build/hue-drivers.intoto.jsonl
           if-no-files-found: error
+
+      # Only now, with the packages built, checked and attested, does the
+      # dispatch path move the tag, so that a run that fails earlier leaves it
+      # where it was. The checkout kept no credentials: the push authenticates
+      # with the workflow's token in the same header actions/checkout would
+      # have configured. The tag ruleset must let GitHub Actions create and
+      # update v* tags (docs/cicd-gitops-design.md, section 5.3).
+      - name: Tag this run's commit and push the tag (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f -a "$TAG" -m "Release ${TAG#v}" "$GITHUB_SHA"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push --force origin "refs/tags/$TAG"
+          echo "$TAG now points at $(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
 
       - name: Create the release if it does not exist, then attach the files
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           build="$(python3 -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
@@ -223,10 +428,11 @@ jobs:
             # generated notes are appended to this first paragraph.
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
               --title "${TAG#v}" --generate-notes \
-              --notes "Build ${build}: the integer the three drivers show as **Driver Version** in Composer. Download all three \`.c4z\` files; they must come from the same build. Install or update them in place through Composer's *Add or Update Driver or Agent...* (see the README). \`SHA256SUMS.txt\` and \`manifest.json\` describe the files; \`attestations.sigstore.json\` is their signed build provenance."
+              --notes "Build ${build}: the integer the three drivers show as **Driver Version** in Composer. Download all three \`.c4z\` files; they must come from the same build. Install or update them in place through Composer's *Add or Update Driver or Agent...* (see the README). \`SHA256SUMS.txt\` and \`manifest.json\` describe the files; \`attestations.sigstore.json\` is their signed build provenance, and \`hue-drivers.intoto.jsonl\` the same provenance as in-toto JSON lines."
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             build/hue_bridge.c4z build/hue_light.c4z build/hue_scene.c4z \
-            build/SHA256SUMS.txt build/manifest.json build/attestations.sigstore.json
+            build/SHA256SUMS.txt build/manifest.json build/attestations.sigstore.json \
+            build/hue-drivers.intoto.jsonl
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json name,tagName,url,assets \
             --jq '"\(.name) (\(.tagName)) \(.url): " + ([.assets[].name] | join(", "))'

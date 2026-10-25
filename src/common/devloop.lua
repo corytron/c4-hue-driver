@@ -29,6 +29,15 @@
 -- module computes are never printed, reported or stored outside this file's
 -- locals.
 --
+-- The bridge's development commands (Hue Request, Probe Call, Proxy Command,
+-- ...) are not in its dispatch table: ExecuteCommand has no sender, so any
+-- driver in the project could send them there. They live in the table the
+-- bridge hands to devloop.set_signed_commands, which only a signed `execute`
+-- command reaches [security review 2026-10-25, finding 9]. Every log line
+-- also passes the bridge's redactor (devloop.set_redactor) when it is
+-- buffered and again when it is shipped, so the Hue application key never
+-- leaves in a line.
+--
 -- State lives in _G.__DEVLOOP so a reload of the rest of the driver cannot
 -- lose the timer or the log buffer; package.loaded["common.devloop"] is the
 -- one driver module a reload never clears.
@@ -54,6 +63,11 @@
 --   devloop.hmac_sha256(key, data)  -> lowercase hex, C4:HMAC or the Lua fallback
 --   devloop.hmac_backend()    -> "C4:HMAC" or "Lua (<why>)"
 --   devloop.lua_sha256(data), devloop.lua_hmac_sha256(key, data)  the fallback itself
+--   devloop.set_signed_commands(handlers)  the bridge's development commands, by
+--                             dispatch name ("Hue_Request"); run for signed commands only
+--   devloop.execute(command, params)  one signed `execute` command -> nil or the error text
+--   devloop.set_redactor(fn)  fn(line) -> what of a log line may leave the controller
+--   devloop.redacted(line)    -> that verdict, as the loop applies it (never raises)
 
 local devloop = {}
 
@@ -94,6 +108,8 @@ if not S then
 		wrapped_c4 = nil,        -- the C4 table whose UpdateProperty we wrapped
 		original_update = nil,
 		loader = nil,            -- our package.loaders entry
+		signed_commands = nil,   -- the bridge's development commands (set_signed_commands)
+		redactor = nil,          -- the bridge's log line filter (set_redactor)
 	}
 	rawset(_G, "__DEVLOOP", S)
 end
@@ -117,7 +133,30 @@ end
 
 -- Log capture -------------------------------------------------------------
 
+-- What stands in for a line the redactor could not vouch for.
+devloop.WITHHELD = "devloop: a log line was withheld (the redactor failed on it)"
+
+local redacting = false -- the redactor is running; a line it prints itself is not given back to it
+
+-- What of `line` may leave the controller, as the bridge's redactor
+-- (devloop.set_redactor) decides; without one, all of it. A string is
+-- kept and nil keeps nothing; a redactor that raises or answers anything
+-- else withholds the line, since nothing then says it is clean. Never
+-- raises: it runs inside capture, which runs inside print.
+local function redacted(line)
+	local fn = S.redactor
+	if type(fn) ~= "function" then return line end
+	if redacting then return devloop.WITHHELD end
+	redacting = true
+	local ok, kept = pcall(fn, line)
+	redacting = false
+	if ok and (kept == nil or type(kept) == "string") then return kept end
+	return devloop.WITHHELD
+end
+
 local function capture(line)
+	line = redacted(line)
+	if line == nil then return end
 	local log = S.log
 	log[#log + 1] = { t = now_ms(), line = line }
 	if #log > devloop.MAX_LOG_LINES then table.remove(log, 1) end
@@ -528,6 +567,9 @@ local function report(event, extra, callback)
 	local body = { version = S.version, light_version = S.light_version, scene_version = S.scene_version,
 		event = event, properties = snapshot(), key_fingerprint = devloop.key_fingerprint() }
 	for k, v in pairs(extra or {}) do body[k] = v end
+	-- An error text can quote whatever a command saw: it passes the redactor
+	-- like a log line.
+	if type(body.error) == "string" then body.error = redacted(body.error) end
 	S.last_report_ms = now_ms()
 	request("POST", "/report", body, function(r)
 		if not r.ok then say("report %s failed: %s", event, tostring(r.err)) end
@@ -779,21 +821,74 @@ local function end_tick()
 end
 
 -- Lines stay in the buffer until the server accepts them (the cap still
--- applies meanwhile), so a failed POST loses nothing.
+-- applies meanwhile), so a failed POST loses nothing. Each line passes the
+-- redactor once more on its way out: one buffered before the redactor knew
+-- the key (a reload's new code learns it only at its late init, after its
+-- first lines) leaves without it all the same.
 local function step_log()
 	if #S.log == 0 then return end_tick() end
-	local sent = {}
-	for _, entry in ipairs(S.log) do sent[entry] = true end
-	request("POST", "/log", { version = S.version, lines = S.log }, function(r)
-		if r.ok then
-			local rest = {}
-			for _, entry in ipairs(S.log) do
-				if not sent[entry] then rest[#rest + 1] = entry end
-			end
-			S.log = rest
+	local entries, sent, lines = {}, {}, {}
+	for i, entry in ipairs(S.log) do entries[i] = entry end
+	for _, entry in ipairs(entries) do
+		sent[entry] = true
+		local line = redacted(entry.line)
+		if line ~= nil then lines[#lines + 1] = { t = entry.t, line = line } end
+	end
+	local function forget_sent()
+		local rest = {}
+		for _, entry in ipairs(S.log) do
+			if not sent[entry] then rest[#rest + 1] = entry end
 		end
+		S.log = rest
+	end
+	if #lines == 0 then
+		forget_sent()
+		return end_tick()
+	end
+	request("POST", "/log", { version = S.version, lines = lines }, function(r)
+		if r.ok then forget_sent() end
 		end_tick()
 	end)
+end
+
+-- Signed commands -------------------------------------------------------------
+
+-- The bridge's development command for `command`, from the table it handed
+-- to devloop.set_signed_commands, named the way common/dispatch.lua names
+-- commands: LUA_ACTION unwrapped to its ACTION, each run of white space as
+-- "_" (devctl's "Hue Request" finds Hue_Request). Returns the handler and
+-- that name, or nil; ACTION leaves `params` only when a handler is found.
+local function signed_handler(command, params)
+	local handlers = S.signed_commands
+	if type(handlers) ~= "table" then return nil end
+	local name = command
+	if name == "LUA_ACTION" and params.ACTION then name = params.ACTION end
+	name = (string.gsub(tostring(name or ""), "%s+", "_"))
+	local fn = handlers[name]
+	if type(fn) ~= "function" then return nil end
+	if command == "LUA_ACTION" then params.ACTION = nil end
+	return fn, name
+end
+
+-- One signed `execute` command: the bridge's development command of that
+-- name when it has one, else the driver's ExecuteCommand as Director would
+-- call it (Composer's actions, the messages devices send). Both are looked
+-- up now, because a reload replaces them. Returns nil, or the error text
+-- for the command_done report. No other driver can reach this: it is a
+-- function of this Lua state, not an entry point Director calls.
+function devloop.execute(command, params)
+	params = type(params) == "table" and params or {}
+	local fn, name = signed_handler(command, params)
+	if fn then
+		local ok, err = pcall(fn, params)
+		if ok then return nil end
+		say("signed command %s failed: %s", name, tostring(err))
+		return tostring(err)
+	end
+	local entry = rawget(_G, "ExecuteCommand")
+	if type(entry) ~= "function" then return "no ExecuteCommand" end
+	local ok, err = pcall(entry, command, params)
+	return (not ok) and tostring(err) or nil
 end
 
 local function run_command(cmd, done)
@@ -804,10 +899,7 @@ local function run_command(cmd, done)
 	end
 	-- Entry points are looked up at call time: a reload replaces them.
 	if cmd.type == "execute" then
-		local fn = rawget(_G, "ExecuteCommand")
-		if type(fn) ~= "function" then return complete("no ExecuteCommand") end
-		local ok, err = pcall(fn, cmd.command, cmd.params or {})
-		complete(not ok and tostring(err) or nil)
+		complete(devloop.execute(cmd.command, cmd.params))
 	elseif cmd.type == "set_property" then
 		local name = tostring(cmd.name)
 		local value = cmd.value == nil and "" or tostring(cmd.value)
@@ -1003,6 +1095,31 @@ end
 
 function devloop.running()
 	return S.timer ~= nil
+end
+
+-- The bridge's development commands, keyed by dispatch name ("Hue_Request";
+-- nil for none), which devloop.execute runs for signed `execute` commands.
+-- The bridge hands them over at every load of its driver.lua, a reload's
+-- included, so they belong to the code running now; a reload that fails
+-- before that keeps the previous ones, as it keeps the previous
+-- ExecuteCommand. The bridge's own code sets them; no message can.
+function devloop.set_signed_commands(handlers)
+	S.signed_commands = type(handlers) == "table" and handlers or nil
+end
+
+-- The bridge's log line filter: fn(line) returns what of the line may leave
+-- the controller, nil for nothing (see redacted() above); nil removes it.
+-- Kept across a reload until the new code installs its own, so the key the
+-- old code held stays covered meanwhile.
+function devloop.set_redactor(fn)
+	S.redactor = type(fn) == "function" and fn or nil
+end
+
+-- What of `line` would leave the controller, as capture and the log
+-- shipping decide it: the line itself, the redactor's version, nil, or
+-- devloop.WITHHELD. Never raises.
+function devloop.redacted(line)
+	return redacted(line)
 end
 
 function devloop.version()

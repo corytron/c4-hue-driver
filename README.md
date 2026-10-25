@@ -99,7 +99,7 @@ Take the release marked **Latest** on the
 it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
 codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
 Every release is built and attached by the repository's Release workflow,
-never by hand, and carries six files:
+never by hand, and carries seven files:
 
 - `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`: the three drivers.
   Download all three; they must come from the same release.
@@ -112,6 +112,7 @@ never by hand, and carries six files:
   the build number too.
 - `attestations.sigstore.json`: the build provenance GitHub signed when the
   workflow built the packages.
+- `hue-drivers.intoto.jsonl`: the same provenance as in-toto JSON lines.
 
 A later release of the same version moves the tag and replaces the attached
 files with a newer build; Driver Version tells the builds apart. To check
@@ -119,7 +120,8 @@ what you downloaded:
 
 ```sh
 sha256sum -c SHA256SUMS.txt                                          # the three packages
-gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver   # GitHub CLI 2.49 or newer; repeat per package
+gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver \
+  --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml   # GitHub CLI 2.102.0 or newer; repeat per package
 ```
 
 The second command confirms that the file was built by this repository's
