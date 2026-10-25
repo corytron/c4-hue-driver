@@ -261,7 +261,7 @@ dd { margin: 2px 0 6px 18px; }
 </ul>
 <p>Mappings are kept by identity, not by name: renaming a Hue room in the Hue app or a Control4 room in Composer leaves its mapping in place, and the line simply shows the new name.</p>
 
-<img src="img/room-mappings.png" width="647" alt="The Room Mappings row">
+<img src="img/room-mappings.png" width="445" alt="The Room Mappings row">
 <p class="caption">The <b>Room Mappings</b> drop-down, open: the summary on the row, then one line per Hue room or zone, Hue on the left of each arrow, the Control4 room, <code>(unmapped)</code> or <code>(Control4 room gone)</code> on the right.</p>
 
 <p>To read all of a long value, widen the Properties pane, or click <b>Map Rooms By Name</b> and read its result in <b>Last Action</b>.</p>
@@ -433,7 +433,7 @@ dd { margin: 2px 0 6px 18px; }
 </ol>
 <p>If the name matches nothing then Last Action reads <code>not linked 1: Hue Light (device 1221): no unimported Hue light has that name; rename the device in Composer to the Hue light's exact name and run Link Devices again</code>: rename the device in the tree to the exact Hue name and click again. If two Hue lights share that name, <code>&hellip; 2 unimported Hue lights have that name; rename the device in Composer to one Hue light's exact name &hellip;</code> (rename one of them in the Hue app first). If two bound devices carry the same name, <code>&hellip; 2 bound devices share that name; rename one in Composer and run Link Devices again</code>. <code>Not linked: the bound-device lookup failed (see the Lua output)</code> means Composer's connection list was not available at that moment; try again. Linking never moves the device: it stays in whatever room it is in.</p>
 
-<img src="img/connections.png" width="700" alt="Connections view for a Hue Light bound to the bridge">
+<img src="img/connections.png" width="760" alt="Connections view for a Hue Light bound to the bridge">
 <p class="caption">The <b>Connections</b> view of a Hue Light, upper pane <b>Control &amp; Audio Video Connections</b>. The row to look at is the device's <b>Hue Bridge</b> input under Control Inputs, whose Connected To column reads <code>Hue Bridge-&gt;Hue Lights</code>: it is connected to the bridge's <b>Hue Lights</b> output. Devices the bridge creates come connected like this; a hand-added one gets this row filled by dragging the bridge from the lower pane, <b>HUE_BRIDGE Output Devices</b>, onto it. The picture predates the keypad feature: today the Control Outputs also list <b>Top Button Link</b>, <b>Bottom Button Link</b> and <b>Toggle Button Link</b> (chapter 11).</p>
 
 <p>If you remove that connection on a managed device then the bridge counts it as <code>1 unbound</code>, <b>Attention</b> reads <code>1 unbound device: Lamp 4 #4 (device 1211) (bind it to this bridge in Composer, or Forget Light)</code> and the device reads <code>Not bound to a Hue Bridge</code>; connect it again and it resumes by itself, no click needed. A device connected to a second Hue Bridge device by mistake never hears from the bridge it belongs to (a bare one reads <code>Bound; waiting for the bridge</code> for ever); delete that second bridge rather than link anything to it.</p>

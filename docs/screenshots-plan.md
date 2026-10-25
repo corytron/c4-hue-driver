@@ -793,3 +793,11 @@ real bars, Enter after editing a value (Composer shows Set only after
 Enter), the font and score in each ledger. Seen: 1 to 3 px of the main
 window at dialog left edges; painted ID values a shade lighter than their
 neighbours.
+
+Round 49, 2026-10-25 11:10, finished the set (24 of 24): `bridge-properties.png`
+after one Refresh Scenes click (a one-row Last Action, painted with the
+neutral counts; the combo faces painted in the font measured on the untouched
+Debug Mode face), `room-mappings.png` cropped to the combo face and its open
+list (445 x 114; the grid needs no scrolling), and `connections.png` with the
+device selected in the Connections view's own list, cropped to the header
+strip and the Hue Bridge input row.
