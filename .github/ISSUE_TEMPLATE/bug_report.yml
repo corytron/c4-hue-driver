@@ -7,7 +7,8 @@ body:
       value: |
         Thanks for the report. Before you paste anything, **replace your LAN addresses
         (the bridge's, the controller's) and the bridge id with placeholders**, for
-        example `10.0.2.143` and `001788fffe25b8f8`. The driver never shows the Hue
+        example `10.0.2.143` for the bridge, `192.0.2.20` for the controller and
+        `001788fffe123abc` for the bridge id. The driver never shows the Hue
         application key; **never paste one**. If you think you have found a security
         problem, do not open an issue: see `SECURITY.md`.
 
@@ -56,16 +57,16 @@ body:
       label: Bridge model
       description: The **Bridge Model** property of the Hue Bridge device.
       options:
-        - BSB003 (Hue Bridge Pro)
-        - BSB002 (Hue Bridge, square version 2)
+        - Hue Bridge Pro (BSB003)
+        - Hue Bridge v2, square (BSB002)
         - Other, or not paired yet (say what Bridge Model shows)
     validations:
       required: true
   - type: textarea
     id: properties
     attributes:
-      label: Status, Attention and Last Action
-      description: The texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties, and the **Status** of the Hue Light or Hue Scene device concerned. Copy them as they are; they are written to be read.
+      label: Status, Event Stream, Attention and Last Action
+      description: The texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties (with **Last Action (2)** to **(6)** when shown), and the **Status** of the Hue Light or Hue Scene device concerned. Copy them as they are; they are written to be read.
       render: text
     validations:
       required: true
@@ -73,7 +74,7 @@ body:
     id: lua-output
     attributes:
       label: Lua output
-      description: Set **Debug Mode** to On on the device (Properties tab), reproduce the problem, and paste the relevant lines of the device's Lua tab in Composer. Addresses and the bridge id replaced; no application key.
+      description: Set **Debug Mode** to On on the device (Properties tab, then the row's Set button), reproduce the problem, paste the relevant lines of the device's Lua tab in Composer, and set Debug Mode back to Off. Addresses and the bridge id replaced; no application key.
       render: text
   - type: checkboxes
     id: private-data

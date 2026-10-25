@@ -41,6 +41,10 @@ PR that says which.
 | `tools/requirements-checks.txt` | coordinator (#222) | hash-pinned Python check tools (§3) |
 | `.github/workflows/code-scanning-triage.yml`, `tools/code_scanning_issue.py`, `tools/tests/test_code_scanning_issue.py` | coordinator (#222) | the one code scanning issue (§4.6) |
 
+Current (2026-10-25, build 316): there is no `.github/zizmor.yml`; zizmor
+runs with its defaults at `--min-severity medium`
+(`tools/check.sh:check_workflows`).
+
 Everything else in the checkout is edited by others at the same time. No
 agent runs `git`; the coordinator integrates and commits on the branch
 `ci/cicd-gitops-204` (PR "Closes #204").
@@ -170,6 +174,9 @@ A release is built only from a commit on `main`: the job fails when
 `git merge-base --is-ancestor "$GITHUB_SHA" origin/main` is false (for the
 tag trigger; the dispatch trigger runs on `main` by construction). Lint and
 tests run before the build, as today.
+Current (2026-10-25, build 316): a dispatch from any ref but `main` is
+refused too, in both jobs' tag step, before anything is built
+(`.github/workflows/release.yml`).
 
 ### 5.2 `build/manifest.json`
 
@@ -209,11 +216,17 @@ everything when the tag moves. The release is created when missing with
 the install rule, as today. The workflow titles a new release `<version>`;
 the coordinator edits the codename into the title once per major version
 (1.x is "Cassian"), and the workflow never changes an existing title.
+Current (2026-10-25, build 316): `.github/release.yml` ends with a sixth
+category, "Other changes", for every other pull request.
 
 ### 5.3 Tag protection
 
 A repository ruleset (coordinator, API) on tags `v*`: deletion blocked,
 creation and update allowed to the repository admin and GitHub Actions.
+Current (2026-10-25): the ruleset "Protect release tags" has one rule,
+deletion, which the admin role may bypass; creating and moving `v*` tags
+is not restricted beyond write access (read with `gh api
+repos/corytron/c4-hue-driver/rulesets`).
 
 ### 5.4 Two jobs (security review 2026-10-25, finding 11)
 
@@ -308,6 +321,11 @@ debug_mode: Off
 (a release build never ships with debugging on). With `--online` it also
 fetches the release's `manifest.json` and fails when its `build` differs
 from the file's (CI runs the offline form; `drift` uses the online form).
+Current (2026-10-25, build 316): the bridge's own ranges differ:
+`Stream Timeout (s)` 30–86400 and `Stream Watchdog (s)` 60–3600
+(`src/hue_bridge/driver.xml`), so a `stream_watchdog_s` from 30 to 59
+passes `validate` but cannot be set in Composer
+(`tools/deploy.py:validate_house`).
 
 Changing the desired state is a PR that edits `build:` (and `release:` when
 the version changes). The release must exist first (§5), so the order is:
@@ -385,6 +403,15 @@ repository from `gh repo view` or `--repo`. Subcommands:
 - `drift --issue`: §7.1 (what `drift.yml` runs). Without `--issue` it only
   prints, like `status`.
 
+Current (2026-10-25, build 316): `start` also refuses while a deployment
+is `queued` or has no status yet, and `deployment.json` also holds
+`commit`, `repo`, `environment`, `environment_page`, `packages` and
+`note`; `failed` also posts the note on the open deploy issue; `record`
+also refuses a release without `manifest.json` unless `--no-manifest`,
+takes `--commit SHA`, keeps the install time in `payload.installed_at`,
+and runs the drift logic as `done` does (`tools/deploy.py:cmd_start`,
+`cmd_failed`, `cmd_record`).
+
 ### 7.1 Drift logic
 
 Desired: `house.yaml` (`release`, `build`). Observed: the newest `success`
@@ -450,6 +477,8 @@ over: once from the VM, once from the workflow finding nothing to do.
   the label `dependencies`, and `pip` for `/tools`
   (`tools/requirements-checks.txt`), weekly, grouped, label `dependencies`;
   reviewed, not auto-merged.
+  Current (2026-10-25, build 316): the `pip` entry has the same 7-day
+  cooldown as the actions (§5.5).
 
 ## 9. Automation decisions (edge cases before automation)
 
@@ -491,6 +520,8 @@ without `--no-attestation` (§7).
 - `v1.0` re-cut from the merge commit by the dispatch path carries the
   packages, `SHA256SUMS.txt`, `manifest.json` and the attestation bundle,
   and the generated notes.
+  Current (2026-10-25): `v1.0` carries the seven files of §5.2, the
+  in-toto file included (read with `gh release view v1.0`).
 - `deploy/house.yaml` set to that build in a PR; the drift workflow opens
   `Deploy v1.0 (build N) to the house`; `deploy.py start` → the Windows
   session installs from the GitHub URLs → `deploy.py done` → the issue is

@@ -2,10 +2,12 @@
 
 What each file here is for. One rule runs through all of them: `status.md` is
 the single page of the present; every other note keeps its history as
-written, with dated "Superseded" lines where behaviour changed later, and
-where a note and `status.md` disagree about the present, `status.md` and the
-code win. The owner's manual itself is not here but in the driver:
-`src/hue_bridge/www/documentation.html` (the Documentation tab in Composer).
+written, with dated "Superseded" or "Current" lines where behaviour changed
+later, and where a note and `status.md` disagree about the present,
+`status.md` and the code win. The owner's manual itself is not here but in
+the driver: `src/hue_bridge/www/documentation.html` (the Hue Bridge's
+Documentation tab in Composer), with a one-page summary for each device type
+in `src/hue_light/www/` and `src/hue_scene/www/`.
 
 ## Start here
 
@@ -13,14 +15,18 @@ code win. The owner's manual itself is not here but in the driver:
   drivers do today, what was verified on hardware, and what is open.
 - [`design.md`](design.md): the engineering notebook. Targets (OS versions,
   Lua 5.1), the three-driver structure, networking and the certificate
-  bundle, the event stream and the measured `C4:url` transfer scheduling on
-  OS 3.4.2, the stream address rotation, lights, keypads, the hardware
-  verification rounds, discovery, commands and rate limiting, colour mapping
-  and storage. Dated sections; each API claim is marked verified or assumed.
+  bundle, the TLS self-check, a rejected key, the event stream and the
+  measured `C4:url` transfer scheduling and concurrent-transfer limit on OS
+  3.4.2, the stream address rotation, lights, keypads, the hardware
+  verification rounds, discovery (not built), commands and rate limiting,
+  colour mapping and storage. Dated sections; each API claim is marked
+  verified or assumed.
 - [`release-checklist.md`](release-checklist.md): what a build must pass on
-  this VM, on the dev loop, in Composer and on the owner's phone and keypads
-  before it is called good; the naming of the 1.0 release, how a release is
-  cut (the Release workflow) and how it reaches the house (`tools/deploy.py`).
+  the development machine, on the dev loop, in Composer and on the owner's
+  phone and keypads before it is called good, and what to check after a
+  controller OS upgrade; the naming of the releases (1.x is "Cassian"), how a
+  release is cut (the Release workflow) and how it reaches the house
+  (`tools/deploy.py`).
 
 ## Feature contracts
 
@@ -48,22 +54,37 @@ of it is live.
   state, the grouped command pace, capabilities, renames and deletions.
 - [`keypad-design.md`](keypad-design.md): Button Links on Hue Light and Hue
   Scene devices: taps, hold-to-dim through Hue's relative dimming, keypad
-  LEDs, decoupled Control4 switches.
+  LEDs, decoupled Control4 switches, and the keypad settings shown in
+  Composer since 2026-10-25 (#59).
+- [`bridge-compat-design.md`](bridge-compat-design.md): bridge generations
+  and software: what pairing refuses (the round BSB001, a device that is not
+  a Hue bridge, software older than 1948086000), the same model check at
+  every start, and the Bridge Model, Bridge Name and Bridge Firmware rows.
 - [`documentation-plan.md`](documentation-plan.md): the Documentation tab in
   every driver, the manual's chapter plan and the Composer icons.
 - [`review-leftovers-design.md`](review-leftovers-design.md): the fixes for
   the open findings of the reviews of 2026-10-22 and 2026-10-24 (#43–#65):
   decisions, owner-visible texts and file owners, one branch and one PR.
+- [`lifecycle-refactor-design.md`](lifecycle-refactor-design.md): one
+  lifecycle base for the bridge's lights, scenes and zone lights
+  (`bridge/owner.lua`, #56) and one keypad machine for the two device
+  drivers (`common/device.lua`, #57), with no owner-visible change.
+- [`security-fixes-design.md`](security-fixes-design.md): the fixes for the
+  security review of 2026-10-25 (#217): the gate on keyed requests, the TLS
+  verdict, the limit on open stream transfers, cleaned names, the
+  development handlers, the two-job Release workflow and its pinned inputs.
 - [`raw-stream-design.md`](raw-stream-design.md): historical, never built: the
   event stream on a raw SSL network connection instead of `C4:url`. Kept as
   the documented alternative to the padded-address design in `design.md`.
 
 ## Research and edge cases
 
-Read-only research written before designing, with a decision per lifecycle
-case: automatic, only offered, or never without a click. Historical
-(2026-10-21): "today" in them is that day's code; the decisions are in the
-contracts above.
+Read-only research written before designing. The three edge-case files are
+historical records (2026-10-21) with a decision per lifecycle case:
+automatic, only offered, or never without a click; "today" in them is that
+day's code, and the decisions are in the contracts above. The other notes
+are dated research; what was built from them is in the contracts and
+`status.md`.
 
 - [`edge-cases-hue.md`](edge-cases-hue.md): what the bridge does when the
   house changes (a bulb added, moved, replaced, renamed; a room or scene
@@ -74,40 +95,55 @@ contracts above.
 - [`edge-cases-ux.md`](edge-cases-ux.md): the owner-facing policy that came
   out of the two: what is automatic, what is offered, what is forbidden.
 - [`smart-scenes-research.md`](smart-scenes-research.md): the time-of-day
-  scene research, the owner's answers and the checks made on the house
-  bridge.
-- [`licensing-research.md`](licensing-research.md): what is in the
-  repository and under whose terms, Snap One's and Signify's terms, the
-  privacy findings before going public, the license recommendation (Apache
-  2.0) and the publication checklist.
+  scene research (2026-10-23 and 24; its status line predates the build, the
+  decisions are in `smart-scenes-design.md`), the owner's answers, the checks
+  made on the house bridge (§7), and the plan of the remaining hardware
+  checks of 2026-10-25 (§8, #40), whose results go into §7.
+- [`licensing-research.md`](licensing-research.md): research of 2026-10-24
+  before going public: what was in the repository and under whose terms,
+  Snap One's and Signify's terms, the privacy findings, the license
+  recommendation (Apache 2.0) and the publication checklist; the decision on
+  the likeness icons was added on 2026-10-25.
+- [`icons-research.md`](icons-research.md): why a light or scene device
+  shows Control4's own light picture in a room's List View and the drivers'
+  icon only in the project tree (2026-10-25, #60).
 
 ## Checklists and process
 
 - [`composer-checklist.md`](composer-checklist.md): the steps only Composer,
   a Navigator, a keypad or the Hue app can show, as the owner runs them, with
   a "Done" line per step.
-- [`spike-checklist.md`](spike-checklist.md): historical: the first pairing
-  and event-stream spike's checklist.
+- [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
+  2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the
   bridge fetches its Lua from `tools/devserver.py`, reloads itself, runs
-  actions queued with `tools/devctl.py` and ships its log back.
-- [`composer-remote.md`](composer-remote.md): driving Composer Pro from here
-  through a Claude Code session on the Windows machine (UI Automation from
-  PowerShell, `tools/composer/Composer.psm1`), and the test rounds run that
-  way.
+  actions queued with `tools/devctl.py` and ships its log back, every bundle
+  and command signed with the developer's dev key.
+- [`composer-remote.md`](composer-remote.md): driving Composer Pro from the
+  development machine through a Claude Code session on the Windows machine
+  (UI Automation from PowerShell, `tools/composer/Composer.psm1`), and the
+  test rounds run that way.
 - [`screenshots-plan.md`](screenshots-plan.md): how the manual's pictures
   are retaken in the house project (#61): crops that never show the title
   or status bar, house texts painted over with a neutral example set, a
   per-picture text list and a hold folder for anything unlisted; the plan
   as JSON for `tools/composer/Shots.ps1`.
 - [`cicd-gitops-design.md`](cicd-gitops-design.md): the CI/CD and GitOps
-  contract (2026-10-25): one check script for the VM and CI
-  (`tools/check.sh`), the four required jobs, attested releases cut by the
-  Release workflow, `deploy/house.yaml` as the desired state of the house,
-  the GitHub Deployment as the observed state, the drift issue,
-  `tools/deploy.py`, and what is automatic, offered or never without a click.
+  contract (2026-10-25): one check script for the development machine and
+  CI (`tools/check.sh`, its tools from `tools/setup-checks.sh`), the four
+  required jobs, the code scanning issue, attested releases cut by the
+  two-job Release workflow from pinned inputs, `deploy/house.yaml` as the
+  desired state of the house, the GitHub Deployment as the observed state,
+  the drift issue, `tools/deploy.py`, and what is automatic, offered or
+  never without a click.
+- [`doc-accuracy-design.md`](doc-accuracy-design.md): the contract of the
+  documentation accuracy pass of 2026-10-25 (#231): every document a reader
+  sees, checked against the drivers at build 316, and who checked which.
 
 ## Reviews
+
+Dated records of the code as it was when each was written; what was fixed is
+in the contracts, the issues and `status.md`.
 
 - [`code-analysis-2026-10-22.md`](code-analysis-2026-10-22.md): the summary of
   four read-only analyses of the release code (security, leaks, races) and
@@ -143,3 +179,11 @@ contracts above.
   the release review of the Hue Light and Hue Scene device pages, the README
   set and the manual's install chapters against the code, with the
   corrections applied before 1.0.
+- [`reviews/security-2026-10-25.md`](reviews/security-2026-10-25.md): the
+  read-only security review of the review leftovers and the lifecycle
+  refactor (PRs #214 and #216, build 292) and of the tooling: fourteen
+  findings, fixed under `security-fixes-design.md` (#217).
+- [`reviews/diff-review-2026-10-25.md`](reviews/diff-review-2026-10-25.md):
+  the read-only diff and efficiency review of the same branch against the
+  refactor's rule that no owner-visible behaviour changes, with differential
+  harnesses run outside the repository.

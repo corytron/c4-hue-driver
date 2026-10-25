@@ -14,6 +14,11 @@ hardened; it is rebased on `main` once #214 merges. One PR.
    spec stays green **without edits**. If a spec must change, it is because
    it reached into a private function that moved; say which and why, and
    prefer a thin compatibility shim over a spec edit.
+   Current (2026-10-25, build 316): #217, after this refactor, changed the
+   names on purpose: every Hue name handed to Control4 is a
+   `util.display_name`, and the comparisons and name matches run both sides
+   through it (`bridge/owner.lua:new_device_name`, `name_differences`,
+   `match_unimported_by_name`).
 2. **Divergences settled first.** Where the copies differ today, list each
    difference before merging them, decide (keep the behaviour each module
    has now, behind a hook or an option), and say so in a comment.
@@ -42,6 +47,13 @@ lights' `tell()` / `foreign()`). Rows 25–26 are done last and only if rows
 12–18 are green; if a high-risk row cannot be merged without a behaviour
 change, leave it per module and say why.
 
+Current (2026-10-25, build 316): a mixin (each module sets
+`setmetatable(module, { __index = owner })`; the reason, and every
+divergence with the option, word or hook it became, are in the header of
+`bridge/owner.lua`); `self.OPTIONS` holds the divergences that are a yes or
+a no; rows 25 and 26 were merged as well (`owner:link_devices`,
+`match_unimported_by_name`, `relink`, `forget`).
+
 Also (found while hardening, `docs/review-leftovers-design.md` §5), so the
 three modules behave alike once they share the base: zone lights answer
 every waiting resync caller once (as lights and scenes now do); a zone
@@ -50,6 +62,14 @@ now do); zone lights pass a field schema to the registry (as lights now
 do); and `refresh_registry` can clear a field whose value became nil
 (analysis R9; a spec shows a stale field cleared). These four are the only
 intended behaviour changes of the refactor; each gets a spec.
+
+Current (2026-10-25, build 316): all four are in (`bridge/owner.lua:resync`,
+`run_pending_resync`; `added` with `zone_lights.OPTIONS.gone_after_add`;
+`zone_lights.ENTRY_FIELDS`; `refresh_fields` with each module's
+`REFRESH_CLEARS`). Left per module on purpose: the scenes keep no
+early-hello cap, no R5, no R11 for hellos and no field schema, and the zone
+lights mark a deleted zone gone at the AddDevice answer but not at a later
+hello.
 
 Also on this branch, found on the house and not part of the refactor
 (Composer rounds 41 and 42, `docs/keypad-design.md`): the keypad settings

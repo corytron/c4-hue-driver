@@ -33,10 +33,18 @@ Scenes Of Room, playable from tiles, keypads, programming and the slider.
    `{"recall":{"action":"deactivate"}}`, then turns the group off through
    the existing group queue (owner's answer 3; deactivate alone leaves the
    lights on, V7). STATE inactive follows from the events.
+   Current (2026-10-25, build 316): the bridge also sends STATE inactive
+   (reason `recall`) itself once the deactivate or the group off has gone
+   through, the cached state when neither did
+   (`src/hue_bridge/bridge/scenes.lua:deactivate`).
 6. **Dims and the slider while running**: unchanged (`HUE_SCENE_DIM`,
    `HUE_SCENE_LEVEL` on the group). The next time slot's look replaces the
    dimmed level when it starts (Hue's behaviour; whether a slot advances
    after a dim is checked at 16:00 on 2026-10-24, research §7).
+   Checked (2026-10-24 16:00, build 199, research §7): a running app-made
+   schedule advanced to its 16:00 slot and the device showed it within
+   two minutes; whether the room had been dimmed before is not known, so
+   a dim before a boundary stays open (#40).
 7. **Names drop the app's number** (owner's answer 4): base name =
    `metadata.name` without a trailing " <digits>" ("Golden hours 4" →
    "Golden hours"). Device name at creation: room → base name; zone →
@@ -67,12 +75,21 @@ Scenes Of Room, playable from tiles, keypads, programming and the slider.
     `0` on ordinary ones [verified: SDK 24_properties/_4]. Re-link across
     kinds is allowed; CONFIGURE carries the new kind and the device re-runs
     this.
+    Not yet seen on the house: `Recall As` shown again on an ordinary
+    device after a re-link from a time-based one (#40).
 13. **Status** of a smart device: "Hue time-based scene <base name> in
     <group label>; now <slot scene name> (from <07:00 | sunset>)" while
     active, "…; not running" while inactive.
+    Current (2026-10-25, build 316): "…; running" while the slot is not
+    known, the first part alone before any state, and "(no room)" without
+    a group label (`src/hue_scene/driver.lua:smart_status`).
 14. **Summary**: the bridge's `Scenes` line counts both: "126 scenes and 15
     time-based on bridge, …" (the other fields unchanged, counting devices
     of both kinds).
+    Current (2026-10-25, build 316): it reads "<n> + <m> time-based on
+    bridge, <k> imported, <d> deleted", "?" for the time-based count until
+    a `/smart_scene` GET has succeeded, "N missing" and "N unbound" only
+    when not zero (`src/hue_bridge/bridge/scenes.lua:summary`).
 
 ## Messages (strings; additions to `docs/scenes-design.md` §2)
 

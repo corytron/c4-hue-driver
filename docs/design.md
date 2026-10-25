@@ -2,13 +2,15 @@
 
 > Addresses: the house's own LAN addresses were replaced on 2026-10-24 by placeholders of the same shape (`10.0.2.143` for the bridge, `192.0.2.7` for this VM), per CLAUDE.md; the behaviour described is unchanged.
 
-**Current state:** `docs/status.md` (2026-10-24) is the one page that says
-what runs on the house (build 160, release builds of all three drivers),
-what the drivers do now and what is open; where this notebook and
-`docs/status.md` disagree about the present, `docs/status.md` and the code
-win. This file is the engineering history: dated sections stay as written,
-and where behaviour changed later a dated "Superseded (date): …" line says
-so at that spot.
+**Current state:** `docs/status.md` (2026-10-25) is the one page that says
+what runs on the house, what the drivers do now and what is open; where
+this notebook and `docs/status.md` disagree about the present,
+`docs/status.md` and the code win. This file is the engineering history:
+dated sections stay as written, and where behaviour changed later a dated
+"Superseded (date): …" line says so at that spot. On 2026-10-25 (#231) the
+sections that describe behaviour were checked against the code of build
+316; a "Current (2026-10-25, build 316): …" note marks where the code now
+differs from what a section first recorded.
 
 How the work gets done (process, not architecture): every change that can
 be split into parts touching disjoint files is built by parallel agents
@@ -22,6 +24,12 @@ builds without the dev loop, installed through Composer by the Windows
 session; a capability change also needs the owner's controller reboot
 (`docs/status.md`, "How builds reach the house"; "Keypad and scene dimmer:
 verified on hardware" below). The dev loop serves development builds only.
+
+Superseded (2026-10-25): releases are cut by the Release workflow and
+reach the house through the GitOps flow (`deploy/house.yaml`,
+`tools/deploy.py`, `docs/cicd-gitops-design.md`; CLAUDE.md "Deploy").
+Dev builds still serve hardware checks; since #52 the dev loop acts only
+on what the dev key signed (`docs/dev-loop.md`, "Security").
 
 Status key: **[verified]** = checked in the DriverWorks docs, Control4's sample
 drivers, Signify's Hue developer docs (Core Concepts, Using HTTPS, Hue Bridge
@@ -65,6 +73,12 @@ shows one Hue scene per device through a light_v2 proxy and binds to the
 bridge like a light (`docs/scenes-design.md`); a dimmer since build 160
 (`docs/scene-dimmer-design.md`). Since 2026-10-22 the light and scene
 drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
+Since 2026-10-24 (build 196) a Hue Light device can also stand for a Hue
+zone or room, driven through its grouped_light (kind "group",
+`docs/zone-light-design.md`). Since 2026-10-25 the bridge's lights, scenes
+and zone lights share one lifecycle base, `bridge/owner.lua` (#56), and the
+two device drivers share `common/device.lua` (their plumbing since
+2026-10-24, the keypad machine since #57).
 
 ## Networking
 
@@ -77,6 +91,16 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
 - Keep consecutive requests on one connection; the bridge also supports TLS
   session tickets **[verified Signify guidance]**. Whether `C4:url()` reuses
   connections between transfers is **[assumed]**.
+- Current (2026-10-25, build 316): every request that carries the key goes
+  through `bridge_request` in `src/hue_bridge/driver.lua`. It answers at
+  once with one refusal while one holds (`keyed_refusal`: `not paired`,
+  `TLS check failed`, `key rejected`), sends nothing until the unkeyed
+  identity check (`verify_identity`: `GET /api/0/config` must report the
+  paired bridge id) and the TLS self-check below have passed for the
+  current start and address, and drops any TLS table the caller passed. A
+  keyed request refuses redirects: a 3xx answer ends it as `redirect
+  refused (HTTP <code>)` (`http.request`; security review 2026-10-25,
+  finding 7). A request path must start with `/` (`http.url`; finding 10).
 
 ### Certificates
 
@@ -105,7 +129,13 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
   (generated from the two PEMs by `tools/gen_ca_bundle.sh`; a spec fails on
   drift) and `bridge/http.lua` uses `ssl_cabundle = "certs/hue_ca_bundle.pem"`
   for every bridge request. Requests to public hosts use the system CAs with
-  hostname checking (`mode = "system"`).
+  hostname checking (`mode = "system"`). Current (2026-10-25, build 316):
+  there is no `mode` option, and the release drivers ask no public host;
+  only the dev-build diagnostics do, with the system CAs and hostname
+  checking (`conntest.TLS_SYSTEM`, `pinning.TLS_SYSTEM`: `ssl_cabundle =
+  false`). A request may lay its own `ssl_*` options over the bundle's
+  (`req.tls`, `http.options`): in release code only the TLS self-check
+  does, and `bridge_request` clears them for every keyed request.
 - Bridge IDs are 16 hex digits, compared lower-case. The discovery endpoint
   returns lower case (`001788fffe100491`), `/api/0/config` upper case
   (`001788FFFE25B8F8`) **[verified]**.
@@ -203,7 +233,9 @@ blocking rule, `docs/security-fixes-design.md`):
 - **Verified** 2026-10-25 on the house (dev build 276, which runs the same
   check; "Hardware facts of the 2026-10-25 dev pass" below): OS 3.4.2
   refuses the decoy with curl error 60, as it refused a public site with the
-  bundle in place (the CA probe above). Until then this was assumed.
+  bundle in place (the CA probe above). Until then this was assumed. The
+  code of #217 answered `pinned` on the house too (its branch through the
+  dev loop on a dev build, 2026-10-25, issue #217).
 - `Check CA Pinning` stays in dev builds; since #46 (L5) it answers
   `inconclusive` rather than `pinned` when its second request fails for a
   reason other than certificate verification (timeout, DNS, connection
@@ -257,14 +289,18 @@ blocking rule, `docs/security-fixes-design.md`):
   only the changed properties **[verified]**.
 - The bridge sends at most one container per second. A property that changed
   twice in that second only reports its last value, and changes to several
-  resources are grouped in one container **[verified]**.
+  resources are grouped in one container **[verified]**. Observed
+  2026-10-25 (#65, dev build 284): during a slider drag on a zone light the
+  Bridge Pro sent 10 containers in about 7 s, at most 2 a second ("Hardware
+  pass of 2026-10-25 night").
 - On HTTP/1.1 the stream needs its own connection, separate from REST calls
   **[verified]**. `C4:url()` cannot provide that second connection on OS
   3.4.2 (see below).
 - Not documented: keepalive or heartbeat messages, resuming with
   `Last-Event-ID`, connection limits **[unknown]**. Design for the worst case:
   a watchdog reconnects on silence, and every reconnect is followed by a full
-  GET resync.
+  GET resync. Since 2026-10-25 the watchdog opens no new transfer while an
+  earlier one may still be open ("Concurrent transfers").
 - Spike transport: `C4:url()` with `OnBodyChunk`. Results on OS 3.4.2, from
   the bridge and from a controlled experiment against a multithreaded HTTPS
   test server on the LAN whose connection log was inspected (the **Connection
@@ -348,7 +384,10 @@ the dev loop (`build/dev/driver.log` of 2026-10-20, 20:08–20:26):
 - `C4:JsonEncode` writes Lua arrays as objects with string keys even with
   `encodeArrays = true` (observed on the `/log` bodies); the dev server
   accepts both shapes. Any Hue request body that needs a real JSON array
-  will need a small encoder of our own.
+  will need a small encoder of our own. As built (2026-10-25, build 316): no
+  body the drivers send holds an array (light and grouped_light PUTs, scene
+  and time-based scene recalls, the pairing POST), so none was written;
+  `http.request` encodes with `C4:JsonEncode(body, false, true)`.
 
 ### Two ways to keep commands flowing while the stream is open
 
@@ -388,7 +427,11 @@ stream's own spelling, so only the stream itself waits; the abandoned
 transfer's last chunk is still parsed and delivered. A dev-loop reload is a
 reconnect too, so a day of reloads can queue several zombies; bridge
 events drain them one per event (the `Hue Request` dev action can generate
-harmless events by renaming a light back and forth).
+harmless events by renaming a light back and forth). Current (2026-10-25,
+build 316): that last chunk reaches the modules at most once, and only
+while the current transfer is not connected (`stream:deliver_abandoned`,
+#46 L1); how many stream transfers may be open at once is capped
+("Concurrent transfers").
 
 ### Stream address rotation (2026-10-21)
 
@@ -427,7 +470,12 @@ replaces, so the two are on different Director queues.
 - **Property.** `Stream Address` shows the spelling in use and the mode:
   `10.000.02.143 (own queue, rotating over 7 spellings; commands use
   10.0.2.143)`, or `… (own queue, no second spelling to rotate; …)` for a
-  one-entry family. The single-queue text is unchanged.
+  one-entry family. The single-queue text is unchanged. Superseded
+  (2026-10-24, build 184, #121): shorter texts that fit Composer's column
+  (`stream_address_text` in `src/hue_bridge/driver.lua`): `10.000.002.143
+  (own queue, spelling 1 of 7)`, and `198.51.100.005 (own queue, the only
+  spelling)` for a one-entry family; the single-queue text is `<ip> (shared
+  queue with commands: <reason>)` (`choose_stream_address`).
 - **Stream module.** `bridge/stream.lua` already asks `opts.connection()`
   afresh on every connect; it now records the spelling it used in
   `stats.address` and logs it.
@@ -480,13 +528,27 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   `HUE_FORGOTTEN` (import-ui, 2026-10-21, `docs/import-design.md`); light →
   bridge `HUE_DIM` {`rid`, `direction` up/down/stop, `duration`, `level`}
   for keypad holds (2026-10-23, `docs/keypad-design.md`); `HUE_LOG` from
-  dev builds only.
+  dev builds only; light → bridge `HUE_FORGET` {`rid`, `device_id`} from the
+  device's Forget This Light; for zone lights (2026-10-24,
+  `docs/zone-light-design.md` §5) `kind`, `group_type`, `light_count` and
+  `no_lights` in `HUE_CONFIGURE` and `kind` in `HUE_HELLO`. Current
+  (2026-10-25, build 316): `HUE_HELLO` leaves out what the device does not
+  know (no `rid` before it has one; the bridge reads that as ""), and
+  `DEV_RELOAD` changed (the "Dev loop" item below).
 
 - **Registry.** `{ [rid] = { device_id, name } }`, persisted as a table with
   `C4:PersistSetValue("hue_lights", table)` **[verified: API docs allow
   tables]**, loaded at late init and written on every change; between those
   the in-memory copy is authoritative (see "Storage" for why). Each light
-  persists its own rid as `hue_rid`.
+  persists its own rid as `hue_rid`. Current (2026-10-25, build 316):
+  `bridge/registry.lua` (registry v2, `docs/import-design.md` §3) keeps far
+  more per entry (the proxy id, the Composer name, the model and its
+  capabilities, the device and Zigbee identity, the Hue room, the lifecycle
+  state and its dates), the tombstones under `hue_tombstones` and the room
+  mappings under `hue_rooms`; mutators change memory and the owner module
+  saves after a batch (one click, one resync). The scenes and the zone
+  lights keep their own instances ("Storage"). A light also persists
+  `hue_name`, `hue_model` and `hue_kind`.
 - **Import** (the **Import Lights** action, serial). GET
   `/clip/v2/resource/light`, `/device` and `/zigbee_connectivity`. For each
   light whose rid is not in the registry: `C4:AddDevice("hue_light.c4z",
@@ -512,7 +574,12 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   "connected"`). After every stream connect the bridge re-GETs the three
   resources and sends full state (reason `resync`) to every registered
   light, `HUE_CONFIGURE` first at startup, so the connect-then-resync rule
-  from "Event stream" covers the lights too.
+  from "Event stream" covers the lights too. Current (2026-10-25, build
+  316): the lights' resync is six serial GETs (`/light`, `/device`,
+  `/zigbee_connectivity`, `/room`, `/zone`, `/bridge_home`); the scenes'
+  (`/scene`, `/smart_scene`, `/grouped_light`) and the zone lights' (which
+  reuse that grouped_light answer) follow it (`on_connected` in
+  `new_stream`, `src/hue_bridge/driver.lua`).
 - **Coalescer** (`bridge/commands.lua`). One pending state per rid, latest
   value wins; setting `x`/`y` clears `mirek` and vice versa (the bridge
   applies xy and ignores mirek when both are sent **[verified]**). A rid is
@@ -532,7 +599,11 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   pending state's last update (`commands.MAX_AGE_S`), then dropped with one
   warning naming its age and the last error; `not paired` and `key
   rejected` end the pending state at once. The grouped_light queue follows
-  the same rules.
+  the same rules. Current (2026-10-25, build 316): `TLS check failed` ends
+  it at once too (#217); `color.xy` is clamped to [0, 1], not to the
+  light's range (the bridge maps it into the gamut); a keypad hold's start
+  and stop skip the bucket (`commands.urgent`); a dim stop the bridge
+  refuses is replaced by the level estimate (`commands:stop_fallback`).
 - **Brightness and colour mapping.** Proxy → bridge:
   `SET_BRIGHTNESS_TARGET` **[verified: sample light driver]** with target 0 →
   `on=false`, otherwise `on=true, brightness=target`, `RATE` passed through;
@@ -552,13 +623,27 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   `LIGHT_COLOR_CHANGED` (mode 1 via `C4:ColorCCTtoXY(1,000,000 / mirek)` for
   `ct`, mode 0 with the xy for `xy`), `ONLINE_CHANGED`. Notify parameter
   names use underscores **[verified for brightness in the sample driver;
-  assumed for colour]**.
+  assumed for colour]**. Superseded (2026-10-25, #216): the driver's own
+  lines of 2026-10-22 answered the parameter question (a colour pick
+  arrives with `LIGHT_COLOR_TARGET_MODE` 0, a temperature pick with 1, each
+  with its X and Y and a `RATE`; checklist D.10), and the log line is gone;
+  every spelling in `COLOR_KEYS` (`src/hue_light/driver.lua`) is still
+  accepted. Also handled: `TOGGLE`,
+  and the Advanced Lighting Scenes stops `SET_BRIGHTNESS_STOP`,
+  `SET_COLOR_STOP` and `STOP_SCENE_RAMP`, which send nothing to the bridge
+  and answer with the cached value.
 - **Dev loop.** The bridge's loop polls the light tree too and forwards
   `DEV_RELOAD` (version plus the bundle as JSON text) to every bound light
   **[assumed: a ~40 KB string param survives `SendToDevice`; chunk it if
   not]**. A dev-build light reloads itself with the same sequence as the
   bridge and reports through its own `print`, which only its Lua output in
-  Composer shows.
+  Composer shows. Current (2026-10-25, build 316): `DEV_RELOAD` carries
+  {`tree`, `version`, `bundle`, `mac`}, the bundle exactly as the dev server
+  signed it, and the device verifies it with its own dev key before it
+  reloads (`devloop.apply_forwarded`); scene devices get the scene tree the
+  same way, and a device's log lines reach the bridge's shipped log as
+  `HUE_LOG` (`devloop.forward_logs`). The ~40 KB parameter reached 47
+  lights on 2026-10-21 ("Lights: verified on hardware").
 
 ### Keypad buttons (2026-10-22, `docs/keypad-design.md`)
 
@@ -586,6 +671,23 @@ drivers, keeps the preset, rate and LED colour settings out of Composer,
 so the defaults apply (same section below). Superseded (2026-10-25, #59):
 both now declare it False, so the settings show in Composer after the
 controller reboot the capability change needs.
+
+Current (2026-10-25, build 316): one press, click and release machine in
+`common/device.lua` (#57, `dev.button_action`) serves both drivers and both
+routes, the proxy's `BUTTON_ACTION` (echoed back) and `DO_PUSH`,
+`DO_RELEASE` and `DO_CLICK` on the links 200–202. A press still down after
+400 ms is a hold: top, or toggle while off, dims up; bottom, or toggle while
+on, dims down; down from off does nothing. A hold from off turns the device
+on at 1 % and dims up 600 ms later (a time-based scene starts instead, and
+the dim follows once its look is on); a click on the same button within
+1 s of a hold's release is ignored. The settings a driver declares (the light:
+Default On Brightness 1–100 % and the click and hold rates; the scene: the
+hold rates; rates 0–86400000 ms) persist per device, are confirmed to the
+proxy with a bare-value notification (`PRESET_LEVEL`, `CLICK_RATE_UP`, …)
+at late init and after each `SET_*`, and a value out of range is refused; a
+persisted one out of range is deleted and the default used
+(`report_setting`, `in_range`, `load_settings`). Seen on the house on
+2026-10-25 ("Hardware pass of 2026-10-25 night", #59).
 
 On hardware (builds 144 and 146): the Top, Bottom and Toggle Button Links
 are connections the driver declares (ids 200–202, BUTTON_LINK outputs),
@@ -634,13 +736,20 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   Light read "Right Bedside Light (Hue color lamp)", Online, version 150 at
   all 19 reads from 19:21:03 to 19:22:33, never "Not bound" **[verified]**.
   Whether the re-check ran or the binding was visible at late init cannot be
-  told from Composer, so the re-check path itself is **[assumed]**.
+  told from Composer, so the re-check path itself is **[assumed]**. Still so
+  on 2026-10-25 (#41): the dev loop's log starts at late init, and after
+  that day's reboot no device logged "still not bound"; the path is
+  `schedule_recheck` in `common/device.lua`, pinned by `device_spec`.
 - **Light Button Links**: taps on a light through its Button Links
   **[verified 2026-10-22, `docs/status.md`]**. The relative hold on a light
   resource (since 2026-10-23: `HUE_DIM` with the hold rate scaled by the
   distance, the 100 ms estimate sent with the stop as a fallback level) and
   the light's keypad LEDs are **[assumed]**: no Hue Light device has been
-  in the project since.
+  in the project since. Current (2026-10-25): the zone lights (2026-10-24)
+  run the Hue Light driver, and the shared keypad machine was driven on a
+  zone light through its Lua window on 2026-10-25 ("Hardware pass of
+  2026-10-25 night"); a hold on a single light resource is still
+  **[assumed]**.
 - **Scene hold-to-dim, build 154 (2026-10-23).** On the Bedside Lights
   Switch, taps play Shine and turn its room off, and holding top or bottom
   brightens or dims the room with Shine's colours and per-light differences
@@ -686,11 +795,19 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   exists only from OS 4.2.1), so after the install the settings appear once
   the owner has rebooted the controller from System Manager; the commands
   they send reach the handlers above **[assumed until a setting is changed
-  on the house]**.
+  on the house]**. Seen 2026-10-25 after the owner's reboot (dev build 284):
+  the settings page appears on light and scene devices, and a changed hold
+  rate reaches the driver and its next hold ("Hardware pass of 2026-10-25
+  night").
 - **Not yet seen on hardware:** the Hue-app side of the on rule and the
   level (a dim, the room off, another scene played in the Hue app), a slider
   move from off at a level, the absolute fallback, `held_on` across a
-  restart (`docs/composer-checklist.md`, section I).
+  restart (`docs/composer-checklist.md`, section I). Seen since (2026-10-25,
+  "Hardware pass of 2026-10-25 night"): a level from off (Shine at 1 %,
+  #41), the scenes' group level following a change made in Hue, and the
+  room turned off from the room light ending Shine's on state (#39). Still
+  not seen: another scene played in the Hue app, the absolute fallback,
+  `held_on` across a restart.
 
 ### Lights: verified on hardware (2026-10-21, through the dev loop)
 
@@ -751,6 +868,9 @@ loop on OS 3.4.2:
   both 1080 and its proxy 1081); a hand-added, never-linked `hue_light` shows
   the driver name "Hue Light" — there is one such device (1034) in the
   project today, the manual install that preceded the first import.
+  Superseded (2026-10-22): device 1034 was linked as Vanity 3 that day and
+  deleted with every other light device in the full reset ("import-ui:
+  verified on hardware").
 - `C4:GetBoundConsumerDevices(bridge, 1)` → `{ [protocolId] = "Hue Light" }`:
   the value is the driver's `<name>`, not the Composer name; 47 entries,
   ids 1036–1128 step 2.
@@ -762,7 +882,8 @@ loop on OS 3.4.2:
   returns the **number 0**, not the nil the API doc promises (2026-10-22).
   Lua takes 0 for true, so until that day both the light and the scene
   driver showed "Bound; waiting for the bridge" on a never-bound device
-  and sent their hello to device 0; `bound_bridge()` now treats 0 as nil.
+  and sent their hello to device 0; `bound_bridge()` (in
+  `common/device.lua` since 2026-10-24) now treats 0 as nil.
 - `C4:Bind(1033, 1, 1034, 1, "HUE_BRIDGE")` (provider bridge, consumer
   light, run from the bridge through `Probe Call`) made the binding at
   once: Director raised `OnBindingChanged(1, HUE_BRIDGE, true, 1034, 1)` on
@@ -905,6 +1026,11 @@ longer queue behind the zombie.
   expected texts (`Attention` "None"; `Room Mappings` listing 9 mapped
   rooms, 7 unmapped rooms and 7 unmapped zones; `Last Action` holding the
   full Room Audit text, about 3 KB, displayed without truncation).
+  Superseded (2026-10-24, #121 and #68): the owner found that Composer
+  shows a value on one line of about 75 characters and clips the rest;
+  `Room Mappings` became a drop-down list, and since build 247 `Last
+  Action` is word-wrapped at 72 characters onto the rows `Last Action (2)`
+  to `(6)`.
 - **G23, the bare device (2026-10-22, Windows session + dev loop).** The
   hand-added "Hue Light" (device 1034, room "Room") was bound with
   `C4:Bind` (above); the bridge logged "device 1034 bound but not
@@ -992,7 +1118,9 @@ project:
   (Hue color lamp)", `Hue Light ID` "#46 (e0e51794…)", `Hue Room` "Master
   Bedroom", `Online` "Online"; the bridge's 2.7 KB `Last Action` text in
   full. A `Room Audit` click from Composer reached the driver (log 17:02:36)
-  and rewrote the same text.
+  and rewrote the same text. Superseded (2026-10-24, #121 and #68): on
+  screen Composer clips a value at about 75 characters ("import-ui:
+  verified on hardware" above).
 - Composer's controls are UIA `Pane`s with meaningful `Name`/`ClassName`
   but no patterns: reading works through UIA, clicking through `SendInput`
   at the reported rectangles; pickers and the System Design tree are
@@ -1081,6 +1209,10 @@ project:
   Correction (2026-10-24): `Dev Server` is ignored, but release builds keep
   the `Connection Test` action, whose "Diagnostic Server" target reads that
   property (`Connection_Test`, since 2026-10-24 in `src/hue_bridge/bridge/devtools.lua`, dev builds only).
+  Current (2026-10-25, build 316): `Connection Test`, `Reload Credentials`,
+  `Check CA Pinning` and the `Diagnostic Server` and `Dev Server` rows sit in
+  the DEV-ONLY blocks of `src/hue_bridge/driver.xml`, which `tools/build.sh`
+  strips from release builds; a release build has none of them.
 - **Build 125: Documentation tab and icons (2026-10-22 13:27, Windows
   session)**: installed the same way over 116; every device read 125 a
   minute later with state intact. The tab strip became "Properties |
@@ -1135,10 +1267,10 @@ Signify's order is mDNS, then the cloud discovery endpoint, then manual IP.
 Discovery runs only at setup, or when the stored bridge stops answering
 **[verified guidance]**.
 
-As built (2026-10-24): only step 1 exists. There is no Discover Bridges
-action and no automatic IP follow-up (`src/` has no discovery code): a new
-bridge address is typed into `Bridge IP Address`, and the pairing survives
-it.
+As built (2026-10-24, unchanged at build 316): only step 1 exists. There
+is no Discover Bridges action and no automatic IP follow-up (`src/` has no
+discovery code): a new bridge address is typed into `Bridge IP Address`,
+and the pairing survives it.
 
 1. **Manual IP** (v1): the `Bridge IP Address` property. A DHCP reservation
    for the bridge is recommended.
@@ -1187,14 +1319,21 @@ it.
   runs at 1/s with a burst of 3 (`docs/zone-light-design.md` Decision 9);
   since 2026-10-25 (#58) it also clamps a zone light's colour temperature to
   the members' common range (Decision 7). Retries: the coalescer's rule
-  above (#43).
+  above (#43). Current (2026-10-25, build 316): one PUT in flight per light
+  or group (`commands:flush`), the rest wait in Director's per-host queue;
+  a keypad hold's start and stop skip the bucket (`commands.urgent`,
+  Decision 9). On the house 50 slider targets in 5 s on a zone light made 9
+  grouped_light PUTs (a burst of 3, then one a second) and no 429
+  (2026-10-25, #39).
 - Rooms and zones are controlled through their `grouped_light` service.
   Scenes are recalled through `/resource/scene/{id}` **[verified: resources
   exist; recall body to be confirmed from the API reference]**.
   Superseded (2026-10-21/23): the recall body `{"recall":{"action":…}}`
   (also with `duration`) and the grouped_light `dimming_delta` with
   `dynamics` and `stop` are verified on hardware; a recall at a level
-  (`recall.dimming.brightness`) is **[assumed]**.
+  (`recall.dimming.brightness`) is **[assumed]**. Verified 2026-10-25 (#41):
+  a recall at 1 % set both lamps of Shine to 1.19 % in the scene's own
+  colours ("Hardware pass of 2026-10-25 night").
 
 ## Color mapping
 
@@ -1227,7 +1366,10 @@ it.
   turn-on **[verified best practice]**.
 - The bridge's state can lag the bulbs; a power-cycled bulb can take minutes
   to show its real state **[verified]**. The driver reports what the bridge
-  reports; `color_trace_tolerance` absorbs rounding.
+  reports; `color_trace_tolerance` absorbs rounding. Current (2026-10-25,
+  build 316): neither device driver declares `color_trace_tolerance`, so the
+  proxy's default applies (light_v2 reference,
+  `5_light_v2_capabilities/_13.5-COLORTRACETOLERANCE`).
 
 ## Storage
 
@@ -1252,7 +1394,12 @@ it.
   also `hue_stream_spelling`, `hue_lights`, `hue_rooms`, `hue_tombstones`,
   `hue_scenes` and `hue_scene_tombstones`. Each device keeps its own
   identity, keypad settings and LED colours, a scene also `recall_as` and
-  `held_on`.
+  `held_on`. Current (2026-10-25, build 316): also `hue_rooms_automapped`
+  (the one-time Map Rooms By Name has run), `hue_zone_lights` and
+  `hue_zone_light_tombstones` (zone lights, build 196),
+  `hue_scene_forgotten` (devices Forget Scene let go, #47) and
+  `tls_pinned_on` (the Director version that answered `pinned`, #217;
+  unencrypted, it is no secret).
 
 ## Hardware facts of the 2026-10-25 dev pass (build 276, OS 3.4.2, Bridge Pro)
 
@@ -1300,6 +1447,12 @@ next bridge event. Dev-loop reloads still leave one abandoned transfer each
 (a reload starts a new Lua module in the same state and cannot know the old
 one's), so repeated reloads in a quiet house can still reach the limit; a
 bridge event drains them.
+
+Since 2026-10-25 (#217, security review finding 5) the cap covers every
+path, not only the watchdog: a new stream transfer waits while two may be
+open (`stream:connect`, `wait_for_close`; `Event Stream` reads `Waiting for
+an earlier stream transfer to close`), and a stop, an oversized line and
+the watchdog all count the transfer they give up (`drop_transfer`).
 
 ## Hardware pass of 2026-10-25 night (dev builds 276 and 284, OS 3.4.2)
 
