@@ -304,8 +304,9 @@ adds it when seen, with `gh project item-add 1 --owner corytron --url`.
 `.github/workflows/drift.yml`: `push` to `main` with `paths:
 [deploy/house.yaml]`, `deployment_status`, `schedule` weekly (Monday 06:30
 UTC), `workflow_dispatch`; `permissions: contents: read, issues: write,
-deployments: read`; runs `python3 tools/deploy.py drift --issue`. `GH_TOKEN:
-${{ github.token }}`. The `deployment_status` trigger fires for statuses the
+deployments: read`; runs `python3 tools/deploy.py drift --issue` and treats its exit 3 (drift) as
+success, since drift is the report the run exists to make; exit 1 (an error)
+fails the run. `GH_TOKEN: ${{ github.token }}`. The `deployment_status` trigger fires for statuses the
 VM's `deploy.py` posts (a user token), so a `done` closes the issue twice
 over: once from the VM, once from the workflow finding nothing to do.
 
