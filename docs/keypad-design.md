@@ -49,7 +49,17 @@ findings".
   the handlers stay, and exposing the settings is open (`docs/status.md`).
   Superseded (2026-10-25, #59): `hide_proxy_properties` False, so the
   preset and the rates are shown after the controller reboot and reach these
-  handlers **[assumed until changed once on the house]**.
+  handlers (verified on the house, Composer rounds 41 and 42).
+- The answer: after each `SET_*`, and for every declared setting at late
+  init, the driver sends the matching notification (`PRESET_LEVEL`,
+  `CLICK_RATE_UP`/`DOWN`, `HOLD_RATE_UP`/`DOWN`) so Composer shows the value
+  in use.
+- Its form: the bare value as a string. The proxy reads the documented
+  `{RATE = …}` table as 0 (verified on the house, 2026-10-25: a table zeroed
+  the settings until the bare form replaced it).
+- Ranges: preset 1 to 100, rates 0 to 86 400 000 ms. A value outside them is
+  refused: from the proxy, the value kept is reported back; persisted, it is
+  deleted, warned about once, and the default used.
 
 ## Driver behaviour
 
