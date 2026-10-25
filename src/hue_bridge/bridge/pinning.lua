@@ -11,7 +11,9 @@
 -- that never started says nothing about the bundle and is "inconclusive"
 -- [code analysis 2026-10-22, L5]. That a refused certificate gives 60 is
 -- verified on OS 3.4.2 (docs/design.md "Certificates"); the other codes are
--- curl's documented ones [assumed].
+-- curl's documented ones [assumed]. An inconclusive answer names the request
+-- that failed and the transfer's error (pinning.status), rather than calling
+-- every one "unreachable" [issue #239].
 
 local log = require("common.log")
 local http = require("bridge.http")
@@ -26,14 +28,16 @@ pinning.TIMEOUT = 10
 pinning.TLS_SYSTEM = { ssl_verify_peer = true, ssl_verify_host = true, ssl_cabundle = false }
 
 -- `ca` is the bundle in use (http.ca, { path }); `callback(verdict, detail)`
--- gets "pinned", "not_pinned" or "inconclusive" and the reason.
+-- gets "pinned", "not_pinned" or "inconclusive" and the reason: for
+-- "inconclusive", which request failed and the transfer's error.
 function pinning.check(ca, callback)
 	local host = pinning.PUBLIC_HOST
 	local described = "ssl_cabundle=" .. tostring(ca.path)
 	http.request({ ip = host, path = "/", timeout = pinning.TIMEOUT, tls = pinning.TLS_SYSTEM }, function(control)
 		if not control.ok and not control.code then
 			log.always("pinning check: %s unreachable with system CAs (%s); inconclusive", host, tostring(control.err))
-			return callback("inconclusive", tostring(control.err))
+			return callback("inconclusive", string.format("%s unreachable with the system CAs (%s)", host,
+				tostring(control.err)))
 		end
 		-- The bundle with hostname checking on, since this is a real hostname.
 		local pinned = { ssl_verify_peer = true, ssl_verify_host = true, ssl_cabundle = ca.path }
@@ -46,13 +50,27 @@ function pinning.check(ca, callback)
 			if not http.certificate_failure(r) then
 				log.always("pinning check: %s failed with %s for a reason other than its certificate (%s); "
 					.. "inconclusive", host, described, tostring(r.err))
-				return callback("inconclusive", tostring(r.err))
+				return callback("inconclusive", string.format(
+					"%s failed with the bundle for a reason other than its certificate (%s)", host, tostring(r.err)))
 			end
 			log.always("pinning check: %s rejected with %s (%s); trust is pinned to the Signify roots",
 				host, described, tostring(r.err))
 			callback("pinned", tostring(r.err))
 		end)
 	end)
+end
+
+-- The bridge's Status text for a verdict and the detail pinning.check gave
+-- with it (Check CA Pinning, bridge/devtools.lua).
+function pinning.status(verdict, detail)
+	if verdict == "pinned" then
+		return "Pinning check passed: only Signify-signed certificates are trusted"
+	elseif verdict == "not_pinned" then
+		return "Pinning check FAILED: public CAs are trusted too; see Lua output"
+	elseif verdict == "inconclusive" then
+		return "Pinning check inconclusive: " .. tostring(detail or "no reason given")
+	end
+	return tostring(verdict)
 end
 
 return pinning

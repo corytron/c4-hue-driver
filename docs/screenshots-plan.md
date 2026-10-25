@@ -765,3 +765,39 @@ texts to `Keep` on its side reports them so that they can be added here.
  ]
 }
 ```
+
+## 11. Round 46b, 2026-10-25 10:40 (release build 329, 1512 x 949)
+
+21 pictures went to `doc\`, were checked by the coordinator (every text, the
+edges, no house names, addresses, bridge ids or resource ids; no PNG text
+metadata) and are in `src/hue_bridge/www/img/`, with the captions and widths
+of the manual adjusted and `add-zone-light.png` and
+`zone-light-properties.png` placed in chapter 7. Three remain the older
+pictures:
+
+- `bridge-properties.png` (held): Room Audit's own text (75 characters)
+  wraps onto Last Action (2), which the row's check refuses, and the four
+  combo faces painted smeared.
+- `room-mappings.png` (error): the open list drops so low that the crop
+  would show the status bar beside it; scroll the row higher first, or crop
+  the combo and its list only.
+- `connections.png` (error): A3 failed three ways (the view selects the
+  project root, not the device; the header reads "Control  Audio Video
+  Connections"; that element is only the header strip).
+
+Assumptions: A1 failed (Composer's menu bar is a native HMENU, invisible to
+UI Automation) and is fixed in `Shots.ps1` (EnumWindows, MN_GETHMENU, items
+as regions); A2 held; A3 failed (above); A4 partly (one font per list now);
+A5 and A6 held. Also fixed: the title and status zones measured from the
+real bars, Enter after editing a value (Composer shows Set only after
+Enter), the font and score in each ledger. Seen: 1 to 3 px of the main
+window at dialog left edges; painted ID values a shade lighter than their
+neighbours.
+
+Round 49, 2026-10-25 11:10, finished the set (24 of 24): `bridge-properties.png`
+after one Refresh Scenes click (a one-row Last Action, painted with the
+neutral counts; the combo faces painted in the font measured on the untouched
+Debug Mode face), `room-mappings.png` cropped to the combo face and its open
+list (445 x 114; the grid needs no scrolling), and `connections.png` with the
+device selected in the Connections view's own list, cropped to the header
+strip and the Hue Bridge input row.
