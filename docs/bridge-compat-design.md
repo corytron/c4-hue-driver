@@ -9,7 +9,7 @@ note the user friendly name along with the Bridge Model in the properties."
 
 | Fact | Status |
 | --- | --- |
-| `GET /api/0/config` needs no key and answers `name` (the bridge's own name from the Hue app), `modelid`, `swversion` (a number such as `1968096020`), `apiversion` (`1.68.0`), `bridgeid`. The driver already reads it at pairing (`bridge/pairing.lua`) and before every keyed request (`verify_identity` in `driver.lua`). | verified on the house Bridge Pro |
+| `GET /api/0/config` needs no key and answers `name` (the bridge's own name from the Hue app), `modelid`, `swversion` (a number such as `1968096020`), `apiversion` (`1.68.0`), `bridgeid`. The driver already reads it at pairing (`bridge/pairing.lua`) and before every keyed request (`verify_identity` in `driver.lua`). Current (2026-10-25, build 316): once per start and per address change, before the first keyed request, which also waits for the TLS self-check (`hue_bridge/driver.lua:verify_identity`, `tls_gate`). | verified on the house Bridge Pro |
 | Model ids: `BSB001` the round first-generation bridge (no HTTPS CLIP v2, discontinued 2020), `BSB002` the square version 2 bridge, `BSB003` the Hue Bridge Pro. | BSB003 verified on the house; the others from Signify's public material [assumed] |
 | CLIP v2 (`/clip/v2/...`, the event stream) exists from bridge software `1948086000` on; the first-generation bridge never had it. Time-of-day (smart) scenes and `dimming_delta` came later and are discovered at run time: a failed `/smart_scene` GET leaves the Scenes row at `? time-based` and the pickers without them, and a refused `stop` falls back to a level write. | the threshold from Signify's developer notes [assumed]; the fallbacks verified in specs |
 | A device that is not a Hue bridge answers `/api/0/config` with an error, with no JSON, or with JSON without `bridgeid`; a Hue bridge of another generation answers with its `modelid`. | assumed |
@@ -40,6 +40,9 @@ note the user friendly name along with the Bridge Model in the properties."
    Firmware` (the firmware label). All three are filled at pairing and
    refreshed at every start and address change by the identity check, so
    a firmware update shows after the next start.
+   Current (2026-10-25, build 316): `Bridge Name` shows the name through
+   `util.display_name` (control characters removed, trimmed, at most 100
+   characters; #217) (`hue_bridge/driver.lua:show_bridge_info`).
 4. **The identity check** (`verify_identity`) also refuses a bridge whose
    model is not supported, even when its id matches: Status "Bridge at <ip>
    is a Hue Bridge v1, round (BSB001): no CLIP v2 API; nothing is sent",

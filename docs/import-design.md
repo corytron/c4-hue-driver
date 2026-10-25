@@ -49,7 +49,7 @@ below. The present is in `docs/status.md`.
 | --- | --- | --- |
 | **import-ui** | `import-ui` from `main` | Registry v2 and its states (§3); messages (§4); resync growth and reconciliation (§5); bridge properties and actions incl. `Add Light`, `Import All New Lights`, room mapping, Re-link, Forget, Link Devices, Adopt Hue Names (§6); light-side changes (§7); picker mechanics (§8); the ALS flag [Q 13]. |
 | **scenes** | `scenes` from `main`, after import-ui merges | `hue_scene.c4z` switch per Hue scene; scene registry; `Add Scene` / `Add All Scenes Of Room`; `status.active` mirroring; recall options (§9). Its contract is §9 here; it reuses everything in §3–§8. (Superseded 2026-10-21: the contract became `docs/scenes-design.md`; the device is a dimmer since build 160, `docs/scene-dimmer-design.md`.) |
-| Later, not now | — | Bridge replacement adoption (`replacesbridgeid`, Re-link By Name/MAC — detection and a clear message are in import-ui, automation is not); smart scenes (24 h scenes; research and a draft awaiting the owner in `docs/smart-scenes-research.md`); `Push Names To Hue`; room devices (grouped_light); Composer-tree nesting (3.4.2+ only). |
+| Later, not now | — | Bridge replacement adoption (`replacesbridgeid`, Re-link By Name/MAC — detection and a clear message are in import-ui, automation is not. Current (2026-10-25, build 316): the detection is the identity check, `Status` "Bridge at <ip> reports ID <id>, expected <id>; nothing is sent until the address is corrected", `Pair Bridge` then pairs with the new bridge without comparing ids, and `replacesbridgeid` is not read: `hue_bridge/driver.lua:verify_identity`, `bridge/pairing.lua:pair`); smart scenes (24 h scenes; research and a draft awaiting the owner in `docs/smart-scenes-research.md`); `Push Names To Hue`; room devices (grouped_light); Composer-tree nesting (3.4.2+ only). |
 
 Both features change `driver.xml` (new properties, actions, a new driver),
 so each ends with a Composer "Update Driver" of the bridge and the light,
@@ -83,6 +83,13 @@ hue_tombstones[rid] = { name, device_name, deleted_at }   -- see "tombstone" bel
 hue_rooms_automapped = "done"     -- the one-time Map Rooms By Name of [Q 5] has run
 ```
 
+Current (2026-10-25, build 316): these entry fields are the registry's
+schema (`lights.ENTRY_FIELDS` with `registry.OWN_FIELDS`): any other
+persisted field is dropped at load (#48 R9), and a refresh after a full GET
+clears `device_name`, `model`, `device_rid`, `mac_address`, `service_id` and
+`id_v1` once the bridge no longer supplies them (`lights.REFRESH_CLEARS`,
+`bridge/owner.lua:refresh_fields`, #56).
+
 States and what moves an entry between them:
 
 | State | Meaning | Entered by | Shown as |
@@ -91,6 +98,14 @@ States and what moves an entry between them:
 | `gone` | device exists, rid no longer on the bridge | a light `delete` event [Q 11] or a full successful GET without the rid | light `Status`: "Gone from the Hue bridge since <date>; re-link or Forget"; `ONLINE_CHANGED false`; bridge `Lights` counts it as missing |
 | `unbound` | device exists but is not bound to this bridge | startup reconcile (`GetBoundConsumerDevices` lacks the id while `GetDevices` still returns it) or `OnBindingChanged(false)` | bridge `Lights`: "1 unbound device"; the light shows its existing "Not bound to a Hue Bridge" |
 | `tombstone` | the device was deleted in Composer | `HUE_GOODBYE`, or reconcile finds the id in neither the bound set nor `GetDevices` | moved to `hue_tombstones`; the rid is listed in `Add Light` as "Desk Lamp #12 (deleted from Composer <date>)" |
+
+Current (2026-10-25, build 316): `gone` is also entered at the device's
+hello when a full GET of this run lacks its rid, and when an AddDevice
+answers for a light deleted in Hue meanwhile (#48 R6;
+`bridge/owner.lua:answer_device`, `added`). An `unbound` entry is counted in
+`Lights` ("…, 1 unbound, …") and named in `Attention` ("1 unbound device:
+Desk Lamp #12 (device 1036) (bind it to this bridge in Composer, or Forget
+Light)"; `owner:attention_items`).
 
 **[resolved]** The UX document auto-forgets a deleted device's entry; the
 Control4 document keeps a tombstone so an import never silently re-creates
@@ -111,11 +126,17 @@ keep everything else) and `Forget` are the exits.
 | Command | Direction | Params | When |
 | --- | --- | --- | --- |
 | `HUE_HELLO` | light → bridge | `rid`, **`device_id`** (new), `name`, `model` (the light's persisted copies) | as today; `device_id` lets the bridge adopt a bound light whose rid the registry lacks |
-| `HUE_GOODBYE` | light → bridge | `rid`, `device_id` | from the light's `OnDriverRemovedFromProject` [verified: API 22/_26; assumed `SendToDevice` works there — probe 2] |
+| `HUE_GOODBYE` | light → bridge | `rid`, `device_id` | from the light's `OnDriverRemovedFromProject` [verified: API 22/_26; assumed `SendToDevice` works there — probe 2]. Verified 2026-10-21 (`docs/design.md`, "Composer Pro 3.4.2 UI"): the goodbye reaches the bridge, tombstone written, before Director's own notices |
 | `HUE_FORGET` | light → bridge | `rid`, `device_id` | from the light's `Forget This Light` action; the bridge runs Forget for that entry and answers `HUE_FORGOTTEN` |
 | `HUE_FORGOTTEN` | bridge → light | `rid`, `name` | after `Forget`; the light shows "Forgotten by the bridge (was Hue light Desk Lamp #12). Delete this device in Composer, or bind it again and use Link Devices" and drops proxy commands |
 | `HUE_CONFIGURE` | bridge → light | as today **plus `hue_room`** (Hue room name or ""), **`id_v1`**, **`state`** ("linked"/"gone") | as today, and after every room or state change. As built: `state` goes only as "gone" (with `gone_since`), absent while linked |
 | `HUE_STATE`, `HUE_SET`, `DEV_RELOAD` | — | unchanged | — |
+
+Current (2026-10-25, build 316): the names the bridge sends are display
+names (`util.display_name`: control characters removed, trimmed, at most
+100 characters; #217): `HUE_CONFIGURE` `name`, `model` and `hue_room`, and
+`HUE_FORGOTTEN` `name` (`bridge/lights.lua:configure_params`,
+`bridge/owner.lua:forget`). The registry keeps Hue's own.
 
 Early messages: a `HUE_HELLO` that reaches the bridge before its registry is
 loaded is queued and answered after `configure_all` (today it is lost and
@@ -125,6 +146,13 @@ unregistered light" × 47 after every bridge reload]. A `HUE_CONFIGURE` or
 and applied after it (`UpdateProperty`/`SendToProxy` are unsafe before late
 init [verified: API 22/_25.2]).
 
+Current (2026-10-25, build 316): the driver keeps up to 200 `HUE_HELLO` and
+`HUE_SCENE_HELLO` that arrive before its late init and drops any other
+message then (`hue_bridge/driver.lua:replay_early_commands`); a module keeps
+the hellos that arrive before its `load()` and answers them in
+`configure_all`, at most 200 for the lights and the zone lights
+(`bridge/owner.lua:hello`, `EARLY_HELLOS_MAX`).
+
 Auto-adopt **[resolved, Q 3]**: on `HUE_HELLO` with a rid the registry
 lacks, a `device_id`, and no other entry holding that rid: register
 `{device_id, name, model, state="linked"}` and complete it from the model at
@@ -132,6 +160,12 @@ the next resync; log "adopted Desk Lamp (device 2043) from its own
 persisted rid". Two devices claiming one rid: neither is adopted and
 `Attention` names both. All three documents agree this is automatic: the
 device itself is the evidence and nothing in the project changes.
+
+Current (2026-10-25, build 316): as [Q 3] says, the device must be in the
+bridge's bound list (an unknown list adopts nothing, #48); the hello's
+`name` and `model` count only as strings (#48 R11), and a rid that this
+run's full GET lacks is adopted as `gone` (`bridge/owner.lua:hello`,
+`adopt`).
 
 ## 5. Resync and reconciliation
 
@@ -152,6 +186,13 @@ fan-out, in this order:
    Entry id bound → fine; present but not bound → `unbound`; absent from both
    → tombstone. A failed or empty `GetDevices` means "unknown", never
    "deleted" [assumed: semantics of a deleted id — probe 2].
+   Current (2026-10-25, build 316): `GetBoundConsumerDevices` answers nil
+   when nothing is bound (verified 2026-10-25, `docs/design.md`, "Hardware
+   facts of the 2026-10-25 dev pass"): one nil is unknown and changes
+   nothing, a second nil at least 5 s later means nothing is bound
+   (`bridge/project.lua:bound_set`, `NIL_CONFIRM_S`). Entries an add or an
+   import has just created wait for the next reconcile (#48;
+   `bridge/registry.lua:reconcile`, `skip`).
 2. **Lights**: registry rid absent from `/light` → `gone` (+ `ONLINE_CHANGED
    false`); back again → `linked`; rid on the bridge with no entry and no
    tombstone → the `Add Light` list, with a hint when a `gone` entry has the
@@ -177,6 +218,10 @@ The bridge also gets `OnBindingChanged` (log all five params; a `false` for
 binding 1 marks the entry `unbound` and re-enumerates one second later, as
 the SDK sample does [verified: sample idc_controller]) and
 `OnBindingValidate` accepting only `HUE_BRIDGE` [verified: API 32/_26].
+Current (2026-10-25, build 316): the five params are logged in Debug Mode
+only; a burst of changes gets one reconcile a second later, and one more
+6 s after that when the bound list answered nil
+(`hue_bridge/driver.lua:OnBindingChanged`, `confirm_unbound_later`).
 
 ## 6. Bridge properties and actions
 
@@ -189,6 +234,14 @@ Read-only properties:
 | `Last Action` (new) | result of the last click: "Added Porch to Outdoor (device 2051)", "Not added: pick a light first" | "" |
 | `Room Mappings` (new) | "Hall → Hall; Kitchen → Kitchen; Office → (Control4 room gone); Porch → (unmapped); Downstairs (zone) → Living Room" | "None; use Map Rooms By Name" |
 | `Room Mappings` (since 2026-10-24) | A `DYNAMIC_LIST` (Composer clips a value at about 75 characters): the row shows "5 Hue rooms and zones; 1 unmapped (open the list to read)", the drop-down one "Hue → Control4" line per group; a pick snaps back to the summary | "None; use Map Rooms By Name" |
+
+Current (2026-10-25, build 316): `Lights` is a `DYNAMIC_LIST` like
+`Room Mappings`: the row shows the summary, the drop-down one "<Hue room>:
+<light>" line per light with its state (`bridge/lights.lua:list_items`).
+`Attention` starts with the TLS check's item when that check failed and
+ends with the zone lights' items (`hue_bridge/driver.lua:attention_text`). A
+long `Last Action` continues on `Last Action (2)` to `(6)`, word-wrapped at
+72 characters, unused rows hidden (`last_action`).
 
 Actions (all plain `LUA_ACTION`s; the two with pickers carry
 `CUSTOM_SELECT` params, §8):
@@ -211,6 +264,15 @@ Everything a click does is also a log line; a click during an import or a
 resync is refused with "Busy: importing; try again in a moment"; empty
 pickers hold one explanatory entry that the action rejects into `Last
 Action`.
+
+Current (2026-10-25, build 316): `Link Devices`, `Adopt Hue Names` and
+`Accept Names As They Are` run for the lights, the scenes and the zone
+lights in one click, through the shared code
+(`bridge/owner.lua:link_devices`, `adopt_hue_names`, `accept_names`). Names
+are compared as display names: the name match trimmed and case-insensitive
+(`util.name_key`), and Adopt Hue Names renames to the display name of the
+Hue name, which Accept Names As They Are records (#217;
+`owner:name_differences`).
 
 Rooms come from `C4:GetDevicesByC4iName("roomdevice.c4i")` → `{[roomId] =
 name}` [verified: Control4's own `lib.lua` uses it; undocumented in the API]
@@ -239,6 +301,11 @@ room id appended when two rooms share a name.
   **device** name for single-light devices (the Hue app shows the device
   name; `light.metadata` is deprecated in the reference [community:
   openhue]) and the light's own name for multi-light devices.
+  Current (2026-10-25, build 316): also the light's own name when the
+  device name has nothing to show; AddDevice gets the `util.display_name`
+  of it, or "Hue light" when nothing of it can be shown
+  (`bridge/lights.lua:creation_name`, `bridge/owner.lua:new_device_name`;
+  #217).
 
 ## 8. Picker mechanics
 
@@ -285,7 +352,10 @@ the original plan.
   `active`/`static`/`dynamic_palette`) [community: openhue/aiohue; PUT exists
   verified: CLIP API list] [Q 7]. OFF = the scene's group `grouped_light`
   off, coalesced per group (1/s limit) [Q 6]. (As built, the group queue
-  enforces no 1/s limit; `docs/scenes-design.md` §1, OFF.)
+  enforces no 1/s limit; `docs/scenes-design.md` §1, OFF.
+  Current (2026-10-25, build 316): it does since the zone lights, one PUT a
+  second with a burst of three; `hue_bridge/driver.lua:new_group_queue`,
+  `docs/zone-light-design.md` Decision 9.)
 - State: ON while `status.active` is `static`/`dynamic_palette`, OFF when
   `inactive`, from `scene` stream items (seen on hardware inside a
   grouped_light container [verified: hardware 2026-10-21]) and from `/scene`
@@ -347,7 +417,9 @@ Status (2026-10-24): the results are in `docs/design.md` ("Project APIs",
 "import-ui", "Composer Pro 3.4.2 UI", "Scenes"); none is recorded for 9
 and 11, and 10 only for API recalls. The probe actions (`Probe Project`,
 `Probe Errors`, `Probe Scenes`, `Probe Call`, `Hue Request`) exist only in
-development builds.
+development builds. Current (2026-10-25, build 316): there they answer
+signed dev-loop commands only, not Composer actions
+(`bridge/devtools.lua:install`).
 
 1. Log all five `OnBindingChanged` params in both drivers across a Director
    restart and a bind/unbind in Composer (Composer for the bind).
@@ -439,6 +511,13 @@ reg:room_mappings() -> table group_rid -> mapping
 Entry fields are §3's. `state` is one of `"linked"`, `"gone"`, `"unbound"`;
 tombstones live in their own table.
 
+Current (2026-10-25, build 316): `registry.new` also takes `keys` (the
+scenes and the zone lights persist under their own names) and `fields` (the
+owner module's schema, #48 R9); `relink` takes the new record's `fields` as
+a third argument; `reconcile` also takes `skip` (entries the caller has just
+created, left alone) and changes nothing when `bound` is not a table
+(unknown, #48) (`bridge/registry.lua:new`, `relink`, `reconcile`).
+
 ### `bridge/groups.lua` and `hue_model.lua` additions
 
 ```lua
@@ -460,9 +539,10 @@ shape above (children as `{ rid, rtype }` pairs reduced to rids plus one
 item)` merges a partial update (a `children` array replaces the whole list).
 `hue_model.light(item)` gains `id_v1` and `service_id`;
 `hue_model.connectivity(item)` gains `mac_address`;
-`hue_model.registry_configure_params (configure_params merged into it 2026-10-24)(light, device, extra)` and
-`hue_model.registry_configure_params(rid, entry, extra)` (the only configure-params builder since 2026-10-24) merge the string
-fields of `extra` (`hue_room`, `id_v1`, `state`) into the result.
+`hue_model.registry_configure_params(rid, entry, extra)` (the live-light
+variant `configure_params(light, device, extra)` was removed 2026-10-24)
+merges the scalar fields of `extra` (`hue_room`, `id_v1`, `state`) into the
+result as strings.
 
 ### `tests/helpers/fake_c4.lua` additions
 
@@ -545,6 +625,14 @@ lights:goodbye(params)                     -- HUE_GOODBYE: tombstone
 lights:forget_request(params)              -- HUE_FORGET from a light: same as forget(device_id)
 lights:on_binding_changed(binding, class, bound, other_id)   -- binding 1 false → "unbound" (then reconcile 1 s later)
 ```
+
+Current (2026-10-25, build 316): `configure_all`, `resync`, `entry`, `push`,
+`reconcile`, `relink`, `link_devices`, `forget`, `adopt_hue_names`,
+`accept_names`, `picker_relink_devices`, `picker_forget_devices`, `hello`,
+`goodbye`, `forget_request` and `on_binding_changed` are
+`bridge/owner.lua`'s, which the scenes and the zone lights share (#56);
+`link_devices(skip_ids)` and `room_audit(extra)` take the zone lights'
+devices (`docs/zone-light-design.md` §6).
 
 Picker values arrive as strings in the action params (`tonumber` room and
 device ids); an empty list holds one entry whose value is "" and every

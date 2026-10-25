@@ -123,8 +123,9 @@ end
 -- see path_refusal), Body (JSON text, optional), Host (a spelling of the
 -- bridge's address, see spells_bridge_address; optional, default the dotted
 -- address; any other host is refused and nothing is sent), Raw ("true" logs
--- the whole body). Like every keyed request of the driver it waits for the
--- bridge identity check (driver.lua, bridge_request). Logs the status,
+-- the whole body). It sends through http.request itself, and is refused
+-- (nothing queued, nothing sent) until the bridge identity check has passed,
+-- as bridge_request in driver.lua refuses. Logs the status,
 -- elapsed time and a summary of the response: ids and names for resource
 -- lists, otherwise the first 300 characters of the body.
 local function hue_request(params)
@@ -595,9 +596,10 @@ end
 -- per-host transfer queue keys on the host string. The TLS check ignores
 -- the host name for the bridge anyway. A Host that is not a spelling of the
 -- bridge's address is refused: nothing is sent, Status and the log say why.
--- With a Host it waits for the bridge identity check like Hue Request, since
--- that check proves the dotted address the spelling stands for; without
--- one, ctx.test_connection (driver.lua) runs the check itself.
+-- With a Host it is refused until the bridge identity check has passed, like
+-- Hue Request, since that check proves the dotted address the spelling
+-- stands for; without one, ctx.test_connection (driver.lua) runs the check
+-- itself and waits for it.
 local function test_connection(params)
 	params = params or {}
 	local host = ctx.state.ip
