@@ -1,9 +1,11 @@
 # Status of the Hue driver (2026-10-25)
 
-**Release 1.0 "Cassian" (build 237), tag `v1.0`**, published on GitHub with the three
-`.c4z` files built by the release workflow; re-cut from build 228 (PR #33)
-with the bridge-compatibility check (PR #35) and the public-repository files
-(PR #34). The house runs it since 2026-10-24 19:26. **The repository is
+**Release 1.0 "Cassian", build 316, tag `v1.0`** (re-cut 2026-10-25 by the
+two-job Release workflow from `main` at e3ec53d): the review leftovers
+(#214), the shared lifecycle base and keypad machine (#216), the security
+fixes of 2026-10-25 (#221), code scanning triage (#223), the scene probe
+(#218) and the screenshot tooling (#227). Its install on the house follows
+the #40 hardware checks of 2026-10-25 10:00 (issue #228 tracks it). **The repository is
 public since 2026-10-24** (history rewritten: placeholder addresses, two
 screenshots dropped): main is protected (pull requests only, the four CI
 checks of `.github/workflows/ci.yml` required, branch current before merge,
@@ -32,9 +34,16 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
+- **Dev build 309 since 2026-10-25 03:24** (Composer round 43): `main` at
+  d13e287 built with `tools/build.sh --dev`, installed in place on all five
+  devices (no reboot: no capability change) so the signed dev loop of #217
+  serves the 10:00 hardware checks of #40. It carries the dev key; the
+  release install replaces it. Recorded on the environment `house` as
+  deployment 7310056842; `deploy.py status` reports drift (desired 259,
+  observed 309) until then, and issue #228 stays open.
 - **Build 259 = release 1.0 "Cassian"** (re-cut 2026-10-25 from the merge of
   PR #205 with `manifest.json` and provenance attestations), installed
-  2026-10-25 23:11 through the GitOps flow: PR #207 set `deploy/house.yaml`,
+  2026-10-24 23:11 local through the GitOps flow: PR #207 set `deploy/house.yaml`,
   the drift workflow opened issue #208, `tools/deploy.py start` verified the
   release assets and created deployment 7307903445 on the environment
   `house`, the Windows Composer session installed from the GitHub release
@@ -243,38 +252,34 @@ app, which also confirms that a grouped_light PUT takes `color` and
 
 ## Open
 
+Every open item is an issue; this list says where each stands on
+2026-10-25.
 
-- Zone lights: Shine's tile going off on a zone OFF, and a change of the
-  zone's lights in Hue reaching a live tile's colour controls, not yet seen
-  by the owner. (Settled on the way, build 199: a device created by AddDevice has an
-  empty property table at its first init, so a property written only by
-  the replay of the property handlers, `Driver Version`, stayed blank until
-  a reload; the three drivers now write it at late init and look again at 5
-  and 15 s. The controller words a missing module "An unknown error
-  occurred", which release builds no longer report as a dev-loop error.) The manual's chapter
-  7 has no screenshot of Add Zone Light yet (shots are in `build/shots/img/`).
-
-
-- Time-of-day scenes: a running schedule advanced to its 16:00 slot and
-  the device showed "now Shine (from 16:00)" within two minutes (2026-10-24;
-  `docs/smart-scenes-research.md` §7), though whether the room had been
-  dimmed before that is not known; whether `Recall As`
-  reappears on an ordinary device after a re-link from a time-based one
-  (`SetPropertyAttribs(…, 0)`, assumed); the keypad on a time-of-day scene
-  not yet tried by the owner.
-- Second-priority hardening items in `docs/code-analysis-2026-10-22.md`.
-- Proxy settings hidden on light and scene devices (above).
-- Not verified: whether a revoked key answers HTTP 401 or 403; the
-  binding re-check path itself (the reboot test ended bound, but which path
-  got there is not visible from Composer); a slider level from off sets all
-  of the scene's lights to that level (follows Hue's brightness override).
-- Code: `Stream Watchdog (s)` is declared with a minimum of 0 in
-  `hue_bridge/driver.xml` but the code treats anything below 60 as 60.
-  (Resolved 2026-10-24: release builds no longer carry the Dev Server and
-  Diagnostic Server properties, the Connection Test, Reload Credentials and
-  Check CA Pinning actions, the conntest and pinning modules, the Test
-  Connection host override or the scene driver's `HUE_DUMP`; development
-  builds keep them.)
-- The Composer project is unsaved.
-- Approvals: the owner approves everything, always (2026-10-24); the
-  Windows session asked him once on its side to confirm that standing rule.
+- **#228** Install release 1.0 build 316 on the house after the #40
+  checks (`deploy.py start`, the Windows session, `deploy.py done`); then
+  Debug Mode Off and the dev loop ends.
+- **#40** Time-of-day scenes: the keypad, Recall As after a cross-kind
+  re-link, a dim before a slot boundary and API-made schedules, run on
+  2026-10-25 10:00 with `tools/smart_scene_probe.py` (plan:
+  `docs/smart-scenes-research.md` §8). The 16:00 boundary itself is not
+  part of that run.
+- **#61** Retake the manual's pictures with `tools/composer/Shots.ps1`
+  (`docs/screenshots-plan.md`) after the release install.
+- **#65** Read the Event Stream reconnect count after a day on the release.
+- **#38** The owner's pass on the phone and keypads, and saving and backing
+  up the Composer project (still unsaved through the test rounds).
+- **#62** The owner deletes the old edit revisions on PRs #6 and #2;
+  GitHub Support ticket for the purge is pending.
+- **#224** Decision: the OpenSSF Best Practices badge, or Scorecard's CII
+  check stays at 0.
+- **After the next reboot from System Manager** (diff review 2026-10-25
+  row 2): the bridge's log right after it should show no "is not bound to
+  this bridge" lines and Attention no unbound devices.
+- **Accepted** (security review 2026-10-25): names the device drivers build
+  from cleaned Hue names ("<Room> Lights", "<Zone> <Scene>") are bounded but
+  not cut; hostname verification stays off for the bridge (no C4:url
+  option); a Hue Request `POST /api` in a dev build logs the newly minted
+  key.
+- **Code scanning** after every merge (CLAUDE.md): on 2026-10-25 every
+  alert is fixed or dismissed with its reason; the triage workflow keeps one
+  issue open only while alerts are.
