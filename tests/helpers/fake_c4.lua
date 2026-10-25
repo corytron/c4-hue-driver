@@ -360,6 +360,18 @@ local function new_c4(env)
 		return c4.persist[name]
 	end
 
+	-- Director's version table [SDK 5_director_command/_2-GetVersionInfo];
+	-- a spec sets c4.director_version, or nil for a controller that answers
+	-- nothing.
+	c4.director_version = "3.4.2.746094"
+	function c4:GetVersionInfo()
+		record("GetVersionInfo")
+		if c4.director_version == nil then
+			return nil
+		end
+		return { version = c4.director_version }
+	end
+
 	function c4:PersistDeleteValue(name)
 		record("PersistDeleteValue", name)
 		c4.persist[name] = nil
