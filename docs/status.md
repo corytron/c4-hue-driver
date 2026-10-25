@@ -1,7 +1,8 @@
 # Status of the Hue driver (2026-10-25)
 
-**Release 1.0 "Cassian", build 349, tag `v1.0`, the final 1.0** (cut 2026-10-25 by
-the two-job Release workflow from `main` at 12ccae1): the review leftovers
+**Release 1.0 "Cassian", build 359, tag `v1.0`** (cut 2026-10-25 by the
+two-job Release workflow from `main` at ad0ad7c; build 349 plus the changelog
+of #255, which every release's notes and every Documentation tab now carry): the review leftovers
 (#214), the shared lifecycle base and keypad machine (#216), the security
 fixes of 2026-10-25 (#221), code scanning triage (#223), the scene probe
 (#218), the screenshot tooling (#227), the documentation accuracy pass
