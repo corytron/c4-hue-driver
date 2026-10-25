@@ -15,7 +15,7 @@ reviewed second edition (13 chapters and a Glossary) and the
 second-generation icons (`docs/design.md`, "Build 125" and "Build 135").
 The manual has since been revised with the features that followed (keypad
 Button Links, the scene dimmer). What shipped is noted in §1, §5, §6 and
-§8; open: the 32 px List View icons of lights and scenes (`docs/status.md`).
+§8. The 32 px List View tile of lights and scenes cannot be custom (verified 2026-10-25, `docs/icons-research.md`).
 
 ## 1. Mechanics (verified in the SDK fundamentals)
 
@@ -244,9 +244,13 @@ Shipped: the first icons in build 125, the second generation in build 135
 View. A light or scene device's 16 px tree icon is stamped when the device
 is created: a device created under a build that declared a custom icon
 shows it and follows later icon changes, one created before keeps the
-standard bulb for good. The 32 px tile in the room's List View stayed the
-light_v2 standard bulb for every light and scene (cause unknown; open in
-`docs/status.md`). The Items pane shows a generic placeholder for all
+standard bulb for good. The 32 px tile in the room's List View is
+Composer's own: it draws every light_v2 device (Hue or Control4 alike) as a
+status tile, "Name:" and "Level:" with a bar, with a picture built into
+Composer, so a driver's `large_image` never shows there [verified 2026-10-25,
+Composer round 37: the four Hue light and scene tiles are pixel-identical to
+the Control4 dimmers' in the same room; the bridge, not a light, shows its
+own 32 px icon]. Nothing to change (`docs/icons-research.md`). The Items pane shows a generic placeholder for all
 three drivers, as it does for Control4's own Hue drivers.
 
 ## 7. Verification

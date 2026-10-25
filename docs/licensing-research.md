@@ -131,3 +131,12 @@ Files to add (drafts):
 8. Certificates: two public Signify root CAs, unmodified, meant for pinning; keep, name their origin in `NOTICE`.
 9. Nothing else third-party is in the tree: no vendored Lua, `dkjson`/`busted`/`luacheck`/Pillow are dev-only, dp3 is called from its own checkout.
 10. Privacy findings: 12 items, 3 blocking (P1-P3), 7 to tidy, 2 informational; no application key, private key, project name or machine identifier found anywhere.
+
+## Decision on the likeness icons (owner's instruction of 2026-10-25, issue #60)
+
+Kept, as §6 step 1 and `docs/icons-research.md` §5 recommend: they are
+logo-free device pictures of the kind Snap One's icon guidance asks for,
+Composer is the only place that shows them (the light and scene icons only
+at 16 px in the tree; the List View draws light_v2 devices with Composer's
+own picture), and the plan stays to redraw them as generic glyphs if
+Signify or Snap One objects.
