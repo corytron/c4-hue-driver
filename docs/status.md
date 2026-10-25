@@ -1,13 +1,14 @@
 # Status of the Hue driver (2026-10-25)
 
-**Release 1.0 "Cassian", build 329, tag `v1.0`** (re-cut 2026-10-25 by the
-two-job Release workflow from `main` at 89de840): the review leftovers
+**Release 1.0 "Cassian", build 349, tag `v1.0`, the final 1.0** (cut 2026-10-25 by
+the two-job Release workflow from `main` at 12ccae1): the review leftovers
 (#214), the shared lifecycle base and keypad machine (#216), the security
 fixes of 2026-10-25 (#221), code scanning triage (#223), the scene probe
-(#218), the screenshot tooling (#227) and the documentation accuracy pass
-(#240; build 316, published earlier that day, has the same driver code with
-the older Documentation tabs). Its install on the house follows
-the #40 hardware checks of 2026-10-25 10:00 (issue #228 tracks it). **The
+(#218), the screenshot tooling (#227), the documentation accuracy pass
+(#240), the pairing and Status fixes (#245), the device fixes (#242) and the
+retaken pictures in all three manuals (#251). Builds 316 and 329, published
+earlier that day, are superseded; build 329 ran on the house from 10:32 until
+the final build's install. **The
 repository is public since 2026-10-24** (history rewritten that day:
 placeholder addresses, two screenshots dropped; rewritten again on
 2026-10-25 for three more spellings of the house address, #62): main is
