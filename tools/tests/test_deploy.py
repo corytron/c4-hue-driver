@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, TOOLS)
@@ -469,8 +470,8 @@ class ValidateHouseTest(unittest.TestCase):
                 "hue_bridge hue_light hue_scene extra",
                 "hue_bridge hue_light hue_light",
             ],
-            "stream_timeout_s": ["59", "86401", "soon"],
-            "stream_watchdog_s": ["29", "3601", "x"],
+            "stream_timeout_s": ["29", "86401", "-60", "soon", ""],
+            "stream_watchdog_s": ["59", "3601", "30", "x", ""],
             "debug_mode": ["On", "off", ""],
         }
         for key, values in cases.items():
@@ -484,6 +485,59 @@ class ValidateHouseTest(unittest.TestCase):
         self.assertTrue(any("below" in p for p in self.problems(stream_timeout_s="600", stream_watchdog_s="600")))
         self.assertTrue(any("below" in p for p in self.problems(stream_timeout_s="600", stream_watchdog_s="700")))
         self.assertEqual(self.problems(stream_timeout_s="600", stream_watchdog_s="599"), [])
+
+    # Issue #237: exactly the ranges src/hue_bridge/driver.xml declares, Stream Timeout (s) 30 to
+    # 86400 and Stream Watchdog (s) 60 to 3600; validate accepted 60 to 86400 and 30 to 3600 before.
+    def test_accepts_the_bounds_driver_xml_declares(self):
+        for timeout, watchdog in (("86400", "3600"), ("61", "60"), ("3601", "3600"), ("30000", "120")):
+            with self.subTest(timeout=timeout, watchdog=watchdog):
+                self.assertEqual(self.problems(stream_timeout_s=timeout, stream_watchdog_s=watchdog), [])
+        # 30 to 60 s are timeouts Composer takes; the rule that the watchdog stays below the timeout
+        # then refuses every watchdog, since driver.xml's smallest is 60.
+        for timeout in ("30", "59", "60"):
+            with self.subTest(timeout=timeout):
+                found = self.problems(stream_timeout_s=timeout, stream_watchdog_s="60")
+                self.assertEqual(["stream_watchdog_s (60) must be below stream_timeout_s (%s)" % timeout], found)
+
+    def test_refuses_what_composer_cannot_set(self):
+        cases = (
+            {"stream_timeout_s": "29"},
+            {"stream_timeout_s": "86401"},
+            {"stream_timeout_s": "86400", "stream_watchdog_s": "30"},
+            {"stream_timeout_s": "86400", "stream_watchdog_s": "59"},
+            {"stream_timeout_s": "86400", "stream_watchdog_s": "3601"},
+        )
+        for overrides in cases:
+            key = "stream_watchdog_s" if "stream_watchdog_s" in overrides else "stream_timeout_s"
+            with self.subTest(**overrides):
+                found = self.problems(**overrides)
+                self.assertEqual(1, len(found), found)
+                self.assertTrue(found[0].startswith(key + " must be an integer from"), found)
+                self.assertIn("in src/hue_bridge/driver.xml", found[0])
+
+    def test_an_out_of_range_timeout_is_not_compared_with_the_watchdog(self):
+        found = self.problems(stream_timeout_s="20", stream_watchdog_s="600")
+        self.assertEqual(
+            [
+                "stream_timeout_s must be an integer from 30 to 86400 "
+                "(Stream Timeout (s) in src/hue_bridge/driver.xml), not '20'"
+            ],
+            found,
+        )
+
+    def test_ranges_are_driver_xml_ranges(self):
+        """deploy.py's ranges are the minimum and maximum the bridge's driver.xml declares."""
+        tree = ET.parse(os.path.join(deploy.ROOT, "src", "hue_bridge", "driver.xml"))
+        declared = {}
+        for prop in tree.iter("property"):
+            name = (prop.findtext("name") or "").strip()
+            if name in ("Stream Timeout (s)", "Stream Watchdog (s)"):
+                self.assertEqual("RANGED_INTEGER", (prop.findtext("type") or "").strip(), name)
+                declared[name] = (int(prop.findtext("minimum")), int(prop.findtext("maximum")))
+        self.assertEqual(
+            {"Stream Timeout (s)": deploy.STREAM_TIMEOUT_RANGE, "Stream Watchdog (s)": deploy.STREAM_WATCHDOG_RANGE},
+            declared,
+        )
 
     def test_missing_and_unknown_keys(self):
         self.assertIn("missing key build", self.problems(build=None))

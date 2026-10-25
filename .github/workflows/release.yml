@@ -19,12 +19,14 @@
 #   stored on GitHub), move or create the tag (dispatch only), and attach the
 #   packages, the checksums, the manifest, the attestation bundle and its
 #   in-toto envelope to the GitHub release of the tag. GH_TOKEN is set only on
-#   the two steps that push the tag or call gh.
+#   the steps that push the tag or call gh.
 # The release is created when it does not exist yet, titled "<version>" with
 # generated notes (categories: .github/release.yml) and a first paragraph
 # naming the build number and the install rule. A tag that moves replaces
-# every attached file (--clobber); an existing release's title and notes are
-# never touched (the coordinator edits the codename in by hand).
+# every attached file (--clobber); an existing release's title is never
+# touched (the coordinator edits the codename in by hand), and of its notes
+# only the build number that ends the first heading, "(build N)", follows the
+# packages (issue #239); the rest stays as the coordinator wrote it.
 name: Release
 
 on:
@@ -417,12 +419,15 @@ jobs:
           echo "$TAG now points at $(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
 
       - name: Create the release if it does not exist, then attach the files
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           build="$(python3 -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
+          existed=true
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existed=false
             # Title without the v ("1.0" for v1.0); the codename is edited in by
             # hand once per major version and never touched here again. The
             # generated notes are appended to this first paragraph.
@@ -436,3 +441,44 @@ jobs:
             build/hue-drivers.intoto.jsonl
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json name,tagName,url,assets \
             --jq '"\(.name) (\(.tagName)) \(.url): " + ([.assets[].name] | join(", "))'
+          echo "existed=$existed" >> "$GITHUB_OUTPUT"
+
+      # A moved tag has just replaced the files of a release whose notes were
+      # written for an earlier build (build 316 needed a hand edit). One narrow
+      # edit keeps them current: when the first heading of the notes ends in
+      # "(build N)", N becomes this run's build. Nothing else in the notes
+      # changes; a "New in build N" section and the like stay the
+      # coordinator's to edit (docs/release-checklist.md). The notes are read
+      # and written as JSON through gh api, never through the shell, and
+      # tools/tests/test_release_notes.py runs this script.
+      - name: Name this build in the first heading of the notes (a release that existed)
+        if: steps.release.outputs.existed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          build="$(python3 -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          python3 - "$build" "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/notes.json" <<'PY'
+          import json, re, sys
+          build, source, target = sys.argv[1:4]
+          with open(source, encoding="utf-8") as f:
+              body = json.load(f).get("body") or ""
+          # The first ATX heading line; only a "(build N)" that ends it changes.
+          heading = re.search(r"^ {0,3}#{1,6}[ \t].*$", body, re.MULTILINE)
+          shape = heading and re.fullmatch(r"(.*\(build )([0-9]+)(\)[ \t]*\r?)", heading.group(0))
+          if not shape:
+              print("The first heading of the notes does not end in (build N): the notes stay as they are")
+          elif shape.group(2) == build:
+              print(f"The first heading of the notes names build {build} already")
+          else:
+              notes = body[: heading.start()] + shape.group(1) + build + shape.group(3) + body[heading.end() :]
+              with open(target, "w", encoding="utf-8") as f:
+                  json.dump({"body": notes}, f)
+              print(f"The first heading of the notes: build {shape.group(2)} -> {build}")
+          PY
+          if [[ -f "$RUNNER_TEMP/notes.json" ]]; then
+            release_id="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["id"])' "$RUNNER_TEMP/release.json")"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              --input "$RUNNER_TEMP/notes.json" --silent
+          fi

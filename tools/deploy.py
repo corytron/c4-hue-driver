@@ -72,6 +72,12 @@ PACKAGES = tuple(name + ".c4z" for name in DRIVERS)
 RELEASE_FILES = ("manifest.json", "SHA256SUMS.txt") + PACKAGES
 HOUSE_KEYS = ("environment", "release", "build", "drivers", "stream_timeout_s", "stream_watchdog_s", "debug_mode")
 
+# The minimum and maximum src/hue_bridge/driver.xml declares for the bridge's RANGED_INTEGER
+# properties Stream Timeout (s) and Stream Watchdog (s): Composer sets nothing outside them, so
+# validate accepts exactly these (issue #237). tools/tests/test_deploy.py reads them from the XML.
+STREAM_TIMEOUT_RANGE = (30, 86400)
+STREAM_WATCHDOG_RANGE = (60, 3600)
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOUSE_FILE = os.path.join(ROOT, "deploy", "house.yaml")
 RELEASE_DIR = os.path.join(ROOT, "build", "release")
@@ -235,6 +241,22 @@ def _integer(value):
     return int(value) if re.fullmatch(r"-?\d+", value or "") else None
 
 
+def _in_range(value, bounds):
+    """The integer `value` spells when it lies within `bounds` (minimum, maximum), else None."""
+    number = _integer(value)
+    return number if number is not None and bounds[0] <= number <= bounds[1] else None
+
+
+def _range_problem(key, prop, bounds, values):
+    return "%s must be an integer from %d to %d (%s in src/hue_bridge/driver.xml), not %r" % (
+        key,
+        bounds[0],
+        bounds[1],
+        prop,
+        values[key],
+    )
+
+
 def validate_house(values):
     """The problems with a parsed house file; an empty list when it is valid."""
     problems = []
@@ -256,15 +278,13 @@ def validate_house(values):
         problems.append("drivers must be exactly: %s (got %r)" % (" ".join(DRIVERS), values["drivers"]))
     timeout = watchdog = None
     if "stream_timeout_s" in values:
-        timeout = _integer(values["stream_timeout_s"])
-        if timeout is None or not 60 <= timeout <= 86400:
-            problems.append("stream_timeout_s must be an integer from 60 to 86400, not %r" % values["stream_timeout_s"])
+        timeout = _in_range(values["stream_timeout_s"], STREAM_TIMEOUT_RANGE)
+        if timeout is None:
+            problems.append(_range_problem("stream_timeout_s", "Stream Timeout (s)", STREAM_TIMEOUT_RANGE, values))
     if "stream_watchdog_s" in values:
-        watchdog = _integer(values["stream_watchdog_s"])
-        if watchdog is None or not 30 <= watchdog <= 3600:
-            problems.append(
-                "stream_watchdog_s must be an integer from 30 to 3600, not %r" % values["stream_watchdog_s"]
-            )
+        watchdog = _in_range(values["stream_watchdog_s"], STREAM_WATCHDOG_RANGE)
+        if watchdog is None:
+            problems.append(_range_problem("stream_watchdog_s", "Stream Watchdog (s)", STREAM_WATCHDOG_RANGE, values))
         elif timeout is not None and watchdog >= timeout:
             problems.append("stream_watchdog_s (%d) must be below stream_timeout_s (%d)" % (watchdog, timeout))
     if "debug_mode" in values and values["debug_mode"] != "Off":

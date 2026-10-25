@@ -239,3 +239,38 @@ light_v2 proxy stores a keypad setting the driver reports as a bare value
 and reads the documented table form as 0, `common/device.lua`), and round
 43 installed dev build 309 for the checks of issue #40 (03:24, no reboot;
 `docs/status.md`).
+
+## Wanted from the Windows session: every click through Invoke-SafeClick
+
+Issue #239. The Windows session keeps the newest `Composer.psm1`, so the
+change is made there and the module sent back; the repo copy is not edited
+here. Rule 5 wants every click checked by `Invoke-SafeClick`, but these
+helpers click through `Invoke-MouseClick` without that check (repo copy of
+2026-10-24):
+
+- directly: `Invoke-ElementClick` (an element's centre),
+  `Select-ComposerTab` (a tab header), `Select-ComposerDevice` (a tree
+  row), `Rename-ComposerDevice` (the row's second click and the click into
+  the editor), `Select-ComposerPickerItem` (the item) and
+  `Set-ComposerProperty` (the value control);
+- through `Invoke-ElementClick`: `Invoke-ComposerAction` (the action
+  button), `Open-ComposerPicker` (`...`), `Select-ComposerPickerItem` (OK),
+  `Close-ComposerDialog` and `Confirm-ComposerDialog` (the named button),
+  `Set-ComposerProperty` (Set);
+- and so, by calling those: `Set-ComposerActionParameter`,
+  `Get-ComposerBridgeStatus` and `Request-ComposerDeviceDelete`.
+  `Invoke-MouseDrag` presses and releases the button unchecked as well.
+
+The change wanted: `Invoke-ElementClick` finds the top-level window of the
+element (`GetAncestor(<its NativeWindowHandle, or its nearest ancestor's>,
+GA_ROOT)`) and clicks through `Invoke-SafeClick -Hwnd <that window>`; the
+coordinate clicks above call `Invoke-SafeClick` with the top-level window of
+the control they aim at (the tab control, the tree's list view, the
+picker's list view, the rename editor, the value control); `Invoke-MouseDrag`
+checks its start and end points the same way. Afterwards `Invoke-MouseClick`
+is called from `Invoke-SafeClick` alone (`Select-String -Path Composer.psm1
+-Pattern 'Invoke-MouseClick'`), PSScriptAnalyzer stays clean (CI's
+`powershell` check), and the coordinator brings the module into the repo
+and drops the 2026-10-25 caveat from rule 5. While there:
+`Close-ComposerDialog`'s Escape path sends its key with `Send-Keys`, not
+the focus-checked `Send-KeysTo`.

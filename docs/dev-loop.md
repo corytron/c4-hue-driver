@@ -179,6 +179,20 @@ Without the token, or with a wrong one: 401.
   package without a dev key still starts (and says once that it will refuse
   every bundle and command), so the log and the reports still reach the
   server.
+- A command that stops or moves the loop reports first (issue #239).
+  `devctl.py set "Dev Server" ""`, or another `host:port`, reaches the
+  row's handler, which calls `devloop.stop()` (or `devloop.start(host)`)
+  while the command runs. During an `execute` or `set_property` command
+  both only note where the loop should end up (the last call wins; the
+  host it already polls cancels a stop); once the command is done its
+  `command_done` report starts towards the server the command came from,
+  and then the loop stops or moves. The rest of that command list stays
+  queued on that server for the loop's next start there, and nothing more
+  of that tick goes to it: no log flush, no heartbeat (the lines still
+  buffered leave with the loop's next tick, to whichever server it then
+  polls). Before the fix the loop stopped first, its report could not
+  start, and the server kept the command pending for ever; a bridge gets
+  the fix only with a dev `.c4z` install ("Gotchas" below).
 - State lives in a global (`_G.__DEVLOOP`) so a reload cannot lose the loop,
   and `package.loaded["common.devloop"]` is never cleared by a reload. The
   dev key is not in that global: it lives in a local of the module.
@@ -380,14 +394,22 @@ everything the server signs.
 
 `run`, `set` and `reload` print the bare id so `devctl.py wait $(devctl.py run …)`
 works; `wait` gives up after `--timeout` seconds (default 60) with exit
-code 2. `pin` and `unpin` take `--tree bridge|light|scene` (default: all
-three); `log` takes `-n`/`--lines` (default 50), `-f`/`--follow` and
-`--file`. The server takes `--quiet` to drop the plain listener's
-connection and request lines and the heartbeat summaries, `--port` and
-`--tls-port`, `--bind` to listen elsewhere, `--key-file` for another key,
-`--state-dir`/`--cert-dir`/`--root` to relocate its files, `--alpn` for the
-protocols its TLS listener offers, and `--ensure-key` ("The dev key"
-below); `devctl.py` takes `--server`, `--key-file` and `--state-dir`.
+code 2. A `Dev Server` change is the one command `wait` may also end
+without a report, for a loop that predates issue #239 and never sends one:
+once the bridge has been in touch after the change was queued (a contact
+up to 3 s before the wait's first look counts, so `devctl.py wait
+$(devctl.py set "Dev Server" "")` works) and silent for 20 s since, it
+says the command is treated as done and exits 0. A wait begun after the
+bridge had already gone quiet cannot tell a stopped loop from a bridge
+that is down; it times out with a hint. `pin` and `unpin` take `--tree
+bridge|light|scene` (default: all three); `log` takes `-n`/`--lines`
+(default 50), `-f`/`--follow` and `--file`. The server takes `--quiet` to
+drop the plain listener's connection and request lines and the heartbeat
+summaries, `--port` and `--tls-port`, `--bind` to listen elsewhere,
+`--key-file` for another key, `--state-dir`/`--cert-dir`/`--root` to
+relocate its files, `--alpn` for the protocols its TLS listener offers, and
+`--ensure-key` ("The dev key" below); `devctl.py` takes `--server`,
+`--key-file` and `--state-dir`.
 `C4_HUE_DEVKEY_FILE` names another key file for all three tools.
 
 ### Leaving the loop (production)
@@ -641,8 +663,10 @@ Never install a dev build as the production driver.
   without pausing between them, or `devctl.py pin` first and pin again once
   the tree is consistent. `devctl.py set "Dev Server" ""` stops the loop
   altogether: the bridge then polls nothing, so only Composer can start it
-  again (the `Dev Server` row and its Set button), and that command never
-  reports `command_done`, since the loop stops before it can.
+  again (the `Dev Server` row and its Set button). Its `command_done` is
+  the last thing the loop sends (issue #239, "Driver-side behaviour"
+  above), so `devctl.py wait` returns as for any command; with a loop from
+  before that fix see the next point.
 - `common/devloop.lua` is the one module a reload never replaces, so an edit
   to it reaches the controller only through a Director restart or a fresh
   `.c4z` install; the bundle carries the new file, but the running copy is
@@ -657,7 +681,17 @@ Never install a dev build as the production driver.
   forward happens. The same holds for the signing: a dev build from before
   issue #52 neither signs nor verifies, and a server from after it refuses
   to talk to it (`nonce` 400s, bundles it cannot read); install a dev build
-  made from the same commit as the server.
+  made from the same commit as the server. And for the report a `Dev
+  Server` change now sends before the loop stops or moves (issue #239): it
+  reaches a bridge only with a dev `.c4z` made from that fix on, since no
+  reload replaces the running loop. A loop from before it stops first, so
+  the command stays pending on the server (`devctl.py wait` then ends on
+  the bridge's silence, "Developer workflow" above), and a loop that later
+  starts fresh (a Director restart or a dev install; it asks `after=0`)
+  receives it again and empties the row once more; a loop with the fix
+  then reports it. To avoid that second stop, take the leftover out before
+  starting the loop again: stop `devserver.py`, delete the command from
+  `commands` in `build/dev/commands.json`, start the server.
 - Director's `C4:JsonEncode` writes Lua arrays as objects with string keys
   even with `encodeArrays = true`; the server accepts both shapes.
 - Every reload restarts the event stream, and the abandoned transfer lives

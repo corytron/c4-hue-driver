@@ -1674,6 +1674,150 @@ describe("common.devloop", function()
 		end)
 	end)
 
+	-- Issue #239: devctl.py set "Dev Server" "" used to stop the loop before
+	-- the command's report, so the server kept the command pending for ever.
+	describe("a command that stops or moves the loop", function()
+		-- The bridge's Dev Server handler (bridge/devtools.lua, after late init).
+		local function dev_server_handler()
+			rawset(_G, "OnPropertyChanged", function(name)
+				if name ~= "Dev Server" then return end
+				local host = tostring(Properties[name] or ""):match("^%s*(.-)%s*$")
+				if host == "" then devloop.stop() else devloop.start(host) end
+			end)
+		end
+
+		-- The transfers started for `path` ("/report", ...), as "host path event".
+		local function sent_to_hosts(path)
+			local out = {}
+			for _, t in ipairs(c4.transfers) do
+				local host, p = t.url:match("^http://([^/]+)(/[^?]*)")
+				if p == path then
+					local body = t.data and c4:JsonDecode(t.data) or {}
+					out[#out + 1] = host .. " " .. p .. " " .. tostring(body.event)
+				end
+			end
+			return out
+		end
+
+		it("reports an emptied Dev Server as done, then stops, leaving the rest of the list queued", function()
+			start_synced()
+			dev_server_handler()
+			local seen = {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(seen, command) end)
+			server.commands = { { id = 4, type = "set_property", name = "Dev Server", value = "" },
+				{ id = 5, type = "execute", command = "A" } }
+			tick()
+			assert.same({ "command_done" }, events())
+			local r = last_report()
+			assert.equal(4, r.command_id)
+			assert.is_nil(r.error)
+			assert.equal("", r.properties["Dev Server"], "the report shows the property as the command left it")
+			assert.same(plus(POLL, "POST /report"), server.requests, "nothing after the report: no /log, no heartbeat")
+			assert.is_false(devloop.running())
+			assert.equal(0, #c4.active_timers())
+			assert.same({}, seen, "command 5 waits on the server for the loop's next start")
+			assert_said("stopped")
+			assert.equal(0, tick(), "stopped: nothing polls")
+
+			-- Composer's Set of the row starts the loop again: it asks after command 4.
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({ "A" }, seen)
+			assert.equal(1, count_containing(server.requests, "GET /commands?after=4"))
+		end)
+
+		it("reports to the server the command came from, then moves to the new one", function()
+			start_synced()
+			dev_server_handler()
+			c4.transfers = {}
+			server.commands = { { id = 6, type = "set_property", name = "Dev Server", value = " other:9090 " } }
+			tick()
+			assert.same({ "devvm:8080 /report command_done", "other:9090 /report startup" }, sent_to_hosts("/report"))
+			assert.is_true(devloop.running())
+			assert.equal(1, #c4.active_timers())
+			assert.equal("other:9090", state().host)
+		end)
+
+		it("holds a stop made through ExecuteCommand or a signed handler until the report, a failing one too", function()
+			start_synced()
+			devloop.set_signed_commands({ Probe_Call = function() devloop.stop(); error("probe broke") end })
+			server.commands = { { id = 7, type = "execute", command = "Probe Call" } }
+			tick()
+			assert.same({ "command_done" }, events())
+			assert.truthy(last_report().error:find("probe broke", 1, true))
+			assert.is_false(devloop.running())
+
+			devloop.set_signed_commands(nil)
+			start_synced()
+			rawset(_G, "ExecuteCommand", function() devloop.start("") end)
+			server.commands = { { id = 8, type = "execute", command = "Stop" } }
+			tick()
+			assert.same({ "command_done" }, events())
+			assert.equal(8, last_report().command_id)
+			assert.is_false(devloop.running())
+		end)
+
+		it("goes on with the list when Dev Server is set to the host it already uses", function()
+			start_synced()
+			dev_server_handler()
+			local seen = {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(seen, command) end)
+			server.commands = { { id = 9, type = "set_property", name = "Dev Server", value = HOST },
+				{ id = 10, type = "execute", command = "A" } }
+			tick()
+			assert.same({ "command_done", "command_done" }, events())
+			assert.same({ "A" }, seen)
+			assert.is_true(devloop.running())
+			assert.equal(1, #c4.calls_to("SetTimer"), "never restarted")
+		end)
+
+		it("ends where the command's last call leaves it: a stop and then the same host keeps the loop", function()
+			start_synced()
+			rawset(_G, "ExecuteCommand", function()
+				devloop.stop()
+				devloop.start(HOST)
+			end)
+			server.commands = { { id = 11, type = "execute", command = "Bounce" },
+				{ id = 12, type = "execute", command = "Bounce" } }
+			tick()
+			assert.same({ "command_done", "command_done" }, events())
+			assert.is_true(devloop.running())
+			assert.equal(1, #c4.calls_to("SetTimer"), "never restarted")
+		end)
+
+		it("stops at once outside a command, as before", function()
+			start_synced()
+			server.commands = { { id = 13, type = "set_property", name = "Dev Server", value = "" } }
+			dev_server_handler()
+			tick()
+			assert.is_false(devloop.running())
+			assert.is_false(devloop.start(""))
+			devloop.start(HOST)
+			assert.is_true(devloop.running())
+			devloop.stop()
+			assert.is_false(devloop.running(), "the hold ended with the command")
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("reports even when the report cannot start, and still stops", function()
+			start_synced()
+			dev_server_handler()
+			server.commands = { { id = 14, type = "set_property", name = "Dev Server", value = "" } }
+			local real_url = c4.url
+			c4.url = function(self)
+				local t = real_url(self)
+				t.Post = function() error("no transfer slot") end
+				return t
+			end
+			tick()
+			c4.url = real_url
+			assert.is_false(devloop.running())
+			assert.equal(1, printed_count("devloop: report command_done failed: could not start transfer: "))
+			assert.equal(1, printed_count("no transfer slot"), "started while the loop still knew its server")
+		end)
+	end)
+
 	describe("log capture", function()
 		it("buffers print() and ships it with POST /log", function()
 			start_synced()
