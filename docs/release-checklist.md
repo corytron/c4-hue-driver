@@ -96,9 +96,10 @@ A build passes when every line reads as expected; anything else goes to
 
 The release of this spike is **1.0 "Cassian"** (owner, 2026-10-24): git tag
 `v1.0`, a GitHub release titled `1.0 "Cassian"` with the three release `.c4z`
-files attached (releases are codenamed after Star Wars: Andor; the coordinator
-proposes a widely recognised character, place or object from the show for
-each release and the owner approves it; used so far: Cassian),
+files attached (major versions are codenamed after Star Wars: Andor and every 1.x
+release keeps "Cassian"; before a new major version the coordinator
+proposes a widely recognised character, place or object from the show and
+the owner approves it; used so far: Cassian),
 and "1.0 (build N)" in the README and status page, where N is the build
 number the drivers show as `Driver Version` (Control4 needs an integer
 there, so the driver files keep the commit count). Later releases of the

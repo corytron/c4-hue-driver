@@ -11,8 +11,8 @@ vulnerability reporting are on, Issues, Discussions and the public project
 board "Hue driver" track the work, and every open item below is an issue. The milestone `1.0 "Cassian"` holds
 the project's history: the 37 merged pull requests and 98 closed issues
 (#71–#187) describing every problem found and fixed, each naming its fix;
-the project board holds them all. Releases are codenamed after Star Wars:
-Andor.
+the project board holds them all. Major versions are codenamed after Star Wars:
+Andor; every 1.x release keeps "Cassian".
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
