@@ -106,15 +106,15 @@ local CLICK_GUARD_MS = 1000
 -- declares (opts.settings).
 local SETTINGS = {
 	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL",
-		notify = "PRESET_LEVEL" },
+		notify = "PRESET_LEVEL", min = 1, max = 100 },
 	click_up = { key = "click_rate_up", default = 250, command = "SET_CLICK_RATE_UP", param = "RATE",
-		notify = "CLICK_RATE_UP" },
+		notify = "CLICK_RATE_UP", min = 0, max = 86400000 },
 	click_down = { key = "click_rate_down", default = 250, command = "SET_CLICK_RATE_DOWN", param = "RATE",
-		notify = "CLICK_RATE_DOWN" },
+		notify = "CLICK_RATE_DOWN", min = 0, max = 86400000 },
 	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE",
-		notify = "HOLD_RATE_UP" },
+		notify = "HOLD_RATE_UP", min = 0, max = 86400000 },
 	hold_down = { key = "hold_rate_down", default = 5000, command = "SET_HOLD_RATE_DOWN", param = "RATE",
-		notify = "HOLD_RATE_DOWN" },
+		notify = "HOLD_RATE_DOWN", min = 0, max = 86400000 },
 }
 
 -- The binding re-check's gaps: checks at 5, 15, 30 and 60 s after start.
@@ -502,10 +502,25 @@ function device.new(opts)
 		C4:SendToProxy(PROXY_BINDING, SETTINGS[name].notify, value)
 	end
 
-	-- At late init: the persisted values, each reported to the proxy.
+	-- A setting outside its range is never taken: a preset level of 0 would
+	-- make the top button turn the light off (seen on the house, 2026-10-25,
+	-- after the proxy had been told 0 by a malformed notification).
+	local function in_range(name, value)
+		local s = SETTINGS[name]
+		return value ~= nil and value >= s.min and value <= s.max
+	end
+
+	-- At late init: the persisted values (one out of range reads as the
+	-- default), each reported to the proxy.
 	function dev.load_settings()
 		for _, name in ipairs(setting_names) do
-			settings[name] = tonumber(C4:PersistGetValue(SETTINGS[name].key))
+			local value = tonumber(C4:PersistGetValue(SETTINGS[name].key))
+			if value ~= nil and not in_range(name, value) then
+				log.warn("%s %s is out of range; using %s", SETTINGS[name].key, tostring(value),
+					tostring(SETTINGS[name].default))
+				value = nil
+			end
+			settings[name] = value
 			report_setting(name)
 		end
 	end
@@ -514,6 +529,10 @@ function device.new(opts)
 		value = tonumber(value)
 		if not value then
 			return log.warn("%s without a number", SETTINGS[name].key)
+		end
+		if not in_range(name, value) then
+			log.warn("%s %s is out of range; kept %s", SETTINGS[name].key, tostring(value), tostring(dev.setting(name)))
+			return report_setting(name)
 		end
 		settings[name] = value
 		C4:PersistSetValue(SETTINGS[name].key, value)
