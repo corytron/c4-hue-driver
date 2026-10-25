@@ -95,6 +95,11 @@ contracts above.
   through a Claude Code session on the Windows machine (UI Automation from
   PowerShell, `tools/composer/Composer.psm1`), and the test rounds run that
   way.
+- [`screenshots-plan.md`](screenshots-plan.md): how the manual's pictures
+  are retaken in the house project (#61): crops that never show the title
+  or status bar, house texts painted over with a neutral example set, a
+  per-picture text list and a hold folder for anything unlisted; the plan
+  as JSON for `tools/composer/Shots.ps1`.
 - [`cicd-gitops-design.md`](cicd-gitops-design.md): the CI/CD and GitOps
   contract (2026-10-25): one check script for the VM and CI
   (`tools/check.sh`), the four required jobs, attested releases cut by the
