@@ -1,6 +1,6 @@
 # Status of the Hue driver (2026-10-24)
 
-**Release 1.0 (build 237), tag `v1.0`**, published on GitHub with the three
+**Release 1.0 "Cassian" (build 237), tag `v1.0`**, published on GitHub with the three
 `.c4z` files built by the release workflow; re-cut from build 228 (PR #33)
 with the bridge-compatibility check (PR #35) and the public-repository files
 (PR #34). The house runs it since 2026-10-24 19:26. **The repository is
@@ -8,7 +8,11 @@ public since 2026-10-24** (history rewritten: placeholder addresses, two
 screenshots dropped): main is protected (pull requests only, CI `test` and
 `build` required, no force pushes), secret scanning and private
 vulnerability reporting are on, Issues, Discussions and the public project
-board "Hue driver" track the work, and every open item below is an issue.
+board "Hue driver" track the work, and every open item below is an issue. The milestone `1.0 "Cassian"` holds
+the project's history: the 37 merged pull requests and 98 closed issues
+(#71–#187) describing every problem found and fixed, each naming its fix;
+the project board holds them all. Releases are codenamed after Star Wars:
+Andor.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -16,11 +20,14 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Build 237, release 1.0** (no dev loop), on all three drivers (installed
-  2026-10-24 19:26: 228's slimming, release hygiene and security hardening
-  plus the bridge-compatibility check; before it build 199 with the zone
-  lights, 185 with the readable properties, 180 with the time-of-day
-  scenes): Hue Bridge, Hue Light, Hue Scene. Read back from Composer: Bridge
+- **Build 247** (no dev loop), on all three drivers (installed 2026-10-24
+  21:04; release 1.0 "Cassian" is build 237 plus PRs #69, #70 and #130:
+  `Last Action` word-wrapped at 72 characters onto read-only rows `Last
+  Action (2)` to `(6)` that are shown only while used, their visibility sent
+  400 ms after the texts and again at 1.5 s because Composer drops attribute
+  changes that arrive with the text updates; the four item lists editable,
+  since a read-only list is a disabled control in Composer; `Debug Mode`
+  Off, a dev build had left it On): Hue Bridge, Hue Light, Hue Scene. Read back from Composer: Bridge
   Model "Hue Bridge Pro (BSB003)", Bridge Name "Hue Bridge Pro", Bridge
   Firmware "2071524040 (API 1.78.0)"; `Stream Timeout (s)` 3600, `Stream
   Watchdog (s)` 600. Controller on OS 3.4.2, Composer Pro 3.4.2, Hue

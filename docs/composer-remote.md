@@ -9,7 +9,7 @@ running inside the Claude desktop app **on the Windows VM** acts as the
 coordinator's hands in Composer, driven by messages from the coordinator's
 session.
 
-**Current state (2026-10-24):** in use since 2026-10-21, 30 rounds so far
+**Current state (2026-10-24):** in use since 2026-10-21, 33 rounds so far
 (history at the end). The house runs production builds, so the dev loop is
 off and Composer is where results are read (rule 13); installs follow
 `docs/status.md`, "How builds reach the house".
@@ -190,4 +190,7 @@ first init), installed the dev build 224 for the regression pass and the
 release builds 226 and 228, and read the Documentation tabs' Apache footer; round 30 installed the
 re-cut 1.0 (build 237) and read the new Bridge Name and Bridge Firmware
 rows. Since the repository is public, reports leave the house's addresses
-and the bridge id out.
+and the bridge id out. Rounds 31–33 settled the Last Action rows (a
+read-only list is a disabled combo box; Composer drops attribute changes
+that arrive with text updates, so the rows' visibility is sent later) and
+set the bridge's Debug Mode back to Off after the dev build had left it On.
