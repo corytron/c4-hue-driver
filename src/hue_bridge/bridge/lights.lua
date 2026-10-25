@@ -733,13 +733,19 @@ end
 -- HUE_CONFIGURE params from a registry entry: the lights-design fields plus
 -- hue_room (the group label, absent for no room), id_v1, and state "gone"
 -- with gone_since while the light is missing (absent means linked) (§4).
+-- The name, the room label and the model are display names
+-- (util.display_name): the light shows them in its Hue Name, Hue Room and
+-- Model rows, and its own Adopt Hue Name renames to the name (security
+-- review 2026-10-25 finding 8). The registry keeps the bridge's own.
 function lights.configure_params(_self, rid, entry)
-	local extra = { hue_room = entry.hue_room, id_v1 = entry.id_v1 }
+	local extra = { hue_room = util.display_name(entry.hue_room), id_v1 = entry.id_v1 }
 	if entry.state == "gone" then
 		extra.state = "gone"
 		extra.gone_since = entry.gone_since
 	end
-	return hue_model.registry_configure_params(rid, entry, extra)
+	local params = hue_model.registry_configure_params(rid, entry, extra)
+	params.name, params.model = owner.shown(params.name), owner.shown(params.model)
+	return params
 end
 
 -- send_configure and configure_changed are bridge/owner.lua's (through tell()).
@@ -1141,10 +1147,12 @@ end
 -- while another is running, §6) are bridge/owner.lua's.
 
 -- Composer name at creation (§7): the Hue device name for a single-light
--- device (what the Hue app shows), the light's own name on a multi-light device.
+-- device (what the Hue app shows), the light's own name on a multi-light device
+-- or when the device name has nothing to show (a JSON null decodes as a
+-- table). Raw: owner:new_device_name makes it a display name for AddDevice.
 function lights:creation_name(model)
 	local device = self.devices[model.device_rid]
-	if device and device.name and #device.light_rids <= 1 then
+	if device and util.display_name(device.name) ~= "" and #device.light_rids <= 1 then
 		return device.name
 	end
 	return model.name
@@ -1356,12 +1364,13 @@ function lights:linked_label(rid, entry)
 	return self:registered_label(rid, entry), self.models[rid] and "" or " (not on the bridge: marked gone)"
 end
 
--- The unimported lights whose Hue name (or device name) is wanted (norm'd names).
+-- The unimported lights whose Hue name (or device name) is wanted (keys of
+-- util.name_key, as owner:match_unimported_by_name builds them).
 function lights:unimported_named(wanted)
 	local out = {}
 	for _, model in ipairs(self:unimported_models()) do
 		local device = self.devices[model.device_rid]
-		if wanted[norm(model.name)] or (device and device.name and wanted[norm(device.name)]) then
+		if wanted[util.name_key(model.name)] or (device and wanted[util.name_key(device.name)]) then
 			out[#out + 1] = model
 		end
 	end

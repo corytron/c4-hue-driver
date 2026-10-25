@@ -731,9 +731,10 @@ end
 -- Messages -----------------------------------------------------------------
 
 -- The current time slot of a time-based record as HUE_SCENE_CONFIGURE and
--- HUE_SCENE_STATE carry it: the slot scene's name and the slot's start
--- ("07:00", "sunset"), each nil when unknown (no slot, or a slot scene the
--- scene catalogue lacks). nil, nil for anything else.
+-- HUE_SCENE_STATE carry it: the slot scene's name (a display name, which the
+-- device shows in its Status; finding 8) and the slot's start ("07:00",
+-- "sunset"), each nil when unknown (no slot, or a slot scene the scene
+-- catalogue lacks). nil, nil for anything else.
 function scenes:slot_info(record)
 	if not is_smart(record) then
 		return nil, nil
@@ -747,7 +748,7 @@ function scenes:slot_info(record)
 	if type(start) ~= "string" or start == "" then
 		start = nil
 	end
-	return target and target.name or nil, start
+	return target and owner.shown(target.name) or nil, start
 end
 
 -- HUE_SCENE_CONFIGURE params (§2): rid, name, group_name, group_type, id_v1?,
@@ -755,13 +756,15 @@ end
 -- time-based scene the name is its base name, auto_dynamic "false", plus
 -- slot_name? and slot_start? (docs/smart-scenes-design.md, Messages). Every
 -- value a non-empty string (hue_model drops nil and "", as C4:SendToDevice
--- would).
+-- would). The names are display names: the device shows them in its Hue
+-- Scene row and Status, and its own Adopt Hue Name renames to them (security
+-- review 2026-10-25 finding 8). The registry keeps Hue's own.
 function scenes:configure_params(rid, entry)
 	local smart = is_smart(entry)
 	local extra = {
 		-- The plain name ("Kitchen", "Downstairs"): the device adds "(zone)"
 		-- itself [verified: a label here showed as "… (zone) (zone)"].
-		group_name = (self:group_info(entry.group_rid, entry)),
+		group_name = owner.shown((self:group_info(entry.group_rid, entry))),
 		group_type = entry.group_type,
 		state = entry.state == "gone" and "gone" or "linked",
 		kind = smart and scenes.SMART_KIND or scenes.PLAIN_KIND,
@@ -772,8 +775,9 @@ function scenes:configure_params(rid, entry)
 	if smart then
 		extra.slot_name, extra.slot_start = self:slot_info(self.smart_catalogue[rid])
 	end
+	local name = (smart and entry.name ~= nil) and name_of(entry) or entry.name
 	return hue_model.scene_configure_params({
-		rid = rid, name = (smart and entry.name ~= nil) and name_of(entry) or entry.name, id_v1 = entry.id_v1,
+		rid = rid, name = owner.shown(name), id_v1 = entry.id_v1,
 		auto_dynamic = not smart and entry.auto_dynamic == true,
 	}, extra)
 end
@@ -1122,7 +1126,8 @@ end
 -- Returns false (not answered with a configuration).
 function scenes:refuse_forgotten(device_id, rid, remembered)
 	rid = rid or remembered.rid
-	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = remembered.name })
+	-- A display name, as Forget Scene sent it (a mark an older build kept may hold Hue's raw name).
+	self.ctx.send(device_id, "HUE_SCENE_FORGOTTEN", { rid = rid, name = owner.shown(remembered.name) })
 	self.ctx.log.info("scenes: device %d said hello for %s, but Forget Scene let it go on %s; told so, not adopted "
 		.. "(Link Devices links it again)", device_id, tostring(rid), util.date_of(remembered.at))
 	return false
@@ -2211,12 +2216,13 @@ function scenes:linked_label(rid, entry)
 end
 
 -- The unimported scenes of either kind whose Hue name, base name (a
--- time-based one's) or creation name is wanted (norm'd names).
+-- time-based one's) or creation name is wanted (keys of util.name_key, as
+-- owner:match_unimported_by_name builds them).
 function scenes:unimported_named(wanted)
 	local out = {}
 	for _, scene in ipairs(self:unimported_scenes()) do
-		if wanted[util.norm(scene.name)] or wanted[util.norm(name_of(scene))]
-			or wanted[util.norm(self:creation_name(scene))] then
+		if wanted[util.name_key(scene.name)] or wanted[util.name_key(name_of(scene))]
+			or wanted[util.name_key(self:creation_name(scene))] then
 			out[#out + 1] = scene
 		end
 	end

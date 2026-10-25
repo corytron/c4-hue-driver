@@ -22,6 +22,9 @@ paths = [
     '''^build/''',
     # Worktrees other sessions keep under .claude/ (excluded from git, never pushed).
     '''^\.claude/worktrees/''',
+    # Python bytecode caches (gitignored): they hold the unit tests' private-data
+    # vectors folded back into whole strings.
+    '''(^|/)__pycache__/''',
 ]
 
 # A Hue application key (the v1 "username", 32 to 40 characters today) or the

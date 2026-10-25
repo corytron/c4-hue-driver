@@ -1332,6 +1332,64 @@ describe("bridge.zone_lights", function()
 		end)
 	end)
 
+	-- Security review 2026-10-25 finding 8: AddDevice, Adopt Hue Names and
+	-- the device's Hue Name and Hue Room rows get display names; the registry
+	-- keeps Hue's own. bridge/owner_spec.lua has the upgrade cases.
+	describe("names that reach Control4 (security review 2026-10-25 finding 8)", function()
+		-- The Living Room called at length, with a newline, in an app paired
+		-- with the bridge (JSON contents), as the registry keeps it ...
+		local ROOM = "Living Room\\n with the bay window seat and the doors to the garden"
+		local RAW = "Living Room\n with the bay window seat and the doors to the garden"
+		-- ... and the display names of the name and of "<Room> Lights".
+		local SHOWN = "Living Room with the bay window seat and the doors to the garden"
+		local SHOWN_LIGHTS = SHOWN .. " Lights"
+
+		-- The lights' caches with the Living Room and the Downstairs zone named
+		-- as given (JSON contents), then a fresh Z over them.
+		local function groups_named(room, zone)
+			L = lights.new({ http = http_ctx, now = function() return now end })
+			L:absorb({ light = decode_data(F.light), device = decode_data(F.device),
+				zigbee = decode_data(F.zigbee_connectivity),
+				room = decode_data(replace(F.room, '"name":"Living Room"', '"name":"' .. room .. '"')),
+				zone = decode_data(replace(F.zone, '"name":"Downstairs"', '"name":"' .. zone .. '"')),
+				bridge_home = decode_data(F.bridge_home) })
+			Z = new_zone_lights()
+		end
+
+		it("adds a room device under the display name of '<Room> Lights'; the device hears display names", function()
+			groups_named(ROOM, "Downstairs")
+			resync()
+			Z:add(LIVING, LIVING_ROOM, done)
+			assert.is_true(last_result().ok)
+			assert.equal(SHOWN_LIGHTS, c4.added[1].name)
+			local configure = sent_to(2001, "HUE_CONFIGURE")[1].params
+			assert.same({ SHOWN, SHOWN }, { configure.name, configure.hue_room })
+			assert.equal(RAW, Z:entry(LIVING).name, "the registry keeps Hue's name")
+		end)
+
+		it("does not list a room device an older build created under the raw name", function()
+			groups_named(ROOM, "Downstairs")
+			resync()
+			Z:add(LIVING, LIVING_ROOM, done)
+			Z.registry[LIVING].proxy_id = 3001
+			fake.project.devices[3001].name = RAW .. " Lights"  -- what an older build's AddDevice was given
+			assert.same({}, Z:name_differences())
+			assert.equal("No Composer names differ from the Hue zone and room names", Z:adopt_hue_names())
+			assert.same({}, c4.renamed)
+		end)
+
+		it("adds a zone whose Hue name has nothing to show as Hue zone light", function()
+			groups_named("Living Room", "\\t\\n")
+			resync()
+			Z:add(DOWNSTAIRS, GARAGE_ROOM, done)
+			assert.is_true(last_result().ok)
+			assert.equal("Hue zone light", c4.added[1].name)
+			local configure = sent_to(2001, "HUE_CONFIGURE")[1].params
+			assert.is_nil(configure.name)
+			assert.equal("(zone)", configure.hue_room)
+		end)
+	end)
+
 	describe("pickers", function()
 		it("picker_groups lists zones then rooms with their light counts, deleted ones last", function()
 			assert.same({ "Attic (zone, no lights)", "Downstairs (zone, 2 lights)", "Garage (room, 1 light)",

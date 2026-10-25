@@ -54,7 +54,7 @@ commands.DEFAULT_LIMITS = { min_dim = 1, mirek_min = 153, mirek_max = 500 }
 -- Answers that no retry can mend: bridge_request (hue_bridge/driver.lua)
 -- gives them at once, without a request, while the driver has no key or the
 -- bridge has refused it. The pending state ends there (issue #43).
-local FINAL_ERRORS = { ["not paired"] = true, ["key rejected"] = true }
+local FINAL_ERRORS = { ["not paired"] = true, ["key rejected"] = true, ["TLS check failed"] = true }
 
 local NUMERIC_FIELDS = { "brightness", "x", "y", "mirek", "rate" }
 
@@ -414,8 +414,9 @@ function commands:on_done(rid, light, result)
 		light.failures = 0
 		light.final_err = nil
 	elseif FINAL_ERRORS[result.err] then
-		-- Not paired, or the key refused: nothing gets through until the owner
-		-- pairs again, and a state kept until then would be stale. The newer
+		-- Not paired, the key refused, or the TLS check failed: nothing gets
+		-- through until the owner pairs again (or restarts the driver after
+		-- fixing the controller), and a state kept until then would be stale. The newer
 		-- fields that arrived meanwhile go too. One warning per rid and
 		-- condition: a slider dragged meanwhile would warn at every step.
 		self:drop(light)

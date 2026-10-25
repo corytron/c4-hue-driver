@@ -13,9 +13,25 @@ function util.positive(value)
 	return nil
 end
 
+-- `s` without its trailing blanks (`%s`: space and bytes 9-13), counted
+-- from the end: the pattern "%s+$" takes time quadratic in an inner run of
+-- blanks, and util.norm sees raw Hue names (group names in Map Rooms By
+-- Name, say), which a hostile peer can make a megabyte long.
+local function rtrim(s)
+	local last = #s
+	while last > 0 do
+		local b = s:byte(last)
+		if b ~= 32 and (b < 9 or b > 13) then
+			break
+		end
+		last = last - 1
+	end
+	return s:sub(1, last)
+end
+
 -- A name trimmed and lower-cased, for comparisons.
 function util.norm(name)
-	return (tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
+	return rtrim((tostring(name or ""):gsub("^%s+", ""))):lower()
 end
 
 -- A text with its commas turned into spaces (picker items are
@@ -26,6 +42,88 @@ end
 function util.sanitise(text)
 	local s = tostring(text):gsub(",", " ")
 	return (s:gsub("%c", ""))
+end
+
+-- The most characters a name the bridge hands to Control4 may have, and the
+-- most bytes, for text that is not UTF-8 (docs/security-fixes-design.md §2).
+-- No genuine Hue name comes near: Hue allows 32 characters
+-- (docs/edge-cases-hue.md §6), and the longest name built from them, a zone
+-- scene's "<Zone> <Scene>", has 65. A real name is never cut; a hostile one
+-- is still bounded. 100 characters of UTF-8 are at most 400 bytes.
+util.NAME_MAX = 100
+util.NAME_MAX_BYTES = 400
+
+-- A continuation byte of a UTF-8 character (0x80-0xBF); every other byte
+-- starts a character.
+local function continuation(b)
+	return b >= 0x80 and b <= 0xBF
+end
+
+-- The length of the longest prefix of `s` that holds at most NAME_MAX
+-- characters (counted by their first bytes) and ends before a character.
+-- Only the first NAME_MAX_BYTES + 1 bytes are read, so a megabyte costs no
+-- more than a short name. Text with too few character starts there is not
+-- UTF-8: it is cut at NAME_MAX_BYTES, backing over at most three
+-- continuation bytes (the most a UTF-8 character has), wherever that ends.
+local function cut_point(s)
+	local chars = 0
+	for i = 1, math.min(#s, util.NAME_MAX_BYTES + 1) do
+		if not continuation(s:byte(i)) then
+			chars = chars + 1
+			if chars > util.NAME_MAX then
+				return i - 1
+			end
+		end
+	end
+	if #s <= util.NAME_MAX_BYTES then
+		return #s
+	end
+	local cut = util.NAME_MAX_BYTES
+	for _ = 1, 3 do
+		if not continuation(s:byte(cut + 1)) then
+			break
+		end
+		cut = cut - 1
+	end
+	return cut
+end
+
+-- A name fit for a Composer device name or a plain property row: what
+-- AddDevice, RenameDevice and the devices' name and model rows get from the
+-- bridge, where any app paired with it can set a name, as can a hostile peer
+-- answering as the bridge (security review 2026-10-25 finding 8). nil or a
+-- non-string is "" (a number its tostring); control characters go (`%c`, as
+-- in sanitise); leading and trailing blanks go; at most NAME_MAX characters
+-- and NAME_MAX_BYTES bytes stay, cut before a character (cut_point). Commas
+-- stay: only picker lists need sanitise's rule. Idempotent (the cut is
+-- trimmed again), which the name comparisons in bridge/owner.lua rely on: a
+-- name made from a display name compares equal to the display name of the
+-- raw one. Linear in the length: the trailing blanks are counted from the
+-- end, as the pattern "%s+$" would take time quadratic in an inner run of
+-- blanks (20000 of them: 1.5 s on lua5.1).
+function util.display_name(text)
+	if type(text) == "number" then
+		text = tostring(text)
+	elseif type(text) ~= "string" then
+		return ""
+	end
+	local s = text:gsub("%c", ""):gsub("^%s+", "")
+	if #s > util.NAME_MAX then  -- fewer bytes are fewer characters: nothing to count
+		s = s:sub(1, cut_point(s))
+	end
+	-- With the control characters gone, a space is the only blank `%s` knows.
+	local last = #s
+	while last > 0 and s:byte(last) == 32 do
+		last = last - 1
+	end
+	return s:sub(1, last)
+end
+
+-- A name as the name matches compare it (Link Devices): its display name,
+-- trimmed and lower-cased. A device named after the display name of a long
+-- or garbled Hue name and that Hue name meet on the same key.
+function util.name_key(text)
+	return util.norm(util.display_name(text))
 end
 
 -- A persisted timestamp is trusted only within this century: os.date

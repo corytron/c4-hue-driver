@@ -1854,6 +1854,78 @@ describe("bridge.scenes", function()
 		end)
 	end)
 
+	-- Security review 2026-10-25 finding 8: AddDevice, Adopt Hue Names and
+	-- the names a scene device shows (HUE_SCENE_CONFIGURE, the slot name,
+	-- HUE_SCENE_FORGOTTEN) get display names; the registry keeps Hue's own.
+	-- bridge/owner_spec.lua has the upgrade cases.
+	describe("names that reach Control4 (security review 2026-10-25 finding 8)", function()
+		-- The Downstairs zone and its Nightlight scene called at length, with
+		-- control characters, in an app paired with the bridge (JSON contents).
+		local ZONE = "Downstairs and the landing by the stairs\\n"
+		local SCENE = "Nightlight\\t for the long hallway"
+		local SCENE_RAW = "Nightlight\t for the long hallway"
+		-- "<Zone> <Scene>" as AddDevice gets it: cleaned, and whole at 72
+		-- characters (NAME_MAX is 100; two 32-character Hue names make 65).
+		local SHOWN = "Downstairs and the landing by the stairs Nightlight for the long hallway"
+
+		before_each(function()
+			L = lights.new({ http = http_ctx, now = function() return now end })
+			L:absorb({ room = decode_data(F.room), zone = decode_data(replace(F.zone, '"name":"Downstairs"',
+				'"name":"' .. ZONE .. '"')), bridge_home = decode_data(F.bridge_home) })
+			S = new_scenes()
+		end)
+
+		local function named_scenes()
+			return { body = replace(F.scene, '"name":"Nightlight"', '"name":"' .. SCENE .. '"') }
+		end
+
+		it("adds a zone scene under the display name of '<Zone> <Scene>'; its device hears display names", function()
+			resync(named_scenes())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			assert.is_true(last_result().ok)
+			assert.equal(SHOWN, c4.added[1].name)
+			local configure = sent_to(2001, "HUE_SCENE_CONFIGURE")[1].params
+			assert.same({ "Nightlight for the long hallway", "Downstairs and the landing by the stairs" },
+				{ configure.name, configure.group_name })
+			assert.equal(SCENE_RAW, S:entry(F.scene_rids.nightlight).name, "the registry keeps Hue's name")
+		end)
+
+		it("does not list a zone scene an older build created under the raw name; renames to the display name", function()
+			resync(named_scenes())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			S.registry[F.scene_rids.nightlight].proxy_id = 3001
+			-- What an older build's AddDevice was given.
+			fake.project.devices[3001].name = "Downstairs and the landing by the stairs\n " .. SCENE_RAW
+			assert.same({}, S:name_differences())
+			assert.equal("None", S:attention())
+			fake.project.devices[3001].name = "Hall light"
+			assert.equal("Renamed 1 scene device: Hall light → " .. SHOWN .. " (device 2001)", S:adopt_hue_names())
+			assert.same({ { id = 3001, name = SHOWN } }, c4.renamed)
+		end)
+
+		it("tells a time-based scene's device the display name of its slot scene", function()
+			resync(named_scenes())  -- Golden hours over Downstairs, Tuesday's slot 1: Nightlight
+			S:add_scene(F.smart_scene_rid, tostring(GARAGE_ROOM), done)
+			assert.equal("Downstairs and the landing by the stairs Golden hours", c4.added[1].name)
+			assert.equal("Nightlight for the long hallway", sent_to(2001, "HUE_SCENE_CONFIGURE")[1].params.slot_name)
+			assert.equal("Nightlight for the long hallway", sent_to(2001, "HUE_SCENE_STATE")[1].params.slot_name)
+		end)
+
+		it("tells a forgotten device its display name, from Forget Scene and from an older build's mark", function()
+			resync(named_scenes())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			c4.sent = {}
+			assert.is_true((S:forget(2001)))
+			assert.same({ rid = F.scene_rids.nightlight, name = "Nightlight for the long hallway" },
+				sent_to(2001, "HUE_SCENE_FORGOTTEN")[1].params)
+			S.forgotten[2001].name = SCENE_RAW  -- a mark an older build kept holds Hue's raw name
+			c4.sent = {}
+			S:hello(F.scene_rids.nightlight, { device_id = "2001" })
+			assert.same({ rid = F.scene_rids.nightlight, name = "Nightlight for the long hallway" },
+				sent_to(2001, "HUE_SCENE_FORGOTTEN")[1].params)
+		end)
+	end)
+
 	describe("pickers", function()
 		it("picker_scenes groups by room label then name, marks dynamic scenes, lists deleted ones last", function()
 			assert.same({ { text = "(no scenes fetched yet; connect the event stream)", value = "" } }, S:picker_scenes())
