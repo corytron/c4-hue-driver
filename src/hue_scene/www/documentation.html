@@ -17,6 +17,8 @@ th { background: #ececec; }
 code { font-family: Consolas, "Courier New", monospace; font-size: 13px; background: #f2f2f2; padding: 0 3px; }
 .note { background: #f6f6ea; border: 1px solid #d8d8c0; padding: 6px 10px; margin: 10px 0; }
 .caption { font-size: 12px; color: #555; margin: 18px 0 0 0; }
+img { display: block; margin: 12px 0 0 0; border: 1px solid #c8c8c8; max-width: 100%; height: auto; }
+.figcap { font-size: 12px; color: #555; margin: 3px 0 18px 0; }
 </style>
 </head>
 <body>
@@ -60,6 +62,10 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 </ul>
 
 <h2>Properties</h2>
+<img src="img/scene-properties.png" width="700" alt="A Hue Scene device's Properties page">
+<p class="figcap">The Properties page of a Hue Scene device for the scene Relax of the Living Room.</p>
+<img src="img/recall-as.png" width="647" alt="The Recall As row with its list open">
+<p class="figcap"><b>Recall As</b>, the one row you may change, with its list open.</p>
 <table>
 <tr><th>Property</th><th>What it shows or does</th></tr>
 <tr><td><b>Driver Version</b></td><td>The build number of the installed driver, for example <code>116</code>; the same as the bridge's after an update. After an update during which Composer asked <code>Restart Director?</code>, the new number and the new behaviour arrive only once the controller has been rebooted from System Manager (the bridge's manual, chapter 3). Build 160, which made this device a dimmer, was such an update: until that reboot the tile shows on and off only, without a slider.</td></tr>
@@ -74,6 +80,8 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 </table>
 
 <h2>Actions</h2>
+<img src="img/scene-actions.png" width="700" alt="A Hue Scene device's Actions tab">
+<p class="figcap">The <b>Actions</b> tab: <b>Adopt Hue Name</b> above <b>Forget This Scene</b>.</p>
 <table>
 <tr><th>Action</th><th>What it does</th></tr>
 <tr><td><b>Adopt Hue Name</b></td><td>Renames this device in Composer to the name the bridge would give it today: the scene's name for a room scene (<code>Relax</code>), the zone's name in front for a zone scene (<code>Bedside Lights Nightlight</code>), and for a time-of-day scene without the number the Hue app adds (<code>Golden hours</code>, <code>Bedside Lights Golden hours</code>). Last Action reads <code>Renamed device 1141 to Bedside Lights Read</code>, or <code>Not renamed: no Hue name known yet (the bridge has not configured this scene)</code> while unlinked. Useful after a <b>Re-link Scene</b>, or after <b>Link Devices</b> matched a device by the scene's plain name, when the device still carries its old name.</td></tr>

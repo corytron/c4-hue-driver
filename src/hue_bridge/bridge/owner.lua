@@ -45,9 +45,9 @@
 -- unimported_named(wanted); optionally entry_caps(caps), tell, foreign,
 -- refuse_hello, adoptable_hello, registered, persist_extra,
 -- goodbye_unregistered, forget_sent, reconciled, reconcile_done,
--- resync_extra, room_mapping, expected_name, entry_name, answer_hello,
--- forgot, told_name, relink_fields, forget_label, relinked_label,
--- link_hello, link_rid, link_adopt_hello (defaults below).
+-- resync_extra, room_mapping, expected_name, agreeing_names, entry_name,
+-- answer_hello, forgot, told_name, relink_fields, forget_label,
+-- relinked_label, link_hello, link_rid, link_adopt_hello (defaults below).
 --
 -- Divergences between the three copies, settled before they were merged
 -- (rule 2 of the contract): today's behaviour of each module is kept behind
@@ -132,9 +132,14 @@
 --   C6 ids_from and dump moved here from lights.lua (lights.ids_from and
 --      lights.dump stay): scenes and zone lights no longer require bridge.lights.
 --   N1 the expected Composer name: the Hue name (lights) or the creation name
---      (scenes, zone lights) -> expected_name (lights override).
+--      (scenes, zone lights) -> expected_name, which the lights overrode
+--      until #236. Since then the creation name for all three: the lights'
+--      Hue name was the light's own name while their devices are named after
+--      the Hue device, so a fresh import could differ at once; the names the
+--      lights compared with before agree too -> agreeing_names (lights only).
 --   N2 name_differences: lights' took include_dismissed and gave no
---      `expected` -> one function with both (lights' expected = entry.name).
+--      `expected` -> one function with both (lights' expected was entry.name
+--      until #236, N1).
 --   N3 adopt_hue_names: lights walked name_differences(true), the others the
 --      linked rids with the same tests -> name_differences(true) for all. The
 --      scenes and zone lights now read every Composer name before the first
@@ -1119,10 +1124,28 @@ end
 
 -- Names (docs/import-design.md §6, [Q 10]) --------------------------------------
 
--- The Composer name a linked device should carry: its creation name (lights
--- override with the Hue name). Raw: name_differences makes it a display name.
+-- The Composer name a linked device should carry: its creation name, the
+-- name the module would give the device today (#236: the lights too). Raw:
+-- name_differences makes it a display name.
 function owner:expected_name(_rid, entry)
 	return self:creation_name(entry)
+end
+
+-- Hook: other names (raw) a linked device may carry without differing, nil
+-- for none (lights: the light's own name; bridge/lights.lua says why).
+function owner.agreeing_names() end
+
+-- Whether `name` (a display name) agrees with `expected` or one of `others`.
+local function agrees(name, expected, others)
+	if name == expected then
+		return true
+	end
+	for _, other in ipairs(others) do
+		if name == other then
+			return true
+		end
+	end
+	return false
 end
 
 -- Linked entries whose Composer name differs from the expected name:
@@ -1155,16 +1178,29 @@ end
 --     not listed, as no Composer name could show it;
 --   - a Hue name with nothing to show (only control characters or blanks):
 --     never listed or renamed, as there is nothing to rename to.
+-- A name of agreeing_names counts as the expected one, for the Composer name
+-- and for the accepted one alike (#236): a light whose Composer name is the
+-- light's own name, or whose difference was accepted against it, is not
+-- listed, renamed or accepted again when the expected name became the
+-- device's creation name, so no rename is reported that did not happen in Hue.
 function owner:name_differences(include_dismissed)
 	local out = {}
 	for _, rid in ipairs(self.reg:rids("linked")) do
 		local entry = self.registry[rid]
 		local expected = util.display_name(self:expected_name(rid, entry))
-		if entry.name and entry.name ~= "" and expected ~= ""
-			and (include_dismissed or util.display_name(entry.name_dismissed) ~= expected) then
-			local current = self.project:display_name(entry.proxy_id or entry.device_id)
-			if current and util.display_name(current) ~= expected then
-				out[#out + 1] = { rid = rid, entry = entry, current = current, expected = expected }
+		if entry.name and entry.name ~= "" and expected ~= "" then
+			local others = {}
+			for _, name in ipairs(self:agreeing_names(rid, entry) or {}) do
+				local other = util.display_name(name)
+				if other ~= "" then
+					others[#others + 1] = other
+				end
+			end
+			if include_dismissed or not agrees(util.display_name(entry.name_dismissed), expected, others) then
+				local current = self.project:display_name(entry.proxy_id or entry.device_id)
+				if current and not agrees(util.display_name(current), expected, others) then
+					out[#out + 1] = { rid = rid, entry = entry, current = current, expected = expected }
+				end
 			end
 		end
 	end

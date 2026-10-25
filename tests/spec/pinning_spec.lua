@@ -90,6 +90,70 @@ describe("bridge.pinning", function()
 		assert.equal("pinned", verdict)
 	end)
 
+	-- Issue #239: an inconclusive answer names the request that failed and the
+	-- transfer's error; it used to read "example.com unreachable" whatever happened.
+	describe("status", function()
+		local function check()
+			local result = {}
+			pinning.check(ca, function(v, d) result.verdict, result.detail = v, d end)
+			return result
+		end
+
+		it("names the transfer's error when the site cannot be reached with the system CAs", function()
+			local result = check()
+			c4.transfers[1]:done(6, "Could not resolve host: example.com")
+			assert.equal("inconclusive", result.verdict)
+			assert.equal("Pinning check inconclusive: example.com unreachable with the system CAs "
+				.. "(transfer failed (6): Could not resolve host: example.com)", pinning.status(result.verdict, result.detail))
+		end)
+
+		it("names the transfer's error when the request with the bundle fails otherwise, without 'unreachable'", function()
+			for _, failure in ipairs({
+				{ 28, "Timeout was reached" },
+				{ 7, "Failed to connect to example.com port 443: Connection refused" },
+				{ 77, "Problem with the SSL CA cert (path? access rights?)" },
+			}) do
+				local result = check()
+				c4.last_transfer():respond(200, "<html>")
+				c4.last_transfer():done(failure[1], failure[2])
+				local status = pinning.status(result.verdict, result.detail)
+				assert.equal("Pinning check inconclusive: example.com failed with the bundle for a reason other than "
+					.. "its certificate (transfer failed (" .. failure[1] .. "): " .. failure[2] .. ")", status)
+				assert.is_nil(status:find("unreachable", 1, true), status)
+			end
+		end)
+
+		it("names a request with the bundle that could not even start", function()
+			local real_url = c4.url
+			local calls = 0
+			c4.url = function(self)
+				local t = real_url(self)
+				calls = calls + 1
+				if calls == 2 then
+					t.Get = function() error("Error loading certificate: fopen: No such file or directory", 0) end
+				end
+				return t
+			end
+			local result = check()
+			c4.transfers[1]:respond(200, "<html>")
+			assert.equal("Pinning check inconclusive: example.com failed with the bundle for a reason other than its "
+				.. "certificate (could not start transfer: Error loading certificate: fopen: No such file or directory)",
+				pinning.status(result.verdict, result.detail))
+		end)
+
+		it("keeps the texts of the conclusive answers", function()
+			local result = check()
+			c4.transfers[1]:respond(200, "<html>")
+			c4.transfers[2]:done(60, "SSL peer certificate or SSH remote key was not OK")
+			assert.equal("Pinning check passed: only Signify-signed certificates are trusted",
+				pinning.status(result.verdict, result.detail))
+			assert.equal("Pinning check FAILED: public CAs are trusted too; see Lua output",
+				pinning.status("not_pinned", "HTTP 200"))
+			assert.equal("Pinning check inconclusive: no reason given", pinning.status("inconclusive"))
+			assert.equal("something else", pinning.status("something else"))
+		end)
+	end)
+
 	it("keeps the peer verified on both requests (tls is applied on top of the bundle's options)", function()
 		pinning.check(ca, function() end)
 		local control = c4.transfers[1]

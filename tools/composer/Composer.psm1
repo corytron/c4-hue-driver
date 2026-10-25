@@ -187,7 +187,8 @@ function Get-ComposerTree {
 }
 
 function Invoke-MouseClick {
-    # Physical left (or -Right / -Double) click at screen coordinates.
+    # Physical left (or -Right / -Double) click at screen coordinates. Unchecked: call it only from Invoke-SafeClick
+    # (issue #239); every other caller goes through Invoke-SafeClick with the top-level window it aims at.
     param([Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y, [switch]$Right, [switch]$Double)
     [void][C4.Native]::SetCursorPos($X, $Y); Start-Sleep -Milliseconds 60
     if ($Right) { $down = 0x0008; $up = 0x0010 } else { $down = 0x0002; $up = 0x0004 }
@@ -198,7 +199,13 @@ function Invoke-MouseClick {
 
 function Invoke-MouseDrag {
     # Physical left-button drag from (X1,Y1) to (X2,Y2) in small steps (Composer's Connections view binds by drag & drop).
-    param([Parameter(Mandatory)][int]$X1, [Parameter(Mandatory)][int]$Y1, [Parameter(Mandatory)][int]$X2, [Parameter(Mandatory)][int]$Y2, [int]$Steps = 25, [int]$StepMs = 20)
+    # Rule 5 (issue #239): both points must lie in top-level window -Hwnd (default: Composer's main window) and that
+    # window must be in the foreground before the button goes down; if it lost the foreground during the drag, the
+    # pointer goes back to the start point and the button is released there (no drop on another window), then it throws.
+    param([Parameter(Mandatory)][int]$X1, [Parameter(Mandatory)][int]$Y1, [Parameter(Mandatory)][int]$X2, [Parameter(Mandatory)][int]$Y2, [int]$Steps = 25, [int]$StepMs = 20, [IntPtr]$Hwnd = [IntPtr]::Zero)
+    if ($Hwnd -eq [IntPtr]::Zero) { $Hwnd = Get-ComposerMainHandle }
+    Assert-SafePoint -Hwnd $Hwnd -X $X1 -Y $Y1
+    Assert-SafePoint -Hwnd $Hwnd -X $X2 -Y $Y2
     [void][C4.Native]::SetCursorPos($X1, $Y1); Start-Sleep -Milliseconds 150
     [C4.Native]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 250     # LEFTDOWN
     for ($i = 1; $i -le $Steps; $i++) {
@@ -206,6 +213,12 @@ function Invoke-MouseDrag {
         Start-Sleep -Milliseconds $StepMs
     }
     Start-Sleep -Milliseconds 300
+    $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2)   # GA_ROOT
+    if ($fgRoot -ne $Hwnd) {
+        [void][C4.Native]::SetCursorPos($X1, $Y1); Start-Sleep -Milliseconds 150
+        [C4.Native]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)                                # LEFTUP at the start point
+        throw "Drag cancelled: window $Hwnd lost the foreground during the drag (foreground root = $fgRoot); released at the start point"
+    }
     [C4.Native]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)                                    # LEFTUP
     Start-Sleep -Milliseconds 400
 }
@@ -218,11 +231,11 @@ function Move-MouseAway {
 }
 
 function Invoke-ElementClick {
-    # Click the centre of a UIA element's bounding rectangle.
+    # Click the centre of a UIA element's bounding rectangle, through Invoke-SafeClick with the element's top-level window.
     param([Parameter(Mandatory)]$Element, [switch]$Right, [switch]$Double)
     $r = $Element.Current.BoundingRectangle
     if ($r.IsEmpty) { throw "Element '$($Element.Current.Name)' has no bounding rectangle" }
-    Invoke-MouseClick -X ([int]($r.X + $r.Width / 2)) -Y ([int]($r.Y + $r.Height / 2)) -Right:$Right -Double:$Double
+    Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Element $Element) -X ([int]($r.X + $r.Width / 2)) -Y ([int]($r.Y + $r.Height / 2)) -Right:$Right -Double:$Double
 }
 
 function Send-Keys {
@@ -268,7 +281,7 @@ function Select-ComposerTab {
     if (-not $tab) { throw "Tab control not found" }
     if (-not $script:TabOffsets.ContainsKey($Name)) { throw "Unknown tab '$Name'; known: $($script:TabOffsets.Keys -join ', ')" }
     $r = $tab.Current.BoundingRectangle
-    Invoke-MouseClick -X ([int]($r.X + $script:TabOffsets[$Name])) -Y ([int]($r.Y + 11))
+    Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Element $tab) -X ([int]($r.X + $script:TabOffsets[$Name])) -Y ([int]($r.Y + 11))
     Start-Sleep -Milliseconds 500
 }
 
@@ -301,11 +314,16 @@ function Close-ComposerDialog {
     $d = Get-ComposerDialog
     if (-not $d) { return $false }
     $h = $d.Current.NativeWindowHandle
+    $useEscape = [bool]$Escape
     if (-not $Escape) {
         $b = Find-ComposerElements -Class 'BUTTON' -Name $Button -Root $d | Select-Object -First 1
-        if ($b) { Invoke-ElementClick -Element $b; Start-Sleep -Milliseconds 400 }
-        else { [void][C4.Native]::SetForegroundWindow([IntPtr]$h); Send-Keys '{ESC}' 400 }
-    } else { [void][C4.Native]::SetForegroundWindow([IntPtr]$h); Send-Keys '{ESC}' 400 }
+        if ($b) { Invoke-ElementClick -Element $b; Start-Sleep -Milliseconds 400 } else { $useEscape = $true }
+    }
+    if ($useEscape) {
+        # rule 5 (issue #239): the key goes only to a control inside THIS dialog while the dialog is in the foreground
+        [void](Show-AnyWindow -Hwnd ([IntPtr]$h))
+        Send-KeysTo -ExpectedHwnd ([IntPtr]$h) -Within -Keys '{ESC}' -DelayMs 400
+    }
     $now = Get-ComposerDialog
     (-not $now -or $now.Current.NativeWindowHandle -ne $h)   # $true when THAT dialog is gone
 }
@@ -434,7 +452,7 @@ function Select-ComposerPickerItem {
     $item = Get-ListViewItems -Hwnd $h | Where-Object { $_.Text -eq $Text } | Select-Object -First 1
     if (-not $item) { throw "Item '$Text' not in picker; items: $((Get-ListViewItems -Hwnd $h | ForEach-Object Text) -join ' | ')" }
     $pt = Get-ListViewItemScreenPoint -Hwnd $h -Index $item.Index
-    Invoke-MouseClick -X ($pt.Left + 20) -Y $pt.Y
+    Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Hwnd $h) -X ($pt.Left + 20) -Y $pt.Y
     Start-Sleep -Milliseconds 300
     $ok = Find-ComposerElements -Class 'BUTTON' -Name 'OK' -Root $d | Select-Object -First 1
     Invoke-ElementClick -Element $ok; Start-Sleep -Milliseconds 500
@@ -479,7 +497,7 @@ function Select-ComposerDevice {
     $row = $row[0]
     if ($row.Selected -and -not $Force) { return $row }
     $pt = Get-ListViewItemScreenPoint -Hwnd $h -Index $row.Index
-    Invoke-MouseClick -X ($pt.Left + $TextOffsetX) -Y $pt.Y
+    Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Hwnd $h) -X ($pt.Left + $TextOffsetX) -Y $pt.Y
     Move-MouseAway   # otherwise a hover tooltip pops up over the tree and confuses window lookups
     Start-Sleep -Milliseconds 700
     $sel = ([C4.ListView]::GetState($h, $row.Index) -band 2) -ne 0
@@ -509,7 +527,7 @@ function Rename-ComposerDevice {
     if (-not $edit) { Send-KeysTo -ExpectedHwnd $h -Keys '{F2}' -DelayMs 600; $edit = Get-ComposerTreeEditor; $method = 'F2' }
     if (-not $edit) {   # slow second click on the selected row's label
         $pt = Get-ListViewItemScreenPoint -Hwnd $h -Index $row.Index
-        Invoke-MouseClick -X ($pt.Left + $TextOffsetX) -Y $pt.Y; Move-MouseAway; Start-Sleep -Milliseconds 900
+        Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Hwnd $h) -X ($pt.Left + $TextOffsetX) -Y $pt.Y; Move-MouseAway; Start-Sleep -Milliseconds 900
         $edit = Get-ComposerTreeEditor; $method = 'second-click'
     }
     if (-not $edit) {
@@ -520,7 +538,7 @@ function Rename-ComposerDevice {
     [C4.ListView]::SetWindowText($eh, $NewName); Start-Sleep -Milliseconds 150
     $typed = [C4.ListView]::GetWindowText($eh)
     $r = $edit.Current.BoundingRectangle
-    Invoke-MouseClick -X ([int]($r.X + $r.Width - 15)) -Y ([int]($r.Y + $r.Height / 2))   # make sure keyboard focus is in the editor
+    Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Hwnd $eh) -X ([int]($r.X + $r.Width - 15)) -Y ([int]($r.Y + $r.Height / 2))   # make sure keyboard focus is in the editor
     Send-KeysTo -ExpectedHwnd $eh -Keys '{ENTER}' -DelayMs $SettleMs   # refuses if focus/menu/dialog state is not as expected
     Move-MouseAway
     $dlg2 = Get-ComposerDialog
@@ -560,10 +578,18 @@ function Get-ComposerFocus {
 
 function Send-KeysTo {
     # Send keystrokes ONLY if Composer's focused control is $ExpectedHwnd and no menu is active; otherwise throw without sending.
-    param([Parameter(Mandatory)][IntPtr]$ExpectedHwnd, [Parameter(Mandatory)][string]$Keys, [int]$DelayMs = 150, [switch]$NoDialogCheck)
+    # -Within: $ExpectedHwnd is a top-level window (a dialog); the focus may be on any control inside it, and that
+    # window must be the foreground window (keys go to the foreground window's focus).
+    param([Parameter(Mandatory)][IntPtr]$ExpectedHwnd, [Parameter(Mandatory)][string]$Keys, [int]$DelayMs = 150, [switch]$NoDialogCheck, [switch]$Within)
     $f = Get-ComposerFocus
     if ($f.MenuActive) { throw "Refusing to send '$Keys': a menu is active (flags=$($f.Flags))" }
-    if ($f.FocusHwnd -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), expected $ExpectedHwnd" }
+    if ($Within) {
+        $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2)   # GA_ROOT
+        if ($fgRoot -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': window $ExpectedHwnd is not in the foreground (foreground root = $fgRoot)" }
+        $focusRoot = if ($f.FocusHwnd -ne [IntPtr]::Zero) { [C4.Win]::GetAncestor($f.FocusHwnd, 2) } else { [IntPtr]::Zero }
+        if ($f.FocusHwnd -ne $ExpectedHwnd -and $focusRoot -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), not inside window $ExpectedHwnd" }
+    }
+    elseif ($f.FocusHwnd -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), expected $ExpectedHwnd" }
     if (-not $NoDialogCheck -and $Keys -match 'ENTER|~') {
         $d = Get-ComposerDialog
         if ($d -and $d.Current.NativeWindowHandle -ne $ExpectedHwnd) {
@@ -666,7 +692,7 @@ function Set-ComposerProperty {
     if (-not $ctl) { throw "Value control for '$Label' not found" }
     $h = [IntPtr]$ctl.Current.NativeWindowHandle; $r = $ctl.Current.BoundingRectangle
     $before = [C4.ListView]::GetWindowText($h)
-    Invoke-MouseClick -X ([int]($r.X + $r.Width - 10)) -Y ([int]($r.Y + $r.Height / 2)); Start-Sleep -Milliseconds 500
+    Invoke-SafeClick -Hwnd (Get-ComposerRootWindow -Hwnd $h) -X ([int]($r.X + $r.Width - 10)) -Y ([int]($r.Y + $r.Height / 2)); Start-Sleep -Milliseconds 500
     $f = $null
     for ($try = 0; $try -lt 6; $try++) { $f = Get-ComposerFocus; if ($f.FocusHwnd -eq $h) { break }; Start-Sleep -Milliseconds 300 }   # focus can read 0 for a moment while the list drops
     if ($f.FocusHwnd -ne $h -or $f.MenuActive) { throw "Value control for '$Label' did not take focus (focus=$($f.FocusHwnd) menu=$($f.MenuActive))" }
@@ -748,15 +774,41 @@ function Show-AnyWindow {
     ([C4.Native]::GetForegroundWindow() -eq $Hwnd)
 }
 
-function Invoke-SafeClick {
-    # Click (X,Y) only if top-level window -Hwnd is the foreground window and the point lies inside its rectangle.
-    # Tries once to bring it forward; throws (without clicking) otherwise.
-    param([Parameter(Mandatory)][IntPtr]$Hwnd, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y, [switch]$Right, [switch]$Double)
+function Get-ComposerRootWindow {
+    # The top-level window (GetAncestor GA_ROOT) of a window handle, or of a UIA element through its nearest
+    # ancestor that has a handle: the window Invoke-SafeClick must find in the foreground before clicking into it.
+    param([IntPtr]$Hwnd = [IntPtr]::Zero, $Element)
+    if ($Hwnd -eq [IntPtr]::Zero) {
+        if (-not $Element) { throw "Get-ComposerRootWindow needs -Hwnd or -Element" }
+        $e = $Element
+        for ($i = 0; $e -and $i -lt 30; $i++) {
+            $h = $e.Current.NativeWindowHandle
+            if ($h -ne 0) { $Hwnd = [IntPtr]$h; break }
+            $e = $script:Raw.GetParent($e)
+        }
+        if ($Hwnd -eq [IntPtr]::Zero) { throw "No window handle above element '$($Element.Current.Name)'" }
+    }
+    $root = [C4.Win]::GetAncestor($Hwnd, 2)   # GA_ROOT
+    if ($root -eq [IntPtr]::Zero) { throw "Window $Hwnd has no top-level window (closed?)" }
+    $root
+}
+
+function Assert-SafePoint {
+    # Rule 5: throw unless top-level window -Hwnd contains (X,Y) and is the foreground window. Tries once to bring
+    # it forward (Show-AnyWindow, no ALT). Used by Invoke-SafeClick and Invoke-MouseDrag before any button goes down.
+    param([Parameter(Mandatory)][IntPtr]$Hwnd, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
     $r = New-Object C4.Native+RECT; [void][C4.Native]::GetWindowRect($Hwnd, [ref]$r)
     if ($X -lt $r.Left -or $X -ge $r.Right -or $Y -lt $r.Top -or $Y -ge $r.Bottom) { throw "Refusing click at ($X,$Y): outside window $Hwnd rect $($r.Left),$($r.Top),$($r.Right),$($r.Bottom)" }
     $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2)   # GA_ROOT
     if ($fgRoot -ne $Hwnd) { [void](Show-AnyWindow -Hwnd $Hwnd); $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2) }
     if ($fgRoot -ne $Hwnd) { throw "Refusing click at ($X,$Y): window $Hwnd is not in the foreground (foreground root = $fgRoot)" }
+}
+
+function Invoke-SafeClick {
+    # Click (X,Y) only if top-level window -Hwnd is the foreground window and the point lies inside its rectangle.
+    # Tries once to bring it forward; throws (without clicking) otherwise. The only caller of Invoke-MouseClick.
+    param([Parameter(Mandatory)][IntPtr]$Hwnd, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y, [switch]$Right, [switch]$Double)
+    Assert-SafePoint -Hwnd $Hwnd -X $X -Y $Y
     Invoke-MouseClick -X $X -Y $Y -Right:$Right -Double:$Double
 }
 

@@ -51,3 +51,48 @@ note the user friendly name along with the Bridge Model in the properties."
 5. Manual: chapter 3 "What you need" (supported bridges, the minimum
    firmware, keep the bridge updated), chapter 4 (the new Status texts),
    chapter 5 (the three rows), chapter 12 (the refusals); README likewise.
+
+## Pairing another bridge (#236)
+
+Decided 2026-10-25 (issue #236, item 1). The lights', scenes' and zone
+lights' registries hold the resource ids of the bridge they were imported
+from, and the stored bridge id names that bridge; the lifecycle tables
+(`docs/edge-cases-ux.md` "Bridge replaced", `docs/zone-light-design.md` §4)
+expected a refusal until Forget Pairing, but build 316's `Pair Bridge`
+compared no ids. `Pair Bridge` now compares the id `/api/0/config` reports
+with the stored one, before anything else and before any key is asked for:
+
+| Case | Id at the address | Decision |
+| --- | --- | --- |
+| Nothing stored (a new bridge device, or after Forget Pairing) | any | Allowed; the model and firmware refusals (Decision 2) still apply |
+| The same bridge re-paired: a new key after a key rejection, a factory reset, or simply again | the stored id | Allowed: the new key replaces the old one, the key-rejected lock ends, the registries stay |
+| The same bridge at a new address | the stored id | Allowed, as above |
+| The same bridge reset and restored from its own Hue backup (the id belongs to the hardware) | the stored id | Allowed, as above |
+| A different bridge at the same address (a replacement plugged in where the old one was) | another id | Refused until Forget Pairing |
+| A different bridge after an address change (the identity check already sends it nothing) | another id | Refused until Forget Pairing |
+| The paired bridge's setup moved to new hardware (the Hue app's transfer, or its backup restored onto another bridge) | another id; `replacesbridgeid` may name the old one [assumed] | Refused until Forget Pairing; adopting a replacement by `replacesbridgeid` stays "later" (`docs/import-design.md` §2) |
+| The key unreadable after a restore while the id is still stored (Status reads `Not paired`) | compared with the stored id | The same id allowed, another refused until Forget Pairing |
+
+- **Refused** means: no key is asked for (the link button press is not
+  used up), nothing is stored, and the stream, the stored key, the
+  key-rejected lock and the Bridge Model, Name and Firmware rows stay as
+  they are. Status (with the driver's "Pairing failed: " prefix): `Bridge
+  at <ip> reports ID <new id>, expected <stored id>; run Forget Pairing
+  first to pair with another bridge`.
+- **Nothing is automatic and nothing new is offered.** Forget Pairing is
+  the click that lets the registries' bridge go. Pairing with another
+  bridge afterwards works as before: after the first full read every entry
+  whose rid the new bridge lacks is gone (Re-link, Forget) and the new
+  bridge's other lights are new; entries whose rids survived a transfer stay
+  linked.
+- Forget Pairing clicked while the identity check is in flight: its late
+  answer is dropped (it raised a Lua error on the missing credentials
+  before), and a bridge paired afterwards is checked afresh even if the old
+  bridge's TLS check passed meanwhile; the identity check runs again after
+  every pairing that changes the bridge id, and after any pairing while it
+  had not passed.
+- Code: `bridge/pairing.lua:other_bridge`, called by `pairing.pair`, whose
+  third argument is the stored id; `hue_bridge/driver.lua` `Pair_Bridge`
+  passes `state.creds.bridge_id`, whether or not the key is still there, and
+  its `on_paired` resets the identity state; `verify_identity` drops an
+  answer once nothing is paired.

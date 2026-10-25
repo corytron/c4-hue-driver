@@ -17,6 +17,8 @@ th { background: #ececec; }
 code { font-family: Consolas, "Courier New", monospace; font-size: 13px; background: #f2f2f2; padding: 0 3px; }
 .note { background: #f6f6ea; border: 1px solid #d8d8c0; padding: 6px 10px; margin: 10px 0; }
 .caption { font-size: 12px; color: #555; margin: 18px 0 0 0; }
+img { display: block; margin: 12px 0 0 0; border: 1px solid #c8c8c8; max-width: 100%; height: auto; }
+.figcap { font-size: 12px; color: #555; margin: 3px 0 18px 0; }
 </style>
 </head>
 <body>
@@ -48,6 +50,10 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 
 <h2>Properties</h2>
 <p>The device fills in the rows below itself, most of them from what the bridge tells it; the only one you change is Debug Mode, and only when asked. The keypad settings are described above.</p>
+<img src="img/light-properties.png" width="700" alt="A Hue Light device's Properties page">
+<p class="figcap">The Properties page of a Hue Light for the lamp <code>Lamp 1</code>.</p>
+<img src="img/zone-light-properties.png" width="700" alt="A zone light's Properties page">
+<p class="figcap">The same page for a zone light, the Hue zone Accent: <b>Status</b> <code>Hue zone Accent (2 lights)</code> and <b>Hue Room</b> <code>Accent (zone)</code>.</p>
 <table>
 <tr><th>Property</th><th>What it shows</th></tr>
 <tr><td><b>Driver Version</b></td><td>The build number of the installed driver, for example <code>116</code>. It matches the bridge's after an update; after an update during which Composer asked <code>Restart Director?</code>, only once the controller has been rebooted from System Manager (the bridge's manual, chapter 3).</td></tr>
@@ -62,6 +68,8 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 </table>
 
 <h2>Actions</h2>
+<img src="img/light-actions.png" width="700" alt="A Hue Light device's Actions tab">
+<p class="figcap">The <b>Actions</b> tab: <b>Adopt Hue Name</b> above <b>Forget This Light</b>.</p>
 <table>
 <tr><th>Action</th><th>What it does</th></tr>
 <tr><td><b>Adopt Hue Name</b></td><td>Renames this device in Composer to its Hue name. Last Action reads <code>Renamed device 1081 to Desk Lamp</code>; while the bridge has not linked the device yet it reads <code>Not renamed: no Hue name known yet (the bridge has not configured this light)</code>. Names are never changed without this click (or the bridge's <b>Adopt Hue Names</b>); the driver never renames anything in Hue. A room light is renamed to the room's name with <code>Lights</code> added.</td></tr>

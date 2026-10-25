@@ -2,6 +2,8 @@
 --
 -- 1. GET /api/0/config (unauthenticated) to learn the bridge ID and model.
 --    This also proves the TLS chain verifies before any secret is sent.
+--    A bridge other than the one the driver is paired with is refused here
+--    (docs/bridge-compat-design.md, "Pairing another bridge (#236)").
 -- 2. POST /api {"devicetype": ..., "generateclientkey": true}. Until the
 --    link button has been pressed the bridge answers with error type 101.
 -- 3. Store the key, bridge ID and IP.
@@ -86,6 +88,24 @@ function pairing.parse_response(json)
 	return "error", "unexpected response"
 end
 
+-- Why the probed bridge may not replace the one the driver is paired with,
+-- or nil (docs/bridge-compat-design.md, "Pairing another bridge (#236)"):
+-- `paired_id` is the stored bridge id, kept until Forget Pairing even when
+-- the key is gone; nil or "" when none is stored. The same bridge may always
+-- be paired again (a new key); another one only after Forget Pairing, since
+-- the registries hold the resource ids of the stored one.
+function pairing.other_bridge(ip, info, paired_id)
+	if paired_id == nil or paired_id == "" then
+		return nil
+	end
+	local expected = config.normalise_bridge_id(paired_id) or tostring(paired_id)
+	if info.bridge_id == expected then
+		return nil
+	end
+	return string.format("Bridge at %s reports ID %s, expected %s; run Forget Pairing first to pair with another "
+		.. "bridge", ip, tostring(info.bridge_id), expected)
+end
+
 -- Why a probed bridge cannot be paired, or nil when it can.
 function pairing.refusal(ip, info)
 	local model = tostring(info.model or "")
@@ -104,15 +124,25 @@ function pairing.refusal(ip, info)
 end
 
 -- Run the whole flow. `handlers`:
---   on_probed(info)        bridge answered the config request
+--   on_probed(info)        the bridge answered the config request, and it is
+--                          the paired bridge or none is stored
 --   on_link_button(info)   press the button and try again
 --   on_paired(creds)       key stored; creds = { key, bridge_id, ip, model }
---   on_error(message)
-function pairing.pair(ip, handlers)
+--   on_error(message)      the reason, without a "Pairing failed" of its own
+--                          (the driver adds that prefix)
+-- `paired_id`: the stored bridge id, or nil (pairing.other_bridge).
+function pairing.pair(ip, handlers, paired_id)
 	pairing.probe(ip, function(info, err)
 		if not info then
 			log.warn("pairing: config probe failed: %s", err)
 			return handlers.on_error(string.format("No Hue bridge answered at %s: %s", ip, tostring(err)))
+		end
+		-- Another bridge than the paired one, before anything is shown or
+		-- asked for: no key is requested and nothing is stored (#236).
+		local other = pairing.other_bridge(ip, info, paired_id)
+		if other then
+			log.warn("pairing refused: %s", other)
+			return handlers.on_error(other)
 		end
 		if handlers.on_probed then
 			handlers.on_probed(info)
@@ -131,7 +161,9 @@ function pairing.pair(ip, handlers)
 			body = { devicetype = pairing.DEVICE_TYPE, generateclientkey = true },
 		}, function(r)
 			if not r.ok and not r.json then
-				return handlers.on_error("Pairing request failed: " .. tostring(r.err))
+				-- The driver prefixes "Pairing failed: " (issue #236: no
+				-- second "Pairing ... failed" of the module's own).
+				return handlers.on_error("No usable answer to the key request: " .. tostring(r.err))
 			end
 			local status, value = pairing.parse_response(r.json)
 			if status == "link_button" then
