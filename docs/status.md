@@ -1,10 +1,12 @@
 # Status of the Hue driver (2026-10-25)
 
-**Release 1.0 "Cassian", build 316, tag `v1.0`** (re-cut 2026-10-25 by the
-two-job Release workflow from `main` at e3ec53d): the review leftovers
+**Release 1.0 "Cassian", build 329, tag `v1.0`** (re-cut 2026-10-25 by the
+two-job Release workflow from `main` at 89de840): the review leftovers
 (#214), the shared lifecycle base and keypad machine (#216), the security
 fixes of 2026-10-25 (#221), code scanning triage (#223), the scene probe
-(#218) and the screenshot tooling (#227). Its install on the house follows
+(#218), the screenshot tooling (#227) and the documentation accuracy pass
+(#240; build 316, published earlier that day, has the same driver code with
+the older Documentation tabs). Its install on the house follows
 the #40 hardware checks of 2026-10-25 10:00 (issue #228 tracks it). **The
 repository is public since 2026-10-24** (history rewritten that day:
 placeholder addresses, two screenshots dropped; rewritten again on
@@ -46,14 +48,14 @@ this page disagree about the present, this page and the code win.
   with the fixes of #217) serves the hardware checks of #40. It carries the
   dev key; the release install replaces it. Recorded on the environment
   `house` as deployment 7310056842; `python3 tools/deploy.py status` reports
-  drift (desired 316 since PR #229, observed 309) until then, and issue #228
-  stays open. Its three `driver.xml` files are build 316's, so the release
-  install needs no reboot.
+  drift (desired 329, observed 309) until then, and issue #228 stays open.
+  Its three `driver.xml` files are build 329's, so the release install
+  needs no reboot.
 - **The proxy's settings on the devices since 2026-10-25** (#59): the owner
   rebooted the controller from System Manager during the night's hardware
   pass (dev build 284), which loaded the capability change of #59
-  (`hide_proxy_properties` False on both device drivers); builds 309 and 316
-  keep it.
+  (`hide_proxy_properties` False on both device drivers); builds 309, 316
+  and 329 keep it.
 - **Build 259 = release 1.0 "Cassian"** (re-cut 2026-10-24 23:04 local from
   the merge of PR #205 with `manifest.json` and provenance attestations),
   installed 2026-10-24 23:11 local through the GitOps flow: PR #207 set
@@ -375,7 +377,7 @@ What was left is under "Open" (#38, #61, #62).
 Every open item is an issue (`gh issue list --state open`); this list says
 where each stands on 2026-10-25.
 
-- **#228** Install release 1.0 build 316 on the house after the #40
+- **#228** Install release 1.0 build 329 on the house after the #40
   checks (`deploy.py start`, the Windows session, `deploy.py done`; no
   reboot); then Debug Mode Off and the dev loop ends.
 - **#40** Time-of-day scenes: the keypad, Recall As after a cross-kind
@@ -383,8 +385,6 @@ where each stands on 2026-10-25.
   2026-10-25 from 10:00 with `tools/smart_scene_probe.py` (plan:
   `docs/smart-scenes-research.md` §8); the 16:00 slot boundary and the
   after-sunset V8 check are later that day. No result is recorded yet.
-- **#231** This documentation accuracy pass against build 316 (branch
-  `docs/accuracy-231`).
 - **#61** Retake the manual's pictures with `tools/composer/Shots.ps1`
   (`docs/screenshots-plan.md`) after the release install.
 - **#65** Read the Event Stream reconnect count after a day on the release.
