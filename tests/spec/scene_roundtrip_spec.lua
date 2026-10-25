@@ -219,7 +219,9 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 
 		-- ON again (so OFF has something to do), then OFF from the proxy: one
 		-- grouped_light call for the scene's room, no transfer of its own, and
-		-- the switch settles OFF from the bridge's STATE.
+		-- the switch settles OFF from the bridge's STATE. The first ON's
+		-- recall window (scenes.RECALL_WINDOW_MS) is long over by now.
+		bc4.fire_timers()
 		fake.as(scene, scene.ReceivedFromProxy, 5001, "ON", {})
 		fake.pump()
 		fake.as(bridge, function()
@@ -329,6 +331,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		fake.as(scene, scene.OnPropertyChanged, "Recall As")
 		scene.Properties["Recall As"] = "Static"
 		fake.as(scene, scene.OnPropertyChanged, "Recall As")
+		bc4.fire_timers()  -- the first recall's window (scenes.RECALL_WINDOW_MS) ended while Composer was open
 		fake.as(scene, scene.ReceivedFromProxy, 5001, "ON", {})
 		fake.pump()
 		assert.same({ recall = { action = "static" } }, json.decode(bc4.last_transfer().data))
