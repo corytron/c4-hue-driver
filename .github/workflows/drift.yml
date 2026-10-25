@@ -1,0 +1,51 @@
+# GitOps reconciliation (docs/cicd-gitops-design.md, section 7.1): compares the
+# desired state of the house, deploy/house.yaml on main, with the observed
+# state, the newest successful GitHub Deployment on the environment "house",
+# and keeps exactly one issue labelled "deploy" open while they differ:
+# created when drift appears, retitled when the desired state changes again,
+# closed with a comment once the deployment is recorded. Runs when the desired
+# state changes on main, when a deployment status is posted (deploy.py on the
+# VM posts them), once a week (Monday 06:30 UTC) and on request. It never
+# installs anything: the controller has no install API and the Composer click
+# stays with the Windows session. Adding the issue to the project board needs a
+# user token, so the coordinator does that by hand.
+name: Drift
+
+on:
+  push:
+    branches: [main]
+    paths: [deploy/house.yaml]
+  deployment_status:
+  schedule:
+    - cron: '30 6 * * 1' # Monday 06:30 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+# One reconciliation at a time, so two runs never open two issues.
+concurrency:
+  group: drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Compare deploy/house.yaml with the recorded deployment
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # read deploy/house.yaml and the release's manifest
+      issues: write # open, update or close the one "deploy" issue
+      deployments: read # list the deployments of the environment "house"
+    steps:
+      # Always main: a deployment_status event would otherwise check out the
+      # deployed tag's commit, whose house.yaml is the old desired state.
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Reconcile and keep the deploy issue current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/deploy.py drift --issue

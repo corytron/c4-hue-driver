@@ -1,5 +1,10 @@
 # Hue Bridge driver for Control4
 
+[![CI](https://github.com/corytron/c4-hue-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/corytron/c4-hue-driver/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/corytron/c4-hue-driver/badge)](https://scorecard.dev/viewer/?uri=github.com/corytron/c4-hue-driver)
+[![Latest release](https://img.shields.io/github/v/release/corytron/c4-hue-driver)](https://github.com/corytron/c4-hue-driver/releases/latest)
+[![License](https://img.shields.io/github/license/corytron/c4-hue-driver)](LICENSE)
+
 An independent Control4 DriverWorks driver that works with Philips Hue bridges
 over the bridge's local CLIP v2 API. Three `.c4z` drivers, **Hue Bridge**,
 **Hue Light** and **Hue Scene**, turn the lights, rooms, zones and scenes of
@@ -85,18 +90,37 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 
 ### The release
 
-The release is **1.0 "Cassian" (build 237)** (major versions are named after Star Wars: Andor): a GitHub release titled *1.0* on the
-[Releases page](https://github.com/corytron/c4-hue-driver/releases) with the
-three driver files attached, `hue_bridge.c4z`, `hue_light.c4z` and
-`hue_scene.c4z`. Download all three; they must come from the same build. `N`
-is the build number, the integer the three drivers show as **Driver Version**
-in Composer once installed (Control4 needs an integer there, so the files
-carry the build number while the release is called 1.0). A later release of
-1.0 moves the attached files to a newer build.
+Take the release marked **Latest** on the
+[Releases page](https://github.com/corytron/c4-hue-driver/releases)
+(<https://github.com/corytron/c4-hue-driver/releases/latest> always points at
+it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
+codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
+Every release is built and attached by the repository's Release workflow,
+never by hand, and carries six files:
 
-<!-- The build number above is stamped at release time (the
-     release checklist's naming section), and check the Releases URL if the
-     repository is published under a new name (licensing research, §6 step 7). -->
+- `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`: the three drivers.
+  Download all three; they must come from the same release.
+- `SHA256SUMS.txt`: the checksum of each package.
+- `manifest.json`: what was built: `tag` and `version`, `build` (the **build
+  number**, the integer the three drivers show as **Driver Version** in
+  Composer once installed; Control4 needs an integer there, so the files
+  carry the build number while the release is called 1.0), `commit`,
+  `built_at`, and each package's `sha256` and size. The release notes name
+  the build number too.
+- `attestations.sigstore.json`: the build provenance GitHub signed when the
+  workflow built the packages.
+
+A later release of the same version moves the tag and replaces the attached
+files with a newer build; Driver Version tells the builds apart. To check
+what you downloaded:
+
+```sh
+sha256sum -c SHA256SUMS.txt                                          # the three packages
+gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver   # GitHub CLI 2.49 or newer; repeat per package
+```
+
+The second command confirms that the file was built by this repository's
+Release workflow from the commit `manifest.json` names.
 
 ### Build from source
 
@@ -120,6 +144,11 @@ invented Hue resources (`tests/fixtures/hue_resources.lua`):
 luacheck src tests tools
 busted tests
 ```
+
+`tools/check.sh` runs these two and every other check CI runs (shell, Python,
+XML, workflows, secrets, the house's desired state), and
+`tools/setup-checks.sh` installs the tools it needs into `~/.local/bin`;
+[CONTRIBUTING.md](CONTRIBUTING.md) lists them.
 
 ## Install in Composer Pro
 
@@ -253,21 +282,61 @@ src/hue_bridge/    the bridge driver: driver.lua, driver.xml, bridge/ (HTTP, eve
 src/hue_light/     the light driver (light_v2 proxy; also zone and room lights)
 src/hue_scene/     the scene driver (light_v2 proxy, a dimmer)
 tests/             busted specs, the fake DriverWorks runtime, invented Hue resources
-tools/             build.sh, the dev loop (devserver.py, devctl.py, regress.sh), Composer
-                   automation (composer/Composer.psm1), the icon and CA-bundle generators
+tools/             build.sh; check.sh (every check, as CI runs it) and setup-checks.sh (its
+                   tools); deploy.py (the house: release download and verification, the
+                   deployment record, the brief) and labels_sync.py, with their unit tests in
+                   tests/; the dev loop (devserver.py, devctl.py, regress.sh); Composer
+                   automation (composer/Composer.psm1); the icon and CA-bundle generators
+deploy/            house.yaml: the desired state of the author's house (release, build, stream
+                   settings); the observed state is a GitHub Deployment, see below
 docs/              design notes, feature contracts, research, checklists (see docs/README.md)
+.github/           the workflows (CI, Release, drift, labels, Scorecard, Dependabot
+                   auto-merge), the labels, the issue and pull request templates
 ```
+
+## How a change reaches the house
+
+The author's house is the one installation, and it is run from the repository
+([`docs/cicd-gitops-design.md`](docs/cicd-gitops-design.md)):
+
+1. A change is a pull request. Four checks must pass before it can merge:
+   *Lint and test (Lua 5.1)*, *Build the three .c4z packages*, *Tooling
+   checks (shell, Python, XML, workflows)* and *Secrets and private data*;
+   `main` takes nothing else.
+2. A release is cut from `main` by the Release workflow (Actions ▸ Release ▸
+   Run workflow ▸ version, or a pushed `vX.Y` tag): it lints, tests, builds,
+   and attaches the packages, the checksums, the manifest and the
+   attestations described above.
+3. [`deploy/house.yaml`](deploy/house.yaml) says which release and build the
+   house should run. Changing it is a pull request of its own.
+4. The `house` environment on the repository's
+   [Environments page](https://github.com/corytron/c4-hue-driver/deployments/house)
+   records what was actually installed. A workflow compares the two and keeps
+   one issue labelled `deploy` open while they differ.
+5. `python3 tools/deploy.py start` downloads the release, verifies the
+   checksums, the manifest and the attestations, records the deployment and
+   writes a brief; the author's Windows Composer session installs the three
+   files from the GitHub release URLs through *Add or Update Driver or
+   Agent...* (the controller has no install API, so this click is never
+   automatic); `python3 tools/deploy.py done` records the result, which
+   closes the issue.
+
+What the house runs is therefore read off the Environments page, not off
+this file.
 
 ## Status
 
-The author's house runs **build 199** (2026-10-24) of all three drivers on a
-controller on OS 3.4.2 with a Hue Bridge Pro: two Hue Scene devices (an
-ordinary and a time-of-day scene), two zone lights, and a two-button keypad
-bound to a scene. Verified on hardware: pairing, the event stream and resync,
-import and the whole light lifecycle, scenes, keypad taps and holds with
-LEDs, time-of-day scenes, zone lights from the phone and the keypad, and a
-light staying bound through a controller reboot. The one-page current state
-is [`docs/status.md`](docs/status.md).
+[`docs/status.md`](docs/status.md) is the one-page current state: what the
+three drivers do today, what was verified on hardware (pairing, the event
+stream and resync, import and the whole light lifecycle, scenes, keypad taps
+and holds with LEDs, time-of-day scenes, zone lights from the phone and the
+keypad, a light staying bound through a controller reboot) and what is open,
+each open item an issue. What the author's house runs, a controller on OS
+3.4.2 with a Hue Bridge Pro, two Hue Scene devices, two zone lights and a
+two-button keypad bound to a scene, is the newest successful deployment on
+the [Environments page](https://github.com/corytron/c4-hue-driver/deployments/house);
+the newest release is on the
+[Releases page](https://github.com/corytron/c4-hue-driver/releases/latest).
 
 Open: the proxy settings (click and hold rates, On preset, LED colours) are
 hidden on Hue Light and Hue Scene devices, so the defaults apply; the 32 px

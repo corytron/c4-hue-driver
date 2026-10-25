@@ -100,3 +100,39 @@ for driver in "${DRIVERS[@]}"; do
 		echo "built build/$driver.c4z (version $version)"
 	fi
 done
+
+# build/manifest.json: what this build is, for the release assets and for
+# tools/deploy.py (docs/cicd-gitops-design.md, section 5.2). The tag is the
+# exact release tag on HEAD, or null for a build between releases.
+tag="$(git -C "$ROOT" describe --tags --exact-match --match 'v*' HEAD 2>/dev/null || true)"
+commit="$(git -C "$ROOT" rev-parse HEAD)"
+dev_json=false
+[[ "$dev_build" == yes ]] && dev_json=true
+{
+	echo "{"
+	echo "  \"schema\": 1,"
+	if [[ -n "$tag" ]]; then
+		echo "  \"tag\": \"$tag\","
+		echo "  \"version\": \"${tag#v}\","
+	else
+		echo "  \"tag\": null,"
+		echo "  \"version\": null,"
+	fi
+	echo "  \"build\": $version,"
+	echo "  \"commit\": \"$commit\","
+	echo "  \"built_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+	echo "  \"dev\": $dev_json,"
+	echo "  \"packages\": {"
+	last="${DRIVERS[${#DRIVERS[@]}-1]}"
+	for driver in "${DRIVERS[@]}"; do
+		sum="$(sha256sum "$ROOT/build/$driver.c4z" | cut -d' ' -f1)"
+		bytes="$(stat -c %s "$ROOT/build/$driver.c4z")"
+		sep=","
+		[[ "$driver" == "$last" ]] && sep=""
+		echo "    \"$driver.c4z\": {\"sha256\": \"$sum\", \"bytes\": $bytes}$sep"
+	done
+	echo "  }"
+	echo "}"
+} > "$ROOT/build/manifest.json"
+python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$ROOT/build/manifest.json"
+echo "wrote build/manifest.json (build $version${tag:+, $tag})"

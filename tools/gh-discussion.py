@@ -30,6 +30,7 @@ repo scope (`gh auth status`).
 Exit codes: 0 success, 1 error (gh failed, unknown category, bad arguments),
 2 body or title refused (private pattern, too long, or a title already used).
 """
+
 import argparse
 import json
 import re
@@ -100,11 +101,12 @@ class GhError(Exception):
 # Talking to gh
 # ---------------------------------------------------------------------------
 
+
 def run_gh(args, stdin=None):
     try:
         return subprocess.run(["gh"] + args, input=stdin, capture_output=True, text=True)
     except FileNotFoundError:
-        raise GhError("gh is not installed or not on PATH")
+        raise GhError("gh is not installed or not on PATH") from None
 
 
 def graphql(query, variables):
@@ -137,8 +139,7 @@ def resolve_repo(spec):
         return parts[0], parts[1]
     proc = run_gh(["repo", "view", "--json", "owner,name"])
     if proc.returncode != 0:
-        raise GhError("gh repo view failed (run it inside the repository or pass --repo): "
-                      + proc.stderr.strip())
+        raise GhError("gh repo view failed (run it inside the repository or pass --repo): " + proc.stderr.strip())
     info = json.loads(proc.stdout)
     return info["owner"]["login"], info["name"]
 
@@ -168,6 +169,7 @@ def pick_category(categories, wanted):
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+
 
 def refusals(text, what):
     """Reasons to refuse `text`, each naming the first offending line."""
@@ -204,22 +206,33 @@ def check_text(body, title):
 # Commands
 # ---------------------------------------------------------------------------
 
+
 def create(args, body):
     owner, name = resolve_repo(args.repo)
     repo_id, categories = repo_and_categories(owner, name)
     category = pick_category(categories, args.category)
     same = existing_with_title(owner, name, args.title)
     if same and not args.allow_duplicate_title:
-        print("refused: a discussion with this title exists: %s (--allow-duplicate-title posts anyway)"
-              % same[0]["url"], file=sys.stderr)
+        print(
+            "refused: a discussion with this title exists: %s (--allow-duplicate-title posts anyway)" % same[0]["url"],
+            file=sys.stderr,
+        )
         return EXIT_REFUSED
     if args.check:
-        print("OK: would post to %s in %s/%s: %r (%d characters%s)"
-              % (category["name"], owner, name, args.title, len(body), ", then pin it" if args.pin else ""))
+        print(
+            "OK: would post to %s in %s/%s: %r (%d characters%s)"
+            % (category["name"], owner, name, args.title, len(body), ", then pin it" if args.pin else "")
+        )
         return EXIT_OK
-    result = graphql(CREATE_MUTATION, {
-        "repositoryId": repo_id, "categoryId": category["id"], "title": args.title, "body": body,
-    })
+    result = graphql(
+        CREATE_MUTATION,
+        {
+            "repositoryId": repo_id,
+            "categoryId": category["id"],
+            "title": args.title,
+            "body": body,
+        },
+    )
     discussion = result["createDiscussion"]["discussion"]
     print(discussion["url"])
     if args.pin:
@@ -228,8 +241,11 @@ def create(args, body):
             print("pinned", file=sys.stderr)
         except GhError as err:
             if "pinDiscussion" in str(err):
-                print("not pinned: GitHub's API has no pinDiscussion mutation; pin it from the "
-                      "discussion's menu in the browser", file=sys.stderr)
+                print(
+                    "not pinned: GitHub's API has no pinDiscussion mutation; pin it from the "
+                    "discussion's menu in the browser",
+                    file=sys.stderr,
+                )
             else:
                 print("not pinned: %s" % err, file=sys.stderr)
     return EXIT_OK
@@ -242,8 +258,10 @@ def comment(args, body):
     if not discussion:
         raise GhError("no discussion #%d in %s/%s" % (args.comment, owner, name))
     if args.check:
-        print("OK: would comment on #%d %r in %s/%s (%d characters)"
-              % (args.comment, discussion["title"], owner, name, len(body)))
+        print(
+            "OK: would comment on #%d %r in %s/%s (%d characters)"
+            % (args.comment, discussion["title"], owner, name, len(body))
+        )
         return EXIT_OK
     result = graphql(COMMENT_MUTATION, {"discussionId": discussion["id"], "body": body})
     print(result["addDiscussionComment"]["comment"]["url"])
@@ -255,16 +273,26 @@ def parse_args(argv):
         prog="gh-discussion.py",
         description="Create a GitHub discussion, or comment on one, through gh api graphql.",
         epilog=__doc__.split("\n\n", 1)[1],
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--category", help="category name or slug (Announcements, General, Ideas, Polls, Q&A, Show and tell)")
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--category", help="category name or slug (Announcements, General, Ideas, Polls, Q&A, Show and tell)"
+    )
     parser.add_argument("--title", help="the discussion's title, YYYY-MM-DD — subject")
-    parser.add_argument("--body-file", required=True, metavar="PATH", help="Markdown file holding the body; - reads standard input")
+    parser.add_argument(
+        "--body-file", required=True, metavar="PATH", help="Markdown file holding the body; - reads standard input"
+    )
     parser.add_argument("--pin", action="store_true", help="ask GitHub to pin the new discussion (see below)")
-    parser.add_argument("--allow-duplicate-title", action="store_true",
-                        help="post even if a discussion with the same title exists")
-    parser.add_argument("--comment", type=int, metavar="NUMBER", help="append the body as a comment to this discussion instead")
+    parser.add_argument(
+        "--allow-duplicate-title", action="store_true", help="post even if a discussion with the same title exists"
+    )
+    parser.add_argument(
+        "--comment", type=int, metavar="NUMBER", help="append the body as a comment to this discussion instead"
+    )
     parser.add_argument("--repo", metavar="OWNER/NAME", help="the repository (default: the one gh resolves here)")
-    parser.add_argument("--check", action="store_true", help="run the checks and print what would be posted; post nothing")
+    parser.add_argument(
+        "--check", action="store_true", help="run the checks and print what would be posted; post nothing"
+    )
     args = parser.parse_args(argv)
     if args.comment is not None:
         if args.category or args.title or args.pin or args.allow_duplicate_title:

@@ -1,0 +1,41 @@
+# Lets Dependabot's updates of the pinned actions merge on their own
+# (docs/cicd-gitops-design.md, sections 8 and 9): on a pull request opened by
+# dependabot[bot], when the update is for the github-actions ecosystem, enable
+# auto-merge on it. Branch protection still gates the merge: the four CI jobs
+# must be green and the branch up to date. Nothing else is ever auto-merged;
+# any other ecosystem is reviewed by a person. The trigger is pull_request,
+# never pull_request_target: the job needs no secret beyond the workflow's own
+# token, and GitHub grants a Dependabot-triggered run the permissions below.
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+
+permissions: {}
+
+# One run per pull request; a newer push to the same PR supersedes the older run.
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enable:
+    name: Enable auto-merge for action-pin updates
+    # The pull request's author, not the actor (which a re-run would change).
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == 'corytron/c4-hue-driver'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the merge auto-merge will perform
+      pull-requests: write # enable auto-merge on the pull request
+    steps:
+      - name: Read what Dependabot updated
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Enable auto-merge (github-actions ecosystem only)
+        if: steps.metadata.outputs.package-ecosystem == 'github_actions'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"

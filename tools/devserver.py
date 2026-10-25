@@ -38,6 +38,7 @@ Usage: tools/devserver.py [--port 8080] [--tls-port 8443] [--bind 0.0.0.0]
                           [--root DIR] [--cert-dir DIR] [--state-dir DIR] [--quiet]
 Standard library only.
 """
+
 import argparse
 import datetime
 import hashlib
@@ -92,7 +93,7 @@ class Tree:
         self.name = name
         self.driver = os.path.join(root, "src", "hue_" + name)
         self.common = os.path.join(root, "src", "common")
-        self.pinned = None   # (version, contents) served instead of the live tree while pinned
+        self.pinned = None  # (version, contents) served instead of the live tree while pinned
 
     def files(self):
         """Return {published_path: absolute_path}. Published paths are relative
@@ -152,6 +153,7 @@ class Tree:
 # Server state: the command queue and what the driver last told us
 # ---------------------------------------------------------------------------
 
+
 class State:
     """Everything remembered between requests, guarded by one lock.
 
@@ -169,14 +171,14 @@ class State:
         self.reports_path = os.path.join(state_dir, "reports.jsonl")
         self.commands_path = os.path.join(state_dir, "commands.json")
         self.next_id = 1
-        self.commands = []        # pending commands, in id order
-        self.done = []            # ids the driver reported command_done for, oldest first
+        self.commands = []  # pending commands, in id order
+        self.done = []  # ids the driver reported command_done for, oldest first
         self.running_version = None
-        self.running_light_version = None   # what the bridge last forwarded to its lights
-        self.running_scene_version = None   # ... and to its scene devices
+        self.running_light_version = None  # what the bridge last forwarded to its lights
+        self.running_scene_version = None  # ... and to its scene devices
         self.last_seen = None
         self.last_event = None
-        self.last_error = None    # text of the most recent report that carried "error"
+        self.last_error = None  # text of the most recent report that carried "error"
         self.properties = {}
         self._load_commands()
 
@@ -193,7 +195,7 @@ class State:
             log("warning: ignoring unreadable %s (%s)" % (self.commands_path, exc))
             return
         self.commands = sorted(commands, key=lambda c: c["id"])
-        self.done = done[-self.DONE_KEEP:]
+        self.done = done[-self.DONE_KEEP :]
         highest = max([c["id"] for c in self.commands] + self.done + [0])
         self.next_id = max(next_id, highest + 1)
 
@@ -267,7 +269,7 @@ class State:
                 self.commands = [c for c in self.commands if c["id"] != command_id]
                 if command_id not in self.done:
                     self.done.append(command_id)
-                    self.done = self.done[-self.DONE_KEEP:]
+                    self.done = self.done[-self.DONE_KEEP :]
                 self._save_commands()
         summary = "REPORT %s" % event
         if isinstance(command_id, int):
@@ -290,11 +292,11 @@ class State:
 
     def status(self, local_version, local_light_version, local_scene_version=None):
         """/status. Beyond the fields in docs/dev-loop.md this adds:
-          done_commands  ids the driver has reported command_done for (last
-                         DONE_KEEP, oldest first); `devctl wait` polls this
-          last_done_id   the most recent of those, or null
-          last_error     the "error" text of the most recent report that had one
-          server_time    unix seconds, so a client can judge last_seen"""
+        done_commands  ids the driver has reported command_done for (last
+                       DONE_KEEP, oldest first); `devctl wait` polls this
+        last_done_id   the most recent of those, or null
+        last_error     the "error" text of the most recent report that had one
+        server_time    unix seconds, so a client can judge last_seen"""
         with self.lock:
             return {
                 "running_version": self.running_version,
@@ -318,6 +320,7 @@ class State:
 # HTTP handling
 # ---------------------------------------------------------------------------
 
+
 def as_list(value):
     """Accept a JSON list, or the object Director's C4:JsonEncode produces for
     a Lua array ({"1": ..., "2": ...}, string keys, unordered): return a list
@@ -336,17 +339,20 @@ def validate_command(body):
     kind = body.get("type")
     if kind == "execute":
         if not isinstance(body.get("command"), str) or not body["command"]:
-            return None, "execute needs a non-empty \"command\" string"
+            return None, 'execute needs a non-empty "command" string'
         params = body.get("params", {})
         if not isinstance(params, dict):
-            return None, "\"params\" must be an object"
-        return {"type": "execute", "command": body["command"],
-                "params": {str(k): str(v) for k, v in params.items()}}, None
+            return None, '"params" must be an object'
+        return {
+            "type": "execute",
+            "command": body["command"],
+            "params": {str(k): str(v) for k, v in params.items()},
+        }, None
     if kind == "set_property":
         if not isinstance(body.get("name"), str) or not body["name"]:
-            return None, "set_property needs a non-empty \"name\" string"
+            return None, 'set_property needs a non-empty "name" string'
         if "value" not in body or body["value"] is None:
-            return None, "set_property needs a \"value\""
+            return None, 'set_property needs a "value"'
         return {"type": "set_property", "name": body["name"], "value": str(body["value"])}, None
     if kind == "reload":
         return {"type": "reload"}, None
@@ -354,8 +360,8 @@ def validate_command(body):
 
 
 class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"   # keep-alive; every reply carries Content-Length or is chunked
-    timeout = 120                   # idle keep-alive connections are dropped after this
+    protocol_version = "HTTP/1.1"  # keep-alive; every reply carries Content-Length or is chunked
+    timeout = 120  # idle keep-alive connections are dropped after this
     server_version = "c4-hue-devserver/1"
     sys_version = ""
 
@@ -457,11 +463,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_bad_request(self, message):
-        self.close_connection = True   # the body may not have been consumed
+        self.close_connection = True  # the body may not have been consumed
         raw = getattr(self, "_raw_body", b"")
         snippet = raw[:300].decode("utf-8", "replace")
-        log("BAD   %s:%d  %s %s: %s body=%r" % (self.client_address[0], self.client_address[1],
-                                                 self.command, self.path, message, snippet))
+        log(
+            "BAD   %s:%d  %s %s: %s body=%r"
+            % (self.client_address[0], self.client_address[1], self.command, self.path, message, snippet)
+        )
         self.send_json({"error": message}, 400)
 
     def read_json_body(self):
@@ -474,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return None, "bad Content-Length"
         raw = self.rfile.read(n) if n > 0 else b""
-        self._raw_body = raw   # kept so a rejection can be logged with context
+        self._raw_body = raw  # kept so a rejection can be logged with context
         if not raw:
             return None, "empty body"
         try:
@@ -538,8 +546,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_status(self, query):
         trees = self.server.trees
-        status = self.server.state.status(trees["bridge"].snapshot()[0], trees["light"].snapshot()[0],
-                                          trees["scene"].snapshot()[0])
+        status = self.server.state.status(
+            trees["bridge"].snapshot()[0], trees["light"].snapshot()[0], trees["scene"].snapshot()[0]
+        )
         # While pinned, local_* are the served (pinned) versions; live_* say
         # what the working tree has become in the meantime.
         status["pinned"] = self.pinned_versions()
@@ -553,7 +562,7 @@ class Handler(BaseHTTPRequestHandler):
         if err is None and isinstance(body, dict):
             body["lines"] = as_list(body.get("lines"))
         if err is None and not (isinstance(body, dict) and isinstance(body.get("lines"), list)):
-            err = "expected {\"version\": ..., \"lines\": [...]}"
+            err = 'expected {"version": ..., "lines": [...]}'
         if err:
             self.send_bad_request(err)
             return
@@ -564,7 +573,7 @@ class Handler(BaseHTTPRequestHandler):
     def post_report(self, query):
         body, err = self.read_json_body()
         if err is None and not (isinstance(body, dict) and isinstance(body.get("event"), str)):
-            err = "expected {\"version\": ..., \"event\": ..., ...}"
+            err = 'expected {"version": ..., "event": ..., ...}'
         if err:
             self.send_bad_request(err)
             return
@@ -631,7 +640,7 @@ class Handler(BaseHTTPRequestHandler):
             while True:
                 time.sleep(2)
                 n += 1
-                self.chunk("id: %d\ndata: [{\"n\": %d, \"t\": %.3f}]\n\n" % (n, n, time.time()))
+                self.chunk('id: %d\ndata: [{"n": %d, "t": %.3f}]\n\n' % (n, n, time.time()))
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError) as exc:
             self.log_conn("STREAM ended after %d events (%s)" % (n, exc.__class__.__name__))
 
@@ -649,7 +658,7 @@ class DevServer(ThreadingHTTPServer):
 
     def __init__(self, address, trees, state, tls_context=None, quiet=False):
         super().__init__(address, Handler)
-        self.trees = trees        # {name: Tree}
+        self.trees = trees  # {name: Tree}
         self.state = state
         self.tls_context = tls_context
         self.quiet = quiet
@@ -681,15 +690,32 @@ class DevServer(ThreadingHTTPServer):
 # Startup
 # ---------------------------------------------------------------------------
 
+
 def ensure_cert(cert_dir):
     """Generate a self-signed certificate with openssl unless one is already there."""
     os.makedirs(cert_dir, exist_ok=True)
     crt, key = os.path.join(cert_dir, "diag.crt"), os.path.join(cert_dir, "diag.key")
     if not (os.path.exists(crt) and os.path.exists(key)):
-        subprocess.run([
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "365",
-            "-subj", "/CN=c4-hue-diag", "-keyout", key, "-out", crt,
-        ], check=True, capture_output=True)
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "365",
+                "-subj",
+                "/CN=c4-hue-diag",
+                "-keyout",
+                key,
+                "-out",
+                crt,
+            ],
+            check=True,
+            capture_output=True,
+        )
         log("generated self-signed certificate in " + cert_dir)
     return crt, key
 
@@ -700,14 +726,27 @@ def main():
     parser.add_argument("--port", type=int, default=8080, help="plain HTTP port (default 8080)")
     parser.add_argument("--tls-port", type=int, default=8443, help="TLS port (default 8443)")
     parser.add_argument("--bind", default="0.0.0.0", help="address to listen on (default all)")
-    parser.add_argument("--root", default=default_root, help="repo root, the directory containing tools/ (default: detected)")
-    parser.add_argument("--cert-dir", default=None, help="where the self-signed certificate lives (default <root>/build/diag)")
-    parser.add_argument("--state-dir", default=None, help="where driver.log etc. are written (default <root>/build/dev)")
-    parser.add_argument("--quiet", action="store_true", help="no connection/request lines for the plain listener, no heartbeat summaries")
-    parser.add_argument("--alpn", default="http/1.1",
-                        help="comma-separated ALPN protocols the TLS listener offers (default http/1.1). "
-                             "Offer 'h2,http/1.1' to learn whether a client asks for HTTP/2: the server "
-                             "cannot speak h2, so such a connection fails, but its OPEN line shows alpn=h2.")
+    parser.add_argument(
+        "--root", default=default_root, help="repo root, the directory containing tools/ (default: detected)"
+    )
+    parser.add_argument(
+        "--cert-dir", default=None, help="where the self-signed certificate lives (default <root>/build/diag)"
+    )
+    parser.add_argument(
+        "--state-dir", default=None, help="where driver.log etc. are written (default <root>/build/dev)"
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="no connection/request lines for the plain listener, no heartbeat summaries",
+    )
+    parser.add_argument(
+        "--alpn",
+        default="http/1.1",
+        help="comma-separated ALPN protocols the TLS listener offers (default http/1.1). "
+        "Offer 'h2,http/1.1' to learn whether a client asks for HTTP/2: the server "
+        "cannot speak h2, so such a connection fails, but its OPEN line shows alpn=h2.",
+    )
     args = parser.parse_args()
 
     root = os.path.abspath(args.root)

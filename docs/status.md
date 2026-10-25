@@ -1,18 +1,27 @@
-# Status of the Hue driver (2026-10-24)
+# Status of the Hue driver (2026-10-25)
 
 **Release 1.0 "Cassian" (build 237), tag `v1.0`**, published on GitHub with the three
 `.c4z` files built by the release workflow; re-cut from build 228 (PR #33)
 with the bridge-compatibility check (PR #35) and the public-repository files
 (PR #34). The house runs it since 2026-10-24 19:26. **The repository is
 public since 2026-10-24** (history rewritten: placeholder addresses, two
-screenshots dropped): main is protected (pull requests only, CI `test` and
-`build` required, no force pushes), secret scanning and private
-vulnerability reporting are on, Issues, Discussions and the public project
+screenshots dropped): main is protected (pull requests only, the four CI
+checks of `.github/workflows/ci.yml` required, branch current before merge,
+admins included, no force pushes), secret scanning, push protection, CodeQL,
+Dependabot security updates and private vulnerability reporting are on, Issues, Discussions and the public project
 board "Hue driver" track the work, and every open item below is an issue. The milestone `1.0 "Cassian"` holds
 the project's history: the 37 merged pull requests and 98 closed issues
 (#71–#187) describing every problem found and fixed, each naming its fix;
 the project board holds them all. Major versions are codenamed after Star Wars:
-Andor; every 1.x release keeps "Cassian".
+Andor; every 1.x release keeps "Cassian". **Since 2026-10-25 the project is
+run as CI/CD and GitOps** (`docs/cicd-gitops-design.md`, PR #205): one
+script, `tools/check.sh`, runs every check on the VM and in CI; releases are
+cut by the Release workflow and carry `manifest.json` and provenance
+attestations; `deploy/house.yaml` is the desired state of the house and the
+GitHub environment [`house`](https://github.com/corytron/c4-hue-driver/deployments/house)
+records every install (`tools/deploy.py`); a drift workflow keeps one
+issue labelled `deploy` open while they differ. The Composer click stays
+with the Windows session: the controller has no install API.
 
 The single page that says what is built, what runs on the house, and what is
 open. Feature contracts and design notes keep their history; where they and
@@ -20,6 +29,12 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
+- **Recorded on GitHub**: deployment 7307525952 on the environment `house`
+  (build 247, v1.0, installed 2026-10-24 21:04, recorded 2026-10-25 with
+  `tools/deploy.py record`) is the observed state; `deploy/house.yaml` says
+  v1.0 build 247, so `python3 tools/deploy.py status` reports "in sync".
+  The Environments page is the authority on what the house runs from now
+  on; the build details below are the history.
 - **Build 247** (no dev loop), on all three drivers (installed 2026-10-24
   21:04; release 1.0 "Cassian" is build 237 plus PRs #69, #70 and #130:
   `Last Action` word-wrapped at 72 characters onto read-only rows `Last

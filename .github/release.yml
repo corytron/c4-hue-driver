@@ -1,0 +1,27 @@
+# Categories of the generated release notes (gh release create --generate-notes
+# in .github/workflows/release.yml), by pull-request label; the labels are the
+# ones .github/labels.json defines. Dependabot's pin updates are left out.
+changelog:
+  exclude:
+    labels:
+      - dependencies
+  categories:
+    - title: Fixed
+      labels:
+        - bug
+    - title: New and changed
+      labels:
+        - enhancement
+    - title: Security
+      labels:
+        - security
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Tooling and CI
+      labels:
+        - ci
+        - release
+    - title: Other changes
+      labels:
+        - "*"
