@@ -17,16 +17,64 @@ function OnDriverDestroyed() table.insert(DEVLOOP_TEST_CALLS, "destroyed") end
 local LIGHT_SRC = "DEVLOOP_TEST_MARK = 'light loaded'"
 local SCENE_SRC = "DEVLOOP_TEST_MARK = 'scene loaded'"
 
+-- The dev key a dev package carries as common/devkey.lua (tools/build.sh
+-- --dev), installed here through package.preload; another build's key; and
+-- what the Python side computes for them (tools/tests/test_devserver.py pins
+-- the same three values, so the two implementations cannot drift apart).
+local TEST_KEY = string.rep("0123456789abcdef", 4)
+local OTHER_KEY = string.rep("fedcba9876543210", 4)
+local DOMAIN = "c4-hue-devloop/1\n"
+local TEST_FINGERPRINT = "eccabde32b59a017"
+local SHARED_PAYLOAD = '{"files":{"driver.lua":"return 1"},"tree":"light","version":"v1"}'
+local SHARED_BUNDLE_MAC = "ca15fb64cce6d849bd18e1f8b4f4303d5f45f1ca103867d4a8b7a55c8afe81c0"
+
 -- Modules a reload clears; the other specs' instances are saved around each test.
 local function is_driver_module(name)
 	return name:match("^bridge%.") or name:match("^common%.") or name:match("^light%.") or name:match("^scene%.")
+end
+
+-- A fresh common.devloop whose package carries `key` (nil: none at all).
+local function load_devloop(key)
+	package.loaded["common.devkey"] = nil
+	package.preload["common.devkey"] = key and function() return key end or nil
+	package.loaded["common.devloop"] = nil
+	rawset(_G, "__DEVLOOP", nil)
+	return require("common.devloop")
+end
+
+local function forget_key()
+	package.preload["common.devkey"] = nil
+	package.loaded["common.devkey"] = nil
+end
+
+-- How many entries of `list` contain `text`.
+local function count_containing(list, text)
+	local n = 0
+	for _, line in ipairs(list) do
+		if tostring(line):find(text, 1, true) then n = n + 1 end
+	end
+	return n
+end
+
+-- Whether `text` occurs in any key or string value anywhere inside `value`.
+local function holds(value, text, seen)
+	if type(value) == "string" then return value:find(text, 1, true) ~= nil end
+	if type(value) ~= "table" then return false end
+	seen = seen or {}
+	if seen[value] then return false end
+	seen[value] = true
+	for k, v in pairs(value) do
+		if holds(k, text, seen) or holds(v, text, seen) then return true end
+	end
+	return false
 end
 
 describe("common.devloop", function()
 	local devloop, c4, server, printed, real_print, saved_modules, sent
 	local HOST = "devvm:8080"
 
-	-- An idle tick's requests: every manifest, then the commands.
+	-- An idle tick's requests: every manifest, then the commands (recorded
+	-- without their nonce).
 	local POLL = { "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene", "GET /commands?after=0" }
 
 	local function state()
@@ -41,6 +89,11 @@ describe("common.devloop", function()
 		return c4:JsonEncode(value)
 	end
 
+	-- The MAC a server holding `key` puts on `payload` under `label`.
+	local function mac(key, label, payload)
+		return devloop.hmac_sha256(key, DOMAIN .. label .. "\n" .. payload)
+	end
+
 	-- `list` followed by the extra items.
 	local function plus(list, ...)
 		local out = {}
@@ -49,7 +102,7 @@ describe("common.devloop", function()
 		return out
 	end
 
-	-- The scripted dev server: what it serves and what it received.
+	-- The scripted dev server: what it serves, how it signs, what it received.
 	local function new_server()
 		return {
 			version = "v1",
@@ -60,13 +113,33 @@ describe("common.devloop", function()
 			scene_files = { ["driver.lua"] = SCENE_SRC },
 			trees = true,        -- false: an older server that knows no ?tree=
 			scene_tree = true,   -- false: a server with a light tree only (HTTP 400 for ?tree=scene)
+			key = TEST_KEY,      -- what it signs with
+			keys = {},           -- what = key: another key for "bridge", "light", "scene" or "commands"
+			unsigned = {},       -- what = true: plain JSON there, as a server from before signing
+			tamper = {},         -- what = function(payload) -> payload changed after signing
+			swap = {},           -- tree = other tree: that tree's (correctly signed) bundle served instead
+			echo_nonce = nil,    -- a nonce to answer with instead of the one asked for (a replay)
+			all_commands = false, -- true: every queued command whatever `after` says
 			commands = {},
-			requests = {},       -- "METHOD /path" in order
+			requests = {},       -- "METHOD /path" in order, without the nonce
+			nonces = {},         -- the nonce of every GET /commands
+			payloads = {},       -- tree = the last bundle payload served for it
 			reports = {},        -- decoded POST /report bodies
 			logs = {},           -- decoded POST /log bodies
 			manifest_error = nil,
 			log_error = nil,
 		}
+	end
+
+	-- What the server answers for `what` ("bridge", "light", "scene" or
+	-- "commands"): the envelope, or plain JSON when told to be unsigned.
+	local function served(what, label, payload)
+		if server.unsigned[what] then return payload end
+		local body = mac(server.keys[what] or server.key, label, payload) .. "\n" .. payload
+		if server.tamper[what] then
+			body = body:sub(1, 65) .. server.tamper[what](payload)
+		end
+		return body
 	end
 
 	-- The tree a request names, as the server sees it: nil before trees
@@ -78,7 +151,7 @@ describe("common.devloop", function()
 
 	local function route(t)
 		local path = t.url:match("^http://[^/]+(/.*)$")
-		table.insert(server.requests, t.method .. " " .. path)
+		table.insert(server.requests, t.method .. " " .. (path:gsub("&nonce=%x+", "")))
 		local base = path:match("^[^?]+")
 		if base == "/manifest" or base == "/bundle" then
 			if base == "/manifest" and server.manifest_error then
@@ -88,20 +161,28 @@ describe("common.devloop", function()
 			if tree == "scene" and not server.scene_tree then
 				return t:respond(400, json({ error = "unknown tree 'scene' (bridge or light)" }))
 			end
-			local forwarded = tree ~= nil and tree ~= "bridge"
-			local version = forwarded and server[tree .. "_version"] or server.version
-			if base == "/manifest" then
-				return t:respond(200, json({ version = version, tree = tree, files = {}, server_time = 1 }))
+			local function version_of(name)
+				return (name ~= nil and name ~= "bridge") and server[name .. "_version"] or server.version
 			end
-			local files = forwarded and server[tree .. "_files"] or server.files
-			return t:respond(200, json({ version = version, tree = tree, files = files }))
+			if base == "/manifest" then
+				return t:respond(200, json({ version = version_of(tree), tree = tree, files = {}, server_time = 1 }))
+			end
+			local what = tree or "bridge"
+			local source = server.swap[what] or what
+			local files = source ~= "bridge" and server[source .. "_files"] or server.files
+			local payload = json({ version = version_of(source), tree = tree and source or nil, files = files })
+			server.payloads[what] = payload
+			return t:respond(200, served(what, "bundle", payload))
 		elseif base == "/commands" then
 			local after = tonumber(path:match("after=(%d+)"))
+			local nonce = path:match("nonce=(%x+)")
+			table.insert(server.nonces, nonce)
 			local pending = {}
 			for _, cmd in ipairs(server.commands) do
-				if cmd.id > after then table.insert(pending, cmd) end
+				if server.all_commands or cmd.id > after then table.insert(pending, cmd) end
 			end
-			return t:respond(200, json({ commands = pending }))
+			return t:respond(200, served("commands", "commands",
+				json({ nonce = server.echo_nonce or nonce, commands = pending })))
 		elseif base == "/report" then
 			table.insert(server.reports, c4:JsonDecode(t.data))
 			return t:respond(204, "")
@@ -180,6 +261,19 @@ describe("common.devloop", function()
 		return ids
 	end
 
+	-- A forwarded DEV_RELOAD's files, after checking that it carries the
+	-- server's payload unchanged with a MAC this build's key accepts.
+	local function forwarded_files(msg)
+		assert.is_string(msg.params.bundle, "the signed payload travels as JSON text")
+		assert.is_nil(devloop.check_signature("bundle", msg.params.bundle, msg.params.mac))
+		assert.equal(mac(TEST_KEY, "bundle", msg.params.bundle), msg.params.mac)
+		assert.is_nil(msg.params.files, "no unsigned form")
+		local payload = c4:JsonDecode(msg.params.bundle)
+		assert.equal(msg.params.tree, payload.tree)
+		assert.equal(msg.params.version, payload.version)
+		return payload.files
+	end
+
 	-- A comma-separated DeviceIds filter as a sorted list.
 	local function csv_sorted(text)
 		local out = {}
@@ -204,11 +298,36 @@ describe("common.devloop", function()
 
 	-- How many printed lines contain `text`.
 	local function printed_count(text)
-		local n = 0
-		for _, line in ipairs(printed) do
-			if line:find(text, 1, true) then n = n + 1 end
+		return count_containing(printed, text)
+	end
+
+	-- The lines in the loop's buffer, not yet shipped.
+	local function buffered()
+		local out = {}
+		for _, entry in ipairs(state().log) do out[#out + 1] = entry.line end
+		return out
+	end
+
+	-- A fresh module instance (a Director restart), the old one stopped and
+	-- its bundle loader removed.
+	local function reload_module(key)
+		local S = state()
+		devloop.stop()
+		for i = #package.loaders, 1, -1 do
+			if S and package.loaders[i] == S.loader then table.remove(package.loaders, i) end
 		end
-		return n
+		devloop = load_devloop(key)
+	end
+
+	-- Every line the server got, every report as JSON and every printed line.
+	local function everything_said()
+		local out = {}
+		for _, line in ipairs(printed) do out[#out + 1] = line end
+		for _, body in ipairs(server.logs) do
+			for _, entry in ipairs(body.lines) do out[#out + 1] = entry.line end
+		end
+		for _, r in ipairs(server.reports) do out[#out + 1] = json(r) end
+		return out
 	end
 
 	before_each(function()
@@ -236,9 +355,7 @@ describe("common.devloop", function()
 		for name, mod in pairs(package.loaded) do
 			if is_driver_module(name) then saved_modules[name] = mod end
 		end
-		package.loaded["common.devloop"] = nil
-		rawset(_G, "__DEVLOOP", nil)
-		devloop = require("common.devloop")
+		devloop = load_devloop(TEST_KEY)
 		server = new_server()
 	end)
 
@@ -254,6 +371,7 @@ describe("common.devloop", function()
 			if is_driver_module(name) then package.loaded[name] = nil end
 		end
 		for name, mod in pairs(saved_modules) do package.loaded[name] = mod end
+		forget_key()
 	end)
 
 	describe("start", function()
@@ -277,6 +395,9 @@ describe("common.devloop", function()
 			assert.equal("table", r.sandbox.C4)
 			assert.equal("1", r.sandbox.driver_version)
 			assert.equal("nil", r.sandbox.jit)
+			assert.equal("nil", r.sandbox.bit)
+			assert.equal("Lua (no C4:HMAC)", r.sandbox.hmac, "the fake runtime has no C4:HMAC")
+			assert.equal(TEST_FINGERPRINT, r.key_fingerprint)
 		end)
 
 		it("is a no-op for the same host and restarts for a different one", function()
@@ -308,6 +429,20 @@ describe("common.devloop", function()
 			serve()
 			tick()
 			assert.equal(0, #c4.calls_to("PersistGetValue"))
+		end)
+
+		it("keeps the key out of the shared state, the reports and the log", function()
+			start_synced()
+			server.commands = { { id = 1, type = "execute", command = "A" } }
+			rawset(_G, "ExecuteCommand", function() end)
+			print("a line")
+			tick()
+			c4.now_ms = c4.now_ms + devloop.HEARTBEAT_MS
+			tick()
+			assert.is_false(holds(state(), TEST_KEY), "not anywhere in _G.__DEVLOOP")
+			assert.is_false(holds(Properties, TEST_KEY))
+			assert.equal(0, count_containing(everything_said(), TEST_KEY))
+			assert.truthy(#server.reports > 0 and #server.logs > 0)
 		end)
 	end)
 
@@ -363,6 +498,7 @@ describe("common.devloop", function()
 			assert.same({ "heartbeat" }, events())
 			assert.equal("Idle", last_report().properties.Status)
 			assert.equal("v1", last_report().version)
+			assert.equal(TEST_FINGERPRINT, last_report().key_fingerprint, "every report names the key")
 			tick()
 			assert.same({ "heartbeat" }, events())
 		end)
@@ -453,6 +589,156 @@ describe("common.devloop", function()
 			tick()
 			assert.equal("from the new log", server.logs[1].lines[1].line)
 		end)
+
+		it("keeps the key it was loaded with, whatever the bundle carries", function()
+			start_synced()
+			-- A bundle that brings its own common/devkey.lua (the server never
+			-- serves one) cannot change what the loop verifies with.
+			server.version = "v2"
+			server.files["common/devkey.lua"] = "return '" .. OTHER_KEY .. "'"
+			server.files["driver.lua"] = DRIVER_SRC .. "\nrequire('common.devkey')"
+			tick()
+			assert.equal("v2", devloop.version())
+			assert.equal(TEST_FINGERPRINT, devloop.key_fingerprint())
+			server.version, server.key = "v3", OTHER_KEY
+			tick()
+			assert.equal("v2", devloop.version(), "a bundle signed with the other key is still refused")
+		end)
+	end)
+
+	describe("signed bundles (bridge side)", function()
+		it("refuses an unsigned bundle with one line and a refused report, and keeps the running code", function()
+			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
+			server.unsigned.bridge = true
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({}, calls(), "nothing torn down, nothing compiled")
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.is_nil(devloop.version())
+			assert_said("bridge bundle v1 refused: not signed")
+			assert.same({ "startup", "refused", "heartbeat" }, events())
+			local r = server.reports[2]
+			assert.equal("bridge", r.tree)
+			assert.equal("v1", r.refused_version)
+			assert.equal("not signed", r.error)
+			assert.is_nil(r.version, "still the .c4z's own code")
+			-- The rest of the tick goes on: the device trees and the commands.
+			assert.same({ "POST /report", "GET /manifest", "GET /bundle", "POST /report",
+				"GET /manifest?tree=light", "GET /bundle?tree=light",
+				"GET /manifest?tree=scene", "GET /bundle?tree=scene",
+				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+		end)
+
+		it("refuses a bundle whose file was changed after signing", function()
+			start_synced()
+			server.version = "v2"
+			server.files["driver.lua"] = DRIVER_SRC .. "\nDEVLOOP_TEST_MARK = 'genuine'"
+			server.tamper.bridge = function(payload) return (payload:gsub("genuine", "planted")) end
+			tick()
+			assert.equal("v1", devloop.version())
+			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert_said("bridge bundle v2 refused: signature mismatch")
+			assert.equal("refused", server.reports[1].event)
+		end)
+
+		it("refuses a bundle signed with another key", function()
+			start_synced()
+			server.version, server.keys.bridge = "v2", OTHER_KEY
+			tick()
+			assert.equal("v1", devloop.version())
+			assert_said("bridge bundle v2 refused: signature mismatch")
+		end)
+
+		it("refuses a correctly signed bundle of another tree", function()
+			server.swap.bridge = "light"
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.is_nil(devloop.version())
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert_said("bridge bundle v1 refused: signed for the light tree")
+		end)
+
+		it("refuses a body that is not an envelope, and a MAC that is not 64 hex characters", function()
+			assert.equal("not signed", devloop.check_signature("bundle", "{}", nil))
+			assert.equal("not signed", devloop.check_signature("bundle", "{}", "abc"))
+			assert.equal("not signed", devloop.check_signature("bundle", "{}", string.rep("g", 64)))
+			assert.equal("not signed", devloop.check_signature("bundle", nil, string.rep("a", 64)))
+			assert.equal("signature mismatch", devloop.check_signature("bundle", "{}", string.rep("a", 64)))
+			local good = mac(TEST_KEY, "bundle", "{}")
+			assert.is_nil(devloop.check_signature("bundle", "{}", good))
+			assert.is_nil(devloop.check_signature("bundle", "{}", good:upper()), "hex in either case")
+			assert.equal("signature mismatch", devloop.check_signature("commands", "{}", good),
+				"a MAC made for one label is no good for another")
+			assert.same({ "{}", good }, { devloop.split_envelope(good .. "\n{}") })
+			assert.same({ "{}" }, { devloop.split_envelope("{}") })
+		end)
+
+		it("does not fetch a refused version again for a minute, then retries it silently", function()
+			server.unsigned.bridge = true
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert_said("bridge bundle v1 refused: not signed")
+			server.requests, server.reports = {}, {}
+			tick()
+			assert.same(POLL, server.requests, "no GET /bundle within REFUSED_RETRY_MS, and nothing new to say")
+
+			c4.now_ms = c4.now_ms + devloop.REFUSED_RETRY_MS
+			server.requests, server.reports = {}, {}
+			tick()
+			assert.equal("GET /bundle", server.requests[2])
+			assert.same({ "heartbeat" }, events(), "a refusal said before is not reported again")
+			assert_said("bridge bundle v1 refused: not signed")
+
+			-- Signed again (the server restarted with its key): the next retry loads it.
+			server.unsigned.bridge = nil
+			c4.now_ms = c4.now_ms + devloop.REFUSED_RETRY_MS
+			tick()
+			assert.equal("v1", devloop.version())
+			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.is_nil(state().refused.bridge)
+		end)
+
+		it("fetches a new version at once, even right after a refusal", function()
+			start_synced()
+			server.version, server.unsigned.bridge = "v2", true
+			tick()
+			assert_said("bridge bundle v2 refused: not signed")
+			server.version, server.unsigned.bridge = "v3", nil
+			server.requests = {}
+			tick()
+			assert.equal("GET /bundle", server.requests[2])
+			assert.equal("v3", devloop.version())
+		end)
+
+		it("retries a refused version at once after a reload command", function()
+			server.unsigned.bridge = true
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.is_nil(devloop.version())
+			server.unsigned.bridge = nil
+			server.commands = { { id = 1, type = "reload" } }
+			server.reports = {}
+			tick()
+			assert.equal("v1", devloop.version())
+			assert.same({ "reload", "command_done" }, events())
+			assert.is_nil(last_report().error)
+		end)
+
+		it("never says or reports the MAC it expected", function()
+			start_synced()
+			server.version, server.keys.bridge = "v2", OTHER_KEY
+			tick()
+			c4.now_ms = c4.now_ms + devloop.HEARTBEAT_MS
+			tick()
+			local expected = mac(TEST_KEY, "bundle", server.payloads.bridge)
+			assert.equal(64, #expected)
+			assert.equal(0, count_containing(everything_said(), expected))
+			assert.equal(0, count_containing(everything_said(), expected:sub(1, 16)))
+		end)
 	end)
 
 	describe("forwarded trees (bridge side)", function()
@@ -469,8 +755,8 @@ describe("common.devloop", function()
 				assert.equal("DEV_RELOAD", msg.command)
 				assert.equal("light", msg.params.tree)
 				assert.equal("L1", msg.params.version)
-				assert.is_string(msg.params.files, "the bundle travels as JSON text")
-				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+				assert.same(server.light_files, forwarded_files(msg))
+				assert.equal(server.payloads.light, msg.params.bundle, "the server's payload, unchanged")
 				assert.is_false(msg.allow_empty, "allowEmptyValues")
 				assert.is_false(msg.log_command, "logCommand: the bundle must not land in Director's log")
 			end
@@ -495,7 +781,7 @@ describe("common.devloop", function()
 			tick()
 			assert.equal(1, #sent)
 			assert.equal("L2", sent[1].params.version)
-			assert.same(server.light_files, c4:JsonDecode(sent[1].params.files))
+			assert.same(server.light_files, forwarded_files(sent[1]))
 			assert.is_false(sent[1].log_command)
 			assert.equal("L2", devloop.light_version())
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
@@ -545,10 +831,10 @@ describe("common.devloop", function()
 				assert.equal("DEV_RELOAD", msg.command)
 				assert.equal("light", msg.params.tree)
 				assert.equal("L1", msg.params.version)
-				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+				assert.same(server.light_files, forwarded_files(msg))
 			end
 			assert_said("light version L1 forwarded to 2 newly bound light device(s)")
-			assert.same(plus(POLL, "POST /log"), server.requests, "the cached bundles are used; no second fetch")
+			assert.same(plus(POLL, "POST /log"), server.requests, "the held bundles are used; no second fetch")
 		end)
 
 		it("forwards the current version to a light bound after the first forward, without a refetch", function()
@@ -560,7 +846,7 @@ describe("common.devloop", function()
 			assert.equal(2002, sent[1].device_id)
 			assert.equal("DEV_RELOAD", sent[1].command)
 			assert.equal("L1", sent[1].params.version)
-			assert.same(server.light_files, c4:JsonDecode(sent[1].params.files))
+			assert.same(server.light_files, forwarded_files(sent[1]))
 			assert.is_false(sent[1].allow_empty)
 			assert.is_false(sent[1].log_command)
 			assert.same(plus(POLL, "POST /log"), server.requests,
@@ -598,7 +884,7 @@ describe("common.devloop", function()
 			assert.same({ 2001, 2002 }, { sent[1].device_id, sent[2].device_id })
 			for _, msg in ipairs(sent) do
 				assert.equal("L2", msg.params.version)
-				assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+				assert.same(server.light_files, forwarded_files(msg))
 			end
 			assert_said("light version L2 forwarded to 2 light device(s)")
 			assert.same({ [2001] = "L2", [2002] = "L2" }, state().light_forwarded)
@@ -643,10 +929,10 @@ describe("common.devloop", function()
 				assert.equal("DEV_RELOAD", msg.command)
 				if msg.params.tree == "scene" then
 					assert.equal("S1", msg.params.version)
-					assert.same(server.scene_files, c4:JsonDecode(msg.params.files))
+					assert.same(server.scene_files, forwarded_files(msg))
 				else
 					assert.equal("L1", msg.params.version)
-					assert.same(server.light_files, c4:JsonDecode(msg.params.files))
+					assert.same(server.light_files, forwarded_files(msg))
 				end
 				assert.is_false(msg.allow_empty)
 				assert.is_false(msg.log_command)
@@ -662,13 +948,13 @@ describe("common.devloop", function()
 			assert.same({ "2001", "2002", "2003" }, csv_sorted(lookups[1][1].DeviceIds))
 			assert.same({ [2001] = "hue_light.c4z", [2002] = "hue_scene.c4z", [2003] = false }, state().driver_files)
 
-			-- Cached: the next tick asks nothing and sends nothing.
+			-- Held: the next tick asks nothing and sends nothing.
 			sent = {}
 			tick()
 			assert.same({}, sent)
 			assert.equal(1, #c4.calls_to("GetDevices"))
 
-			-- A scene device bound later is looked up alone and gets the cached scene bundle.
+			-- A scene device bound later is looked up alone and gets the held scene bundle.
 			project_device(2004, "hue_scene.c4z")
 			bind_lights({ [2001] = "A", [2002] = "B", [2003] = "C", [2004] = "D" })
 			server.requests = {}
@@ -677,7 +963,7 @@ describe("common.devloop", function()
 			assert.equal(2004, sent[1].device_id)
 			assert.equal("scene", sent[1].params.tree)
 			assert.equal("S1", sent[1].params.version)
-			assert.same(server.scene_files, c4:JsonDecode(sent[1].params.files))
+			assert.same(server.scene_files, forwarded_files(sent[1]))
 			lookups = c4.calls_to("GetDevices")
 			assert.equal(2, #lookups)
 			assert.equal("2004", lookups[2][1].DeviceIds)
@@ -700,7 +986,7 @@ describe("common.devloop", function()
 			assert.equal("DEV_RELOAD", sent[1].command)
 			assert.equal("scene", sent[1].params.tree)
 			assert.equal("S2", sent[1].params.version)
-			assert.same(server.scene_files, c4:JsonDecode(sent[1].params.files))
+			assert.same(server.scene_files, forwarded_files(sent[1]))
 			assert.is_false(sent[1].log_command)
 			assert.equal("S2", devloop.tree_version("scene"))
 			assert.equal("L1", devloop.light_version(), "the light tree is untouched")
@@ -775,7 +1061,7 @@ describe("common.devloop", function()
 			tick()
 			assert.same({ 2002 }, sent_to("scene"))
 			assert.equal("S1", sent[2].params.version)
-			assert.same(server.scene_files, c4:JsonDecode(sent[2].params.files))
+			assert.same(server.scene_files, forwarded_files(sent[2]))
 			assert.equal("S1", devloop.tree_version("scene"))
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
 				"GET /bundle?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
@@ -800,6 +1086,51 @@ describe("common.devloop", function()
 			tick()
 			assert.equal(1, #sent)
 		end)
+
+		it("forwards nothing from a light bundle that does not verify, says so once and reports it", function()
+			bind_lights({ [2001] = "A" })
+			server.keys.light = OTHER_KEY
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({}, sent)
+			assert.is_nil(devloop.light_version())
+			assert_said("light bundle L1 refused: signature mismatch")
+			assert.equal(1, #c4.calls_to("SetTimer"))
+			local refused
+			for _, r in ipairs(server.reports) do
+				if r.event == "refused" then refused = r end
+			end
+			assert.equal("light", refused.tree)
+			assert.equal("L1", refused.refused_version)
+
+			-- Within REFUSED_RETRY_MS it is not fetched again; a new, good version goes out at once.
+			server.requests = {}
+			tick()
+			assert.same(POLL, server.requests)
+			server.light_version, server.keys.light = "L2", nil
+			tick()
+			assert.same({ 2001 }, sent_to("light"))
+			assert.equal("L2", sent[1].params.version)
+			assert.same(server.light_files, forwarded_files(sent[1]))
+		end)
+
+		it("forwards nothing from an unsigned scene bundle or one signed for the light tree", function()
+			project_device(2002, "hue_scene.c4z")
+			bind_lights({ [2002] = "B" })
+			server.unsigned.scene = true
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({}, sent)
+			assert_said("scene bundle S1 refused: not signed")
+
+			server.unsigned.scene, server.swap.scene = nil, "light"
+			server.scene_version = "S2"
+			tick()
+			assert.same({}, sent)
+			assert_said("scene bundle S2 refused: signed for the light tree")
+		end)
 	end)
 
 	describe("own_tree", function()
@@ -815,8 +1146,17 @@ describe("common.devloop", function()
 	end)
 
 	describe("apply_forwarded (device side)", function()
-		local function forwarded(version, files, tree)
-			return devloop.apply_forwarded({ tree = tree, version = version, files = json(files) })
+		-- What a bridge forwards: the server's signed payload for `signed_tree`
+		-- (default `tree`) and its MAC, with `tree` as the unsigned hint
+		-- (none when `tree` is nil, as an older bridge sends).
+		local function signed_params(version, files, tree, opts)
+			opts = opts or {}
+			local payload = json({ version = version, tree = opts.signed_tree or tree or "light", files = files })
+			return { tree = tree, version = version, bundle = payload, mac = mac(opts.key or TEST_KEY, "bundle", payload) }
+		end
+
+		local function forwarded(version, files, tree, opts)
+			return devloop.apply_forwarded(signed_params(version, files, tree, opts))
 		end
 
 		before_each(function()
@@ -827,7 +1167,7 @@ describe("common.devloop", function()
 			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "old destroyed") end)
 			package.loaded["light.x"] = { old = true }
 			package.loaded["common.dispatch"] = { old = true }
-			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light"))
+			assert.same({ true, "L1" }, { forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light") })
 			assert.same({ "old destroyed", "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls())
 			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
 			assert.is_nil(package.loaded["light.x"])
@@ -850,7 +1190,7 @@ describe("common.devloop", function()
 
 		it("skips a bundle for the other tree and leaves the running code alone", function()
 			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
-			assert.is_false(forwarded("S1", { ["driver.lua"] = SCENE_SRC }, "scene"))
+			assert.same({ false, "skipped" }, { forwarded("S1", { ["driver.lua"] = SCENE_SRC }, "scene") })
 			assert.equal("devloop: light reload skipped: DEV_RELOAD carries the scene tree", printed[#printed])
 			assert.same({}, calls(), "nothing was torn down")
 			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
@@ -859,7 +1199,7 @@ describe("common.devloop", function()
 			-- Its own tree is applied, named or not (an older bridge forwards without one).
 			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light"))
 			assert.equal("L1", devloop.version())
-			assert.is_true(forwarded("L2", { ["driver.lua"] = DRIVER_SRC }))
+			assert.is_true(forwarded("L2", { ["driver.lua"] = DRIVER_SRC }, nil, { signed_tree = "light" }))
 			assert.equal("L2", devloop.version())
 			assert.equal("devloop: light reload complete: version L2", printed[#printed])
 		end)
@@ -879,7 +1219,7 @@ describe("common.devloop", function()
 			assert.equal("devloop: scene reload complete: version S1", printed[#printed])
 		end)
 
-		it("applies any tree when its own driver file is not a hue_*.c4z", function()
+		it("applies either device tree when its own driver file is not a hue_*.c4z", function()
 			c4.driver_file = "other.c4z"
 			assert.is_true(forwarded("S1", { ["driver.lua"] = SCENE_SRC }, "scene"))
 			assert.equal("scene loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
@@ -887,7 +1227,7 @@ describe("common.devloop", function()
 		end)
 
 		it("prints the failure for a broken bundle and stays usable", function()
-			assert.is_false(forwarded("L2", { ["driver.lua"] = "function (" }, "light"))
+			assert.same({ false, "failed" }, { forwarded("L2", { ["driver.lua"] = "function (" }, "light") })
 			assert.truthy(printed[#printed]:find("^devloop: light reload failed: "))
 			assert.truthy(printed[#printed]:find("driver.lua", 1, true))
 			assert.equal("L2", devloop.version())
@@ -900,24 +1240,102 @@ describe("common.devloop", function()
 			assert.equal("devloop: light reload complete: version L4", printed[#printed])
 		end)
 
-		it("rejects params without a decodable files object", function()
+		it("fails cleanly on a signed payload that does not decode", function()
 			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
-			assert.is_false(devloop.apply_forwarded({ tree = "light", version = "L1", files = "not json" }))
-			assert.truthy(printed[#printed]:find("^devloop: light reload failed: files param"))
-			assert.is_false(devloop.apply_forwarded({ tree = "light", version = "L1" }))
+			local payload = "not json"
+			assert.same({ false, "failed" }, { devloop.apply_forwarded({ tree = "light", version = "L1", bundle = payload,
+				mac = mac(TEST_KEY, "bundle", payload) }) })
+			assert.equal("devloop: light reload failed: the signed bundle does not decode", printed[#printed])
+			assert.same({}, calls(), "nothing was torn down")
+			assert.is_nil(devloop.version())
+		end)
+
+		it("refuses the old unsigned form, a bundle without a MAC and no params at all", function()
+			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
+			assert.same({ false, "refused", "not signed" }, { devloop.apply_forwarded({ tree = "light", version = "L1",
+				files = json({ ["driver.lua"] = DRIVER_SRC }) }) })
+			assert.equal("devloop: light reload refused: not signed", printed[#printed])
+			local unsigned = signed_params("L1", { ["driver.lua"] = DRIVER_SRC }, "light")
+			unsigned.mac = nil
+			assert.is_false(devloop.apply_forwarded(unsigned))
 			assert.is_false(devloop.apply_forwarded(nil))
 			assert.same({}, calls(), "nothing was torn down")
 			assert.is_nil(devloop.version())
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+		end)
+
+		it("refuses a DEV_RELOAD whose bundle was changed after signing, tearing nothing down", function()
+			rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "destroyed") end)
+			local params = signed_params("L1", { ["driver.lua"] = DRIVER_SRC }, "light")
+			params.bundle = params.bundle:gsub("loaded", "owned")
+			assert.same({ false, "refused", "signature mismatch" }, { devloop.apply_forwarded(params) })
+			assert.equal("devloop: light reload refused: signature mismatch", printed[#printed])
+			assert.same({}, calls())
+			assert.is_nil(devloop.version())
+		end)
+
+		it("refuses a bundle signed with another key, as any other driver in the project would send", function()
+			assert.same({ false, "refused", "signature mismatch" },
+				{ forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light", { key = OTHER_KEY }) })
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.is_nil(devloop.version())
+		end)
+
+		it("goes by the signed tree, not the tree param", function()
+			assert.same({ false, "refused", "signed for the scene tree" },
+				{ forwarded("S1", { ["driver.lua"] = SCENE_SRC }, "light", { signed_tree = "scene" }) })
+			assert.equal("devloop: light reload refused: signed for the scene tree", printed[#printed])
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+		end)
+
+		it("refuses the bridge's own bundle, wherever it comes from", function()
+			assert.same({ false, "refused", "signed for the bridge tree" },
+				{ forwarded("v1", { ["driver.lua"] = DRIVER_SRC }, "light", { signed_tree = "bridge" }) })
+			c4.driver_file = "other.c4z"
+			assert.is_false(forwarded("v1", { ["driver.lua"] = DRIVER_SRC }, nil, { signed_tree = "bridge" }))
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+		end)
+
+		it("loads at the signed version, whatever the version param says", function()
+			local params = signed_params("L7", { ["driver.lua"] = DRIVER_SRC }, "light")
+			params.version = "L9"
+			assert.same({ true, "L7" }, { devloop.apply_forwarded(params) })
+			assert.equal("L7", devloop.version())
+		end)
+
+		it("never says the MAC it expected", function()
+			local params = signed_params("L1", { ["driver.lua"] = DRIVER_SRC }, "light", { key = OTHER_KEY })
+			devloop.apply_forwarded(params)
+			local expected = mac(TEST_KEY, "bundle", params.bundle)
+			assert.equal("devloop: light reload refused: signature mismatch", printed[#printed])
+			assert.equal(0, count_containing(printed, expected:sub(1, 16)))
+			assert.equal(0, count_containing(buffered(), expected:sub(1, 16)))
 		end)
 
 		it("works as a dispatch command handler", function()
 			package.loaded["common.dispatch"] = nil
 			local dispatch = require("common.dispatch")
 			dispatch.commands["DEV_RELOAD"] = devloop.apply_forwarded
-			dispatch.execute_command("DEV_RELOAD",
-				{ tree = "light", version = "L1", files = json({ ["driver.lua"] = DRIVER_SRC }) })
+			dispatch.execute_command("DEV_RELOAD", signed_params("L1", { ["driver.lua"] = DRIVER_SRC }, "light"))
 			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
 			assert.equal("L1", devloop.version())
+		end)
+
+		it("through the device's handler, a refusal is forwarded as a refusal and nothing reloads", function()
+			local lines = {}
+			local log = {
+				debug = function() end,
+				always = function(fmt, ...) lines[#lines + 1] = "always " .. string.format(fmt, ...) end,
+				warn = function(fmt, ...) lines[#lines + 1] = "warn " .. string.format(fmt, ...) end,
+			}
+			local handler = devloop.reload_handler(log, "light")
+			handler(signed_params("L1", { ["driver.lua"] = DRIVER_SRC }, "light", { key = OTHER_KEY }))
+			assert.same({ "warn light reload refused (signature mismatch); see this light's Lua output" }, lines)
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+
+			handler(signed_params("L2", { ["driver.lua"] = DRIVER_SRC }, "light"))
+			assert.equal("always light reloaded to version L2", lines[2])
+			assert.equal("loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
 		end)
 	end)
 
@@ -1009,28 +1427,44 @@ describe("common.devloop", function()
 			end
 			log = { debug = keep("debug"), always = keep("always"), warn = keep("warn") }
 			got = nil
-			devloop.apply_forwarded = function(params) got = params; return params.ok == true end
+			devloop.apply_forwarded = function(params)
+				got = params
+				if params.ok == true then return true, params.signed_version end
+				return false, params.outcome, params.why
+			end
 		end)
 
 		it("applies its own tree's bundle and logs the version always", function()
 			local handler = devloop.reload_handler(log, "light")
-			handler({ tree = "light", version = "L1", files = "{}", ok = true })
-			assert.same({ tree = "light", version = "L1", files = "{}", ok = true }, got)
+			handler({ tree = "light", version = "L1", bundle = "{}", ok = true })
+			assert.same({ tree = "light", version = "L1", bundle = "{}", ok = true }, got)
 			assert.same({ "always light reloaded to version L1" }, lines)
+		end)
+
+		it("names the version it loaded, the signed one, over the version param", function()
+			local handler = devloop.reload_handler(log, "light")
+			handler({ tree = "light", version = "hint", bundle = "{}", ok = true, signed_version = "L3" })
+			assert.same({ "always light reloaded to version L3" }, lines)
 		end)
 
 		it("takes a bundle without a tree as its own (an older bridge) and warns when the reload fails", function()
 			local handler = devloop.reload_handler(log, "scene")
-			handler({ version = "S2", files = "{}" })
+			handler({ version = "S2", bundle = "{}" })
 			assert.equal("S2", got.version)
 			assert.same({ "warn scene reload failed; see this scene's Lua output" }, lines)
 			handler(nil)
 			assert.same({}, got, "nil params read as none")
 		end)
 
+		it("says a refusal as a refusal, with the reason", function()
+			local handler = devloop.reload_handler(log, "scene")
+			handler({ tree = "scene", version = "S2", bundle = "{}", outcome = "refused", why = "not signed" })
+			assert.same({ "warn scene reload refused (not signed); see this scene's Lua output" }, lines)
+		end)
+
 		it("ignores another tree's bundle at debug level without touching the dev loop", function()
 			local handler = devloop.reload_handler(log, "scene")
-			handler({ tree = "light", version = "L1", files = "{}" })
+			handler({ tree = "light", version = "L1", bundle = "{}" })
 			assert.is_nil(got)
 			assert.same({ "debug DEV_RELOAD for the light tree ignored" }, lines)
 		end)
@@ -1095,6 +1529,82 @@ describe("common.devloop", function()
 			tick()
 			assert.truthy(server.reports[1].error:find("nope", 1, true))
 			assert.truthy(server.reports[2].error:find("unknown command type", 1, true))
+			assert.equal(6, state().last_command_id)
+		end)
+
+		it("asks with a fresh nonce every time", function()
+			start_synced()
+			tick()
+			tick()
+			assert.equal(3, #server.nonces)
+			for i, nonce in ipairs(server.nonces) do
+				assert.truthy(nonce:match("^%x+$") and #nonce == 32, "32 hex characters: " .. tostring(nonce))
+				for j = 1, i - 1 do assert.is_not.equal(server.nonces[j], nonce) end
+			end
+			-- A reloaded module (a Director restart) starts its own series.
+			local before = server.nonces[3]
+			reload_module(TEST_KEY)
+			start_synced()
+			assert.is_not.equal(before, server.nonces[4])
+		end)
+
+		it("runs nothing from an unsigned command list, and says so once per streak", function()
+			start_synced()
+			local seen = {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(seen, command) end)
+			rawset(_G, "OnPropertyChanged", function(name) table.insert(seen, name) end)
+			server.unsigned.commands = true
+			server.commands = { { id = 1, type = "execute", command = "Probe Call" },
+				{ id = 2, type = "set_property", name = "Dev Server", value = "elsewhere:80" } }
+			tick()
+			tick()
+			assert.same({}, seen)
+			assert.same({}, c4.calls_to("UpdateProperty"))
+			assert.same({}, events())
+			assert_said("commands refused: not signed")
+
+			server.unsigned.commands = nil
+			tick()
+			assert.same({ "Probe Call", "Dev Server" }, seen, "signed, the same list runs")
+			server.unsigned.commands = true
+			server.commands[3] = { id = 3, type = "execute", command = "C" }
+			tick()
+			assert.equal(2, times_said("commands refused: not signed"), "a new streak is said again")
+		end)
+
+		it("runs nothing from a list signed with another key", function()
+			start_synced()
+			local seen = {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(seen, command) end)
+			server.keys.commands = OTHER_KEY
+			server.commands = { { id = 1, type = "execute", command = "A" } }
+			tick()
+			assert.same({}, seen)
+			assert_said("commands refused: signature mismatch")
+		end)
+
+		it("runs nothing from an answer to another request, so a recorded one cannot be replayed", function()
+			start_synced()
+			local seen = {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(seen, command) end)
+			server.commands = { { id = 1, type = "execute", command = "A" } }
+			server.echo_nonce = server.nonces[1]   -- what the previous request asked; signed, but stale
+			tick()
+			assert.same({}, seen)
+			assert_said("commands refused: the answer is for another request (replayed?)")
+		end)
+
+		it("skips a command whose id is not above the last one run", function()
+			start_synced()
+			local seen = {}
+			rawset(_G, "ExecuteCommand", function(command) table.insert(seen, command) end)
+			server.commands = { { id = 5, type = "execute", command = "A" } }
+			tick()
+			server.all_commands = true
+			server.commands = { { id = 3, type = "execute", command = "old" }, { id = 5, type = "execute", command = "A" },
+				{ id = 6, type = "execute", command = "B" } }
+			tick()
+			assert.same({ "A", "B" }, seen)
 			assert.equal(6, state().last_command_id)
 		end)
 	end)
@@ -1201,5 +1711,284 @@ describe("common.devloop", function()
 			assert.same(plus(POLL, "POST /log"), server.requests)
 			assert.truthy(server.logs[1].lines[1].line:find("unreachable", 1, true))
 		end)
+	end)
+
+	describe("without a dev key", function()
+		it("starts, says once that it will refuse everything, and still reports", function()
+			reload_module(nil)
+			assert.is_false(devloop.has_key())
+			assert.is_nil(devloop.key_fingerprint())
+			devloop.start(HOST)
+			assert.equal("devloop: this build has no dev key (common/devkey.lua; build with tools/build.sh --dev): "
+				.. "every bundle and command will be refused", printed[2])
+			serve()
+			assert.equal("startup", server.reports[1].event)
+			assert.is_nil(server.reports[1].key_fingerprint)
+			server.commands = { { id = 1, type = "execute", command = "A" } }
+			local seen = false
+			rawset(_G, "ExecuteCommand", function() seen = true end)
+			tick()
+			assert.is_nil(devloop.version())
+			assert.is_false(seen)
+			assert_said("bridge bundle v1 refused: this build has no dev key")
+			assert.equal(0, count_containing(server.requests, "/commands"), "nothing to verify commands with")
+			c4.driver_file = "hue_light.c4z"
+			assert.same({ false, "refused", "this build has no dev key" }, { devloop.apply_forwarded({ tree = "light",
+				version = "L1", bundle = "{}", mac = string.rep("a", 64) }) })
+		end)
+
+		it("treats a malformed key as none and never prints it", function()
+			local secret = "a-secret-that-is-not-64-hex-characters"
+			reload_module(secret)
+			assert.is_false(devloop.has_key())
+			devloop.start(HOST)
+			serve()
+			assert.equal("devloop: common/devkey.lua is malformed (64 lowercase hex characters expected): "
+				.. "every bundle and command will be refused", printed[2])
+			assert.equal(0, count_containing(everything_said(), secret))
+			reload_module(string.upper(TEST_KEY))
+			assert.is_false(devloop.has_key(), "build.sh writes lowercase; anything else is not its key")
+		end)
+	end)
+
+	describe("HMAC-SHA256", function()
+		local function bytes(n, byte)
+			return string.rep(string.char(byte), n)
+		end
+
+		-- RFC 4231, section 4: HMAC-SHA-256 of test cases 1 to 7.
+		it("matches RFC 4231", function()
+			local key4 = ""
+			for i = 1, 25 do key4 = key4 .. string.char(i) end
+			local cases = {
+				{ bytes(20, 0x0b), "Hi There", "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7" },
+				{ "Jefe", "what do ya want for nothing?",
+					"5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" },
+				{ bytes(20, 0xaa), bytes(50, 0xdd), "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe" },
+				{ key4, bytes(50, 0xcd), "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b" },
+				{ bytes(131, 0xaa), "Test Using Larger Than Block-Size Key - Hash Key First",
+					"60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54" },
+				{ bytes(131, 0xaa), "This is a test using a larger than block-size key and a larger than block-size data. "
+					.. "The key needs to be hashed before being used by the HMAC algorithm.",
+					"9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2" },
+			}
+			for i, case in ipairs(cases) do
+				assert.equal(case[3], devloop.lua_hmac_sha256(case[1], case[2]), "case " .. i)
+				assert.equal(case[3], devloop.hmac_sha256(case[1], case[2]), "case " .. i .. " through the selection")
+			end
+			-- Test case 5: truncated to 128 bits.
+			assert.equal("a3b6167473100ee06e0c796c2955552b",
+				devloop.lua_hmac_sha256(bytes(20, 0x0c), "Test With Truncation"):sub(1, 32))
+		end)
+
+		-- FIPS 180-4 examples, and lengths around the padding boundaries.
+		it("hashes like SHA-256", function()
+			local vectors = {
+				{ "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+				{ "abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" },
+				{ "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+					"248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1" },
+				{ string.rep("a", 55), "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318" },
+				{ string.rep("a", 56), "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a" },
+				{ string.rep("a", 63), "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34" },
+				{ string.rep("a", 64), "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb" },
+				{ string.rep("a", 119), "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb" },
+				{ string.rep("a", 1000), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3" },
+			}
+			for _, v in ipairs(vectors) do
+				assert.equal(v[2], devloop.lua_sha256(v[1]), #v[1] .. " bytes")
+			end
+		end)
+
+		it("agrees with tools/devserver.py on the shared vectors", function()
+			assert.equal(SHARED_BUNDLE_MAC, devloop.hmac_sha256(TEST_KEY, DOMAIN .. "bundle\n" .. SHARED_PAYLOAD))
+			assert.is_nil(devloop.check_signature("bundle", SHARED_PAYLOAD, SHARED_BUNDLE_MAC))
+			assert.equal(TEST_FINGERPRINT, devloop.key_fingerprint())
+		end)
+
+		it("uses the Lua code when C4 has no HMAC", function()
+			assert.equal("Lua (no C4:HMAC)", devloop.hmac_backend())
+		end)
+
+		it("uses C4:HMAC with the documented arguments once it passes the RFC 4231 self-test", function()
+			local seen = {}
+			c4.HMAC = function(self, digest, key, data, options)
+				assert.equal(c4, self, "called as a method")
+				seen[#seen + 1] = { digest = digest, key = key, data = data, options = options }
+				return devloop.lua_hmac_sha256(key, data):upper()   -- the case of the hex is not documented
+			end
+			assert.equal("C4:HMAC", devloop.hmac_backend())
+			assert.same({ digest = "SHA256", key = "Jefe", data = "what do ya want for nothing?",
+				options = { return_encoding = "HEX", key_encoding = "NONE", data_encoding = "NONE" } }, seen[1])
+			assert.equal(SHARED_BUNDLE_MAC, devloop.hmac_sha256(TEST_KEY, DOMAIN .. "bundle\n" .. SHARED_PAYLOAD))
+			assert.equal(2, #seen)
+			assert.equal(TEST_KEY, seen[2].key)
+			assert.is_nil(devloop.check_signature("bundle", SHARED_PAYLOAD, SHARED_BUNDLE_MAC))
+		end)
+
+		it("keeps to the Lua code when C4:HMAC answers wrong, raises or returns an error", function()
+			c4.HMAC = function() return string.rep("0", 64) end
+			assert.equal("Lua (C4:HMAC failed the RFC 4231 self-test)", devloop.hmac_backend())
+			assert.equal(SHARED_BUNDLE_MAC, devloop.hmac_sha256(TEST_KEY, DOMAIN .. "bundle\n" .. SHARED_PAYLOAD))
+
+			reload_module(TEST_KEY)
+			c4.HMAC = function() error("no such digest", 0) end
+			assert.equal("Lua (C4:HMAC raised: no such digest)", devloop.hmac_backend())
+
+			reload_module(TEST_KEY)
+			c4.HMAC = function() return nil, "bad options" end
+			assert.equal("Lua (C4:HMAC raised: bad options)", devloop.hmac_backend())
+			assert.is_nil(devloop.check_signature("bundle", SHARED_PAYLOAD, SHARED_BUNDLE_MAC))
+		end)
+
+		it("switches to the Lua code for good when C4:HMAC raises on a real input, without its error text", function()
+			c4.HMAC = function(_, _, key, data)
+				if key ~= "Jefe" then error("refusing " .. key .. " and " .. data, 0) end
+				return devloop.lua_hmac_sha256(key, data)
+			end
+			assert.equal("C4:HMAC", devloop.hmac_backend())
+			assert.equal(SHARED_BUNDLE_MAC, devloop.hmac_sha256(TEST_KEY, DOMAIN .. "bundle\n" .. SHARED_PAYLOAD))
+			assert.equal("Lua (C4:HMAC raised on a real input)", devloop.hmac_backend())
+			assert.same({ "devloop: C4:HMAC failed; checking signatures in Lua from now on" }, printed)
+			assert.same({ "devloop: C4:HMAC failed; checking signatures in Lua from now on" }, buffered())
+		end)
+	end)
+end)
+
+
+-- Finding 15 of the security review: the development requests send the
+-- application key only to spellings of the bridge's own address.
+describe("bridge/devtools.lua development requests", function()
+	local log = require("common.log")
+
+	local IP = "10.0.2.143"
+	local IP_PATTERN = (IP:gsub("%.", "%%."))
+	local CHECK_URL = "https://10.00.02.143/clip/v2/resource/bridge"
+	local env, c4, lines, real_sink
+
+	-- The identity check, then the self-check via the check spelling.
+	local function answer_identity()
+		local t = c4.last_transfer()
+		assert(t and t.url == "https://" .. IP .. "/api/0/config",
+			"expected the identity check, got " .. tostring(t and t.url))
+		t:respond(200, '{"bridgeid":"001788FFFE123ABC","modelid":"BSB003","name":"Hue","swversion":"1968096020",'
+			.. '"apiversion":"1.68.0"}')
+	end
+
+	local function answer_check()
+		answer_identity()
+		local t = c4.last_transfer()
+		assert(t and t.url == CHECK_URL, "expected the self-check, got " .. tostring(t and t.url))
+		t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe123abc"}]}')
+	end
+
+	-- A dev build of the bridge (common.devloop is on the test path, so
+	-- bridge/devtools.lua is installed), paired, its identity checked unless
+	-- `answer` is false.
+	local function paired(answer)
+		env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = IP })
+		c4.persist.hue_app_key = "abc123"
+		c4.persist.hue_bridge_id = "001788fffe123abc"
+		env.OnDriverLateInit("DIT_STARTUP")
+		if answer ~= false then answer_check() end
+	end
+
+	local function action(name, params)
+		params = params or {}
+		params.ACTION = name
+		env.ExecuteCommand("LUA_ACTION", params)
+	end
+
+	before_each(function()
+		lines = {}
+		real_sink = log.sink
+		log.sink = function(line) lines[#lines + 1] = line end
+	end)
+
+	after_each(function()
+		log.sink = real_sink
+	end)
+
+	it("knows the spellings altaddr writes, and nothing else", function()
+		local altaddr = require("bridge.altaddr")
+		local devtools = require("bridge.devtools")
+		local ok = { IP, "10.00.02.143", "10.000.002.143", "10.0.002.143", "10.000.2.143", "10.00.2.143" }
+		for _, host in ipairs(ok) do
+			assert.is_true(devtools.spells_bridge_address(host, IP), host)
+		end
+		for _, host in ipairs({ "192.0.2.143", "010.0.2.143", "10.0.2.0143", "10.0000.2.143", "10.0.2.143.", " 10.0.2.143",
+			"10.0.2", "10.0.2.143:443", "bridge.local", "167772815", "0x0a.0.2.143", "", "10.0.2.143/x" }) do
+			assert.is_false(devtools.spells_bridge_address(host, IP), host)
+		end
+		assert.is_false(devtools.spells_bridge_address(IP, nil), "no bridge address, no spelling of it")
+		assert.is_false(devtools.spells_bridge_address(nil, IP))
+		-- 10 and 143 are 8 or more: a leading zero would make curl read them as octal.
+		assert.is_false(devtools.spells_bridge_address("192.0.2.010", "192.0.2.10"))
+		assert.is_false(devtools.spells_bridge_address("192.0.2.11", "192.0.2.10"), "one octet off")
+		assert.is_true(devtools.spells_bridge_address("192.00.002.10", "192.0.2.10"))
+		-- Every spelling the driver itself uses passes.
+		local mine = { altaddr.for_check(IP), altaddr.padded(IP, 3), altaddr.padded(IP, 2) }
+		for _, spelling in ipairs(altaddr.stream_family(IP)) do mine[#mine + 1] = spelling end
+		for _, spelling in ipairs(mine) do
+			assert.is_true(devtools.spells_bridge_address(spelling, IP), spelling)
+		end
+	end)
+
+	it("sends Hue Request to a spelling of the bridge address", function()
+		paired()
+		for _, host in ipairs({ "10.00.002.143", IP }) do
+			action("Hue Request", { Path = "/clip/v2/resource/light", Host = host })
+			local t = c4.last_transfer()
+			assert.equal("https://" .. host .. "/clip/v2/resource/light", t.url)
+			assert.equal("abc123", t.headers["hue-application-key"])
+			t:respond(200, '{"errors":[],"data":[]}')
+		end
+		action("Hue Request", { Path = "/clip/v2/resource/light", Host = " " })
+		assert.equal("https://" .. IP .. "/clip/v2/resource/light", c4.last_transfer().url, "the dotted address by default")
+	end)
+
+	it("refuses Hue Request to any other host, saying why and sending nothing", function()
+		paired()
+		local before = #c4.transfers
+		for _, host in ipairs({ "192.0.2.7", "10.0.2.0143", "evil.example", "10.0.2.143:8443" }) do
+			action("Hue Request", { Method = "PUT", Path = "/clip/v2/resource/light/x", Body = "{}", Host = host })
+			assert.equal(string.format('Hue Bridge: Hue Request: Host "%s" refused: not a spelling of the bridge address %s',
+				host, IP), lines[#lines])
+		end
+		assert.equal(before, #c4.transfers)
+	end)
+
+	it("holds Hue Request until the bridge identity is verified", function()
+		paired(false)
+		local before = #c4.transfers
+		action("Hue Request", { Path = "/clip/v2/resource/light" })
+		assert.equal("Hue Bridge: Hue Request: bridge identity not verified yet; see Status", lines[#lines])
+		assert.equal(before, #c4.transfers)
+	end)
+
+	it("fails an unknown method in http.lua, with the reason in the result line", function()
+		paired()
+		local before = #c4.transfers
+		action("Hue Request", { Method = "PATCH", Path = "/clip/v2/resource/light/x", Body = "{}" })
+		assert.equal(before, #c4.transfers, "no transfer started")
+		assert.truthy(lines[#lines]:find("^Hue Bridge: Hue Request PATCH /clip/v2/resource/light/x via " .. IP_PATTERN
+			.. ": could not start transfer: .*unsupported method PATCH"), lines[#lines])
+	end)
+
+	it("refuses Test Connection to another host and runs it on a spelling of the bridge address", function()
+		paired()
+		local before = #c4.transfers
+		action("Test Connection", { Host = "192.0.2.7" })
+		assert.equal(before, #c4.transfers)
+		assert.equal("Test Connection refused: Host is not a spelling of the bridge address", env.Properties["Status"])
+		assert.equal('Hue Bridge: Test Connection: Host "192.0.2.7" refused: not a spelling of the bridge address ' .. IP,
+			lines[#lines])
+
+		action("Test Connection", { Host = "10.000.2.143" })
+		local t = c4.last_transfer()
+		assert.equal("https://10.000.2.143/clip/v2/resource/bridge", t.url)
+		assert.equal("abc123", t.headers["hue-application-key"])
+		t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe123abc"}]}')
+		assert.truthy(env.Properties["Status"]:find("^Test OK: HTTP 200 via 10.000.2.143"))
 	end)
 end)

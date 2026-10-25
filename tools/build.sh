@@ -3,8 +3,15 @@
 #
 # Usage: tools/build.sh [--dev]
 #   --dev   developer build: ships common/devloop.lua (the self-reloading dev
-#           loop, see docs/dev-loop.md) and allows the Lua command window in
-#           Composer (dp3 --allowexecute). Release builds contain neither.
+#           loop, see docs/dev-loop.md) with the dev key baked in as
+#           common/devkey.lua, and allows the Lua command window in Composer
+#           (dp3 --allowexecute). Release builds contain none of it.
+#
+# The dev key (docs/dev-loop.md, "Security") is the file tools/devserver.py
+# uses: ~/.config/c4-hue-driver/devkey, or $C4_HUE_DEVKEY_FILE; created on
+# first use. It is written into the stage of a dev build only and removed
+# from it once packed; the dev packages are written 0600, since whoever
+# holds one holds the key. The key is never printed or put on a command line.
 #
 # Each driver is staged into build/stage/<driver>/ with src/common copied in
 # as common/, so `require("common.log")` resolves inside the .c4z the same way
@@ -30,6 +37,26 @@ if [[ ! -f "$DP3" ]]; then
 	exit 1
 fi
 
+# A key in the source tree could be committed or packed into a release:
+# the dev key only ever exists in the stage of a dev build.
+if [[ -e "$ROOT/src/common/devkey.lua" ]]; then
+	echo "src/common/devkey.lua must not exist: the dev key is written into the stage of a dev build only" \
+		"(docs/dev-loop.md, Security); delete it" >&2
+	exit 1
+fi
+
+dev_key=""
+if [[ "$dev_build" == yes ]]; then
+	# devserver.py creates the key file if missing (0600) and checks it; it
+	# prints the path on stdout and the fingerprint on stderr.
+	key_file="$(python3 "$ROOT/tools/devserver.py" --ensure-key)" || exit 1
+	IFS= read -r dev_key < "$key_file" || true
+	if [[ ! "$dev_key" =~ ^[0-9a-f]{64}$ ]]; then
+		echo "the dev key in $key_file is not 64 lowercase hex characters" >&2
+		exit 1
+	fi
+fi
+
 version="$(git -C "$ROOT" rev-list --count HEAD)"
 if [[ -n "$(git -C "$ROOT" status --porcelain -- src)" ]]; then
 	echo "warning: src/ has uncommitted changes; version $version may repeat" >&2
@@ -38,12 +65,20 @@ fi
 stage_root="$ROOT/build/stage"
 rm -rf "$stage_root"
 mkdir -p "$stage_root"
+if [[ "$dev_build" == yes ]]; then
+	# Even a build that fails half-way leaves no key in the stage.
+	trap 'rm -f "$stage_root"/*/common/devkey.lua' EXIT
+fi
 
 for driver in "${DRIVERS[@]}"; do
 	stage="$stage_root/$driver"
 	cp -R "$ROOT/src/$driver" "$stage"
 	cp -R "$ROOT/src/common" "$stage/common"
-	if [[ "$dev_build" != yes ]]; then
+	if [[ "$dev_build" == yes ]]; then
+		# What common/devloop.lua checks every bundle and command against.
+		# printf is a builtin, so the key is on no command line.
+		(umask 077 && printf 'return "%s"\n' "$dev_key" > "$stage/common/devkey.lua")
+	else
 		# Release builds: no dev loop, none of the bridge's development
 		# handlers (bridge/devtools.lua) nor the connection experiment and
 		# pinning check modules they drive, and none of the DEV-ONLY
@@ -52,7 +87,8 @@ for driver in "${DRIVERS[@]}"; do
 			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua"
 		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
 			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
-		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" ]]; then
+		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" \
+			|| -e "$stage/common/devkey.lua" ]]; then
 			echo "release build still carries development items in $driver" >&2
 			exit 1
 		fi
@@ -95,7 +131,10 @@ for driver in "${DRIVERS[@]}"; do
 		exit 1
 	fi
 	if [[ "$dev_build" == yes ]]; then
-		echo "built build/$driver.c4z (version $version, DEV build)"
+		# The package carries the key: as secret as the key file.
+		chmod 600 "$ROOT/build/$driver.c4z"
+		rm -f "$stage/common/devkey.lua"
+		echo "built build/$driver.c4z (version $version, DEV build, carries the dev key)"
 	else
 		echo "built build/$driver.c4z (version $version)"
 	fi
