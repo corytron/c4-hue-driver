@@ -549,11 +549,13 @@ describe("Hue Bridge driver", function()
 		local text = fake.last_action(env)
 		assert.truthy(text:find(" | Scenes: ", 1, true), text)
 		assert.is_true(#env.Properties["Last Action"] <= 72)
+		c4.fire_timers() -- the rows' visibility goes out as a batch after the texts
 		assert.equal(0, c4.property_attribs["Last Action (2)"])
 		assert.equal(1, c4.property_attribs["Last Action (5)"])
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Add Zone Light", Group = "", Room = "" })
 		assert.equal("Not added: pick a zone or room first", env.Properties["Last Action"])
 		assert.equal("", env.Properties["Last Action (2)"], "a short text clears the rows")
+		c4.fire_timers() -- the rows' visibility goes out as a batch after the texts
 		assert.equal(1, c4.property_attribs["Last Action (2)"])
 	end)
 
