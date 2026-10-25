@@ -765,6 +765,27 @@ describe("common.device", function()
 			assert.same({ 60, 1500, 500, 7000, 3000 }, all(), "unchanged")
 		end)
 
+		-- Hardware 2026-10-25 (dev build 284): without the answer the proxy kept
+		-- its old value, so Composer showed 5.000 s after a change to 2.000 s
+		-- and setting 5.000 s again sent nothing.
+		it("answers each setting command with the notification the proxy stores, and reports all at late init", function()
+			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up",
+				"hold_down" } })
+			c4.persist.hold_rate_down = "2000"
+			dev.load_settings()
+			assert.same({ { 5001, { BRIGHTNESS = 100 } } }, proxied(c4, "PRESET_LEVEL"))
+			assert.same({ { 5001, { RATE = 250 } } }, proxied(c4, "CLICK_RATE_UP"))
+			assert.same({ { 5001, { RATE = 250 } } }, proxied(c4, "CLICK_RATE_DOWN"))
+			assert.same({ { 5001, { RATE = 5000 } } }, proxied(c4, "HOLD_RATE_UP"))
+			assert.same({ { 5001, { RATE = 2000 } } }, proxied(c4, "HOLD_RATE_DOWN"), "the persisted value")
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "5000" })
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+			assert.same({ 5001, { RATE = 5000 } }, proxied(c4, "HOLD_RATE_DOWN")[2])
+			assert.same({ 5001, { BRIGHTNESS = 60 } }, proxied(c4, "PRESET_LEVEL")[2])
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "fast" })
+			assert.equal(1, #proxied(c4, "HOLD_RATE_UP"), "a refused value is not reported")
+		end)
+
 		it("handles only the settings a driver declares; the rest stay without a handler", function()
 			local dev, c4, _, dispatch = new_keypad({ settings = { "hold_up", "hold_down" } })
 			assert.is_function(dispatch.proxy["SET_HOLD_RATE_UP"])

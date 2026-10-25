@@ -93,14 +93,24 @@ local CLICK_GUARD_MS = 1000
 -- The keypad settings the light_v2 proxy sends when the dealer edits them in
 -- Composer [verified: proxy-protocol reference, light_v2 SET_PRESET_LEVEL
 -- {LEVEL}, SET_CLICK_RATE_* and SET_HOLD_RATE_* {RATE ms}]: the persisted key,
--- the default, the command and its parameter. A driver takes the ones its
--- driver.xml declares (opts.settings).
+-- the default, the command and its parameter, and the notification that
+-- tells the proxy the value now in use [verified: light_v2 notifications
+-- PRESET_LEVEL {BRIGHTNESS}, CLICK_RATE_UP/DOWN and HOLD_RATE_UP/DOWN {RATE}].
+-- Without that answer the proxy keeps its old value: on the house (dev build
+-- 284, 2026-10-25) a hold rate set to 2.000 s reached the driver, Composer
+-- still showed 5.000 afterwards, and setting 5.000 again sent nothing. A
+-- driver takes the ones its driver.xml declares (opts.settings).
 local SETTINGS = {
-	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL" },
-	click_up = { key = "click_rate_up", default = 250, command = "SET_CLICK_RATE_UP", param = "RATE" },
-	click_down = { key = "click_rate_down", default = 250, command = "SET_CLICK_RATE_DOWN", param = "RATE" },
-	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE" },
-	hold_down = { key = "hold_rate_down", default = 5000, command = "SET_HOLD_RATE_DOWN", param = "RATE" },
+	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL",
+		notify = "PRESET_LEVEL", notify_param = "BRIGHTNESS" },
+	click_up = { key = "click_rate_up", default = 250, command = "SET_CLICK_RATE_UP", param = "RATE",
+		notify = "CLICK_RATE_UP", notify_param = "RATE" },
+	click_down = { key = "click_rate_down", default = 250, command = "SET_CLICK_RATE_DOWN", param = "RATE",
+		notify = "CLICK_RATE_DOWN", notify_param = "RATE" },
+	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE",
+		notify = "HOLD_RATE_UP", notify_param = "RATE" },
+	hold_down = { key = "hold_rate_down", default = 5000, command = "SET_HOLD_RATE_DOWN", param = "RATE",
+		notify = "HOLD_RATE_DOWN", notify_param = "RATE" },
 }
 
 -- The binding re-check's gaps: checks at 5, 15, 30 and 60 s after start.
@@ -480,9 +490,18 @@ function device.new(opts)
 		return tonumber(settings[name]) or SETTINGS[name].default
 	end
 
+	-- The proxy hears the value in use, so Composer shows what the driver
+	-- does (and a later edit back to the old value is sent at all).
+	local function report_setting(name)
+		local s = SETTINGS[name]
+		notify(s.notify, { [s.notify_param] = dev.setting(name) })
+	end
+
+	-- At late init: the persisted values, each reported to the proxy.
 	function dev.load_settings()
 		for _, name in ipairs(setting_names) do
 			settings[name] = tonumber(C4:PersistGetValue(SETTINGS[name].key))
+			report_setting(name)
 		end
 	end
 
@@ -493,6 +512,7 @@ function device.new(opts)
 		end
 		settings[name] = value
 		C4:PersistSetValue(SETTINGS[name].key, value)
+		report_setting(name)
 	end
 
 	for _, name in ipairs(setting_names) do
