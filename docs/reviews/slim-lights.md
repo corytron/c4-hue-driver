@@ -159,3 +159,25 @@ dispatcher in driver.lua and three interface changes.
 8. **driver.lua moved under this review** (1812 → 1864 lines, last write
    17:12): re-pin its line numbers before handing rows 3 and 6 and question 1
    to an implementation agent.
+
+## Done: row 14 (2026-10-25, issue #56)
+
+Row 14's `module_base` became `src/hue_bridge/bridge/owner.lua`, shared with the scenes and the zone lights and
+wider than proposed: besides `bridge_id`, `protect`, `mark` / `flush` / `save`, `entry`, `count`,
+`clear_conflicts_for`, `run_pending_resync` and the busy expiry it holds `send_configure`, `push`,
+`configure_all`, `hello` / `adopt` / `goodbye` / `on_binding_changed`, the project-side `reconcile`, `resync`,
+`default_room` / `room_for_add`, the creation chain (`create`, `register_added`), the names trio, the shared
+Attention items, the relink and forget pickers, `relink`, `forget`, `forget_request` and `link_devices`
+(docs/reviews/slim-scenes-zones.md, "Done"). `busy_text` is shared too, its texts being words. The lights keep
+their own behaviour behind owner options (`push_needs_state`, `gone_at_hello`, `gone_after_add`,
+`announced_follows_entry`, `hello_tells_unknown`, `log_unregistered_bind`) and hooks (`tell` / `foreign` for
+the skip set, `reconciled` for the foreign-entry warning, `forgot`, `device_text`, `linked_label`, ...).
+`ids_from` and `dump` moved into owner.lua for the creation code; `lights.ids_from` and `lights.dump` stay as
+the same functions (lights_spec, devtools), and scenes.lua and zone_lights.lua no longer require bridge.lights.
+`protect` and the project calls moved verbatim (bridge.project already held the latter).
+
+lights.lua: 2827 → 1905 lines (2265 → 1427 code lines); owner.lua is 1579 lines (1091 code) for the three
+modules. One lights behaviour changed on purpose: after a full GET a refresh clears `device_name`, `model`,
+`device_rid`, `mac_address`, `service_id` and `id_v1` when the bridge no longer supplies them (analysis R9;
+an event's refresh leaves them, since a re-added light's device record may come later). lights_spec is
+unchanged and green. Rows 1–13 and 15 are not part of #56.
