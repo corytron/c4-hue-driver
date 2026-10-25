@@ -58,6 +58,18 @@ stream.DEFAULT_WATCHDOG = 600       -- seconds of silence before reconnecting
 stream.BACKOFF_MIN = 1              -- seconds
 stream.BACKOFF_MAX = 60
 
+-- Director runs at most four C4:url transfers at once: on 2026-10-25 (OS
+-- 3.4.2, dev build 276) three abandoned stream transfers plus the live one
+-- were open and every other transfer, to the bridge and to another host
+-- alike, timed out until a bridge event let the abandoned ones abort
+-- [verified: hardware, docs/design.md "Concurrent transfers"]. An abandoned
+-- transfer stays open until its next callback or its own timeout (rule 2),
+-- and the bridge sends no keepalive, so in a quiet house every watchdog
+-- reconnect used to leave one more open. The watchdog therefore starts a
+-- new transfer only while fewer than MAX_ABANDONED abandoned ones may still
+-- be open: at most two stream transfers, two left for commands.
+stream.MAX_ABANDONED = 1
+
 -- opts:
 --   connection()    returns { ip, key, stream_ip } or nil when not paired;
 --                   stream_ip (optional) is the address spelling the stream
@@ -75,6 +87,9 @@ stream.BACKOFF_MAX = 60
 --                                   rewrite (count and clock), so the owner
 --                                   can coalesce those writes
 --   on_connected()                  stream is up; resync state here
+--   abandoned       a list shared by successive stream objects (the driver
+--                   rebuilds the stream on a property change): the abandoned
+--                   transfers that may still be open, { gen, owner, expires_ms }
 --   on_key_rejected(code)           the bridge answered the stream with 401 or
 --                                   403; called once, after the stream has
 --                                   stopped itself. It runs inside OnHeaders,
@@ -97,6 +112,8 @@ function stream.new(opts)
 		connected_timer = nil,      -- defers on_connected out of OnHeaders
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
+		abandoned = opts.abandoned or {}, -- see MAX_ABANDONED
+		transfer_expires_ms = nil,  -- when the current transfer's own timeout ends it
 		abandoned_ids = nil,        -- SSE ids an abandoned transfer delivered (see the header)
 		stats = { containers = 0, events = 0, keepalives = 0, reconnects = 0,
 			last_event = nil, connected_since = nil, last_error = nil,
@@ -121,6 +138,36 @@ local function now_ms()
 		return ms
 	end
 	return os.time() * 1000
+end
+
+-- The abandoned transfers that may still be open: those whose own timeout
+-- has not passed and that have not called back since (a callback aborts
+-- them, see connect). Expired ones are pruned.
+function stream:open_abandoned()
+	local now, kept = now_ms(), {}
+	for _, z in ipairs(self.abandoned) do
+		if z.expires_ms > now then
+			kept[#kept + 1] = z
+		end
+	end
+	for i = #self.abandoned, 1, -1 do
+		self.abandoned[i] = nil
+	end
+	for i, z in ipairs(kept) do
+		self.abandoned[i] = z
+	end
+	return #kept
+end
+
+-- An abandoned transfer called back (and is aborted by its answer): it is
+-- no longer open.
+function stream:forget_abandoned(gen)
+	for i = #self.abandoned, 1, -1 do
+		local z = self.abandoned[i]
+		if z.owner == self and z.gen == gen then
+			table.remove(self.abandoned, i)
+		end
+	end
 end
 
 function stream:status(text, per_event)
@@ -157,6 +204,15 @@ function stream:arm_watchdog(delay_ms)
 				return self:arm_watchdog(remaining)
 			end
 		end
+		local open = self:open_abandoned()
+		if open >= stream.MAX_ABANDONED then
+			-- A quiet house, most likely: the transfer that the previous
+			-- watchdog abandoned is still open too. Another one would bring
+			-- Director towards its four-transfer limit and stall commands.
+			log.info("event stream: no data for %d s; not reconnecting while %d earlier transfer(s) may still be "
+				.. "open (Director runs at most four at once)", seconds, open)
+			return self:arm_watchdog()
+		end
 		log.warn("event stream: no data for %d s, reconnecting", seconds)
 		self.stats.last_error = "watchdog: no data for " .. seconds .. " s"
 		self:drop_transfer()
@@ -174,6 +230,10 @@ function stream:drop_transfer()
 	if self.transfer then
 		self.transfer:Cancel()
 		self.transfer = nil
+		-- Cancel() does not end a streaming transfer (rule 2): it stays open
+		-- until its next callback or its own timeout.
+		self.abandoned[#self.abandoned + 1] = { gen = self.generation - 1, owner = self,
+			expires_ms = self.transfer_expires_ms or (now_ms() + (self.opts.timeout or stream.DEFAULT_TIMEOUT) * 1000) }
 	end
 end
 
@@ -227,6 +287,7 @@ function stream:connect()
 	-- Before the transfer starts, so a start that fails at once (on_done -2)
 	-- cancels it again.
 	self:arm_watchdog()
+	self.transfer_expires_ms = now_ms() + (self.opts.timeout or stream.DEFAULT_TIMEOUT) * 1000
 	local last_chunk_seen = false -- this transfer's, once it is abandoned
 	self.transfer = http.stream({
 		ip = host,
@@ -236,7 +297,10 @@ function stream:connect()
 		timeout = self.opts.timeout or stream.DEFAULT_TIMEOUT,
 	}, {
 		on_headers = function(code)
-			if gen ~= self.generation then return true end
+			if gen ~= self.generation then
+				self:forget_abandoned(gen)
+				return true
+			end
 			return self:handle_headers(code)
 		end,
 		on_chunk = function(data)
@@ -250,12 +314,15 @@ function stream:connect()
 					last_chunk_seen = true
 					self:deliver_abandoned(parser, data)
 				end
+				self:forget_abandoned(gen)
 				return true
 			end
 			self:handle_chunk(data)
 		end,
 		on_done = function(err_code, err_msg, code)
-			if gen ~= self.generation then return end
+			if gen ~= self.generation then
+				return self:forget_abandoned(gen)
+			end
 			self:handle_done(err_code, err_msg, code)
 		end,
 	})

@@ -60,6 +60,7 @@ local state = {
 	attention_sent = nil, -- the Attention text last written, so an unchanged one is not written again
 	limits_sent = {},    -- light rid -> the limits last given to the command queue
 	stream_started_at = nil, -- "MM-DD HH:MM" of the stream's first connect since the driver started
+	stream_abandoned = {}, -- abandoned stream transfers that may still be open, across stream rebuilds (stream.lua)
 }
 
 -- The Attention text of a failed TLS self-check (issue #53, tls_gate below).
@@ -541,6 +542,7 @@ end
 local function new_stream()
 	return stream.new({
 		connection = stream_connection,
+		abandoned = state.stream_abandoned,
 		timeout = stream_timeout(),
 		watchdog = math.max(WATCHDOG_MIN, number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG)),
 		-- The per-event rewrite of the row ("Connected since …, N containers,

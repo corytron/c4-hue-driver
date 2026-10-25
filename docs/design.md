@@ -1193,3 +1193,32 @@ it.
   second nil 5 s later as nothing bound (`bridge/project.lua`).
 - **Unknown application key (#44):** HTTP 403 with an HTML body on CLIP v2
   GETs and on the event stream (see "A rejected key").
+
+## Concurrent transfers (verified 2026-10-25)
+
+Director runs at most **four** `C4:url` transfers at once, across all hosts.
+Seen on the house (OS 3.4.2, dev build 276, a quiet night): after three
+dev-loop reloads within fifteen minutes, three abandoned event-stream
+transfers (each still open, waiting for its next callback, rule 2 of
+`bridge/stream.lua`) plus the live stream were open; from that moment every
+other transfer timed out after 15 s, GETs to the bridge's dotted address
+and requests to the dev server on another host alike. At 01:00:00 the
+bridge's hourly `geolocation` update reached all four streams, the
+abandoned ones aborted on that callback, and everything flowed again at
+once. With one abandoned transfer fewer (00:48), the same GETs went
+through.
+
+Consequence for production: the watchdog was the only other source of
+abandoned transfers, and since release 1.0 (Stream Timeout 3600, watchdog
+600) a quiet night could leave up to five of them open, enough to stall
+every command until the next bridge event. The stream therefore tracks the
+transfers it abandoned (until their next callback or their own timeout,
+shared across stream rebuilds) and the watchdog opens a new transfer only
+while none may still be open (`stream.MAX_ABANDONED = 1`): at most two
+stream transfers, two left for commands. The cost: after a bridge restart in
+a quiet house that followed a watchdog reconnect, the feed may stay stale
+until the abandoned transfer's own timeout (at most Stream Timeout) or the
+next bridge event. Dev-loop reloads still leave one abandoned transfer each
+(a reload starts a new Lua module in the same state and cannot know the old
+one's), so repeated reloads in a quiet house can still reach the limit; a
+bridge event drains them.

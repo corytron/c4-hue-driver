@@ -619,4 +619,85 @@ describe("bridge.stream", function()
 			assert.equal(1, s.stats.reconnects, "a stop and a start is not a reconnect")
 		end)
 	end)
+
+	-- Director runs at most four C4:url transfers at once (verified
+	-- 2026-10-25); an abandoned stream transfer stays open until its next
+	-- callback or its own timeout, so the watchdog opens no new transfer while
+	-- an earlier abandoned one may still be open.
+	describe("abandoned transfers and the watchdog", function()
+		local function watchdog_reconnect()
+			assert.equal(1, c4.fire_timers(), "the watchdog fires")
+			assert.equal(1, c4.fire_timers(), "the retry timer reconnects")
+		end
+
+		it("does not open a third transfer while the one the last watchdog abandoned may be open", function()
+			s:start()
+			open_ok()
+			fire_deferrals()
+			watchdog_reconnect()
+			assert.equal(2, #c4.transfers)
+			assert.equal(1, s:open_abandoned())
+			open_ok()
+			fire_deferrals()
+			c4.now_ms = c4.now_ms + stream.DEFAULT_WATCHDOG * 1000
+			assert.equal(1, c4.fire_timers(), "the watchdog fires again")
+			assert.equal(2, #c4.transfers, "no new transfer")
+			assert.equal("connected", s.state, "the current transfer is kept")
+			assert.same({ stream.DEFAULT_WATCHDOG * 1000 }, timer_delays(), "the watchdog is armed again")
+		end)
+
+		it("reconnects again once the abandoned transfer called back", function()
+			s:start()
+			local first = open_ok()
+			fire_deferrals()
+			watchdog_reconnect()
+			open_ok()
+			fire_deferrals()
+			-- Its next callback aborts it (the fake keeps a cancelled transfer
+			-- silent, so its end stands for that callback).
+			first:done(-1, "aborted")
+			assert.equal(0, s:open_abandoned())
+			c4.now_ms = c4.now_ms + stream.DEFAULT_WATCHDOG * 1000
+			watchdog_reconnect()
+			assert.equal(3, #c4.transfers)
+		end)
+
+		it("reconnects again once the abandoned transfer's own timeout has passed", function()
+			s:start()
+			open_ok()
+			fire_deferrals()
+			watchdog_reconnect()
+			open_ok()
+			fire_deferrals()
+			c4.now_ms = c4.now_ms + stream.DEFAULT_TIMEOUT * 1000
+			assert.equal(0, s:open_abandoned())
+			watchdog_reconnect()
+			assert.equal(3, #c4.transfers)
+		end)
+
+		it("counts a transfer that ended on its own as closed", function()
+			s:start()
+			open_ok()
+			fire_deferrals()
+			c4.last_transfer():done(28, "Operation timed out")
+			assert.equal(0, s:open_abandoned())
+		end)
+
+		it("shares the list between stream objects the driver rebuilds", function()
+			local shared = {}
+			s = new_stream({ abandoned = shared })
+			s:start()
+			open_ok()
+			fire_deferrals()
+			s:stop()
+			assert.equal(1, #shared, "a stop abandons the open transfer too")
+			local s2 = new_stream({ abandoned = shared })
+			s2:start()
+			open_ok()
+			fire_deferrals()
+			c4.now_ms = c4.now_ms + stream.DEFAULT_WATCHDOG * 1000
+			assert.equal(1, c4.fire_timers(), "the new stream's watchdog")
+			assert.equal(2, #c4.transfers, "it opens nothing while the first object's transfer may be open")
+		end)
+	end)
 end)

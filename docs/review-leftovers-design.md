@@ -90,3 +90,12 @@ modules' lifecycle code: the zone lights keep only the latest pending resync
 callback (F2 named lights and scenes); no R6 for a zone deleted while its
 AddDevice is pending; zone lights pass no R9 schema; and `refresh_registry`
 cannot clear a field whose value became nil (the analysis's original R9).
+
+## 6. Found on the house during the dev pass (2026-10-25)
+
+Director runs at most four `C4:url` transfers at once; abandoned stream
+transfers stay open until their next callback or timeout, and the bridge
+sends no keepalive, so watchdog reconnects in a quiet house could stall all
+commands (`docs/design.md`, "Concurrent transfers"). The watchdog now opens
+no new transfer while an abandoned one may still be open
+(`stream.MAX_ABANDONED = 1`, `opts.abandoned` shared across stream rebuilds).
