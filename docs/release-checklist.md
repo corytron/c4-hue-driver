@@ -187,10 +187,10 @@ below). Major versions are codenamed after Star Wars: Andor and every
 proposes a widely recognised character, place or object from the show and
 the owner approves it (used so far: Cassian). The driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
-integer there); it is named in the release's `manifest.json` and in the
-release notes (step 4 below), and nowhere else: since 2026-10-25 the
-README and `docs/status.md` link to the Releases and Environments pages
-instead of stamping a build number. Later releases of the same spike move
+integer there); it is named in the release's `manifest.json`, in the
+release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the
+README names no build and links to the Releases and Environments pages, and
+`docs/status.md` names the build it describes. Later releases of the same spike move
 the tag and replace the attached files; a new version number comes when
 development here is finished.
 

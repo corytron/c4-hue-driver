@@ -395,8 +395,10 @@ below); `devctl.py` takes `--server`, `--key-file` and `--state-dir`.
 A release build (`tools/build.sh` without `--dev`) ships no
 `common/devloop.lua` and no key; every driver requires the loop with
 `pcall`, so the same `driver.lua` starts without it and the bridge simply
-never contacts this VM again. Since build 259 (2026-10-24) the house gets
-a GitHub release, never a VM build. Before installing one:
+never contacts this VM again. Since build 259 (2026-10-24) a production
+install is a GitHub release, never a VM build; a dev build (such as 309, on
+the house since 2026-10-25) goes around `tools/deploy.py` and is recorded
+with `deploy.py record --no-manifest`. Before installing a release:
 `devctl.py set "Debug Mode" Off` (the property survives the update, and
 `deploy/house.yaml` wants it Off), then the GitOps install of
 `docs/release-checklist.md`, "Deploy to the house" (`tools/deploy.py

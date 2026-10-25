@@ -71,8 +71,10 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 
 - A Control4 controller on **OS 3.3.0 or newer** (the `minimum_os_version` of
   the three drivers) and Composer Pro. Written and tested on **OS 3.4.2 with
-  Composer Pro 3.4.2**; nothing OS-version-specific is used, but OS 4 has not
-  been tried. Tested with a Hue Bridge Pro; the square version 2 bridge speaks
+  Composer Pro 3.4.2**; OS 4 has not been tried. Where the drivers rely on
+  behaviour measured on OS 3.4.2 (the event stream's own connection queue,
+  the controller applying the driver's CA bundle), they check it at every
+  start and fall back or stop safely (the manual's chapters 3 and 12). Tested with a Hue Bridge Pro; the square version 2 bridge speaks
   the same CLIP v2 API and its certificate should chain to the same Signify
   roots, but it has not been tried.
 - A **Philips Hue Bridge** (the square version 2 bridge, BSB002) or a **Hue
@@ -199,8 +201,9 @@ chapters 3 to 7 and 9 are the long version of this list.
    IP Address** (the Hue app shows it under Settings > My Hue system) and
    click the row's **Set** button. Status reads *Not paired: press the link
    button, then run Pair Bridge*.
-5. Press the round **link button** on the bridge, then within 30 seconds click
-   **Pair Bridge** on the **Actions** tab. Status goes *Pairing: contacting
+5. Press the round **link button** on the bridge, then right away click
+   **Pair Bridge** on the **Actions** tab (Hue accepts a pairing for about 30
+   seconds after the press). Status goes *Pairing: contacting
    bridge*, *Pairing: found Hue Bridge Pro (BSB003) ..., requesting key*,
    **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware fill
    in, Event Stream reads *Connected since ...*, Lights reads for example *47
@@ -399,13 +402,8 @@ deployment on the
 the newest release is on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases/latest).
 
-Every open item is an [issue](https://github.com/corytron/c4-hue-driver/issues).
-On 2026-10-25 they are: installing the current release on the house (#228),
-the remaining hardware checks of the time-of-day scenes (#40) and the
-owner's pass on the phone and keypads (#38), measuring how often the stream
-resyncs on the house (#65), retaking the manual's screenshots (#61), cleaning
-up old pull-request revisions (#62), and the decision on the OpenSSF Best
-Practices badge (#224). A known limit rather than an open item: in a room's
+Every open item is an [issue](https://github.com/corytron/c4-hue-driver/issues);
+[`docs/status.md`](docs/status.md), "Open", says where each stands. A known limit rather than an open item: in a room's
 List View, Hue Lights and Hue Scenes show Control4's standard light picture,
 and the drivers' icons appear in the project tree only (verified 2026-10-25,
 #60).

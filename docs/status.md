@@ -85,10 +85,11 @@ this page disagree about the present, this page and the code win.
   room's time-of-day scene, created 2026-10-24 12:06); two zone lights
   in the Master Bedroom, created with Add Zone Light on 2026-10-24: "Bedside
   Lights" (device 1166, the Hue zone of the two bedside lamps) and "Master
-  Bedroom Lights" (device 1168, the whole Hue room). No Hue Light devices:
-  all 47 lights were deleted in Composer on 2026-10-22 and are remembered as
-  deleted (Add Light brings any of them back). 126 scenes on the bridge, 1
-  imported.
+  Bedroom Lights" (device 1168, the whole Hue room). No single-light Hue
+  Light devices: all 47 lights were deleted in Composer on 2026-10-22 and are
+  remembered as deleted (Add Light brings any of them back). 126 + 15
+  time-based scenes on the bridge, 2 imported (the two Hue Scene devices
+  above).
 - **Keypads.** The "Bedside Lights Switch" (a Control4 switch run as a
   2-button keypad, Buttons Control Load off) has its top and bottom buttons
   bound to Shine's Top and Bottom Button Links. The "Floor Lamp Switch" is
@@ -371,8 +372,8 @@ What was left is under "Open" (#38, #61, #62).
 
 ## Open
 
-Every open item but the last is an issue (`gh issue list --state open`);
-this list says where each stands on 2026-10-25.
+Every open item is an issue (`gh issue list --state open`); this list says
+where each stands on 2026-10-25.
 
 - **#228** Install release 1.0 build 316 on the house after the #40
   checks (`deploy.py start`, the Windows session, `deploy.py done`; no
@@ -393,9 +394,15 @@ this list says where each stands on 2026-10-25.
   GitHub Support ticket for the purge is pending.
 - **#224** Decision: the OpenSSF Best Practices badge, or Scorecard's CII
   check stays at 0.
-- **After the next reboot from System Manager** (diff review 2026-10-25
-  row 2; no issue yet): the bridge's log right after it should show no "is
-  not bound to this bridge" lines and Attention no unbound devices.
+- **#238** After the next reboot from System Manager: the bridge's log
+  right after it shows no "is not bound to this bridge" lines and Attention
+  no unbound devices (diff review 2026-10-25 row 2).
+- **#232, #234, #236** Code bugs found by the documentation pass: a light or
+  zone light hold from mid-range ramps faster than its tile; device-driver
+  persistence and setting edge cases; pairing and Status edge cases.
+- **#237, #239** Tooling: `deploy.py`'s watchdog range and the tag ruleset;
+  `devctl`, `Composer.psm1` and release-note leftovers.
+- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness.
 
 Decided, not open:
 
