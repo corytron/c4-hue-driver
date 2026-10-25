@@ -213,27 +213,23 @@ development here is finished.
    and pinned tools (contract §5.4 and §5.5); its publish job, which runs no
    third-party code, checks what the build job handed over, signs the
    provenance and attaches to the release of the tag, creating it when
-   missing with the title `<version>` and generated notes whose first
-   paragraph names the build number and the install rule:
+   missing, with the title and notes written from `CHANGELOG.md` (step 4):
    `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`, `SHA256SUMS.txt`,
    `manifest.json` (contract §5.2: tag, version, build, commit, build time,
    each package's sha256 and size), `attestations.sigstore.json`, the
    signed build provenance, and `hue-drivers.intoto.jsonl`, the same
    provenance as in-toto JSON lines. A run for a moved tag replaces every
    file.
-4. Once per major version the coordinator edits the codename into the
-   release title (`1.0 "Cassian"`); the workflow never changes an existing
-   title. It writes the build number into the notes when it creates the
-   release, and for a moved tag it keeps one line of the existing notes
-   current (issue #239, after the hand edit build 316 needed on
-   2026-10-25): when the notes' first heading ends in `(build N)`, as
-   `## 1.0 "Cassian" (build 329)` does, N becomes the run's build
-   (`manifest.json` names it), and the step's log says what it did.
-   Nothing else in the notes changes: a "New in build N" section or any
-   other text that names a build is the coordinator's to edit after the
-   run, and so is the heading itself when it does not end that way. Check
-   the release page: seven assets, the build number in the first heading
-   and wherever else the notes name it.
+4. The release's title and notes come from `CHANGELOG.md` on every run
+   (`docs/changelog-design.md`): before dispatching, make sure its
+   `## Unreleased` entry lists what this build changes (a run with an empty
+   entry fails), and for the first release of a new major version that the
+   codename is agreed (Andor rule). Check the release page: seven assets,
+   the title `<version> "<codename>"`, the notes' first heading with this
+   build. After the release, the desired-state PR also runs
+   `python3 tools/changelog.py stamp --version X.Y --build N --date
+   YYYY-MM-DD`, so `CHANGELOG.md` names the build that was published, and
+   each driver's Documentation tab ends with the same list.
 5. Nothing is built on the VM for an install: the house gets these same
    files, downloaded from the release by `tools/deploy.py start` (next
    section).

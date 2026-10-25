@@ -208,22 +208,15 @@ Scorecard "Signed-Releases" check can see it), and the bundle's DSSE
 envelope as `hue-drivers.intoto.jsonl` (one compact JSON line: the in-toto
 v1 statement with the SLSA provenance v1 of the three packages, which
 Signed-Releases scores 10 where the bundle alone gets 8). `--clobber` replaces
-everything when the tag moves. The release is created when missing with
-`--generate-notes` (categories from `.github/release.yml`: by label `bug` →
-"Fixed", `enhancement` → "New and changed", `security` → "Security",
-`documentation` → "Documentation", `ci`/`release` → "Tooling and CI";
-`dependencies` excluded) and a first paragraph naming the build number and
-the install rule, as today. The workflow titles a new release `<version>`;
-the coordinator edits the codename into the title once per major version
-(1.x is "Cassian"), and the workflow never changes an existing title.
-Of an existing release's notes it changes one thing (issue #239, after the
-hand edit build 316 needed): when their first heading ends in `(build N)`,
-as the coordinator writes it (`## 1.0 "Cassian" (build 329)`), N becomes
-the run's build; nothing else in the notes changes, and notes whose first
-heading ends otherwise stay as they are. The publish job reads and writes
-them as JSON with `gh api` (`GET .../releases/tags/<tag>`, `PATCH
-.../releases/<id>` with the body alone); `tools/tests/test_release_notes.py`
-runs the step's own Python.
+everything when the tag moves. Since #255 (2026-10-25) the release's title
+and notes come from `CHANGELOG.md` on every run (`docs/changelog-design.md`):
+the build job writes `build/release-notes.md` with `tools/changelog.py notes`
+(the template `.github/release-notes.md`, this build's changes from the
+`Unreleased` entry, the earlier builds of the version) and fails when
+`Unreleased` is empty; the publish job checks it with the packages and sets
+it with `gh release create --notes-file` or `gh release edit --notes-file`,
+the title being the notes' first heading without the build
+(`1.0 "Cassian"`). Nothing in the notes is edited by hand any more.
 Current (2026-10-25, build 316): `.github/release.yml` ends with a sixth
 category, "Other changes", for every other pull request.
 
@@ -260,11 +253,10 @@ No third-party code runs where the write token or the signing identity is:
   in-toto file (§5.2), the workflow artifact `hue-drivers-<tag>` with all
   seven release files (the six of the single job before, and the in-toto
   file), the tag push (dispatch only, a one-commit checkout without
-  credentials), the release, and for a release that existed the build
-  number of its notes' first heading (§5.2).
+  credentials), and the release with its title and notes from
+  `CHANGELOG.md` (§5.2).
 - `GH_TOKEN` (`github.token`) is set only on the steps that push the tag or
-  call `gh`: three since issue #239 (the tag push, the release with its
-  files, the notes' first heading).
+  call `gh`: the tag push and the release with its files, title and notes.
 
 What a compromised tool in the build job can still do: put its own code
 into the packages, which the attestation then truthfully describes as built

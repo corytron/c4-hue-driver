@@ -22,6 +22,7 @@
 #   secrets      gitleaks over the working tree, then over the history of every
 #                local ref (git log --all) or, in GitHub Actions, of HEAD only
 #   house        python3 tools/deploy.py validate (deploy/house.yaml, offline)
+#   changelog    python3 tools/changelog.py check (CHANGELOG.md, docs/changelog-design.md)
 #
 # One line per check: "ok <name>", "FAIL <name>" followed by the output of the
 # failing command(s), or "skip <name> (<tool> not installed)". Exit 1 when a
@@ -33,7 +34,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 
-ALL_CHECKS=(lua-lint lua-test shell python-lint python-test xml powershell workflows secrets house)
+ALL_CHECKS=(lua-lint lua-test shell python-lint python-test xml powershell workflows secrets house changelog)
 
 usage() {
 	echo "usage: tools/check.sh [--strict] [--only <name>...]" >&2
@@ -48,7 +49,7 @@ tools_for() {
 		lua-test) echo busted ;;
 		shell) echo shellcheck ;;
 		python-lint) echo ruff ;;
-		python-test | xml | house) echo python3 ;;
+		python-test | xml | house | changelog) echo python3 ;;
 		powershell) echo pwsh ;;
 		workflows) echo actionlint zizmor ;;
 		secrets) echo gitleaks ;;
@@ -155,6 +156,10 @@ check_house() {
 		return 1
 	fi
 	run python3 tools/deploy.py validate
+}
+
+check_changelog() {
+	run python3 -I tools/changelog.py check --file CHANGELOG.md
 }
 
 strict=no

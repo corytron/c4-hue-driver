@@ -33,4 +33,7 @@
 - [ ] **Manual.** `src/hue_bridge/www/documentation.html`, and the Hue Light or Hue Scene
       page (`documentation.html` under `src/hue_light/www/` or `src/hue_scene/www/`), are
       updated if a property text, a `Last Action` result or an `Attention` line changed.
+- [ ] **Changelog.** A change to what the drivers do or what their documentation says
+      has a line under `## Unreleased` in `CHANGELOG.md`, written for the people who
+      install and use the drivers, with the issue number (`docs/changelog-design.md`).
 - [ ] **Status.** `docs/status.md` is updated if what runs or what is open changed.

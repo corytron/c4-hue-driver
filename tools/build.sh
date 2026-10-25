@@ -62,6 +62,21 @@ if [[ -n "$(git -C "$ROOT" status --porcelain -- src)" ]]; then
 	echo "warning: src/ has uncommitted changes; version $version may repeat" >&2
 fi
 
+# The changelog at the bottom of every Documentation tab (docs/changelog-design.md
+# §3): rendered once from CHANGELOG.md, as this release when HEAD carries a
+# v* tag, as a development build in a --dev build, else as it stands.
+release_tag="$(git -C "$ROOT" describe --tags --exact-match --match 'v*' HEAD 2>/dev/null || true)"
+changelog_args=()
+if [[ "$dev_build" == yes ]]; then
+	changelog_args=(--dev-build "$version")
+elif [[ -n "$release_tag" ]]; then
+	changelog_args=(--release "${release_tag#v}" --build "$version" --date "$(date -u +%F)")
+fi
+changelog_html="$ROOT/build/changelog.html"
+mkdir -p "$ROOT/build"
+python3 -I "$ROOT/tools/changelog.py" check --file "$ROOT/CHANGELOG.md" >/dev/null
+python3 -I "$ROOT/tools/changelog.py" html --file "$ROOT/CHANGELOG.md" "${changelog_args[@]}" > "$changelog_html"
+
 stage_root="$ROOT/build/stage"
 rm -rf "$stage_root"
 mkdir -p "$stage_root"
@@ -93,6 +108,23 @@ for driver in "${DRIVERS[@]}"; do
 			exit 1
 		fi
 	fi
+	# The changelog replaces the marker line in the staged manual only; src/
+	# keeps the marker. A manual without the marker fails the build.
+	doc="$stage/www/documentation.html"
+	if [[ "$(grep -c '^<!-- CHANGELOG -->$' "$doc")" != 1 ]]; then
+		echo "$doc: needs exactly one <!-- CHANGELOG --> line (docs/changelog-design.md)" >&2
+		exit 1
+	fi
+	python3 -I - "$doc" "$changelog_html" <<'PY'
+import sys
+doc, fragment = sys.argv[1], sys.argv[2]
+with open(doc, encoding="utf-8") as f:
+    text = f.read()
+with open(fragment, encoding="utf-8") as f:
+    html = f.read().rstrip("\n")
+with open(doc, "w", encoding="utf-8") as f:
+    f.write(text.replace("<!-- CHANGELOG -->", html, 1))
+PY
 	# Apache 2.0 §4: the license and notice travel with every package.
 	cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$stage/"
 	# The device drivers' shared module is of no use to the bridge.
