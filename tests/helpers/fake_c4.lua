@@ -179,6 +179,18 @@ local function new_transfer(c4)
 		assert(not self.started, "transfer already started")
 		self.started = true
 		self.method, self.url, self.data, self.headers = method, url, data, headers or {}
+		-- The TLS self-check's decoy bundle (bridge/tlscheck.lua): the
+		-- controller honours ssl_cabundle (verified on OS 3.4.2), so the
+		-- request fails certificate verification at once (curl 60) and is
+		-- kept apart from c4.transfers, which specs answer by position. A
+		-- spec models an OS that ignores the bundle with
+		-- c4.tls_ignores_cabundle = true: the request then joins
+		-- c4.transfers like any other and the spec answers it.
+		if tostring(self.options.ssl_cabundle or ""):find("decoy", 1, true) and not c4.tls_ignores_cabundle then
+			table.insert(c4.decoy_transfers, self)
+			self:done(60, "SSL peer certificate or SSH remote key was not OK")
+			return self
+		end
 		table.insert(c4.transfers, self)
 		return self
 	end
@@ -283,6 +295,8 @@ local function new_c4(env)
 		calls = {},
 		config_info = { version = "1" },
 		transfers = {},
+		decoy_transfers = {},   -- TLS self-check requests failed by the fake (see new_transfer)
+		tls_ignores_cabundle = false,
 		timers = {},
 		persist = {},
 		property_lists = {},
@@ -606,9 +620,14 @@ local function new_c4(env)
 		return nodes[id] and { [id] = nodes[id] } or {}
 	end
 
-	function c4:SendToDevice(id, command, params)
+	-- allowEmptyValues and logCommand are optional (API 32/_19); logCommand
+	-- is nil when the caller left it out (Director then logs the message).
+	function c4:SendToDevice(id, command, params, allow_empty, log_command)
 		record("SendToDevice", id, command, params)
-		local message = { id = id, command = command, params = params }
+		-- The two flags are readable (m.log_command) but not keys of the
+		-- message, so specs comparing messages whole are unaffected.
+		local message = setmetatable({ id = id, command = command, params = params },
+			{ __index = { allow_empty = allow_empty, log_command = log_command } })
 		table.insert(c4.sent, message)
 		table.insert(c4.outbox, message)
 	end

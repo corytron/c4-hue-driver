@@ -204,7 +204,7 @@
 			<property>
 				<name>Stream Watchdog (s)</name>
 				<type>RANGED_INTEGER</type>
-				<minimum>0</minimum>
+				<minimum>60</minimum>
 				<maximum>3600</maximum>
 				<default>600</default>
 				<readonly>false</readonly>

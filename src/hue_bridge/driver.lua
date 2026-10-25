@@ -16,6 +16,7 @@ local lights_mod = require("bridge.lights")
 local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
 local commands = require("bridge.commands")
+local tlscheck = require("bridge.tlscheck")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -52,7 +53,17 @@ local state = {
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
 	late_init_done = false,
+	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
+	key_rejected = nil,  -- HTTP code (401/403) once the bridge refused the key; cleared by Pair Bridge or a new address
+	tls_verdict = nil,   -- the TLS self-check's answer for this start and address (bridge/tlscheck.lua)
+	attention_sent = nil, -- the Attention text last written, so an unchanged one is not written again
+	limits_sent = {},    -- light rid -> the limits last given to the command queue
+	stream_started_at = nil, -- "MM-DD HH:MM" of the stream's first connect since the driver started
 }
+
+-- The Attention text of a failed TLS self-check (issue #53, tls_gate below).
+local TLS_ATTENTION = "TLS check failed: the controller accepted the bridge without its Signify roots; "
+	.. "keyed requests stopped (see the manual)"
 
 -- Stream timeout in single-queue mode: commands wait for the stream to
 -- end, so it must end often.
@@ -124,6 +135,10 @@ local function refresh_status()
 		prop("Status", "Enter the bridge IP address")
 	elseif not paired() then
 		prop("Status", "Not paired: press the link button, then run Pair Bridge")
+	elseif state.key_rejected then
+		prop("Status", string.format("Key rejected by the bridge (HTTP %d): re-pair with Pair Bridge", state.key_rejected))
+	elseif state.tls_verdict == "not_pinned" then
+		prop("Status", "TLS check failed: nothing is sent (see Attention)")
 	else
 		prop("Status", "Paired")
 	end
@@ -222,9 +237,30 @@ end
 -- Every request that carries the application key goes through here: only
 -- to the paired bridge, only once its identity is verified (below), and
 -- never with a caller-supplied TLS table (the pinned bundle always applies).
+-- The bridge refused the key (HTTP 401/403 on the stream or on a keyed
+-- request; the house Bridge Pro answers an unknown key with 403, verified
+-- 2026-10-25): stop the stream, say so, and answer every keyed request at
+-- once until Pair Bridge succeeds or the address changes (issue #44).
+local function key_rejected(code)
+	code = tonumber(code) or 403
+	if state.key_rejected == code then
+		return
+	end
+	state.key_rejected = code
+	log.warn("the bridge rejected the application key (HTTP %d): stream stopped; re-pair with Pair Bridge", code)
+	if state.stream then
+		state.stream:stop()
+	end
+	C4:UpdateProperty("Event Stream", string.format("Stopped: key rejected (HTTP %d)", code))
+	refresh_status()
+end
+
 local function bridge_request(req, callback)
 	if not connection() then
 		return callback({ ok = false, err = "not paired" })
+	end
+	if state.key_rejected then
+		return callback({ ok = false, err = "key rejected", code = state.key_rejected })
 	end
 	if state.identity_ok ~= true then
 		return callback({ ok = false, err = "bridge identity not verified yet" })
@@ -232,7 +268,13 @@ local function bridge_request(req, callback)
 	req.ip = state.ip
 	req.key = state.creds.key
 	req.tls = nil
-	return http.request(req, callback)
+	return http.request(req, function(r)
+		if type(r) == "table" and (r.code == 401 or r.code == 403) then
+			key_rejected(r.code)
+			r.err = "key rejected"
+		end
+		callback(r)
+	end)
 end
 
 
@@ -268,7 +310,10 @@ local function device_send(id, command, params)
 	if log.enabled("debug") then
 		log.debug("%s %s -> %d: %s", command, tostring(params and params.rid):sub(1, 8), id, params_text(params))
 	end
-	C4:SendToDevice(id, command, params)
+	-- logCommand (the fifth argument) defaults to true; false keeps Director
+	-- from logging every message with its whole parameter table [verified:
+	-- API 32_serial_network_device/_19-SendToDevice]. Debug Mode brings it back.
+	C4:SendToDevice(id, command, params, false, log.enabled("debug"))
 end
 
 local function new_lights()
@@ -323,6 +368,18 @@ local group_hooks = {
 	-- command (docs/zone-light-design.md Decision 5).
 	group_set = function(grouped_light_rid, fields)
 		if state.group_queue and type(fields) == "table" then
+			-- A zone light's PUTs are clamped to its members' common colour
+			-- temperature range (docs/zone-light-design.md Decision 7), not
+			-- only on the device side.
+			local limits = state.zone_lights and state.zone_lights:limits(grouped_light_rid)
+			if limits then
+				local sent = state.limits_sent[grouped_light_rid]
+				if not (sent and sent.min_dim == limits.min_dim and sent.mirek_min == limits.mirek_min
+					and sent.mirek_max == limits.mirek_max) then
+					state.limits_sent[grouped_light_rid] = limits
+					state.group_queue:limits(grouped_light_rid, limits)
+				end
+			end
 			state.group_queue:set(grouped_light_rid, fields)
 			return true
 		end
@@ -377,6 +434,9 @@ end
 -- The lights' Attention text followed by the scenes' and the zone lights' items.
 local function attention_text()
 	local items = {}
+	if state.tls_verdict == "not_pinned" then
+		items[1] = TLS_ATTENTION
+	end
 	local text = state.lights:attention()
 	if text and text ~= "" and text ~= "None" then
 		items[#items + 1] = text
@@ -399,7 +459,7 @@ end
 local list_rows = {}
 
 local function commaless(text)
-	return (tostring(text == nil and "" or text):gsub(",", "‚"))
+	return (tostring(text == nil and "" or text):gsub("%c", ""):gsub(",", "‚"))
 end
 
 local list_rows_sent = {}
@@ -439,7 +499,11 @@ local function refresh_lights_props()
 		return -- before late init created the modules
 	end
 	show_module_list("Lights", state.lights)
-	prop("Attention", attention_text())
+	local attention = attention_text()
+	if attention ~= state.attention_sent then
+		state.attention_sent = attention
+		prop("Attention", attention)
+	end
 	refresh_room_mappings()
 	show_module_list("Scenes", state.scenes)
 	show_module_list("Zone Lights", state.zone_lights)
@@ -460,6 +524,7 @@ end
 -- hold) (docs/zone-light-design.md Decision 9).
 local function new_group_queue()
 	return commands.new({
+		label = "grouped_light",
 		rate_per_sec = 1,
 		burst = 3,
 		send = function(rid, body, done)
@@ -480,11 +545,26 @@ local function new_stream()
 		-- The per-event rewrite of the row ("Connected since …, N containers,
 		-- last …") is coalesced; a state change lands at once.
 		on_status = function(text, per_event)
+			-- Reconnects since the driver started (any stream instance), so
+			-- the owner can read the real reconnect rate off the row (#65).
+			if not per_event and tostring(text):find("^Connected since") then
+				state.stream_connects = (state.stream_connects or 0) + 1
+				state.stream_started_at = state.stream_started_at or os.date("%m-%d %H:%M")
+			end
+			local reconnects = math.max(0, (state.stream_connects or 0) - 1)
+			if reconnects > 0 and tostring(text):find("^Connected since") then
+				text = per_event and string.format("%s; %d reconnect%s", text, reconnects, reconnects == 1 and "" or "s")
+					or string.format("%s (%d reconnect%s since %s)", text, reconnects, reconnects == 1 and "" or "s",
+						state.stream_started_at)
+			end
 			if per_event then
 				prop_soon("Event Stream", text)
 			else
 				prop("Event Stream", text)
 			end
+		end,
+		on_key_rejected = function(code)
+			key_rejected(code)
 		end,
 		on_connected = function()
 			-- Runs from a timer, never inside the stream's callbacks (see
@@ -549,7 +629,7 @@ local function restart_stream(force)
 	local was_running = state.stream:running()
 	state.stream:stop()
 	state.stream = new_stream()
-	if (was_running or force) and connection() then
+	if (was_running or force) and connection() and not state.key_rejected then
 		state.stream:start()
 	end
 end
@@ -588,11 +668,43 @@ local function show_bridge_info(info)
 	end
 end
 
+-- The TLS self-check (issue #53, bridge/tlscheck.lua): before the key goes
+-- anywhere, a request with a decoy CA bundle must fail certificate
+-- verification. If the controller accepts it, its OS is not using the
+-- configured bundle and nothing keyed is sent. Once per start and address;
+-- an inconclusive answer is asked again at the next identity check.
+local function tls_gate(gen, ip, done)
+	if state.tls_verdict == "pinned" then
+		return done(true)
+	end
+	tlscheck.run(ip, function(verdict, detail)
+		if gen ~= state.address_gen then
+			return -- the address changed meanwhile; its own check runs
+		end
+		if verdict == "not_pinned" then
+			state.tls_verdict = verdict
+			log.warn("TLS check: the bridge at %s was accepted with a decoy CA bundle (%s); nothing keyed is sent",
+				ip, tostring(detail))
+			refresh_status()
+			C4:UpdateProperty("Attention", TLS_ATTENTION)
+			state.attention_sent = TLS_ATTENTION
+			return done(false)
+		end
+		if verdict == "pinned" then
+			state.tls_verdict = verdict
+			log.debug("TLS check: the decoy bundle was refused (%s); trust is pinned", tostring(detail))
+		else
+			log.warn("TLS check inconclusive (%s); asked again at the next identity check", tostring(detail))
+		end
+		done(true)
+	end)
+end
+
 local function verify_identity(callback)
 	cancel_identity_retry()
-	local ip = state.ip
+	local ip, gen = state.ip, state.address_gen
 	http.request({ ip = ip, path = "/api/0/config", timeout = 10 }, function(r)
-		if ip ~= state.ip then
+		if ip ~= state.ip or gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
 		end
 		local cfg = r.ok and type(r.json) == "table" and r.json or nil
@@ -610,9 +722,11 @@ local function verify_identity(callback)
 			end
 		end
 		if reported and reported == state.creds.bridge_id then
-			state.identity_ok = true
-			refresh_status()
-			return callback(true)
+			return tls_gate(gen, ip, function(trusted)
+				state.identity_ok = trusted
+				refresh_status()
+				callback(trusted)
+			end)
 		end
 		state.identity_ok = false
 		if reported then
@@ -632,6 +746,7 @@ local function verify_identity(callback)
 end
 
 local function choose_stream_address(callback)
+	local gen = state.address_gen
 	local check_ip = altaddr.for_check(state.ip)
 	local family = altaddr.stream_family(state.ip)
 	local function single(reason, detail)
@@ -656,6 +771,13 @@ local function choose_stream_address(callback)
 		return single("no octet below 8 to pad")
 	end
 	http.request({ ip = check_ip, key = state.creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+		if gen ~= state.address_gen then
+			return log.debug("stream address check for an earlier address ignored")
+		end
+		if r.code == 401 or r.code == 403 then
+			key_rejected(r.code)
+			return callback()
+		end
 		if r.ok then
 			state.stream_family = family
 			state.stream_ip = next_stream_address(false)
@@ -688,11 +810,20 @@ end
 -- handler [hardware 2026-10-24, devices 1166 and 1168], so late init writes
 -- the read-only row itself (it has no property handler) and looks again
 -- twice while it is empty.
+local version_timer = nil
+
 local function show_driver_version(attempt)
+	if version_timer then
+		version_timer:Cancel()
+		version_timer = nil
+	end
 	local v = driver_version()
 	prop("Driver Version", v)
 	if v == "" and attempt < 3 then
-		C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+		version_timer = C4:SetTimer(5000 * attempt, function()
+			version_timer = nil
+			show_driver_version(attempt + 1)
+		end)
 	end
 end
 
@@ -707,6 +838,11 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 	end
 	local changed = ip ~= state.ip
 	state.ip = ip
+	if changed then
+		state.address_gen = state.address_gen + 1
+		state.key_rejected = nil
+		state.tls_verdict = nil
+	end
 	refresh_status()
 	if changed and state.late_init_done then
 		state.stream_ip = nil
@@ -749,24 +885,36 @@ dispatch.commands["Pair_Bridge"] = function()
 		return
 	end
 	prop("Status", "Pairing: contacting bridge")
+	local gen = state.address_gen
+	local function stale()
+		if gen ~= state.address_gen then
+			log.info("pairing result for an earlier bridge address ignored")
+			return true
+		end
+	end
 	pairing.pair(state.ip, {
 		on_probed = function(info)
+			if stale() then return end
 			show_bridge_info(info)
 			prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
 				info.bridge_id))
 		end,
 		on_link_button = function()
+			if stale() then return end
 			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
 		end,
 		on_paired = function(creds)
+			if stale() then return end
 			-- Use the in-memory result: the store writes on its own thread
 			-- and may not return the value yet.
 			state.creds = creds
+			state.key_rejected = nil
 			prop("Bridge Model", config.model_label(creds.model))
 			refresh_status()
 			choose_stream_address(function() restart_stream(true) end)
 		end,
 		on_error = function(message)
+			if stale() then return end
 			prop("Status", "Pairing failed: " .. message)
 		end,
 	})
@@ -787,6 +935,7 @@ local function test_connection(host)
 		log.always("Test Connection via %s: %s after %d s", host, r.ok and "OK" or tostring(r.err), secs)
 		if not r.ok then
 			if r.code == 401 or r.code == 403 then
+				key_rejected(r.code)
 				prop("Status", "Test failed: key rejected (HTTP " .. r.code .. "). Re-pair with Pair Bridge")
 			else
 				prop("Status", "Test failed: " .. tostring(r.err))
@@ -954,7 +1103,7 @@ local function picker(module, method, ...)
 		log.warn("%s: %s", method, tostring(list))
 		return { { text = "(error building the list; see Lua output)", value = "" } }
 	end
-	return { { text = "(not available in this build)", value = "" } }
+	return { { text = "(not ready yet; open the list again)", value = "" } }
 end
 
 function HueLightList() return picker(state.lights, "picker_lights") end
@@ -1276,6 +1425,20 @@ dispatch.commands["HUE_SCENE_FORGET"] = function(params)
 	end
 end
 
+-- The light's limits go to the command queue only when they changed: a
+-- slider tick used to build three tables per light for nothing
+-- (docs/reviews/efficiency-2026-10-24.md R4).
+local function set_light_limits(rid)
+	local limits = state.lights:limits(rid) or {}
+	local sent = state.limits_sent[rid]
+	if sent and sent.min_dim == limits.min_dim and sent.mirek_min == limits.mirek_min
+		and sent.mirek_max == limits.mirek_max then
+		return
+	end
+	state.limits_sent[rid] = { min_dim = limits.min_dim, mirek_min = limits.mirek_min, mirek_max = limits.mirek_max }
+	state.queue:limits(rid, limits)
+end
+
 -- From a light driver: a proxy command mapped to Hue fields (strings).
 dispatch.commands["HUE_SET"] = function(params)
 	params = params or {}
@@ -1300,7 +1463,7 @@ dispatch.commands["HUE_SET"] = function(params)
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
 			tostring(fields.rate))
 	end
-	state.queue:limits(rid, state.lights:limits(rid))
+	set_light_limits(rid)
 	state.queue:set(rid, fields)
 end
 
@@ -1326,7 +1489,7 @@ dispatch.commands["HUE_DIM"] = function(params)
 		log.info("HUE_DIM %s: %s duration=%s level=%s", rid:sub(1, 8), dir, tostring(params.duration),
 			tostring(params.level))
 	end
-	state.queue:limits(rid, state.lights:limits(rid))
+	set_light_limits(rid)
 	state.queue:set(rid, { dim = dir, rate = tonumber(params.duration), level = tonumber(params.level) })
 end
 
@@ -1399,7 +1562,13 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 		refresh_lights_props()
 		-- Director settles the binding tables after the callback; the SDK's
 		-- own sample re-enumerates a second later [verified: sample idc_controller].
-		C4:SetTimer(1000, function()
+		-- One reconcile for a burst: a project load with N bindings used to
+		-- run N (docs/reviews/efficiency-2026-10-24.md R5, security finding 11).
+		if state.binding_reconcile_timer then
+			state.binding_reconcile_timer:Cancel()
+		end
+		state.binding_reconcile_timer = C4:SetTimer(1000, function()
+			state.binding_reconcile_timer = nil
 			state.lights:reconcile()
 			refresh_lights_props()
 		end)
@@ -1555,6 +1724,15 @@ function OnDriverDestroyed()
 	if prop_soon_timer then
 		prop_soon_timer:Cancel()
 		prop_soon_timer = nil
+	end
+	if state.binding_reconcile_timer then
+		state.binding_reconcile_timer:Cancel()
+		state.binding_reconcile_timer = nil
+	end
+	cancel_identity_retry()
+	if version_timer then
+		version_timer:Cancel()
+		version_timer = nil
 	end
 	if state.stream then
 		state.stream:stop()
