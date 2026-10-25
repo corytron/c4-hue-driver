@@ -5,24 +5,30 @@
   gh-discussion.py --comment 12 --body-file reply.md
   gh-discussion.py --check --category General --title "…" --body-file draft.md
 
-The first form creates a discussion and prints its URL; --pin also pins it to
-the repository's Discussions page (GitHub allows four pinned at a time). The
-second form appends the body as a comment to discussion number 12 and prints
-the comment's URL. --check runs every check (repository, category, title,
-body) and prints what would be posted, without posting anything.
+The first form creates a discussion and prints its URL. --pin asks GitHub to
+pin it; the GraphQL API has no pinDiscussion mutation as of 2026-10-24, so the
+result says to pin it from the discussion's menu in the browser (the attempt
+stays in case GitHub adds the mutation). The second form appends the body as
+a comment to discussion number 12 and prints the comment's URL. --check runs
+every check (repository, category, title, body) and prints what would be
+posted, without posting anything.
 
 A body or title is refused when it holds an obvious private pattern: an
 address starting with 10.0.1., the string c42996 (also spelled c4:29:96) or
 the string hue_app_key; a body is also refused over GitHub's limit of 65,536
 characters. Replace the data or trim the text and run again. The documented
-placeholders (10.0.2.143, 192.0.2.7, 001788fffe123abc) pass.
+placeholders (10.0.2.143, 192.0.2.7, 001788fffe123abc) pass. A title that one
+of the repository's latest 100 discussions already carries is refused as
+well, so a retry after a server error cannot post twice (GitHub has answered
+"Something went wrong" after creating the discussion all the same);
+--allow-duplicate-title posts anyway.
 
 The repository is the one `gh repo view` resolves from the current directory,
 or --repo owner/name. Standard library only; needs `gh` logged in with the
 repo scope (`gh auth status`).
 
 Exit codes: 0 success, 1 error (gh failed, unknown category, bad arguments),
-2 body or title refused.
+2 body or title refused (private pattern, too long, or a title already used).
 """
 import argparse
 import json
@@ -60,6 +66,14 @@ mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) 
 PIN_MUTATION = """
 mutation($discussionId: ID!) {
   pinDiscussion(input: {discussionId: $discussionId}) { discussion { number } }
+}
+"""
+
+TITLES_QUERY = """
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    discussions(first: 100, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { number title url } }
+  }
 }
 """
 
@@ -136,6 +150,12 @@ def repo_and_categories(owner, name):
     return repo["id"], repo["discussionCategories"]["nodes"]
 
 
+def existing_with_title(owner, name, title):
+    """The latest discussions whose title equals `title`."""
+    nodes = graphql(TITLES_QUERY, {"owner": owner, "name": name})["repository"]["discussions"]["nodes"]
+    return [d for d in nodes if d["title"].strip() == title.strip()]
+
+
 def pick_category(categories, wanted):
     key = wanted.strip().lower()
     for cat in categories:
@@ -188,6 +208,11 @@ def create(args, body):
     owner, name = resolve_repo(args.repo)
     repo_id, categories = repo_and_categories(owner, name)
     category = pick_category(categories, args.category)
+    same = existing_with_title(owner, name, args.title)
+    if same and not args.allow_duplicate_title:
+        print("refused: a discussion with this title exists: %s (--allow-duplicate-title posts anyway)"
+              % same[0]["url"], file=sys.stderr)
+        return EXIT_REFUSED
     if args.check:
         print("OK: would post to %s in %s/%s: %r (%d characters%s)"
               % (category["name"], owner, name, args.title, len(body), ", then pin it" if args.pin else ""))
@@ -196,15 +221,17 @@ def create(args, body):
         "repositoryId": repo_id, "categoryId": category["id"], "title": args.title, "body": body,
     })
     discussion = result["createDiscussion"]["discussion"]
+    print(discussion["url"])
     if args.pin:
         try:
             graphql(PIN_MUTATION, {"discussionId": discussion["id"]})
-            pinned = " (pinned)"
+            print("pinned", file=sys.stderr)
         except GhError as err:
-            pinned = " (not pinned: %s)" % err
-    else:
-        pinned = ""
-    print("%s%s" % (discussion["url"], pinned))
+            if "pinDiscussion" in str(err):
+                print("not pinned: GitHub's API has no pinDiscussion mutation; pin it from the "
+                      "discussion's menu in the browser", file=sys.stderr)
+            else:
+                print("not pinned: %s" % err, file=sys.stderr)
     return EXIT_OK
 
 
@@ -232,13 +259,15 @@ def parse_args(argv):
     parser.add_argument("--category", help="category name or slug (Announcements, General, Ideas, Polls, Q&A, Show and tell)")
     parser.add_argument("--title", help="the discussion's title, YYYY-MM-DD — subject")
     parser.add_argument("--body-file", required=True, metavar="PATH", help="Markdown file holding the body; - reads standard input")
-    parser.add_argument("--pin", action="store_true", help="pin the new discussion")
+    parser.add_argument("--pin", action="store_true", help="ask GitHub to pin the new discussion (see below)")
+    parser.add_argument("--allow-duplicate-title", action="store_true",
+                        help="post even if a discussion with the same title exists")
     parser.add_argument("--comment", type=int, metavar="NUMBER", help="append the body as a comment to this discussion instead")
     parser.add_argument("--repo", metavar="OWNER/NAME", help="the repository (default: the one gh resolves here)")
     parser.add_argument("--check", action="store_true", help="run the checks and print what would be posted; post nothing")
     args = parser.parse_args(argv)
     if args.comment is not None:
-        if args.category or args.title or args.pin:
+        if args.category or args.title or args.pin or args.allow_duplicate_title:
             parser.error("--comment takes only --body-file (and --repo, --check)")
     else:
         if not args.category or not args.title:
