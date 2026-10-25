@@ -85,7 +85,7 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 
 ### The release
 
-The release is **1.0 "Cassian" (build 237)** (releases are named after Star Wars: Andor): a GitHub release titled *1.0* on the
+The release is **1.0 "Cassian" (build 237)** (major versions are named after Star Wars: Andor): a GitHub release titled *1.0* on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases) with the
 three driver files attached, `hue_bridge.c4z`, `hue_light.c4z` and
 `hue_scene.c4z`. Download all three; they must come from the same build. `N`
