@@ -18,6 +18,7 @@ local zone_lights_mod = require("bridge.zone_lights")
 local commands = require("bridge.commands")
 local tlscheck = require("bridge.tlscheck")
 local project_mod = require("bridge.project")
+local util = require("bridge.util")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -155,6 +156,26 @@ local function connection()
 	return nil
 end
 
+-- Why nothing that carries the key may go out now, or nil
+-- (docs/security-fixes-design.md §3): not paired; the TLS self-check found
+-- the controller accepting a decoy CA (until the next start or address
+-- change); the bridge refused the key (until Pair Bridge, an address change,
+-- or a Test Connection that shows the key works). Test Connection asks with
+-- `for_test`: a rejected key is the one thing it may disprove, so that
+-- refusal does not apply to it. The identity check is the callers' own step.
+local function keyed_refusal(for_test)
+	if not connection() then
+		return "not paired"
+	end
+	if state.tls_verdict == "not_pinned" then
+		return "TLS check failed"
+	end
+	if state.key_rejected and not for_test then
+		return "key rejected"
+	end
+	return nil
+end
+
 local function number_property(name, default)
 	return tonumber(Properties[name]) or default
 end
@@ -207,8 +228,20 @@ local function stream_address_text(spelling)
 end
 
 -- What the stream connects with. The stream calls this for every attempt,
--- so each connection gets the next spelling.
+-- so each connection gets the next spelling. Every path that starts the
+-- stream checks first; this is the last guard for a path added later (diff
+-- review 2026-10-25 row 6): nothing keyed to an unverified bridge, after a
+-- failed TLS check, or with a rejected key. The second value is the stream's
+-- status text.
 local function stream_connection()
+	local refusal = keyed_refusal()
+	if refusal == nil and state.identity_ok ~= true then
+		refusal = "bridge identity not verified yet"
+	end
+	if refusal and refusal ~= "not paired" then
+		log.warn("event stream not connected: %s", refusal)
+		return nil, "Not connected: " .. refusal
+	end
 	local conn = connection()
 	if conn then
 		state.stream_ip = next_stream_address(true)
@@ -257,12 +290,38 @@ local function key_rejected(code)
 	refresh_status()
 end
 
-local function bridge_request(req, callback)
-	if not connection() then
-		return callback({ ok = false, err = "not paired" })
+-- A 401/403 to a keyed module request is not proof that the key is gone:
+-- which other refusals CLIP v2 answers with 403 is not known [assumed:
+-- Signify's error list is behind a login]. One keyed GET of the bridge
+-- resource, which any valid key may read, decides; only its own 401/403
+-- locks (security review 2026-10-25 finding 4). One at a time, however many
+-- refusals arrive; a result for an earlier address or pairing is ignored.
+local key_confirm_running = false
+
+local function confirm_key_rejected(code)
+	if key_confirm_running or state.key_rejected or keyed_refusal() or state.identity_ok ~= true then
+		return
 	end
-	if state.key_rejected then
-		return callback({ ok = false, err = "key rejected", code = state.key_rejected })
+	key_confirm_running = true
+	local gen, creds = state.address_gen, state.creds
+	log.info("HTTP %d to a keyed request: asking the bridge resource whether the key itself is refused", code)
+	http.request({ ip = state.ip, key = creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+		key_confirm_running = false
+		if gen ~= state.address_gen or creds ~= state.creds then
+			return log.debug("key check for an earlier address or pairing ignored")
+		end
+		if r.code == 401 or r.code == 403 then
+			key_rejected(r.code)
+		elseif r.ok then
+			log.warn("the bridge refused one request (HTTP %d) but accepts the key: not locked", code)
+		end
+	end)
+end
+
+local function bridge_request(req, callback)
+	local refusal = keyed_refusal()
+	if refusal then
+		return callback({ ok = false, err = refusal, code = refusal == "key rejected" and state.key_rejected or nil })
 	end
 	if state.identity_ok ~= true then
 		return callback({ ok = false, err = "bridge identity not verified yet" })
@@ -272,8 +331,7 @@ local function bridge_request(req, callback)
 	req.tls = nil
 	return http.request(req, function(r)
 		if type(r) == "table" and (r.code == 401 or r.code == 403) then
-			key_rejected(r.code)
-			r.err = "key rejected"
+			confirm_key_rejected(r.code)
 		end
 		callback(r)
 	end)
@@ -608,7 +666,12 @@ local function new_stream()
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
-			-- callback; nothing here starts a transfer.
+			-- callback; nothing here starts a transfer. A container that is not
+			-- a table is the bridge's or a peer's malformed data (security
+			-- review 2026-10-25 finding 6).
+			if type(container) ~= "table" then
+				return
+			end
 			state.lights:on_container(container)
 			state.scenes:on_container(container)
 			state.zone_lights:on_container(container)
@@ -632,7 +695,7 @@ local function restart_stream(force)
 	local was_running = state.stream:running()
 	state.stream:stop()
 	state.stream = new_stream()
-	if (was_running or force) and connection() and not state.key_rejected then
+	if (was_running or force) and keyed_refusal() == nil and state.identity_ok == true then
 		state.stream:start()
 	end
 end
@@ -659,11 +722,40 @@ local function cancel_identity_retry()
 	end
 end
 
+-- Who waits for the identity check, by purpose ("stream", "test"): one check
+-- answers them all, so Test Connection never drops the stream's pending start
+-- and two stream starts never queue twice (the later callback of a purpose
+-- replaces the earlier). Kept across the 30 s retries; dropped at an address
+-- change or Forget Pairing. identity_running is the address generation whose
+-- check is in flight (its GET or its TLS check). During a 30 s wait it is
+-- nil, so a new waiter (a Test Connection click) starts the check at once
+-- instead of waiting for the timer.
+local IDENTITY_PURPOSES = { "stream", "test" }
+local identity_waiters = {}
+local identity_running = nil
+
+local function answer_identity(ok)
+	identity_running = nil
+	local waiters = identity_waiters
+	identity_waiters = {}
+	for _, purpose in ipairs(IDENTITY_PURPOSES) do
+		if waiters[purpose] then
+			waiters[purpose](ok)
+		end
+	end
+end
+
+local function reset_identity_check()
+	cancel_identity_retry()
+	identity_waiters = {}
+	identity_running = nil
+end
+
 -- The bridge's model, name and firmware rows (docs/bridge-compat-design.md
 -- Decision 3), from a /api/0/config answer or a pairing probe.
 local function show_bridge_info(info)
 	prop("Bridge Model", config.model_label(info.model))
-	prop("Bridge Name", info.name or "")
+	prop("Bridge Name", util.display_name(info.name))
 	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
 	if config.firmware_check(info.sw_version) == "old" then
 		log.warn("bridge firmware %s is older than %d: the CLIP v2 API may be missing", tostring(info.sw_version),
@@ -674,11 +766,21 @@ end
 -- The TLS self-check (issue #53, bridge/tlscheck.lua): before the key goes
 -- anywhere, a request with a decoy CA bundle must fail certificate
 -- verification. If the controller accepts it, its OS is not using the
--- configured bundle and nothing keyed is sent. Once per start and address;
--- an inconclusive answer is asked again at the next identity check.
+-- configured bundle and nothing keyed is sent. Once per start and address.
+-- `done(trusted, again)`: `again` asks the identity check to run again in
+-- 30 s, keeping its waiters.
+-- - not_pinned sticks until the next start or address change: a later
+--   inconclusive answer must not lift it (security review 2026-10-25
+--   finding 2).
+-- - inconclusive passes only on a Director version that has answered pinned
+--   before: pinning is a property of the OS, and an active attacker can
+--   always make the decoy request fail some other way (finding 3).
 local function tls_gate(gen, ip, done)
 	if state.tls_verdict == "pinned" then
 		return done(true)
+	end
+	if state.tls_verdict == "not_pinned" then
+		return done(false)
 	end
 	tlscheck.run(ip, function(verdict, detail)
 		if gen ~= state.address_gen then
@@ -695,17 +797,42 @@ local function tls_gate(gen, ip, done)
 		end
 		if verdict == "pinned" then
 			state.tls_verdict = verdict
+			tlscheck.remember_pinned()
 			log.debug("TLS check: the decoy bundle was refused (%s); trust is pinned", tostring(detail))
-		else
-			log.warn("TLS check inconclusive (%s); asked again at the next identity check", tostring(detail))
+			return done(true)
 		end
-		done(true)
+		if tlscheck.pinned_before() then
+			log.warn("TLS check inconclusive (%s); this Director version answered pinned before, so it passes",
+				tostring(detail))
+			return done(true)
+		end
+		prop("Status", string.format("TLS check inconclusive (%s): nothing is sent; checking again in %d s",
+			tostring(detail), IDENTITY_RETRY_MS / 1000))
+		log.warn("TLS check inconclusive (%s) on a Director version that has not answered pinned: nothing keyed is "
+			.. "sent; again in %d s", tostring(detail), IDENTITY_RETRY_MS / 1000)
+		done(false, true)
 	end)
 end
 
-local function verify_identity(callback)
-	cancel_identity_retry()
+-- Runs the identity check, or joins the one in flight; `purpose` and
+-- `callback(ok)` as for identity_waiters above (a retry passes neither).
+local function verify_identity(purpose, callback)
+	if purpose then
+		identity_waiters[purpose] = callback
+	end
 	local ip, gen = state.ip, state.address_gen
+	if identity_running == gen then
+		return -- the check in flight answers this waiter too
+	end
+	cancel_identity_retry()
+	identity_running = gen
+	local function again()
+		identity_running = nil
+		identity_timer = C4:SetTimer(IDENTITY_RETRY_MS, function()
+			identity_timer = nil
+			verify_identity()
+		end)
+	end
 	http.request({ ip = ip, path = "/api/0/config", timeout = 10 }, function(r)
 		if ip ~= state.ip or gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
@@ -721,14 +848,20 @@ local function verify_identity(callback)
 				prop("Status", string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip,
 					config.model_label(cfg.modelid)))
 				log.warn("bridge at %s is %s: no request is sent", ip, config.model_label(cfg.modelid))
-				return callback(false)
+				return answer_identity(false)
 			end
 		end
 		if reported and reported == state.creds.bridge_id then
-			return tls_gate(gen, ip, function(trusted)
+			return tls_gate(gen, ip, function(trusted, retry)
+				if gen ~= state.address_gen then
+					return
+				end
 				state.identity_ok = trusted
+				if retry then
+					return again() -- Status already says why
+				end
 				refresh_status()
-				callback(trusted)
+				answer_identity(trusted)
 			end)
 		end
 		state.identity_ok = false
@@ -736,15 +869,12 @@ local function verify_identity(callback)
 			prop("Status", string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
 				.. "is corrected", ip, reported, state.creds.bridge_id))
 			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
-			return callback(false)
+			return answer_identity(false)
 		end
 		prop("Status", string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
 			tostring(r.ok and "no bridge id in the answer" or r.err), IDENTITY_RETRY_MS / 1000))
 		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
-		identity_timer = C4:SetTimer(IDENTITY_RETRY_MS, function()
-			identity_timer = nil
-			verify_identity(callback)
-		end)
+		again()
 	end)
 end
 
@@ -763,8 +893,12 @@ local function choose_stream_address(callback)
 	if not paired() then
 		return single("not paired")
 	end
+	local refusal = keyed_refusal()
+	if refusal then
+		return log.info("stream address not chosen: %s", refusal) -- Status says why
+	end
 	if state.identity_ok ~= true then
-		return verify_identity(function(ok)
+		return verify_identity("stream", function(ok)
 			if ok then
 				choose_stream_address(callback)
 			end
@@ -850,7 +984,7 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 	if changed and state.late_init_done then
 		state.stream_ip = nil
 		state.stream_family = nil
-		cancel_identity_retry()
+		reset_identity_check()
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
@@ -926,10 +1060,29 @@ end
 -- GET /clip/v2/resource/bridge with the key via `host` (the dotted address;
 -- dev builds may pass another spelling, see bridge/devtools.lua), then the
 -- application-layer identity check described in docs/design.md.
+-- Gated like every keyed request (security review 2026-10-25 finding 1):
+-- refused after a failed TLS check, and sent only once the unkeyed identity
+-- check has passed, so a different bridge at the address is reported from
+-- /api/0/config without the key. A rejected key does not stop it: a 200 with
+-- the paired bridge id is how the key is shown to work again, which clears
+-- the lock and starts the stream (finding 4).
 local function test_connection(host)
-	if not connection() then
+	local refusal = keyed_refusal(true)
+	if refusal == "not paired" then
 		prop("Status", "Not paired")
 		return
+	end
+	if refusal then
+		prop("Status", "Test refused: " .. refusal .. "; nothing is sent (see Attention)")
+		return
+	end
+	if state.identity_ok ~= true then
+		prop("Status", "Testing: checking the bridge identity first")
+		return verify_identity("test", function(ok)
+			if ok then
+				test_connection(host)
+			end
+		end)
 	end
 	prop("Status", "Testing: GET /clip/v2/resource/bridge via " .. host)
 	local started = os.time()
@@ -953,6 +1106,15 @@ local function test_connection(host)
 			prop("Status", string.format("Test failed: bridge reports ID %s, expected %s",
 				reported, state.creds.bridge_id))
 			return
+		end
+		if state.key_rejected then
+			log.warn("Test Connection: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
+			state.key_rejected = nil
+			if state.stream_ip then
+				restart_stream(true)
+			else
+				choose_stream_address(function() restart_stream(true) end)
+			end
 		end
 		prop("Status", string.format("Test OK: HTTP 200 via %s in %d s, bridge %s", host, secs,
 			tostring(reported or state.creds.bridge_id)))
@@ -1517,6 +1679,11 @@ dispatch.commands["Connect_Event_Stream"] = function()
 		prop("Event Stream", "Not paired")
 		return
 	end
+	local refusal = keyed_refusal()
+	if refusal then
+		prop("Event Stream", "Not connected: " .. refusal)
+		return
+	end
 	if not state.stream_ip then
 		return choose_stream_address(function() restart_stream(true) end)
 	end
@@ -1529,7 +1696,7 @@ end
 
 dispatch.commands["Forget_Pairing"] = function()
 	state.identity_ok = nil
-	cancel_identity_retry()
+	reset_identity_check()
 	state.stream:stop()
 	credentials.clear()
 	state.creds = nil
