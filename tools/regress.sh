@@ -37,8 +37,8 @@ run_action() { # run_action "Action" [Param=value ...] -> prints the wait output
 # shipped log (every Status and Last Action text is logged as it is set)
 # until <pattern> shows up, at most <seconds>; prints the matching lines.
 settle() { # settle <pattern> <seconds>
-	local i out
-	for i in $(seq 1 "$2"); do
+	local out
+	for _ in $(seq 1 "$2"); do
 		out="$("${DEVCTL[@]}" log 2>&1 | tail -300 | grep -E "$1" | tail -3)"
 		if [[ -n "$out" ]]; then echo "$out"; return 0; fi
 		sleep 2

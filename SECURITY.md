@@ -51,6 +51,26 @@ firmware belong to Snap One and Signify; report problems in them to those
 companies. What someone already on your LAN can do by talking to the bridge
 directly is the Hue API's own threat model, not this driver's.
 
+## What is checked automatically
+
+- **Secrets and private data.** Every pull request and every push to `main`
+  runs `gitleaks` over the working tree and the whole git history with the
+  repository's rules (`.gitleaks.toml`); the same check runs locally in
+  `tools/check.sh`. A real key, token, private key or LAN address fails it.
+- **Code scanning.** GitHub's CodeQL default setup scans the Python tooling
+  and the workflows; alerts are on the repository's Security tab.
+- **OpenSSF Scorecard** rates the repository's practices (pinned actions,
+  branch protection, token permissions, signed releases) on every push to
+  `main` and weekly:
+  <https://scorecard.dev/viewer/?uri=github.com/corytron/c4-hue-driver>.
+- **Build provenance.** The Release workflow builds the packages and signs a
+  provenance attestation for each; the bundle is also attached to the
+  release as `attestations.sigstore.json`. Verify a download with
+  `gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver`
+  (GitHub CLI 2.49 or newer; repeat per package) and its checksum against
+  `SHA256SUMS.txt`. A package that fails either check was not built by this
+  repository's workflow: do not install it, and report it.
+
 ## What to expect
 
 A personal project: no service level, no bounty. The author reads reports as

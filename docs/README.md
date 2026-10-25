@@ -19,7 +19,8 @@ code win. The owner's manual itself is not here but in the driver:
   and storage. Dated sections; each API claim is marked verified or assumed.
 - [`release-checklist.md`](release-checklist.md): what a build must pass on
   this VM, on the dev loop, in Composer and on the owner's phone and keypads
-  before it is called good, and the naming of the 1.0 release.
+  before it is called good; the naming of the 1.0 release, how a release is
+  cut (the Release workflow) and how it reaches the house (`tools/deploy.py`).
 
 ## Feature contracts
 
@@ -91,6 +92,12 @@ contracts above.
   through a Claude Code session on the Windows machine (UI Automation from
   PowerShell, `tools/composer/Composer.psm1`), and the test rounds run that
   way.
+- [`cicd-gitops-design.md`](cicd-gitops-design.md): the CI/CD and GitOps
+  contract (2026-10-25): one check script for the VM and CI
+  (`tools/check.sh`), the four required jobs, attested releases cut by the
+  Release workflow, `deploy/house.yaml` as the desired state of the house,
+  the GitHub Deployment as the observed state, the drift issue,
+  `tools/deploy.py`, and what is automatic, offered or never without a click.
 
 ## Reviews
 
