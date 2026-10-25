@@ -380,11 +380,14 @@ where each stands on 2026-10-25.
 - **#228** Install release 1.0 build 329 on the house after the #40
   checks (`deploy.py start`, the Windows session, `deploy.py done`; no
   reboot); then Debug Mode Off and the dev loop ends.
-- **#40** Time-of-day scenes: the keypad, Recall As after a cross-kind
-  re-link, a dim before a slot boundary and API-made schedules, run on
-  2026-10-25 from 10:00 with `tools/smart_scene_probe.py` (plan:
-  `docs/smart-scenes-research.md` §8); the 16:00 slot boundary and the
-  after-sunset V8 check are later that day. No result is recorded yet.
+- **#40** Time-of-day scenes, parked for the next major release
+  (milestone 2.0) on 2026-10-25: the keypad works on a time-based scene
+  (taps, holds from off, the short hold), see `docs/smart-scenes-research.md`
+  §7b; whether API-made schedules advance, a dim before an app-made slot
+  boundary, Recall As after a cross-kind re-link and V8 stay open.
+- **#249** Holds on scenes, zone and room lights jump to the end of the
+  range: Hue ignores `dynamics.duration` on grouped_light dims (measured
+  2026-10-25); the fix is a design choice for the owner.
 - **#61** Retake the manual's pictures with `tools/composer/Shots.ps1`
   (`docs/screenshots-plan.md`) after the release install.
 - **#65** Read the Event Stream reconnect count after a day on the release.
