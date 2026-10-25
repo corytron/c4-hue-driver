@@ -58,7 +58,12 @@ directly is the Hue API's own threat model, not this driver's.
   repository's rules (`.gitleaks.toml`); the same check runs locally in
   `tools/check.sh`. A real key, token, private key or LAN address fails it.
 - **Code scanning.** GitHub's CodeQL default setup scans the Python tooling
-  and the workflows; alerts are on the repository's Security tab.
+  and the workflows on every pull request and every push to `main`, and
+  OpenSSF Scorecard's findings land beside them on the Security tab. After
+  each push to `main` a workflow waits for those scans and keeps one issue
+  labelled `security`, *Code scanning: N open alerts on main*, listing what
+  is open until each alert is fixed or dismissed with a reason. CodeQL has no
+  Lua support: the drivers are covered by luacheck and the busted specs.
 - **OpenSSF Scorecard** rates the repository's practices (pinned actions,
   branch protection, token permissions, signed releases) on every push to
   `main` and weekly:

@@ -1,0 +1,56 @@
+# The owner's rule (2026-10-25): every merge to main is scanned again and what the
+# scan finds is addressed. CodeQL default setup and the Scorecard workflow both
+# analyse every push to main; this workflow then keeps exactly one issue labelled
+# "security", "Code scanning: N open alert(s) on main", in step with the open
+# alerts of main (tools/code_scanning_issue.py): created when alerts appear,
+# updated with one comment when the set changes, closed when none remain. On a
+# push it first waits (up to 30 minutes) until the scans of that commit are in, so
+# the issue reflects the merge just made; daily and on request it reports the
+# alerts as they are. It never dismisses an alert, never changes code, never
+# reopens or edits a closed issue and never opens a second one. The workflow
+# token reads code scanning alerts (security-events) and Dependabot alerts
+# (vulnerability-alerts) but cannot read secret scanning alerts; the issue says so.
+name: Code scanning triage
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '41 7 * * *' # daily, 07:41 UTC (after Monday's 07:00 Scorecard run)
+  workflow_dispatch:
+
+permissions: {}
+
+# One triage at a time, so two runs never race on the issue. A newer push queues
+# behind the running one, which stops waiting as soon as main moves on and
+# leaves the issue to the newer run.
+concurrency:
+  group: code-scanning-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: Keep the code scanning issue current
+    if: github.repository == 'corytron/c4-hue-driver'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40 # the wait for the scans gives up after 30
+    permissions:
+      contents: read # check out the script, read the head of main
+      security-events: read # list the code scanning analyses and alerts
+      vulnerability-alerts: read # count the open Dependabot alerts
+      issues: write # open, update or close the one code scanning issue
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Wait for the scans of a push, then update the code scanning issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY")
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            args+=(--wait-for "$GITHUB_SHA")
+          fi
+          python3 tools/code_scanning_issue.py "${args[@]}"

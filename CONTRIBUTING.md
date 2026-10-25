@@ -115,8 +115,10 @@ not installed is reported as `skip` and does not fail the run; CI runs the
 same script with `--strict`, where a skip is a failure, in four jobs whose
 names are the required checks on `main`: *Lint and test (Lua 5.1)*, *Build
 the three .c4z packages*, *Tooling checks (shell, Python, XML, workflows)*
-and *Secrets and private data*. The tool versions are pinned in
-`tools/setup-checks.sh`, which verifies the sha256 of what it downloads.
+and *Secrets and private data*. The tool versions are pinned with their
+sha256: actionlint and gitleaks in `tools/setup-checks.sh`, which verifies
+what it downloads, and ruff, zizmor and shellcheck-py in
+`tools/requirements-checks.txt`, which pip enforces (`--require-hashes`).
 
 ## Pull request checklist
 

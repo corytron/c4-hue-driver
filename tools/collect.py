@@ -4,9 +4,11 @@
     python3 -I tools/collect.py --dir build/collect [--port 8090]
 
 PUT /img/<name>.png with the file as the body saves it as <dir>/img/<name>.png;
-GET /  lists what has arrived. Names are reduced to [A-Za-z0-9._-], one path
-segment under the given sub-folder, so nothing can escape --dir. LAN use for a
-session only; stop it when the round is over (docs/documentation-plan.md).
+GET /  lists what has arrived. Exactly two path segments, each reduced to
+[A-Za-z0-9._-] and refused when it starts with a dot (so neither "." nor ".."
+nor a hidden name), and the resolved path must lie inside --dir, so nothing
+can escape it, not even through a symlink. LAN use for a session only; stop
+it when the round is over (docs/documentation-plan.md).
 """
 
 import argparse
@@ -21,13 +23,18 @@ class Handler(BaseHTTPRequestHandler):
     root = "."
 
     def _target(self):
+        """The file a PUT /<folder>/<name> writes, or None when the path is refused."""
         parts = [p for p in self.path.split("?")[0].split("/") if p]
         if len(parts) != 2:
             return None
         folder, name = (SAFE.sub("_", p) for p in parts)
-        if not name or name.startswith("."):
+        # "." and ".." survive SAFE, so a folder of ".." used to write next to --dir.
+        if folder.startswith(".") or name.startswith("."):
             return None
-        return os.path.join(self.root, folder, name)
+        target = os.path.realpath(os.path.join(self.root, folder, name))
+        if not target.startswith(os.path.join(self.root, "")):
+            return None
+        return target
 
     def do_PUT(self):
         target = self._target()
@@ -73,7 +80,7 @@ def main():
     ap.add_argument("--port", type=int, default=8090)
     args = ap.parse_args()
     os.makedirs(args.dir, exist_ok=True)
-    Handler.root = os.path.abspath(args.dir)
+    Handler.root = os.path.realpath(args.dir)
     print("collecting into %s on port %d" % (Handler.root, args.port), flush=True)
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
 
