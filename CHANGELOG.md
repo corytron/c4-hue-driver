@@ -12,6 +12,11 @@ listed.
 
 ## Unreleased
 
+### Changed
+- The manual says what to do when a device's Documentation tab still shows
+  the page of the build before right after an update: select the device
+  again (#260).
+
 ## 1.0 "Cassian", build 359 (2026-10-25)
 
 ### Added

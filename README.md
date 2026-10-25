@@ -260,7 +260,9 @@ If Composer asks **Restart Director?**, the new build changes a driver's
 capabilities. Answer Yes, then **reboot the controller from System Manager**
 (Tools > System Manager): the new code loads only with the reboot, and until
 then the affected devices keep the old Driver Version. Builds that change only
-Lua or connections take effect at once.
+Lua or connections take effect at once. If a device's Documentation tab still
+shows the page of the build before right after an update, select the device
+again.
 
 ## Use it
 
