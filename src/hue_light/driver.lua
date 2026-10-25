@@ -50,23 +50,25 @@ local FORGOTTEN_INSTRUCTION = "Delete this device in Composer, or bind it again 
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaTimer, assume = fn }
-local color_params_logged = false
 
 -- The plumbing both device drivers share (common/device.lua): properties and
 -- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
--- for bridge messages that arrive before late init, the keypad LEDs and
--- Button Links, the binding re-check, the goodbye, and in dev builds the dev
--- loop's log forwarding and DEV_RELOAD. The hooks it asks of this driver
--- (is_on, button_action, on_bridge_found) are set below, with their functions.
+-- for bridge messages that arrive before late init, the keypad (LEDs, Button
+-- Links, settings, the press machine), the binding re-check, the goodbye, and
+-- in dev builds the dev loop's log forwarding and DEV_RELOAD. Its hooks
+-- (is_on, on_bridge_found, on_click, on_hold, on_finish) are set below.
 local dev = device.new({
 	prefix = LOG_PREFIX,
 	tree = "light", -- the dev loop's name for this driver's source tree
 	bridge = function() return bridge end,
 	rid = function() return st.rid end,
+	noun = "light",
+	-- driver.xml declares supports_default_on, click_rates and hold_rates.
+	settings = { "preset", "click_up", "click_down", "hold_up", "hold_down" },
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
-local update_leds, LINK_BUTTON = dev.update_leds, device.LINK_BUTTON
+local update_leds, LINK_BUTTON, send = dev.update_leds, device.LINK_BUTTON, dev.send
 
 -- Identity and status texts ------------------------------------------------
 
@@ -337,6 +339,10 @@ local function ready(command)
 	return true
 end
 
+-- True when the target went to the bridge. When the send fails
+-- (common/device.lua logs why) nothing changed: the proxy hears CHANGED with
+-- the level its CHANGING came from, and a colour kept for the next turn-on
+-- keeps waiting for it.
 local function set_brightness(target, rate)
 	target, rate = tonumber(target), tonumber(rate) or 0
 	if not target then
@@ -345,13 +351,19 @@ local function set_brightness(target, rate)
 	if not ready("brightness target") then
 		return
 	end
+	local current = state.to_proxy_brightness(st) or 0
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = state.to_proxy_brightness(st) or 0,
+		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = target,
 		RATE = rate,
 	})
+	local stored = st.pending_color
 	local params = state.from_brightness_target(st, target, rate)
-	C4:SendToDevice(bridge, "HUE_SET", params)
+	if not send("HUE_SET", params) then
+		st.pending_color = stored
+		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = current })
+		return false
+	end
 	arm("brightness", rate, function()
 		log.debug("brightness target %s unconfirmed after %d ms; assuming it", tostring(target), rate + FALLBACK_MS)
 		local changed = state.apply_hue(st, params)
@@ -360,6 +372,7 @@ local function set_brightness(target, rate)
 			report_color() -- the turn-on carried a colour stored while off
 		end
 	end)
+	return true
 end
 
 local function set_color(x, y, mode, rate)
@@ -382,7 +395,12 @@ local function set_color(x, y, mode, rate)
 	})
 	local params, why = state.from_color_target(st, x, y, mode, rate)
 	if params then
-		C4:SendToDevice(bridge, "HUE_SET", params)
+		if not send("HUE_SET", params) then
+			-- Nothing reached the bridge (logged): the proxy hears the colour
+			-- the light still has, when one is known, as for an ignored target.
+			report_color()
+			return
+		end
 		arm("color", rate, function()
 			log.debug("colour target unconfirmed after %d ms; assuming it", rate + FALLBACK_MS)
 			state.apply_hue(st, params)
@@ -593,16 +611,12 @@ local function pick(params, names)
 	return nil
 end
 
+-- A Navigator's colour pick arrives as LIGHT_COLOR_TARGET_MODE 0 with X and
+-- Y, a temperature pick as mode 1 with the temperature's X and Y, and RATE
+-- [verified: hardware 2026-10-22, the one-time parameter log this driver
+-- carried until 2026-10-25, checklist D.10]; the other spellings in
+-- COLOR_KEYS are kept for other proxy versions [assumed].
 dispatch.proxy["SET_COLOR_TARGET"] = function(_, params)
-	if not color_params_logged then
-		color_params_logged = true
-		local parts = {}
-		for k, v in pairs(params) do
-			parts[#parts + 1] = tostring(k) .. "=" .. tostring(v)
-		end
-		table.sort(parts)
-		log.always("first SET_COLOR_TARGET params: %s", table.concat(parts, " "))
-	end
 	set_color(pick(params, COLOR_KEYS.x), pick(params, COLOR_KEYS.y),
 		pick(params, COLOR_KEYS.mode), pick(params, COLOR_KEYS.rate))
 end
@@ -637,52 +651,17 @@ dispatch.proxy["SET_LEVEL"] = function(_, params) set_brightness(params.LEVEL, p
 dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
 
 -- Keypad buttons ----------------------------------------------------------
--- A keypad bound to the proxy's Top / Bottom / Toggle Button Link inputs
--- reaches the driver as BUTTON_ACTION { BUTTON_ID 0 top 1 bottom 2 toggle,
--- ACTION 1 press, 2 release as a click, 0 release after a hold }; the proxy
--- expects a BUTTON_ACTION notification echoing every press and release
--- [verified: proxy-protocol reference, light_v2 BUTTON_ACTION command and
--- notification]. Behaviour and defaults: docs/keypad-design.md.
-local BUTTON_TOP, BUTTON_BOTTOM = 0, 1
-local ACT_RELEASE, ACT_PRESS, ACT_CLICK = device.ACT_RELEASE, device.ACT_PRESS, device.ACT_CLICK
-local HOLD_AFTER_MS = 400       -- a press still down after this starts a ramp
-local HOLD_TICK_MS = 100        -- the level estimate advances this often during a ramp
-local RAMP_AFTER_ON_MS = 600    -- hold from off: the ramp follows the turn-on at 1 % this much later
-local CLICK_GUARD_MS = 1000     -- a click this soon after a hold's release on that button is ignored
-local SETTING_KEYS = { preset = "preset_level", click_up = "click_rate_up", click_down = "click_rate_down",
-	hold_up = "hold_rate_up", hold_down = "hold_rate_down" }
-local SETTING_DEFAULTS = { preset = 100, click_up = 250, click_down = 250, hold_up = 5000, hold_down = 5000 }
-local settings = {}
-local hold = nil  -- { button, timer, held, ramping, level, step, to } while a button is down
-local guard = nil -- { button, timer } for CLICK_GUARD_MS after a hold's release
+-- What a tap and a hold do to a light; the press / click / release machine
+-- and the proxy's preset and rates are common/device.lua's. A hold's record
+-- carries the ramp: ramping, the level estimate, its step and its end (to).
+-- Behaviour: docs/keypad-design.md, "Driver behaviour" and "Light parity".
+local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
+local HOLD_TICK_MS = 100 -- the level estimate advances this often during a ramp
+local setting = dev.setting
 
-local function setting(name)
-	return tonumber(settings[name]) or SETTING_DEFAULTS[name]
-end
-
-local function load_settings()
-	for name, key in pairs(SETTING_KEYS) do
-		settings[name] = tonumber(C4:PersistGetValue(key))
-	end
-end
-
-local function save_setting(name, value)
-	value = tonumber(value)
-	if not value then
-		return log.warn("%s without a number", SETTING_KEYS[name])
-	end
-	settings[name] = value
-	C4:PersistSetValue(SETTING_KEYS[name], value)
-end
-
-local function end_hold()
-	if hold and hold.timer then
-		hold.timer:Cancel()
-	end
-	hold = nil
-end
-
-local function click(button)
+-- A tap: top goes to the On preset over the click rate up, bottom off over
+-- the click rate down, toggle either way from the state the light shows.
+function dev.on_click(button)
 	if button == BUTTON_TOP then
 		set_brightness(setting("preset"), setting("click_up"))
 	elseif button == BUTTON_BOTTOM then
@@ -694,29 +673,14 @@ local function click(button)
 	end
 end
 
-local function disarm_guard()
-	if guard then
-		guard.timer:Cancel()
-		guard = nil
-	end
-end
-
-local function arm_guard(button)
-	disarm_guard()
-	local g = { button = button }
-	g.timer = C4:SetTimer(CLICK_GUARD_MS, function()
-		if guard == g then
-			guard = nil
-		end
-	end)
-	guard = g
-end
-
 -- A hold uses Hue's own relative dim (HUE_DIM up / down to the bridge, a
 -- grouped dimming_delta on the light), stopped by the release, as the scene
 -- does; the proxy hears CHANGING toward the end of the range over the hold
 -- rate scaled by the distance, and a 100 ms tick keeps an estimate of the
--- level for the stop and its fallback (docs/keypad-design.md).
+-- level for the stop and its fallback (docs/keypad-design.md). A dim that
+-- never reaches the bridge (logged) moves nothing: the tick stops, the
+-- release has nothing to stop, and the proxy hears the level the hold began
+-- at.
 local function start_ramp(h, up, from)
 	local to = up and 100 or 1
 	local full = setting(up and "hold_up" or "hold_down")
@@ -724,7 +688,7 @@ local function start_ramp(h, up, from)
 	h.ramping, h.level, h.to = true, from, to
 	h.step = (to - from) / math.max(1, duration / HOLD_TICK_MS)
 	h.timer = C4:SetTimer(HOLD_TICK_MS, function()
-		if hold ~= h then
+		if not dev.holding(h) then
 			return
 		end
 		h.level = h.level + h.step
@@ -741,101 +705,50 @@ local function start_ramp(h, up, from)
 		RATE = duration,
 	})
 	log.debug("hold: dim %s from %d over %d ms", up and "up" or "down", from, duration)
-	C4:SendToDevice(bridge, "HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
-		duration = string.format("%d", duration) })
+	if not send("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
+		duration = string.format("%d", duration) }) then
+		h.timer:Cancel()
+		h.timer, h.ramping = nil, false
+		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = from })
+	end
 end
 
--- The hold timer fired with the button still down: top (or toggle while
--- off) dims up, bottom (or toggle while on) down. From off, top turns the
--- light on at 1 % first and ramps up from there; bottom does nothing.
-local function start_hold(h)
-	h.held = true
-	local on = st.on == true
-	local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
-	if not up and not on then
-		return log.debug("hold: dimming down a light that is off does nothing")
-	end
+-- A hold began (the machine chose the direction; down from off does
+-- nothing): on, the ramp starts from the level shown; off, the light turns
+-- on at 1 % first and the ramp up follows (dev.dim_after_on).
+function dev.on_hold(h, up, on)
 	if not ready("hold") then
 		return
 	end
 	if on then
 		return start_ramp(h, up, state.to_proxy_brightness(st) or 1)
 	end
-	set_brightness(1, 0)
-	h.timer = C4:SetTimer(RAMP_AFTER_ON_MS, function()
-		if hold ~= h then
-			return
-		end
-		h.timer = nil
-		if bridge and st.rid then
-			start_ramp(h, true, st.on == true and state.to_proxy_brightness(st) or 1)
-		end
+	if not set_brightness(1, 0) then
+		return -- the turn-on never reached the bridge (logged): nothing to dim up from
+	end
+	dev.dim_after_on(h, function()
+		start_ramp(h, true, st.on == true and state.to_proxy_brightness(st) or 1)
 	end)
 end
 
--- Release (or release-as-click) after a hold: stop the dim at Hue, which
--- keeps the level it reached; `level` is the estimate, for the bridge to
--- write should Hue refuse the stop. The proxy hears the bridge's next
--- report, or the estimate after the fallback time. The click some keypads
--- send after a hold is ignored for a moment.
-local function finish_hold()
-	local h = hold
-	end_hold()
-	arm_guard(h.button)
+-- The release (or release-as-click) after a hold: stop the dim at Hue,
+-- which keeps the level it reached; `level` is the estimate, for the bridge
+-- to write should Hue refuse the stop. The proxy hears the bridge's next
+-- report, or the estimate after the fallback time, also when the stop
+-- itself never reaches the bridge (logged; Hue then dims on to the end of
+-- the range and reports it). The machine has armed the click guard.
+function dev.on_finish(h)
 	if not (h.ramping and bridge and st.rid) then
 		return
 	end
 	local level = math.floor(h.level + 0.5)
-	C4:SendToDevice(bridge, "HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
+	send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
 	arm("brightness", 0, function()
 		log.debug("dim stop unconfirmed after %d ms; assuming %d %%", FALLBACK_MS, level)
 		state.apply_hue(st, { on = "true", brightness = tostring(level) })
 		report_brightness()
 	end)
 end
-
-local function button_action(button, action)
-	if action == ACT_PRESS then
-		end_hold()
-		local h = { button = button }
-		h.timer = C4:SetTimer(HOLD_AFTER_MS, function()
-			if hold == h then
-				h.timer = nil
-				start_hold(h)
-			end
-		end)
-		hold = h
-	elseif action == ACT_CLICK then
-		if hold and hold.held then
-			finish_hold()
-		elseif guard and guard.button == button then
-			end_hold()
-			log.debug("click on button %d right after a hold ignored", button)
-		else
-			end_hold()
-			click(button)
-		end
-	elseif action == ACT_RELEASE then
-		-- Release after a hold: stop the ramp; a release that follows a click
-		-- has nothing left to do.
-		if hold and hold.held then
-			finish_hold()
-		else
-			end_hold()
-		end
-	end
-end
-
--- The proxy's own route (BUTTON_ACTION on the proxy binding, echoed) and the
--- Button Link bindings (DO_PUSH / DO_RELEASE / DO_CLICK on 200, 201, 202)
--- both end here (common/device.lua).
-dev.button_action = button_action
-
-dispatch.proxy["SET_PRESET_LEVEL"] = function(_, params) save_setting("preset", params.LEVEL) end
-dispatch.proxy["SET_CLICK_RATE_UP"] = function(_, params) save_setting("click_up", params.RATE) end
-dispatch.proxy["SET_CLICK_RATE_DOWN"] = function(_, params) save_setting("click_down", params.RATE) end
-dispatch.proxy["SET_HOLD_RATE_UP"] = function(_, params) save_setting("hold_up", params.RATE) end
-dispatch.proxy["SET_HOLD_RATE_DOWN"] = function(_, params) save_setting("hold_down", params.RATE) end
 
 -- Lifecycle ----------------------------------------------------------------
 
@@ -856,7 +769,7 @@ local schedule_recheck, cancel_recheck = dev.schedule_recheck, dev.cancel_rechec
 
 function OnDriverLateInit()
 	load_identity()
-	load_settings()
+	dev.load_settings()
 	dev.load_colors()
 	dispatch.replay_properties(Properties)
 	dev.show_driver_version(1)
@@ -874,11 +787,15 @@ function OnDriverLateInit()
 	if not bridge then
 		schedule_recheck(1)
 	end
+	-- Last: a binding change Director delivered before late init acts now
+	-- (common/device.lua), against the binding state read above.
+	dev.replay_bindings()
 end
 
 -- Control bindings only: the bridge binding, and the Button Links, where a
--- newly bound keypad gets the LED state; the proxy's binding is not one.
-function OnBindingChanged(idBinding, _, bound, otherDevice)
+-- newly bound keypad gets the LED state; the proxy's binding is not one. A
+-- call before late init waits for it (common/device.lua).
+OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice)
 	if LINK_BUTTON[idBinding] then
 		if bound then
 			update_leds(true)
@@ -898,7 +815,7 @@ function OnBindingChanged(idBinding, _, bound, otherDevice)
 		refresh_status()
 		report_online()
 	end
-end
+end)
 
 -- Composer is deleting this device: tell the bridge, so it tombstones the
 -- entry instead of fanning state out to a dead id (common/device.lua).
@@ -910,7 +827,5 @@ end
 function OnDriverDestroyed()
 	settle("brightness")
 	settle("color")
-	end_hold()
-	disarm_guard()
-	cancel_recheck()
+	dev.cancel_timers() -- a keypad press and the click guard, the binding re-check, the Driver Version looks
 end

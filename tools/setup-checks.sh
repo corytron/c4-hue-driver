@@ -6,20 +6,43 @@
 #
 # Usage: tools/setup-checks.sh
 #
-# Pinned versions. Python tools go through `python3 -m pip install --user
-# --break-system-packages` (pipx or uv when pip is missing); actionlint and
-# gitleaks are release binaries downloaded with curl into a fresh temporary
-# directory, verified against the sha256 below before anything is moved into
-# ~/.local/bin, and never run from the download directory. A tool already
-# present at the pinned version is skipped; shellcheck-py is skipped whenever
-# any shellcheck is on PATH. Prints one line per tool, then every version. In
-# GitHub Actions ($GITHUB_PATH set) ~/.local/bin is appended to the job's PATH.
+# Pinned versions. The Python tools (ruff, zizmor, shellcheck-py) are pinned in
+# tools/requirements-checks.txt by version and by the sha256 of every file PyPI
+# has for that version, and installed one at a time with `python3 -m pip
+# install --require-hashes --no-deps --only-binary=:all: --user
+# --break-system-packages`: pip refuses a file whose hash is not listed, any
+# dependency and any source build. That check is pip's, so a machine without
+# `python3 -m pip` fails with a clear line (there is no pipx or uv fallback).
+# actionlint and gitleaks are release binaries downloaded with curl into a
+# fresh temporary directory, verified against the sha256 below before anything
+# is moved into ~/.local/bin, and never run from the download directory. A
+# tool already present at the pinned version is skipped; shellcheck-py is
+# skipped whenever any shellcheck is on PATH. Prints one line per tool, then
+# every version. In GitHub Actions ($GITHUB_PATH set) ~/.local/bin is appended
+# to the job's PATH.
 set -euo pipefail
 
-RUFF_VERSION=0.17.2
-ZIZMOR_VERSION=1.31.1
-SHELLCHECK_PY_VERSION=0.10.0.1 # ships shellcheck 0.10.0
-SHELLCHECK_VERSION=0.10.0
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REQUIREMENTS="$ROOT/tools/requirements-checks.txt"
+
+# The version tools/requirements-checks.txt pins for a package; exits when the
+# file pins none.
+pinned_version() {
+	local version
+	version="$(awk -v name="$1" '$1 ~ "^" name "==" { sub(/^[^=]*==/, "", $1); print $1; exit }' "$REQUIREMENTS")"
+	if [[ -z "$version" ]]; then
+		echo "setup-checks.sh: $REQUIREMENTS pins no version of $1" >&2
+		exit 1
+	fi
+	echo "$version"
+}
+
+RUFF_VERSION="$(pinned_version ruff)"
+ZIZMOR_VERSION="$(pinned_version zizmor)"
+SHELLCHECK_PY_VERSION="$(pinned_version shellcheck-py)"
+# The package's version is the shellcheck it ships plus a build number (0.10.0.1
+# ships 0.10.0); the command reports the shellcheck version.
+SHELLCHECK_VERSION="${SHELLCHECK_PY_VERSION%.*}"
 
 ACTIONLINT_VERSION=1.7.12
 ACTIONLINT_ASSET="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
@@ -52,21 +75,26 @@ version_of() {
 	esac
 }
 
-# Install a PyPI package (`name==version`) for the user: pip, else pipx, else
-# uv, else a clear failure.
+# Install one package of tools/requirements-checks.txt for the user, in pip's
+# hash-checking mode. Only that package's lines (`name==version \` and its
+# `--hash` lines) go to pip, so nothing else in the file is installed with it.
 pip_install() {
-	local spec="$1"
-	if python3 -m pip --version >/dev/null 2>&1; then
-		python3 -m pip install --user --break-system-packages --quiet \
-			--disable-pip-version-check --no-warn-script-location "$spec"
-	elif command -v pipx >/dev/null 2>&1; then
-		pipx install --force "$spec" >/dev/null
-	elif command -v uv >/dev/null 2>&1; then
-		uv tool install --force "$spec" >/dev/null
-	else
-		echo "setup-checks.sh: cannot install $spec: none of python3 -m pip, pipx or uv is available" >&2
+	local package="$1" requirement="$WORK/requirements-$1.txt"
+	awk -v name="$package" '
+		$1 ~ "^" name "==" { found = 1 }
+		found { print; if ($0 !~ /\\$/) exit }
+	' "$REQUIREMENTS" >"$requirement"
+	if ! grep -q -- '--hash=sha256:' "$requirement"; then
+		echo "setup-checks.sh: $REQUIREMENTS lists no sha256 hashes for $package; not installed" >&2
 		exit 1
 	fi
+	if ! python3 -m pip --version >/dev/null 2>&1; then
+		echo "setup-checks.sh: cannot install $package: python3 -m pip is not available (install python3-pip); the hash-checked install needs pip" >&2
+		exit 1
+	fi
+	python3 -m pip install --require-hashes --no-deps --only-binary=:all: \
+		--user --break-system-packages --quiet --disable-pip-version-check --no-warn-script-location \
+		--requirement "$requirement"
 }
 
 # install_pip_tool <command> <package> <package version> <version the command reports>
@@ -77,13 +105,13 @@ install_pip_tool() {
 		echo "$cmd $want: already installed ($(command -v "$cmd"))"
 		return
 	fi
-	pip_install "$package==$package_version"
+	pip_install "$package"
 	have="$(version_of "$cmd")"
 	if [[ "$have" != "$want" ]]; then
 		echo "setup-checks.sh: installed $package==$package_version but $cmd reports '${have:-nothing}' (wanted $want)" >&2
 		exit 1
 	fi
-	echo "$cmd $want: installed ($(command -v "$cmd"))"
+	echo "$cmd $want: installed ($(command -v "$cmd"), sha256 verified by pip)"
 }
 
 # install_release_binary <command> <version> <url> <asset name> <sha256>

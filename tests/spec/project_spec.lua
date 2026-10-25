@@ -1,7 +1,7 @@
--- The project access the scenes and zone-light modules share: the defaults
--- to the real C4 calls and the pcall-wrapped reads, with the outputs the
--- modules' own copies produced before they were merged
--- (docs/reviews/slim-scenes-zones.md, row 6).
+-- The project access the lights, scenes and zone-light modules share: the
+-- defaults to the real C4 calls and the pcall-wrapped reads, with the outputs
+-- the modules' own copies produced before they were merged
+-- (docs/reviews/slim-scenes-zones.md, row 6; docs/reviews/diff-review-2026-10-24.md, row 10).
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -83,12 +83,15 @@ describe("bridge.project", function()
 			assert.same({}, view({ rooms = function() return nil end }):rooms())
 		end)
 
-		it("bound_set: a set of numeric ids, nil only when the lookup failed", function()
+		-- Issue #48 item 14: a nil answer is unknown, never "nothing bound";
+		-- an empty table still is.
+		it("bound_set: a set of numeric ids; nil and why when the lookup failed or answered no table", function()
 			local p = view({ bound = function() return { ["2001"] = "Hue Light", [2002] = "Hue Scene" } end })
 			assert.same({ [2001] = true, [2002] = true }, p:bound_set())
-			assert.same({}, view({ bound = function() return nil end }):bound_set(), "nothing bound is a known fact")
-			assert.same({}, view({ bound = function() return "junk" end }):bound_set())
-			assert.is_nil(view({ bound = function() error("boom") end }):bound_set())
+			assert.same({}, view({ bound = function() return {} end }):bound_set(), "an empty table: nothing bound")
+			assert.same({ nil, "unknown" }, { view({ bound = function() return nil end }):bound_set() })
+			assert.same({ nil, "unknown" }, { view({ bound = function() return "junk" end }):bound_set() })
+			assert.same({ nil, "failed" }, { view({ bound = function() error("boom") end }):bound_set() })
 		end)
 
 		it("devices_of: asks for the driver file, keys by numeric id, nil when failed or empty", function()
@@ -116,6 +119,39 @@ describe("bridge.project", function()
 			assert.is_nil(p:display_name(2004))
 			assert.is_nil(p:display_name(nil))
 			assert.is_nil(view({ display_name = function() error("boom") end }):display_name(2001))
+		end)
+	end)
+
+	describe("a nil bound list (issue #48, verified 2026-10-25: nil means nothing bound on OS 3.4.2)", function()
+		local now, answer, calls, p
+		before_each(function()
+			now, answer = 1000, nil
+			calls = { bound = function() return answer end, clock = function() return now end }
+			p = project.new({ project = calls, log = { warn = function() end } }, "lights")
+		end)
+
+		it("is unknown once, and nothing bound when a second lookup NIL_CONFIRM_S later is nil too", function()
+			assert.same({ nil, "unknown" }, { p:bound_set() })
+			now = now + project.NIL_CONFIRM_S - 1
+			assert.same({ nil, "unknown" }, { p:bound_set() }, "too soon to confirm")
+			now = now + 1
+			assert.same({}, (p:bound_set()))
+		end)
+
+		it("starts over when a list is answered in between", function()
+			assert.same({ nil, "unknown" }, { p:bound_set() })
+			answer = { [7] = "Hue Light" }
+			assert.same({ [7] = true }, (p:bound_set()))
+			answer = nil
+			now = now + 60
+			assert.same({ nil, "unknown" }, { p:bound_set() }, "a new first nil")
+		end)
+
+		it("is shared by the modules through ctx.project", function()
+			local q = project.new({ project = calls, log = { warn = function() end } }, "scenes")
+			assert.same({ nil, "unknown" }, { p:bound_set() })
+			now = now + project.NIL_CONFIRM_S
+			assert.same({}, (q:bound_set()), "the other module's lookup confirms it")
 		end)
 	end)
 end)

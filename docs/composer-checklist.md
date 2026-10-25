@@ -128,16 +128,28 @@ rooms (step 20). Moving a device never touches its binding.
     a colour, then a temperature: the bulb follows each. Paste the
     temperature range offered (the bulb's own, roughly 2000–6500 K) and the
     line "first SET_COLOR_TARGET params: …" from the light's Lua tab (it is
-    written whatever `Debug Mode` says). **Open.**
+    written whatever `Debug Mode` says). **Done 2026-10-25 from the record:**
+    the driver's own lines of 2026-10-22 show both kinds of pick from the
+    phone on colour bulbs, a colour as `LIGHT_COLOR_TARGET_MODE=0` with X and
+    Y, a temperature as mode 1 (e.g. X 0.317 Y 0.327, sent to Hue as mirek
+    159); every bulb in this house has colour and temperature, so the
+    white-ambiance and white-only cases cannot be shown here. The probe line
+    is removed (`docs/design.md`, hardware pass of 2026-10-25).
 11. Colour while off: turn a colour bulb off, pick a colour if the Navigator
     allows it (the bulb stays off), then turn it on: it comes on in that
-    colour. **Open.**
+    colour. **Done 2026-10-25** on a zone light (Bedside Lights): a
+    temperature set while off sent nothing, and the turn-on carried it in the
+    same PUT.
 12. Slider spam: say when you start, drag one light's slider back and forth
     for five seconds, say when you stop. The bulb follows with a short lag
     and ends at the slider's final position; the bridge's `Event Stream`
     stays "Connected since …". With the bridge's `Debug Mode` On, paste its
     Lua output for those seconds: at most about ten "PUT light" lines a
-    second and no 429. **Open.**
+    second and no 429. **Done 2026-10-25** on a zone light: 50 slider
+    targets in five seconds became 9 grouped_light PUTs (the group queue: a
+    burst of 3, then one a second; the latest value won), no 429, the stream
+    stayed connected. A single light's queue (ten a second) was not run: the
+    house has no Hue Light device; its pacing is pinned by `commands_spec`.
 
 ## E. The dev loop (not in use on the house)
 
@@ -362,6 +374,11 @@ Setup (done for Shine on the Bedside Lights Switch):
     over 250 ms, a hold covers the full range in 5 s, the On preset is
     100 %, the LEDs are blue). Showing them would be a capability change
     (a reboot). **Open** as a recorded check (`docs/status.md` states it).
+    Superseded (2026-10-25, #59): the drivers now declare
+    `hide_proxy_properties` False. After the install and the owner's
+    controller reboot, a Hue Light lists the On preset, click and hold rates
+    and LED colours and a Hue Scene its hold rate and LED colours; change a
+    hold rate once and see it on a keypad (#59's hardware check).
 
 A Hue Scene on the keypad (Shine):
 

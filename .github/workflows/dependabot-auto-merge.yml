@@ -3,9 +3,13 @@
 # dependabot[bot], when the update is for the github-actions ecosystem, enable
 # auto-merge on it. Branch protection still gates the merge: the four CI jobs
 # must be green and the branch up to date. Nothing else is ever auto-merged;
-# any other ecosystem is reviewed by a person. The trigger is pull_request,
-# never pull_request_target: the job needs no secret beyond the workflow's own
-# token, and GitHub grants a Dependabot-triggered run the permissions below.
+# any other ecosystem is reviewed by a person. A version update reaches this
+# workflow no sooner than 7 days after the action's release (the cooldown in
+# .github/dependabot.yml, security review 2026-10-25, finding 13), since the
+# Release workflow runs the same actions; security updates come at once. The
+# trigger is pull_request, never pull_request_target: the job needs no secret
+# beyond the workflow's own token, and GitHub grants a Dependabot-triggered
+# run the permissions below.
 name: Dependabot auto-merge
 
 on:

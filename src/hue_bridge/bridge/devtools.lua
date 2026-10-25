@@ -12,6 +12,15 @@
 -- driver.lua loads this module only when common/devloop.lua is present and
 -- hands over what the handlers need in devtools.install(ctx); nothing here
 -- reaches into the driver's locals.
+--
+-- ExecuteCommand has no sender parameter
+-- [verified: API 5_director_command/_1-ExecuteCommand], so whatever sits in
+-- dispatch.commands any driver in the project can run with C4:SendToDevice.
+-- Only what Composer itself sends (the DEV-ONLY actions of driver.xml) and
+-- the devices' HUE_LOG go there; the requests, probes and proxy commands
+-- run only for commands the dev loop verified (devloop.set_signed_commands),
+-- and the loop's redactor keeps the application key out of every shipped
+-- line [security review 2026-10-25, finding 9].
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -25,8 +34,9 @@ local pinning = require("bridge.pinning")
 local devtools = {}
 
 -- Set by devtools.install:
---   state                    the driver's state table: ip, creds, lights,
---                            scenes, zone_lights, queue, stream, late_init_done
+--   state                    the driver's state table: ip, creds, identity_ok,
+--                            lights, scenes, zone_lights, queue, stream,
+--                            late_init_done
 --   prop(name, value)        write a property
 --   connection()             { ip, key } when paired with an address, else nil
 --   paired()                 whether credentials are held
@@ -78,6 +88,22 @@ local function request_host(given)
 		tostring(ctx.state.ip))
 end
 
+-- Why Hue Request must not use `path`, or nil. bridge/http.lua builds
+-- "https://" .. host .. path, so a Path that does not start with "/" moves
+-- the request, key and all, to another host or port ("@203.0.113.9/...",
+-- ".example.net/...", ":8443/..."); "@", "\", "#", white space and other
+-- control characters are refused as well, since URL parsers disagree on
+-- them [security review 2026-10-25, finding 10].
+local function path_refusal(path)
+	if type(path) ~= "string" or path:sub(1, 1) ~= "/" then
+		return 'it must start with "/"'
+	end
+	if path:find("[@\\#%s%c]") then
+		return 'it must hold no "@", "\\", "#", white space or control characters'
+	end
+	return nil
+end
+
 -- host:port of tools/devserver.py; empty disables the loop.
 local function dev_server_changed(value)
 	local host = trimmed(value)
@@ -89,11 +115,12 @@ local function dev_server_changed(value)
 	end
 end
 
--- Not in driver.xml, reachable through the dev loop: an arbitrary
--- authenticated request to the bridge. Params: Method (GET/PUT/POST/DELETE;
--- any other, PATCH for one, fails in bridge/http.lua with "could not start
--- transfer: ... unsupported method PATCH", logged as the result), Path
--- (/clip/v2/...), Body (JSON text, optional), Host (a spelling of the
+-- Not in driver.xml, reachable only through signed dev loop commands: an
+-- arbitrary authenticated request to the bridge. Params: Method
+-- (GET/PUT/POST/DELETE; any other, PATCH for one, fails in bridge/http.lua
+-- with "could not start transfer: ... unsupported method PATCH", logged as
+-- the result), Path (/clip/v2/...; optional, default the bridge resource;
+-- see path_refusal), Body (JSON text, optional), Host (a spelling of the
 -- bridge's address, see spells_bridge_address; optional, default the dotted
 -- address; any other host is refused and nothing is sent), Raw ("true" logs
 -- the whole body). Like every keyed request of the driver it waits for the
@@ -109,7 +136,14 @@ local function hue_request(params)
 		return log.always("Hue Request: bridge identity not verified yet; see Status")
 	end
 	local method = (params.Method or "GET"):upper()
-	local path = params.Path or "/clip/v2/resource/bridge"
+	local path = params.Path
+	if path == nil or path == "" then
+		path = "/clip/v2/resource/bridge"
+	end
+	local bad = path_refusal(path)
+	if bad then
+		return log.always("Hue Request: Path %q refused: %s; nothing is sent", (tostring(path):gsub("%c", "?")), bad)
+	end
 	local host, refusal = request_host(params.Host)
 	if not host then
 		return log.always("Hue Request: %s", refusal)
@@ -247,7 +281,68 @@ local function probe_scenes()
 	end)
 end
 
--- Probe Call: any C4 method by name, arguments as a JSON array, result dumped.
+-- The credential store's names, taken from bridge/credentials.lua, which
+-- keeps them to itself: its load() runs once against a stand-in C4 that
+-- notes the name each call asks for and answers nil, and the real C4 is
+-- back before this returns. nil when that yields no name (a credentials.lua
+-- that stopped looking C4 up as a global, say, whose load() then read the
+-- real store into a table nobody keeps): the caller then refuses every
+-- Persist call. The names are never logged.
+local function credential_store_names()
+	local names = {}
+	local stand_in = setmetatable({}, {
+		__index = function()
+			return function(_, name)
+				if type(name) == "string" then names[#names + 1] = name end
+				return nil
+			end
+		end,
+	})
+	local real = rawget(_G, "C4")
+	rawset(_G, "C4", stand_in)
+	local ok = pcall(credentials.load)
+	rawset(_G, "C4", real)
+	if not ok or #names == 0 then
+		return nil
+	end
+	return names
+end
+
+-- How a store name compares. How Director matches names (case, padding, a
+-- NUL that ends a C string) is not documented, so the comparison is loose
+-- and refuses more than it must.
+local function store_key(name)
+	return (name:match("^[^%z]*"):match("^%s*(.-)%s*$"):lower())
+end
+
+-- Why Probe Call must not run C4[fn] with `args`, or nil. The persistent
+-- store holds the application key (bridge/credentials.lua), so a Persist
+-- call [verified: API 26.5_persistence] must name one entry, and not one of
+-- the credential store's; one that names none, PersistDeleteAll, would
+-- delete them with everything else [security review 2026-10-25, finding 9].
+local function persist_refusal(fn, args)
+	if not fn:lower():find("^%s*persist") then
+		return nil
+	end
+	if type(args[1]) ~= "string" then
+		return "a Persist call must name one store entry as its first argument"
+	end
+	local names = credential_store_names()
+	if not names then
+		return "the credential store's names could not be read"
+	end
+	local wanted = store_key(args[1])
+	for _, name in ipairs(names) do
+		if store_key(name) == wanted then
+			return "its first argument names a credential store entry"
+		end
+	end
+	return nil
+end
+
+-- Probe Call (signed dev loop commands only): any C4 method by name,
+-- arguments as a JSON array, result dumped; Persist calls on the credential
+-- store are refused (persist_refusal).
 -- e.g. Fn=GetDevices Args=[{"DeviceIds":[1080]}]; Fn=GetDeviceDisplayName Args=[1081]
 local function probe_call(params)
 	params = params or {}
@@ -262,21 +357,32 @@ local function probe_call(params)
 	if type(C4[fn]) ~= "function" then
 		return log.always("Probe Call: C4.%s is not a function", fn)
 	end
+	local refusal = persist_refusal(fn, args)
+	if refusal then
+		-- Neither the arguments nor the store's names go into the line.
+		return log.always("Probe Call: C4.%s refused: %s; nothing was called", fn, refusal)
+	end
 	probe("C4:" .. fn .. "(" .. tostring(params.Args or "") .. ")", function()
 		return C4[fn](C4, unpack(args))
 	end)
 end
 
--- A light driver's own log line (dev builds forward info and above), so it
--- shows up in this driver's output and in the dev loop's shipped log.
+-- A light or scene driver's own log line (dev builds forward info and
+-- above), so it shows up in this driver's output and in the dev loop's
+-- shipped log. The devices send it with C4:SendToDevice (common/devloop.lua,
+-- forward_logs), which arrives through ExecuteCommand, so this is the one
+-- development handler that stays in dispatch.commands, where any driver in
+-- the project reaches it. All it does is print one line under the sender's
+-- name; control characters become spaces, so a message cannot forge further
+-- lines of the shipped log.
 local function hue_log(params)
 	params = params or {}
 	local who = "light"
 	if params.rid and params.rid ~= "" then
 		local entry = ctx.state.lights and ctx.state.lights.registry and ctx.state.lights.registry[params.rid]
-		who = (entry and entry.name) or params.rid:sub(1, 8)
+		who = (entry and entry.name) or tostring(params.rid):sub(1, 8)
 	end
-	log.always("[%s] %s", who, tostring(params.line))
+	log.always("[%s] %s", (tostring(who):gsub("%c", " ")), (tostring(params.line):gsub("%c", " ")))
 end
 
 -- Find a registered light by rid, Hue name or protocol device id.
@@ -292,9 +398,29 @@ local function find_light(key)
 	return nil
 end
 
--- Not in driver.xml: a light_v2 proxy command to one light, the way a
--- Navigator or programming would send it, so the whole command path can be
--- exercised from the dev loop. Params: Light (rid, Hue name or protocol
+-- A zone light or scene device by its device id or its Composer or Hue
+-- name (dev builds only): { device_id, name } or nil.
+local function find_group_device(key)
+	local wanted = tostring(key):lower()
+	for _, module in ipairs({ ctx.state.zone_lights, ctx.state.scenes }) do
+		local registry = module and module.registry or {}
+		for rid, entry in pairs(registry) do
+			if type(entry) == "table" and entry.device_id then
+				local display = C4:GetDeviceDisplayName(tonumber(entry.device_id) or 0)
+				if rid == key or tostring(entry.device_id) == wanted or (entry.name or ""):lower() == wanted
+					or (display and tostring(display):lower() == wanted) then
+					return { device_id = entry.device_id, name = entry.name or display or rid }
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- Not in driver.xml, reachable only through signed dev loop commands: a
+-- light_v2 proxy command to one light, zone light or scene device, the way
+-- a Navigator or programming would send it, so the whole command path can
+-- be exercised from the dev loop. Params: Light (rid, Hue name or protocol
 -- device id), Command (e.g. SET_BRIGHTNESS_TARGET), and the command's own
 -- params (e.g. LIGHT_BRIGHTNESS_TARGET=50 RATE=0).
 local function proxy_command(params)
@@ -302,7 +428,26 @@ local function proxy_command(params)
 	local lights = ctx.state.lights
 	local rid, entry = find_light(params.Light or "")
 	if not rid then
-		return log.always("Proxy Command: no registered light matches %q", tostring(params.Light))
+		-- A zone light or a scene device: its light_v2 proxy is the consumer
+		-- of its binding 5001, as for a light.
+		local group = find_group_device(params.Light or "")
+		if not group then
+			return log.always("Proxy Command: no registered light, zone light or scene matches %q",
+				tostring(params.Light))
+		end
+		local consumers = C4:GetBoundConsumerDevices(tonumber(group.device_id), 5001)
+		local gproxy = type(consumers) == "table" and next(consumers) or nil
+		if not gproxy then
+			return log.always("Proxy Command: no proxy found for %s (device %s)", group.name, tostring(group.device_id))
+		end
+		local command = params.Command or "SET_BRIGHTNESS_TARGET"
+		local forwarded = {}
+		for k, v in pairs(params) do
+			if k ~= "Light" and k ~= "Command" then forwarded[k] = v end
+		end
+		C4:SendToDevice(gproxy, command, forwarded)
+		return log.always("Proxy Command: %s -> %s (proxy %s): %s", command, group.name, tostring(gproxy),
+			C4:JsonEncode(forwarded))
 	end
 	local proxy = lights:proxy_for(rid)
 	if not proxy then
@@ -329,7 +474,8 @@ local function proxy_command(params)
 		C4:JsonEncode(forwarded))
 end
 
--- A summary of the light registry. Param Limit (default 5).
+-- A summary of the light registry (signed dev loop commands only: it lists
+-- the radios' MAC addresses). Param Limit (default 5).
 local function lights_report(params)
 	params = params or {}
 	local state = ctx.state
@@ -414,6 +560,12 @@ local function connection_test(params)
 			ctx.prop("Status", "Not paired")
 			return
 		end
+		-- The key goes out only once the bridge at the address has shown the
+		-- paired id, as for Hue Request [security review 2026-10-25, finding
+		-- 10]. Status keeps what the identity check said.
+		if state.identity_ok ~= true then
+			return log.always("Connection Test: bridge identity not verified yet; nothing is sent (see Status)")
+		end
 		target = { name = "bridge", ip = state.ip, key = state.creds.key,
 			stream_path = "/eventstream/clip/v2", ping_path = "/clip/v2/resource/bridge",
 			headers = { Accept = "text/event-stream" } }
@@ -436,12 +588,16 @@ local function connection_test(params)
 	end)
 end
 
--- Test Connection with an optional param Host: an alternative spelling of
--- the bridge address (a padded one, see spells_bridge_address) to probe
--- whether Director's per-host transfer queue keys on the host string. The
--- TLS check ignores the host name for the bridge anyway. A Host that is not
--- a spelling of the bridge's address is refused: nothing is sent, Status
--- and the log say why.
+-- Test Connection with an optional param Host (signed dev loop commands
+-- only; Composer's Test Connection, which has no params, stays the
+-- driver's own handler): an alternative spelling of the bridge address (a
+-- padded one, see spells_bridge_address) to probe whether Director's
+-- per-host transfer queue keys on the host string. The TLS check ignores
+-- the host name for the bridge anyway. A Host that is not a spelling of the
+-- bridge's address is refused: nothing is sent, Status and the log say why.
+-- With a Host it waits for the bridge identity check like Hue Request, since
+-- that check proves the dotted address the spelling stands for; without
+-- one, ctx.test_connection (driver.lua) runs the check itself.
 local function test_connection(params)
 	params = params or {}
 	local host = ctx.state.ip
@@ -453,28 +609,71 @@ local function test_connection(params)
 			ctx.prop("Status", "Test Connection refused: Host is not a spelling of the bridge address")
 			return
 		end
+		if ctx.state.identity_ok ~= true then
+			return log.always("Test Connection: bridge identity not verified yet; see Status")
+		end
 		log.always("Test Connection via host %s instead of %s", host, ctx.state.ip)
 	end
 	ctx.test_connection(host)
 end
 
--- Register the handlers; `given` is the context described above.
+-- The dev loop's redactor (devloop.set_redactor): every line the loop
+-- ships, and every error text it reports, has the application key the
+-- driver holds now replaced by "<key>" [security review 2026-10-25, finding
+-- 9]. A plain search: the key is data, not a pattern.
+local function redact_key(line)
+	local creds = ctx and ctx.state and ctx.state.creds
+	local key = type(creds) == "table" and creds.key or nil
+	if type(key) ~= "string" or key == "" or type(line) ~= "string" then
+		return line
+	end
+	local parts, from = {}, 1
+	while true do
+		local first, last = line:find(key, from, true)
+		if not first then break end
+		parts[#parts + 1] = line:sub(from, first - 1)
+		parts[#parts + 1] = "<key>"
+		from = last + 1
+	end
+	if from == 1 then
+		return line
+	end
+	parts[#parts + 1] = line:sub(from)
+	return table.concat(parts)
+end
+
+-- Register the handlers; `given` is the context described above. The
+-- dispatch tables get the Dev Server property, the three DEV-ONLY actions
+-- of driver.xml (what Composer can send) and HUE_LOG (what the devices
+-- send); the rest, Test Connection's Host variant included, runs only for
+-- signed dev loop commands (devloop.execute), and the redactor goes to the
+-- loop. See the top of this file.
 function devtools.install(given)
 	ctx = given
 	dispatch.properties["Dev_Server"] = dev_server_changed
-	dispatch.commands["Hue_Request"] = hue_request
-	dispatch.commands["Probe_Project"] = probe_project
-	dispatch.commands["Probe_Errors"] = probe_errors
-	dispatch.commands["Probe_Scenes"] = probe_scenes
-	dispatch.commands["Probe_Call"] = probe_call
-	dispatch.commands["HUE_LOG"] = hue_log
-	dispatch.commands["Proxy_Command"] = proxy_command
-	dispatch.commands["Lights_Report"] = lights_report
+	dispatch.commands["Connection_Test"] = connection_test
 	dispatch.commands["Reload_Credentials"] = reload_credentials
 	dispatch.commands["Check_CA_Pinning"] = check_ca_pinning
-	dispatch.commands["Connection_Test"] = connection_test
-	-- Replaces the driver's handler: the same action, plus the Host param.
-	dispatch.commands["Test_Connection"] = test_connection
+	dispatch.commands["HUE_LOG"] = hue_log
+	-- common/devloop.lua is the one module a reload never replaces: code
+	-- pushed to a bridge whose loop predates signed commands leaves these
+	-- out rather than fail to load.
+	if type(devloop.set_signed_commands) ~= "function" or type(devloop.set_redactor) ~= "function" then
+		log.warn("dev loop: the running common/devloop.lua predates signed commands; the development "
+			.. "commands stay unavailable until a dev .c4z install or a Director restart")
+		return
+	end
+	devloop.set_signed_commands({
+		Hue_Request = hue_request,
+		Probe_Project = probe_project,
+		Probe_Errors = probe_errors,
+		Probe_Scenes = probe_scenes,
+		Probe_Call = probe_call,
+		Proxy_Command = proxy_command,
+		Lights_Report = lights_report,
+		Test_Connection = test_connection,
+	})
+	devloop.set_redactor(redact_key)
 end
 
 -- The end of the driver's late init: the dev loop starts last, so a reload

@@ -460,6 +460,44 @@ describe("Hue Light driver", function()
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "20" })
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 20 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
+
+		-- docs/review-leftovers-design.md #49: the bridge's import binds a device
+		-- it has just created, so OnBindingChanged can come before late init.
+		it("holds a bridge binding that arrives before late init and greets through it once late init has run", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4.persist.hue_rid = "l1"
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			assert.equal(0, #c4.calls_to("UpdateProperty"), "nothing touches Director before late init")
+			assert.equal(0, #c4.calls_to("SendToProxy"))
+			assert.equal(0, #c4.sent)
+
+			-- Director's lookup does not show the binding yet at late init.
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
+			assert.equal(0, #c4.active_timers(), "the binding ended the re-checks late init started")
+		end)
+
+		it("greets once when late init already sees the binding that arrived before it", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4.persist.hue_rid = "l1"
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal(1, #messages(c4, "HUE_HELLO"))
+			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
+		end)
+
+		it("applies an unbind that arrived before late init after it", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4.persist.hue_rid = "l1"
+			env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+			assert.equal(0, #c4.calls_to("UpdateProperty"))
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+			assert.equal("Offline", env.Properties["Online"])
+			assert.equal(0, #c4.sent)
+		end)
 	end)
 
 	describe("OnDriverRemovedFromProject", function()
@@ -502,6 +540,133 @@ describe("Hue Light driver", function()
 			end
 			assert.has_no.errors(function() env.OnDriverRemovedFromProject() end)
 			assert.equal(0, #messages(c4, "HUE_GOODBYE"))
+		end)
+
+		it("stops the Driver Version looks on destroy", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c4.config_info.version = ""
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ 5000 }, { c4.active_timers()[1].delay }, "the second look")
+			env.OnDriverDestroyed("DIT_LOADED")
+			assert.equal(0, #c4.active_timers())
+		end)
+	end)
+
+	-- docs/review-leftovers-design.md #49: a command that never reaches the
+	-- bridge (SendToDevice raising) closes the proxy's CHANGING with the
+	-- unchanged state, and the error is logged.
+	describe("a command the bridge never gets", function()
+		-- From here on SendToDevice raises for HUE_SET and HUE_DIM; returns the
+		-- commands it was asked to send.
+		local function failing(c4)
+			local tried = {}
+			local original = c4.SendToDevice
+			c4.SendToDevice = function(self, id, command, ...)
+				if command == "HUE_SET" or command == "HUE_DIM" then
+					tried[#tried + 1] = command
+					error("Director says no")
+				end
+				return original(self, id, command, ...)
+			end
+			return tried
+		end
+
+		it("a brightness target closes its CHANGING with the unchanged level, logs, and arms no fallback", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			local env, c4 = lit_light() -- on at 40 %
+			local tried = failing(c4)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "500" })
+			assert.same({ "HUE_SET" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 75, RATE = 500 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #c4.active_timers())
+			local logged = false
+			for _, line in ipairs(lines) do
+				if line:find("^%[ERROR%] Hue Light: HUE_SET to the bridge failed: .*Director says no") then logged = true end
+			end
+			assert.is_true(logged)
+		end)
+
+		it("closes with 0 a target for a light the bridge has not reported yet", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env)
+			c4.calls = {}
+			failing(c4)
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("keeps a colour stored while off for the next turn-on when a turn-on fails", function()
+			local env, c4 = lit_light()
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35",
+				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+			c4.calls = {}
+			local original = c4.SendToDevice
+			failing(c4)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			c4.SendToDevice = original
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+			assert.same({ rid = "l1", on = "true", brightness = "60", rate = "0", x = "0.4", y = "0.35" },
+				last_sent(c4).params)
+		end)
+
+		it("a colour target closes its CHANGING with the colour the light still has", function()
+			local env, c4 = lit_light() -- white at 370 mirek
+			failing(c4)
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35",
+				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "3000" })
+			assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGING"))
+			local ex, ey = c4:ColorCCTtoXY(1000000 / 370)
+			assert.same({ { LIGHT_COLOR_CURRENT_X = ex, LIGHT_COLOR_CURRENT_Y = ey, LIGHT_COLOR_CURRENT_COLOR_MODE = 1 } },
+				notifies(c4, "LIGHT_COLOR_CHANGED"))
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("a hold whose dim fails closes its CHANGING at the level it began from; the release sends nothing", function()
+			local env, c4 = lit_light() -- on at 40 %
+			local tried = failing(c4)
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time: the dim up fails
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 3000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #c4.active_timers(), "no estimate ticking")
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.same({ "HUE_DIM" }, tried, "no stop for a dim that never started")
+			assert.same({ 1000 }, { c4.active_timers()[1].delay }, "only the click guard, no fallback")
+			assert.equal(1, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("a hold from off whose turn-on fails does not dim up afterwards", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "40", online = "true" })
+			c4.calls = {}
+			local tried = failing(c4)
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time: the turn-on at 1 % fails
+			assert.same({ "HUE_SET" }, tried)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(0, #c4.active_timers(), "no dim 600 ms later")
+		end)
+
+		it("a release whose stop fails still closes the hold through the fallback", function()
+			local env, c4 = lit_light() -- on at 40 %
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the dim up goes out
+			for _ = 1, 10 do c4.fire_timers() end -- the estimate reaches 60
+			local tried = failing(c4)
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			assert.same({ "HUE_DIM" }, tried)
+			c4.fire_timers()
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
 	end)
 
@@ -829,22 +994,13 @@ describe("Hue Light driver", function()
 			assert.same({ rid = "l1", x = "0.4", y = "0.35", rate = "100" }, last_sent(c4).params)
 		end)
 
-		it("logs every param of the first one received, once", function()
-			local lines = {}
-			log.sink = function(line) lines[#lines + 1] = line end
-			local env = lit_light()
-			local params = { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35", LIGHT_COLOR_TARGET_COLOR_MODE = "0" }
-			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", params)
-			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", params)
-			local hits = 0
-			for _, line in ipairs(lines) do
-				if line:find("first SET_COLOR_TARGET params:", 1, true) then
-					hits = hits + 1
-					assert.truthy(line:find("LIGHT_COLOR_TARGET_X=0.4", 1, true))
-					assert.truthy(line:find("LIGHT_COLOR_TARGET_COLOR_MODE=0", 1, true))
-				end
-			end
-			assert.equal(1, hits)
+		it("takes a temperature pick as the Navigator sends it: LIGHT_COLOR_TARGET_MODE 1", function()
+			local env, c4 = lit_light()
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_MODE = "1", LIGHT_COLOR_TARGET_RATE = "0",
+				LIGHT_COLOR_TARGET_X = "0.317097", LIGHT_COLOR_TARGET_Y = "0.327069" })
+			local params = last_sent(c4).params
+			assert.truthy(params.mirek, "a temperature pick becomes a colour temperature")
+			assert.is_nil(params.x)
 		end)
 
 		it("stores the colour while off, closes with CHANGED, and sends it with the next turn-on", function()

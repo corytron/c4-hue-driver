@@ -274,7 +274,8 @@ describe("bridge.commands", function()
 			for i = 1, 6 do
 				sends[i].done({ ok = false, code = 500, err = "HTTP 500" })
 				delays[i] = timer_delays()[1]
-				c4.now_ms = c4.now_ms + 10000
+				-- Each retry when its delay is up: 23.5 s in all, inside MAX_AGE_S.
+				c4.now_ms = c4.now_ms + delays[i]
 				c4.fire_timers()
 			end
 			assert.same({ 500, 1000, 2000, 4000, 8000, 8000 }, delays)
@@ -686,5 +687,141 @@ describe("bridge.commands", function()
 			assert.is_false(commands.urgent({ brightness = 100, on = true }))
 			assert.is_false(commands.urgent(nil))
 		end)
+	end)
+
+	-- Issue #43: "not paired" and "key rejected" are never retried; any other
+	-- retriable failure is retried for at most commands.MAX_AGE_S from the
+	-- pending state's last update, then dropped with one warning. The light
+	-- queue and the grouped_light queue (driver.lua new_group_queue: one PUT a
+	-- second, a burst of three) follow the same rules.
+	describe("retry limits", function()
+		local function warnings()
+			local out = {}
+			for _, line in ipairs(lines) do
+				if line:find("^%[WARN%]") then out[#out + 1] = line end
+			end
+			return out
+		end
+
+		before_each(function()
+			log.set_debug(false)
+		end)
+
+		it("exports a 30 s age limit", function()
+			assert.equal(30, commands.MAX_AGE_S)
+		end)
+
+		for _, kind in ipairs({
+			{ name = "light queue", opts = {}, label = "light" },
+			{ name = "group queue", opts = { rate_per_sec = 1, burst = 3, label = "grouped_light" }, label = "grouped_light" },
+		}) do
+			describe(kind.name, function()
+				before_each(function()
+					local opts = { send = fake_send }
+					for k, v in pairs(kind.opts) do opts[k] = v end
+					q = commands.new(opts)
+				end)
+
+				it("does not retry 'not paired' and drops what arrived meanwhile", function()
+					set_now("g", { brightness = 50 })
+					q:set("g", { brightness = 60 }) -- arrives while the PUT is in flight
+					sends[1].done({ ok = false, err = "not paired" })
+					assert.same({}, timer_delays(), "no retry, no debounce left")
+					assert.is_nil(q:pending("g"), "the newer state is dropped too")
+					c4.now_ms = c4.now_ms + 60000
+					c4.fire_timers()
+					assert.equal(1, #sends)
+					assert.equal(1, q:stats().dropped)
+					assert.equal(0, q:stats().retried)
+					local warned = warnings()
+					assert.equal(1, #warned)
+					assert.truthy(warned[1]:find(kind.label .. " g: not paired", 1, true), warned[1])
+				end)
+
+				it("does not retry 'key rejected', and warns once per rid and condition", function()
+					set_now("g", { on = true })
+					sends[1].done({ ok = false, err = "key rejected", code = 403 })
+					assert.same({}, timer_delays())
+					set_now("g", { on = false })
+					sends[2].done({ ok = false, err = "key rejected", code = 403 })
+					assert.same({}, timer_delays())
+					assert.equal(2, q:stats().dropped)
+					assert.equal(1, #warnings(), "a slider dragged meanwhile does not warn at every step")
+					assert.truthy(warnings()[1]:find("key rejected", 1, true))
+
+					-- Once commands go through again, the next refusal warns again
+					-- (a second apart, so the group queue's bucket has a token).
+					c4.now_ms = c4.now_ms + 1000
+					set_now("g", { on = true })
+					sends[3].done({ ok = true, code = 200 })
+					c4.now_ms = c4.now_ms + 1000
+					set_now("g", { on = false })
+					sends[4].done({ ok = false, err = "key rejected", code = 403 })
+					assert.equal(2, #warnings())
+				end)
+
+				it("writes no fallback level for a dim stop whose key was refused", function()
+					set_now("g", { dim = "up", rate = 3000 })
+					sends[1].done({ ok = true, code = 200 })
+					set_now("g", { dim = "stop", level = 40 })
+					sends[2].done({ ok = false, err = "key rejected", code = 401 })
+					assert.equal(2, #sends, "nothing could go through")
+					assert.same({}, timer_delays())
+				end)
+
+				it("retries another failure only within 30 s of the last update, then drops it once", function()
+					set_now("g", { brightness = 50 })
+					local body = sends[1].body
+					sends[1].done({ ok = false, err = "transfer failed (28): Timeout was reached" })
+					assert.same({ 500 }, timer_delays(), "retried while young")
+					c4.now_ms = c4.now_ms + 500
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					assert.same(body, sends[2].body)
+
+					-- The bridge stays away; 29.5 s after the update the next retry
+					-- (1 s later) would go out after the limit.
+					c4.now_ms = c4.now_ms + 29000
+					sends[2].done({ ok = false, err = "transfer failed (7): Failed to connect" })
+					assert.same({}, timer_delays(), "no retry beyond the limit")
+					assert.is_nil(q:pending("g"))
+					assert.equal(1, q:stats().dropped)
+					local warned = warnings()
+					local last = warned[#warned]
+					assert.truthy(last:find(kind.label .. " g: transfer failed (7): Failed to connect", 1, true), last)
+					assert.truthy(last:find("last changed 30 s ago", 1, true), last)
+					assert.equal(1, #warned - 1, "one retry warning before it, one drop warning")
+
+					-- Nothing stale is sent when the bridge returns; a new change is.
+					c4.now_ms = c4.now_ms + 60000
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					set_now("g", { brightness = 70 })
+					assert.equal(3, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 70 } }, sends[3].body)
+				end)
+
+				it("counts the 30 s from the latest change, not from the first one or the first failure", function()
+					set_now("g", { brightness = 50 })
+					sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+					c4.now_ms = c4.now_ms + 25000
+					q:set("g", { brightness = 80 }) -- the owner moves the slider again, into the retry state
+					assert.same({ 500 }, timer_delays(), "the retry timer is kept")
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 80 } }, sends[2].body)
+					sends[2].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.same({ 1000 }, timer_delays(), "young again: retried")
+
+					-- 31 s after the first change, 6 s after the latest: still retried.
+					c4.now_ms = c4.now_ms + 6000
+					c4.fire_timers()
+					assert.equal(3, #sends)
+					sends[3].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.same({ 2000 }, timer_delays())
+					assert.equal(0, q:stats().dropped)
+				end)
+			end)
+		end
 	end)
 end)

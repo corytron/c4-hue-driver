@@ -38,6 +38,8 @@ PR that says which.
 | `.github/release.yml`, `.github/dependabot.yml`, `.gitleaks.toml`, `.github/zizmor.yml`, `.github/actionlint.yaml` (if needed) | agent workflows | release-note categories, update schedule, scan rules, linter settings |
 | `tools/deploy.py`, `tools/labels_sync.py`, `tools/tests/test_*.py`, lint fixes in the existing `tools/*.py` | agent **tooling** | the deploy and drift tool, label sync, their unit tests |
 | `tools/check.sh`, `tools/setup-checks.sh`, `README.md`, `CONTRIBUTING.md`, `docs/release-checklist.md`, `docs/README.md`, `SECURITY.md` | agent **checks-and-docs** | one check script for VM and CI, its installer, the documents |
+| `tools/requirements-checks.txt` | coordinator (#222) | hash-pinned Python check tools (§3) |
+| `.github/workflows/code-scanning-triage.yml`, `tools/code_scanning_issue.py`, `tools/tests/test_code_scanning_issue.py` | coordinator (#222) | the one code scanning issue (§4.6) |
 
 Everything else in the checkout is edited by others at the same time. No
 agent runs `git`; the coordinator integrates and commits on the branch
@@ -70,23 +72,26 @@ runner):
 | `lua-test` | `busted tests` | as today |
 | `shell` | `shellcheck -S style` | `tools/*.sh`, `setup-vm.sh` if present in the repository (it is not today) |
 | `python-lint` | `ruff check tools` and `ruff format --check tools` | `tools/**/*.py` |
-| `python-test` | `python3 -m unittest discover -s tools/tests` | `tools/tests` |
+| `python-test` | `python3 -B -m unittest discover -s tools/tests` (`-B`: no `__pycache__`, whose constant-folded test vectors the `secrets` tree scan would flag) | `tools/tests` |
 | `xml` | well-formedness of every `src/*/driver.xml` with `python3 -c` and `xml.etree` (no xmllint: it needs apt) | `src/*/driver.xml` |
 | `powershell` | `pwsh -c "Invoke-ScriptAnalyzer -Path tools/composer -Recurse -Severity Error -EnableExit"` | `tools/composer/*.psm1`; skip when `pwsh` is missing (the VM has none; GitHub's Ubuntu runners have it) |
 | `workflows` | `actionlint` then `zizmor --min-severity medium .github/workflows` | `.github/workflows/*.yml` |
-| `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` then `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=HEAD` (the whole history of the current branch, which is what a push publishes; CI checks out with `fetch-depth: 0`; stale local branches do not count) | tree and history |
+| `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` then `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=<refs>`: on the VM `--all`, the history of every local ref (branches, tags, stashes, remote-tracking refs), because a stale tag or branch can hold history that never reached GitHub and a `--tags` or `--mirror` push would publish it (security review 2026-10-25, finding 14); in CI (`GITHUB_ACTIONS=true`) `HEAD`, the history a pull request publishes (its `fetch-depth: 0` checkout also holds every other branch and tag, whose findings are not the pull request's) | tree and history |
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
 
 `tools/setup-checks.sh` installs what the VM lacks into `~/.local/bin`
-without `sudo`: `ruff`, `zizmor` and `shellcheck-py` with `python3 -m pip
-install --user --break-system-packages`, `actionlint` and `gitleaks` as
-pinned release binaries whose sha256 the script carries and verifies (the
-versions on the VM today: ruff 0.17.2, zizmor 1.31.1, actionlint 1.7.12,
-gitleaks 8.30.1; `shellcheck-py` latest 0.10.x). CI runs the same script
-(ubuntu-latest has `shellcheck` and `pwsh` already; the script skips what
-is present). It prints each tool's version at the end. `python3 -m pip`
-may be missing on a runner: fall back to `pipx` or `uv` only if present,
-otherwise fail with a clear line.
+without `sudo`. `ruff`, `zizmor` and `shellcheck-py` come from
+`tools/requirements-checks.txt`, which pins each by version and by the
+sha256 of every file PyPI has for it; they are installed one at a time with
+`python3 -m pip install --require-hashes --no-deps --only-binary=:all:
+--user --break-system-packages`, so pip refuses an unlisted hash, any
+dependency and any source build. `actionlint` and `gitleaks` are pinned
+release binaries whose sha256 the script carries and verifies. Today:
+ruff 0.17.2, zizmor 1.31.1, shellcheck-py 0.10.0.1, actionlint 1.7.12,
+gitleaks 8.30.1. CI runs the same script (ubuntu-latest has `shellcheck`
+and `pwsh` already; the script skips what is present). It prints each
+tool's version at the end. Without `python3 -m pip` it fails with a clear
+line: the hash check is pip's, so there is no `pipx` or `uv` fallback.
 
 ## 4. CI: `.github/workflows/ci.yml`
 
@@ -99,12 +104,14 @@ Four jobs; **their `name:` strings are the required status checks on
 (coordinator):
 
 1. `Lint and test (Lua 5.1)`: as today (apt Lua 5.1, luarocks, luacheck,
-   busted, dkjson), then `tools/check.sh --strict --only lua-lint lua-test`.
+   busted, dkjson, every rock at an exact version since 2026-10-25, §5.5),
+   then `tools/check.sh --strict --only lua-lint lua-test`.
    Cache `~/.luarocks` and `/usr/local/lib/luarocks` keyed on the workflow
    file if it saves time; otherwise leave it.
 2. `Build the three .c4z packages`: as today (`needs: test`, full-depth
-   checkout, packager cloned at build time, LICENSE and NOTICE in each
-   package, artifact upload), plus `tools/build.sh` output `build/manifest.json`
+   checkout, packager fetched at build time at its pinned commit, §5.5,
+   LICENSE and NOTICE in each package, artifact upload), plus
+   `tools/build.sh` output `build/manifest.json`
    (§5.2) uploaded with the packages.
 3. `Tooling checks (shell, Python, XML, workflows)`: `tools/setup-checks.sh`
    then `tools/check.sh --strict --only shell python-lint python-test xml
@@ -125,18 +132,39 @@ The README gets the Scorecard badge next to the CI badge. CodeQL default
 setup (Python and Actions) is enabled by the coordinator through the API,
 not a workflow file.
 
+### 4.6 The code scanning issue
+
+CodeQL default setup and `scorecard.yml` analyse every push to `main`.
+`.github/workflows/code-scanning-triage.yml` (push to `main`, daily 07:41
+UTC, dispatch; `contents: read`, `security-events: read`,
+`vulnerability-alerts: read`, `issues: write`; concurrency group
+`code-scanning-triage`, never cancelled) runs `tools/code_scanning_issue.py`,
+on a push with `--wait-for $GITHUB_SHA`. It waits up to 30 minutes until
+every tool and category that analysed the three previous commits has
+analysed this one; a newer push ends the wait and leaves the issue to the
+newer run. Then it keeps exactly one open issue labelled `security`, "Code
+scanning: N open alert(s) on main": created when alerts exist and none is
+open; title and table updated, with one comment naming what is new and
+gone, when the set changes; refreshed silently when only details change;
+closed with a comment when none remain. It never dismisses, never touches
+closed issues, never opens a second, and ignores other `security` issues
+(recognised by a body marker and the exact title). `GITHUB_TOKEN` cannot
+read secret scanning alerts; the issue says so, and the coordinator checks
+them with `gh api`.
+
 ## 5. Releases: `.github/workflows/release.yml`
 
 ### 5.1 Triggers and the rule
 
 - `push` of a tag `v*` (as today), and
-- `workflow_dispatch` with input `version` (`1.0`, `1.1`, …): the job
-  verifies the input matches `^[0-9]+\.[0-9]+$`, tags `main`'s head as
-  `v<version>` (force-moving an existing tag: "later releases of the same
-  spike move the tag", `docs/release-checklist.md`) with `git tag -f -a` and
-  pushes with `--force`, then continues with the build in the same run,
-  because a tag pushed with `GITHUB_TOKEN` starts no second workflow.
-  `permissions: contents: write, id-token: write, attestations: write`.
+- `workflow_dispatch` with input `version` (`1.0`, `1.1`, …): the run
+  verifies the input matches `^[0-9]+\.[0-9]+$`, builds `main`'s head, and
+  once the packages are built, checked and attested tags it `v<version>`
+  (force-moving an existing tag: "later releases of the same spike move the
+  tag", `docs/release-checklist.md`) with `git tag -f -a` and pushes with
+  `--force`, all in the same run, because a tag pushed with `GITHUB_TOKEN`
+  starts no second workflow. A run that fails before that leaves the tag
+  where it was. The jobs and their permissions: §5.4.
 
 A release is built only from a commit on `main`: the job fails when
 `git merge-base --is-ancestor "$GITHUB_SHA" origin/main` is false (for the
@@ -166,10 +194,13 @@ tests run before the build, as today.
 
 The release workflow attaches `hue_bridge.c4z`, `hue_light.c4z`,
 `hue_scene.c4z`, `SHA256SUMS.txt`, `manifest.json`, and the provenance
-bundle(s) from `actions/attest-build-provenance` (`subject-path:
-build/*.c4z`; also write the bundle to a file and attach it as
+bundle(s) from `actions/attest-build-provenance` (`subject-path:` the three
+packages by name; also write the bundle to a file and attach it as
 `attestations.sigstore.json`, so verifiers without `gh attestation` and the
-Scorecard "Signed-Releases" check can see it). `--clobber` replaces
+Scorecard "Signed-Releases" check can see it), and the bundle's DSSE
+envelope as `hue-drivers.intoto.jsonl` (one compact JSON line: the in-toto
+v1 statement with the SLSA provenance v1 of the three packages, which
+Signed-Releases scores 10 where the bundle alone gets 8). `--clobber` replaces
 everything when the tag moves. The release is created when missing with
 `--generate-notes` (categories from `.github/release.yml`: by label `bug` →
 "Fixed", `enhancement` → "New and changed", `security` → "Security",
@@ -183,6 +214,72 @@ the coordinator edits the codename into the title once per major version
 
 A repository ruleset (coordinator, API) on tags `v*`: deletion blocked,
 creation and update allowed to the repository admin and GitHub Actions.
+
+### 5.4 Two jobs (security review 2026-10-25, finding 11)
+
+No third-party code runs where the write token or the signing identity is:
+
+- **build** (`Lint, test and build the packages`; `contents: read`, no
+  `id-token`, no `GH_TOKEN`): checkout, the tag check of §5.1 (before any
+  third-party code; on dispatch it also tags the commit locally, annotated,
+  so that `tools/build.sh` names the tag in the manifest), the pinned rocks,
+  lint and test, the pinned packager, the build, the package and manifest
+  checks, `SHA256SUMS.txt`, then `actions/upload-artifact` of the three
+  packages, `SHA256SUMS.txt` and `manifest.json` as
+  `hue-drivers-<tag>-build`.
+- **publish** (`Attest the packages and publish the release`; `needs:
+  build`; `contents: write`, `id-token: write`, `attestations: write`): only
+  `actions/*` pinned by SHA (checkout, download-artifact, attest-build-provenance,
+  upload-artifact), `git`, `gh` and short `python3` steps of its own. It works
+  the tag out again from the event (it takes nothing from the build job but
+  the files), downloads the artifact, and checks it before signing: exactly
+  the five files, `sha256sum --check --strict SHA256SUMS.txt`, and a manifest
+  naming this tag, version and run's commit, `dev: false`, with each
+  package's sha256 and size. Then the attestation, the bundle and the
+  in-toto file (§5.2), the workflow artifact `hue-drivers-<tag>` with all
+  seven release files (the six of the single job before, and the in-toto
+  file), the tag push (dispatch only, a one-commit checkout without
+  credentials), and the release.
+- `GH_TOKEN` (`github.token`) is set only on the two steps that push the tag
+  or call `gh`.
+
+What a compromised tool in the build job can still do: put its own code
+into the packages, which the attestation then truthfully describes as built
+by `release.yml` from this commit. What it can no longer do: push or move
+tags, replace the assets of any release, or sign provenance for files of its
+choosing.
+
+### 5.5 Pinned build inputs
+
+Everything the CI and release jobs run is pinned, so that a new upstream
+release reaches a build only through a reviewed change:
+
+- **Actions** by full commit SHA (§2 conventions). Dependabot proposes new
+  versions once a week, no sooner than **7 days** after their release
+  (`cooldown: default-days: 7` in `.github/dependabot.yml`, finding 13;
+  GitHub Actions supports `default-days` only, and security updates are never
+  delayed), and `dependabot-auto-merge.yml` merges them once CI is green.
+- **Snap One's packager** (`snap-one/drivers-driverpackager`) at a reviewed
+  commit, fetched by SHA (`git init`, `git fetch --depth 1 origin <sha>`,
+  `git checkout FETCH_HEAD`) in `ci.yml` and `release.yml`: today
+  `16eef8beb70303606f066524cda516b2aa7ce38d`, the head of its master branch
+  on 2026-10-25 (last changed 2024-08-28) and the commit of the VM's
+  `~/c4-tools/drivers-driverpackager`. To move it: pull that copy, read
+  `git log -p <pinned>..HEAD` there, and change the sha in both workflows in
+  one pull request.
+- **luarocks**: every rock at an exact version, dependencies included, each
+  installed with `--deps-mode=none`, so luarocks fetches nothing the list
+  does not name and a missing rock fails the job instead of arriving
+  unpinned. The versions current on 2026-10-25, which the jobs installed
+  before the pin and the VM runs: luacheck 1.2.0-1 (argparse 0.7.2-1,
+  luafilesystem 1.9.0-1), busted 2.3.0-1 (dkjson 2.11-1, lua_cliargs
+  3.0.2-1, luasystem 0.7.1-1, say 1.4.1-3, luassert 1.9.0-1, lua-term 0.8-1,
+  penlight 1.15.0-1, mediator_lua 1.1.2-0). The same list stands in both
+  workflows; move a rock in both in one pull request, after reading its
+  changes.
+
+The packager and the rocks are no Dependabot ecosystem, so nothing proposes
+their updates: the weekly CI run keeps proving that the pinned set installs.
 
 ## 6. Desired state: `deploy/house.yaml`
 
@@ -220,20 +317,33 @@ merge → the drift workflow opens the deploy issue → the coordinator runs
 
 ## 7. Observed state and the deploy tool: `tools/deploy.py`
 
-Standard library only; talks to GitHub through `gh api` (the VM's `gh` is
-2.46, which has no `gh attestation`), repository from `gh repo view` or
-`--repo`. Subcommands:
+Standard library only; talks to GitHub through `gh` (`gh api`, `gh release
+download`, and for provenance `gh attestation verify`, which needs gh
+2.102.0 or newer: the VM's apt `gh` 2.46 has no `gh attestation` at all),
+repository from `gh repo view` or `--repo`. Subcommands:
 
 - `validate [--online]`: §6.
-- `start [--tag v1.0] [--supersede] [--note TEXT]`: resolves the tag (default
-  `release:` from `house.yaml`), downloads `manifest.json`, `SHA256SUMS.txt`
-  and the three packages from the release into `build/release/<tag>/`
+- `start [--tag v1.0] [--supersede] [--note TEXT] [--no-attestation]`:
+  resolves the tag (default `release:` from `house.yaml`), downloads
+  `manifest.json`, `SHA256SUMS.txt` and the three packages from the
+  release into `build/release/<tag>/`
   (fresh directory), verifies every sha256 against both files and that
   `manifest.build` equals `house.yaml`'s `build` and `manifest.commit` is the
   tag's commit; checks that a provenance attestation for each package's
   digest exists at `GET /repos/{owner}/{repo}/attestations/sha256:<digest>`
-  and that its subject digest matches (presence and subject only; it says so
-  in the brief, since cryptographic verification needs a newer `gh`);
+  and names that digest as a subject, then verifies who signed it (security
+  review 2026-10-25, finding 12): `gh attestation verify <file> --repo
+  <o>/<r> --signer-workflow <o>/<r>/.github/workflows/release.yml --format
+  json` for each package, which checks the Sigstore signature and that the
+  signing certificate names the release workflow, after which `start`
+  checks again that every verified attestation's identity is
+  `https://github.com/<o>/<r>/.github/workflows/release.yml@<ref>`. It
+  refuses a gh older than 2.102.0 (2.51.0 to 2.101.0 match only the start of
+  the workflow path, GHSA-wjmr-j3rp-mh2g; older ones lack the option), a
+  failed verification and an empty result. `--no-attestation` accepts a
+  package that has no attestation at all (a release cut before attestations
+  existed), never one whose attestation fails; the brief says which packages
+  were verified, with which gh and command;
   refuses when a deployment of environment `house` is still `in_progress`
   or `pending` unless `--supersede` (which marks that one `inactive` with a
   comment-style description); then creates the GitHub Deployment
@@ -337,7 +447,9 @@ over: once from the VM, once from the workflow finding nothing to do.
   of ours would be run against a Dependabot PR with secrets it needs, it
   isn't: our workflows need none.)
 - `.github/dependabot.yml`: `github-actions` weekly grouped (as today) with
-  the label `dependencies`; add `pip` only if a requirements file appears.
+  the label `dependencies`, and `pip` for `/tools`
+  (`tools/requirements-checks.txt`), weekly, grouped, label `dependencies`;
+  reviewed, not auto-merged.
 
 ## 9. Automation decisions (edge cases before automation)
 
@@ -352,6 +464,7 @@ over: once from the VM, once from the workflow finding nothing to do.
 | Labels | automatic create/update; delete forbidden | a deleted label loses its history on issues |
 | Dependabot | automatic PRs; auto-merge for action pins only | CI gates them; everything else is reviewed |
 | Scorecard, CodeQL | automatic, read-only reports | |
+| Code scanning issue | automatic open/update/close of one `security` issue; never dismisses an alert, never reopens or edits closed issues, never a second | a record, not an actor; a dismissal is a decision with a reason |
 
 Corner cases decided: the tag moves while a deployment is `in_progress` →
 `deploy.py start` of the new build refuses until `done`/`failed`/`--supersede`;
@@ -364,7 +477,10 @@ error after the deployment is created → `start` writes `deployment.json`
 before anything that can fail afterwards and `start --resume` is not
 needed: `done --deployment ID` takes the id from the deployment list;
 `deploy.py` run from any branch or a dirty checkout → unaffected, it reads
-GitHub, not the tree (except `house.yaml`).
+GitHub, not the tree (except `house.yaml`); a package whose attestation a
+workflow other than `release.yml` signed, or a `gh` too old to tell
+(before 2.102.0) → `start` refuses before the deployment exists, with or
+without `--no-attestation` (§7).
 
 ## 10. Done when
 

@@ -226,7 +226,8 @@ altogether.
 
 1. #5: Stage A alone before the release, as recommended, or both stages?
    Stage B is where the two drivers genuinely differ (four hooks) and where
-   the keypad behaviour verified on the house lives.
+   the keypad behaviour verified on the house lives. **Stage B done
+   2026-10-25** (#57): §5.
 2. #5: ship `common/device.lua` unused in `hue_bridge.c4z`, or extend
    `tools/build.sh:46-49` to drop it from the bridge's stage as it drops
    `devloop.lua` from release stages?
@@ -240,15 +241,87 @@ altogether.
    (`hue_light/driver.lua:675`, `hue_scene/driver.lua:994`) are the only
    timers `OnDriverDestroyed` does not track; harmless on the controller (the
    Lua state goes with the device) and at most a stray `UpdateProperty` after
-   a dev-loop reload. Track them (3 lines each) or leave?
+   a dev-loop reload. Track them (3 lines each) or leave? **Done
+   2026-10-25** (#49): the Driver Version timers are tracked and killed in
+   `OnDriverDestroyed` in both device drivers and the bridge.
 6. Not slimming: the device-side pre-late-init buffer (`hue_light/driver.lua:694`,
    `hue_scene/driver.lua:1056`) has no cap, where the bridge's hello queue
    keeps 200 (`docs/code-analysis-2026-10-22.md:40-46`). The window is one
    startup, the senders are the bridge's own configure/state per device; a
    cap of 50 would be three lines. For the hardening list, not this pass.
+   **Done 2026-10-24** on `release-prep` (security review finding 4): the
+   buffer is capped at 200 messages (`common/device.lua`).
 7. #5 drifts one log line: a shared `load_identity` gives the scene the
    light's "persisted kind %q is not one this build knows" warning
    (`hue_light/driver.lua:636`) where the scene is silent (955-957). Not an
    owner-visible text under the brief's rule 1 (no property, action, picker,
    Status, Last Action, notification or message changes), but say so in the
-   implementation brief.
+   implementation brief. Stage B (#57) leaves `load_identity` in each driver,
+   so this line does not drift; the machine's one wording difference keeps
+   each driver's text (§5, row 6).
+
+## 5. Stage B done (#57, 2026-10-25)
+
+The press / click / release machine is in `src/common/device.lua`
+("Keypad press, click and release"), with the keypad settings (`SETTINGS`,
+`opts.settings`) and their `SET_*` handlers; each driver keeps what a tap and
+a hold do to it, in hooks. Contract: `docs/lifecycle-refactor-design.md`
+(#57).
+
+**Where the two copies differed** (rule 2 there: each driver's behaviour kept):
+
+| # | Difference | Light | Scene | Settled as |
+|---|---|---|---|---|
+| 1 | a tap | `click`: preset or 0 over the click rates, toggle by `st.on` | `button_click`: ON, OFF, TOGGLE | hook `on_click(button)` |
+| 2 | the hold itself | `start_ramp` (`HUE_DIM`, 100 ms estimate); from off on at 1 % first | `HUE_SCENE_DIM`, the held-on rule; from off a recall at 1 %, or a time-based start with its `follow` | hook `on_hold(h, up, on)` |
+| 3 | the finish | stop with the estimate, brightness fallback | stop when a dim went out, level fallback | hook `on_finish(h)` |
+| 4 | `end_hold` | nothing more | cancels the `follow` of a time-based scene this hold started | hook `on_end_hold(h)` (optional) |
+| 5 | the settings | preset, click up/down, hold up/down | hold up/down | option `settings` |
+| 6 | the down-from-off debug line | "a light" | "a scene" | option `noun`, text unchanged |
+| 7 | the click guard | armed before the stop | armed after the stop and its fallback | armed first in both |
+| – | the on state a hold starts from | `st.on == true` | `effective_on()` | both are `dev.is_on() == true`: no hook |
+
+The review's "exactly four places" holds for behaviour; rows 5 to 7 are data,
+one word and an order that is not observable: the guard's timer only forgets the
+guard, both timers are 1000 ms and independent, and no message changes.
+Arming the guard before `on_finish` means a failing hook still leaves the
+keypad's click after a hold ignored (pinned in `device_spec`). The 600 ms gap
+after a hold's 1 % turn-on (light `RAMP_AFTER_ON_MS`, scene
+`RECALL_DIM_AFTER_MS`) is one `DIM_AFTER_ON_MS`, through
+`dev.dim_after_on(h, fn)`. Q7's line is `load_identity`'s, outside the
+machine: each driver keeps its own.
+
+**Steps**, `busted tests` after each (the five specs that pin the keypad:
+`device_spec`, `light_driver_spec`, `scene_driver_spec`,
+`scene_roundtrip_spec`, `zone_light_roundtrip_spec`); `luacheck src tests
+tools` clean throughout:
+
+| Step | Suite | device | light | scene | scene round trip | zone light round trip |
+|---|---|---|---|---|---|---|
+| before | 1277 | 36 | 128 | 197 | 2 | 2 |
+| 2. the machine and its hooks in `device.lua`, 14 new specs | 1291 | 50 | 128 | 197 | 2 | 2 |
+| 3. the light on the machine | 1291 | 50 | 128 | 197 | 2 | 2 |
+| 4. the scene on the machine | 1291 | 50 | 128 | 197 | 2 | 2 |
+
+No existing spec was edited. A mutation pass over the machine (14 changes:
+the three timings, the direction rule, down from off, the guard and its
+order, the settings, `on_end_hold`, `dim_after_on`, `cancel_timers`, the
+noun) failed at least one spec each; the drivers' own specs caught 11, the
+new `device_spec` specs the other three (the guard's order,
+`dim_after_on`'s binding check, the noun). `tools/build.sh` builds; the
+bridge's package still drops `common/device.lua`.
+
+**Lines** (`wc -l`):
+
+| File | Before | After | Change |
+|---|---|---|---|
+| `src/common/device.lua` | 591 | 779 | +188 |
+| `src/hue_light/driver.lua` | 947 | 836 | −111 |
+| `src/hue_scene/driver.lua` | 1455 | 1355 | −100 |
+| total | 2993 | 2970 | −23 |
+
+Less than the −105 estimated in §2: the driver halves stay with their
+comments (the light's `start_ramp`; the scene's `send_dim`, `hold_changing`
+and `start_smart_hold`), the settings became one table with their commands
+and parameters, and the module documents its hooks and the differences it
+settled. What it buys is one machine: a keypad change is made once.

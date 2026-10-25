@@ -16,7 +16,9 @@ order: keypads reach the driver through its own Button Link connections
 parity"); a scene device is a dimmer whose on state follows the on rule
 (`held_on`) of `docs/scene-dimmer-design.md`. Both drivers declare
 `hide_proxy_properties`, so Composer shows none of the proxy's preset,
-rate or button colour settings and the defaults below apply.
+rate or button colour settings and the defaults below apply. Superseded
+(2026-10-25, #59): both declare it False now, so Composer lists those
+settings once the controller has been rebooted after the install.
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
@@ -45,6 +47,19 @@ findings".
   the rates in Composer, so nobody can change them there and the defaults
   apply (whether the proxy sends values of its own has not been checked);
   the handlers stay, and exposing the settings is open (`docs/status.md`).
+  Superseded (2026-10-25, #59): `hide_proxy_properties` False, so the
+  preset and the rates are shown after the controller reboot and reach these
+  handlers (verified on the house, Composer rounds 41 and 42).
+- The answer: after each `SET_*`, and for every declared setting at late
+  init, the driver sends the matching notification (`PRESET_LEVEL`,
+  `CLICK_RATE_UP`/`DOWN`, `HOLD_RATE_UP`/`DOWN`) so Composer shows the value
+  in use.
+- Its form: the bare value as a string. The proxy reads the documented
+  `{RATE = …}` table as 0 (verified on the house, 2026-10-25: a table zeroed
+  the settings until the bare form replaced it).
+- Ranges: preset 1 to 100, rates 0 to 86 400 000 ms. A value outside them is
+  refused: from the proxy, the value kept is reported back; persisted, it is
+  deleted, warned about once, and the default used.
 
 ## Driver behaviour
 
@@ -232,7 +247,8 @@ restart, as build 144 did.
 
 Current (2026-10-24): `hide_proxy_properties` True hides the colour
 settings too, so they cannot be changed in Composer and the default
-colours apply.
+colours apply. Superseded (2026-10-25, #59): shown since then, after the
+controller reboot the capability change needs.
 
 Install findings (2026-10-23/24): the capability changes of this section
 and of the scene dimmer made Composer ask "Restart Director?"; Yes did

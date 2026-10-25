@@ -2,15 +2,41 @@
 # labelled "dependencies" (left out of the release notes by .github/release.yml)
 # and merged by .github/workflows/dependabot-auto-merge.yml once the required
 # checks pass. Dependabot updates the commit SHA and the version comment of
-# every `uses:` together. No pip ecosystem: tools/ has no requirements file.
+# every `uses:` together. pip: the hash-pinned check tools in
+# tools/requirements-checks.txt, one grouped PR a week; reviewed, never
+# auto-merged (the auto-merge workflow takes github-actions only).
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    # A new release of an action is proposed only 7 days after it was
+    # published, not after GitHub's default 3 (security review 2026-10-25,
+    # finding 13): the pins merge without a human look and the Release
+    # workflow runs the same actions, so a compromised release gets a week to
+    # be noticed and withdrawn first. GitHub Actions takes default-days only
+    # (no semver-*-days); security updates are never delayed by a cooldown.
+    # The packager commit and the luarocks versions in ci.yml and release.yml
+    # are no Dependabot ecosystem: they move by hand
+    # (docs/cicd-gitops-design.md, section 5.5).
+    cooldown:
+      default-days: 7
     labels:
       - dependencies
     groups:
       github-actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /tools
+    schedule:
+      interval: weekly
+    # The same week's grace as the actions: these tools run in CI with the
+    # repository checked out (reviewed, never auto-merged, all the same).
+    cooldown:
+      default-days: 7
+    labels:
+      - dependencies
+    groups:
+      check-tools:
         patterns: ["*"]

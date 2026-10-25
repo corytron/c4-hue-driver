@@ -147,4 +147,41 @@ describe("bridge.pairing", function()
 		assert.equal("error", events[1][1])
 		assert.equal("No Hue bridge answered at 192.0.2.10: no bridge ID in config response", events[1][2])
 	end)
+
+	-- Code analysis 2026-10-22, L6: whatever the bridge calls the key is stored
+	-- and then sent with every request, so it must be a usable string.
+	describe("the key in the answer", function()
+		it("must be a non-empty string", function()
+			for _, body in ipairs({
+				'[{"success":{"username":""}}]',
+				'[{"success":{"username":42}}]',
+				'[{"success":{"username":{"a":1}}}]',
+				'[{"success":{"username":true}}]',
+				'[{"success":{"clientkey":"00"}}]',
+				'[{"success":"yes"}]',
+			}) do
+				local status, value = pairing.parse_response(c4:JsonDecode(body))
+				assert.equal("error", status, body)
+				assert.equal("the bridge answered without a usable application key", value, body)
+			end
+			assert.same({ "ok", "abc-123_XYZ" }, { pairing.parse_response({ { success = { username = "abc-123_XYZ" } } }) })
+		end)
+
+		it("must fit in a header: no white space, no control characters", function()
+			for _, key in ipairs({ "abc 123", "abc\r\nX-Injected: 1", "abc\t", "\0abc" }) do
+				local status = pairing.parse_response({ { success = { username = key } } })
+				assert.equal("error", status, key)
+			end
+		end)
+
+		it("fails the pairing with a clear error and stores nothing", function()
+			pairing.pair("192.0.2.10", handlers())
+			c4.transfers[1]:respond(200, CONFIG)
+			c4.transfers[2]:respond(200, '[{"success":{"username":12345}}]')
+			assert.equal("error", events[2][1])
+			assert.equal("the bridge answered without a usable application key", events[2][2])
+			assert.is_nil(c4.persist.hue_app_key)
+			assert.equal(0, #c4.calls_to("PersistSetValue"), "nothing persisted")
+		end)
+	end)
 end)

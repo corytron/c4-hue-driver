@@ -138,6 +138,30 @@ describe("bridge.registry", function()
 			assert.equal("Porch", entries["rid-b"].name)
 		end)
 
+		-- Code analysis 2026-10-22 R9 (issue #48): the owner module's schema
+		-- (lights.lua gives one) decides what a persisted entry keeps.
+		it("drops, given a schema, the persisted fields neither the registry nor the module knows", function()
+			reg = registry.new({ persist_get = persist_get, persist_set = persist_set, now = now, log = log,
+				fields = { "model", "caps" } })
+			store.hue_lights = {
+				["rid-a"] = { device_id = "2043", proxy_id = 2044, name = "Desk Lamp", model = "LCA001", state = "gone",
+					gone_since = "1234", unbound_since = 5, device_name = "Desk", created_at = 900, created_room_id = "7",
+					hue_room_name = "Old", future_field = { x = 1 } },
+				["rid-b"] = { device_id = 2050, name = "Porch", caps = { has_color = true } },
+			}
+			reg:load()
+			assert.same({ device_id = 2043, proxy_id = 2044, name = "Desk Lamp", model = "LCA001", state = "gone",
+				gone_since = 1234, device_name = "Desk", created_at = 900, created_room_id = 7 }, reg:get("rid-a"))
+			assert.same({ device_id = 2050, name = "Porch", caps = { has_color = true }, state = "linked" }, reg:get("rid-b"))
+			assert.truthy(saw_log("registry: rid-a: dropped future_field, hue_room_name, which this build no longer keeps"))
+			assert.falsy(saw_log("rid-b: dropped"))
+			reg:save()
+			assert.is_nil(store.hue_lights["rid-a"].future_field, "the next save writes the entry without them")
+			assert.has_error(function()
+				registry.new({ persist_get = persist_get, persist_set = persist_set, fields = "model" })
+			end)
+		end)
+
 		it("loads room mappings and tombstones, and starts empty for a non-table value", function()
 			store.hue_rooms = { ["room-1"] = { c4_room_id = "12", c4_room_name = "Kitchen", hue_name = "Kitchen" } }
 			store.hue_tombstones = { ["rid-x"] = { name = "Old Lamp", device_name = "Old", deleted_at = "777" } }
@@ -451,12 +475,39 @@ describe("bridge.registry", function()
 			assert.truthy(saw_log("empty present set treated as unknown"))
 		end)
 
-		it("accepts string device ids in the sets and a missing argument", function()
+		it("accepts string device ids in the sets", function()
 			local out = reg:reconcile({ bound = { ["100"] = true, ["200"] = true }, present = { ["300"] = true } })
 			assert.same({ unbound = {}, relinked = { "rid-unbound" }, tombstoned = {} }, out)
 			assert.equal("gone", reg:get("rid-gone").state)
-			out = reg:reconcile()
-			assert.same({ unbound = { "rid-linked", "rid-unbound" }, relinked = {}, tombstoned = {} }, out)
+		end)
+
+		-- Code analysis 2026-10-22 item 14 (issue #48): a bound set the lookup
+		-- did not give (GetBoundConsumerDevices answered nil) is unknown; until
+		-- 2026-10-25 a missing one read as "nothing bound".
+		it("changes nothing at all while the bound set is unknown; an empty one still means nothing bound", function()
+			local none = { unbound = {}, relinked = {}, tombstoned = {} }
+			assert.same(none, reg:reconcile())
+			assert.same(none, reg:reconcile({ present = { [100] = true } }), "a known present set tombstones nothing either")
+			assert.same(none, reg:reconcile({ bound = "junk", present = { [100] = true } }))
+			assert.equal("linked", reg:get("rid-linked").state)
+			assert.equal("unbound", reg:get("rid-unbound").state)
+			assert.equal("gone", reg:get("rid-gone").state)
+			assert.equal(0, reg:counts().tombstones)
+			assert.truthy(saw_log("reconcile skipped: the bound set is unknown"))
+			assert.same({ "rid-linked" }, reg:reconcile({ bound = {} }).unbound)
+		end)
+
+		-- Item 13: Director may not list a device AddDevice has just created,
+		-- or its binding, yet; the caller's batch names what it created.
+		it("leaves the entries named in skip as they are, and judges them at the next reconcile", function()
+			add("rid-new", 600, "New")
+			local out = reg:reconcile({ bound = { [100] = true }, present = { [100] = true },
+				skip = { ["rid-new"] = true, ["rid-gone"] = true } })
+			assert.same({ unbound = {}, relinked = {}, tombstoned = { "rid-unbound" } }, out)
+			assert.equal("linked", reg:get("rid-new").state, "neither unbound nor tombstoned")
+			assert.equal("gone", reg:get("rid-gone").state)
+			out = reg:reconcile({ bound = { [100] = true }, present = { [100] = true, [600] = true } })
+			assert.same({ unbound = { "rid-new" }, relinked = {}, tombstoned = { "rid-gone" } }, out)
 		end)
 
 		it("reports in name order", function()

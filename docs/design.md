@@ -70,7 +70,8 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
 
 - HTTPS only, port 443. Signify forbids falling back to plain HTTP, and CLIP v2
   has never supported it **[verified]**. The driver has no HTTP code path.
-- REST calls: `C4:url()` with `ssl_cacerts` pointing at the bundled roots and
+- REST calls: `C4:url()` with `ssl_cabundle` naming the bundled roots (not
+  `ssl_cacerts`, which adds to the system store; "Certificates" below) and
   `ssl_verify_host=false`, since the certificate's CN is the bridge ID, not the
   IP **[verified API]**.
 - Keep consecutive requests on one connection; the bridge also supports TLS
@@ -108,6 +109,143 @@ drivers also declare Top, Bottom and Toggle Button Links (ids 200–202).
 - Bridge IDs are 16 hex digits, compared lower-case. The discovery endpoint
   returns lower case (`001788fffe100491`), `/api/0/config` upper case
   (`001788FFFE25B8F8`) **[verified]**.
+
+### TLS self-check in release builds (2026-10-25, #53; limits and blocking since #217)
+
+Pinning rests on one behaviour observed on OS 3.4.2: Director applies a
+relative `ssl_cabundle` from the driver's directory instead of the system
+store, and fails closed when it cannot (above); the SDK documents the same
+"instead of" **[verified: API 35_url/_12-SetOption]**. Another OS release
+might handle the option otherwise, and with hostname checking off a keyed
+request could then accept a certificate that does not chain to the Signify
+roots. Until #53 only `Check CA Pinning` (dev builds) could notice. The
+release bridge driver now checks by itself
+(`src/hue_bridge/bridge/tlscheck.lua`, `tests/spec/tlscheck_spec.lua`;
+contracts `docs/review-leftovers-design.md` and, for the limits and the
+blocking rule, `docs/security-fixes-design.md`):
+
+- **When**: after the identity check (`GET /api/0/config`, no key) has
+  confirmed the paired bridge id and before the first keyed request of each
+  start and of each new bridge address.
+- **How**: one more `GET /api/0/config` to the bridge with `ssl_cabundle`
+  set to a decoy bundle, `certs/decoy_ca.pem` (a self-signed CA made for
+  this purpose, its private key discarded, so no certificate chains to it),
+  and `ssl_verify_peer` on. `tlscheck.run(ip, callback)` uses `bridge.http`
+  and the relative path, never the key.
+- **What a refusal proves**: the configured bundle is consulted, and the
+  bridge's chain is not trusted without it. A controller that ignored the
+  option while its own store trusted the bridge, skipped peer verification
+  when a bundle is named, or served the decoy request from a session the
+  real bundle verified would answer it: `not_pinned`.
+- **What it cannot prove** (security review 2026-10-25, finding 3):
+  - That the bundle *replaces* the system store. A controller that adds the
+    named file to the store, as `ssl_cacerts` does on OS 3.4.2 (above),
+    refuses the bridge's private Signify chain against store plus decoy just
+    as against the decoy alone, so it reads `pinned` while its keyed
+    requests would accept any publicly trusted certificate. Only a peer with
+    a public-CA certificate tells the two apart: `Check CA Pinning`, run once
+    in a dev build after every OS upgrade (`docs/release-checklist.md`). A
+    release that adds instead of replacing would break the documented
+    semantics **[assumed: none does]**.
+  - Anything against an active attacker. The decoy request is easy to
+    recognise on the wire (the first TLS handshake after the identity GET),
+    so whoever can drop it makes the check `inconclusive` at will.
+- **Verdicts and what the driver does** (`tls_gate` in
+  `src/hue_bridge/driver.lua`):
+  - `pinned` (the request fails certificate verification): the expected
+    answer. The driver records the running Director version,
+    `C4:GetVersionInfo().version` **[verified: API
+    5_director_command/_2-GetVersionInfo]**, in the persisted value
+    `tls_pinned_on` (`tlscheck.remember_pinned()`; unencrypted, it is no
+    secret), and keyed requests may go.
+  - `not_pinned` (it gets an HTTP answer, whatever the status): keyed
+    requests stop, `Status` reads `TLS check failed: nothing is sent (see
+    Attention)`, `Attention` reads `TLS check failed: the controller
+    accepted the bridge without its Signify roots; keyed requests stopped
+    (see the manual)` (the manual's chapter 12, "The TLS check", asks the
+    owner to report it as an issue). The verdict sticks until the next start
+    or address change (finding 2): a later check never lifts it, and every
+    keyed send refuses meanwhile (module requests, the stream address
+    self-check, the event stream, `Connect Event Stream`, `Test
+    Connection`).
+  - `inconclusive` (a timeout or connection error): pinning is a property of
+    the OS, not of the network, so this passes only on a Director version
+    that has answered `pinned` before (`tlscheck.pinned_before()`); it is
+    logged and asked again at the next identity check. On any other version
+    (the first start of a build with this rule, the first after an OS
+    update, a controller whose version cannot be read) nothing is sent,
+    `Status` reads `TLS check inconclusive (<detail>): nothing is sent;
+    checking again in 30 s`, and the identity check, and with it this
+    check, runs again every 30 s until an answer is conclusive.
+- **Test Connection** (finding 1): it carries the key, so it waits for the
+  identity check like every keyed request. While the current address's
+  identity is not confirmed it runs the identity check, and with it this
+  check, first (`Status`: `Testing: checking the bridge identity first`),
+  and sends its keyed `GET /clip/v2/resource/bridge` only once both passed,
+  waiting across the 30 s retries if need be; a different bridge id or a
+  failed TLS check ends it. A different bridge id therefore comes from the
+  unkeyed `/api/0/config`: `Status` reads `Bridge at <ip> reports ID <id>,
+  expected <id>; nothing is sent until the address is corrected`. The
+  identity check keeps one waiter per purpose (stream, test), so a test does
+  not drop the stream's pending start; an address change or `Forget Pairing`
+  drops them all. After `not_pinned` the test refuses: `Test refused: TLS
+  check failed; nothing is sent (see Attention)`. The comparison with the id
+  in the keyed answer stays. A rejected key does not stop it: it is the one
+  way to show that the key works again ("A rejected key", below).
+- **Why a decoy**: the check needs nothing but the bridge (no public site,
+  no internet access, no name resolution), and it exercises the very option
+  every keyed request relies on, on the controller that runs the driver, at
+  every start. It does not depend on the OS release: on OS 4.x (#53,
+  CLAUDE.md investigation 3) the first start after an upgrade reports by
+  itself whether the configured bundle is consulted, without a dev build;
+  whether it replaces the store still takes the one `Check CA Pinning` run
+  above.
+- **Verified** 2026-10-25 on the house (dev build 276, which runs the same
+  check; "Hardware facts of the 2026-10-25 dev pass" below): OS 3.4.2
+  refuses the decoy with curl error 60, as it refused a public site with the
+  bundle in place (the CA probe above). Until then this was assumed.
+- `Check CA Pinning` stays in dev builds; since #46 (L5) it answers
+  `inconclusive` rather than `pinned` when its second request fails for a
+  reason other than certificate verification (timeout, DNS, connection
+  refused). It is the only test of the first limit above.
+
+### A rejected key (2026-10-25, #44)
+
+- **[verified 2026-10-25 on the house Bridge Pro, software 2071524040]**: an
+  unknown application key gets **HTTP 403** on `GET
+  /clip/v2/resource/bridge` and on `/eventstream/clip/v2`, with an HTML
+  body, not JSON. A revoked key is an unknown key to the bridge **[assumed:
+  the same 403]**. The JSON `unauthorized user` body in
+  `docs/edge-cases-hue.md` is from the v1 API; CLIP v2 sends none on these
+  paths, so the driver goes by the status code alone.
+- **Behaviour.** Before: a non-200 answer to the stream request was an
+  abort, so a 401 or 403 was retried as an outage (every 60 s at most, with
+  the same key) and `Status` stayed `Paired` (security review 2026-10-24,
+  finding 8). Now a 401 or 403 on the event stream stops the stream (no
+  reconnect), and a keyed REST request answered 401 or 403 does the same
+  (since #217 only once a second request confirms it, below):
+  `Status` reads `Key rejected by the bridge (HTTP <code>): re-pair with
+  Pair Bridge`, `Event Stream` reads `Stopped: key rejected (HTTP <code>)`,
+  and `bridge_request` answers `{ ok = false, err = "key rejected", code =
+  <code> }` at once for keyed requests until `Pair Bridge` succeeds or
+  `Bridge IP Address` changes. The command queues end such a pending state
+  without retrying (#43).
+- **Confirmed before the lock, and lifted by a test (#217, security review
+  2026-10-25, finding 4).** Whether CLIP v2 answers 403 to anything but an
+  unknown key is not known **[assumed: Signify's error list is behind a
+  login]**, and one refusal for another reason stopped the feed and every
+  command until someone pressed the link button. Now a 401 or 403 to a keyed
+  module request answers that request with `HTTP <code>` and sends one keyed
+  `GET /clip/v2/resource/bridge` (one at a time, however many refusals
+  arrive); only a 401 or 403 to that GET locks. The stream's 401/403, the
+  stream address self-check and `Test Connection` lock at once: they ask the
+  key-only endpoint or the bridge resource. While locked, `Connect Event
+  Stream` refuses too (`Event Stream`: `Not connected: key rejected`; after
+  `not_pinned`, `Not connected: TLS check failed`), so the rejected key is
+  not presented again, except by `Test Connection`, the one way to show that
+  the key works again: a 200 with the paired bridge id clears the lock, logs
+  it and starts the stream again, and `Status` reads the test's `Test OK:
+  …`. `Pair Bridge` and an address change clear it as before.
 
 ### Event stream
 
@@ -268,8 +406,8 @@ replaces, so the two are on different Director queues.
   `padded(ip, 3)` (all 3-digit; `for_stream` was folded into it 2026-10-24), then the widths count down octet by octet:
   for `10.0.2.143` that is `10.000.002.143`, `10.000.02.143`, `10.000.2.143`,
   `10.00.002.143`, `10.00.2.143`, `10.0.002.143`, `10.0.02.143` (7). An
-  address with one paddable octet (`192.168.1.50`) has a one-entry family,
-  `192.168.001.50`: no rotation, today's behaviour, and the property says so.
+  address with one paddable octet (`198.51.100.5`) has a one-entry family,
+  `198.51.100.005`: no rotation, today's behaviour, and the property says so.
   No paddable octet: nil, single-queue fallback as before. Only forms
   measured on hardware are generated (2- and 3-digit padding, mixed per
   octet, see the scheduling notes); 4-digit padding would give one-octet
@@ -389,6 +527,12 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   PUTs go to `/clip/v2/resource/light/<rid>` on the dotted address, so they
   never queue behind the stream (see the option A decision above). On 429 or
   5xx: retry after 500 ms, doubling to 8 s; other 4xx: drop and log.
+  Superseded (2026-10-25, #43): a failure retried that way (a transport
+  error without an HTTP code too) is retried for at most 30 s from the
+  pending state's last update (`commands.MAX_AGE_S`), then dropped with one
+  warning naming its age and the last error; `not paired` and `key
+  rejected` end the pending state at once. The grouped_light queue follows
+  the same rules.
 - **Brightness and colour mapping.** Proxy → bridge:
   `SET_BRIGHTNESS_TARGET` **[verified: sample light driver]** with target 0 →
   `on=false`, otherwise `on=true, brightness=target`, `RATE` passed through;
@@ -439,7 +583,9 @@ preset **[assumed until a switch is bound on hardware]**.
 
 Superseded (2026-10-24): `hide_proxy_properties`, declared by both device
 drivers, keeps the preset, rate and LED colour settings out of Composer,
-so the defaults apply (same section below).
+so the defaults apply (same section below). Superseded (2026-10-25, #59):
+both now declare it False, so the settings show in Composer after the
+controller reboot the capability change needs.
 
 On hardware (builds 144 and 146): the Top, Bottom and Toggle Button Links
 are connections the driver declares (ids 200–202, BUTTON_LINK outputs),
@@ -535,6 +681,12 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   on, bottom lit while off). On OS 3.4.2 the capability is static (dynamic
   only from OS 4.2.1 **[verified: light_v2 proxy reference, "What's New in
   4.2.1"]**), so showing them is a capability change and needs a reboot.
+  Superseded (2026-10-25, #59): both device drivers declare
+  `hide_proxy_properties` False (the XML route, since the run-time switch
+  exists only from OS 4.2.1), so after the install the settings appear once
+  the owner has rebooted the controller from System Manager; the commands
+  they send reach the handlers above **[assumed until a setting is changed
+  on the house]**.
 - **Not yet seen on hardware:** the Hue-app side of the on rule and the
   level (a dim, the room off, another scene played in the Hue app), a slider
   move from off at a level, the absolute fallback, `held_on` across a
@@ -1031,6 +1183,11 @@ it.
   As built (2026-10-24): the grouped_light queue (scene OFF, holds, slider
   moves) is a second `bridge/commands.lua` queue with its own bucket at the
   same 10/s, burst 10; nothing enforces 1/s for groups.
+  Superseded (2026-10-24, zone lights, build 196): the grouped_light queue
+  runs at 1/s with a burst of 3 (`docs/zone-light-design.md` Decision 9);
+  since 2026-10-25 (#58) it also clamps a zone light's colour temperature to
+  the members' common range (Decision 7). Retries: the coalescer's rule
+  above (#43).
 - Rooms and zones are controlled through their `grouped_light` service.
   Scenes are recalled through `/resource/scene/{id}` **[verified: resources
   exist; recall body to be confirmed from the API reference]**.
@@ -1096,3 +1253,108 @@ it.
   `hue_scenes` and `hue_scene_tombstones`. Each device keeps its own
   identity, keypad settings and LED colours, a scene also `recall_as` and
   `held_on`.
+
+## Hardware facts of the 2026-10-25 dev pass (build 276, OS 3.4.2, Bridge Pro)
+
+- **TLS self-check (#53):** the request with the decoy CA bundle failed with
+  curl error 60 ("SSL peer certificate or SSH remote key was not OK"): the
+  controller honours `ssl_cabundle`, and with the CA probe's refusal of a
+  public site ("Certificates") trust is pinned to the Signify roots (the
+  decoy alone shows that the bundle is consulted, not that it replaces the
+  store: "TLS self-check in release builds"). No TLS session verified with
+  the real bundle was reused.
+- **HMAC (#52):** `C4:HMAC` exists on OS 3.4.2 and reproduces RFC 4231 test
+  case 2, so the dev loop uses it rather than its Lua fallback.
+- **GetBoundConsumerDevices (#48):** a binding with nothing bound (the
+  bridge's bindings 2 and 77) answers `nil`; the bridge's binding 1 answers a
+  table of the four bound devices. The modules read one nil as unknown and a
+  second nil 5 s later as nothing bound (`bridge/project.lua`).
+- **Unknown application key (#44):** HTTP 403 with an HTML body on CLIP v2
+  GETs and on the event stream (see "A rejected key").
+
+## Concurrent transfers (verified 2026-10-25)
+
+Director runs at most **four** `C4:url` transfers at once, across all hosts.
+Seen on the house (OS 3.4.2, dev build 276, a quiet night): after three
+dev-loop reloads within fifteen minutes, three abandoned event-stream
+transfers (each still open, waiting for its next callback, rule 2 of
+`bridge/stream.lua`) plus the live stream were open; from that moment every
+other transfer timed out after 15 s, GETs to the bridge's dotted address
+and requests to the dev server on another host alike. At 01:00:00 the
+bridge's hourly `geolocation` update reached all four streams, the
+abandoned ones aborted on that callback, and everything flowed again at
+once. With one abandoned transfer fewer (00:48), the same GETs went
+through.
+
+Consequence for production: the watchdog was the only other source of
+abandoned transfers, and since release 1.0 (Stream Timeout 3600, watchdog
+600) a quiet night could leave up to five of them open, enough to stall
+every command until the next bridge event. The stream therefore tracks the
+transfers it abandoned (until their next callback or their own timeout,
+shared across stream rebuilds) and the watchdog opens a new transfer only
+while none may still be open (`stream.MAX_ABANDONED = 1`): at most two
+stream transfers, two left for commands. The cost: after a bridge restart in
+a quiet house that followed a watchdog reconnect, the feed may stay stale
+until the abandoned transfer's own timeout (at most Stream Timeout) or the
+next bridge event. Dev-loop reloads still leave one abandoned transfer each
+(a reload starts a new Lua module in the same state and cannot know the old
+one's), so repeated reloads in a quiet house can still reach the limit; a
+bridge event drains them.
+
+## Hardware pass of 2026-10-25 night (dev builds 276 and 284, OS 3.4.2)
+
+Run from the VM through the signed dev loop (`Proxy Command`, `Hue Request`)
+and the devices' Lua command windows (Composer round 38 and 40); every
+bedroom light kept at 1–3 % at the owner's request.
+
+- **Commands into a light_v2 proxy with `SendToDevice`:** `ON`, `OFF`,
+  `SET_LEVEL` and `RAMP_TO_LEVEL` work (known); `SET_COLOR_TARGET` is
+  forwarded to the driver but always with `LIGHT_COLOR_TARGET_MODE=0`,
+  whatever mode was sent, so a temperature cannot be injected that way
+  (round 38: a direct `ReceivedFromProxy` with mode 1 arrives as 1). A
+  Navigator temperature pick arrives with `LIGHT_COLOR_TARGET_MODE=1` and a
+  colour pick with 0 (the driver's own "first SET_COLOR_TARGET params"
+  lines, 2026-10-22). Lua code typed into a device's Lua window cannot
+  replace `C4` methods (`C4` is userdata).
+- **Zone light (Bedside Lights):** a 1 % level from off is one grouped_light
+  PUT and both lamps read 1.19 %; a colour pick is one xy PUT; a temperature
+  pick (mode 1) is one `color_temperature` PUT (mirek 366 for 2700 K) and Hue
+  reports the lamps in ct mode; a colour set while off is stored and goes
+  out with the turn-on in the same PUT; a change made in Hue reaches both
+  zone and room devices and the scene devices' group level within a second.
+- **Issue #39:** OFF on the room light (Master Bedroom Lights) is one
+  grouped_light PUT and Shine and Golden hours report off with level 0. A
+  member added to the zone in Hue reaches the live device as a new
+  configuration (`light_count` 3, then 2 after the restore) within seconds;
+  every bulb in this house has colour and colour temperature (mirek 153–500
+  or 50–1000), so no capability change can be produced here. A slider burst
+  of 50 targets in 5 s on the zone made 9 grouped_light PUTs (a burst of 3,
+  then one a second, the latest value winning) and no 429.
+- **Issue #65:** during that drag the bridge sent 10 event containers in
+  about 7 s, at most 2 a second.
+- **Issue #41:** a 1 % level on Shine from off recalled the scene with a
+  brightness override: both lamps at 1.19 % in the scene's own colours. The
+  boot path of the binding re-check is not visible in the shipped log (the
+  dev loop starts at late init); after the reboot every device was bound
+  and configured within seconds and none logged "still not bound".
+- **Issue #59, after the controller reboot:** the light_v2 proxy's own
+  settings page appears in Composer above the driver's "Advanced
+  Properties" on light and scene devices (default on brightness, click
+  rates, hold ramp rates, LED colours, and colour on mode on lights). A
+  field commits on Enter and arrives as, for example, `SET_HOLD_RATE_DOWN
+  RATE=2000`; a hold down from 3 % then went out with a 40 ms duration
+  (2000 × 2 %). The drivers did not answer with the notification the proxy
+  stores (`HOLD_RATE_DOWN` and its siblings), so Composer kept showing the
+  old value and an edit back to it sent nothing; fixed 2026-10-25
+  (`common/device.lua` reports every setting at late init and after every
+  change).
+- **Keypad (dev build 284, the shared state machine of #57), through the
+  Lua windows:** a hold of the top button from off released at 800 ms turns
+  the zone on at 1 % (one PUT) and sends no dim; a hold down then a click
+  100 ms after the release sends dim down and stop, and the click is
+  ignored; a bottom tap is OFF with the proxy's click rate (0.75 s); on
+  Shine a hold from off recalls the scene at 1 % and sends no dim, and a
+  bottom tap turns the room off.
+- **Capability changes:** Composer asks "Restart Director?" once per driver
+  whose capabilities changed ("hue_light.c4z requires a Director restart
+  after update…", then the same for hue_scene.c4z).

@@ -213,6 +213,31 @@ describe("common.device", function()
 			assert(ok, err)
 		end)
 
+		it("a second show_driver_version starts over: one look pending, never two chains", function()
+			local dev, c4 = new_device()
+			c4.config_info.version = ""
+			dev.show_driver_version(1)
+			c4.fire_timers()
+			assert.same({ 10000 }, delays(c4))
+			dev.show_driver_version(1) -- late init run again
+			assert.same({ 5000 }, delays(c4), "the pending look was replaced")
+		end)
+
+		it("cancel_timers stops the pending look and the binding re-check (OnDriverDestroyed)", function()
+			local dev, c4, env, _, st = new_device()
+			c4.config_info.version = ""
+			dev.show_driver_version(1)
+			st.bridge = nil
+			dev.schedule_recheck(1)
+			assert.same({ 5000, 5000 }, delays(c4))
+			dev.cancel_timers()
+			assert.same({}, delays(c4))
+			c4.config_info.version = "7"
+			assert.equal(0, c4.fire_timers())
+			assert.equal("", env.Properties["Driver Version"], "no stray write after the destroy")
+			assert.has_no.errors(dev.cancel_timers, "nothing pending is fine")
+		end)
+
 		it("Debug_Mode On enables debug lines, anything else keeps them off", function()
 			local _, _, _, dispatch = new_device()
 			dispatch.property_changed("Debug Mode", "On")
@@ -248,6 +273,104 @@ describe("common.device", function()
 			assert.same({ "good" }, seen)
 			assert.equal(1, #lines)
 			assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: buffered BAD failed: .*boom"))
+		end)
+	end)
+
+	-- docs/review-leftovers-design.md #49: OnBindingChanged acts only after
+	-- late init; an earlier call waits and is replayed once late init has run.
+	describe("binding changes before late init", function()
+		-- A handler through binding_changed that records every call it gets.
+		local function recorder(dev)
+			local seen = {}
+			local handler = dev.binding_changed(function(id, class, bound, other, other_binding)
+				seen[#seen + 1] = { id, class, bound, other, other_binding }
+			end)
+			return handler, seen
+		end
+
+		it("wait until replay_bindings, the latest call per binding in arrival order, then pass straight through", function()
+			local dev, c4 = new_device()
+			local handler, seen = recorder(dev)
+			c4.calls = {}
+			handler(200, "BUTTON_LINK", true, 77, 1)
+			handler(1, "HUE_BRIDGE", true, 16, 1)
+			handler(200, "BUTTON_LINK", false, 77, 1)
+			assert.same({}, seen)
+			assert.same({}, c4.calls, "nothing touches Director before late init")
+			dev.late_init()
+			assert.same({}, seen, "late_init applies the bridge's messages only; the driver greets first")
+			dev.replay_bindings()
+			assert.same({ { 1, "HUE_BRIDGE", true, 16, 1 }, { 200, "BUTTON_LINK", false, 77, 1 } }, seen,
+				"one call per binding, the latest; the older one for 200 says nothing the latest does not")
+			handler(201, "BUTTON_LINK", true, 78, 1)
+			assert.same({ 201, "BUTTON_LINK", true, 78, 1 }, seen[3], "after late init: at once")
+			dev.replay_bindings()
+			assert.equal(3, #seen, "nothing is replayed twice")
+		end)
+
+		it("drop a bridge binding bound to the bridge late init found, which it has greeted already", function()
+			local dev = new_device() -- its bridge is 15: what late init's lookup found
+			local handler, seen = recorder(dev)
+			handler(1, "HUE_BRIDGE", true, 15, 1)
+			dev.late_init()
+			dev.replay_bindings()
+			assert.same({}, seen)
+
+			-- Late init's lookup did not show the binding yet: the call is what says it.
+			local lagging, _, _, _, st = new_device()
+			handler, seen = recorder(lagging)
+			st.bridge = nil
+			handler(1, "HUE_BRIDGE", true, 15, 1)
+			lagging.late_init()
+			lagging.replay_bindings()
+			assert.same({ { 1, "HUE_BRIDGE", true, 15, 1 } }, seen)
+
+			-- An unbind, and a binding to another bridge, are replayed too.
+			for _, call in ipairs({ { 1, "HUE_BRIDGE", false, 15, 1 }, { 1, "HUE_BRIDGE", true, 16, 1 } }) do
+				dev = new_device()
+				handler, seen = recorder(dev)
+				handler(unpack(call))
+				dev.late_init()
+				dev.replay_bindings()
+				assert.same({ call }, seen)
+			end
+		end)
+
+		it("a replayed call that fails is logged and does not stop the rest", function()
+			local dev = new_device()
+			local seen = {}
+			local handler = dev.binding_changed(function(id)
+				if id == 200 then error("boom") end
+				seen[#seen + 1] = id
+			end)
+			handler(200, "BUTTON_LINK", true, 77, 1)
+			handler(201, "BUTTON_LINK", true, 78, 1)
+			dev.late_init()
+			local lines = capture_log()
+			dev.replay_bindings()
+			assert.same({ 201 }, seen)
+			assert.equal(1, #lines)
+			assert.truthy(lines[1]:find(
+				"^%[ERROR%] Hue Test: OnBindingChanged on binding 200 from before late init failed: .*boom"))
+		end)
+	end)
+
+	describe("commands to the bridge", function()
+		it("send hands the command to the bound bridge and answers true", function()
+			local dev, c4 = new_device()
+			assert.is_true(dev.send("HUE_SET", { rid = "r1", on = "true" }))
+			assert.same({ { id = 15, command = "HUE_SET", params = { rid = "r1", on = "true" } } }, c4.sent)
+		end)
+
+		it("answers false with an error line when SendToDevice fails, and raises nothing", function()
+			local dev, c4 = new_device()
+			local lines = capture_log()
+			c4.SendToDevice = function() error("Director says no") end
+			local ok
+			assert.has_no.errors(function() ok = dev.send("HUE_SCENE_RECALL", { rid = "r1" }) end)
+			assert.is_false(ok)
+			assert.equal(1, #lines)
+			assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: HUE_SCENE_RECALL to the bridge failed: .*Director says no"))
 		end)
 	end)
 
@@ -439,6 +562,300 @@ describe("common.device", function()
 			assert.has_no.errors(function() dev.goodbye("HUE_GOODBYE") end)
 			assert.equal(1, #lines)
 			assert.truthy(lines[1]:find("^%[WARN%] Hue Test: HUE_GOODBYE failed: .*Director says no"))
+		end)
+	end)
+
+	-- #57: the keypad press / click / release machine both drivers share
+	-- (docs/lifecycle-refactor-design.md), its hooks recording what reaches
+	-- them. The drivers' specs pin what each driver does in its hooks.
+	describe("keypad machine", function()
+		-- BUTTON_ACTION's ACTION values (device.ACT_*).
+		local RELEASE, PRESS, CLICK = 0, 1, 2
+
+		-- An instance with the module's own machine in dev.button_action and
+		-- every hook recording into st.calls; st.on is what the device shows.
+		local function new_keypad(opts)
+			opts = opts or {}
+			package.loaded["common.device"] = nil
+			package.loaded["common.dispatch"] = nil
+			local c4, env = fake.install_c4({ ["Debug Mode"] = "Off", ["Driver Version"] = "" })
+			local device = require("common.device")
+			local dispatch = require("common.dispatch")
+			local st = { bridge = 15, rid = "r1", on = true, calls = {} }
+			local dev = device.new({
+				prefix = "Hue Test",
+				tree = "light",
+				bridge = function() return st.bridge end,
+				rid = function() return st.rid end,
+				noun = opts.noun,
+				settings = opts.settings,
+			})
+			local function record(...) st.calls[#st.calls + 1] = { ... } end
+			dev.is_on = function() return st.on end
+			dev.on_bridge_found = function() end
+			dev.on_click = function(button) record("click", button) end
+			dev.on_hold = function(h, up, on) record("hold", h.button, up, on) end
+			dev.on_finish = function(h) record("finish", h.button) end
+			dev.on_end_hold = function(h) record("end", h.button) end
+			quiet() -- the dev loop's forwarding sink; nothing here reads the bridge's HUE_LOG
+			return dev, c4, env, dispatch, st
+		end
+
+		it("a click before the hold time is a tap: the press ends, then on_click; a click alone too", function()
+			local dev, c4, _, _, st = new_keypad()
+			dev.button_action(0, PRESS)
+			assert.same({ 400, false }, c4.calls_to("SetTimer")[1])
+			dev.button_action(0, CLICK)
+			assert.same({ { "end", 0 }, { "click", 0 } }, st.calls)
+			assert.same({}, delays(c4), "the hold timer is cancelled")
+			dev.button_action(2, CLICK)
+			assert.same({ "click", 2 }, st.calls[3])
+		end)
+
+		it("holds once the press is still down at 400 ms: top up, bottom down, toggle by the on state then", function()
+			-- { button, what the device shows, the direction (up), the on state on_hold hears }
+			for _, case in ipairs({
+				{ 0, true, true, true }, { 0, false, true, false },
+				{ 1, true, false, true },
+				{ 2, true, false, true }, { 2, false, true, false }, { 2, nil, true, false },
+			}) do
+				local dev, c4, _, _, st = new_keypad()
+				st.on = case[2]
+				dev.button_action(case[1], PRESS)
+				assert.same({ 400 }, delays(c4))
+				c4.fire_timers()
+				assert.same({ { "hold", case[1], case[3], case[4] } }, st.calls)
+			end
+			-- The on state counts when the hold time passes, not at the press.
+			local dev, c4, _, _, st = new_keypad()
+			st.on = false
+			dev.button_action(2, PRESS)
+			st.on = true
+			c4.fire_timers()
+			assert.same({ { "hold", 2, false, true } }, st.calls)
+		end)
+
+		it("does nothing for down from off, with the device's own word in the debug line", function()
+			for _, noun in ipairs({ "light", "scene" }) do
+				local dev, c4, _, _, st = new_keypad({ noun = noun })
+				st.on = false
+				log.set_debug(true)
+				local lines = capture_log()
+				dev.button_action(1, PRESS)
+				c4.fire_timers()
+				assert.same({}, st.calls)
+				assert.same({ "[DEBUG] Hue Test: hold: dimming down a " .. noun .. " that is off does nothing" }, lines)
+				dev.button_action(1, RELEASE) -- still a hold that ends: the click after it is guarded
+				assert.same({ { "end", 1 }, { "finish", 1 } }, st.calls)
+				assert.same({ 1000 }, delays(c4))
+			end
+		end)
+
+		it("finishes a hold at its release and then ignores a click on that button for 1 s, not on another", function()
+			local dev, c4, _, _, st = new_keypad()
+			log.set_debug(true)
+			local lines = capture_log()
+			dev.button_action(0, PRESS)
+			c4.fire_timers()
+			dev.button_action(0, RELEASE)
+			assert.same({ { "hold", 0, true, true }, { "end", 0 }, { "finish", 0 } }, st.calls)
+			assert.same({ 1000 }, delays(c4), "the click guard")
+			st.calls = {}
+			dev.button_action(0, CLICK)
+			assert.same({}, st.calls, "the keypad's click after the hold")
+			assert.same({ "[DEBUG] Hue Test: click on button 0 right after a hold ignored" }, lines)
+			dev.button_action(0, PRESS)
+			dev.button_action(0, CLICK)
+			assert.same({ { "end", 0 } }, st.calls, "a new tap within the second is the keypad's too")
+			dev.button_action(1, CLICK)
+			assert.same({ "click", 1 }, st.calls[2], "another button is not guarded")
+			c4.fire_timers() -- 1 s later
+			dev.button_action(0, CLICK)
+			assert.same({ "click", 0 }, st.calls[3])
+		end)
+
+		it("finishes a hold at a release-as-click instead of tapping", function()
+			local dev, c4, _, _, st = new_keypad()
+			dev.button_action(2, PRESS)
+			c4.fire_timers()
+			dev.button_action(2, CLICK)
+			assert.same({ { "hold", 2, false, true }, { "end", 2 }, { "finish", 2 } }, st.calls)
+			assert.same({ 1000 }, delays(c4))
+		end)
+
+		it("ends a press released before the hold time quietly: no tap, no finish, no guard", function()
+			local dev, c4, _, _, st = new_keypad()
+			dev.button_action(0, PRESS)
+			dev.button_action(0, RELEASE)
+			assert.same({ { "end", 0 } }, st.calls)
+			assert.same({}, delays(c4))
+			dev.button_action(0, CLICK) -- the click a keypad sends after such a release is the tap
+			assert.same({ { "end", 0 }, { "click", 0 } }, st.calls)
+		end)
+
+		it("ends a press when the next one starts, which gets its own hold time", function()
+			local dev, c4, _, _, st = new_keypad()
+			dev.button_action(0, PRESS)
+			dev.button_action(1, PRESS)
+			assert.same({ { "end", 0 } }, st.calls)
+			assert.same({ 400 }, delays(c4), "only the new press's hold timer")
+			c4.fire_timers()
+			assert.same({ { "end", 0 }, { "hold", 1, false, true } }, st.calls)
+		end)
+
+		it("cancels the timer a hook keeps in h.timer when the press ends; holding(h) names the press", function()
+			local dev, c4 = new_keypad()
+			local held
+			dev.on_hold = function(h)
+				held = h
+				h.timer = c4:SetTimer(100, function() end, true)
+			end
+			dev.button_action(0, PRESS)
+			c4.fire_timers()
+			assert.is_true(dev.holding(held))
+			assert.same({ 100 }, delays(c4))
+			dev.button_action(0, RELEASE)
+			assert.is_false(dev.holding(held))
+			assert.same({ 1000 }, delays(c4), "the hook's timer is gone; the click guard remains")
+		end)
+
+		it("dim_after_on dims up 600 ms later while the press lasts and the device is bound with a rid", function()
+			for _, case in ipairs({ "held", "released", "unbound", "no rid" }) do
+				local dev, c4, _, _, st = new_keypad()
+				local dims = 0
+				dev.on_hold = function(h)
+					dev.dim_after_on(h, function() dims = dims + 1 end)
+				end
+				dev.button_action(0, PRESS)
+				c4.fire_timers() -- the hold time
+				assert.same({ 600, false }, c4.calls_to("SetTimer")[2], case)
+				if case == "released" then dev.button_action(0, RELEASE) end
+				if case == "unbound" then st.bridge = nil end
+				if case == "no rid" then st.rid = nil end
+				c4.fire_timers() -- 600 ms later
+				assert.equal(case == "held" and 1 or 0, dims, case)
+			end
+		end)
+
+		it("takes the declared settings: defaults, persisted values, and the proxy's commands that set them", function()
+			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up",
+				"hold_down" } })
+			local function all()
+				return { dev.setting("preset"), dev.setting("click_up"), dev.setting("click_down"),
+					dev.setting("hold_up"), dev.setting("hold_down") }
+			end
+			assert.same({ 100, 250, 250, 5000, 5000 }, all())
+			c4.persist.preset_level = 40
+			c4.persist.hold_rate_down = "2000"
+			dev.load_settings()
+			assert.same({ 40, 250, 250, 5000, 2000 }, all())
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+			dispatch.received_from_proxy(5001, "SET_CLICK_RATE_UP", { RATE = "1500" })
+			dispatch.received_from_proxy(5001, "SET_CLICK_RATE_DOWN", { RATE = "500" })
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "7000" })
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "3000" })
+			assert.same({ 60, 1500, 500, 7000, 3000 }, all())
+			assert.same({ preset_level = 60, click_rate_up = 1500, click_rate_down = 500, hold_rate_up = 7000,
+				hold_rate_down = 3000 }, c4.persist)
+			local lines = capture_log()
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "fast" })
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", {})
+			assert.same({ "[WARN] Hue Test: hold_rate_up without a number",
+				"[WARN] Hue Test: preset_level without a number" }, lines)
+			assert.same({ 60, 1500, 500, 7000, 3000 }, all(), "unchanged")
+		end)
+
+		-- Hardware 2026-10-25 (dev build 284): without the answer the proxy kept
+		-- its old value, so Composer showed 5.000 s after a change to 2.000 s
+		-- and setting 5.000 s again sent nothing.
+		it("answers each setting command with the notification the proxy stores, and reports all at late init", function()
+			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up",
+				"hold_down" } })
+			c4.persist.hold_rate_down = "2000"
+			dev.load_settings()
+			assert.same({ { 5001, "100" } }, proxied(c4, "PRESET_LEVEL"))
+			assert.same({ { 5001, "250" } }, proxied(c4, "CLICK_RATE_UP"))
+			assert.same({ { 5001, "250" } }, proxied(c4, "CLICK_RATE_DOWN"))
+			assert.same({ { 5001, "5000" } }, proxied(c4, "HOLD_RATE_UP"))
+			assert.same({ { 5001, "2000" } }, proxied(c4, "HOLD_RATE_DOWN"),
+				"the persisted value, bare (the proxy reads a table as 0)")
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "5000" })
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+			assert.same({ 5001, "5000" }, proxied(c4, "HOLD_RATE_DOWN")[2])
+			assert.same({ 5001, "60" }, proxied(c4, "PRESET_LEVEL")[2])
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "fast" })
+			assert.equal(1, #proxied(c4, "HOLD_RATE_UP"), "a refused value is not reported")
+		end)
+
+		it("refuses a setting out of range, from the proxy and at load, and tells the proxy the value kept", function()
+			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "hold_down" } })
+			c4.persist.preset_level = "0"
+			local lines = capture_log()
+			dev.load_settings()
+			assert.equal(100, dev.setting("preset"), "a persisted 0 reads as the default")
+			assert.same({ { 5001, "100" } }, proxied(c4, "PRESET_LEVEL"))
+			assert.same({ "[WARN] Hue Test: preset_level 0 is out of range; using 100" }, lines)
+			assert.is_nil(c4.persist.preset_level, "the bad value is deleted, so the next start does not warn again")
+			dev.load_settings()
+			assert.equal(1, #lines, "warned once")
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "0" })
+			assert.equal(100, dev.setting("preset"))
+			assert.same({ 5001, "100" }, proxied(c4, "PRESET_LEVEL")[2], "the proxy hears the value kept")
+			dispatch.received_from_proxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "-5" })
+			assert.equal(5000, dev.setting("hold_down"))
+		end)
+
+		it("handles only the settings a driver declares; the rest stay without a handler", function()
+			local dev, c4, _, dispatch = new_keypad({ settings = { "hold_up", "hold_down" } })
+			assert.is_function(dispatch.proxy["SET_HOLD_RATE_UP"])
+			assert.is_function(dispatch.proxy["SET_HOLD_RATE_DOWN"])
+			for _, command in ipairs({ "SET_PRESET_LEVEL", "SET_CLICK_RATE_UP", "SET_CLICK_RATE_DOWN" }) do
+				assert.is_nil(dispatch.proxy[command], command)
+			end
+			dev.load_settings()
+			local keys = {}
+			for _, args in ipairs(c4.calls_to("PersistGetValue")) do keys[#keys + 1] = args[1] end
+			assert.same({ "hold_rate_up", "hold_rate_down" }, keys)
+			local _, _, _, none = new_keypad()
+			assert.is_nil(none.proxy["SET_HOLD_RATE_UP"], "no settings declared, none handled")
+		end)
+
+		it("is fed by both routes: the Button Links and the proxy's BUTTON_ACTION", function()
+			local _, c4, _, dispatch, st = new_keypad()
+			dispatch.received_from_proxy(201, "DO_PUSH", {})
+			c4.fire_timers()
+			dispatch.received_from_proxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "0" })
+			assert.same({ { "hold", 1, false, true }, { "end", 1 }, { "finish", 1 } }, st.calls)
+			assert.same({ { 5001, { BUTTON_ID = 1, ACTION = 0 } } }, proxied(c4, "BUTTON_ACTION"))
+		end)
+
+		it("arms the click guard before on_finish, so a failing hook still leaves the keypad's click ignored", function()
+			local dev, c4, _, dispatch, st = new_keypad()
+			dev.on_finish = function() error("boom") end
+			local lines = capture_log()
+			dispatch.received_from_proxy(200, "DO_PUSH", {})
+			c4.fire_timers()
+			dispatch.received_from_proxy(200, "DO_RELEASE", {})
+			assert.equal(1, #lines)
+			assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: proxy handler DO_RELEASE failed: .*boom"))
+			dispatch.received_from_proxy(200, "DO_CLICK", {})
+			assert.same({ { "hold", 0, true, true }, { "end", 0 } }, st.calls, "no tap after the hold")
+		end)
+
+		it("cancel_timers ends a press and the click guard (OnDriverDestroyed)", function()
+			local dev, c4, _, _, st = new_keypad()
+			dev.button_action(0, PRESS)
+			dev.cancel_timers()
+			assert.same({ { "end", 0 } }, st.calls)
+			assert.same({}, delays(c4))
+			dev.button_action(1, PRESS)
+			c4.fire_timers()
+			dev.button_action(1, RELEASE)
+			assert.same({ 1000 }, delays(c4))
+			dev.cancel_timers()
+			assert.same({}, delays(c4))
+			dev.button_action(1, CLICK)
+			assert.same({ "click", 1 }, st.calls[#st.calls], "the guard went with it")
 		end)
 	end)
 

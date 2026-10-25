@@ -36,12 +36,15 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
   schedule.
 - **Keypads.** Hue Light and Hue Scene devices offer Top, Bottom and Toggle
   Button Links: tap for on and off, hold for Hue's own smooth dimming, and the
-  keypad LEDs follow the device, including changes made on the Hue side. A
-  Control4 switch can run as a decoupled two-button keypad for a Hue bulb.
+  keypad LEDs follow the device, including changes made on the Hue side. The
+  click and hold rates, the On preset and the LED colours are set in
+  Composer as on any Control4 dimmer. A Control4 switch can run as a
+  decoupled two-button keypad for a Hue bulb.
 - **Pairing from Composer.** Enter the bridge's address, press the link
   button, click Pair Bridge. The application key is stored on the controller
   and never shown. HTTPS only; the bridge's certificate is verified against
-  Signify's root certificates, which ship with the driver.
+  Signify's root certificates, which ship with the driver, and a check at
+  every start makes sure the controller really applies them.
 - **Lifecycle handling.** Renames on either side, lights replaced or deleted in
   Hue, devices deleted in Composer, a bridge reset or replaced, a project
   restored from a backup: each is reported in a readable `Attention` line and
@@ -67,7 +70,7 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
   Bridge Pro** (BSB003) on the same network as the controller, with a fixed
   IPv4 address (a DHCP reservation in your router). The driver finds the
   bridge by its address only. An address with a number below 8 in it
-  (`192.168.1.50`, not `192.168.10.50`) gives the event stream a connection
+  (`10.0.2.143`, not `198.51.100.50`) gives the event stream a connection
   queue of its own; the manual's chapter 3 explains why.
 - Not supported: the round first-generation bridge (BSB001), which has no CLIP v2
   API, and devices that are not Hue bridges; both are refused at pairing. The
@@ -96,7 +99,7 @@ Take the release marked **Latest** on the
 it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
 codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
 Every release is built and attached by the repository's Release workflow,
-never by hand, and carries six files:
+never by hand, and carries seven files:
 
 - `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`: the three drivers.
   Download all three; they must come from the same release.
@@ -109,6 +112,7 @@ never by hand, and carries six files:
   the build number too.
 - `attestations.sigstore.json`: the build provenance GitHub signed when the
   workflow built the packages.
+- `hue-drivers.intoto.jsonl`: the same provenance as in-toto JSON lines.
 
 A later release of the same version moves the tag and replaces the attached
 files with a newer build; Driver Version tells the builds apart. To check
@@ -116,7 +120,8 @@ what you downloaded:
 
 ```sh
 sha256sum -c SHA256SUMS.txt                                          # the three packages
-gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver   # GitHub CLI 2.49 or newer; repeat per package
+gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver \
+  --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml   # GitHub CLI 2.102.0 or newer; repeat per package
 ```
 
 The second command confirms that the file was built by this repository's
@@ -283,15 +288,18 @@ src/hue_light/     the light driver (light_v2 proxy; also zone and room lights)
 src/hue_scene/     the scene driver (light_v2 proxy, a dimmer)
 tests/             busted specs, the fake DriverWorks runtime, invented Hue resources
 tools/             build.sh; check.sh (every check, as CI runs it) and setup-checks.sh (its
-                   tools); deploy.py (the house: release download and verification, the
-                   deployment record, the brief) and labels_sync.py, with their unit tests in
+                   tools, the Python ones hash-pinned in requirements-checks.txt); deploy.py
+                   (the house: release download and verification, the deployment record, the
+                   brief), labels_sync.py and code_scanning_issue.py (the one issue listing
+                   the open code scanning alerts), with their unit tests in
                    tests/; the dev loop (devserver.py, devctl.py, regress.sh); Composer
                    automation (composer/Composer.psm1); the icon and CA-bundle generators
 deploy/            house.yaml: the desired state of the author's house (release, build, stream
                    settings); the observed state is a GitHub Deployment, see below
 docs/              design notes, feature contracts, research, checklists (see docs/README.md)
-.github/           the workflows (CI, Release, drift, labels, Scorecard, Dependabot
-                   auto-merge), the labels, the issue and pull request templates
+.github/           the workflows (CI, Release, drift, labels, Scorecard, code scanning
+                   triage, Dependabot auto-merge), the labels, the issue and pull request
+                   templates
 ```
 
 ## How a change reaches the house
@@ -338,12 +346,14 @@ the [Environments page](https://github.com/corytron/c4-hue-driver/deployments/ho
 the newest release is on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases/latest).
 
-Open: the proxy settings (click and hold rates, On preset, LED colours) are
-hidden on Hue Light and Hue Scene devices, so the defaults apply; the 32 px
-List View icons are Control4's standard ones; whether a revoked key answers
-401 or 403 is not verified; a few zone-light corner cases have not been seen
-on the house yet; second-priority hardening items are listed in
-`docs/code-analysis-2026-10-22.md`.
+Open: the 32 px List View icons are Control4's standard ones; the keypad
+settings shown since 2026-10-25 (click and hold rates, On preset, LED
+colours) have not been changed on the house yet; a few zone-light corner cases
+have not been seen on the house yet; some fixes of the review findings
+(`docs/code-analysis-2026-10-22.md`, `docs/reviews/`) still wait for a check
+on the house, among them the code a revoked key gets (an unknown key gets
+HTTP 403 from the Bridge Pro, verified 2026-10-25); the development loop's
+own security (development builds only) has an issue of its own.
 
 ## License, trademarks and provenance
 

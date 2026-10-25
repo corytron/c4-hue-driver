@@ -88,7 +88,7 @@ for driver in "${DRIVERS[@]}"; do
 		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
 			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
 		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" \
-			|| -e "$stage/common/devkey.lua" ]]; then
+			|| -e "$stage/common/devkey.lua" || -e "$stage/bridge/conntest.lua" || -e "$stage/bridge/pinning.lua" ]]; then
 			echo "release build still carries development items in $driver" >&2
 			exit 1
 		fi

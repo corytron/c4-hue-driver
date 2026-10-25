@@ -1,8 +1,14 @@
 # Analysis 3: scenes.lua, groups.lua, hue_model.lua
 
-Paths are under `/home/cory/projects/c4-hue-driver/src/hue_bridge/bridge/`. Read-only review; nothing run.
+Paths are under `src/hue_bridge/bridge/` (relative to the repository). Read-only review; nothing run.
 
 ## Findings
+
+Status (2026-10-25): F1, F3 and F4 were fixed on 2026-10-22
+(`docs/code-analysis-2026-10-22.md`, items 2 and 4) and F11 on 2026-10-24
+(the persisted dates are range-checked); F2, F8, F9, F10 and F12 are fixed on
+branch `fix/review-leftovers-43-65` (#47), each marked below; the ids of F6
+are validated in `hue_model` since the same branch (#45).
 
 ### F1. `adding` / `resyncing` flags can stick forever, freezing every action and all later resyncs — Medium-High
 - scenes.lua:1051-1056, 1370-1373, 1434, 1532; fetch_all 563-590.
@@ -15,6 +21,7 @@ Paths are under `/home/cory/projects/c4-hue-driver/src/hue_bridge/bridge/`. Read
 - What: a second `resync(done2)` arriving while one is in flight (or while adding) overwrites `resync_pending`, so `done1` is silently dropped.
 - Trigger: stream reconnect resync queued during Add All, then the owner clicks Refresh Scenes; the coordinator's connect-time `done` (status property, chained steps) never runs.
 - Fix: keep a list of pending `done`s and invoke all of them from one coalesced resync.
+- **Fixed 2026-10-25** (#47): every waiting caller is kept and its `done` called once.
 
 ### F3. Recall callback sends stale state after a later OFF, delete, or stream event — Medium
 - scenes.lua:1232-1247; off at 1291-1293; delete at 1116-1125.
@@ -50,16 +57,19 @@ Paths are under `/home/cory/projects/c4-hue-driver/src/hue_bridge/bridge/`. Read
 - What: `forget` removes the entry, sends `HUE_SCENE_FORGOTTEN`, then unbinds; the unbind is pcall-wrapped and may fail (1733-1735). A hello from that device carrying its rid, while it is still bound and the rid is unregistered, is auto-adopted at 872 ("from its own persisted rid").
 - Trigger: unbind fails, or the device's hello (sent on its own late init) is processed before it handles FORGOTTEN.
 - Fix: remember forgotten `(device_id, rid)` pairs in memory and refuse auto-adoption for them; let Link Devices be the explicit path back.
+- **Fixed 2026-10-25** (#47): the forgotten devices persist under `hue_scene_forgotten`; a hello from one is answered with `HUE_SCENE_FORGOTTEN` again, and Link Devices is the way back.
 
 ### F9. Recalls are not coalesced; rapid taps hit the bridge's grouped-command limit — Low-Medium
 - scenes.lua:1232.
 - What: every `HUE_SCENE_RECALL` is a direct PUT; `off` goes through the driver's coalescer but recall does not. A keypad double-tap or a programming loop sends N PUTs; the bridge answers 429 for the extras and the callback sends the cached (now wrong) status.
 - Fix: drop a recall for a rid that already has a PUT in flight (or route it through the group queue keyed by `group_rid`).
+- **Fixed 2026-10-25** (#47): the first recall of a scene goes at once; a recall of the same scene within 300 ms waits and the latest wins, so a burst makes two PUTs.
 
 ### F10. Stale `conflicts` are never cleared when the claimant disappears without a goodbye — Low
 - scenes.lua:839, 866, 1660 set; cleared only at 782-788, 902-904, 972-973, 1583, 1729.
 - What: a claimant device deleted in Composer while the bridge is not watching never sends GOODBYE; `reconcile` clears conflicts only for tombstoned rids, so the "2 devices claim" Attention item persists until reload.
 - Fix: in `reconcile`, drop conflicts whose holder or claimant is absent from the bound/present sets.
+- **Fixed 2026-10-25** (#47): a conflict is pruned when fewer than two of its claimants are still in the project.
 
 ### F11. `date_of` / `short_date_of` crash on a non-number timestamp — Low
 - scenes.lua:181-193; used in 1213, 1495, 1885, 1961, 2039.
@@ -70,6 +80,7 @@ Paths are under `/home/cory/projects/c4-hue-driver/src/hue_bridge/bridge/`. Read
 - scenes.lua:1227-1228.
 - What: `positive("1e400")` is `inf`; `math.floor(inf)` is `inf`, which the JSON encoder either rejects (throwing inside the command handler) or emits as invalid JSON.
 - Fix: clamp to an integer range (Hue accepts up to a few minutes in ms).
+- **Fixed 2026-10-25** (#47): the recall `duration` is clamped like the dim and level durations.
 
 ### F13. Lights: a JSON-null name becomes "table: 0x…" — Low
 - hue_model.lua:105, 109 (`tostring(item.metadata.name)` with only a `~= nil` check), vs the type-checked scene path at 499.

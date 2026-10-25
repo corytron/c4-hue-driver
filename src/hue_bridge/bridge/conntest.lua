@@ -28,8 +28,8 @@ conntest.CONTROL_HOST = "example.com"
 -- driver's bundle, bridge/http.lua): the diagnostic server's self-signed
 -- certificate goes unverified, the control host is checked against the
 -- platform's CAs.
-conntest.TLS_INSECURE = { ssl_verify_peer = false, ssl_verify_host = false }
-conntest.TLS_SYSTEM = { ssl_verify_peer = true, ssl_verify_host = true }
+conntest.TLS_INSECURE = { ssl_verify_peer = false, ssl_verify_host = false, ssl_cabundle = false }
+conntest.TLS_SYSTEM = { ssl_verify_peer = true, ssl_verify_host = true, ssl_cabundle = false }
 
 local function c4_time()
 	return C4:GetTime()
@@ -45,7 +45,8 @@ end
 
 -- target = { name, ip (host or host:port), stream_path, ping_path,
 --            headers (optional), key (optional), tls (optional ssl_* options
---            in place of the bundle's) }
+--            on top of the bundle's, see http.options; ssl_cabundle = false
+--            means the system CAs) }
 -- report(line) receives one line per step; done(summary) at the end, where
 -- summary = { stream_ok, ping_ok, concurrent_ok (count), control_ok, lines }.
 function conntest.run(target, report, done)

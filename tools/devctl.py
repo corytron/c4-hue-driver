@@ -9,7 +9,7 @@ the server uses (~/.config/c4-hue-driver/devkey, or $C4_HUE_DEVKEY_FILE, or
   devctl.py status                               versions of every tree (running vs
                                                  local), the dev key, last contact,
                                                  properties
-  devctl.py run "Connection Test" Target=Bridge  queue ExecuteCommand(name, params)
+  devctl.py run "Connection Test" Target=Bridge  queue a signed command (devloop.execute)
   devctl.py set "Stream Timeout (s)" 60          queue a property change
   devctl.py reload                               queue a reload of the current code
   devctl.py wait <id> [--timeout 60]             block until the driver reports the
@@ -375,7 +375,7 @@ def build_parser():
         func=cmd_status
     )
 
-    p = sub.add_parser("run", help="queue an ExecuteCommand action")
+    p = sub.add_parser("run", help="queue a signed command: a development handler or a driver action")
     p.add_argument("command", help='action name, e.g. "Connection Test"')
     p.add_argument("params", nargs="*", help="parameters as Key=Value")
     p.set_defaults(func=cmd_run)

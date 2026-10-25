@@ -167,7 +167,9 @@ this page disagree about the present, this page and the code win.
   **icons** (Bridge Pro; the dimmer-switch remote for lights; the same lit in
   colours for scenes); a light or scene device shows the new 16 px icon in
   the tree if it was created under a build that declared a custom icon; the
-  32 px List View tile stays the standard light icon.
+  32 px List View tile is Composer's own status tile for every light_v2
+  device and cannot show a driver icon (verified 2026-10-25, issue #60;
+  the likeness icons are kept, `docs/licensing-research.md`).
 
 ## How builds reach the house (verified)
 
@@ -262,7 +264,6 @@ app, which also confirms that a grouped_light PUT takes `color` and
   not yet tried by the owner.
 - Second-priority hardening items in `docs/code-analysis-2026-10-22.md`.
 - Proxy settings hidden on light and scene devices (above).
-- List View 32 px icons for lights and scenes.
 - Not verified: whether a revoked key answers HTTP 401 or 403; the
   binding re-check path itself (the reboot test ended bound, but which path
   got there is not visible from Composer); a slider level from off sets all

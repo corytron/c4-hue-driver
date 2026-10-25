@@ -130,6 +130,20 @@ describe("bridge.scenes", function()
 		answer_gets(opts)
 	end
 
+	-- Answer the oldest unanswered GET of /clip/v2/resource/<kind> with
+	-- `body`, whichever module asked (the lights' and the scenes' GETs
+	-- interleave when both resync).
+	local function answer(kind, body)
+		local url = "https://192.0.2.10/clip/v2/resource/" .. kind
+		for _, t in ipairs(c4.transfers) do
+			if t.method == "GET" and t.url == url and #t.responses == 0 then
+				t:respond(200, body)
+				return t
+			end
+		end
+		error("no GET of " .. kind .. " is waiting")
+	end
+
 	local function sent_to(device_id, command)
 		local out = {}
 		for _, m in ipairs(c4.sent) do
@@ -183,6 +197,13 @@ describe("bridge.scenes", function()
 		resync(opts)
 		S:add_scene(F.scene_rids.relax, nil, done)
 		return 2001
+	end
+
+	-- scenes.RECALL_WINDOW_MS pass: every scene's recall window ends, and a
+	-- recall that waited in one goes now (the fake's timers are those windows
+	-- alone here). Before #47 F9 each recall was a PUT of its own at once.
+	local function window_ends()
+		c4.fire_timers()
 	end
 
 	before_each(function()
@@ -291,16 +312,62 @@ describe("bridge.scenes", function()
 			assert.is_nil(got)
 		end)
 
-		it("runs a resync requested during a resync once more afterwards, latest done wins", function()
+		-- #47 F2: until 2026-10-25 the latest waiting done replaced the others.
+		it("runs a resync requested during a resync once more afterwards, answering every caller that waited once", function()
 			S:resync(function() done(true, "first") end)
 			S:resync(function() done(true, "second") end)
 			S:resync(function() done(true, "third") end)
 			answer_gets()
-			assert.equal("first", last_result().text)
+			assert.same({ "first" }, texts(results))
 			assert.equal(4, #c4.transfers, "the pending resync started")
 			answer_gets()
-			assert.equal("third", last_result().text)
-			assert.equal(2, #results)
+			assert.same({ "first", "second", "third" }, texts(results))
+			assert.equal(6, #c4.transfers, "one resync for the two that waited")
+		end)
+
+		it("answers a connect's chain and a Refresh Scenes that waited for a running resync, once each, with the "
+			.. "catalogue they waited for (#47 F2)", function()
+			-- A Refresh Scenes runs when the stream connects.
+			S:resync(function(ok) done(ok, "refresh 1") end)
+			-- driver.lua's on_connected: the lights' resync, then the scenes';
+			-- the chain goes on from the scenes' done (the zone lights' resync,
+			-- then the rows), which must not be lost.
+			local chain, rows, handed = {}, nil, nil
+			L:resync(function(ok)
+				chain[#chain + 1] = "lights " .. tostring(ok)
+				S:resync(function(sok, _, _, grouped)
+					chain[#chain + 1] = "scenes " .. tostring(sok)
+					rows, handed = S:list_items(), grouped
+				end)
+			end)
+			for _, kind in ipairs({ "light", "device", "zigbee_connectivity", "room", "zone", "bridge_home" }) do
+				answer(kind, F[kind])
+			end
+			assert.same({ "lights true" }, chain, "the scenes' resync waits for the one running")
+			-- Refresh Scenes clicked again before the running resync ends.
+			S:resync(function(ok) done(ok, "refresh 2") end)
+			answer("scene", F.scene)
+			answer("smart_scene", F.smart_scene)
+			answer("grouped_light", NO_GROUPED_LIGHTS)
+			assert.same({ "refresh 1" }, texts(results))
+			assert.same({ "lights true" }, chain)
+			-- One more resync answers both that waited, with a scene added in Hue meanwhile.
+			local body = json.decode(F.scene)
+			body.data[#body.data + 1] = json.decode(F.events.scene_added)[1].data[1]
+			answer("scene", json.encode(body))
+			answer("smart_scene", F.smart_scene)
+			answer("grouped_light", grouped_lights({ living_room = true }))
+			assert.same({ "lights true", "scenes true" }, chain, "the connect's chain went on, once")
+			assert.equal(F.grouped_light_rids.living_room, handed[1].id, "with the grouped_light items for the zone lights")
+			assert.same({ "refresh 1", "refresh 2" }, texts(results))
+			assert.equal(6, S:bridge_count())
+			assert.same(S:list_items(), rows, "the rows the chain refreshed show the catalogue it waited for")
+			local listed = false
+			for _, row in ipairs(rows) do
+				listed = listed or row == "Living Room: Read"
+			end
+			assert.is_true(listed, "the scene added meanwhile is on the Scenes list")
+			assert.equal(3 + 6 + 3, #c4.transfers, "the running resync, the lights', and one more for the two that waited")
 		end)
 
 		it("refuses actions while resyncing", function()
@@ -408,6 +475,34 @@ describe("bridge.scenes", function()
 			assert.equal(3001, S:entry(F.scene_rids.relax).proxy_id)
 			assert.is_true(saw_log("AddDevice callback for scene Relax"))
 		end)
+
+		it("the reconcile after an add leaves what it just made alone while Director lists neither the device nor its "
+			.. "binding yet (#48 item 13)", function()
+			resync()
+			S:add_scene(F.scene_rids.concentrate, nil, done)  -- device 2001, Director up to date
+			-- Director lags behind AddDevice and Bind: its lists hold Concentrate only.
+			S.ctx.project.bound = function() return { [2001] = "Concentrate" } end
+			S.ctx.project.devices = function() return { [2001] = { name = "Concentrate" } } end
+			S:add_scene(F.scene_rids.relax, nil, done)
+			assert.same({ ok = true, text = "Added Relax to Living Room (device 2002)" }, last_result())
+			assert.equal("linked", S:entry(F.scene_rids.relax).state, "neither deleted in Composer nor unbound")
+			assert.is_nil(c4.persist.hue_scene_tombstones[F.scene_rids.relax])
+			assert.equal("5 + 1 time-based on bridge, 2 imported, 0 deleted", S:summary())
+			-- Add All Scenes Of Room the same; an entry outside the batch is still
+			-- reconciled against what Director says (here: nothing bound).
+			S.ctx.project.bound = function() return {} end
+			S.ctx.project.devices = function() return nil end
+			L.reg:set_room_mapping(F.group_rids.downstairs, { c4_room_id = GARAGE_ROOM, c4_room_name = "Garage",
+				hue_name = "Downstairs", type = "zone" })
+			S:add_all_of_group(F.group_rids.downstairs, done)
+			assert.equal("Added 3 scenes of Downstairs (zone) to Garage: Bright (device 2003), Nightlight (device 2004), "
+				.. "Golden hours (device 2005)", last_result().text)
+			for _, rid in ipairs({ F.scene_rids.bright, F.scene_rids.nightlight, F.smart_scene_rid }) do
+				assert.equal("linked", S:entry(rid).state, rid)
+			end
+			assert.equal("unbound", S:entry(F.scene_rids.concentrate).state)
+			assert.equal("unbound", S:entry(F.scene_rids.relax).state)
+		end)
 	end)
 
 	describe("add_all_of_group", function()
@@ -495,6 +590,25 @@ describe("bridge.scenes", function()
 			assert.equal(0, #c4.renamed)
 			assert.is_true(saw_log("Relax was renamed to Chill in Hue (Composer name unchanged)"))
 			assert.equal("Chill", c4.persist.hue_scenes[F.scene_rids.relax].name)
+		end)
+
+		it("does not even compute the CONFIGURE for a status-only item; a rename does (efficiency R3)", function()
+			add_relax()
+			local computed = 0
+			local configure_params = S.configure_params
+			S.configure_params = function(self, ...)
+				computed = computed + 1
+				return configure_params(self, ...)
+			end
+			c4.sent = {}
+			assert.equal(2, S:on_container(container(F.events.scene_recalled)))
+			assert.same({ "HUE_SCENE_GROUP@2001", "HUE_SCENE_STATE@2001" }, commands_sent())
+			assert.equal(2, S:on_container(container(F.events.scene_inactive)))
+			assert.equal(0, computed, "a status cannot change a CONFIGURE")
+			c4.sent = {}
+			assert.equal(1, S:on_container(container(F.events.scene_renamed)))
+			assert.same({ "HUE_SCENE_CONFIGURE@2001" }, commands_sent())
+			assert.is_true(computed > 0, "a rename can")
 		end)
 
 		it("updates the catalogue for unimported scenes without telling anyone", function()
@@ -615,7 +729,11 @@ describe("bridge.scenes", function()
 			add_relax()
 			S:add_scene(F.scene_rids.concentrate, nil, done)
 			c4.sent = {}
+			-- A light stays bound, so Director answers a list without the two
+			-- scene devices: its nil (nothing bound at all) reads as unknown
+			-- since #48 item 14 (bridge/project.lua), and unbinds nothing.
 			c4.bindings = {}
+			c4:Bind(15, 1, 4242, 1, "HUE_BRIDGE")
 			now = T0 + 20
 			local r = S:reconcile()
 			assert.same({ F.scene_rids.concentrate, F.scene_rids.relax }, r.unbound)
@@ -641,16 +759,23 @@ describe("bridge.scenes", function()
 			assert.same({ "HUE_SCENE_CONFIGURE@2002", "HUE_SCENE_STATE@2002" }, commands_sent())
 		end)
 
-		it("treats a failed bound lookup as unknown and an empty project lookup as not deleted", function()
+		it("treats a failed or nil bound lookup as unknown and an empty project lookup as not deleted", function()
 			add_relax()
 			S = new_scenes({ project = { bound = function() error("boom") end } })
 			S:load()
 			local r = S:reconcile()
 			assert.same({ unbound = {}, relinked = {}, tombstoned = {} }, r)
 			assert.is_true(saw_log("reconcile skipped"))
-			S = new_scenes({ project = { devices = function() return {} end } })
-			S:load()
+			-- Director's nil ("null if no bindings", API 32/_3) is unknown since
+			-- #48 item 14: nothing is unbound on it.
 			c4.bindings = {}
+			S = new_scenes()
+			S:load()
+			assert.same({ unbound = {}, relinked = {}, tombstoned = {} }, S:reconcile())
+			assert.equal("linked", S:entry(F.scene_rids.relax).state)
+			-- An empty list answered is nothing bound.
+			S = new_scenes({ project = { devices = function() return {} end, bound = function() return {} end } })
+			S:load()
 			r = S:reconcile()
 			assert.same({ F.scene_rids.relax }, r.unbound)
 			assert.same({}, r.tombstoned)
@@ -728,6 +853,49 @@ describe("bridge.scenes", function()
 			S:load()
 			assert.equal(1, S:configure_all())
 			assert.same({ "HUE_SCENE_CONFIGURE@2001", "HUE_SCENE_CONFIGURE@2001" }, commands_sent())
+		end)
+
+		it("drops a claim once fewer than two of its devices are still in the project (#47 F10)", function()
+			add_relax()                                       -- device 2001 holds Relax
+			S:add_scene(F.scene_rids.concentrate, nil, done)  -- device 2002
+			for _, id in ipairs({ 2099, 2097, 2098 }) do
+				fake.project.devices[id] = { name = "Old " .. id, room_id = LIVING_ROOM, c4i = "hue_scene.c4z",
+					driver_name = "Hue Scene" }
+			end
+			c4:Bind(15, 1, 2099, 1, "HUE_BRIDGE")
+			assert.is_false(S:hello(F.scene_rids.relax, { device_id = "2099" }))
+			-- Two devices announcing a scene nobody holds (2098 not bound, 2097 bound).
+			assert.is_false(S:hello(F.scene_rids.bright, { device_id = "2098" }))
+			c4:Bind(15, 1, 2097, 1, "HUE_BRIDGE")
+			assert.is_false(S:hello(F.scene_rids.bright, { device_id = "2097" }))
+			local relax_claim = "2 devices claim Hue scene Relax: 2001 and 2099 (Forget Scene on one of them)"
+			local bright_claim = "2 devices claim Hue scene Downstairs (zone): Bright: 2098 and 2097 "
+				.. "(Forget Scene on one of them)"
+			local function claims()
+				local out = {}
+				for _, item in ipairs(S:attention_items()) do
+					if item:find("^2 devices claim") then out[#out + 1] = item end
+				end
+				table.sort(out)
+				return out
+			end
+			local both = { bright_claim, relax_claim }
+			table.sort(both)
+			assert.same(both, claims())
+			S:reconcile()
+			assert.same(both, claims(), "every claimant is still in the project")
+			-- 2099 and 2098 deleted in Composer while the bridge was not watching: no goodbye.
+			fake.project.devices[2099] = nil
+			fake.project.devices[2098] = nil
+			local devices = S.ctx.project.devices
+			S.ctx.project.devices = function() return nil end
+			S:reconcile()
+			assert.same(both, claims(), "the project's scene devices unknown: nothing is dropped")
+			S.ctx.project.devices = devices
+			S:reconcile()
+			assert.same({}, claims())
+			assert.equal("None", S:attention())
+			assert.is_true(saw_log("devices 2001 and 2099 no longer both claim"))
 		end)
 	end)
 
@@ -837,10 +1005,12 @@ describe("bridge.scenes", function()
 			S:recall({ rid = F.scene_rids.savanna })
 			respond_ok(c4.last_transfer())
 			assert.equal("dynamic_palette", c4.sent[1].params.active)
+			window_ends()
 			S:recall({ rid = F.scene_rids.savanna, action = "static" })
 			assert.same({ recall = { action = "static" } }, json.decode(c4.last_transfer().data))
 			respond_ok(c4.last_transfer())
 			assert.equal("static", c4.sent[2].params.active)
+			window_ends()
 			S:recall({ rid = F.scene_rids.savanna, action = "dynamic_palette", duration = "400" })
 			assert.same({ recall = { action = "dynamic_palette", duration = 400 } }, json.decode(c4.last_transfer().data))
 			respond_ok(c4.last_transfer())
@@ -852,15 +1022,18 @@ describe("bridge.scenes", function()
 			S:recall({ rid = F.scene_rids.relax, action = "active", brightness = "1" })
 			assert.same({ recall = { action = "active", dimming = { brightness = 1 } } }, json.decode(c4.last_transfer().data))
 			respond_ok(c4.last_transfer())
+			window_ends()
 			S:recall({ rid = F.scene_rids.relax, brightness = "100" })
 			assert.same({ brightness = 100 }, json.decode(c4.last_transfer().data).recall.dimming)
 			respond_ok(c4.last_transfer())
 			for _, bad in ipairs({ "0", "101", "-3", "lots" }) do
+				window_ends()
 				S:recall({ rid = F.scene_rids.relax, brightness = bad })
 				assert.same({ recall = { action = "active" } }, json.decode(c4.last_transfer().data))
 				respond_ok(c4.last_transfer())
 			end
 			assert.is_true(saw_log("recall brightness 101 for Relax out of range"))
+			window_ends()
 			S:recall({ rid = F.scene_rids.relax, brightness = "" })
 			assert.same({ recall = { action = "active" } }, json.decode(c4.last_transfer().data))
 		end)
@@ -880,9 +1053,11 @@ describe("bridge.scenes", function()
 			c4.last_transfer():respond(404, '{"errors":[{"description":"Not Found"}],"data":[]}')
 			assert.same({ rid = F.scene_rids.relax, active = "static", reason = "recall" }, c4.sent[1].params)
 			assert.is_true(saw_log("Relax (device 2001): Recall failed: HTTP 404 (scene gone?)"))
+			window_ends()
 			S:recall({ rid = F.scene_rids.relax })
 			c4.last_transfer():respond(503, "")
 			assert.is_true(saw_log("Recall failed: HTTP 503"))
+			window_ends()
 			S:recall({ rid = F.scene_rids.relax })
 			c4.last_transfer():done(7, "Couldn't connect")
 			assert.is_true(saw_log("Recall failed: transfer failed (7): Couldn't connect"))
@@ -914,6 +1089,163 @@ describe("bridge.scenes", function()
 			c4.sent = {}
 			respond_ok(put)
 			assert.equal(0, #c4.sent)
+		end)
+
+		it("clamps the duration as the dim and level durations are; one not above 0 sends none (#47 F12)", function()
+			add_relax()
+			for _, case in ipairs({ { "400", 400 }, { "99999999", 6000000 }, { "1e400", 6000000 }, { "inf", 6000000 },
+				{ "0.4", 0 } }) do
+				window_ends()
+				S:recall({ rid = F.scene_rids.relax, duration = case[1] })
+				assert.same({ recall = { action = "active", duration = case[2] } }, json.decode(c4.last_transfer().data),
+					case[1])
+			end
+			for _, none in ipairs({ "0", "-5", "nan", "soon", "" }) do
+				window_ends()
+				S:recall({ rid = F.scene_rids.relax, duration = none })
+				assert.same({ recall = { action = "active" } }, json.decode(c4.last_transfer().data), none)
+			end
+		end)
+
+		-- #47 F9 (scenes.RECALL_WINDOW_MS): a recall within 300 ms of the
+		-- scene's last recall PUT waits for the window to end; those that waited
+		-- leave as one PUT carrying the latest parameters.
+		describe("coalescing (#47 F9)", function()
+			-- The rid and brightness of every PUT started after the first `from`.
+			local function puts(from)
+				local out = {}
+				for i = from + 1, #c4.transfers do
+					local t = c4.transfers[i]
+					if t.method == "PUT" then
+						local recall = json.decode(t.data).recall or {}
+						local text = t.url:match("([^/]+)$")
+						if recall.dimming then
+							text = text .. " at " .. recall.dimming.brightness
+						end
+						out[#out + 1] = text
+					end
+				end
+				return out
+			end
+
+			it("sends a quiet scene's recall at once, and the ones within 300 ms after it as one PUT, the latest winning",
+				function()
+				add_relax()
+				c4.sent = {}
+				local n = #c4.transfers
+				assert.is_true(S:recall({ rid = F.scene_rids.relax, brightness = "20" }))
+				assert.equal(n + 1, #c4.transfers, "the first at once")
+				local first = c4.last_transfer()
+				assert.same({ 300 }, { c4.active_timers()[1].delay }, "it opens the scene's window")
+				assert.equal(1, #c4.active_timers())
+				assert.is_true(S:recall({ rid = F.scene_rids.relax, brightness = "40" }))
+				assert.is_true(S:recall({ rid = F.scene_rids.relax, action = "static", brightness = "60" }))
+				assert.equal(n + 1, #c4.transfers, "the next two wait for the window to end")
+				respond_ok(first)
+				assert.same({}, c4.sent, "the first one's answer reports nothing: a later recall superseded it")
+				window_ends()
+				assert.equal(n + 2, #c4.transfers, "one PUT for the two that waited")
+				assert.same({ recall = { action = "static", dimming = { brightness = 60 } } },
+					json.decode(c4.last_transfer().data))
+				respond_ok(c4.last_transfer())
+				assert.same({ { id = 2001, command = "HUE_SCENE_STATE", params = { rid = F.scene_rids.relax,
+					active = "static", reason = "recall" } } }, c4.sent)
+				-- That PUT opened a window too; it ends with nothing waiting, and the scene is quiet again.
+				window_ends()
+				assert.equal(n + 2, #c4.transfers)
+				assert.same({}, c4.active_timers())
+				assert.is_true(S:recall({ rid = F.scene_rids.relax }))
+				assert.equal(n + 3, #c4.transfers, "at once again")
+			end)
+
+			it("drops a waiting recall when an OFF of the scene comes after it", function()
+				add_relax()
+				S:recall({ rid = F.scene_rids.relax })
+				local n = #c4.transfers
+				S:recall({ rid = F.scene_rids.relax, brightness = "50" })
+				c4.sent = {}
+				assert.is_true(S:off({ rid = F.scene_rids.relax }))
+				assert.same({ F.grouped_light_rids.living_room }, offs)
+				assert.same({ rid = F.scene_rids.relax, active = "inactive", reason = "recall" }, c4.sent[1].params)
+				window_ends()
+				assert.equal(n, #c4.transfers, "the recall that waited does not light the room after the OFF")
+				assert.is_true(saw_log("dropped: an off came after it"))
+			end)
+
+			it("sends a waiting recall before any other scene command, so nothing overtakes it", function()
+				resync()
+				S:add_all_of_group(F.group_rids.living_room, done)  -- Relax 2001, Savanna sunset 2002
+				S:add_scene(F.scene_rids.concentrate, nil, done)     -- Concentrate 2003, the Garage
+				local relax, savanna, concentrate = F.scene_rids.relax, F.scene_rids.savanna, F.scene_rids.concentrate
+				local n = #c4.transfers
+				S:recall({ rid = relax })
+				S:recall({ rid = concentrate })
+				S:recall({ rid = concentrate, brightness = "30" })  -- waits
+				assert.same({ relax, concentrate }, puts(n))
+				S:recall({ rid = relax, brightness = "40" })  -- another scene's: Concentrate's goes first, this one waits
+				assert.same({ relax, concentrate, concentrate .. " at 30" }, puts(n))
+				S:recall({ rid = savanna })
+				assert.same({ relax, concentrate, concentrate .. " at 30", relax .. " at 40", savanna }, puts(n))
+				window_ends()
+				assert.equal(n + 5, #c4.transfers, "nothing was left waiting")
+
+				-- Another scene's OFF.
+				window_ends()
+				n = #c4.transfers
+				S:recall({ rid = relax })
+				S:recall({ rid = relax, brightness = "70" })  -- waits
+				local queued_at = {}
+				S.ctx.group_off = function(rid)
+					offs[#offs + 1] = rid
+					queued_at[#queued_at + 1] = #c4.transfers
+					return true
+				end
+				S:off({ rid = savanna })
+				assert.same({ relax, relax .. " at 70" }, puts(n))
+				assert.same({ n + 2 }, queued_at, "the waiting recall's PUT started before the group off was queued")
+
+				-- A dim and a level of the scene itself.
+				window_ends()
+				n = #c4.transfers
+				S:recall({ rid = relax })
+				S:recall({ rid = relax, brightness = "80" })  -- waits
+				S.ctx.group_dim = function(rid, body)
+					dims[#dims + 1] = { rid = rid, body = body, after = #c4.transfers }
+					return true
+				end
+				assert.is_true(S:dim({ rid = relax, direction = "up" }))
+				assert.same({ relax, relax .. " at 80" }, puts(n))
+				assert.equal(n + 2, dims[1].after)
+				window_ends()
+				n = #c4.transfers
+				S:recall({ rid = relax })
+				S:recall({ rid = relax, brightness = "90" })  -- waits
+				S.ctx.group_set = function(rid, fields)
+					sets[#sets + 1] = { rid = rid, fields = fields, after = #c4.transfers }
+					return true
+				end
+				assert.is_true(S:level({ rid = relax, level = "35" }))
+				assert.same({ relax, relax .. " at 90" }, puts(n))
+				assert.equal(n + 2, sets[1].after, "the level is unknown here: an absolute set, after the recall")
+			end)
+
+			it("drops a waiting recall whose device was forgotten, or whose scene left the bridge, meanwhile", function()
+				add_relax()
+				S:recall({ rid = F.scene_rids.relax })
+				S:recall({ rid = F.scene_rids.relax, brightness = "50" })  -- waits
+				local n = #c4.transfers
+				S:forget(2001)
+				window_ends()
+				assert.equal(n, #c4.transfers)
+				S:add_scene(F.scene_rids.relax, nil, done)  -- device 2002
+				S:recall({ rid = F.scene_rids.relax })
+				S:recall({ rid = F.scene_rids.relax, brightness = "50" })  -- waits
+				n = #c4.transfers
+				S:on_container(container(F.events.scene_deleted))
+				window_ends()
+				assert.equal(n, #c4.transfers, "a scene deleted in Hue meanwhile is not recalled")
+				assert.is_true(saw_log("dropped: the scene left the bridge"))
+			end)
 		end)
 	end)
 
@@ -1058,6 +1390,26 @@ describe("bridge.scenes", function()
 			c4.sent = {}
 			assert.equal(1, S:on_container(container(grouped_light_event("garage", nil, 50))))
 			assert.same({ rid = F.scene_rids.concentrate, level = "50" }, c4.sent[1].params)
+		end)
+
+		it("looks only at the scenes of the group an item concerns: the registry's full sort never runs (efficiency R8)",
+			function()
+			add_three({ grouped = grouped_lights({ living_room = true, garage = true }) })
+			local sorts = 0
+			local rids = S.reg.rids
+			S.reg.rids = function(...)
+				sorts = sorts + 1
+				return rids(...)
+			end
+			assert.equal(2, S:on_container(container(grouped_light_event("living_room", nil, 72.4))))
+			assert.same({ "HUE_SCENE_GROUP@2001", "HUE_SCENE_GROUP@2002" }, commands_sent())
+			assert.equal(0, S:on_container(container(grouped_light_event("home", false, 30))), "no scene is on that group")
+			assert.equal(30, S.group_level[F.grouped_light_rids.home], "its level is kept all the same")
+			assert.is_false(S.group_on[F.grouped_light_rids.home])
+			c4.sent = {}
+			assert.equal(2, S:on_container(container(F.events.scene_dynamic)))
+			assert.same({ "HUE_SCENE_GROUP@2001", "HUE_SCENE_STATE@2002" }, commands_sent())
+			assert.equal(0, sorts)
 		end)
 
 		it("an unimported scene becoming active tells the linked scenes of its group", function()
@@ -1327,9 +1679,78 @@ describe("bridge.scenes", function()
 				c4.sent[#c4.sent])
 			assert.same({ false, "Not forgotten: the scene device named no device" }, { S:forget_request({}) })
 		end)
+
+		it("remembers the device: its hello is answered HUE_SCENE_FORGOTTEN and never adopted, after a restart too "
+			.. "(#47 F8)", function()
+			add_relax()
+			now = T0 + 5
+			S:forget(2001)
+			assert.same({ ["2001"] = { rid = F.scene_rids.relax, name = "Relax", at = T0 + 5 } },
+				c4.persist.hue_scene_forgotten)
+			-- Its unbind failed, or the owner bound it again: its hello still names the scene.
+			c4:Bind(15, 1, 2001, 1, "HUE_BRIDGE")
+			c4.sent = {}
+			assert.is_false(S:hello(F.scene_rids.relax, { device_id = "2001", name = "Relax" }))
+			assert.same({ { id = 2001, command = "HUE_SCENE_FORGOTTEN", params = { rid = F.scene_rids.relax,
+				name = "Relax" } } }, c4.sent)
+			assert.is_nil(S:entry(F.scene_rids.relax))
+			assert.is_nil(S.announced[2001], "neither an announcement nor a claim")
+			assert.equal("None", S:attention())
+			assert.is_true(saw_log("device 2001 said hello for " .. F.scene_rids.relax .. ", but Forget Scene let it go"))
+			-- A restart reads the mark back; a hello without a rid is told the one it had.
+			c4.calls = {}
+			S = new_scenes()
+			S:load()
+			resync()
+			c4.sent = {}
+			assert.is_false(S:hello(nil, { device_id = "2001" }))
+			assert.is_false(S:hello(F.scene_rids.relax, { device_id = "2001" }))
+			assert.same({ "HUE_SCENE_FORGOTTEN@2001", "HUE_SCENE_FORGOTTEN@2001" }, commands_sent())
+			assert.equal(F.scene_rids.relax, c4.sent[1].params.rid)
+			assert.is_nil(S:entry(F.scene_rids.relax))
+			assert.equal("Living Room: Relax", text_of(S:picker_scenes(), F.scene_rids.relax), "listed under Add Scene")
+			assert.same({}, c4.calls_to("PersistSetValue"), "nothing written: neither the registry nor the mark changed")
+		end)
+
+		it("Link Devices brings a forgotten device back by the rid it had; a goodbye or its deletion drops the mark",
+			function()
+			add_relax()
+			S:forget(2001)
+			c4:Bind(15, 1, 2001, 1, "HUE_BRIDGE")
+			c4.sent = {}
+			assert.equal("Linked 1 scene device: Relax (device 2001) to Living Room: Relax by its rid", S:link_devices())
+			assert.equal(2001, S:entry(F.scene_rids.relax).device_id)
+			assert.same({}, c4.persist.hue_scene_forgotten)
+			assert.same({ "HUE_SCENE_CONFIGURE@2001", "HUE_SCENE_STATE@2001" }, commands_sent())
+			c4.sent = {}
+			assert.is_true(S:hello(F.scene_rids.relax, { device_id = "2001" }), "answered as any registered device")
+			-- Forgotten again, then deleted in Composer: its goodbye takes the mark along.
+			S:forget(2001)
+			assert.is_not_nil(c4.persist.hue_scene_forgotten["2001"])
+			assert.is_nil(S:goodbye({ rid = F.scene_rids.relax, device_id = "2001" }))
+			assert.same({}, c4.persist.hue_scene_forgotten)
+			-- One forgotten and deleted while the bridge was not watching: the next reconcile drops its mark.
+			S:add_scene(F.scene_rids.concentrate, nil, done)  -- device 2002
+			S:add_scene(F.scene_rids.savanna, nil, done)      -- device 2003 keeps the project's scene devices known
+			S:forget(2002)
+			assert.is_not_nil(c4.persist.hue_scene_forgotten["2002"])
+			S:reconcile()
+			assert.is_not_nil(c4.persist.hue_scene_forgotten["2002"], "still in the project")
+			fake.project.devices[2002] = nil
+			S:reconcile()
+			assert.same({}, c4.persist.hue_scene_forgotten)
+		end)
 	end)
 
 	describe("link_devices", function()
+		it("reads Director's nil for the bound devices as none bound: it only adds (#48 item 14)", function()
+			resync()
+			assert.is_nil(C4:GetBoundConsumerDevices(15, 1), "Director's null: nothing bound")
+			assert.equal("No scene devices are bound to this bridge", S:link_devices())
+			S.ctx.project.bound = function() error("boom") end
+			assert.equal("Not linked: the bound-device lookup failed (see the Lua output)", S:link_devices())
+		end)
+
 		it("counts only hue_scene devices among the bound ones", function()
 			resync()
 			c4:Bind(15, 1, 4242, 1, "HUE_BRIDGE")  -- a light
@@ -1430,6 +1851,78 @@ describe("bridge.scenes", function()
 			S.registry[F.scene_rids.relax].proxy_id = nil
 			-- Without a proxy id the protocol device's own name ("Relax", as AddDevice named it) is compared.
 			assert.equal("not renamed 1: Relax (device 2001): no proxy id known", S:adopt_hue_names())
+		end)
+	end)
+
+	-- Security review 2026-10-25 finding 8: AddDevice, Adopt Hue Names and
+	-- the names a scene device shows (HUE_SCENE_CONFIGURE, the slot name,
+	-- HUE_SCENE_FORGOTTEN) get display names; the registry keeps Hue's own.
+	-- bridge/owner_spec.lua has the upgrade cases.
+	describe("names that reach Control4 (security review 2026-10-25 finding 8)", function()
+		-- The Downstairs zone and its Nightlight scene called at length, with
+		-- control characters, in an app paired with the bridge (JSON contents).
+		local ZONE = "Downstairs and the landing by the stairs\\n"
+		local SCENE = "Nightlight\\t for the long hallway"
+		local SCENE_RAW = "Nightlight\t for the long hallway"
+		-- "<Zone> <Scene>" as AddDevice gets it: cleaned, and whole at 72
+		-- characters (NAME_MAX is 100; two 32-character Hue names make 65).
+		local SHOWN = "Downstairs and the landing by the stairs Nightlight for the long hallway"
+
+		before_each(function()
+			L = lights.new({ http = http_ctx, now = function() return now end })
+			L:absorb({ room = decode_data(F.room), zone = decode_data(replace(F.zone, '"name":"Downstairs"',
+				'"name":"' .. ZONE .. '"')), bridge_home = decode_data(F.bridge_home) })
+			S = new_scenes()
+		end)
+
+		local function named_scenes()
+			return { body = replace(F.scene, '"name":"Nightlight"', '"name":"' .. SCENE .. '"') }
+		end
+
+		it("adds a zone scene under the display name of '<Zone> <Scene>'; its device hears display names", function()
+			resync(named_scenes())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			assert.is_true(last_result().ok)
+			assert.equal(SHOWN, c4.added[1].name)
+			local configure = sent_to(2001, "HUE_SCENE_CONFIGURE")[1].params
+			assert.same({ "Nightlight for the long hallway", "Downstairs and the landing by the stairs" },
+				{ configure.name, configure.group_name })
+			assert.equal(SCENE_RAW, S:entry(F.scene_rids.nightlight).name, "the registry keeps Hue's name")
+		end)
+
+		it("does not list a zone scene an older build created under the raw name; renames to the display name", function()
+			resync(named_scenes())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			S.registry[F.scene_rids.nightlight].proxy_id = 3001
+			-- What an older build's AddDevice was given.
+			fake.project.devices[3001].name = "Downstairs and the landing by the stairs\n " .. SCENE_RAW
+			assert.same({}, S:name_differences())
+			assert.equal("None", S:attention())
+			fake.project.devices[3001].name = "Hall light"
+			assert.equal("Renamed 1 scene device: Hall light → " .. SHOWN .. " (device 2001)", S:adopt_hue_names())
+			assert.same({ { id = 3001, name = SHOWN } }, c4.renamed)
+		end)
+
+		it("tells a time-based scene's device the display name of its slot scene", function()
+			resync(named_scenes())  -- Golden hours over Downstairs, Tuesday's slot 1: Nightlight
+			S:add_scene(F.smart_scene_rid, tostring(GARAGE_ROOM), done)
+			assert.equal("Downstairs and the landing by the stairs Golden hours", c4.added[1].name)
+			assert.equal("Nightlight for the long hallway", sent_to(2001, "HUE_SCENE_CONFIGURE")[1].params.slot_name)
+			assert.equal("Nightlight for the long hallway", sent_to(2001, "HUE_SCENE_STATE")[1].params.slot_name)
+		end)
+
+		it("tells a forgotten device its display name, from Forget Scene and from an older build's mark", function()
+			resync(named_scenes())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			c4.sent = {}
+			assert.is_true((S:forget(2001)))
+			assert.same({ rid = F.scene_rids.nightlight, name = "Nightlight for the long hallway" },
+				sent_to(2001, "HUE_SCENE_FORGOTTEN")[1].params)
+			S.forgotten[2001].name = SCENE_RAW  -- a mark an older build kept holds Hue's raw name
+			c4.sent = {}
+			S:hello(F.scene_rids.nightlight, { device_id = "2001" })
+			assert.same({ rid = F.scene_rids.nightlight, name = "Nightlight for the long hallway" },
+				sent_to(2001, "HUE_SCENE_FORGOTTEN")[1].params)
 		end)
 	end)
 
@@ -1826,7 +2319,10 @@ describe("bridge.scenes", function()
 					reason = "recall", slot_name = "Savanna sunset", slot_start = "07:00" } } }, c4.sent)
 				assert.equal("active", S:smart_scene(SMART.living).state)
 				logged = {}
+				window_ends()
+				local n = #c4.transfers
 				S:recall({ rid = SMART.living, action = "activate" })
+				assert.equal(n + 1, #c4.transfers, "a PUT of its own once the first recall's window has ended")
 				assert.same({ recall = { action = "activate" } }, json.decode(c4.last_transfer().data))
 				assert.is_false(saw_log("ignored"), "nothing to ignore")
 			end)
@@ -1922,6 +2418,23 @@ describe("bridge.scenes", function()
 				assert.is_true(S:level({ rid = SMART.living, level = "75", rate = "400" }))
 				assert.same({ dimming_delta = { action = "up", brightness_delta = 25 }, dynamics = { duration = 400 } },
 					dims[3].body)
+			end)
+
+			it("paces its activates as recalls are: those within 300 ms of the last leave as one PUT (#47 F9)", function()
+				add_living()
+				local n = #c4.transfers
+				for _ = 1, 3 do
+					assert.is_true(S:recall({ rid = SMART.living }))
+				end
+				assert.equal(n + 1, #c4.transfers)
+				window_ends()
+				assert.equal(n + 2, #c4.transfers)
+				assert.equal("https://192.0.2.10/clip/v2/resource/smart_scene/" .. SMART.living, c4.last_transfer().url)
+				assert.same({ recall = { action = "activate" } }, json.decode(c4.last_transfer().data))
+				c4.sent = {}
+				c4.last_transfer():respond(200, OK_SMART)
+				assert.same({ "HUE_SCENE_STATE@2001" }, commands_sent(), "the one that waited answers")
+				assert.equal("active", c4.sent[1].params.active)
 			end)
 		end)
 
@@ -2112,6 +2625,27 @@ describe("bridge.scenes", function()
 					name = "Golden hours" } } }, c4.sent)
 				assert.equal("Living Room: Golden hours (time-based)", text_of(S:picker_scenes(), SMART.living))
 			end)
+		end)
+	end)
+
+	describe("rids_where (efficiency R8)", function()
+		it("orders any subset of the registry exactly as reg:rids() orders the whole", function()
+			-- Names that tie case-insensitively or exactly, a missing name, digits and a non-ASCII letter.
+			local names = { r1 = "relax", r2 = "Relax", r3 = "RELAX", r4 = "Bright", r5 = "bright", r6 = false,
+				r7 = "Zebra", r8 = "relax", r9 = "Äther", r10 = "10 lights", r11 = "9 lights", r12 = "" }
+			local id = 100
+			for rid, name in pairs(names) do
+				id = id + 1
+				S.reg.lights[rid] = { device_id = id, name = name or nil, state = id % 2 == 0 and "linked" or "gone" }
+			end
+			assert.same(S.reg:rids(), S:rids_where(function() return true end))
+			assert.same(S.reg:rids("linked"), S:rids_where(function(_, entry) return entry.state == "linked" end))
+			local expected = {}
+			for _, rid in ipairs(S.reg:rids()) do
+				if rid ~= "r2" and rid ~= "r5" and rid ~= "r12" then expected[#expected + 1] = rid end
+			end
+			assert.same(expected, S:rids_where(function(rid) return rid ~= "r2" and rid ~= "r5" and rid ~= "r12" end))
+			assert.same({}, S:rids_where(function() return false end))
 		end)
 	end)
 

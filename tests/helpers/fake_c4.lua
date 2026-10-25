@@ -143,12 +143,22 @@ end
 
 -- A C4LuaUrl look-alike: records the request, and lets a spec drive the
 -- response through respond_headers()/chunk()/done(), or respond() for the
--- common one-shot case.
+-- common one-shot case, or redirect() for a 3xx.
+--
+-- A true returned from OnHeaders or OnBodyChunk aborts the transfer [SDK
+-- 35_url/_9-OnHeaders, 35_url/_7-OnBodyChunk]: `aborted` and `cancelled`
+-- are set and later chunks are not delivered (a spec clears `cancelled` to
+-- model a transfer that keeps calling back, stream.lua's rule 2). With the
+-- low-level respond_headers()/chunk() the spec ends an aborted transfer
+-- itself (done(-1)); respond() and redirect() end it with errCode -1, as
+-- Director does for an aborted transfer [SDK 35_url/_8-OnDone], and deliver
+-- no body after an aborting OnHeaders.
 local function new_transfer(c4)
 	local t = {
 		options = {},
 		callbacks = {},
 		cancelled = false,
+		aborted = false,
 		started = false,
 	}
 
@@ -179,6 +189,18 @@ local function new_transfer(c4)
 		assert(not self.started, "transfer already started")
 		self.started = true
 		self.method, self.url, self.data, self.headers = method, url, data, headers or {}
+		-- The TLS self-check's decoy bundle (bridge/tlscheck.lua): the
+		-- controller honours ssl_cabundle (verified on OS 3.4.2), so the
+		-- request fails certificate verification at once (curl 60) and is
+		-- kept apart from c4.transfers, which specs answer by position. A
+		-- spec models an OS that ignores the bundle with
+		-- c4.tls_ignores_cabundle = true: the request then joins
+		-- c4.transfers like any other and the spec answers it.
+		if tostring(self.options.ssl_cabundle or ""):find("decoy", 1, true) and not c4.tls_ignores_cabundle then
+			table.insert(c4.decoy_transfers, self)
+			self:done(60, "SSL peer certificate or SSH remote key was not OK")
+			return self
+		end
 		table.insert(c4.transfers, self)
 		return self
 	end
@@ -205,7 +227,7 @@ local function new_transfer(c4)
 		table.insert(self.responses, response)
 		if self.callbacks.headers then
 			local abort = self.callbacks.headers(self, response)
-			if abort then self.cancelled = true end
+			if abort then self.cancelled, self.aborted = true, true end
 		end
 		return response
 	end
@@ -214,7 +236,7 @@ local function new_transfer(c4)
 		assert(#self.responses > 0, "respond_headers() before chunk()")
 		if self.callbacks.chunk and not self.cancelled then
 			local abort = self.callbacks.chunk(self, self.responses[#self.responses], data)
-			if abort then self.cancelled = true end
+			if abort then self.cancelled, self.aborted = true, true end
 		end
 	end
 
@@ -225,9 +247,14 @@ local function new_transfer(c4)
 	end
 
 	-- Complete the transfer with one response. Mirrors the controller: with no
-	-- OnBodyChunk callback the body is aggregated into response.body.
+	-- OnBodyChunk callback the body is aggregated into response.body. An
+	-- aborted transfer (see above) gets no body after its headers and ends
+	-- with errCode -1.
 	function t:respond(code, body, headers)
 		local response = self:respond_headers(code, headers)
+		if self.aborted then
+			return self:done(-1, nil)
+		end
 		if self.callbacks.chunk then
 			self:chunk(body or "")
 		else
@@ -236,7 +263,19 @@ local function new_transfer(c4)
 				self.callbacks.body(self, response)
 			end
 		end
-		self:done(0, nil)
+		self:done(self.aborted and -1 or 0, nil)
+	end
+
+	-- A redirect: a 3xx response (302 by default) with a Location header.
+	-- C4:url follows it by itself, OnHeaders running once per response [SDK
+	-- 35_url/_9-OnHeaders], so the spec answers the followed request with
+	-- respond() on the same transfer and OnDone gets both responses. When
+	-- OnHeaders aborts on the 3xx, the transfer ends at once with errCode -1.
+	function t:redirect(code, location)
+		self:respond_headers(code or 302, { Location = location })
+		if self.aborted then
+			self:done(-1, nil)
+		end
 	end
 
 	return t
@@ -283,6 +322,8 @@ local function new_c4(env)
 		calls = {},
 		config_info = { version = "1" },
 		transfers = {},
+		decoy_transfers = {},   -- TLS self-check requests failed by the fake (see new_transfer)
+		tls_ignores_cabundle = false,
 		timers = {},
 		persist = {},
 		property_lists = {},
@@ -344,6 +385,18 @@ local function new_c4(env)
 	function c4:PersistGetValue(name, encrypted)
 		record("PersistGetValue", name, encrypted or false)
 		return c4.persist[name]
+	end
+
+	-- Director's version table [SDK 5_director_command/_2-GetVersionInfo];
+	-- a spec sets c4.director_version, or nil for a controller that answers
+	-- nothing.
+	c4.director_version = "3.4.2.746094"
+	function c4:GetVersionInfo()
+		record("GetVersionInfo")
+		if c4.director_version == nil then
+			return nil
+		end
+		return { version = c4.director_version }
 	end
 
 	function c4:PersistDeleteValue(name)
@@ -606,9 +659,14 @@ local function new_c4(env)
 		return nodes[id] and { [id] = nodes[id] } or {}
 	end
 
-	function c4:SendToDevice(id, command, params)
+	-- allowEmptyValues and logCommand are optional (API 32/_19); logCommand
+	-- is nil when the caller left it out (Director then logs the message).
+	function c4:SendToDevice(id, command, params, allow_empty, log_command)
 		record("SendToDevice", id, command, params)
-		local message = { id = id, command = command, params = params }
+		-- The two flags are readable (m.log_command) but not keys of the
+		-- message, so specs comparing messages whole are unaffected.
+		local message = setmetatable({ id = id, command = command, params = params },
+			{ __index = { allow_empty = allow_empty, log_command = log_command } })
 		table.insert(c4.sent, message)
 		table.insert(c4.outbox, message)
 	end

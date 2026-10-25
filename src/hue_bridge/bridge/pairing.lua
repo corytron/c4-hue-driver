@@ -48,6 +48,15 @@ function pairing.probe(ip, callback)
 	end)
 end
 
+-- The key the bridge issued, if it is one: a non-empty string that can travel
+-- as a header value (no white space, no control characters). Anything else
+-- would be stored and then sent with every request [code analysis
+-- 2026-10-22, L6]. Hue keys are letters, digits and hyphens [assumed], so
+-- the rule refuses no real one.
+local function usable_key(value)
+	return type(value) == "string" and value ~= "" and not value:find("[%s%c]")
+end
+
 -- Interpret the array the /api endpoint returns. Returns one of:
 --   "ok", key          on success
 --   "link_button"      when the button hasn't been pressed
@@ -60,8 +69,12 @@ function pairing.parse_response(json)
 	if type(first) ~= "table" then
 		return "error", "empty response"
 	end
-	if first.success and first.success.username then
-		return "ok", first.success.username
+	local success = first.success
+	if success ~= nil then
+		if type(success) == "table" and usable_key(success.username) then
+			return "ok", success.username
+		end
+		return "error", "the bridge answered without a usable application key"
 	end
 	local err = first.error
 	if type(err) == "table" then

@@ -30,9 +30,9 @@ LEDs, two-way state, and the same lifecycle handling as a light.
 | `on=false` on a grouped_light deactivates the scenes of that group (ordinary and time-based); a whole-group `dimming_delta` or absolute `dimming.brightness` keeps them active. | verified (research §7 V9, V11) |
 | A zone with no lights has no grouped_light (empty `services`); deleting a zone deletes its grouped_light; a light can be in any number of zones; a room's children are devices, a zone's are lights. | verified (fixtures `F.zone` Attic comment, hardware 2026-10-21; research §7 V14; `bridge/groups.lua` header) |
 | Hue asks for at most about one grouped_light request a second (ten for lights). | verified (Core Concepts page saved by the owner, "Limitations") |
-| light_v2: `dimmer`, `supports_color`, `supports_color_correlated_temperature`, the CCT min/max and `supports_target` are dynamic capabilities, changed at run time with the `DYNAMIC_CAPABILITIES_CHANGED` notify; the two colour flags must travel in one notify. `hide_proxy_properties` is not dynamic. | verified (`~/c4-tools/reference/docs-driverworks-proxyprotocol-lightv2/source/includes/5_light_v2_capabilities/_5-DIMMER.md`, `_30-SUPPORTSCOLOR.md`, `_31-SUPPORTSCOLORCORRELATEDTEMPERATURE.md`, `_8.4-COLORCORRELATEDTEMPERATUREMAX.md`, `_38-HIDEPROXYPROPERTIES.md`; `35_Light_v2_protocol_notifications…/_8-DYNAMICCAPABILITIESCHANGED.md`) |
+| light_v2: `dimmer`, `supports_color`, `supports_color_correlated_temperature`, the CCT min/max and `supports_target` are dynamic capabilities, changed at run time with the `DYNAMIC_CAPABILITIES_CHANGED` notify; the two colour flags must travel in one notify. `hide_proxy_properties` is not dynamic (on OS 3.x; the proxy reference's "What's New in 4.2.1" makes it dynamic from OS 4.2.1). | verified (`~/c4-tools/reference/docs-driverworks-proxyprotocol-lightv2/source/includes/5_light_v2_capabilities/_5-DIMMER.md`, `_30-SUPPORTSCOLOR.md`, `_31-SUPPORTSCOLORCORRELATEDTEMPERATURE.md`, `_8.4-COLORCORRELATEDTEMPERATUREMAX.md`, `_38-HIDEPROXYPROPERTIES.md`; `35_Light_v2_protocol_notifications…/_8-DYNAMICCAPABILITIESCHANGED.md`) |
 | The Hue Light driver already sends that notify on every `HUE_CONFIGURE` from `has_color`/`has_cct`/mirek bounds, and the colour controls appeared on the house's lights that way. A later change of the flags on a live device is documented ("capabilities that change during runtime") but not yet seen on the house. | verified / assumed (`src/hue_light/driver.lua` `HUE_CONFIGURE`, `src/hue_light/light/caps.lua`; `docs/status.md`) |
-| Add Light = `lights:add_light` → `create_lights`: `C4:AddDevice("hue_light.c4z", room_id, name, cb)`, then `C4:Bind(bridge, 1, protocol_id, 1, "HUE_BRIDGE")`, registry entry, `HUE_CONFIGURE` + `HUE_STATE`. AddDevice is for user-initiated use only. | verified (`src/hue_bridge/bridge/lights.lua`; `~/c4-tools/reference/docs-driverworks-api/source/includes/9_helper/_0.1-AddDevice.md`, `_1-bind.md`) |
+| Add Light = `lights:add_light` → `owner:create`: `C4:AddDevice("hue_light.c4z", room_id, name, cb)`, then `C4:Bind(bridge, 1, protocol_id, 1, "HUE_BRIDGE")`, registry entry, `HUE_CONFIGURE` + `HUE_STATE`. AddDevice is for user-initiated use only. | verified (`src/hue_bridge/bridge/lights.lua`; `~/c4-tools/reference/docs-driverworks-api/source/includes/9_helper/_0.1-AddDevice.md`, `_1-bind.md`) |
 | A zone scene's Control4 room: the zone's entry in `hue_rooms` (Set Room Mapping lists zones too), else the `Room` picked, else refused "Not added: <scene>: Hue room <Zone> (zone) not mapped; pick a room, or Set Room Mapping first". Zone scenes are named "<Zone> <Scene>". | verified (`scenes.lua` `room_for_add`, `default_room`, `creation_name`; `lights.lua` `set_room_mapping`, `picker_hue_rooms`) |
 | `C4:GetDevices({C4iNames="hue_light.c4z"})` returns every device of that driver (used by Link Devices and the reconcile to tell lights from scene devices); `GetBoundConsumerDevices` values are the driver `<name>`, not the Composer name. | verified (`lights.lua` `project_lights`, `link_devices`; `docs/design.md` "Project APIs") |
 | Adding properties or actions to the bridge's `driver.xml` (it has no `<capabilities>`) and Lua changes take effect with an ordinary "Add or Update Driver"; only a `<capabilities>` change needs the controller reboot. | verified (`docs/status.md` "How builds reach the house"; import-ui and scenes installs, `docs/import-design.md` §2) |
@@ -102,7 +102,16 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    CT-capable members' ranges (max of minimums, min of maximums; the first
    member's range if the intersection is empty). `min_dim` is 1 (Hue clamps
    per lamp). A membership change re-sends `HUE_CONFIGURE` and the device
-   re-sends `DYNAMIC_CAPABILITIES_CHANGED`.
+   re-sends `DYNAMIC_CAPABILITIES_CHANGED`. **The bridge clamps too**
+   (2026-10-25, #58): `zone_lights:limits(grouped_light_rid)` returns
+   `{ min_dim = 1, mirek_min = n, mirek_max = m }`, the zone's intersected
+   range (`nil` while the zone's members are unknown), and the driver gives
+   it to the group queue (`state.group_queue:limits(grouped_light_rid, …)`)
+   before each `group_set`. So a value from programming outside the range is
+   clamped on the bridge side as well, not only by the device's Kelvin range
+   on the Navigators; before, grouped_light PUTs were clamped to
+   `commands.DEFAULT_LIMITS` (mirek 153–500), because the first `limits`
+   was never wired and was removed as unused on 2026-10-24.
 8. **Colour shown**: Hue reports none for a group, so the bridge derives it
    from the member lights it already caches (`lights.models`): if any lit
    colour-capable member is in `xy` mode, the first such member's `x`,`y`

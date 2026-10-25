@@ -35,13 +35,30 @@ jobs:
 
       # The controller runs Lua 5.1 semantics (LuaJIT), so the specs run on
       # Lua 5.1 too. dkjson is what the fake runtime and the specs decode with.
+      # Every rock at an exact version, its dependencies included, with
+      # --deps-mode=none so that luarocks fetches nothing this list does not
+      # name: a rock missing from it fails the job instead of arriving
+      # unpinned (security review 2026-10-25, finding 11). The versions are
+      # those current on luarocks.org on 2026-10-25, which this job installed
+      # before the pin and the VM runs. release.yml has the same list; to move
+      # a rock, read its changes and change both files in one pull request.
       - name: Install Lua 5.1, luarocks, luacheck, busted and dkjson
         run: |
           sudo apt-get update
           sudo apt-get install -y lua5.1 liblua5.1-0-dev luarocks
-          sudo luarocks --lua-version=5.1 install luacheck
-          sudo luarocks --lua-version=5.1 install busted
-          sudo luarocks --lua-version=5.1 install dkjson
+          rock() { sudo luarocks --lua-version=5.1 install --deps-mode=none "$1" "$2"; }
+          rock argparse 0.7.2-1
+          rock luafilesystem 1.9.0-1
+          rock luacheck 1.2.0-1
+          rock dkjson 2.11-1
+          rock lua_cliargs 3.0.2-1
+          rock luasystem 0.7.1-1
+          rock say 1.4.1-3
+          rock luassert 1.9.0-1
+          rock lua-term 0.8-1
+          rock penlight 1.15.0-1
+          rock mediator_lua 1.1.2-0
+          rock busted 2.3.0-1
           lua5.1 -v
           luacheck --version
           busted --version
@@ -69,11 +86,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-lxml
 
-      # Cloned at build time, never vendored (CONTRIBUTING.md). build.sh looks
+      # Fetched at build time, never vendored (CONTRIBUTING.md). build.sh looks
       # for dp3/driverpackager.py under ~/c4-tools/drivers-driverpackager or
-      # at $DP3.
-      - name: Clone Snap One's driver packager
-        run: git clone --depth 1 https://github.com/snap-one/drivers-driverpackager "$RUNNER_TEMP/drivers-driverpackager"
+      # at $DP3. Pinned to a reviewed commit (security review 2026-10-25,
+      # finding 11): the packager runs in Build, here and in the Release
+      # workflow, so a new commit on its default branch reaches no package
+      # until someone has read it. The pin is the head of its master branch on
+      # 2026-10-25 (last changed 2024-08-28), the commit the VM's
+      # ~/c4-tools/drivers-driverpackager is at. To move it: pull that copy,
+      # read `git log -p <pinned>..HEAD` there, then put the new full sha here
+      # and in release.yml in one pull request.
+      - name: Fetch Snap One's driver packager at the reviewed commit
+        env:
+          PACKAGER_SHA: 16eef8beb70303606f066524cda516b2aa7ce38d
+        run: |
+          dir="$RUNNER_TEMP/drivers-driverpackager"
+          git init -q "$dir"
+          git -C "$dir" remote add origin https://github.com/snap-one/drivers-driverpackager
+          git -C "$dir" fetch -q --depth 1 origin "$PACKAGER_SHA"
+          git -C "$dir" checkout -q FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$PACKAGER_SHA"
 
       - name: Build
         run: DP3="$RUNNER_TEMP/drivers-driverpackager/dp3/driverpackager.py" tools/build.sh

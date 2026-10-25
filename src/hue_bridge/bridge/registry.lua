@@ -32,16 +32,20 @@
 -- spike]. load() on a missing key starts empty.
 --
 -- Entry fields (§3): device_id, proxy_id, name, device_name, model, caps,
--- device_rid, mac_address, service_id, id_v1, hue_room_rid, state, gone_since,
--- unbound_since, created_room_id, created_at, name_dismissed. add() and
--- update() copy every key they are given, known or not, so a field a later
--- build adds survives a round trip through an older one. Device ids and
--- timestamps are numbers, rids strings. A persisted entry without `state` is
--- v1 and is upgraded to "linked" at load; the other v2 fields stay nil until
--- the next resync fills them. `state` is "linked" | "gone" | "unbound";
--- tombstoned entries leave the table (the §3 "tombstone" state is the
--- hue_tombstones table). gone_since / unbound_since exist exactly while the
--- entry is in that state.
+-- device_rid, mac_address, service_id, id_v1, hue_room_rid, hue_room, state,
+-- gone_since, unbound_since, created_room_id, created_at, name_dismissed.
+-- add() and update() copy every key they are given, known or not. load()
+-- keeps unknown keys too, unless the owner module names its schema (the
+-- `fields` option of new(), which lights.lua gives): then a persisted field
+-- that neither the registry nor the module knows is dropped at load, with
+-- one debug line per entry (code analysis 2026-10-22 R9, issue #48), so a
+-- field an earlier build wrote and this one no longer has does not ride
+-- along for ever. Device ids and timestamps are numbers, rids strings. A
+-- persisted entry without `state` is v1 and is upgraded to "linked" at load;
+-- the other v2 fields stay nil until the next resync fills them. `state` is
+-- "linked" | "gone" | "unbound"; tombstoned entries leave the table (the §3
+-- "tombstone" state is the hue_tombstones table). gone_since / unbound_since
+-- exist exactly while the entry is in that state.
 --
 -- Invariants add() enforces (anything else is a bug upstream, and a duplicate
 -- would make by_device() ambiguous): a non-empty string rid, a positive
@@ -65,6 +69,11 @@ local STAMP = { gone = "gone_since", unbound = "unbound_since" }
 -- The entry fields that are numbers: timestamps and ids, coerced at load.
 local NUMERIC_FIELDS = { "gone_since", "unbound_since", "created_at", "created_room_id" }
 
+-- The entry fields the registry itself reads or writes, whatever the owner
+-- module's schema: always kept at load.
+registry.OWN_FIELDS = { "device_id", "proxy_id", "name", "device_name", "state", "gone_since", "unbound_since",
+	"created_at", "created_room_id" }
+
 -- Pass as a field value to update() to remove that field: a nil in a table
 -- literal is invisible to pairs(), so it cannot mean "clear".
 registry.CLEAR = setmetatable({}, { __tostring = function() return "registry.CLEAR" end })
@@ -72,7 +81,9 @@ registry.CLEAR = setmetatable({}, { __tostring = function() return "registry.CLE
 -- opts: persist_get(name), persist_set(name, value) required; now() defaults
 -- to os.time; log to common.log; keys = { lights, tombstones, rooms } renames
 -- the persisted keys (each defaults to the constant above; rooms = false
--- disables room mappings altogether).
+-- disables room mappings altogether); fields (optional) = the entry field
+-- names the owner module persists besides registry.OWN_FIELDS: with it,
+-- load() drops every other persisted field (see the header).
 function registry.new(opts)
 	opts = opts or {}
 	assert(type(opts.persist_get) == "function", "registry.new: persist_get is required")
@@ -88,6 +99,16 @@ function registry.new(opts)
 		local ok = (type(key) == "string" and key ~= "") or (key == false and name == "rooms")
 		assert(ok, "registry.new: keys." .. name .. " must be a name")
 	end
+	local schema = nil
+	if opts.fields ~= nil then
+		assert(type(opts.fields) == "table", "registry.new: fields must be a list of names")
+		schema = {}
+		for _, list in ipairs({ registry.OWN_FIELDS, opts.fields }) do
+			for _, name in ipairs(list) do
+				schema[name] = true
+			end
+		end
+	end
 	return setmetatable({
 		persist_get = opts.persist_get,
 		persist_set = opts.persist_set,
@@ -98,6 +119,7 @@ function registry.new(opts)
 			tombstones = keys.tombstones or registry.TOMBSTONES_KEY,
 			rooms = rooms_key,
 		},
+		schema = schema,  -- field name → true when the owner module gave its schema, else nil (keep everything)
 		lights = {},
 		rooms = {},
 		tombs = {},
@@ -177,13 +199,28 @@ end
 
 -- One persisted entry, normalised: numeric ids and timestamps, a valid state
 -- (v1 entries have none and become "linked"), timestamps only for the state
--- they belong to. nil for an entry without a usable device id: it represents
--- nothing the driver could address, and lights.lua has always dropped those.
+-- they belong to, and with a schema only the fields it names. nil for an
+-- entry without a usable device id: it represents nothing the driver could
+-- address, and lights.lua has always dropped those.
 function registry:normalise_entry(rid, raw)
 	if type(raw) ~= "table" then
 		return nil
 	end
 	local entry = shallow_copy(raw)
+	if self.schema then
+		local dropped = {}
+		for k in pairs(raw) do
+			if not self.schema[k] then
+				entry[k] = nil
+				dropped[#dropped + 1] = tostring(k)
+			end
+		end
+		if #dropped > 0 then
+			table.sort(dropped)
+			self.log.debug("registry: %s: dropped %s, which this build no longer keeps", tostring(rid),
+				table.concat(dropped, ", "))
+		end
+	end
 	entry.device_id = positive(raw.device_id)
 	if not entry.device_id then
 		return nil
@@ -497,10 +534,21 @@ end
 -- ones stay until bound again. An empty `present` is treated as unknown: an
 -- empty or failed GetDevices must never read as "everything was deleted"
 -- (§5), and a wrong tombstone costs the owner far more than a missed one.
+-- A `bound` that is not a table is unknown and changes nothing at all: no
+-- entry is unbound, re-linked or tombstoned on it (an empty table still
+-- means nothing is bound; code analysis 2026-10-22 item 14). `skip`
+-- (optional, a set { [rid] = true }) names the entries the caller created
+-- in this batch, left as they are: Director may not list a device that
+-- AddDevice has just created, or its new binding, yet (item 13).
 -- Returns { unbound, relinked, tombstoned } as rid arrays in name order.
 function registry:reconcile(sets)
 	sets = sets or {}
-	local bound = sets.bound or {}
+	local bound = sets.bound
+	if type(bound) ~= "table" then
+		self.log.debug("registry: reconcile skipped: the bound set is unknown")
+		return { unbound = {}, relinked = {}, tombstoned = {} }
+	end
+	local skip = type(sets.skip) == "table" and sets.skip or {}
 	local present = sets.present
 	if type(present) ~= "table" or next(present) == nil then
 		if present ~= nil then
@@ -511,15 +559,18 @@ function registry:reconcile(sets)
 	local out = { unbound = {}, relinked = {}, tombstoned = {} }
 	for _, rid in ipairs(self:rids()) do
 		local entry = self.lights[rid]
-		if in_set(bound, entry.device_id) then
-			if entry.state == "unbound" and self:set_state(rid, "linked") then
-				out.relinked[#out.relinked + 1] = rid
+		-- An entry created in the caller's batch waits for the next reconcile.
+		if not skip[rid] then
+			if in_set(bound, entry.device_id) then
+				if entry.state == "unbound" and self:set_state(rid, "linked") then
+					out.relinked[#out.relinked + 1] = rid
+				end
+			elseif present and not in_set(present, entry.device_id) then
+				self:tombstone(rid)
+				out.tombstoned[#out.tombstoned + 1] = rid
+			elseif entry.state == "linked" and self:set_state(rid, "unbound") then
+				out.unbound[#out.unbound + 1] = rid
 			end
-		elseif present and not in_set(present, entry.device_id) then
-			self:tombstone(rid)
-			out.tombstoned[#out.tombstoned + 1] = rid
-		elseif entry.state == "linked" and self:set_state(rid, "unbound") then
-			out.unbound[#out.unbound + 1] = rid
 		end
 	end
 	return out

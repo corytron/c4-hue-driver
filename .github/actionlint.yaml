@@ -1,0 +1,9 @@
+# actionlint settings (docs/cicd-gitops-design.md, section 2: ".github/actionlint.yaml (if needed)").
+paths:
+  .github/workflows/code-scanning-triage.yml:
+    ignore:
+      # GitHub's workflow token gained the `vulnerability-alerts` permission (read
+      # Dependabot alerts; https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions),
+      # which actionlint 1.7.12 does not list yet. Only this message, only this file;
+      # remove the entry once tools/setup-checks.sh pins an actionlint that knows the scope.
+      - 'unknown permission scope "vulnerability-alerts"'

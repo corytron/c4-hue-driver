@@ -1,4 +1,5 @@
 local json = require("dkjson")
+local log = require("common.log")
 local hue_model = require("bridge.hue_model")
 local F = require("fixtures.hue_resources")
 
@@ -1588,6 +1589,108 @@ describe("bridge.hue_model", function()
 				has_color = "false", has_cct = "false", min_dim = "1" }, p)
 			assert.same({ rid = "z", kind = "group", no_lights = "false", has_color = "false", has_cct = "false",
 				min_dim = "1" }, hue_model.group_configure_params("z", nil))
+		end)
+	end)
+
+	-- Security review 2026-10-24 finding 5 (issue #45): the registries keep
+	-- these rids and recall, activate and the PUT queues put them into
+	-- request paths, so an id that is not a resource id never makes a model.
+	describe("resource ids", function()
+		local logged
+
+		-- Ids a hostile bridge or a tampered store could send: empty, path and
+		-- query characters, spaces and controls, a decoded JSON null, numbers.
+		local JUNK = { "", "a/b", "x?y=1", "../config", "id with space", "tab\tid", "rid\n", "ünï", {}, 7, true }
+
+		local function with_id(item, id)
+			local copy = {}
+			for k, v in pairs(item) do copy[k] = v end
+			copy.id = id
+			return copy
+		end
+
+		-- fn(id) must drop the item; each drop logs exactly one debug line.
+		local function each_junk(what, fn)
+			for _, id in ipairs(JUNK) do
+				logged = {}
+				fn(id)
+				assert.equal(1, #logged, what .. ": one line for " .. tostring(id))
+				assert.truthy(logged[1]:find("hue_model: dropped a " .. what .. " item with ", 1, true), logged[1])
+				assert.truthy(logged[1]:find("not a resource id", 1, true))
+			end
+			logged = {}
+		end
+
+		before_each(function()
+			logged = {}
+			log.sink = function(line) logged[#logged + 1] = line end
+			log.set_debug(true)
+		end)
+
+		after_each(function()
+			log.set_debug(false)
+		end)
+
+		it("takes letters, digits and dashes only", function()
+			assert.equal(F.rids.living, hue_model.resource_id(F.rids.living))
+			assert.equal("Ab-9", hue_model.resource_id("Ab-9"))
+			for _, id in ipairs(JUNK) do
+				assert.is_nil(hue_model.resource_id(id), tostring(id))
+			end
+			assert.is_nil(hue_model.resource_id(nil))
+		end)
+
+		it("light() drops an item whose id is not a resource id, or no table", function()
+			local item = by_rid(items(F.light))[F.rids.living]
+			each_junk("light", function(id) assert.is_nil(hue_model.light(with_id(item, id))) end)
+			assert.is_nil(hue_model.light(with_id(item, nil)))
+			assert.truthy(logged[1]:find("dropped a light item with no id", 1, true))
+			assert.is_nil(hue_model.light(nil))
+			assert.is_nil(hue_model.light("junk"))
+			assert.equal(F.rids.living, hue_model.light(item).rid)
+		end)
+
+		it("devices() leaves out a device whose id is not a resource id", function()
+			local list = items(F.device)
+			each_junk("device", function(id) assert.same({}, hue_model.devices({ with_id(list[1], id) })) end)
+			local devices = hue_model.devices({ with_id(list[1], "a/b"), list[2] })
+			assert.is_nil(devices["a/b"])
+			assert.truthy(devices[list[2].id], "the others are kept")
+		end)
+
+		it("group() drops a room, zone or bridge_home whose id is not a resource id, and nothing else is logged", function()
+			for _, item in ipairs({ items(F.room)[1], items(F.zone)[1], items(F.bridge_home)[1] }) do
+				each_junk(item.type, function(id) assert.is_nil(hue_model.group(with_id(item, id))) end)
+				assert.equal(item.id, hue_model.group(item).rid)
+			end
+			assert.is_nil(hue_model.group(with_id(items(F.device)[1], "a/b")), "a device is no group")
+			assert.equal(0, #logged, "an item of another type is not a dropped group")
+		end)
+
+		it("update_group() takes a grouped_light service only with a resource id", function()
+			local zone = hue_model.group(decode(F.events.zone_add)[1].data[2])
+			assert.equal(F.new_zone_grouped_light_rid, zone.grouped_light_rid)
+			for _, id in ipairs(JUNK) do
+				assert.same({}, hue_model.update_group(zone, { services = { { rid = id, rtype = "grouped_light" } } }))
+			end
+			assert.equal(F.new_zone_grouped_light_rid, zone.grouped_light_rid)
+			assert.same({ "grouped_light_rid" },
+				hue_model.update_group(zone, { services = { { rid = "gl-2", rtype = "grouped_light" } } }))
+			assert.equal("gl-2", zone.grouped_light_rid)
+		end)
+
+		it("scene(), smart_scene() and grouped_light() drop an item whose id is not a resource id", function()
+			local scene = items(F.scene)[1]
+			each_junk("scene", function(id) assert.is_nil(hue_model.scene(with_id(scene, id))) end)
+			assert.equal(scene.id, hue_model.scene(scene).rid)
+			local smart = items(F.smart_scenes)[1]
+			each_junk("smart_scene", function(id) assert.is_nil(hue_model.smart_scene(with_id(smart, id))) end)
+			assert.equal(smart.id, hue_model.smart_scene(smart).rid)
+			local grouped = items(F.grouped_light)[1]
+			each_junk("grouped_light", function(id) assert.is_nil(hue_model.grouped_light(with_id(grouped, id))) end)
+			assert.equal(grouped.id, hue_model.grouped_light(grouped).rid)
+			assert.is_nil(hue_model.scene(with_id(grouped, "a/b")), "another type: nil without a line")
+			assert.equal(0, #logged)
 		end)
 	end)
 end)

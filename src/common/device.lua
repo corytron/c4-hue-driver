@@ -2,14 +2,15 @@
 -- light_v2 proxy and their bridge binding: properties and proxy notifies, the
 -- bridge and proxy lookups, the Driver Version row, the buffer for bridge
 -- messages that arrive before late init, the keypad Button Links with their
--- LEDs and button colours, the binding re-check after a Director restart, the
--- goodbye on a Composer delete, and the dev-build pieces (log forwarding,
--- DEV_RELOAD) that common/devloop.lua carries. Until 2026-10-24 each driver
--- had its own byte-identical copy of every block here
--- (docs/reviews/slim-device-drivers.md, #5 Stage A); the code is that copy,
--- and both drivers' specs pin it end to end. What the two drivers do
--- differently (the hold machine, the targets, the identity texts) stays in
--- the drivers and reaches this module through three hooks.
+-- LEDs, button colours and press / click / release machine, the binding
+-- re-check after a Director restart, the goodbye on a Composer delete, and
+-- the dev-build pieces (log forwarding, DEV_RELOAD) that common/devloop.lua
+-- carries. Until 2026-10-24 each driver had its own byte-identical copy of
+-- every block here (docs/reviews/slim-device-drivers.md, #5 Stage A), and
+-- until 2026-10-25 its own copy of the keypad machine (Stage B, #57); the
+-- code is those copies, and both drivers' specs pin it end to end. What the
+-- two drivers do differently (the hold itself, the targets, the identity
+-- texts) stays in the drivers and reaches this module through hooks.
 --
 -- No module-level state: device.new() returns one instance per driver.
 --
@@ -18,23 +19,35 @@
 --       tree = "light",         -- the dev loop's name for this driver's source tree (DEV_RELOAD)
 --       bridge = function() return bridge end,  -- device id of the bound Hue Bridge driver, or nil
 --       rid = function() return st.rid end,     -- the device's Hue resource id, or nil
+--       noun = "light",         -- what the keypad's log lines call the device
+--       settings = { "hold_up", "hold_down" },  -- the keypad settings its driver.xml declares (SETTINGS)
 --   })
 --
 -- Hooks the driver assigns once the functions they call exist (they are read
 -- when something arrives, never at load):
---   dev.is_on()                        nil while the on state is unknown, else whether
---                                      the device shows on: what the keypad LEDs follow
---   dev.button_action(button, action)  the driver's press / click / release machine,
---                                      fed from BUTTON_ACTION and the Button Links
---   dev.on_bridge_found()              the re-check found the bridge: greet it and report online
+--   dev.is_on()              nil while the on state is unknown, else whether the device
+--                            shows on: what the keypad LEDs and holds follow
+--   dev.on_bridge_found()    the re-check found the bridge: greet it and report online
+--   dev.on_click(button)     a keypad tap
+--   dev.on_hold(h, up, on)   a keypad hold began ("Keypad press, click and release" below)
+--   dev.on_finish(h)         the release of a hold that began
+--   dev.on_end_hold(h)       optional: a press ended, whatever ended it
 --
 -- The instance: devloop (the module; nil in release builds), flush_log(),
 -- prop(), notify(), device_id(), result(), bound_bridge(), proxy_id(),
--- after_late_init(), late_init(), show_driver_version(), load_colors(),
--- update_leds(), link_button(), schedule_recheck(), cancel_recheck() and
+-- send(), after_late_init(), late_init(), binding_changed(),
+-- replay_bindings(), show_driver_version(), load_colors(), update_leds(),
+-- setting(), load_settings(), button_action(), holding(), dim_after_on(),
+-- link_button(), schedule_recheck(), cancel_recheck(), cancel_timers() and
 -- goodbye(). It registers the Driver_Version and Debug_Mode property
 -- handlers, the proxy's BUTTON_ACTION, DO_PUSH, DO_RELEASE, DO_CLICK,
--- REQUEST_BUTTON_COLORS and SET_BUTTON_COLOR, and DEV_RELOAD in dev builds.
+-- REQUEST_BUTTON_COLORS and SET_BUTTON_COLOR, the SET_* command of each
+-- keypad setting it takes, and DEV_RELOAD in dev builds.
+--
+-- OnDriverLateInit in both drivers: load_settings() and load_colors() with
+-- the persisted identity, read the binding (bound_bridge), then late_init()
+-- (the buffered bridge messages), greet, and replay_bindings() last;
+-- OnDriverDestroyed calls cancel_timers().
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -48,8 +61,12 @@ device.BRIDGE_BINDING = 1
 local PROXY_BINDING, BRIDGE_BINDING = device.PROXY_BINDING, device.BRIDGE_BINDING
 
 -- BUTTON_ACTION's actions: 1 press, 2 release as a click, 0 release after a
--- hold [verified: proxy-protocol reference, light_v2 BUTTON_ACTION].
+-- hold; its buttons: 0 top, 1 bottom, 2 toggle [verified: proxy-protocol
+-- reference, light_v2 BUTTON_ACTION].
 device.ACT_RELEASE, device.ACT_PRESS, device.ACT_CLICK = 0, 1, 2
+local ACT_RELEASE, ACT_PRESS, ACT_CLICK = device.ACT_RELEASE, device.ACT_PRESS, device.ACT_CLICK
+device.BUTTON_TOP, device.BUTTON_BOTTOM = 0, 1
+local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 
 -- Keypad buttons bound to the driver's Button Link connections (driver.xml
 -- 200 top, 201 bottom, 202 toggle) -> BUTTON_ID.
@@ -63,6 +80,41 @@ local COLOR_DEFAULTS = {
 	[0] = { on = "0000ff", off = "000000" },
 	[1] = { on = "000000", off = "0000ff" },
 	[2] = { on = "0000ff", off = "000000" },
+}
+
+-- The keypad machine's timing (docs/keypad-design.md): a press still down
+-- after HOLD_AFTER_MS is a hold; a hold from off dims up DIM_AFTER_ON_MS
+-- after the device was turned on at 1 %; a click on the same button within
+-- CLICK_GUARD_MS after a hold's release is the keypad's own and is ignored.
+local HOLD_AFTER_MS = 400
+local DIM_AFTER_ON_MS = 600
+local CLICK_GUARD_MS = 1000
+
+-- The keypad settings the light_v2 proxy sends when the dealer edits them in
+-- Composer [verified: proxy-protocol reference, light_v2 SET_PRESET_LEVEL
+-- {LEVEL}, SET_CLICK_RATE_* and SET_HOLD_RATE_* {RATE ms}]: the persisted key,
+-- the default, the command and its parameter, and the notification that
+-- tells the proxy the value now in use (PRESET_LEVEL, CLICK_RATE_UP/DOWN,
+-- HOLD_RATE_UP/DOWN). Without that answer the proxy keeps its old value: on
+-- the house (dev build 284, 2026-10-25) a hold rate set to 2.000 s reached the
+-- driver, Composer still showed 5.000 afterwards, and setting 5.000 again sent
+-- nothing. The notification carries the BARE value: the reference documents
+-- a table ({RATE} / {BRIGHTNESS}), but the proxy reads such a table as 0
+-- (Default On Brightness 0, click rates 0, hold rates clamped to its 1 s
+-- minimum), while "5000" or 5000 is stored as sent [verified: hardware,
+-- Composer rounds 41 and 42]. A driver takes the ones its driver.xml
+-- declares (opts.settings).
+local SETTINGS = {
+	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL",
+		notify = "PRESET_LEVEL", min = 1, max = 100 },
+	click_up = { key = "click_rate_up", default = 250, command = "SET_CLICK_RATE_UP", param = "RATE",
+		notify = "CLICK_RATE_UP", min = 0, max = 86400000 },
+	click_down = { key = "click_rate_down", default = 250, command = "SET_CLICK_RATE_DOWN", param = "RATE",
+		notify = "CLICK_RATE_DOWN", min = 0, max = 86400000 },
+	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE",
+		notify = "HOLD_RATE_UP", min = 0, max = 86400000 },
+	hold_down = { key = "hold_rate_down", default = 5000, command = "SET_HOLD_RATE_DOWN", param = "RATE",
+		notify = "HOLD_RATE_DOWN", min = 0, max = 86400000 },
 }
 
 -- The binding re-check's gaps: checks at 5, 15, 30 and 60 s after start.
@@ -208,6 +260,26 @@ function device.new(opts)
 		return tonumber((next(bound)))
 	end
 
+	-- A command to the bound bridge that follows a *_CHANGING notify (or ends
+	-- what one began) goes through here, protected: whatever makes the call
+	-- raise [assumed possible: the API documents no error and returns None,
+	-- API 32/_19; a missing id returned nil silently on OS 3.4.2,
+	-- docs/design.md], the handler still gets to tell the proxy CHANGED
+	-- instead of ending in dispatch's error line, or a timer's, with the
+	-- proxy waiting on its CHANGING (docs/code-analysis-2026-10-22.md item
+	-- 15). True when the call went through; false once the error is logged,
+	-- and the driver then reports the unchanged state.
+	function dev.send(command, params)
+		local target = get_bridge()
+		local ok, err = pcall(function()
+			C4:SendToDevice(target, command, params)
+		end)
+		if not ok then
+			log.error("%s to the bridge failed: %s", command, tostring(err))
+		end
+		return ok
+	end
+
 	-- Driver Version and Debug Mode -----------------------------------------
 
 	-- Director answers the version lookup with nothing at the first init of a
@@ -231,12 +303,23 @@ function device.new(opts)
 	-- of a device created by AddDevice the replay of the properties reaches
 	-- no Driver_Version handler [hardware 2026-10-24, devices 1166 and 1168],
 	-- so late init writes the row itself and looks again twice while it is
-	-- empty.
+	-- empty. The pending look is tracked: cancel_timers() (OnDriverDestroyed)
+	-- stops it, and a late init run again starts over instead of adding a
+	-- second chain.
+	local version_timer = nil
+
 	local function show_driver_version(attempt)
+		if version_timer then
+			version_timer:Cancel()
+			version_timer = nil
+		end
 		local v = driver_version()
 		prop("Driver Version", v)
 		if v == "" and attempt < 3 then
-			C4:SetTimer(5000 * attempt, function() show_driver_version(attempt + 1) end)
+			version_timer = C4:SetTimer(5000 * attempt, function()
+				version_timer = nil
+				show_driver_version(attempt + 1)
+			end)
 		end
 	end
 	dev.show_driver_version = show_driver_version
@@ -279,6 +362,58 @@ function device.new(opts)
 			local ok, err = pcall(m.handler, m.params)
 			if not ok then
 				log.error("buffered %s failed: %s", m.name, tostring(err))
+			end
+		end
+	end
+
+	-- OnBindingChanged before late init: the bridge's import binds a device it
+	-- has just created, so Director can call it while the driver is still
+	-- initialising, where UpdateProperty and SendToProxy are not yet safe
+	-- [verified: API 22/_25.2; the race: docs/code-analysis-2026-10-22.md
+	-- item 15]. binding_changed(handler) wraps the driver's handler: before
+	-- late init the latest call per binding waits (an older one for the same
+	-- binding says nothing the latest does not), and replay_bindings(), the
+	-- last step of OnDriverLateInit, hands those calls over in arrival order;
+	-- from late init on, calls pass straight through.
+	local early_bindings = {} -- { id, handler, args, n }: the latest call per binding, in arrival order
+
+	function dev.binding_changed(handler)
+		return function(...)
+			if late_init_done then
+				return handler(...)
+			end
+			local id, _, bound, other = ...
+			for i = #early_bindings, 1, -1 do
+				if early_bindings[i].id == id then
+					table.remove(early_bindings, i)
+				end
+			end
+			early_bindings[#early_bindings + 1] = { id = id, handler = handler, args = { ... }, n = select("#", ...) }
+			log.debug("OnBindingChanged on binding %s (%s, device %s) before late init; applied after it",
+				tostring(id), bound and "bound" or "unbound", tostring(other))
+		end
+	end
+
+	-- Late init has read the bridge binding itself and greeted what it found,
+	-- so a waiting call that says the bridge binding is bound to that same
+	-- bridge would only greet it twice: it is dropped. What late init could
+	-- not see (a binding Director's lookup does not show yet, an unbind, a
+	-- keypad on a Button Link) reaches the handler.
+	function dev.replay_bindings()
+		local queued = early_bindings
+		early_bindings = {}
+		for _, call in ipairs(queued) do
+			local _, _, bound, other = unpack(call.args, 1, call.n)
+			local known = get_bridge()
+			if tonumber(call.id) == BRIDGE_BINDING and bound and known and known == tonumber(other) then
+				log.debug("bridge binding to device %d from before late init: greeted already", known)
+			else
+				log.debug("applying OnBindingChanged on binding %s from before late init", tostring(call.id))
+				local ok, err = pcall(call.handler, unpack(call.args, 1, call.n))
+				if not ok then
+					log.error("OnBindingChanged on binding %s from before late init failed: %s", tostring(call.id),
+						tostring(err))
+				end
 			end
 		end
 	end
@@ -349,6 +484,192 @@ function device.new(opts)
 		end
 	end
 
+	-- Keypad settings (SETTINGS) -------------------------------------------
+	-- Persisted per device; one never set reads as its default.
+
+	local setting_names = opts.settings or {}
+	local settings = {}
+
+	function dev.setting(name)
+		return tonumber(settings[name]) or SETTINGS[name].default
+	end
+
+	-- The proxy hears the value in use, so Composer shows what the driver
+	-- does (and a later edit back to the old value is sent at all).
+	local function report_setting(name)
+		local value = tostring(dev.setting(name))
+		log.debug("-> proxy %s %s", SETTINGS[name].notify, value)
+		C4:SendToProxy(PROXY_BINDING, SETTINGS[name].notify, value)
+	end
+
+	-- A setting outside its range is never taken: a preset level of 0 would
+	-- make the top button turn the light off (seen on the house, 2026-10-25,
+	-- after the proxy had been told 0 by a malformed notification).
+	local function in_range(name, value)
+		local s = SETTINGS[name]
+		return value ~= nil and value >= s.min and value <= s.max
+	end
+
+	-- At late init: the persisted values, each reported to the proxy. One out
+	-- of range reads as the default and is deleted, so it is warned about once
+	-- rather than at every start (Composer shows the default, so nobody has a
+	-- reason to edit the field and overwrite it).
+	function dev.load_settings()
+		for _, name in ipairs(setting_names) do
+			local value = tonumber(C4:PersistGetValue(SETTINGS[name].key))
+			if value ~= nil and not in_range(name, value) then
+				log.warn("%s %s is out of range; using %s", SETTINGS[name].key, tostring(value),
+					tostring(SETTINGS[name].default))
+				C4:PersistDeleteValue(SETTINGS[name].key)
+				value = nil
+			end
+			settings[name] = value
+			report_setting(name)
+		end
+	end
+
+	local function save_setting(name, value)
+		value = tonumber(value)
+		if not value then
+			return log.warn("%s without a number", SETTINGS[name].key)
+		end
+		if not in_range(name, value) then
+			log.warn("%s %s is out of range; kept %s", SETTINGS[name].key, tostring(value), tostring(dev.setting(name)))
+			return report_setting(name)
+		end
+		settings[name] = value
+		C4:PersistSetValue(SETTINGS[name].key, value)
+		report_setting(name)
+	end
+
+	for _, name in ipairs(setting_names) do
+		local s = SETTINGS[name]
+		dispatch.proxy[s.command] = function(_, params) save_setting(name, params[s.param]) end
+	end
+
+	-- Keypad press, click and release ----------------------------------------
+	-- A click before the hold timer fires is a tap (dev.on_click). A press
+	-- still down after HOLD_AFTER_MS is a hold: top, or toggle while off, dims
+	-- up; bottom, or toggle while on, down; down from off does nothing.
+	-- dev.on_hold gets the direction and the on state and keeps a timer it
+	-- arms for the hold in h.timer, cancelled when the press ends (for any
+	-- reason; dev.on_end_hold hears each end). The release, or a
+	-- release-as-click, of a hold calls dev.on_finish and ignores a click on
+	-- that button for CLICK_GUARD_MS (some keypads send one).
+	--
+	-- The drivers' own copies (until #57) also differed in the settings
+	-- (opts.settings), one debug line's word (opts.noun), and the guard, armed
+	-- before the light's stop but after the scene's. That order is observable
+	-- only for a click that lands between two timers due at the same moment
+	-- (the scene's guard and its level window are both 1000 ms); it is armed
+	-- first, so a failing hook still leaves the keypad's click ignored. The on state a
+	-- hold starts from (st.on == true, effective_on()) is dev.is_on() == true.
+
+	local noun = opts.noun or "device"
+	local hold = nil  -- { button, timer, held, ... } while a button is down; the hooks add their own fields
+	local guard = nil -- { button, timer } for CLICK_GUARD_MS after a hold's release
+
+	function dev.on_end_hold() end
+
+	-- True while `h` is the press in progress: no release, click or new press since.
+	function dev.holding(h)
+		return hold == h
+	end
+
+	local function end_hold()
+		if hold and hold.timer then
+			hold.timer:Cancel()
+		end
+		if hold then
+			dev.on_end_hold(hold)
+		end
+		hold = nil
+	end
+
+	local function disarm_guard()
+		if guard then
+			guard.timer:Cancel()
+			guard = nil
+		end
+	end
+
+	local function arm_guard(button)
+		disarm_guard()
+		local g = { button = button }
+		g.timer = C4:SetTimer(CLICK_GUARD_MS, function()
+			if guard == g then
+				guard = nil
+			end
+		end)
+		guard = g
+	end
+
+	-- The hold timer fired with the button still down.
+	local function start_hold(h)
+		h.held = true
+		local on = dev.is_on() == true
+		local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
+		if not up and not on then
+			return log.debug("hold: dimming down a %s that is off does nothing", noun)
+		end
+		dev.on_hold(h, up, on)
+	end
+
+	local function finish_hold()
+		local h = hold
+		end_hold()
+		arm_guard(h.button)
+		dev.on_finish(h)
+	end
+
+	-- A hold from off: once dev.on_hold has turned the device on at 1 %, the
+	-- dim up follows DIM_AFTER_ON_MS later, while the button is still down and
+	-- the device is still bound with a Hue resource.
+	function dev.dim_after_on(h, dim_up)
+		h.timer = C4:SetTimer(DIM_AFTER_ON_MS, function()
+			if hold ~= h then
+				return
+			end
+			h.timer = nil
+			if get_bridge() and get_rid() then
+				dim_up()
+			end
+		end)
+	end
+
+	-- The routes below end here (a spec may put its own in place).
+	function dev.button_action(button, action)
+		if action == ACT_PRESS then
+			end_hold()
+			local h = { button = button }
+			h.timer = C4:SetTimer(HOLD_AFTER_MS, function()
+				if hold == h then
+					h.timer = nil
+					start_hold(h)
+				end
+			end)
+			hold = h
+		elseif action == ACT_CLICK then
+			if hold and hold.held then
+				finish_hold()
+			elseif guard and guard.button == button then
+				end_hold()
+				log.debug("click on button %d right after a hold ignored", button)
+			else
+				end_hold()
+				dev.on_click(button)
+			end
+		elseif action == ACT_RELEASE then
+			-- Release after a hold: finish it; a release that follows a click
+			-- has nothing left to do.
+			if hold and hold.held then
+				finish_hold()
+			else
+				end_hold()
+			end
+		end
+	end
+
 	-- Keypad buttons --------------------------------------------------------
 	-- The proxy's own route (BUTTON_ACTION on the proxy binding) carries the
 	-- button in the parameters and wants every action echoed [verified:
@@ -356,7 +677,7 @@ function device.new(opts)
 	-- notification]; a keypad button bound to one of the driver's Button Link
 	-- connections (200 top, 201 bottom, 202 toggle) delivers DO_PUSH,
 	-- DO_RELEASE and DO_CLICK on that binding [verified: public light_v2
-	-- drivers]. Both end in the driver's machine, dev.button_action.
+	-- drivers]. Both end in the machine above, dev.button_action.
 
 	local function link_button(binding, command)
 		local button = LINK_BUTTON[tonumber(binding)]
@@ -378,17 +699,17 @@ function device.new(opts)
 
 	dispatch.proxy["DO_PUSH"] = function(binding)
 		local button = link_button(binding, "DO_PUSH")
-		if button then dev.button_action(button, device.ACT_PRESS) end
+		if button then dev.button_action(button, ACT_PRESS) end
 	end
 
 	dispatch.proxy["DO_RELEASE"] = function(binding)
 		local button = link_button(binding, "DO_RELEASE")
-		if button then dev.button_action(button, device.ACT_RELEASE) end
+		if button then dev.button_action(button, ACT_RELEASE) end
 	end
 
 	dispatch.proxy["DO_CLICK"] = function(binding)
 		local button = link_button(binding, "DO_CLICK")
-		if button then dev.button_action(button, device.ACT_CLICK) end
+		if button then dev.button_action(button, ACT_CLICK) end
 	end
 
 	-- A keypad on a link asks for its button's colours and the LED state.
@@ -462,6 +783,22 @@ function device.new(opts)
 		end)
 	end
 	dev.schedule_recheck = schedule_recheck
+
+	-- OnDriverDestroyed: the timers this module arms (a keypad press and its
+	-- hold, the click guard, the Driver Version looks and the binding
+	-- re-check) stop with the driver. Harmless on the controller, where the
+	-- Lua state goes with the device, but after a dev-loop reload a stray look
+	-- would still write the row (docs/reviews/slim-device-drivers.md §4
+	-- question 5).
+	function dev.cancel_timers()
+		end_hold()
+		disarm_guard()
+		if version_timer then
+			version_timer:Cancel()
+			version_timer = nil
+		end
+		dev.cancel_recheck()
+	end
 
 	-- Composer delete -------------------------------------------------------
 
