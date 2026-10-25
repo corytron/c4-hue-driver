@@ -94,23 +94,27 @@ local CLICK_GUARD_MS = 1000
 -- Composer [verified: proxy-protocol reference, light_v2 SET_PRESET_LEVEL
 -- {LEVEL}, SET_CLICK_RATE_* and SET_HOLD_RATE_* {RATE ms}]: the persisted key,
 -- the default, the command and its parameter, and the notification that
--- tells the proxy the value now in use [verified: light_v2 notifications
--- PRESET_LEVEL {BRIGHTNESS}, CLICK_RATE_UP/DOWN and HOLD_RATE_UP/DOWN {RATE}].
--- Without that answer the proxy keeps its old value: on the house (dev build
--- 284, 2026-10-25) a hold rate set to 2.000 s reached the driver, Composer
--- still showed 5.000 afterwards, and setting 5.000 again sent nothing. A
--- driver takes the ones its driver.xml declares (opts.settings).
+-- tells the proxy the value now in use (PRESET_LEVEL, CLICK_RATE_UP/DOWN,
+-- HOLD_RATE_UP/DOWN). Without that answer the proxy keeps its old value: on
+-- the house (dev build 284, 2026-10-25) a hold rate set to 2.000 s reached the
+-- driver, Composer still showed 5.000 afterwards, and setting 5.000 again sent
+-- nothing. The notification carries the BARE value: the reference documents
+-- a table ({RATE} / {BRIGHTNESS}), but the proxy reads such a table as 0
+-- (Default On Brightness 0, click rates 0, hold rates clamped to its 1 s
+-- minimum), while "5000" or 5000 is stored as sent [verified: hardware,
+-- Composer rounds 41 and 42]. A driver takes the ones its driver.xml
+-- declares (opts.settings).
 local SETTINGS = {
 	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL",
-		notify = "PRESET_LEVEL", notify_param = "BRIGHTNESS" },
+		notify = "PRESET_LEVEL" },
 	click_up = { key = "click_rate_up", default = 250, command = "SET_CLICK_RATE_UP", param = "RATE",
-		notify = "CLICK_RATE_UP", notify_param = "RATE" },
+		notify = "CLICK_RATE_UP" },
 	click_down = { key = "click_rate_down", default = 250, command = "SET_CLICK_RATE_DOWN", param = "RATE",
-		notify = "CLICK_RATE_DOWN", notify_param = "RATE" },
+		notify = "CLICK_RATE_DOWN" },
 	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE",
-		notify = "HOLD_RATE_UP", notify_param = "RATE" },
+		notify = "HOLD_RATE_UP" },
 	hold_down = { key = "hold_rate_down", default = 5000, command = "SET_HOLD_RATE_DOWN", param = "RATE",
-		notify = "HOLD_RATE_DOWN", notify_param = "RATE" },
+		notify = "HOLD_RATE_DOWN" },
 }
 
 -- The binding re-check's gaps: checks at 5, 15, 30 and 60 s after start.
@@ -493,8 +497,9 @@ function device.new(opts)
 	-- The proxy hears the value in use, so Composer shows what the driver
 	-- does (and a later edit back to the old value is sent at all).
 	local function report_setting(name)
-		local s = SETTINGS[name]
-		notify(s.notify, { [s.notify_param] = dev.setting(name) })
+		local value = tostring(dev.setting(name))
+		log.debug("-> proxy %s %s", SETTINGS[name].notify, value)
+		C4:SendToProxy(PROXY_BINDING, SETTINGS[name].notify, value)
 	end
 
 	-- At late init: the persisted values, each reported to the proxy.
