@@ -129,7 +129,7 @@ dd { margin: 2px 0 6px 18px; }
 <li>Do <b>not</b> add a Hue Light or a Hue Scene from the Items pane. The bridge creates them, already connected and linked, when you use its actions. The two drivers only need to be in the project's driver list, which step 2 did.</li>
 </ol>
 
-<img src="img/add-driver-menu.png" width="320" alt="Composer's Driver menu with Add or Update Driver or Agent highlighted">
+<img src="img/add-driver-menu.png" width="296" alt="Composer's Driver menu with Add or Update Driver or Agent highlighted">
 <p class="caption">Composer's <b>Driver</b> menu with <b>Add or Update Driver or Agent&hellip;</b> highlighted: the one route used both for installing and for updating.</p>
 
 <p class="note">(No screenshot of the System Design tree is included: it would show one home's device inventory. Yours shows the Hue Bridge in the room you added it to.)</p>
@@ -240,7 +240,7 @@ dd { margin: 2px 0 6px 18px; }
 </table>
 
 <img src="img/bridge-actions.png" width="700" alt="The Hue Bridge Actions tab">
-<p class="caption">The bridge's <b>Actions</b> tab: the actions in the order of chapter 13's quick reference, <b>Pair Bridge</b> at the top and <b>Forget Pairing</b> at the bottom. The picture was taken on a development build before <b>Add Zone Light</b> and <b>Re-link Zone Light</b> existed: it lacks those two and shows three diagnostics (<b>Connection Test</b>, <b>Reload Credentials</b>, <b>Check CA Pinning</b>) that a release build does not have, so a release build shows 22 buttons, not 23. One click on a button runs it. Actions with choices open a dialog; the rest run at once and report in <b>Last Action</b> or <b>Status</b>.</p>
+<p class="caption">The bridge's <b>Actions</b> tab: the actions in the order of chapter 13's quick reference, <b>Pair Bridge</b> at the top and <b>Forget Pairing</b> at the bottom, 22 buttons in all. One click on a button runs it. Actions with choices open a dialog; the rest run at once and report in <b>Last Action</b> or <b>Status</b>.</p>
 
 <p>Actions that take choices open Composer's <b>Action Parameter List</b> dialog: one row per choice, each with a <b>&hellip;</b> button that opens a <b>Select</b> list, and <b>OK</b> and <b>Cancel</b>. In the Select list, click an entry and then its OK. A row left empty reaches the driver empty: an empty <b>Room</b> in <b>Add Light</b>, <b>Add Zone Light</b> or <b>Add Scene</b> means <code>(mapped room)</code>; any other empty row, <b>Set Room Mapping</b>'s <b>Room</b> included, is refused with a <code>Not &hellip;: pick &hellip;</code> text in <b>Last Action</b> (for example <code>Not added: pick a light first</code> or <code>Not re-linked: pick a device and a light</code>; chapter 12 lists them all). The dialog remembers your previous choices for that action, so always look at every row before clicking OK; a remembered choice is as good as a new one to the driver.</p>
 
@@ -261,7 +261,7 @@ dd { margin: 2px 0 6px 18px; }
 </ul>
 <p>Mappings are kept by identity, not by name: renaming a Hue room in the Hue app or a Control4 room in Composer leaves its mapping in place, and the line simply shows the new name.</p>
 
-<img src="img/room-mappings.png" width="647" alt="The Room Mappings row">
+<img src="img/room-mappings.png" width="445" alt="The Room Mappings row">
 <p class="caption">The <b>Room Mappings</b> drop-down, open: the summary on the row, then one line per Hue room or zone, Hue on the left of each arrow, the Control4 room, <code>(unmapped)</code> or <code>(Control4 room gone)</code> on the right.</p>
 
 <p>To read all of a long value, widen the Properties pane, or click <b>Map Rooms By Name</b> and read its result in <b>Last Action</b>.</p>
@@ -278,10 +278,10 @@ dd { margin: 2px 0 6px 18px; }
 <li><b>Room</b>: <code>(no mapping)</code> first, then every Control4 room as <code>Floor / Room</code>, for example <code>Main Floor / Den</code>. Where two rooms share a name the room's number is appended so you can tell them apart.</li>
 </ul>
 
-<img src="img/set-room-mapping.png" width="505" alt="Set Room Mapping dialog with the Hue Room list open">
+<img src="img/set-room-mapping.png" width="483" alt="Set Room Mapping dialog with the Hue Room list open">
 <p class="caption">The <b>Set Room Mapping</b> dialog with the <b>Hue Room</b> list open: rooms first, zones after them, each with its current mapping after the arrow.</p>
 
-<img src="img/set-room-mapping-room.png" width="505" alt="Set Room Mapping dialog with the Room list open">
+<img src="img/set-room-mapping-room.png" width="483" alt="Set Room Mapping dialog with the Room list open">
 <p class="caption">The same dialog with the <b>Room</b> list open: <code>(no mapping)</code> at the top, then the project's rooms as <code>Floor / Room</code>.</p>
 
 <p>Example: pick <code>Garden &rarr; (unmapped)</code> and <code>Main Floor / Den</code>, click OK. <b>Last Action</b> reads <code>Mapped Garden &rarr; Den</code> and <b>Room Mappings</b> updates. To remove a mapping, pick the Hue room and <code>(no mapping)</code>: <code>Removed the mapping for Accent (zone)</code>, or <code>No mapping for TV Area (zone) to remove</code> when there was none. If you click OK without choosing, Last Action says <code>Not mapped: pick a Hue room first</code> or <code>Not mapped: pick a Control4 room or (no mapping)</code>; a room deleted since the list was built gives <code>Not mapped: Control4 room 31 does not exist</code>. Before the bridge has been read, the Hue Room list holds only <code>(no Hue rooms fetched yet; connect the event stream)</code>.</p>
@@ -298,7 +298,7 @@ dd { margin: 2px 0 6px 18px; }
 <p>If you move a light to another Hue room in the Hue app, its <b>Hue Room</b> property follows within seconds; the Control4 device stays where it is, and the next Room Audit lists it until you drag it or decide not to.</p>
 
 <img src="img/room-audit.png" width="647" alt="Last Action after Room Audit">
-<p class="caption"><b>Last Action</b> after a <b>Room Audit</b> with nothing to drag: every checked light is in the room its Hue room maps to (an older build's wording; today it reads <code>All 1 linked light in a mapped Hue room is in the room its Hue room maps to</code>). With differences the row holds one line per light, each ending in the room to drag it to; the driver only reports, you drag.</p>
+<p class="caption"><b>Last Action</b> after a <b>Room Audit</b> with nothing to drag: every checked light is in the room its Hue room maps to. With differences the row holds one line per light, each ending in the room to drag it to; the driver only reports, you drag.</p>
 
 <div class="note"><b>Why the driver never moves a device.</b> Control4 gives drivers no way to move a device between rooms, and a move would also be the kind of surprise this driver avoids: you may well want a Hue light that Hue files under "Kitchen" to live in the Control4 room "Den". The audit is there so you can decide, light by light.</div>
 
@@ -319,10 +319,10 @@ dd { margin: 2px 0 6px 18px; }
 <li><b>Room</b>: <code>(mapped room)</code> first, then every Control4 room as <code>Floor / Room</code>, for example <code>Main Floor / Kitchen</code>. Pick <code>(mapped room)</code>, like any other entry, to use the <b>Room Mappings</b> entry of the light's Hue room; pick a room to put the light there regardless of the mapping.</li>
 </ul>
 
-<img src="img/add-light.png" width="505" alt="Add Light dialog with the Light list open">
+<img src="img/add-light.png" width="483" alt="Add Light dialog with the Light list open">
 <p class="caption">The <b>Add Light</b> dialog with the <b>Light</b> list open: each entry is <code>Name [Hue room] #number</code>; lights deleted from Composer are listed last with the date. The row's inner <b>OK</b> is greyed out until an entry is clicked.</p>
 
-<img src="img/add-light-room.png" width="505" alt="Add Light dialog with the Room list open">
+<img src="img/add-light-room.png" width="483" alt="Add Light dialog with the Room list open">
 <p class="caption">The same dialog with the <b>Room</b> list open: <code>(mapped room)</code> first, then <code>Floor / Room</code> rows.</p>
 
 <p>Click OK. <b>Last Action</b> reads <code>Added Lamp 1 #1 to Living Room (device 1201)</code> and the device appears in that room in the System Design tree within a second. If you pick <code>(mapped room)</code> for a light that has no mapped room then nothing is created and Last Action explains which case it is: <code>Not added: Lamp 6 #6: Hue room Garden not mapped; pick a room, or Set Room Mapping first</code>, <code>Not added: Lamp 7 #7: no Hue room; pick a room, or Set Room Mapping first</code> or <code>Not added: Lamp 6 #6: Hue room Garden mapped to a Control4 room that no longer exists; pick a room, or Set Room Mapping first</code>; pick a room explicitly, or fix the mapping first. A light that already has a device is refused with <code>Not added: Lamp 1 #1 is already imported (device 1201)</code>; an empty choice with <code>Not added: pick a light first</code>; a room deleted since the list was built with <code>Not added: Control4 room 31 no longer exists</code>; a light that left the bridge since the list was built with <code>Not added: light &hellip; is not on the bridge (connect the event stream and try again)</code>.</p>
@@ -352,8 +352,12 @@ dd { margin: 2px 0 6px 18px; }
 <li><b>Group</b>: every zone on the bridge that has no device yet, then every such room, each with the number of lights it holds: <code>Accent (zone, 2 lights)</code>, <code>Living Room (room, 2 lights)</code>. A zone or room whose device you deleted in Composer comes after the others, its entry ending in <code>(deleted from Composer 2026-10-24)</code>; one that holds no lights reads <code>Reading Corner (zone, no lights)</code> and is refused. When every zone and room has a device the list holds only <code>(every zone and room on the bridge is imported)</code>; with no zone or room on the bridge at all, <code>(no zones or rooms on the bridge)</code>. Hue's whole-home group ("all lights") is not offered (chapter 2).</li>
 <li><b>Room</b>: <code>(mapped room)</code> first, then every Control4 room as <code>Floor / Room</code>, exactly as in <b>Add Light</b> (pictured above). <code>(mapped room)</code> uses the <b>Room Mappings</b> entry of that zone or room itself: a Hue room is usually mapped already by <b>Map Rooms By Name</b>; a zone is mapped only if you mapped it with <b>Set Room Mapping</b> (chapter 6).</li>
 </ul>
+<img src="img/add-zone-light.png" width="483" alt="Add Zone Light dialog with the Group list open">
+<p class="caption">The <b>Add Zone Light</b> dialog with the <b>Group</b> list open: the zones first, then the rooms, each with the number of lights it holds.</p>
 <p>Click OK. <b>Last Action</b> reads <code>Added Accent (zone) to Living Room (device 1203)</code> (a room reads, for example, <code>Kitchen (room)</code> in these texts) and the device appears in that room in the System Design tree within a second; choose <b>File</b> &raquo; <b>Refresh Navigators</b> afterwards. If you pick <code>(mapped room)</code> for a zone that is not mapped then nothing is created: <code>Not added: TV Area (zone): Hue room TV Area (zone) not mapped; pick a room, or Set Room Mapping first</code>; pick the room in the dialog, or map the zone first. A zone or room mapped to a Control4 room that has since been deleted is refused as a light would be (<code>mapped to a Control4 room that no longer exists</code>). A zone without lights answers <code>Not added: Reading Corner (zone) has no lights</code>; a remembered choice that already has a device, <code>Not added: Accent (zone) is already imported (device 1203)</code>. The dialog remembers your last choices, as every dialog does: open both lists each time.</p>
 <p><b>Names and properties.</b> A zone light takes the zone's name as it is, <code>Accent</code>. A room light is named <code>Living Room Lights</code>, the room's name with <code>Lights</code> added, so that the Living Room's Lighting page does not list a light called "Living Room". As with lights the name is set once and is then yours; <b>Attention</b> and <b>Adopt Hue Name</b> apply the same rule, so a room light called <code>Living Room Lights</code> is never reported as differing from its Hue name. The device's <b>Status</b> reads <code>Hue zone Accent (2 lights)</code> or <code>Hue room Living Room (2 lights)</code>; its <b>Hue Light ID</b> <code>zone #1 (5e6f7a8b&hellip;)</code>, the zone's number on the bridge and the start of its Hue identity; <b>Hue Name</b> the zone's or room's name; <b>Model</b> <code>Hue zone (2 lights)</code>; <b>Hue Room</b> the zone's own label, <code>Accent (zone)</code>, or the room's name; <b>Online</b> <code>Online</code>. Composer shows the device's driver as Hue Light, with the Hue Light icon.</p>
+<img src="img/zone-light-properties.png" width="700" alt="A zone light's Properties page">
+<p class="caption">The Properties page of a zone light for the zone Accent: <b>Status</b> <code>Hue zone Accent (2 lights)</code>, <b>Hue Light ID</b> <code>zone #1 (5e6f7a8b&hellip;)</code>, <b>Model</b> <code>Hue zone (2 lights)</code> and <b>Hue Room</b> <code>Accent (zone)</code>.</p>
 <p><b>What the tile does.</b> The zone light is on while any lamp of the zone is lit, and its slider shows the brightness of the lit lamps as Hue reports it, their average in whole percents; 0 % while all are off.</p>
 <ul>
 <li><b>ON</b> ("Turn On" in programming, a tap on the tile, a tap on the top keypad button while the On preset is at its default) turns every lamp on at 100 %, exactly as on a Hue Light (chapter 11); the lamps' own last levels are not restored (the Hue app does that).</li>
@@ -397,10 +401,10 @@ dd { margin: 2px 0 6px 18px; }
 <li>Click OK. <b>Last Action</b> reads <code>Re-linked device 1213 (was Lamp 5 #5) to Lamp 5 [Bedroom] #9</code>. The device keeps its name, room, connections and programming; its Status, Hue Light ID and capabilities now describe the new light and its tile works again. If the new light is named differently in Hue, <b>Attention</b> mentions the name difference (8.2). If the new light can do less than the old one (a white light in place of a colour one) the colour controls disappear from the tile, and programming that sets a colour on it does nothing.</li>
 </ol>
 
-<img src="img/relink-device.png" width="505" alt="Re-link Device To Light dialog with the Device list open">
+<img src="img/relink-device.png" width="483" alt="Re-link Device To Light dialog with the Device list open">
 <p class="caption">The <b>Re-link Device To Light</b> dialog with its <b>Device</b> list open. With a gone device in the project the list reads <code>Name (device number, gone since date)</code>; here there is none, so it holds only <code>(no gone or unbound devices)</code>.</p>
 
-<img src="img/relink-device-light.png" width="505" alt="Re-link Device To Light dialog with the Light list open">
+<img src="img/relink-device-light.png" width="483" alt="Re-link Device To Light dialog with the Light list open">
 <p class="caption">The same dialog with its <b>Light</b> list open: every light that has no device at the moment, likely replacements first with their <code>(looks like &hellip;; re-link?)</code> hint, lights whose device was deleted from Composer last, marked with the date.</p>
 
 <p>If the light comes back under its old identity (for example you restored a Hue backup) then the driver notices and the device is simply linked again; you do nothing. If the light is gone for good and you do not want the device either, use <b>Forget Light</b> (8.5) and then delete the device in Composer. A gone device is never dropped by the driver itself. Refusals: <code>Not re-linked: pick a device and a light</code> (an empty row), <code>Not re-linked: Lamp 5 #9 is already linked to device 1217</code> (the light you picked already has a device), <code>Not re-linked: device 1213 is already linked to Lamp 5 #9</code> (the device you picked was re-linked meanwhile, usually a remembered choice; open the Device list again), <code>Not re-linked: device 1213 is not a registered light</code> (the device is not one the bridge manages) and <code>Not re-linked: light &hellip; is not on the bridge (connect the event stream and try again)</code> (the list was stale). The <b>Device</b> list says <code>(no gone or unbound devices)</code> when there is nothing to re-link.</p>
@@ -417,7 +421,7 @@ dd { margin: 2px 0 6px 18px; }
 <p><b>Forget Light</b> is the deliberate way to release a device from its Hue light without deleting anything. Its <b>Device</b> list holds every managed device as <code>Lamp 1 #1 (device 1201)</code>; a device that is not in its normal state carries its state after the bracket, <code>Lamp 5 #5 (device 1213) gone</code> or <code>Lamp 4 #4 (device 1211) unbound</code>. On OK, <b>Last Action</b> reads <code>Forgot Lamp 1 #1 (device 1201): unbound and left in the project for you to delete; the Hue light is listed under Add Light again</code>. The device stays in the project with <b>Status</b> <code>Forgotten by the bridge (was Hue light Lamp 1 #1). Delete this device in Composer, or bind it again and use Link Devices</code>, its connection to the bridge removed and its tile disabled; delete it in Composer when you are ready. The Hue light is available in <b>Add Light</b> and counted as new again. The same can be started from the device itself with its <b>Forget This Light</b> action. An empty choice answers <code>Not forgotten: pick a device first</code>.</p>
 <p>Which to use: delete the device without Forget when you want the light gone from Control4 for good (a bulk import will not bring it back); Forget and then delete when you want to import the light afresh, for example into another room; Re-link when you are replacing the light and want to keep the device.</p>
 
-<img src="img/forget-light.png" width="505" alt="Forget Light dialog with its Device list open">
+<img src="img/forget-light.png" width="483" alt="Forget Light dialog with its Device list open">
 <p class="caption">The <b>Forget Light</b> dialog: every managed device as <code>Name #number (device number)</code>; a gone or unbound device carries that word at the end of its entry. Zone and room lights follow as <code>Name (zone light, device number)</code> (the picture predates them).</p>
 
 <h3>8.6 Link Devices and the bare "Hue Light"</h3>
@@ -429,7 +433,7 @@ dd { margin: 2px 0 6px 18px; }
 </ol>
 <p>If the name matches nothing then Last Action reads <code>not linked 1: Hue Light (device 1221): no unimported Hue light has that name; rename the device in Composer to the Hue light's exact name and run Link Devices again</code>: rename the device in the tree to the exact Hue name and click again. If two Hue lights share that name, <code>&hellip; 2 unimported Hue lights have that name; rename the device in Composer to one Hue light's exact name &hellip;</code> (rename one of them in the Hue app first). If two bound devices carry the same name, <code>&hellip; 2 bound devices share that name; rename one in Composer and run Link Devices again</code>. <code>Not linked: the bound-device lookup failed (see the Lua output)</code> means Composer's connection list was not available at that moment; try again. Linking never moves the device: it stays in whatever room it is in.</p>
 
-<img src="img/connections.png" width="700" alt="Connections view for a Hue Light bound to the bridge">
+<img src="img/connections.png" width="760" alt="Connections view for a Hue Light bound to the bridge">
 <p class="caption">The <b>Connections</b> view of a Hue Light, upper pane <b>Control &amp; Audio Video Connections</b>. The row to look at is the device's <b>Hue Bridge</b> input under Control Inputs, whose Connected To column reads <code>Hue Bridge-&gt;Hue Lights</code>: it is connected to the bridge's <b>Hue Lights</b> output. Devices the bridge creates come connected like this; a hand-added one gets this row filled by dragging the bridge from the lower pane, <b>HUE_BRIDGE Output Devices</b>, onto it. The picture predates the keypad feature: today the Control Outputs also list <b>Top Button Link</b>, <b>Bottom Button Link</b> and <b>Toggle Button Link</b> (chapter 11).</p>
 
 <p>If you remove that connection on a managed device then the bridge counts it as <code>1 unbound</code>, <b>Attention</b> reads <code>1 unbound device: Lamp 4 #4 (device 1211) (bind it to this bridge in Composer, or Forget Light)</code> and the device reads <code>Not bound to a Hue Bridge</code>; connect it again and it resumes by itself, no click needed. A device connected to a second Hue Bridge device by mistake never hears from the bridge it belongs to (a bare one reads <code>Bound; waiting for the bridge</code> for ever); delete that second bridge rather than link anything to it.</p>
@@ -497,8 +501,8 @@ dd { margin: 2px 0 6px 18px; }
 <li><b>Room</b>: <code>(mapped room)</code> first, then <code>Floor / Room</code>, as in <b>Add Light</b>. Pick <code>(mapped room)</code>, like any other entry, to use the <b>Room Mappings</b> entry of the scene's Hue room or zone.</li>
 </ul>
 
-<img src="img/add-scene.png" width="505" alt="Add Scene dialog with the Scene list open">
-<p class="caption">The <b>Add Scene</b> dialog with the <b>Scene</b> list open: each entry is <code>Room: Scene</code>, zones marked <code>(zone)</code>. The picture predates time-of-day scenes: today each room's or zone's time-of-day scenes come first, marked <code>(time-based)</code>, scenes a schedule plays carry <code>(in &hellip;)</code>, and a scene Hue plays as changing colours ends in <code>(dynamic)</code>.</p>
+<img src="img/add-scene.png" width="483" alt="Add Scene dialog with the Scene list open">
+<p class="caption">The <b>Add Scene</b> dialog with the <b>Scene</b> list open: each entry is <code>Room: Scene</code>, zones marked <code>(zone)</code>. A room's or zone's time-of-day scenes come first, marked <code>(time-based)</code>, scenes a schedule plays carry <code>(in &hellip;)</code>, and a scene Hue plays as changing colours ends in <code>(dynamic)</code>.</p>
 
 <p>Click OK. <b>Last Action</b> reads <code>Added Nightlight to Living Room (device 1225)</code>. If you pick <code>(mapped room)</code> for a scene whose Hue room or zone is unmapped then nothing is created: <code>Not added: Nightlight: Hue room TV Area (zone) not mapped; pick a room, or Set Room Mapping first</code>; a whole-home scene has no room to map, so with <code>(mapped room)</code> it answers <code>Not added: Bright: not in a Hue room; pick a room, or Set Room Mapping first</code>, and a scene of a room mapped to a deleted Control4 room <code>Not added: Relax: Hue room Kitchen mapped to a Control4 room that no longer exists; pick a room, or Set Room Mapping first</code>: pick a room explicitly. Other refusals: <code>Not added: pick a scene first</code>, <code>Not added: Relax is already imported (device 1205)</code>, <code>Not added: scene &hellip; is not on the bridge (Refresh Scenes and try again)</code>, <code>Not added: Control4 room 31 no longer exists</code>. The dialog remembers your last choices, so re-open both lists each time.</p>
 
@@ -507,7 +511,7 @@ dd { margin: 2px 0 6px 18px; }
 <h3>9.3 Add All Scenes Of Room</h3>
 <p><b>Add All Scenes Of Room</b> creates a device for every scene of one Hue room or zone that has none yet, into the room it maps to. Its one row, <b>Hue Room</b>, lists every Hue room and zone that has scenes, with its mapping and counts: <code>Kitchen &rarr; Kitchen (7 scenes)</code>, <code>Living Room &rarr; Living Room (7 scenes, 1 imported)</code>, <code>Garden &rarr; (unmapped) (7 scenes)</code>; a room or zone with time-of-day scenes lists them separately: <code>Bedroom &rarr; Bedroom (8 scenes, 1 time-based)</code> means 8 ordinary scenes and 1 time-of-day one (an <code>imported</code> count covers both kinds), and the action creates them after its ordinary scenes (9.11). The Hue room must be mapped: an unmapped one is refused with <code>Not added: Hue room Garden not mapped; Set Room Mapping first</code>, and one mapped to a deleted Control4 room with <code>Not added: Hue room Garden mapped to a Control4 room that no longer exists; Set Room Mapping first</code>. An empty row answers <code>Not added: pick a Hue room first</code>; a remembered choice whose room has lost its scenes or has left the bridge since, <code>Not added: Garden has no scenes</code> or <code>Not added: Hue room &hellip; is not on the bridge (connect the event stream and try again)</code>; open the list again.</p>
 
-<img src="img/add-all-scenes.png" width="505" alt="Add All Scenes Of Room dialog with the Hue Room list open">
+<img src="img/add-all-scenes.png" width="483" alt="Add All Scenes Of Room dialog with the Hue Room list open">
 <p class="caption">The <b>Add All Scenes Of Room</b> dialog: each Hue room or zone with its mapping after the arrow and, in brackets, how many of its scenes exist and how many are imported.</p>
 
 <p><b>Last Action</b> reads <code>Added 6 scenes of Living Room to Living Room: Bright (device 1227), Concentrate (device 1229), Dimmed (device 1231), Energize (device 1233), Nightlight (device 1235), Read (device 1237)</code>; on a second run <code>No new scenes in Living Room (7 on bridge, 7 imported)</code>, or for a room with time-of-day scenes <code>No new scenes in Bedroom (8 scenes and 1 time-based on bridge, 9 imported)</code>. Scene devices you deleted in Composer are skipped and listed: <code>Added no scenes; skipped 1 deleted in Composer (Add Scene re-creates one): Energize (deleted 2026-10-21)</code>. While it runs, the other scene actions answer <code>Busy: adding scenes; try again in a moment</code>, and during a full read of the scenes <code>Busy: resyncing scenes; try again in a moment</code>. After adding scenes, choose <b>File</b> &raquo; <b>Refresh Navigators</b>.</p>
@@ -535,7 +539,7 @@ dd { margin: 2px 0 6px 18px; }
 </ul>
 
 <img src="img/scene-properties.png" width="700" alt="A Hue Scene device's Properties page">
-<p class="caption">The Properties page of a Hue Scene device (<code>Bedside Lights Nightlight</code>). <b>Recall As</b> is the one row you may change; <b>Status</b> names the scene and its zone, <code>in Bedside Lights (zone)</code>.</p>
+<p class="caption">The Properties page of a Hue Scene device for the scene Relax of the Living Room. <b>Recall As</b> is the one row you may change; <b>Status</b> names the scene and its room, <code>Hue scene Relax in Living Room</code>.</p>
 
 <img src="img/recall-as.png" width="647" alt="The Recall As row with its list open">
 <p class="caption">The <b>Recall As</b> row with its three choices: <code>As set in Hue</code>, <code>Static</code>, <code>Dynamic</code>. Click <b>Set</b> after choosing, or the change never reaches the driver.</p>
@@ -544,7 +548,7 @@ dd { margin: 2px 0 6px 18px; }
 <p><b>Adopt Hue Name</b> renames the device to the name the bridge would give it today (the scene's name, with the zone's name in front for a zone scene and without the Hue app's number for a time-of-day scene): <code>Renamed device 1216 to Accent Read</code>; while unlinked, <code>Not renamed: no Hue name known yet (the bridge has not configured this scene)</code>. <b>Forget This Scene</b> asks the bridge to release the device, exactly like a light's Forget This Light; its Last Action reads <code>Asked the bridge to forget this scene; its answer sets Status</code>, or <code>Not sent: not bound to a Hue Bridge</code> when there is no bridge to ask.</p>
 
 <img src="img/scene-actions.png" width="700" alt="A Hue Scene device's Actions tab">
-<p class="caption">A Hue Scene device's <b>Actions</b> tab (an older build; since build 130 <b>Adopt Hue Name</b> is above <b>Forget This Scene</b>, as on a Hue Light).</p>
+<p class="caption">A Hue Scene device's <b>Actions</b> tab: <b>Adopt Hue Name</b> above <b>Forget This Scene</b>, as on a Hue Light.</p>
 
 <h3>9.7 Re-link Scene, Forget Scene, Refresh Scenes</h3>
 <ul>
@@ -606,7 +610,7 @@ dd { margin: 2px 0 6px 18px; }
 </table>
 
 <img src="img/light-properties.png" width="700" alt="A Hue Light device's Properties page">
-<p class="caption">The Properties page of a Hue Light (<code>Left Bedside Light</code>): <b>Status</b>, <b>Hue Light ID</b>, <b>Hue Name</b>, <b>Model</b>, <b>Online</b> and <b>Hue Room</b> are filled in by the bridge; <b>Debug Mode</b> is the only one of these rows you could change. The picture predates the keypad settings, which Composer now also lists for the device (chapter 11).</p>
+<p class="caption">The Properties page of a Hue Light (<code>Lamp 1</code>): <b>Status</b>, <b>Hue Light ID</b>, <b>Hue Name</b>, <b>Model</b>, <b>Online</b> and <b>Hue Room</b> are filled in by the bridge; <b>Debug Mode</b> is the only one of these rows you could change. Composer lists the keypad settings for the device on its own settings page (chapter 11).</p>
 
 <p><b>Actions.</b> <b>Adopt Hue Name</b> renames this device in Composer to its Hue name (<code>Renamed device 1202 to Lamp 1</code>; <code>Not renamed: no Hue name known yet (the bridge has not configured this light)</code> while unlinked). <b>Forget This Light</b> asks the bridge to release this device (<code>Asked the bridge to forget this light; its answer sets Status</code>; <code>Not sent: not bound to a Hue Bridge</code> when there is no bridge to ask); see 8.5.</p>
 
