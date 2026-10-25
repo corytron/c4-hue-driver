@@ -1,10 +1,16 @@
-# Keep the actions pinned in .github/workflows current; one grouped PR a week.
+# Keep the actions pinned in .github/workflows current: one grouped PR a week,
+# labelled "dependencies" (left out of the release notes by .github/release.yml)
+# and merged by .github/workflows/dependabot-auto-merge.yml once the required
+# checks pass. Dependabot updates the commit SHA and the version comment of
+# every `uses:` together. No pip ecosystem: tools/ has no requirements file.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    labels:
+      - dependencies
     groups:
       github-actions:
         patterns: ["*"]

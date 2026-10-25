@@ -1,0 +1,39 @@
+# Keeps the repository's labels equal to .github/labels.json
+# (docs/cicd-gitops-design.md, section 8): creates the labels the file has and
+# the repository lacks, updates colour and description of the ones it has, and
+# never deletes (a deleted label loses its history on every issue; the script
+# only prints the labels the repository has that the file does not). Runs when
+# the file changes on main and on request.
+name: Labels
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/labels.json]
+  workflow_dispatch:
+
+permissions: {}
+
+# One sync at a time: two runs must not race on the same label.
+concurrency:
+  group: labels
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Create or update labels from .github/labels.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # read .github/labels.json
+      issues: write # create and edit labels
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create or update the labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/labels_sync.py

@@ -74,7 +74,7 @@ runner):
 | `xml` | well-formedness of every `src/*/driver.xml` with `python3 -c` and `xml.etree` (no xmllint: it needs apt) | `src/*/driver.xml` |
 | `powershell` | `pwsh -c "Invoke-ScriptAnalyzer -Path tools/composer -Recurse -Severity Error -EnableExit"` | `tools/composer/*.psm1`; skip when `pwsh` is missing (the VM has none; GitHub's Ubuntu runners have it) |
 | `workflows` | `actionlint` then `zizmor --min-severity medium .github/workflows` | `.github/workflows/*.yml` |
-| `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` then `gitleaks git . --config .gitleaks.toml --no-banner --redact` (whole history; CI checks out with `fetch-depth: 0`) | tree and history |
+| `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` then `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=HEAD` (the whole history of the current branch, which is what a push publishes; CI checks out with `fetch-depth: 0`; stale local branches do not count) | tree and history |
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
 
 `tools/setup-checks.sh` installs what the VM lacks into `~/.local/bin`

@@ -18,7 +18,7 @@
 #   xml          every src/*/driver.xml is well-formed (xml.etree, no xmllint)
 #   powershell   Invoke-ScriptAnalyzer over tools/composer (skipped without pwsh)
 #   workflows    actionlint; zizmor --min-severity medium .github/workflows
-#   secrets      gitleaks over the working tree and the whole git history
+#   secrets      gitleaks over the working tree and the current branch's whole history
 #   house        python3 tools/deploy.py validate (deploy/house.yaml, offline)
 #
 # One line per check: "ok <name>", "FAIL <name>" followed by the output of the
@@ -128,7 +128,7 @@ check_secrets() {
 		return 1
 	fi
 	run gitleaks dir . --config .gitleaks.toml --no-banner --redact || rc=1
-	run gitleaks git . --config .gitleaks.toml --no-banner --redact || rc=1
+	run gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=HEAD || rc=1
 	return "$rc"
 }
 

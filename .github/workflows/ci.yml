@@ -1,13 +1,19 @@
-# Lint, test and build on every push to main and every pull request, with the
-# same commands a developer runs on the VM (README, "Build from source"):
-# luacheck src tests tools; busted tests; tools/build.sh.
+# Continuous integration: every pull request, every push to main, a manual run,
+# and once a week (Monday 06:00 UTC) so a broken tool install shows up without
+# a pull request. The four job names are the required status checks on main
+# (docs/cicd-gitops-design.md, section 4); renaming one means updating the
+# branch protection too. Every job runs tools/check.sh, the script a developer
+# runs on the VM, so CI and the VM agree on what "passing" means. Jobs 3 and 4
+# do not wait for the Lua job: a failing spec never hides a tooling finding.
 name: CI
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1' # Monday 06:00 UTC
 
 permissions:
   contents: read
@@ -20,8 +26,12 @@ jobs:
   test:
     name: Lint and test (Lua 5.1)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The controller runs Lua 5.1 semantics (LuaJIT), so the specs run on
       # Lua 5.1 too. dkjson is what the fake runtime and the specs decode with.
@@ -36,22 +46,22 @@ jobs:
           luacheck --version
           busted --version
 
-      - name: Lint
-        run: luacheck src tests tools
-
-      - name: Test
-        run: busted tests
+      - name: Lint and test (luacheck, busted)
+        run: tools/check.sh --strict --only lua-lint lua-test
 
   build:
     name: Build the three .c4z packages
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out the repository with its full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # tools/build.sh stamps the build number from `git rev-list --count HEAD`;
           # a shallow checkout would stamp every package as build 1.
           fetch-depth: 0
+          persist-credentials: false
 
       # dp3/driverpackager.py imports lxml; nothing else beyond the stdlib.
       - name: Install the packager's Python dependency (lxml)
@@ -68,18 +78,94 @@ jobs:
       - name: Build
         run: DP3="$RUNNER_TEMP/drivers-driverpackager/dp3/driverpackager.py" tools/build.sh
 
-      # docs/release-checklist.md, section 0: every package carries LICENSE and NOTICE.
-      - name: Check the packages
+      # docs/release-checklist.md, section 0: every package carries LICENSE and
+      # NOTICE. build/manifest.json (docs/cicd-gitops-design.md, section 5.2)
+      # must describe exactly the packages that were built.
+      - name: Check the packages and the manifest
         run: |
           for d in hue_bridge hue_light hue_scene; do
             test -f "build/$d.c4z"
             unzip -Z1 "build/$d.c4z" | grep -qx LICENSE
             unzip -Z1 "build/$d.c4z" | grep -qx NOTICE
           done
-          ls -l build/*.c4z
+          ls -l build/*.c4z build/manifest.json
+          python3 - <<'PY'
+          import hashlib, json, subprocess, sys
+          with open("build/manifest.json", encoding="utf-8") as f:
+              m = json.load(f)
+          count = int(subprocess.check_output(["git", "rev-list", "--count", "HEAD"], text=True))
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          problems = []
+          if m.get("schema") != 1:
+              problems.append("schema is not 1")
+          if m.get("build") != count:
+              problems.append(f"build {m.get('build')!r} is not the commit count {count}")
+          if m.get("commit") != head:
+              problems.append(f"commit {m.get('commit')!r} is not HEAD {head}")
+          if m.get("dev") is not False:
+              problems.append("dev is not false")
+          for name in ("hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"):
+              entry = (m.get("packages") or {}).get(name)
+              if not entry:
+                  problems.append(f"{name} is missing from packages")
+                  continue
+              with open(f"build/{name}", "rb") as f:
+                  data = f.read()
+              if entry.get("sha256") != hashlib.sha256(data).hexdigest():
+                  problems.append(f"{name}: sha256 differs from the file")
+              if entry.get("bytes") != len(data):
+                  problems.append(f"{name}: bytes differs from the file")
+          if problems:
+              sys.exit("build/manifest.json: " + "; ".join(problems))
+          print(f"manifest.json: build {m['build']}, commit {m['commit'][:12]}, tag {m.get('tag')}")
+          PY
 
-      - uses: actions/upload-artifact@v7
+      - name: Upload the packages and the manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hue-drivers-build-${{ github.run_number }}
-          path: build/*.c4z
+          path: |
+            build/*.c4z
+            build/manifest.json
           if-no-files-found: error
+
+  tooling:
+    name: Tooling checks (shell, Python, XML, workflows)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # ubuntu-latest already has shellcheck, pwsh with PSScriptAnalyzer, gh and
+      # Python; the script adds ruff, zizmor, actionlint and gitleaks to
+      # ~/.local/bin without sudo and prints every tool's version.
+      - name: Install the check tools (ruff, zizmor, actionlint, gitleaks)
+        run: |
+          tools/setup-checks.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Shell, Python, XML, PowerShell, workflow and desired-state checks
+        run: tools/check.sh --strict --only shell python-lint python-test xml powershell workflows house
+
+  secrets:
+    name: Secrets and private data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository with its full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gitleaks scans every commit, not only the tree (.gitleaks.toml).
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the check tools (gitleaks among them)
+        run: |
+          tools/setup-checks.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Scan the tree and the history for keys, LAN addresses and bridge ids
+        run: tools/check.sh --strict --only secrets
