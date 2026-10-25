@@ -30,6 +30,10 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
   keypad contract's `dimmed_on`; the flag is renamed `held_on`, persisted
   (`PersistSetValue("held_on")`) so it survives a restart, and dropped at
   the first `HUE_SCENE_GROUP on=false` after a restart.
+  Current (2026-10-25, build 316): ordinary scenes only; a time-based
+  scene is on exactly while Hue says it runs
+  (`docs/smart-scenes-design.md` Decision 2;
+  `src/hue_scene/driver.lua:held`).
 - **Slider / SET_BRIGHTNESS_TARGET {LIGHT_BRIGHTNESS_TARGET, RATE}:**
   target 0 → off (as OFF, with the rate); target > 0 while off → recall
   with `brightness = target` and `duration = RATE`; target > 0 while on →
@@ -38,6 +42,10 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
   and `LIGHT_BRIGHTNESS_CHANGED` when the bridge's level report arrives,
   or the target after RATE + 1 s (the existing fallback pattern).
   SET_LEVEL / RAMP_TO_LEVEL map to the same path.
+  Current (2026-10-25, build 316): on a time-based scene a target below
+  100 from off starts the schedule, and the move follows once its look is
+  on (`docs/smart-scenes-design.md` Decision 4;
+  `src/hue_scene/driver.lua:set_target`, `follow_with_level`).
 - **Keypad holds** report `LIGHT_BRIGHTNESS_CHANGING {current, target 100
   or 1, RATE = duration}` at the start and settle on the level reports.
 - **Level reports to the proxy are throttled on the device** to one
@@ -75,6 +83,9 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
 - `driver.lua`: `group_dim` passes `brightness_delta` as `delta`;
   new `ctx.group_set(rid, fields)` → `state.group_queue:set(rid, fields)`;
   `dispatch.commands["HUE_SCENE_LEVEL"]` → `state.scenes:level(params)`.
+  Current (2026-10-25, build 316): `group_set` first hands the queue a
+  zone light's colour temperature limits (`docs/zone-light-design.md`
+  Decision 7; `src/hue_bridge/driver.lua`, `group_hooks.group_set`).
 - `hue_scene/driver.xml`: `dimmer`, `set_level` True. Capability change:
   the install needs a controller reboot (Composer's "Restart Director?"
   does not restart Director; `docs/keypad-design.md`).
@@ -100,6 +111,10 @@ sends `MATCH_LED_STATE` false on the three links.
   added or restarted between resyncs shows the right percentage at once.
 - A group level of 0 (no light lit) is not cached or shown; the last lit
   level stays. A fallback's assumed recall does not set `held_on`.
+  Current (2026-10-25, build 316): that rule is the device's (its
+  `HUE_SCENE_GROUP` handler in `src/hue_scene/driver.lua`); the bridge
+  keeps a 0 in `group_level` and sends it as `level`
+  (`src/hue_bridge/bridge/scenes.lua:on_grouped_light`, `absorb`).
 - `driver.xml` also declares `ramp_level` True; `SET_LEVEL` and
   `RAMP_TO_LEVEL` take the slider's path with `TIME` as the rate.
 - A slider target while a recall or OFF is still on its way recalls at that
