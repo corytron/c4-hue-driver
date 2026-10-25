@@ -144,6 +144,7 @@ real mouse and keyboard input at the reported rectangles.
 | Properties | `Set-ComposerProperty` (edits the row and clicks Set, rule 7) |
 | Checks | `Get-ComposerBaseline`, `Assert-ComposerUnchanged` (rule 6) |
 | Screenshots | `Save-ComposerShot`, `Save-ScreenShot`, `Save-RegionShot`, `Save-ElementShot`, `Save-PropertyRowShot` (unscaled crops for the manual, round 12), `Send-DocShot` (PUT to `tools/collect.py` on this VM) |
+| Manual pictures (`tools/composer/Shots.ps1`, dot-sourced after the module; #61, `docs/screenshots-plan.md`) | `Save-PaneShot` (crops to a dialog's visible frame, refuses the title bar, status bar and tree), `Get-TextRegions`, `Set-TextReplacement` (paints a neutral text in the measured font), `Invoke-ShotPlan`, `Export-ShotPlanFromDoc`, `Export-ShotTexts` (the per-picture text list) |
 
 Connections cannot be made with synthesized input (two drag attempts
 started no OLE drag); a binding is made from the bridge with `C4:Bind`
