@@ -179,8 +179,8 @@ jobs:
           tools/setup-checks.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Shell, Python, XML, PowerShell, workflow and desired-state checks
-        run: tools/check.sh --strict --only shell python-lint python-test xml powershell workflows house changelog
+      - name: Shell, Python, XML, PowerShell, workflow, desired-state, changelog and link checks
+        run: tools/check.sh --strict --only shell python-lint python-test xml powershell workflows house changelog links
 
   secrets:
     name: Secrets and private data

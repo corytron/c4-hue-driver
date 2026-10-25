@@ -23,6 +23,8 @@
 #                local ref (git log --all) or, in GitHub Actions, of HEAD only
 #   house        python3 tools/deploy.py validate (deploy/house.yaml, offline)
 #   changelog    python3 tools/changelog.py check (CHANGELOG.md, docs/changelog-design.md)
+#   links        python3 tools/check_links.py: every link in every tracked Markdown
+#                file and Documentation tab resolves (files and heading anchors)
 #
 # One line per check: "ok <name>", "FAIL <name>" followed by the output of the
 # failing command(s), or "skip <name> (<tool> not installed)". Exit 1 when a
@@ -34,7 +36,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 
-ALL_CHECKS=(lua-lint lua-test shell python-lint python-test xml powershell workflows secrets house changelog)
+ALL_CHECKS=(lua-lint lua-test shell python-lint python-test xml powershell workflows secrets house changelog links)
 
 usage() {
 	echo "usage: tools/check.sh [--strict] [--only <name>...]" >&2
@@ -50,6 +52,7 @@ tools_for() {
 		shell) echo shellcheck ;;
 		python-lint) echo ruff ;;
 		python-test | xml | house | changelog) echo python3 ;;
+		links) echo python3 git ;;
 		powershell) echo pwsh ;;
 		workflows) echo actionlint zizmor ;;
 		secrets) echo gitleaks ;;
@@ -160,6 +163,10 @@ check_house() {
 
 check_changelog() {
 	run python3 -I tools/changelog.py check --file CHANGELOG.md
+}
+
+check_links() {
+	run python3 -I tools/check_links.py
 }
 
 strict=no

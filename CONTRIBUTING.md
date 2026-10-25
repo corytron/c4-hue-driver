@@ -125,6 +125,8 @@ PSScriptAnalyzer for the `powershell` check.
 | `workflows` | `actionlint`, `zizmor --min-severity medium .github/workflows` | `.github/workflows/` |
 | `secrets` | `gitleaks dir`, `gitleaks git` with `.gitleaks.toml` | the working tree, then the history: of every local branch and tag on your machine, of the commit under test in CI |
 | `house` | `python3 tools/deploy.py validate` | `deploy/house.yaml`, the house's desired state |
+| `changelog` | `python3 tools/changelog.py check` | `CHANGELOG.md`'s format |
+| `links` | `python3 tools/check_links.py` | every link in every Markdown file and Documentation tab resolves |
 
 `tools/check.sh --only <name>...` runs a selection, `--help` lists the
 names. A check whose tool is not installed is reported as `skip` and does
@@ -135,7 +137,8 @@ packages* (after the Lua job: `tools/build.sh`, then a check that every
 package carries `LICENSE` and `NOTICE` and that `build/manifest.json`
 describes them), *Tooling
 checks (shell, Python, XML, workflows)* (`shell`, `python-lint`,
-`python-test`, `xml`, `powershell`, `workflows`, `house`) and *Secrets and
+`python-test`, `xml`, `powershell`, `workflows`, `house`, `changelog`,
+`links`) and *Secrets and
 private data* (`secrets`). Without `pwsh`, run `--strict` with `--only` and
 every other name. The tool versions are pinned with their sha256: actionlint
 and gitleaks in `tools/setup-checks.sh`, which verifies what it downloads,
@@ -150,6 +153,8 @@ pip enforces (`--require-hashes`).
   `tools/build.sh` builds the three `.c4z` files.
 - The manual, the Hue Light and Hue Scene pages and `docs/status.md` are
   updated if behaviour or a text changed.
+- A new document: if visitors of the project page would find it useful, the
+  README links it; a design note goes in `docs/README.md`.
 - A change to a `driver.xml` `<capabilities>` block is called out in the PR
   description: installing it makes Composer ask "Restart Director?" and users
   must reboot their controller from System Manager before it loads.
