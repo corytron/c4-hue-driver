@@ -256,5 +256,7 @@ pressing and, if the window loses the foreground mid-drag, releases at the
 start point and throws. Checked on the Windows VM: the parser finds no
 error, the file is ASCII only, all 58 functions import, and with the desktop
 disconnected a tab click and a drag both refuse without clicking.
-PSScriptAnalyzer runs in CI. Still open: `Close-ComposerDialog`'s Escape
-path sends its key with `Send-Keys`, not the focus-checked `Send-KeysTo`.
+PSScriptAnalyzer runs in CI. `Close-ComposerDialog`'s Escape goes through
+`Send-KeysTo -ExpectedHwnd <dialog> -Within` (new: focus on any control
+inside that top-level window, which must be in the foreground); raw
+`Send-Keys` remains only inside `Send-KeysTo`.

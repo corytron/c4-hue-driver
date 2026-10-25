@@ -314,11 +314,16 @@ function Close-ComposerDialog {
     $d = Get-ComposerDialog
     if (-not $d) { return $false }
     $h = $d.Current.NativeWindowHandle
+    $useEscape = [bool]$Escape
     if (-not $Escape) {
         $b = Find-ComposerElements -Class 'BUTTON' -Name $Button -Root $d | Select-Object -First 1
-        if ($b) { Invoke-ElementClick -Element $b; Start-Sleep -Milliseconds 400 }
-        else { [void][C4.Native]::SetForegroundWindow([IntPtr]$h); Send-Keys '{ESC}' 400 }
-    } else { [void][C4.Native]::SetForegroundWindow([IntPtr]$h); Send-Keys '{ESC}' 400 }
+        if ($b) { Invoke-ElementClick -Element $b; Start-Sleep -Milliseconds 400 } else { $useEscape = $true }
+    }
+    if ($useEscape) {
+        # rule 5 (issue #239): the key goes only to a control inside THIS dialog while the dialog is in the foreground
+        [void](Show-AnyWindow -Hwnd ([IntPtr]$h))
+        Send-KeysTo -ExpectedHwnd ([IntPtr]$h) -Within -Keys '{ESC}' -DelayMs 400
+    }
     $now = Get-ComposerDialog
     (-not $now -or $now.Current.NativeWindowHandle -ne $h)   # $true when THAT dialog is gone
 }
@@ -573,10 +578,18 @@ function Get-ComposerFocus {
 
 function Send-KeysTo {
     # Send keystrokes ONLY if Composer's focused control is $ExpectedHwnd and no menu is active; otherwise throw without sending.
-    param([Parameter(Mandatory)][IntPtr]$ExpectedHwnd, [Parameter(Mandatory)][string]$Keys, [int]$DelayMs = 150, [switch]$NoDialogCheck)
+    # -Within: $ExpectedHwnd is a top-level window (a dialog); the focus may be on any control inside it, and that
+    # window must be the foreground window (keys go to the foreground window's focus).
+    param([Parameter(Mandatory)][IntPtr]$ExpectedHwnd, [Parameter(Mandatory)][string]$Keys, [int]$DelayMs = 150, [switch]$NoDialogCheck, [switch]$Within)
     $f = Get-ComposerFocus
     if ($f.MenuActive) { throw "Refusing to send '$Keys': a menu is active (flags=$($f.Flags))" }
-    if ($f.FocusHwnd -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), expected $ExpectedHwnd" }
+    if ($Within) {
+        $fgRoot = [C4.Win]::GetAncestor([C4.Native]::GetForegroundWindow(), 2)   # GA_ROOT
+        if ($fgRoot -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': window $ExpectedHwnd is not in the foreground (foreground root = $fgRoot)" }
+        $focusRoot = if ($f.FocusHwnd -ne [IntPtr]::Zero) { [C4.Win]::GetAncestor($f.FocusHwnd, 2) } else { [IntPtr]::Zero }
+        if ($f.FocusHwnd -ne $ExpectedHwnd -and $focusRoot -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), not inside window $ExpectedHwnd" }
+    }
+    elseif ($f.FocusHwnd -ne $ExpectedHwnd) { throw "Refusing to send '$Keys': focus is on hwnd $($f.FocusHwnd) ($($f.FocusClass)), expected $ExpectedHwnd" }
     if (-not $NoDialogCheck -and $Keys -match 'ENTER|~') {
         $d = Get-ComposerDialog
         if ($d -and $d.Current.NativeWindowHandle -ne $ExpectedHwnd) {
