@@ -140,8 +140,21 @@ describe("Hue Bridge driver", function()
 		assert.equal(rotating("192.000.02.10", 2), env.Properties["Stream Address"])
 		assert.equal("192.000.02.10", c4.persist.hue_stream_spelling)
 
+		-- At most two stream transfers are open at once (stream.MAX_ABANDONED):
+		-- with the first still open, Disconnect and Connect abandon the second
+		-- and the third waits for one of them to close (security review
+		-- 2026-10-25, finding 5). The spelling moves on only for a transfer
+		-- that opens.
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
 		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+		assert.equal(second, c4.last_transfer(), "no third transfer while two may be open")
+		assert.equal("Waiting for an earlier stream transfer to close", env.Properties["Event Stream"])
+		assert.equal("192.000.02.10", c4.persist.hue_stream_spelling, "the spelling waits too")
+		-- The first one's next callback aborts it (the fake keeps a cancelled
+		-- transfer silent, so its end stands for that callback); the retry
+		-- then opens the third on the next spelling.
+		first:done(-1, nil)
+		c4.fire_timers()
 		assert.equal(STREAM_URL_3, c4.last_transfer().url)
 		local checks = 0
 		for _, t in ipairs(c4.transfers) do

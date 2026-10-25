@@ -4,6 +4,16 @@ local log = require("common.log")
 local CONTAINER = '[{"creationtime":"2021-10-18T17:04:55Z","data":[{"id":"e7","on":{"on":true},'
 	.. '"owner":{"rid":"3f","rtype":"device"},"type":"light"}],"id":"9d","type":"update"}]'
 
+-- One complete SSE event carrying CONTAINER.
+local function event_text(id)
+	return "id: " .. id .. "\ndata: " .. CONTAINER .. "\n\n"
+end
+
+-- A line longer than the parser accepts (bridge/sse.lua MAX_LINE).
+local function oversized()
+	return string.rep("x", require("bridge.sse").MAX_LINE + 1)
+end
+
 describe("bridge.stream", function()
 	local stream, c4, seen, s
 
@@ -73,6 +83,30 @@ describe("bridge.stream", function()
 		s:start()
 		assert.equal(0, #c4.transfers)
 		assert.equal("Not paired", seen.status[#seen.status])
+	end)
+
+	it("shows the reason connection() gives when the stream may not connect, and stops", function()
+		s = new_stream({ connection = function() return nil, "Not connected: key rejected" end })
+		s:start()
+		assert.equal(0, #c4.transfers)
+		assert.equal("stopped", s.state)
+		assert.equal("Not connected: key rejected", seen.status[#seen.status])
+		assert.same({}, timer_delays())
+
+		-- A reconnect that finds the owner refusing stops the same way.
+		local allowed = true
+		s = new_stream({ connection = function()
+			if allowed then return { ip = "192.0.2.10", key = "k" } end
+			return nil, "Not connected: TLS check failed"
+		end })
+		s:start()
+		open_ok():done(28, "Operation timed out")
+		allowed = false
+		assert.equal(1, c4.fire_timers(), "the retry timer")
+		assert.equal("stopped", s.state)
+		assert.equal("Not connected: TLS check failed", seen.status[#seen.status])
+		assert.same({}, timer_delays(), "no retry")
+		assert.equal(1, #c4.transfers)
 	end)
 
 	it("defers on_connected to a 1 ms timer instead of calling it inside OnHeaders", function()
@@ -698,6 +732,303 @@ describe("bridge.stream", function()
 			c4.now_ms = c4.now_ms + stream.DEFAULT_WATCHDOG * 1000
 			assert.equal(1, c4.fire_timers(), "the new stream's watchdog")
 			assert.equal(2, #c4.transfers, "it opens nothing while the first object's transfer may be open")
+		end)
+	end)
+
+	-- Security review 2026-10-25, finding 5: every new transfer respects the
+	-- cap, not only the watchdog's. Open stream transfers, live and abandoned
+	-- together, never exceed MAX_ABANDONED + 1; a new one opens at once next
+	-- to a single abandoned one.
+	describe("the cap on open transfers", function()
+		-- Start, connect and stop: one more abandoned transfer. Returns it.
+		local function connect_and_stop(obj)
+			obj = obj or s
+			obj:start()
+			local t = open_ok()
+			fire_deferrals()
+			obj:stop()
+			return t
+		end
+
+		it("opens a transfer next to one a stop abandoned, and waits after a second stop", function()
+			local first = connect_and_stop()
+			assert.equal(1, s:open_abandoned())
+			s:start()
+			assert.equal(2, #c4.transfers, "opened at once next to the single abandoned one")
+			open_ok()
+			fire_deferrals()
+			s:stop()
+			assert.equal(2, s:open_abandoned())
+
+			s:start()
+			assert.equal(2, #c4.transfers, "no third transfer while two may be open")
+			assert.equal("waiting", s.state)
+			assert.is_true(s:running())
+			assert.equal("Waiting for an earlier stream transfer to close", stream.WAITING)
+			assert.equal(stream.WAITING, seen.status[#seen.status])
+			assert.same({ stream.BACKOFF_MIN * 1000 }, timer_delays(), "a retry after the current backoff, nothing else")
+
+			-- Both still open: it waits again, the backoff doubled.
+			assert.equal(1, c4.fire_timers())
+			assert.equal(2, #c4.transfers)
+			assert.equal(stream.WAITING, seen.status[#seen.status])
+			assert.same({ 2 * stream.BACKOFF_MIN * 1000 }, timer_delays())
+
+			-- The first one's next callback aborts it (the fake keeps a
+			-- cancelled transfer silent, so its end stands for that callback).
+			first:done(-1, nil)
+			assert.equal(1, s:open_abandoned())
+			assert.equal(1, c4.fire_timers())
+			assert.equal(3, #c4.transfers)
+			assert.equal("connecting", s.state)
+			assert.equal("Connecting", seen.status[#seen.status])
+		end)
+
+		it("ends the wait once an abandoned transfer's own timeout has passed", function()
+			connect_and_stop()
+			connect_and_stop()
+			s:start()
+			assert.equal(2, #c4.transfers)
+			c4.now_ms = c4.now_ms + stream.DEFAULT_TIMEOUT * 1000
+			assert.equal(1, c4.fire_timers())
+			assert.equal(3, #c4.transfers)
+		end)
+
+		it("ends the wait on an abandoned transfer's chunk, which is delivered once", function()
+			local first = connect_and_stop()
+			connect_and_stop()
+			s:start()
+			assert.equal("waiting", s.state)
+			first.cancelled = false -- Cancel() had no effect on it (rule 2)
+			first:chunk(event_text("9:0"))
+			assert.is_true(first.cancelled, "aborted by its callback's answer")
+			assert.equal(1, #seen.containers, "its last event still reaches the owner")
+			assert.equal(1, s:open_abandoned())
+			assert.equal(1, c4.fire_timers())
+			assert.equal(3, #c4.transfers)
+		end)
+
+		it("leaves no retry timer once stopped while it waits", function()
+			connect_and_stop()
+			connect_and_stop()
+			s:start()
+			assert.same({ stream.BACKOFF_MIN * 1000 }, timer_delays())
+			s:stop()
+			assert.equal("stopped", s.state)
+			assert.equal("Stopped", seen.status[#seen.status])
+			assert.same({}, timer_delays(), "no timer kept alive")
+			s:start()
+			assert.equal(stream.WAITING, seen.status[#seen.status], "a later start still respects the cap")
+			assert.equal(2, #c4.transfers)
+		end)
+
+		it("does not ask connection() while it waits, so the owner's spelling rotation moves on only per transfer", function()
+			local calls = 0
+			s = new_stream({ connection = function()
+				calls = calls + 1
+				return { ip = "192.0.2.10", stream_ip = "192.000.002.10", key = "k" }
+			end })
+			connect_and_stop()
+			connect_and_stop()
+			assert.equal(2, calls)
+			s:start()
+			c4.fire_timers()
+			c4.fire_timers()
+			assert.equal(2, #c4.transfers)
+			assert.equal(2, calls, "not asked while waiting")
+		end)
+
+		it("holds for a new stream object sharing the list (the driver's restart_stream)", function()
+			local shared = {}
+			local function rebuild()
+				s:stop()
+				s = new_stream({ abandoned = shared })
+				s:start()
+			end
+			s = new_stream({ abandoned = shared })
+			s:start()
+			open_ok()
+			fire_deferrals()
+			rebuild() -- a Stream Timeout edit
+			assert.equal(2, #c4.transfers, "opened next to the one the old object abandoned")
+			open_ok()
+			fire_deferrals()
+			rebuild() -- a Stream Watchdog edit
+			assert.equal(2, #c4.transfers, "a third waits")
+			assert.equal("waiting", s.state)
+			assert.equal(stream.WAITING, seen.status[#seen.status])
+			assert.equal(1, #c4.active_timers(), "only the new object's retry; the old ones keep none")
+			c4.now_ms = c4.now_ms + stream.DEFAULT_TIMEOUT * 1000
+			assert.equal(1, c4.fire_timers())
+			assert.equal(3, #c4.transfers)
+		end)
+
+		it("aborts a transfer that sent an oversized line, and counts it as open until it has ended", function()
+			s:start()
+			local t = open_ok()
+			fire_deferrals()
+			t:chunk(oversized())
+			assert.is_true(t.aborted, "the chunk callback returned true, so Director aborts it")
+			assert.equal("oversized line in stream", s.stats.last_error)
+			assert.equal("waiting", s.state)
+			assert.equal(1, s:open_abandoned(), "open until Director reports its end")
+			t:done(-1, nil)
+			assert.equal(0, s:open_abandoned())
+		end)
+
+		it("makes the reconnect after an oversized line wait too", function()
+			connect_and_stop()
+			s:start()
+			local t = open_ok()
+			t:chunk(oversized())
+			assert.equal(2, s:open_abandoned())
+			assert.equal(1, c4.fire_timers(), "the retry timer")
+			assert.equal(2, #c4.transfers, "no third transfer before the aborted one has ended")
+			assert.equal(stream.WAITING, seen.status[#seen.status])
+			t:done(-1, nil) -- Director ends the aborted transfer
+			assert.equal(1, c4.fire_timers())
+			assert.equal(3, #c4.transfers)
+		end)
+
+		it("keeps the doubled backoff after an oversized line until a transfer delivers an event", function()
+			-- Answer 200, overflow; Director then ends the aborted transfer.
+			local function overflow(prefix)
+				local t = open_ok()
+				t:chunk((prefix or "") .. oversized())
+				assert.is_true(t.aborted)
+				t:done(-1, nil)
+			end
+			s:start()
+			overflow()
+			assert.truthy(seen.status[#seen.status]:find("Reconnecting in 1 s", 1, true))
+			assert.equal(1, c4.fire_timers())
+			overflow()
+			assert.truthy(seen.status[#seen.status]:find("Reconnecting in 2 s", 1, true), "the 200 kept the backoff")
+			assert.equal(1, c4.fire_timers())
+			overflow(event_text("1:0")) -- an event in the chunk that overflows does not end the hold
+			assert.truthy(seen.status[#seen.status]:find("Reconnecting in 4 s", 1, true))
+			assert.equal(1, c4.fire_timers())
+
+			local t = open_ok()
+			assert.equal(8, s.backoff, "still held after the 200")
+			t:chunk(event_text("2:0"))
+			assert.equal(stream.BACKOFF_MIN, s.backoff, "an event delivered normally ends the hold")
+			t:done(28, "Operation timed out")
+			assert.truthy(seen.status[#seen.status]:find("Reconnecting in 1 s", 1, true))
+			assert.equal(1, c4.fire_timers())
+			open_ok()
+			assert.equal(stream.BACKOFF_MIN, s.backoff, "and a 200 resets it again")
+		end)
+	end)
+
+	-- Security review 2026-10-25, finding 6: events are decoded and handed
+	-- to the owner inside OnBodyChunk, each one under pcall.
+	describe("an event the owner cannot handle", function()
+		local lines
+
+		local function warnings()
+			local out = {}
+			for _, line in ipairs(lines) do
+				if line:find("^%[WARN%]") then out[#out + 1] = line end
+			end
+			return out
+		end
+
+		before_each(function()
+			lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+		end)
+
+		it("costs that event only: the rest of the chunk is delivered, with one warning", function()
+			local calls = 0
+			s = new_stream({ on_container = function(c, ev)
+				calls = calls + 1
+				if ev.id ~= "3:0" then error("owner bug") end
+				table.insert(seen.containers, { c, ev })
+			end })
+			s:start()
+			local t = open_ok()
+			t:chunk(event_text("1:0") .. event_text("2:0") .. event_text("3:0"))
+			assert.equal(3, calls)
+			assert.equal(1, #seen.containers)
+			assert.equal("3:0", seen.containers[1][2].id)
+			assert.equal("connected", s.state)
+			local warned = warnings()
+			assert.equal(1, #warned, "one warning per chunk")
+			assert.truthy(warned[1]:find("2 of 3 event(s)", 1, true), warned[1])
+			assert.truthy(warned[1]:find("owner bug", 1, true), warned[1])
+		end)
+
+		it("does not skip the overflow check after the events", function()
+			s = new_stream({ on_container = function() error("owner bug") end })
+			s:start()
+			local t = open_ok()
+			t:chunk(event_text("1:0") .. oversized())
+			assert.is_true(t.aborted)
+			assert.equal("oversized line in stream", s.stats.last_error)
+			assert.equal("waiting", s.state)
+		end)
+
+		it("in an abandoned transfer's last chunk costs that event only", function()
+			s = new_stream({ on_container = function(c, ev)
+				if ev.id == "9:0" then error("owner bug") end
+				table.insert(seen.containers, { c, ev })
+			end })
+			s:start()
+			local old = open_ok()
+			fire_deferrals()
+			s:drop_transfer()
+			s:schedule_reconnect()
+			old.cancelled = false
+			old:chunk(event_text("9:0") .. event_text("10:0"))
+			assert.is_true(old.cancelled, "aborted")
+			assert.equal(1, #seen.containers)
+			assert.equal("10:0", seen.containers[1][2].id)
+			assert.equal(1, #warnings())
+		end)
+
+		it("stops delivering an abandoned transfer's last chunk once an owner callback has stopped the stream", function()
+			s = new_stream({ on_container = function(c, ev)
+				table.insert(seen.containers, { c, ev })
+				s:stop()
+			end })
+			s:start()
+			local old = open_ok()
+			fire_deferrals()
+			s:drop_transfer()
+			s:schedule_reconnect()
+			old.cancelled = false
+			old:chunk(event_text("9:0") .. event_text("10:0"))
+			assert.is_true(old.cancelled)
+			assert.equal(1, #seen.containers, "nothing after the stop")
+			assert.equal("stopped", s.state)
+		end)
+
+		it("skips containers that are not objects, Debug Mode on, and delivers the others", function()
+			log.set_debug(true)
+			finally(function() log.set_debug(false) end)
+			s:start()
+			local t = open_ok()
+			t:chunk('id: 1:0\ndata: [1, "two", {"type":"update","id":"9d","data":[5, {"type":"light"}]}]\n\n')
+			assert.equal(1, #seen.containers)
+			assert.equal("update", seen.containers[1][1].type)
+			assert.equal(1, s.stats.containers, "only the object is counted")
+			t:chunk('id: 2:0\ndata: [{"type":"update","id":"9e","data":7}]\n\n')
+			assert.equal(2, #seen.containers, "a container whose data is no list is still delivered")
+			assert.equal(1, #warnings(), "one warning, for the skipped containers of 1:0")
+		end)
+
+		it("stops delivering a chunk once an owner callback has stopped the stream", function()
+			s = new_stream({ on_container = function(c, ev)
+				table.insert(seen.containers, { c, ev })
+				s:stop()
+			end })
+			s:start()
+			local t = open_ok()
+			t:chunk(event_text("1:0") .. event_text("2:0"))
+			assert.equal(1, #seen.containers, "nothing after the stop")
+			assert.is_true(t.aborted, "the transfer it gave up is aborted by the callback's answer")
+			assert.equal("stopped", s.state)
 		end)
 	end)
 end)
