@@ -39,6 +39,45 @@ local function trimmed(value)
 	return (value or ""):match("^%s*(.-)%s*$")
 end
 
+-- Whether `host` spells the bridge's address `ip` (the dotted form the Bridge
+-- IP Address property holds) the way bridge/altaddr.lua writes it: an octet
+-- below 8 with up to two leading zeros (curl reads a leading zero as octal,
+-- which changes nothing below 8), every other octet as it is. Hue Request
+-- and Test Connection take no other Host, so the application key goes only
+-- to the bridge's address [security review 2026-10-24, finding 15].
+function devtools.spells_bridge_address(host, ip)
+	if type(host) ~= "string" or type(ip) ~= "string" then
+		return false
+	end
+	local want = { ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$") }
+	local got = { host:match("^(%d%d?%d?)%.(%d%d?%d?)%.(%d%d?%d?)%.(%d%d?%d?)$") }
+	if #want ~= 4 or #got ~= 4 then
+		return false
+	end
+	for i = 1, 4 do
+		local octet = tonumber(want[i])
+		if got[i] ~= want[i] and not (octet < 8 and tonumber(got[i]) == octet) then
+			return false
+		end
+	end
+	return true
+end
+
+-- The Host a development request may use: the dotted address when `given`
+-- is empty, `given` when it spells the bridge's address, else nil and the
+-- refusal to show.
+local function request_host(given)
+	local host = trimmed(given)
+	if host == "" then
+		return ctx.state.ip
+	end
+	if devtools.spells_bridge_address(host, ctx.state.ip) then
+		return host
+	end
+	return nil, string.format("Host %q refused: not a spelling of the bridge address %s", host,
+		tostring(ctx.state.ip))
+end
+
 -- host:port of tools/devserver.py; empty disables the loop.
 local function dev_server_changed(value)
 	local host = trimmed(value)
@@ -51,19 +90,30 @@ local function dev_server_changed(value)
 end
 
 -- Not in driver.xml, reachable through the dev loop: an arbitrary
--- authenticated request to the bridge. Params: Method (GET/PUT/POST/DELETE),
--- Path (/clip/v2/...), Body (JSON text, optional), Host (address spelling,
--- optional; default the dotted address), Raw ("true" logs the whole body).
--- Logs the status, elapsed time and a summary of the response: ids and
--- names for resource lists, otherwise the first 300 characters of the body.
+-- authenticated request to the bridge. Params: Method (GET/PUT/POST/DELETE;
+-- any other, PATCH for one, fails in bridge/http.lua with "could not start
+-- transfer: ... unsupported method PATCH", logged as the result), Path
+-- (/clip/v2/...), Body (JSON text, optional), Host (a spelling of the
+-- bridge's address, see spells_bridge_address; optional, default the dotted
+-- address; any other host is refused and nothing is sent), Raw ("true" logs
+-- the whole body). Like every keyed request of the driver it waits for the
+-- bridge identity check (driver.lua, bridge_request). Logs the status,
+-- elapsed time and a summary of the response: ids and names for resource
+-- lists, otherwise the first 300 characters of the body.
 local function hue_request(params)
 	params = params or {}
 	if not ctx.connection() then
 		return log.always("Hue Request: not paired")
 	end
+	if ctx.state.identity_ok ~= true then
+		return log.always("Hue Request: bridge identity not verified yet; see Status")
+	end
 	local method = (params.Method or "GET"):upper()
 	local path = params.Path or "/clip/v2/resource/bridge"
-	local host = (params.Host and params.Host ~= "") and params.Host or ctx.state.ip
+	local host, refusal = request_host(params.Host)
+	if not host then
+		return log.always("Hue Request: %s", refusal)
+	end
 	local body
 	if params.Body and params.Body ~= "" then
 		body = C4:JsonDecode(params.Body)
@@ -242,6 +292,25 @@ local function find_light(key)
 	return nil
 end
 
+-- A zone light or scene device by its device id or its Composer or Hue
+-- name (dev builds only): { device_id, name } or nil.
+local function find_group_device(key)
+	local wanted = tostring(key):lower()
+	for _, module in ipairs({ ctx.state.zone_lights, ctx.state.scenes }) do
+		local registry = module and module.registry or {}
+		for rid, entry in pairs(registry) do
+			if type(entry) == "table" and entry.device_id then
+				local display = C4:GetDeviceDisplayName(tonumber(entry.device_id) or 0)
+				if rid == key or tostring(entry.device_id) == wanted or (entry.name or ""):lower() == wanted
+					or (display and tostring(display):lower() == wanted) then
+					return { device_id = entry.device_id, name = entry.name or display or rid }
+				end
+			end
+		end
+	end
+	return nil
+end
+
 -- Not in driver.xml: a light_v2 proxy command to one light, the way a
 -- Navigator or programming would send it, so the whole command path can be
 -- exercised from the dev loop. Params: Light (rid, Hue name or protocol
@@ -252,7 +321,26 @@ local function proxy_command(params)
 	local lights = ctx.state.lights
 	local rid, entry = find_light(params.Light or "")
 	if not rid then
-		return log.always("Proxy Command: no registered light matches %q", tostring(params.Light))
+		-- A zone light or a scene device: its light_v2 proxy is the consumer
+		-- of its binding 5001, as for a light.
+		local group = find_group_device(params.Light or "")
+		if not group then
+			return log.always("Proxy Command: no registered light, zone light or scene matches %q",
+				tostring(params.Light))
+		end
+		local consumers = C4:GetBoundConsumerDevices(tonumber(group.device_id), 5001)
+		local gproxy = type(consumers) == "table" and next(consumers) or nil
+		if not gproxy then
+			return log.always("Proxy Command: no proxy found for %s (device %s)", group.name, tostring(group.device_id))
+		end
+		local command = params.Command or "SET_BRIGHTNESS_TARGET"
+		local forwarded = {}
+		for k, v in pairs(params) do
+			if k ~= "Light" and k ~= "Command" then forwarded[k] = v end
+		end
+		C4:SendToDevice(gproxy, command, forwarded)
+		return log.always("Proxy Command: %s -> %s (proxy %s): %s", command, group.name, tostring(gproxy),
+			C4:JsonEncode(forwarded))
 	end
 	local proxy = lights:proxy_for(rid)
 	if not proxy then
@@ -387,14 +475,22 @@ local function connection_test(params)
 end
 
 -- Test Connection with an optional param Host: an alternative spelling of
--- the bridge address (for example its decimal form) to probe whether
--- Director's per-host transfer queue keys on the host string. The TLS check
--- ignores the host name for the bridge anyway.
+-- the bridge address (a padded one, see spells_bridge_address) to probe
+-- whether Director's per-host transfer queue keys on the host string. The
+-- TLS check ignores the host name for the bridge anyway. A Host that is not
+-- a spelling of the bridge's address is refused: nothing is sent, Status
+-- and the log say why.
 local function test_connection(params)
 	params = params or {}
 	local host = ctx.state.ip
-	if params.Host and params.Host ~= "" and ctx.connection() then
-		host = params.Host
+	if trimmed(params.Host) ~= "" and ctx.connection() then
+		local refusal
+		host, refusal = request_host(params.Host)
+		if not host then
+			log.always("Test Connection: %s", refusal)
+			ctx.prop("Status", "Test Connection refused: Host is not a spelling of the bridge address")
+			return
+		end
 		log.always("Test Connection via host %s instead of %s", host, ctx.state.ip)
 	end
 	ctx.test_connection(host)

@@ -77,23 +77,38 @@ end
 -- { [device_id] = true } of everything bound to the bridge's binding (lights,
 -- scenes and group devices alike); an empty table answered means nothing is
 -- bound. nil, "failed" when the lookup raised; nil, "unknown" when it
--- answered anything but a table. GetBoundConsumerDevices is documented to
--- return nil when nothing is bound [verified: API 32/_3], but a nil read as
--- "nothing bound" would let one transient nil at startup mark every entry
--- unbound, so this build reads it as unknown: no reconcile step unbinds,
--- relabels or reports "unbound" on it (code analysis 2026-10-22 item 14,
--- issue #48) [assumed: what Director answers for a bridge with no bindings
--- is still to be checked on hardware]. Actions that only add (Link Devices,
--- a hello's adoption) may take "unknown" as nothing bound: they find
--- nothing to adopt either way.
+-- answered anything but a table, once. On OS 3.4.2 GetBoundConsumerDevices
+-- answers nil for a binding with nothing bound [verified: hardware
+-- 2026-10-25, the house bridge's empty bindings 2 and 77; API 32/_3 says
+-- the same], but a single nil read as "nothing bound" would let one
+-- transient nil at startup mark every entry unbound (code analysis
+-- 2026-10-22 item 14, issue #48). So a nil is "unknown" until a second
+-- lookup at least NIL_CONFIRM_S seconds after the first nil also answers
+-- nil: then it is "nothing bound" ({}). Any table answered resets that. The
+-- memory lives on ctx.project, which the three modules share in the driver,
+-- so one module's lookup confirms another's. Actions that only add (Link
+-- Devices, a hello's adoption) may take "unknown" as nothing bound: they
+-- find nothing to adopt either way.
+project.NIL_CONFIRM_S = 5
+
 function project:bound_set()
+	local calls = self.ctx.project
 	local ok, raw = self:call("bound")
 	if not ok then
 		return nil, "failed"
 	end
 	if type(raw) ~= "table" then
+		local now = (rawget(calls, "clock") or os.time)()
+		local since = rawget(calls, "bound_nil_since")
+		if since and now - since >= project.NIL_CONFIRM_S then
+			return {}
+		end
+		if not since then
+			calls.bound_nil_since = now
+		end
 		return nil, "unknown"
 	end
+	calls.bound_nil_since = nil
 	local out = {}
 	for id in pairs(raw) do
 		out[tonumber(id) or id] = true

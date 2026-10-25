@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """CLI for the dev loop (docs/dev-loop.md). Talks to tools/devserver.py over
-its plain-HTTP port; `log` reads build/dev/driver.log directly, so run it on
-the VM the server runs on.
+its plain-HTTP port, found through build/dev/server.json (--server overrides);
+`log` reads build/dev/driver.log directly, so run it on the VM the server runs
+on. Every server call carries the admin token, derived from the dev key file
+the server uses (~/.config/c4-hue-driver/devkey, or $C4_HUE_DEVKEY_FILE, or
+--key-file); the key itself never leaves this machine.
 
-  devctl.py status                               bridge and light versions (running vs
-                                                 local), last contact, properties
+  devctl.py status                               versions of every tree (running vs
+                                                 local), the dev key, last contact,
+                                                 properties
   devctl.py run "Connection Test" Target=Bridge  queue ExecuteCommand(name, params)
   devctl.py set "Stream Timeout (s)" 60          queue a property change
   devctl.py reload                               queue a reload of the current code
   devctl.py wait <id> [--timeout 60]             block until the driver reports the
                                                  command done, then show properties
+  devctl.py pin / unpin [--tree T]               serve src/ as it is now / live again
   devctl.py log [-n 50] [-f]                     show / follow the shipped driver log
 
 `run`, `set` and `reload` print only the queued command's id, so
 `devctl.py wait $(devctl.py run "Connection Test")` works.
 
-Exit codes: 0 success, 1 error (server unreachable, bad arguments), 2 timeout.
+Exit codes: 0 success, 1 error (server unreachable, bad arguments, no key), 2 timeout.
 Standard library only.
 """
 
@@ -27,9 +32,13 @@ import time
 import urllib.error
 import urllib.request
 
+TOOLS = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, TOOLS)  # also under python3 -I, which leaves the script's directory out
+
+import devserver  # noqa: E402
+
 EXIT_OK, EXIT_ERROR, EXIT_TIMEOUT = 0, 1, 2
-DEFAULT_SERVER = "http://127.0.0.1:8080"
-DEFAULT_LOG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build", "dev", "driver.log")
+DEFAULT_STATE = os.path.join(os.path.dirname(TOOLS), "build", "dev")
 
 
 class DevctlError(Exception):
@@ -41,10 +50,37 @@ class DevctlError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def api(server, method, path, body=None):
+def server_url(state_dir):
+    """The URL devserver.py wrote to <state_dir>/server.json when it started."""
+    path = os.path.join(state_dir, "server.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            url = json.load(f).get("url")
+    except FileNotFoundError:
+        raise DevctlError("no %s: is tools/devserver.py running? (or pass --server URL)" % path) from None
+    except (OSError, ValueError, AttributeError) as exc:
+        raise DevctlError("unreadable %s (%s); pass --server URL" % (path, exc)) from exc
+    if not isinstance(url, str) or not url.startswith("http://"):
+        raise DevctlError("%s holds no http:// url; pass --server URL" % path)
+    return url
+
+
+def token_for(key_file):
+    """The admin token for the key in `key_file` (never the key itself)."""
+    try:
+        return devserver.admin_token(devserver.load_key(key_file))
+    except devserver.DevKeyError as exc:
+        raise DevctlError(str(exc)) from exc
+    except OSError as exc:
+        raise DevctlError("cannot read the dev key file %s (%s)" % (key_file, exc.strerror or exc)) from exc
+
+
+def api(server, method, path, body=None, token=None):
     """One request to the server. Returns the decoded JSON reply (None for 204)."""
     data = None
     headers = {}
+    if token:
+        headers[devserver.TOKEN_HEADER] = token
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -54,6 +90,11 @@ def api(server, method, path, body=None):
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace").strip()
+        if exc.code == 401:
+            raise DevctlError(
+                "%s %s -> HTTP 401: the server refused the admin token; does it use the same dev key file "
+                "(compare the fingerprint it printed at start with `tools/devserver.py --ensure-key`)?" % (method, path)
+            ) from exc
         raise DevctlError("%s %s -> HTTP %d %s" % (method, path, exc.code, detail)) from exc
     except (urllib.error.URLError, OSError) as exc:
         raise DevctlError(
@@ -67,8 +108,12 @@ def api(server, method, path, body=None):
         raise DevctlError("%s %s returned something that is not JSON (%s)" % (method, path, exc)) from exc
 
 
+def call(args, method, path, body=None):
+    return api(args.server, method, path, body, args.token)
+
+
 def enqueue(args, command):
-    reply = api(args.server, "POST", "/admin/enqueue", command)
+    reply = call(args, "POST", "/admin/enqueue", command)
     if not isinstance(reply, dict) or not isinstance(reply.get("id"), int):
         raise DevctlError("unexpected reply from /admin/enqueue: %r" % (reply,))
     return reply["id"]
@@ -117,6 +162,21 @@ def version_note(running, local, action, unreported):
     return "DIFFERS from local; a %s is due" % action
 
 
+def key_note(st):
+    """The `dev_key` row: whether the driver's dev key is the server's."""
+    ours = st.get("key_fingerprint")
+    if not ours:
+        return "server does not say (from before signing?)"
+    if not st.get("driver_reported_key"):
+        return "fingerprint %s; driver has not reported yet" % ours
+    theirs = st.get("driver_key_fingerprint")
+    if theirs == ours:
+        return "matches the server's (fingerprint %s)" % ours
+    if not theirs:
+        return "DRIVER HAS NONE: it refuses every bundle and command (server's fingerprint %s)" % ours
+    return "DIFFERS: driver %s, server %s; install a dev build made with this key" % (theirs, ours)
+
+
 def print_properties(properties):
     if not properties:
         row("properties", "(none reported)")
@@ -133,7 +193,7 @@ def print_properties(properties):
 
 
 def cmd_status(args):
-    st = api(args.server, "GET", "/status")
+    st = call(args, "GET", "/status")
     running, local = st.get("running_version"), st.get("local_version")
     row(
         "running_version",
@@ -162,6 +222,7 @@ def cmd_status(args):
             ),
         )
         row("local_scene_version", short(local_scene))
+    row("dev_key", key_note(st))
     pinned = st.get("pinned") or {}
     if any(pinned.values()):
         trees = ", ".join("%s at %s" % (name, short(pinned[name])) for name in sorted(pinned) if pinned[name])
@@ -210,7 +271,7 @@ def cmd_pin(args):
     controller reloads to this snapshot and ignores later edits. For stretches
     when several agents edit src/ at once."""
     query = "?tree=%s" % args.tree if args.tree else ""
-    reply = api(args.server, "POST", "/admin/pin" + query)
+    reply = call(args, "POST", "/admin/pin" + query)
     for name in sorted(reply.get("pinned", {})):
         row("pinned " + name, short(reply["pinned"][name]))
     return EXIT_OK
@@ -218,7 +279,7 @@ def cmd_pin(args):
 
 def cmd_unpin(args):
     query = "?tree=%s" % args.tree if args.tree else ""
-    reply = api(args.server, "POST", "/admin/unpin" + query)
+    reply = call(args, "POST", "/admin/unpin" + query)
     if not any((reply.get("pinned") or {}).values()):
         print("serving the live tree")
     else:
@@ -230,7 +291,7 @@ def cmd_unpin(args):
 def cmd_wait(args):
     deadline = time.monotonic() + args.timeout
     while True:
-        st = api(args.server, "GET", "/status")
+        st = call(args, "GET", "/status")
         done = st.get("done_commands")
         if isinstance(done, list):
             finished = args.id in done
@@ -256,7 +317,7 @@ def tail_lines(path, count):
 
 
 def cmd_log(args):
-    path = args.file
+    path = args.file or os.path.join(args.state_dir, "driver.log")
     if not os.path.exists(path):
         if not args.follow:
             raise DevctlError("no log yet at %s" % path)
@@ -294,15 +355,25 @@ def cmd_log(args):
 # ---------------------------------------------------------------------------
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Control the hue_bridge dev loop (docs/dev-loop.md).")
     parser.add_argument(
-        "--server", default=DEFAULT_SERVER, help="devserver plain-HTTP base URL (default %s)" % DEFAULT_SERVER
+        "--server", default=None, help="devserver plain-HTTP base URL (default: the url in <state-dir>/server.json)"
+    )
+    parser.add_argument(
+        "--state-dir", default=DEFAULT_STATE, help="the server's state directory (default %s)" % DEFAULT_STATE
+    )
+    parser.add_argument(
+        "--key-file",
+        default=None,
+        help="the dev key the server uses (default $%s, else ~/.config/c4-hue-driver/devkey)" % devserver.KEY_FILE_ENV,
     )
     sub = parser.add_subparsers(dest="cmd", metavar="command")
     sub.required = True
 
-    sub.add_parser("status", help="show versions, last contact and properties").set_defaults(func=cmd_status)
+    sub.add_parser("status", help="show versions, the dev key, last contact and properties").set_defaults(
+        func=cmd_status
+    )
 
     p = sub.add_parser("run", help="queue an ExecuteCommand action")
     p.add_argument("command", help='action name, e.g. "Connection Test"')
@@ -319,10 +390,10 @@ def main():
     p = sub.add_parser(
         "pin", help="serve src/ as it is now until unpin or the next pin (controller ignores later edits)"
     )
-    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="pin one tree only (default both)")
+    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="pin one tree only (default all)")
     p.set_defaults(func=cmd_pin)
     p = sub.add_parser("unpin", help="serve the live tree again")
-    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="unpin one tree only (default both)")
+    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="unpin one tree only (default all)")
     p.set_defaults(func=cmd_unpin)
 
     p = sub.add_parser("wait", help="wait for a queued command to finish")
@@ -333,12 +404,20 @@ def main():
     p = sub.add_parser("log", help="show the shipped driver log")
     p.add_argument("-n", "--lines", type=int, default=50, help="how many trailing lines (default 50)")
     p.add_argument("-f", "--follow", action="store_true", help="keep printing as lines arrive")
-    p.add_argument("--file", default=DEFAULT_LOG, help="log file (default %s)" % DEFAULT_LOG)
+    p.add_argument("--file", default=None, help="log file (default <state-dir>/driver.log)")
     p.set_defaults(func=cmd_log)
+    return parser
 
-    args = parser.parse_args()
-    args.server = args.server.rstrip("/")
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     try:
+        if args.func is not cmd_log:
+            key_file = (
+                os.path.abspath(os.path.expanduser(args.key_file)) if args.key_file else devserver.default_key_file()
+            )
+            args.token = token_for(key_file)
+            args.server = (args.server or server_url(args.state_dir)).rstrip("/")
         return args.func(args)
     except DevctlError as exc:
         sys.stderr.write("devctl: %s\n" % exc)

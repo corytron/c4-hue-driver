@@ -636,7 +636,7 @@ describe("Hue Bridge driver", function()
 			local before = #c4.sent
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Proxy Command", Light = "nope" })
 			assert.equal(before, #c4.sent)
-			assert.truthy(lines[#lines]:find("no registered light matches", 1, true))
+			assert.truthy(lines[#lines]:find("no registered light, zone light or scene matches", 1, true))
 		end)
 
 		it("Lights Report lists the registry and the owner-facing texts", function()

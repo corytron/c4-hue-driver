@@ -35,8 +35,12 @@ light_v2 device as a live status tile (name line, level bar) with Composer's
 own light picture, which changes with the light's state. The driver's
 `large_image` is therefore never used there, for any build, and no
 `driver.xml` change can put the dimmer-switch picture on that tile
-**[assumed: strong documentary evidence in §2; one Composer check, §4,
-can confirm it on the house]**. Recommended change: none; record the
+**[verified 2026-10-25, Composer round 37 on the house: Shine, Golden hours,
+Bedside Lights and Master Bedroom Lights are status tiles ("Name:", "Level:"
+and a progress bar) whose picture is pixel-identical to the Control4
+dimmers' in the same room and matches no file in Composer's
+`Images\devices_lg`; the Hue Bridge is a plain icon tile with its own
+`hue_bridge_pro_32.png`]**. Recommended change: none; record the
 limitation. The likeness icons: keep (§5).
 
 ## 1. What each icon declaration does
