@@ -1178,3 +1178,18 @@ it.
   `hue_scenes` and `hue_scene_tombstones`. Each device keeps its own
   identity, keypad settings and LED colours, a scene also `recall_as` and
   `held_on`.
+
+## Hardware facts of the 2026-10-25 dev pass (build 276, OS 3.4.2, Bridge Pro)
+
+- **TLS self-check (#53):** the request with the decoy CA bundle failed with
+  curl error 60 ("SSL peer certificate or SSH remote key was not OK"): the
+  controller honours `ssl_cabundle` and trust is pinned to the Signify
+  roots. No TLS session verified with the real bundle was reused.
+- **HMAC (#52):** `C4:HMAC` exists on OS 3.4.2 and reproduces RFC 4231 test
+  case 2, so the dev loop uses it rather than its Lua fallback.
+- **GetBoundConsumerDevices (#48):** a binding with nothing bound (the
+  bridge's bindings 2 and 77) answers `nil`; the bridge's binding 1 answers a
+  table of the four bound devices. The modules read one nil as unknown and a
+  second nil 5 s later as nothing bound (`bridge/project.lua`).
+- **Unknown application key (#44):** HTTP 403 with an HTML body on CLIP v2
+  GETs and on the event stream (see "A rejected key").

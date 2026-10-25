@@ -121,4 +121,37 @@ describe("bridge.project", function()
 			assert.is_nil(view({ display_name = function() error("boom") end }):display_name(2001))
 		end)
 	end)
+
+	describe("a nil bound list (issue #48, verified 2026-10-25: nil means nothing bound on OS 3.4.2)", function()
+		local now, answer, calls, p
+		before_each(function()
+			now, answer = 1000, nil
+			calls = { bound = function() return answer end, clock = function() return now end }
+			p = project.new({ project = calls, log = { warn = function() end } }, "lights")
+		end)
+
+		it("is unknown once, and nothing bound when a second lookup NIL_CONFIRM_S later is nil too", function()
+			assert.same({ nil, "unknown" }, { p:bound_set() })
+			now = now + project.NIL_CONFIRM_S - 1
+			assert.same({ nil, "unknown" }, { p:bound_set() }, "too soon to confirm")
+			now = now + 1
+			assert.same({}, (p:bound_set()))
+		end)
+
+		it("starts over when a list is answered in between", function()
+			assert.same({ nil, "unknown" }, { p:bound_set() })
+			answer = { [7] = "Hue Light" }
+			assert.same({ [7] = true }, (p:bound_set()))
+			answer = nil
+			now = now + 60
+			assert.same({ nil, "unknown" }, { p:bound_set() }, "a new first nil")
+		end)
+
+		it("is shared by the modules through ctx.project", function()
+			local q = project.new({ project = calls, log = { warn = function() end } }, "scenes")
+			assert.same({ nil, "unknown" }, { p:bound_set() })
+			now = now + project.NIL_CONFIRM_S
+			assert.same({}, (q:bound_set()), "the other module's lookup confirms it")
+		end)
+	end)
 end)

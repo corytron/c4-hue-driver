@@ -17,6 +17,7 @@ local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
 local commands = require("bridge.commands")
 local tlscheck = require("bridge.tlscheck")
+local project_mod = require("bridge.project")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -1543,6 +1544,28 @@ end
 
 -- Bindings and system events --------------------------------------------------
 
+-- Director answers nil, not an empty table, when nothing is bound to the
+-- bridge [verified: hardware 2026-10-25]; the modules read one nil as
+-- unknown and a second one, NIL_CONFIRM_S later, as "nothing bound"
+-- (bridge/project.lua). When the lookup answers nil, the three modules
+-- reconcile once more after that, so removing the last binding is noticed.
+local function confirm_unbound_later()
+	local ok, bound = pcall(project_calls.bound)
+	if not ok or type(bound) == "table" then
+		return
+	end
+	if state.unbound_confirm_timer then
+		state.unbound_confirm_timer:Cancel()
+	end
+	state.unbound_confirm_timer = C4:SetTimer((project_mod.NIL_CONFIRM_S + 1) * 1000, function()
+		state.unbound_confirm_timer = nil
+		state.lights:reconcile()
+		state.scenes:reconcile()
+		state.zone_lights:reconcile()
+		refresh_lights_props()
+	end)
+end
+
 -- Director reports changes to the HUE_BRIDGE control binding here [verified:
 -- API 9/_12]; the three registries settle against it. Before late init the
 -- modules do not exist yet; the startup reconcile covers the bindings then.
@@ -1571,6 +1594,7 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 			state.binding_reconcile_timer = nil
 			state.lights:reconcile()
 			refresh_lights_props()
+			confirm_unbound_later()
 		end)
 	end
 end
@@ -1699,6 +1723,7 @@ function OnDriverLateInit()
 	log.info("startup reconcile: %d unbound, %d relinked, %d deleted in Composer",
 		#(r.unbound or {}), #(r.relinked or {}), #(r.tombstoned or {}))
 	fill_proxy_ids()
+	confirm_unbound_later()
 	refresh_lights_props()
 	dispatch.replay_properties(Properties)
 	show_driver_version(1)
@@ -1728,6 +1753,10 @@ function OnDriverDestroyed()
 	if state.binding_reconcile_timer then
 		state.binding_reconcile_timer:Cancel()
 		state.binding_reconcile_timer = nil
+	end
+	if state.unbound_confirm_timer then
+		state.unbound_confirm_timer:Cancel()
+		state.unbound_confirm_timer = nil
 	end
 	cancel_identity_retry()
 	if version_timer then
