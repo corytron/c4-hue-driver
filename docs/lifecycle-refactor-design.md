@@ -49,7 +49,15 @@ deleted in Hue while its AddDevice is pending is marked gone (as lights
 now do); zone lights pass a field schema to the registry (as lights now
 do); and `refresh_registry` can clear a field whose value became nil
 (analysis R9; a spec shows a stale field cleared). These four are the only
-intended behaviour changes in this PR; each gets a spec.
+intended behaviour changes of the refactor; each gets a spec.
+
+Also on this branch, found on the house and not part of the refactor
+(Composer rounds 41 and 42, `docs/keypad-design.md`): the keypad settings
+are answered with the notification the proxy stores, as a bare value, at
+late init and after every `SET_*`; a value out of range is refused, from
+the proxy and when persisted (a persisted one is deleted and the default
+used); and the light's one-time colour-parameter log line is gone (D.10
+answered).
 
 Done: the three modules on the base, every existing spec green unchanged
 (or a shim and a reason), the line counts before and after recorded in

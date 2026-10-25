@@ -510,14 +510,17 @@ function device.new(opts)
 		return value ~= nil and value >= s.min and value <= s.max
 	end
 
-	-- At late init: the persisted values (one out of range reads as the
-	-- default), each reported to the proxy.
+	-- At late init: the persisted values, each reported to the proxy. One out
+	-- of range reads as the default and is deleted, so it is warned about once
+	-- rather than at every start (Composer shows the default, so nobody has a
+	-- reason to edit the field and overwrite it).
 	function dev.load_settings()
 		for _, name in ipairs(setting_names) do
 			local value = tonumber(C4:PersistGetValue(SETTINGS[name].key))
 			if value ~= nil and not in_range(name, value) then
 				log.warn("%s %s is out of range; using %s", SETTINGS[name].key, tostring(value),
 					tostring(SETTINGS[name].default))
+				C4:PersistDeleteValue(SETTINGS[name].key)
 				value = nil
 			end
 			settings[name] = value
@@ -556,9 +559,10 @@ function device.new(opts)
 	--
 	-- The drivers' own copies (until #57) also differed in the settings
 	-- (opts.settings), one debug line's word (opts.noun), and the guard, armed
-	-- before the light's stop but after the scene's. That order is not
-	-- observable (the guard's timer only forgets the guard); it is armed first,
-	-- so a failing hook still leaves the keypad's click ignored. The on state a
+	-- before the light's stop but after the scene's. That order is observable
+	-- only for a click that lands between two timers due at the same moment
+	-- (the scene's guard and its level window are both 1000 ms); it is armed
+	-- first, so a failing hook still leaves the keypad's click ignored. The on state a
 	-- hold starts from (st.on == true, effective_on()) is dev.is_on() == true.
 
 	local noun = opts.noun or "device"
