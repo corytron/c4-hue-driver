@@ -79,12 +79,13 @@ behalf, not the owner.
    `Get-ComposerDialog` before every Enter and Cancel anything unexpected.
    **Every click** goes through `Invoke-SafeClick`, which refuses unless
    the intended top-level window is in the foreground and contains the
-   point (round 18c). `Shots.ps1`'s own clicks go that way; the module's
-   older helpers (`Invoke-ElementClick`, `Invoke-ComposerAction`,
-   `Select-ComposerDevice`, `Select-ComposerTab`, `Set-ComposerProperty`,
-   the dialog and picker functions) click through `Invoke-MouseClick`
-   without that check (2026-10-25), so the foreground is the caller's to
-   make sure of (`Show-Composer` returns whether Composer is in front).
+   point (round 18c). Since 2026-10-25 (#239) that holds for every helper
+   of the module too: `Invoke-ElementClick` and the tab, tree, picker,
+   rename and property clicks go through `Invoke-SafeClick` with their
+   target's top-level window (`Get-ComposerRootWindow`), and
+   `Invoke-MouseDrag` checks both points first (`Assert-SafePoint`) and
+   releases at the start point if the window loses the foreground
+   mid-drag. `Invoke-MouseClick` is called from `Invoke-SafeClick` alone.
    Learned the hard way on 2026-10-21: an ALT tap left
    Composer's File menu in keyboard mode and the Enter meant for the rename
    editor opened **File ▸ Clear Project**'s confirmation; the session
@@ -144,7 +145,7 @@ behalf, not the owner.
 `tools/composer/Composer.psm1` is the PowerShell module the Windows
 session grows as it works (it develops and tests it there, then sends it
 back for the repo). The repo copy was last refreshed from the session's
-own file on 2026-10-24, after rounds 21–23, and holds 56 functions; it is
+own file on 2026-10-25 (#239: every click checked), and holds 58 functions; it is
 not run on this VM, but CI's `powershell` check runs PSScriptAnalyzer over
 it and `Shots.ps1` (`tools/check.sh`). Composer exposes no UIA patterns,
 so the module reads through UIA and acts through real mouse and keyboard
@@ -152,7 +153,7 @@ input at the reported rectangles.
 
 | Purpose | Functions |
 | --- | --- |
-| Window, focus, input | `Get-ComposerProcess`, `Get-ComposerMainHandle`, `Get-ComposerWindow`, `Get-ComposerTopWindows`, `Show-Composer`, `Show-AnyWindow` (foreground without ALT), `Get-ComposerFocus`, `Invoke-SafeClick` (rule 5), `Invoke-MouseClick`, `Invoke-MouseDrag`, `Move-MouseAway`, `Invoke-ElementClick`, `Send-Keys`, `Send-KeysTo` (keys only into the expected window) |
+| Window, focus, input | `Get-ComposerProcess`, `Get-ComposerMainHandle`, `Get-ComposerWindow`, `Get-ComposerTopWindows`, `Show-Composer`, `Show-AnyWindow` (foreground without ALT), `Get-ComposerFocus`, `Invoke-SafeClick` (rule 5), `Assert-SafePoint`, `Get-ComposerRootWindow`, `Invoke-MouseClick` (from `Invoke-SafeClick` only), `Invoke-MouseDrag` (both points checked), `Move-MouseAway`, `Invoke-ElementClick`, `Send-Keys`, `Send-KeysTo` (keys only into the expected window) |
 | Reading | `Find-ComposerElements`, `Get-ComposerElementInfo`, `Get-ComposerTree`, `Get-ComposerProperties`, `Get-ComposerProperty`, `Get-ComposerBridgeStatus`, `Format-BridgeStatus`, `Get-ComboItems` (a combo box's item count and selection; Composer's combos refuse their texts cross-process), `Get-ComboListItemsMsaa` (the texts of a dropped list through MSAA) |
 | Tabs and actions | `Get-ComposerTabControl`, `Select-ComposerTab`, `Set-ComposerTabOffset`, `Get-ComposerActions`, `Invoke-ComposerAction` |
 | Dialogs and pickers | `Get-ComposerDialog`, `Wait-ComposerDialog`, `Get-ComposerDialogText`, `Close-ComposerDialog`, `Confirm-ComposerDialog`, `Get-ListViewItems`, `Get-ListViewItemScreenPoint`, `Get-ComposerPickerItems`, `Open-ComposerPicker`, `Get-ComposerParameterValues`, `Select-ComposerPickerItem`, `Set-ComposerActionParameter` |
@@ -240,37 +241,20 @@ and reads the documented table form as 0, `common/device.lua`), and round
 43 installed dev build 309 for the checks of issue #40 (03:24, no reboot;
 `docs/status.md`).
 
-## Wanted from the Windows session: every click through Invoke-SafeClick
+## Done 2026-10-25: every click through Invoke-SafeClick (#239)
 
-Issue #239. The Windows session keeps the newest `Composer.psm1`, so the
-change is made there and the module sent back; the repo copy is not edited
-here. Rule 5 wants every click checked by `Invoke-SafeClick`, but these
-helpers click through `Invoke-MouseClick` without that check (repo copy of
-2026-10-24):
-
-- directly: `Invoke-ElementClick` (an element's centre),
-  `Select-ComposerTab` (a tab header), `Select-ComposerDevice` (a tree
-  row), `Rename-ComposerDevice` (the row's second click and the click into
-  the editor), `Select-ComposerPickerItem` (the item) and
-  `Set-ComposerProperty` (the value control);
-- through `Invoke-ElementClick`: `Invoke-ComposerAction` (the action
-  button), `Open-ComposerPicker` (`...`), `Select-ComposerPickerItem` (OK),
-  `Close-ComposerDialog` and `Confirm-ComposerDialog` (the named button),
-  `Set-ComposerProperty` (Set);
-- and so, by calling those: `Set-ComposerActionParameter`,
-  `Get-ComposerBridgeStatus` and `Request-ComposerDeviceDelete`.
-  `Invoke-MouseDrag` presses and releases the button unchecked as well.
-
-The change wanted: `Invoke-ElementClick` finds the top-level window of the
-element (`GetAncestor(<its NativeWindowHandle, or its nearest ancestor's>,
-GA_ROOT)`) and clicks through `Invoke-SafeClick -Hwnd <that window>`; the
-coordinate clicks above call `Invoke-SafeClick` with the top-level window of
-the control they aim at (the tab control, the tree's list view, the
-picker's list view, the rename editor, the value control); `Invoke-MouseDrag`
-checks its start and end points the same way. Afterwards `Invoke-MouseClick`
-is called from `Invoke-SafeClick` alone (`Select-String -Path Composer.psm1
--Pattern 'Invoke-MouseClick'`), PSScriptAnalyzer stays clean (CI's
-`powershell` check), and the coordinator brings the module into the repo
-and drops the 2026-10-25 caveat from rule 5. While there:
-`Close-ComposerDialog`'s Escape path sends its key with `Send-Keys`, not
-the focus-checked `Send-KeysTo`.
+The Windows session changed its `Composer.psm1` and sent it back; the repo
+copy is that file, with the VM's address in `Send-DocShot`'s default
+replaced by the placeholder 192.0.2.7. New: `Get-ComposerRootWindow` (the
+top-level window of a handle or of a UIA element through its nearest
+ancestor with a handle) and `Assert-SafePoint` (the rectangle and
+foreground check, split out of `Invoke-SafeClick`). The tab, tree, picker,
+rename and property clicks and `Invoke-ElementClick` go through
+`Invoke-SafeClick` with their target's top-level window; `Invoke-MouseDrag`
+takes `-Hwnd` (default Composer's main window), checks both points before
+pressing and, if the window loses the foreground mid-drag, releases at the
+start point and throws. Checked on the Windows VM: the parser finds no
+error, the file is ASCII only, all 58 functions import, and with the desktop
+disconnected a tab click and a drag both refuse without clicking.
+PSScriptAnalyzer runs in CI. Still open: `Close-ComposerDialog`'s Escape
+path sends its key with `Send-Keys`, not the focus-checked `Send-KeysTo`.
