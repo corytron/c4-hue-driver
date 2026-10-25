@@ -42,8 +42,12 @@ local COLOR_KEYS = {
 -- of importing them a second time (docs/import-design.md §1, rule 3). The
 -- kind is part of it (docs/zone-light-design.md §2): a zone or room device
 -- persists "group" and the bridge routes its hello on it; a light persists
--- none, as every light did before zone lights existed.
-local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model", kind = "hue_kind" }
+-- none, as every light did before zone lights existed. So is a group's type
+-- ("zone" / "room"): its texts, and the name Adopt Hue Name gives a room
+-- device, are right after a restart, before the bridge configures it again
+-- (#234).
+local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model", kind = "hue_kind",
+	group_type = "hue_group_type" }
 
 -- What a forgotten device's owner can do; a light's Status says it, a group
 -- device's Last Action (its Status names the group instead).
@@ -86,9 +90,10 @@ end
 -- text stays under about 60 characters where the name allows, since
 -- Composer clips a property at about 75.
 
--- "Hue light"; for a group "Hue zone" / "Hue room" from the configure's
--- group_type, else the model the bridge sent (which reads the same, and is
--- persisted, so the text is right before the bridge answers after a start).
+-- "Hue light"; for a group "Hue zone" / "Hue room" from its group_type
+-- (persisted, so right after a start too), else the model the bridge sent,
+-- which reads the same (a device last configured by a build that did not
+-- persist the type, until the bridge answers its hello).
 local function kind_label()
 	if not state.is_group(st) then
 		return "Hue light"
@@ -462,10 +467,25 @@ local function load_identity()
 	end
 end
 
-local function save_identity()
+-- The persisted fields as they stand, for save_identity to compare with.
+local function identity()
+	local fields = {}
+	for field in pairs(PERSISTED) do
+		fields[field] = st[field]
+	end
+	return fields
+end
+
+-- After a configure: store what it left. Only the group type can go back to
+-- none (state.configure takes it as sent), and its stored copy then goes too
+-- (an empty value would not remove it [verified: API 26.5, PersistSetValue,
+-- PersistDeleteValue]), so a restart shows what the device showed before.
+local function save_identity(before)
 	for field, key in pairs(PERSISTED) do
 		if st[field] then
 			C4:PersistSetValue(key, st[field])
+		elseif before[field] ~= nil then
+			C4:PersistDeleteValue(key)
 		end
 	end
 end
@@ -481,15 +501,15 @@ end
 -- configure also carries changed capabilities (lights added to or removed
 -- from a group, Decision 7), which the notify below re-announces every time.
 dispatch.commands["HUE_CONFIGURE"] = after_late_init("HUE_CONFIGURE", function(params)
-	local before = st.kind
+	local before = identity()
 	state.configure(st, params)
 	local named = params.kind
 	if named ~= nil and named ~= "" and not state.KINDS[named] then
 		log.warn("HUE_CONFIGURE with unknown kind %s ignored; still a %s", tostring(named), what())
-	elseif before and st.kind ~= before then
-		log.info("now a %s (was a %s)", what(), before == state.KIND_GROUP and "group light" or "light")
+	elseif before.kind and st.kind ~= before.kind then
+		log.info("now a %s (was a %s)", what(), before.kind == state.KIND_GROUP and "group light" or "light")
 	end
-	save_identity()
+	save_identity(before)
 	prop("Hue Light ID", light_id_label())
 	prop("Hue Name", st.name)
 	prop("Model", model_label())
@@ -659,6 +679,11 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVE
 -- Behaviour: docs/keypad-design.md, "Driver behaviour" and "Light parity".
 local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 local HOLD_TICK_MS = 100 -- the level estimate advances this often during a ramp
+-- A longer hold rate is used as this, for the light and its tile alike: the
+-- bound the bridge holds a zone light's and a scene's hold to (100 minutes;
+-- zone_lights.DIM_MAX_DURATION, scenes.DIM_MAX_DURATION), which a light's
+-- lacked (#234).
+local HOLD_MAX_MS = 6000000
 local setting = dev.setting
 
 -- A tap: top goes to the On preset over the click rate up, bottom off over
@@ -675,17 +700,32 @@ function dev.on_click(button)
 	end
 end
 
--- A hold uses Hue's own relative dim (HUE_DIM up / down to the bridge, a
--- grouped dimming_delta on the light), stopped by the release, as the scene
--- does; the proxy hears CHANGING toward the end of the range over the hold
--- rate scaled by the distance, and a 100 ms tick keeps an estimate of the
--- level for the stop and its fallback (docs/keypad-design.md). A dim that
--- never reaches the bridge (logged) moves nothing: the tick stops, the
--- release has nothing to stop, and the proxy hears the level the hold began
--- at.
+-- A hold uses Hue's own relative dim (HUE_DIM up / down to the bridge: a
+-- dimming_delta on the light, or on a zone's grouped_light), stopped by the
+-- release, as the scene does (docs/keypad-design.md). A hold rate is the
+-- time of the whole range [verified: proxy reference, HOLD_RATE_UP/DOWN], so
+-- a hold moves at 100 % per rate from any level: Hue is asked for the whole
+-- range (the bridge's brightness_delta 100) over the whole rate, and the
+-- proxy hears CHANGING toward the end of the range over the share of the
+-- rate the distance takes, with a 100 ms tick keeping an estimate of the
+-- level at that speed for the stop and its fallback.
+--
+-- #232: Hue used to get that share with the whole range, so from 50 % it ran
+-- at twice the tile's speed. The whole rate rather than the distance left as
+-- the delta: a zone or room light's level is its lamps' average, and the
+-- whole range brings a lamp below the average to the end too while the
+-- button is held; the start stays a whole-range dim, which the bridge sends
+-- without waiting for its request bucket (commands.urgent); and a scene's
+-- hold sends the same. Assumed until the hold on the house that #232 asks
+-- for: Hue keeps the speed, and stops at the end of the range when the delta
+-- reaches past it, as a Zigbee level step does.
+--
+-- A dim that never reaches the bridge (logged) moves nothing: the tick
+-- stops, the release has nothing to stop, and the proxy hears the level the
+-- hold began at.
 local function start_ramp(h, up, from)
 	local to = up and 100 or 1
-	local full = setting(up and "hold_up" or "hold_down")
+	local full = math.floor(math.min(setting(up and "hold_up" or "hold_down"), HOLD_MAX_MS))
 	local duration = math.floor(full * math.abs(to - from) / 100)
 	h.ramping, h.level, h.to = true, from, to
 	h.step = (to - from) / math.max(1, duration / HOLD_TICK_MS)
@@ -706,9 +746,10 @@ local function start_ramp(h, up, from)
 		LIGHT_BRIGHTNESS_TARGET = to,
 		RATE = duration,
 	})
-	log.debug("hold: dim %s from %d over %d ms", up and "up" or "down", from, duration)
+	log.debug("hold: dim %s from %d, the tile over %d ms, Hue the whole range over %d ms", up and "up" or "down",
+		from, duration, full)
 	if not send("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
-		duration = string.format("%d", duration) }) then
+		duration = string.format("%d", full) }) then
 		h.timer:Cancel()
 		h.timer, h.ramping = nil, false
 		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = from })

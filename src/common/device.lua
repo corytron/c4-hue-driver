@@ -528,10 +528,16 @@ function device.new(opts)
 		end
 	end
 
-	local function save_setting(name, value)
-		value = tonumber(value)
+	-- A value that is not a number is refused as one out of range is: the
+	-- proxy hears the value kept, so Composer shows that one again rather
+	-- than what was typed (#234).
+	local function save_setting(name, raw)
+		local value = tonumber(raw)
 		if not value then
-			return log.warn("%s without a number", SETTINGS[name].key)
+			log.warn("%s %s; kept %s", SETTINGS[name].key,
+				raw == nil and "without a value" or string.format("%q is not a number", tostring(raw)),
+				tostring(dev.setting(name)))
+			return report_setting(name)
 		end
 		if not in_range(name, value) then
 			log.warn("%s %s is out of range; kept %s", SETTINGS[name].key, tostring(value), tostring(dev.setting(name)))
