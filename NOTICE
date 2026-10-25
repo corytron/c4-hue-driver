@@ -3,11 +3,13 @@ Copyright 2026 Cory Fair
 
 Licensed under the Apache License, Version 2.0; see the LICENSE file.
 
-The certificates in src/hue_bridge/certs/ are X.509 root CA certificates
-published by Signify Netherlands B.V. for Philips Hue bridges
+The Signify certificates in src/hue_bridge/certs/ are X.509 root CA
+certificates published by Signify Netherlands B.V. for Philips Hue bridges
 ("root-bridge", valid 2017-2038; "Hue Root CA 01", valid 2025-2050),
 included unmodified so the driver can verify a bridge's TLS certificate.
 They are Signify's and are not covered by this project's license.
+decoy_ca.pem in the same folder is this project's own: a key-less certificate made for
+the driver's TLS self-check, which trusts nothing.
 
 Philips Hue and Hue are trademarks of Signify Holding B.V. Philips is a
 registered trademark of Koninklijke Philips N.V. Control4, Composer and
