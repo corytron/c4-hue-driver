@@ -219,6 +219,17 @@ motion.ENTRY_FIELDS = { "name", "kind", "model", "model_id", "id_v1", "hue_room_
 -- while its device exists.
 motion.REFRESH_CLEARS = { "id_v1", "hue_room_rid", "hue_room" }
 
+-- A re-link merges the new record's fields into the old entry (owner:relink),
+-- so a field the new sensor or area lacks would keep the old one's value
+-- (the old Hue room on a sensor in no room): clear those instead.
+function motion:relink_fields(fields)
+	for _, name in ipairs(motion.REFRESH_CLEARS) do
+		if fields[name] == nil then
+			fields[name] = self.reg.CLEAR
+		end
+	end
+end
+
 -- Helpers ------------------------------------------------------------------------
 
 local hello_text = owner.hello_text

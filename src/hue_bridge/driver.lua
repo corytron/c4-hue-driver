@@ -515,6 +515,23 @@ local function module_ctx(extra)
 	return ctx
 end
 
+-- True when a stream container may change what the Motion Sensors row or
+-- Attention shows: battery, reachability, an area's configuration, or a
+-- sensor or area switched on or off in the Hue app. Plain motion, light level
+-- and temperature updates do not, and they are the frequent ones.
+local MOTION_ROW_TYPES = { device_power = true, zigbee_connectivity = true, motion_area_configuration = true }
+local MOTION_ENABLED_TYPES = { motion = true, convenience_area_motion = true, security_area_motion = true }
+
+local function motion_rows_changed(container)
+	for _, item in ipairs(type(container.data) == "table" and container.data or {}) do
+		if type(item) == "table" and (MOTION_ROW_TYPES[item.type]
+				or (MOTION_ENABLED_TYPES[item.type] and item.enabled ~= nil)) then
+			return true
+		end
+	end
+	return false
+end
+
 local function zone_light_device(device_id)
 	local id = tonumber(device_id)
 	return id ~= nil and state.zone_lights:device_ids()[id] == true
@@ -747,8 +764,10 @@ local function new_stream()
 			state.motion:on_container(container)
 			state.motion_diag:on_container(container)
 			-- A resource appearing or disappearing changes the counts and the
-			-- Attention list; plain updates (state, names) do not.
-			if container.type == "add" or container.type == "delete" then
+			-- Attention list; plain updates (state, names) do not, except the
+			-- motion devices' battery, reachability and switched-off state,
+			-- which Attention lists at once (docs/motion-design.md D5, D6).
+			if container.type == "add" or container.type == "delete" or motion_rows_changed(container) then
 				refresh_lights_props()
 			end
 			prop_soon("Events Received", state.stream.stats.containers)
@@ -1342,6 +1361,7 @@ dispatch.properties["Room_Mappings"] = list_pick("Room Mappings")
 dispatch.properties["Lights"] = list_pick("Lights")
 dispatch.properties["Scenes"] = list_pick("Scenes")
 dispatch.properties["Zone_Lights"] = list_pick("Zone Lights")
+dispatch.properties["Motion_Sensors"] = list_pick("Motion Sensors")
 
 -- False, with the reason in Last Action, when an action cannot run.
 local function can()
@@ -2027,7 +2047,7 @@ end
 -- late init (Director's inter-driver order is not guaranteed) and the
 -- handlers index state that does not exist yet [code analysis 2026-10-22,
 -- H1]: hellos are queued and replayed after late init, anything else dropped.
-local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true }
+local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true }
 local EARLY_MAX = 200
 local early_commands = {}
 local execute_command = dispatch.execute_command
