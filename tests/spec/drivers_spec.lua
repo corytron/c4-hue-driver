@@ -332,7 +332,8 @@ describe("Hue Bridge driver", function()
 			assert.is_true(devloop.running())
 			local repeating = {}
 			for _, args in ipairs(c4.calls_to("SetTimer")) do
-				if args[2] == true then repeating[#repeating + 1] = args[1] end
+				-- The bridge's five-minute row refresh (docs/motion-design.md D5) repeats too.
+				if args[2] == true and args[1] ~= 300000 then repeating[#repeating + 1] = args[1] end
 			end
 			assert.same({ 3000 }, repeating, "one repeating poll timer")
 			local startup

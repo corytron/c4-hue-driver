@@ -2122,6 +2122,11 @@ function OnDriverLateInit()
 	state.motion:reconcile()
 	-- The diagnostics' output goes into public issues: everything that
 	-- identifies this bridge is scrubbed from every line (docs/motion-design.md §4.3).
+	-- Attention items that wait an hour (a sensor unreachable, an area
+	-- degraded, no motion reading: docs/motion-design.md D5) come due without
+	-- any event to refresh the rows: look again every five minutes. The rows
+	-- are sent only when they changed.
+	state.rows_timer = C4:SetTimer(300000, function() refresh_lights_props() end, true)
 	state.motion_diag = motion_diag_mod.new(module_ctx({
 		secrets = function()
 			return { key = state.creds and state.creds.key, ip = state.ip,

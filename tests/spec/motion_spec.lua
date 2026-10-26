@@ -424,9 +424,9 @@ describe("bridge.motion", function()
 			assert.equal("2 sensors on the bridge; 2 added; MotionAware not supported by this bridge", D:summary())
 			assert.same({ { text = "(this bridge offers no MotionAware areas)", value = "" } }, D:picker_areas())
 			assert.same({ rid = M.area, reason = "resync", online = "false",
-				status = "This bridge offers no MotionAware areas; re-link or Forget" }, states(2002)[1])
+				status = "This bridge offers no MotionAware areas; Forget Motion Device removes it" }, states(2002)[1])
 			assert.is_true(has_item(attention(), "1 motion area device on a bridge without MotionAware: Kitchen motion area "
-				.. "(Re-link Motion Device or Forget Motion Device)"))
+				.. "(Forget Motion Device)"))
 			assert.is_true(saw_log("this bridge offers no MotionAware areas (GET /clip/v2/resource/"
 				.. "motion_area_configuration answered 404)"))
 			-- Served again (a firmware update, B4): the area reports as before.

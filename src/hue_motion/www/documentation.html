@@ -41,18 +41,18 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <li>Hue reports the start of motion and its end as two separate reports. The end comes some seconds after the last movement, a time the sensor keeps itself and Control4 cannot set; while someone keeps moving nothing new is reported and the sensor stays Open. How long the end takes on each model is one of the first things the beta measures.</li>
 <li>The bridge bundles its reports, about one bundle a second, so motion reaches Control4 within a second or two. A movement shorter than that may be reported as its end only, and then changes nothing in Control4.</li>
 <li><b>Occupancy Hold Time (s)</b>, default 0, keeps the sensor Open for that many seconds after Hue reports the end of motion; new motion meanwhile cancels the wait. The <b>Hue Motion</b> row always shows Hue's own state, before the hold. Change the value, then click the row's <b>Set</b> button; it applies from the next end of motion. A hold interrupted by a restart starts again in full at the next end of motion. A timeout that turns lights off belongs in programming, not here.</li>
-<li>If the bridge's event feed is lost, nothing is assumed: after a minute <b>Status</b> says the motion is not current (table below), the sensor stays as it is, and when the feed is back the device reports what changed meanwhile, so programming catches up late rather than never. A whole visit that began and ended while the feed was down is noted in the bridge's Lua output and not replayed.</li>
-<li>When the sensor has shown motion for five minutes without a word from Hue, the bridge asks for its state once, and again every five minutes while it lasts. It is the only time the driver asks rather than listens.</li>
+<li>If the bridge's event feed is lost, or stopped with the bridge's <b>Disconnect Event Stream</b> or <b>Forget Pairing</b>, nothing is assumed: after a minute <b>Status</b> says the motion is not current (table below), the sensor stays as it is, and when the feed is back the device reports what changed meanwhile, so programming catches up late rather than never. A whole visit that began and ended while the feed was down is not replayed (the bridge's Lua output notes it only while the bridge's <b>Debug Mode</b> is On).</li>
+<li>When the sensor has shown motion for five minutes without a word from Hue, the bridge asks for its state once, and again every five minutes while it lasts. Between full reads it is the only time the driver asks rather than listens.</li>
 <li>Hue's own automations for the sensor or area keep running beside Control4's programming; neither stops the other.</li>
 </ul>
 
 <h2>Temperature, light level and battery</h2>
 <p>These come from a sensor only; on an area their rows are hidden and their variables stay 0.</p>
 <ul>
-<li><b>Temperature</b> shows both scales, for example <code>21.5 &deg;C (70.7 &deg;F)</code>, and sets the variables <code>Temperature C</code> and <code>Temperature F</code>. The device also sends it on its <b>Temperature</b> output: in Composer's Connections view, connect that output to the <b>Temperature In</b> input of Control4's Temperature Display driver (from Composer's online driver database) to show the temperature on Navigators, or to a thermostat that takes a remote temperature sensor. The output sends Celsius and Fahrenheit with the time of the reading whenever Hue reports a new temperature and when it is connected, answers a request with the last reading, and says the value is unavailable while the sensor is offline or switched off. A Control4 thermostat is reported to ignore a reading older than 15 minutes, and the sensor reports only every few minutes or on a change; whether a thermostat keeps the value through a steady temperature has not been tried. An area's output stays silent.</li>
+<li><b>Temperature</b> shows both scales, for example <code>21.5 &deg;C (70.7 &deg;F)</code>, and sets the variables <code>Temperature C</code> and <code>Temperature F</code>. The device also sends it on its <b>Temperature</b> output: in Composer's Connections view, connect that output to the <b>Temperature In</b> input of Control4's Temperature Display driver (from Composer's online driver database) to show the temperature on Navigators, or to a thermostat that takes a remote temperature sensor. The output sends Celsius and Fahrenheit, with the time the reading reached the controller, whenever the bridge passes on a temperature (a new one, and the last one again at every full read and <b>Refresh From Bridge</b>) and when it is connected; it answers a request with the last reading; and when the sensor goes offline, is switched off, deleted or forgotten, or the device is disconnected, it says once that the value is unavailable, until the bridge passes on a reading again (not merely when the sensor is back). Nothing is sent after a start until the first reading. A Control4 thermostat is reported to ignore a reading older than 15 minutes, and the sensor reports only every few minutes or on a change; whether a thermostat keeps the value through a steady temperature has not been tried. An area's output stays silent.</li>
 <li><b>Light Level</b> shows lux, for example <code>123 lux</code>, or <code>Dark</code> when it is too dark to measure; the variable <code>Light Level</code> holds the lux, rounded, 0 when dark. The event <i>Light Level Changed</i> fires when the level has moved by at least 5 lux or 10 %, whichever is more, since it last fired, so that small changes do not keep programming busy.</li>
-<li><b>Battery</b> shows the charge and Hue's word for it, for example <code>85 % (normal)</code> or <code>12 % (low)</code>; the variables are <code>Battery Level</code> and <code>Battery Low</code> (true while Hue says low or critical), and the events <i>Battery Low</i> and <i>Battery Normal</i> fire when Hue's word changes. The bridge's <b>Attention</b> row lists a low battery at once.</li>
-<li>A reading that is lost keeps its last value: the row says how old it is, the variable keeps its value, and nothing is ever set to a made-up number.</li>
+<li><b>Battery</b> shows the charge and Hue's word for it, for example <code>85 % (normal)</code> or <code>12 % (low)</code>; the variables are <code>Battery Level</code> and <code>Battery Low</code> (true while Hue says low or critical), and the events <i>Battery Low</i> and <i>Battery Normal</i> fire when Hue's word changes between normal and low or critical. The bridge's <b>Attention</b> row lists a low or critical battery at once.</li>
+<li>A reading that is lost keeps its last value, and so does its variable; nothing is ever set to a made-up number. While the sensor is offline the row adds the time it went offline, for example <code>123 lux (old, 14:02)</code>; a reading switched off in the Hue app, or flagged invalid by Hue, keeps its last value without a mark. A sensor without one of the readings shows <code>Not available</code> on that row. After a re-link the old sensor's readings stay until the new one reports.</li>
 </ul>
 
 <h2>When the sensor stops reporting</h2>
@@ -61,14 +61,14 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <tr><th>What happened</th><th>Open or Closed</th><th>Online, Enabled</th><th>Temperature output</th></tr>
 <tr><td>The controller has just started and the bridge has not reported yet</td><td>Left as it was; nothing is sent until the first report</td><td>Unchanged</td><td>Nothing until the first reading</td></tr>
 <tr><td>The bridge away for less than a minute</td><td>Unchanged</td><td>Unchanged</td><td>Unchanged</td></tr>
-<tr><td>The bridge away for longer (offline, its pairing refused, its event feed down)</td><td>Left as it is</td><td>Unchanged (they are about the sensor, not the bridge)</td><td>No new value</td></tr>
+<tr><td>The bridge away for longer (offline, its pairing refused, its event feed down), or its feed stopped on purpose (<b>Disconnect Event Stream</b>, <b>Forget Pairing</b>)</td><td>Left as it is</td><td>Unchanged (they are about the sensor, not the bridge)</td><td>No new value</td></tr>
 <tr><td>The sensor out of reach or its battery flat</td><td>Left as it is</td><td><code>Online</code> No, and <i>Offline</i> fires</td><td>Unavailable</td></tr>
 <tr><td>No motion reading from Hue</td><td>Left as it is</td><td>Unchanged</td><td>Unchanged</td></tr>
-<tr><td>An area not running in Hue</td><td>Left as it is</td><td><code>Online</code> No</td><td>-</td></tr>
+<tr><td>An area not running in Hue</td><td>Left as it is</td><td><code>Online</code> No, and <i>Offline</i> fires</td><td>-</td></tr>
 <tr><td>An area degraded (one of its lights not responding)</td><td>Still reported</td><td>Unchanged</td><td>-</td></tr>
-<tr><td>The sensor switched off in the Hue app, or the area paused</td><td>Closed once, if it was Open</td><td><code>Enabled</code> No, and <i>Switched Off In Hue</i> fires</td><td>Unavailable (sensor)</td></tr>
+<tr><td>The sensor switched off in the Hue app, or the area paused</td><td>Closed once, if it was Open</td><td><code>Enabled</code> false (the row reads <code>Switched off in the Hue app</code> or <code>Paused in the Hue app</code>), and <i>Switched Off In Hue</i> fires</td><td>Unavailable (sensor)</td></tr>
 <tr><td>Deleted in the Hue app</td><td>Closed once, if it was Open</td><td><code>Online</code> No</td><td>Unavailable</td></tr>
-<tr><td>Forgotten by the bridge, or disconnected from it</td><td>Closed once, if it was Open</td><td><code>Online</code> No</td><td>Unavailable</td></tr>
+<tr><td>Forgotten by the bridge, or disconnected from it (also when the device still sees no connection a minute after its start)</td><td>Closed once, if it was Open</td><td><code>Online</code> No</td><td>Unavailable</td></tr>
 </table>
 <p>When the sensor answers again, or is switched on again in the Hue app, <code>Online</code> and <code>Enabled</code> return with <i>Online</i> or <i>Switched On In Hue</i>, and the current state is reported, firing its event if it differs from what the sensor shows. <b>Status</b> returns to normal by itself.</p>
 
@@ -76,16 +76,16 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <p>Besides the standard motion events above, the device fires these events of its own:</p>
 <table>
 <tr><th>Event</th><th>Fires when</th></tr>
-<tr><td><i>Light Level Changed</i></td><td>The light level has moved by at least 5 lux or 10 %, whichever is more, since the event last fired.</td></tr>
-<tr><td><i>Temperature Changed</i></td><td>The temperature has moved by at least 0.5 &deg;C since the event last fired.</td></tr>
-<tr><td><i>Battery Low</i></td><td>Hue's battery state became low or critical.</td></tr>
+<tr><td><i>Light Level Changed</i></td><td>The light level has moved by at least 5 lux or 10 %, whichever is more, since the event last fired. The first reading after the device was added only sets the starting point.</td></tr>
+<tr><td><i>Temperature Changed</i></td><td>The temperature has moved by at least 0.5 &deg;C since the event last fired; the first reading only sets the starting point, as for the light level.</td></tr>
+<tr><td><i>Battery Low</i></td><td>Hue's battery state became low or critical, also at the first report of a battery that is low already. A change between low and critical fires neither battery event.</td></tr>
 <tr><td><i>Battery Normal</i></td><td>It became normal again.</td></tr>
 <tr><td><i>Offline</i></td><td><code>Online</code> went from true to false.</td></tr>
 <tr><td><i>Online</i></td><td><code>Online</code> went from false to true.</td></tr>
 <tr><td><i>Switched Off In Hue</i></td><td>The sensor was switched off, or the area paused, in the Hue app.</td></tr>
 <tr><td><i>Switched On In Hue</i></td><td>It was switched on, or resumed, again.</td></tr>
 </table>
-<p>Its variables, which an area keeps at 0 (and <code>Battery Low</code> at false) where they do not apply:</p>
+<p>Its variables, which an area keeps at 0 (and <code>Battery Low</code> at false) where they do not apply; until the bridge first reports, a new device's <code>Online</code> and <code>Enabled</code> are false and its readings 0:</p>
 <table>
 <tr><th>Variable</th><th>Type</th><th>Holds</th></tr>
 <tr><td><code>Online</code></td><td>true or false</td><td>Whether the sensor or area is reachable and on the bridge.</td></tr>
@@ -95,7 +95,7 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <tr><td><code>Battery Level</code></td><td>whole number</td><td>The charge in percent.</td></tr>
 <tr><td><code>Battery Low</code></td><td>true or false</td><td>True while Hue calls the battery low or critical.</td></tr>
 </table>
-<p>Its conditionals: <i>Online</i>, <i>Enabled</i> and <i>Battery Low</i> (true or false), <i>Light Level</i> (0 to 100000 lux), <i>Temperature C</i> (-40 to 60) and <i>Battery Level</i> (0 to 100). The numeric ones compare whole numbers.</p>
+<p>Its conditionals: <i>Online</i>, <i>Enabled in the Hue app</i> and <i>Battery Low</i> (true or false), <i>Light Level (lux)</i> (0 to 100000), <i>Temperature C</i> (-40 to 60) and <i>Battery Level (%)</i> (0 to 100). The numeric ones compare whole numbers.</p>
 
 <h2>Properties</h2>
 <!-- Picture to add once there is a sensor to photograph (#268): the Properties page of a Hue Motion Sensor, Control4's contact rows above the driver's rows. -->
@@ -103,47 +103,49 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <table>
 <tr><th>Property</th><th>What it shows or does</th></tr>
 <tr><td><b>Driver Version</b></td><td>The build number of the installed driver; the same as the bridge's after an update.</td></tr>
-<tr><td><b>Status</b></td><td>In normal use the sensor or area it stands for; otherwise why the motion is not current or what to do (the table at the end).</td></tr>
-<tr><td><b>Online</b></td><td><code>Yes</code> or <code>No</code>: whether the sensor, or the area, can report.</td></tr>
-<tr><td><b>Enabled</b></td><td><code>Yes</code>, <code>Switched off in the Hue app</code> (a sensor) or <code>Paused in the Hue app</code> (an area). Only the Hue app changes it.</td></tr>
+<tr><td><b>Status</b></td><td>In normal use the sensor or area it stands for, for example <code>Hue motion sensor Hallway sensor in Hallway</code> or <code>MotionAware area Kitchen motion area in Kitchen</code>; otherwise why the motion is not current or what to do (the table at the end).</td></tr>
+<tr><td><b>Online</b></td><td><code>Yes</code> or <code>No</code>: whether the sensor, or the area, can report. Blank on a new device until the bridge first reports.</td></tr>
+<tr><td><b>Enabled</b></td><td><code>Yes</code>, <code>Switched off in the Hue app</code> (a sensor) or <code>Paused in the Hue app</code> (an area); blank on a new device until the bridge first reports. Only the Hue app changes it.</td></tr>
 <tr><td><b>Kind</b></td><td><code>Motion sensor</code> or <code>MotionAware area</code>.</td></tr>
 <tr><td><b>Hue Name</b></td><td>The sensor's or area's name in the Hue app. The device's name in Composer starts out the same and is then yours.</td></tr>
-<tr><td><b>Hue Room</b></td><td>The Hue room the sensor is in, or the room or zone the area belongs to; <code>(whole home)</code> for an area of the whole home; blank for a sensor in no room.</td></tr>
+<tr><td><b>Hue Room</b></td><td>The Hue room the sensor is in, or the room or zone the area belongs to; <code>(whole home)</code> for an area of the whole home; blank for a sensor in no room. An area whose room or zone was deleted in Hue keeps its last name with <code>(deleted in Hue)</code>, for example <code>Kitchen (deleted in Hue)</code>.</td></tr>
 <tr><td><b>Model</b></td><td>For example <code>Hue motion sensor (SML003)</code>; for an area, <code>MotionAware area</code>.</td></tr>
-<tr><td><b>Hue Motion</b></td><td>Hue's own state before the hold time, with the bridge's time of the last change: <code>Motion</code>, <code>No motion</code> or <code>Unknown</code>, for example <code>No motion since 14:05</code>.</td></tr>
-<tr><td><b>Light Level</b></td><td>For example <code>123 lux</code>, or <code>Dark</code>. Sensors only.</td></tr>
-<tr><td><b>Temperature</b></td><td>For example <code>21.5 &deg;C (70.7 &deg;F)</code>. Sensors only.</td></tr>
-<tr><td><b>Battery</b></td><td>For example <code>85 % (normal)</code>. Sensors only.</td></tr>
+<tr><td><b>Hue Motion</b></td><td>Hue's own state before the hold time, with the bridge's time of the last change: <code>Motion</code>, <code>No motion</code> or <code>Unknown</code>, for example <code>No motion since 14:05</code> (<code>No motion since 10-25 14:05</code> for a change on an earlier day). <code>Unknown</code> also while the sensor is switched off, the area paused, either deleted, forgotten or disconnected, and just after a re-link.</td></tr>
+<tr><td><b>Light Level</b></td><td>For example <code>123 lux</code>, or <code>Dark</code>; followed by <code>(old, 14:02)</code> while the sensor is offline (the time it went offline); <code>Not available</code> on a sensor without a light sensor. Sensors only.</td></tr>
+<tr><td><b>Temperature</b></td><td>For example <code>21.5 &deg;C (70.7 &deg;F)</code>, followed by <code>(old, 14:02)</code> while the sensor is offline; <code>Not available</code> on a sensor without one. Sensors only.</td></tr>
+<tr><td><b>Battery</b></td><td>For example <code>85 % (normal)</code> (just <code>85 %</code>, or <code>low</code>, when Hue gives only one of the two), followed by <code>(old, 14:02)</code> while the sensor is offline. Sensors only.</td></tr>
 <tr><td><b>Occupancy Hold Time (s)</b></td><td>0 to 3600 seconds, default <code>0</code>: how long the sensor stays Open after Hue reports the end of motion ("When motion is reported" above).</td></tr>
-<tr><td><b>Last Action</b></td><td>The result of the last click on this device's Actions tab.</td></tr>
+<tr><td><b>Last Action</b></td><td>The result of the last click on this device's Actions tab; after the bridge forgot the device, what to do: <code>Delete this device in Composer, or bind it again and use Link Devices</code>.</td></tr>
 <tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>. On writes many more lines to this device's Lua output (the lower part of its <b>Lua</b> tab); developer use only.</td></tr>
 </table>
 
 <h2>Actions</h2>
 <table>
 <tr><th>Action</th><th>What it does</th></tr>
-<tr><td><b>Refresh From Bridge</b></td><td>Asks the bridge to send this device its sensor's or area's details and state again. Normally not needed: the bridge sends them by itself.</td></tr>
-<tr><td><b>Test: Motion</b></td><td>Makes the sensor read Open and fire <i>senses motion</i>, as if Hue had seen someone, so programming can be tried without walking past a sensor (or without one at all). <b>Last Action</b> says it was a test. Hue's own state returns at the next report from the bridge, or after 30 seconds, whichever comes first.</td></tr>
-<tr><td><b>Test: No Motion</b></td><td>The same for Closed and <i>stops sensing motion</i>.</td></tr>
+<tr><td><b>Refresh From Bridge</b></td><td>Asks the bridge to send this device its sensor's or area's details and state again. Normally not needed: the bridge sends them by itself. <b>Last Action</b> reads <code>Asked the bridge for this device's state; its answer updates the rows</code>, or <code>Not sent: not bound to a Hue Bridge</code>.</td></tr>
+<tr><td><b>Test: Motion</b></td><td>Makes the sensor read Open and fire <i>senses motion</i>, as if Hue had seen someone, so programming can be tried without walking past a sensor (or without one at all). <b>Last Action</b> reads <code>Test: motion sent; Hue's state returns within 30 s</code>. At the next motion report from the bridge, or after 30 seconds, whichever comes first, the sensor goes back to Hue's state (hold time included) and fires that state's event if it differs: 30 seconds after the test a sensor with no motion reads Closed again and <i>stops sensing motion</i> fires. A device that knows no Hue state (no sensor, or not linked) goes back to what it showed before the first test, Closed if it showed nothing.</td></tr>
+<tr><td><b>Test: No Motion</b></td><td>The same for Closed and <i>stops sensing motion</i> (<code>Test: no motion sent; Hue's state returns within 30 s</code>).</td></tr>
 </table>
 <p>The device has no Forget or rename action of its own: the bridge's <b>Forget Motion Device</b>, <b>Adopt Hue Names</b> and <b>Accept Names As They Are</b> cover it (the manual, chapter 14).</p>
 
 <h2>Status texts and what to do</h2>
+<p>Where this table says that the bridge's <b>Attention</b> lists something after an hour, it appears at the bridge's first refresh of its rows after that hour (the manual, 14.10).</p>
 <table>
 <tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
-<tr><td><code>Not bound to a Hue Bridge</code></td><td>No connection to a Hue Bridge. In the first minute after a Director restart or a controller reboot it can also show while the connection is in place.</td><td>Right after a restart, wait a minute; the device looks for its connection again after 5, 15, 30 and 60 seconds. Otherwise connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Lights</b> output in Composer's <b>Connections</b> view (motion devices use the same output as lights and scenes).</td></tr>
+<tr><td><code>Not bound to a Hue Bridge</code></td><td>No connection to a Hue Bridge. In the first minute after a Director restart or a controller reboot it can also show while the connection is in place.</td><td>Right after a restart, wait a minute; the device looks for its connection again after 5, 15, 30 and 60 seconds, and one that still sees none then treats it as a disconnection (the table above). Otherwise connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Lights</b> output in Composer's <b>Connections</b> view (motion devices use the same output as lights and scenes).</td></tr>
 <tr><td><code>Bound; waiting for the bridge</code></td><td>Connected, but the bridge has not linked it to a sensor or area: a device added by hand.</td><td>Name it exactly as the sensor or area is named in the Hue app and click <b>Link Devices</b> on the bridge; or delete it and use the bridge's <b>Add Motion Sensor</b> or <b>Add Motion Area</b>.</td></tr>
 <tr><td><code>Waiting for the bridge</code></td><td>The controller or the driver has just started and the bridge has not reported the state yet. The sensor shows what it showed before.</td><td>Nothing; it normally lasts seconds.</td></tr>
-<tr><td><code>Bridge not answering since 14:02; motion not current</code></td><td>The bridge has been away for more than a minute.</td><td>See the bridge's <b>Status</b> and <b>Event Stream</b>. The device catches up when the bridge is back.</td></tr>
+<tr><td><code>Bridge not answering since 14:02; motion not current</code></td><td>The bridge has been away for more than a minute, or its event feed was stopped (<b>Disconnect Event Stream</b>, <b>Forget Pairing</b>).</td><td>See the bridge's <b>Status</b> and <b>Event Stream</b>. The device catches up when the bridge is back.</td></tr>
 <tr><td><code>Not reachable since 14:02; motion not current</code></td><td>Hue cannot reach the sensor: out of range, or its battery flat.</td><td>Check the batteries and the distance to the nearest Hue light or the bridge. After an hour the bridge's <b>Attention</b> lists it.</td></tr>
 <tr><td><code>No motion reading from Hue yet</code></td><td>Hue reports no usable motion state for the sensor or area.</td><td>Wait; if it lasts an hour, the bridge's <b>Attention</b> lists it. Report it.</td></tr>
 <tr><td><code>Area not running in Hue; save it again in the Hue app</code></td><td>Hue says the MotionAware area is not running.</td><td>Make sure the area's lights have power, then open the area in the Hue app and save it again.</td></tr>
-<tr><td><code>Area degraded: Desk Lamp not responding</code></td><td>One of the area's lights does not respond; the area still reports motion.</td><td>Give that light power (its wall switch on).</td></tr>
+<tr><td><code>Area degraded: 1 of its 4 lights not responding</code>, <code>Area degraded in Hue; check that its lights are powered</code></td><td>Some of the area's lights have no power or do not respond; the area still reports motion.</td><td>Give those lights power (their wall switches on).</td></tr>
+<tr><td><code>Area recovering in Hue</code></td><td>Hue is bringing the area back after a degraded spell; motion is still reported.</td><td>Nothing; if it lasts an hour, the bridge's <b>Attention</b> lists it with the degraded areas.</td></tr>
 <tr><td><code>Switched off in the Hue app; no motion is reported</code>, <code>Paused in the Hue app; no motion is reported</code></td><td>Deliberate: switched off, or the area paused, in the Hue app. The sensor was set to Closed once.</td><td>Switch it on, or resume the area, in the Hue app; the driver cannot.</td></tr>
-<tr><td><code>Sensor deleted in Hue since 10-26; re-link or Forget</code>, <code>Area deleted in Hue since 10-26; re-link or Forget</code></td><td>The sensor or area is no longer on the bridge, for example after a replacement. The device, its room and its programming are kept.</td><td>On the bridge, <b>Re-link Motion Device</b> to point this device at the replacement, or <b>Forget Motion Device</b> and delete the device. Do not delete it to start again: its programming would go with it.</td></tr>
-<tr><td><code>This bridge offers no MotionAware areas; re-link or Forget</code></td><td>An area's device on a bridge without MotionAware, for example after a change of bridge.</td><td><b>Re-link Motion Device</b> or <b>Forget Motion Device</b> on the bridge.</td></tr>
+<tr><td><code>Sensor deleted in Hue since 10-26; re-link or Forget</code>, <code>Area deleted in Hue since 10-26; re-link or Forget</code></td><td>The sensor or area is no longer on the bridge, for example after a replacement. The device, its room and its programming are kept. For a moment it may read without <code>since 10-26</code>.</td><td>On the bridge, <b>Re-link Motion Device</b> to point this device at the replacement, or <b>Forget Motion Device</b> and delete the device. Do not delete it to start again: its programming would go with it.</td></tr>
+<tr><td><code>This bridge offers no MotionAware areas; Forget Motion Device removes it</code></td><td>An area's device on a bridge without MotionAware, for example after a change of bridge.</td><td><b>Forget Motion Device</b> on the bridge, then delete the device: on a bridge without MotionAware it cannot be re-linked (Re-link does not list it, and there is no area to point it at).</td></tr>
 <tr><td><code>Hue reports this area only in part; update the bridge</code></td><td>The bridge's software reports the area without its name, room or health.</td><td>Update the bridge in the Hue app. Motion is still reported.</td></tr>
-<tr><td><code>Forgotten by the bridge (was Hue motion sensor Hallway sensor)</code></td><td>You or the bridge released this device; <b>Last Action</b> says what to do.</td><td>Delete the device in Composer; or connect it to the bridge again and run <b>Link Devices</b>, which links it to the sensor it remembers (connected alone, it stays released).</td></tr>
+<tr><td><code>Forgotten by the bridge (was Hue motion sensor Hallway sensor)</code>, <code>Forgotten by the bridge (was MotionAware area Kitchen motion area)</code></td><td>You or the bridge released this device; <b>Last Action</b> says what to do.</td><td>Delete the device in Composer; or connect it to the bridge again and run <b>Link Devices</b>, which links it to the sensor it remembers (connected alone, it stays released).</td></tr>
 </table>
 
 <!-- CHANGELOG -->

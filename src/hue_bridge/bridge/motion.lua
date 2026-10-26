@@ -193,7 +193,7 @@ motion.WORDS = {
 motion.KIND_WORDS = {
 	sensor = { kind = "motion sensor", fallback = "Hue motion sensor", add_action = "Add Motion Sensor",
 		forget_tail = "; the Hue motion sensor is listed under Add Motion Sensor again", pick = "a sensor" },
-	area = { kind = "motion area", fallback = "Hue motion area", add_action = "Add Motion Area",
+	area = { kind = "motion area", fallback = "MotionAware area", add_action = "Add Motion Area",
 		forget_tail = "; the MotionAware area is listed under Add Motion Area again", pick = "an area" },
 }
 motion.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Motion Sensor / Area's flag first
@@ -963,7 +963,7 @@ function motion:area_state(rid, entry)
 	if self.areas_supported == false then
 		-- B5: an area entry on a bridge that serves no areas. Not gone (only a
 		-- successful GET that lacks it says that), and no deliberate end.
-		return { online = "false", status = "This bridge offers no MotionAware areas; re-link or Forget" }
+		return { online = "false", status = "This bridge offers no MotionAware areas; Forget Motion Device removes it" }
 	end
 	local record = self.area_records[rid]
 	local out = {}
@@ -2268,8 +2268,9 @@ function motion:attention_items(items)
 	add(degraded, "%d motion area%s degraded for more than 1 h: %s (power its lights)", s(degraded), named(degraded))
 	add(no_reading, "%d motion device%s without a motion reading from Hue for more than 1 h: %s", s(no_reading),
 		named(no_reading))
+	-- No Re-link: a bridge without MotionAware has no area to offer.
 	add(unsupported, "%d motion area device%s on a bridge without MotionAware: %s (%s)", s(unsupported),
-		named(unsupported), words.relink_or_forget)
+		named(unsupported), words.forget_action)
 	return items
 end
 
