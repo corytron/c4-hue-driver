@@ -1428,3 +1428,140 @@ describe("Hue Bridge driver", function()
 		end)
 	end)
 end)
+
+-- The Hue Motion device's driver.xml (docs/motion-design.md §2.1 to §2.6):
+-- what Composer reads from the file. Its behaviour is motion_driver_spec.
+describe("Hue Motion driver (driver.xml)", function()
+	before_each(quiet)
+
+	-- The file without its comments, which quote element names.
+	local function motion_xml()
+		local file = assert(io.open("src/hue_motion/driver.xml"))
+		local xml = file:read("*a")
+		file:close()
+		return (xml:gsub("<!%-%-.-%-%->", ""))
+	end
+
+	local function field(body, tag)
+		return body:match("<" .. tag .. ">(.-)</" .. tag .. ">")
+	end
+
+	local function each(xml, tag)
+		local out = {}
+		for body in xml:gmatch("<" .. tag .. ">(.-)</" .. tag .. ">") do
+			out[#out + 1] = body
+		end
+		return out
+	end
+
+	it("is the motion sensor itself: one contact proxy on 5001 and no capabilities", function()
+		local xml = motion_xml()
+		local proxies = {}
+		for attrs, name in xml:gmatch("<proxy%s([^>]*)>(.-)</proxy>") do
+			proxies[#proxies + 1] = { attrs = attrs, name = name }
+		end
+		assert.equal(1, #proxies)
+		assert.equal("contactsingle_motionsensor", proxies[1].name)
+		assert.truthy(proxies[1].attrs:find('proxybindingid="5001"', 1, true))
+		assert.truthy(proxies[1].attrs:find('name="Hue Motion Sensor"', 1, true))
+		assert.is_nil(xml:find("<capabilities", 1, true))
+		assert.is_nil(xml:find("<combo", 1, true))
+		assert.equal("Hue Motion Sensor", field(xml, "name"))
+		assert.equal("Philips Hue", field(xml, "manufacturer"))
+		assert.equal("3.3.0", field(xml, "minimum_os_version"))
+		assert.equal("Sensors", field(field(xml, "composer_categories"), "category"))
+		assert.equal("www/documentation.html", xml:match('<documentation file="([^"]+)"'))
+	end)
+
+	it("connects the proxy, the bridge and the temperature output", function()
+		local connections = {}
+		for _, body in ipairs(each(motion_xml(), "connection")) do
+			connections[#connections + 1] = { id = field(body, "id"), type = field(body, "type"),
+				consumer = field(body, "consumer"), class = field(body, "classname"), name = field(body, "connectionname") }
+		end
+		assert.same({
+			{ id = "5001", type = "2", consumer = "False", class = "CONTACT_SENSOR", name = "Motion Sensor" },
+			{ id = "1", type = "1", consumer = "True", class = "HUE_BRIDGE", name = "Hue Bridge" },
+			{ id = "2", type = "1", consumer = "False", class = "TEMPERATURE_VALUE", name = "Temperature" },
+		}, connections)
+	end)
+
+	it("shows the stock motion sensor icons", function()
+		local xml = motion_xml()
+		assert.equal("devices_sm/contactsingle_motionsensor_close.gif", field(xml, "small"))
+		assert.equal("devices_lg/contactsingle_motionsensor_close.gif", field(xml, "large"))
+		assert.is_nil(xml:match("<small[^>]*image_source"), "Composer's own images, not the package's")
+		local states = {}
+		for _, body in ipairs(each(field(xml, "states"), "state")) do
+			states[#states + 1] = { field(body, "id"), field(body, "small"), field(body, "large") }
+		end
+		assert.same({
+			{ "1", "devices_sm\\contactsingle_motionsensor_open.gif", "devices_lg\\contactsingle_motionsensor_open.gif" },
+			{ "2", "devices_sm\\contactsingle_motionsensor_close.gif", "devices_lg\\contactsingle_motionsensor_close.gif" },
+		}, states)
+	end)
+
+	it("declares the rows of §2.2 in that order, the hold time from 0 to 3600 s", function()
+		local names, hold = {}, nil
+		for _, body in ipairs(each(motion_xml(), "property")) do
+			names[#names + 1] = field(body, "name")
+			if field(body, "name") == "Occupancy Hold Time (s)" then hold = body end
+		end
+		assert.same({ "Driver Version", "Status", "Online", "Enabled", "Kind", "Hue Name", "Hue Room", "Model",
+			"Hue Motion", "Light Level", "Temperature", "Battery", "Occupancy Hold Time (s)", "Last Action",
+			"Debug Mode" }, names)
+		assert.equal("RANGED_INTEGER", field(hold, "type"))
+		assert.same({ "0", "3600", "0", "false" },
+			{ field(hold, "minimum"), field(hold, "maximum"), field(hold, "default"), field(hold, "readonly") })
+	end)
+
+	it("has the events of §2.4 with their fixed ids, each naming NAME", function()
+		local events = {}
+		for _, body in ipairs(each(motion_xml(), "event")) do
+			assert.truthy(field(body, "description"):find("NAME", 1, true), field(body, "name"))
+			events[#events + 1] = field(body, "id") .. " " .. field(body, "name")
+		end
+		assert.same({ "1 Light Level Changed", "2 Temperature Changed", "3 Battery Low", "4 Battery Normal",
+			"5 Offline", "6 Online", "7 Switched Off In Hue", "8 Switched On In Hue" }, events)
+	end)
+
+	it("has the conditionals of §2.5, which TestCondition answers", function()
+		local env = fake.load_driver("hue_motion", {}, { device_id = 2101 })
+		local conditionals = {}
+		for _, body in ipairs(each(motion_xml(), "conditional")) do
+			local name = field(body, "name")
+			assert.truthy(field(body, "description"):find("NAME", 1, true), name)
+			assert.equal("boolean", type(env.TestCondition(name, { LOGIC = "EQUAL", VALUE = "0" })), name)
+			local range = field(body, "minimum") and (" " .. field(body, "minimum") .. ".." .. field(body, "maximum")) or ""
+			conditionals[#conditionals + 1] = field(body, "id") .. " " .. field(body, "type") .. " " .. name .. range
+		end
+		assert.same({ "0 BOOL BOOL_ONLINE", "1 BOOL BOOL_ENABLED", "2 BOOL BOOL_BATTERY_LOW",
+			"3 NUMBER NUMBER_LIGHT_LEVEL 0..100000", "4 NUMBER NUMBER_TEMPERATURE_C -40..60",
+			"5 NUMBER NUMBER_BATTERY_LEVEL 0..100" }, conditionals)
+	end)
+
+	it("offers the actions of §2.6, each with a handler", function()
+		local env, c4 = fake.load_driver("hue_motion", {}, { device_id = 2101 })
+		env.OnDriverInit("DIT_ADDING")
+		env.OnDriverLateInit("DIT_ADDING")
+		local actions = {}
+		for _, body in ipairs(each(motion_xml(), "action")) do
+			actions[#actions + 1] = field(body, "name")
+			c4.calls = {}
+			env.ExecuteCommand("LUA_ACTION", { ACTION = field(body, "command") })
+			assert.equal(1, #c4.calls_to("UpdateProperty"), field(body, "name") .. " writes Last Action")
+		end
+		assert.same({ "Refresh From Bridge", "Test: Motion", "Test: No Motion" }, actions)
+	end)
+
+	it("loads from Composer's driver search, unbound, and says so", function()
+		local env, c4 = fake.load_driver("hue_motion", {}, { device_id = 2101 })
+		assert.has_no.errors(function()
+			env.OnDriverInit("DIT_ADDING")
+			env.OnDriverLateInit("DIT_ADDING")
+		end)
+		assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+		assert.equal("1", env.Properties["Driver Version"])
+		assert.same({}, c4.calls_to("SendToProxy"), "nothing to the proxy before a state is known")
+	end)
+end)

@@ -58,6 +58,12 @@ has the release notes and the provenance attestations. How to install them:
   turns its room or zone off, and the slider brightens or dims the room or
   zone while keeping the scene's look. On a time-of-day scene, on starts the
   schedule.
+- **Motion sensors (1.1 beta).** A fourth driver, **Hue Motion**, makes each
+  Hue motion sensor, and each MotionAware area of a Hue Bridge Pro, a stock
+  Control4 motion sensor: its icon, "senses motion" programming and history,
+  plus light level, temperature (also as an output for a thermostat or a
+  temperature display), battery and an occupancy hold time. In the 1.1
+  prereleases only, for testers; it never changes anything on the Hue side.
 - **Keypads.** Hue Light and Hue Scene devices offer Top, Bottom and Toggle
   Button Links: tap for on and off, hold for Hue's own smooth dimming, and the
   keypad LEDs follow the device, including changes made on the Hue side. The
@@ -142,7 +148,8 @@ it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
 codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
 Prereleases for testers (`X.Y-beta.N`) are on the same page, marked
 **Pre-release**; they are never **Latest**, and the Download links above
-never serve them. What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
+never serve them. The 1.1 prereleases carry a fourth driver,
+`hue_motion.c4z`; install all four of a prerelease together. What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
 release's notes on GitHub and the end of each driver's Documentation tab
 repeat. Every release is built and attached by the repository's Release workflow,
 never by hand, and carries seven files:

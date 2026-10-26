@@ -1,18 +1,24 @@
 # Changelog
 
-Every published release of the Hue Bridge, Hue Light and Hue Scene drivers,
+Every published release of the Hue Bridge, Hue Light, Hue Scene and (from
+1.1) Hue Motion drivers,
 newest first, with what changed since the release before it. A version X.Y
 is the GitHub release of the tag `vX.Y` and carries its major version's
 codename from Star Wars: Andor (every 1.x release is "Cassian"). A version
 can be released as several builds: the build number is the commit count of
-the released commit and the Driver Version that Composer shows for all
-three drivers, and each newer build of a version replaces the files of its
+the released commit and the Driver Version that Composer shows for every
+driver, and each newer build of a version replaces the files of its
 release. Development builds and builds installed only for tests are not
 listed.
 
 ## Unreleased
 
 ### Added
+- Hue motion sensors and MotionAware areas (Hue Bridge Pro) as Control4
+  motion sensors: a fourth driver, Hue Motion, with the stock motion
+  programming, light level, temperature, battery and an occupancy hold time,
+  added from the bridge's Add Motion Sensor and Add Motion Area actions, and
+  a Log Motion Diagnostics action for testers (#268).
 - Prereleases for testers: versions such as 1.1-beta.1 appear on the
   Releases page marked Pre-release, with their own notes and a Beta feedback
   form; the stable release stays the one marked Latest (#269).

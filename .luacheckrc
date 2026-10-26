@@ -18,10 +18,12 @@ files["src/hue_bridge/driver.lua"] = {
 		-- CUSTOM_SELECT list functions named in the bridge's driver.xml.
 		"HueLightList", "RoomList", "RelinkDeviceList", "ForgetDeviceList", "HueRoomList", "MappingTargetList",
 		"SceneList", "SceneGroupList", "RelinkSceneList", "ForgetSceneList", "ZoneGroupList", "RelinkZoneLightList",
+		"MotionSensorList", "MotionAreaList", "MotionTargetList", "RelinkMotionDeviceList", "ForgetMotionDeviceList",
 	},
 }
 
 files["src/hue_light/driver.lua"] = files["src/hue_bridge/driver.lua"]
+files["src/hue_motion/driver.lua"] = files["src/hue_bridge/driver.lua"]
 files["src/hue_scene/driver.lua"] = files["src/hue_bridge/driver.lua"]
 
 files["tests"] = {

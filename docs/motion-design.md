@@ -139,13 +139,12 @@ These go through `C4:SendToDevice`, with string values, `rid` in every message, 
 | `HUE_MOTION_STATE` | `rid`, `reason` ("event"/"resync"/"hello"/"check"), and any of: `motion` ("true"/"false"), `motion_changed` (the bridge's ISO time), `online`, `enabled`, `status` (the EC §6 text the bridge chose, or absent for "fine"), `lux` (decimal, "0" means dark), `temperature` (°C, decimal), `battery_level`, `battery_state` ("normal"/"low"/"critical"), `ended` ("deleted"/"off"/"paused"/"forgotten"; a deliberate end) |
 | `HUE_MOTION_FORGOTTEN` | `rid`, as `HUE_SCENE_FORGOTTEN` |
 
-**Device → bridge**
+**Device → bridge** (no `HUE_MOTION_FORGET`: forgetting is the bridge's Forget Motion Device action only)
 
 | Command | Params |
 | --- | --- |
 | `HUE_MOTION_HELLO` | `rid` ("" if unknown), `device_id`, `name`, `kind`, `model` |
 | `HUE_MOTION_GOODBYE` | as `HUE_SCENE_GOODBYE` |
-| `HUE_MOTION_FORGET` | as `HUE_SCENE_FORGET` |
 
 The bridge decides `status` and `ended`, and the device shows them. Each
 `HUE_MOTION_STATE` that carries `motion` also carries `motion_changed`, and
@@ -184,7 +183,7 @@ This module parses resources into records. It does no I/O.
   - `add(rid, room_device_id, cb)`, `relink(device_id, rid)`, `forget(device_id)`;
   - `link_devices(skip_ids)`, `adopt_hue_names()`, `accept_names()`;
   - the pickers `picker_sensors()`, `picker_areas()`, `picker_relink_devices()`, `picker_forget_devices()`;
-  - `summary()` returning `{ sensors = "N on the bridge, M added", areas = "…" or "Not supported by this bridge" }`.
+  - `summary()` (one string, the row) and `list_items()` (the drop-down), as the other modules give `show_module_list`. A bridge without the area types says "MotionAware not supported by this bridge" in the summary.
 - **Where the data comes from.** Sensor devices come from the lights' device cache (EC §0.3: `lights.devices`, `lights.groups`), as the zone lights read `lights.models`. `resync(cb)` GETs `motion`, `light_level`, `temperature`, `device_power`, `zigbee_connectivity`, `motion_area_configuration`, `convenience_area_motion` and `security_area_motion`.
   - One GET at a time, after the zone lights in the resync chain.
   - A 404 on the area types means "not supported by this bridge" (EC §0.1). It never means "areas gone".
@@ -216,7 +215,7 @@ A bridge action, **Log Motion Diagnostics**, available in release builds. It run
   - **Re-link Motion Device:** device picker plus target.
   - **Forget Motion Device.**
   - **Log Motion Diagnostics.**
-- **Properties:** the rows **Motion Sensors** and **Motion Areas**, after Scenes.
+- **Properties:** one DYNAMIC_LIST row, **Motion Sensors**, after Zone Lights, for sensors and areas together.
 - **Shared actions:** the `HUE_MOTION_*` dispatch. Link Devices, Adopt Hue Names, Accept Names As They Are and the Attention list include the motion module.
 - **Resync chain:** lights → scenes → zone lights → motion.
 - **Stream fan-out:** `on_container` calls `motion` and then `motion_diag`.
