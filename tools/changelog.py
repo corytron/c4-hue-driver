@@ -82,7 +82,8 @@ VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)(?:-beta\.([1-9][0-9]*))?")
 
 # The sentence under the Documentation tab's "Changelog" heading.
 INTRO = (
-    "Every release of the Hue Bridge, Hue Light and Hue Scene drivers, newest first; the build number is "
+    "Every release of the Hue Bridge, Hue Light, Hue Scene and (from 1.1) Hue Motion drivers, newest first; "
+    "the build number is "
     "the Driver Version that Composer shows for each device."
 )
 

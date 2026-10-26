@@ -1,0 +1,334 @@
+<devicedata>
+	<copyright>Copyright 2026 Cory Fair. Licensed under the Apache License, Version 2.0 (see LICENSE). Not affiliated with Signify or Snap One.</copyright>
+	<creator>Cory Fair</creator>
+	<manufacturer>Philips Hue</manufacturer>
+	<name>Hue Motion Sensor</name>
+	<model>Hue Motion Sensor (CLIP v2)</model>
+	<created>10/26/2026 12:00</created>
+	<modified>10/26/2026 12:00</modified>
+	<version>1</version>
+	<!-- The stock motion sensor icons that ship with Composer (no image_source):
+	     the closed (no motion) one here, both states below
+	     [verified: docs/motion-control4-research.md §1.3; PP 111/_1]. -->
+	<small>devices_sm/contactsingle_motionsensor_close.gif</small>
+	<large>devices_lg/contactsingle_motionsensor_close.gif</large>
+	<control>lua_gen</control>
+	<controlmethod>IP</controlmethod>
+	<driver>DriverWorks</driver>
+	<!-- 3.3.0: the same floor as the other three drivers; nothing here needs more
+	     (docs/motion-control4-research.md §6). -->
+	<minimum_os_version>3.3.0</minimum_os_version>
+	<composer_categories>
+		<category>Sensors</category>
+	</composer_categories>
+	<config>
+		<script jit="1" file="driver.lua"/>
+		<documentation file="www/documentation.html"/>
+		<!-- The rows of docs/motion-design.md §2.2, in that order. The sensor
+		     rows (Light Level, Temperature, Battery) are hidden on an area's
+		     device at run time. -->
+		<properties>
+			<property>
+				<name>Driver Version</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Status</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Online</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Enabled</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Kind</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Hue Name</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Hue Room</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Model</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Hue Motion</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Light Level</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Temperature</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Battery</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<!-- Hue's "no motion" is held this long before the sensor closes; new
+			     motion cancels the wait (docs/motion-design.md D10). -->
+			<property>
+				<name>Occupancy Hold Time (s)</name>
+				<type>RANGED_INTEGER</type>
+				<minimum>0</minimum>
+				<maximum>3600</maximum>
+				<default>0</default>
+				<readonly>false</readonly>
+			</property>
+			<property>
+				<name>Last Action</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Debug Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Off</item>
+					<item>On</item>
+				</items>
+				<default>Off</default>
+				<readonly>false</readonly>
+			</property>
+		</properties>
+		<actions>
+			<action>
+				<name>Refresh From Bridge</name>
+				<command>Refresh From Bridge</command>
+				<sort_order>1</sort_order>
+				<params/>
+			</action>
+			<!-- Kept in release builds: they check programming without a sensor. -->
+			<action>
+				<name>Test: Motion</name>
+				<command>Test Motion</command>
+				<sort_order>2</sort_order>
+				<params/>
+			</action>
+			<action>
+				<name>Test: No Motion</name>
+				<command>Test No Motion</command>
+				<sort_order>3</sort_order>
+				<params/>
+			</action>
+		</actions>
+		<commands/>
+	</config>
+	<!-- The device IS the motion sensor: its only proxy is Control4's contact
+	     proxy for motion sensors, OPENED for motion and CLOSED for none
+	     (docs/motion-design.md D1). A proxy can never change for this file name
+	     [verified: FUND 14/_2], and there are no capabilities, so installing
+	     or updating the driver needs no controller reboot. -->
+	<proxies>
+		<proxy proxybindingid="5001" name="Hue Motion Sensor">contactsingle_motionsensor</proxy>
+	</proxies>
+	<states>
+		<state>
+			<id>1</id>
+			<small>devices_sm\contactsingle_motionsensor_open.gif</small>
+			<large>devices_lg\contactsingle_motionsensor_open.gif</large>
+		</state>
+		<state>
+			<id>2</id>
+			<small>devices_sm\contactsingle_motionsensor_close.gif</small>
+			<large>devices_lg\contactsingle_motionsensor_close.gif</large>
+		</state>
+	</states>
+	<!-- Ids are fixed forever: programming refers to them, so an event is never
+	     renumbered or removed [verified: FUND 14/_2]. Motion events are the
+	     proxy's own. -->
+	<events>
+		<event>
+			<id>1</id>
+			<name>Light Level Changed</name>
+			<description>When the light level at NAME changes</description>
+		</event>
+		<event>
+			<id>2</id>
+			<name>Temperature Changed</name>
+			<description>When the temperature at NAME changes</description>
+		</event>
+		<event>
+			<id>3</id>
+			<name>Battery Low</name>
+			<description>When the battery of NAME becomes low</description>
+		</event>
+		<event>
+			<id>4</id>
+			<name>Battery Normal</name>
+			<description>When the battery of NAME is normal again</description>
+		</event>
+		<event>
+			<id>5</id>
+			<name>Offline</name>
+			<description>When NAME goes offline</description>
+		</event>
+		<event>
+			<id>6</id>
+			<name>Online</name>
+			<description>When NAME comes online</description>
+		</event>
+		<event>
+			<id>7</id>
+			<name>Switched Off In Hue</name>
+			<description>When NAME is switched off or paused in the Hue app</description>
+		</event>
+		<event>
+			<id>8</id>
+			<name>Switched On In Hue</name>
+			<description>When NAME is switched on or resumed in the Hue app</description>
+		</event>
+	</events>
+	<!-- TestCondition in driver.lua answers these by name; ids and names are
+	     fixed forever, as the events'. A NUMBER conditional compares whole
+	     numbers [verified: FUND 10/_1, 10/_7]. -->
+	<conditionals>
+		<conditional>
+			<id>0</id>
+			<name>BOOL_ONLINE</name>
+			<type>BOOL</type>
+			<condition_statement>Online</condition_statement>
+			<description>NAME Online is STRING</description>
+			<true_text>True</true_text>
+			<false_text>False</false_text>
+		</conditional>
+		<conditional>
+			<id>1</id>
+			<name>BOOL_ENABLED</name>
+			<type>BOOL</type>
+			<condition_statement>Enabled in the Hue app</condition_statement>
+			<description>NAME Enabled is STRING</description>
+			<true_text>True</true_text>
+			<false_text>False</false_text>
+		</conditional>
+		<conditional>
+			<id>2</id>
+			<name>BOOL_BATTERY_LOW</name>
+			<type>BOOL</type>
+			<condition_statement>Battery Low</condition_statement>
+			<description>NAME Battery Low is STRING</description>
+			<true_text>True</true_text>
+			<false_text>False</false_text>
+		</conditional>
+		<conditional>
+			<id>3</id>
+			<name>NUMBER_LIGHT_LEVEL</name>
+			<type>NUMBER</type>
+			<condition_statement>Light Level (lux)</condition_statement>
+			<description>NAME Light Level is LOGIC INTEGER lux</description>
+			<minimum>0</minimum>
+			<maximum>100000</maximum>
+		</conditional>
+		<conditional>
+			<id>4</id>
+			<name>NUMBER_TEMPERATURE_C</name>
+			<type>NUMBER</type>
+			<condition_statement>Temperature C</condition_statement>
+			<description>NAME Temperature C is LOGIC INTEGER</description>
+			<minimum>-40</minimum>
+			<maximum>60</maximum>
+		</conditional>
+		<conditional>
+			<id>5</id>
+			<name>NUMBER_BATTERY_LEVEL</name>
+			<type>NUMBER</type>
+			<condition_statement>Battery Level (%)</condition_statement>
+			<description>NAME Battery Level is LOGIC INTEGER %</description>
+			<minimum>0</minimum>
+			<maximum>100</maximum>
+		</conditional>
+	</conditionals>
+	<connections>
+		<!-- The proxy binding: Director binds the contact proxy here itself when
+		     the device is added; hidden in Composer [verified: FUND 11/_1;
+		     docs/motion-control4-research.md §1.3]. -->
+		<connection>
+			<id>5001</id>
+			<facing>6</facing>
+			<connectionname>Motion Sensor</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>CONTACT_SENSOR</classname>
+				</class>
+			</classes>
+		</connection>
+		<!-- The bridge's provider binding 1, as the light and scene devices use it
+		     (docs/motion-design.md D12). -->
+		<connection>
+			<id>1</id>
+			<facing>6</facing>
+			<connectionname>Hue Bridge</connectionname>
+			<type>1</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>HUE_BRIDGE</classname>
+				</class>
+			</classes>
+			<hidden>False</hidden>
+		</connection>
+		<!-- A sensor's temperature, for a Temperature Display or a thermostat:
+		     VALUE_CHANGED with CELSIUS, FAHRENHEIT and TIMESTAMP, VALUE_UNAVAILABLE,
+		     and GET_SENSOR_VALUE answered [verified: PP 97/_1, 97/_2;
+		     docs/motion-control4-research.md §3.1]. An area never sends on it. -->
+		<connection>
+			<id>2</id>
+			<facing>6</facing>
+			<connectionname>Temperature</connectionname>
+			<type>1</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>TEMPERATURE_VALUE</classname>
+				</class>
+			</classes>
+		</connection>
+	</connections>
+</devicedata>

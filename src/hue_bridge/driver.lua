@@ -15,6 +15,8 @@ local stream = require("bridge.stream")
 local lights_mod = require("bridge.lights")
 local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
+local motion_mod = require("bridge.motion")
+local motion_diag_mod = require("bridge.motion_diag")
 local commands = require("bridge.commands")
 local tlscheck = require("bridge.tlscheck")
 local project_mod = require("bridge.project")
@@ -52,6 +54,8 @@ local state = {
 	lights = nil,        -- bridge.lights registry, created in OnDriverLateInit
 	scenes = nil,        -- bridge.scenes (docs/scenes-design.md), created in OnDriverLateInit
 	zone_lights = nil,   -- bridge.zone_lights (docs/zone-light-design.md), created in OnDriverLateInit
+	motion = nil,        -- bridge.motion (docs/motion-design.md), created in OnDriverLateInit
+	motion_diag = nil,   -- bridge.motion_diag, Log Motion Diagnostics
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
 	late_init_done = false,
@@ -511,6 +515,23 @@ local function module_ctx(extra)
 	return ctx
 end
 
+-- True when a stream container may change what the Motion Sensors row or
+-- Attention shows: battery, reachability, an area's configuration, or a
+-- sensor or area switched on or off in the Hue app. Plain motion, light level
+-- and temperature updates do not, and they are the frequent ones.
+local MOTION_ROW_TYPES = { device_power = true, zigbee_connectivity = true, motion_area_configuration = true }
+local MOTION_ENABLED_TYPES = { motion = true, convenience_area_motion = true, security_area_motion = true }
+
+local function motion_rows_changed(container)
+	for _, item in ipairs(type(container.data) == "table" and container.data or {}) do
+		if type(item) == "table" and (MOTION_ROW_TYPES[item.type]
+				or (MOTION_ENABLED_TYPES[item.type] and item.enabled ~= nil)) then
+			return true
+		end
+	end
+	return false
+end
+
 local function zone_light_device(device_id)
 	local id = tonumber(device_id)
 	return id ~= nil and state.zone_lights:device_ids()[id] == true
@@ -547,6 +568,11 @@ local function attention_text()
 	end
 	for _, item in ipairs(state.zone_lights:attention_items() or {}) do
 		items[#items + 1] = item
+	end
+	if state.motion then
+		for _, item in ipairs(state.motion:attention_items() or {}) do
+			items[#items + 1] = item
+		end
 	end
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
@@ -609,6 +635,9 @@ local function refresh_lights_props()
 	refresh_room_mappings()
 	show_module_list("Scenes", state.scenes)
 	show_module_list("Zone Lights", state.zone_lights)
+	if state.motion then
+		show_module_list("Motion Sensors", state.motion)
+	end
 end
 
 local function new_queue()
@@ -650,6 +679,11 @@ local function new_stream()
 		on_status = function(text, per_event)
 			-- Reconnects since the driver started (any stream instance), so
 			-- the owner can read the real reconnect rate off the row (#65).
+			-- The motion devices say "bridge not answering" while the stream
+			-- is down (docs/edge-cases-motion.md §6).
+			if not per_event and state.motion and not tostring(text):find("^Connected since") then
+				state.motion:on_stream_state(false)
+			end
 			if not per_event and tostring(text):find("^Connected since") then
 				state.stream_connects = (state.stream_connects or 0) + 1
 				state.stream_started_at = state.stream_started_at or os.date("%m-%d %H:%M")
@@ -678,6 +712,7 @@ local function new_stream()
 			-- scenes (their grouped_light GET is small); the owner-facing
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
+			state.motion:on_stream_state(true)
 			state.lights:resync(function(ok, err, sent)
 				if ok then
 					log.info("resync done: %d state messages", tonumber(sent) or 0)
@@ -701,7 +736,16 @@ local function new_stream()
 						else
 							log.warn("zone light resync failed: %s", tostring(zerr))
 						end
-						refresh_lights_props()
+						-- The motion devices last (docs/motion-design.md §4.2):
+						-- their sensors come from the lights' device cache.
+						state.motion:resync(function(mok, merr, msent)
+							if mok then
+								log.info("motion resync done: %d state messages", tonumber(msent) or 0)
+							else
+								log.warn("motion resync failed: %s", tostring(merr))
+							end
+							refresh_lights_props()
+						end)
 					end, grouped)
 				end)
 			end)
@@ -717,9 +761,13 @@ local function new_stream()
 			state.lights:on_container(container)
 			state.scenes:on_container(container)
 			state.zone_lights:on_container(container)
+			state.motion:on_container(container)
+			state.motion_diag:on_container(container)
 			-- A resource appearing or disappearing changes the counts and the
-			-- Attention list; plain updates (state, names) do not.
-			if container.type == "add" or container.type == "delete" then
+			-- Attention list; plain updates (state, names) do not, except the
+			-- motion devices' battery, reachability and switched-off state,
+			-- which Attention lists at once (docs/motion-design.md D5, D6).
+			if container.type == "add" or container.type == "delete" or motion_rows_changed(container) then
 				refresh_lights_props()
 			end
 			prop_soon("Events Received", state.stream.stats.containers)
@@ -1313,6 +1361,7 @@ dispatch.properties["Room_Mappings"] = list_pick("Room Mappings")
 dispatch.properties["Lights"] = list_pick("Lights")
 dispatch.properties["Scenes"] = list_pick("Scenes")
 dispatch.properties["Zone_Lights"] = list_pick("Zone Lights")
+dispatch.properties["Motion_Sensors"] = list_pick("Motion Sensors")
 
 -- False, with the reason in Last Action, when an action cannot run.
 local function can()
@@ -1360,13 +1409,16 @@ function SceneGroupList() return picker(state.scenes, "picker_groups") end
 function RelinkSceneList() return picker(state.scenes, "picker_relink_devices") end
 function ForgetSceneList() return picker(state.scenes, "picker_forget_devices") end
 
-local function join_texts(lights_text, scenes_text, zone_lights_text)
+local function join_texts(lights_text, scenes_text, zone_lights_text, motion_text)
 	local text = tostring(lights_text)
 	if scenes_text ~= nil and scenes_text ~= "" then
 		text = text .. " | Scenes: " .. tostring(scenes_text)
 	end
 	if zone_lights_text ~= nil and zone_lights_text ~= "" then
 		text = text .. " | Zone lights: " .. tostring(zone_lights_text)
+	end
+	if motion_text ~= nil and motion_text ~= "" then
+		text = text .. " | Motion: " .. tostring(motion_text)
 	end
 	return text
 end
@@ -1432,7 +1484,7 @@ dispatch.commands["Link_Devices"] = function()
 		-- Zone-light devices run the light driver too: each module skips the
 		-- other's devices.
 		last_action(join_texts(state.lights:link_devices(state.zone_lights:device_ids()), state.scenes:link_devices(),
-			state.zone_lights:link_devices(light_device_ids())))
+			state.zone_lights:link_devices(light_device_ids()), state.motion:link_devices()))
 	end
 end
 
@@ -1476,21 +1528,38 @@ local function fill_proxy_ids()
 	if filled > 0 then
 		state.lights:save()
 	end
-	return filled
+	-- The motion devices too: the contact proxy is the consumer of 5001 the
+	-- same way (docs/motion-design.md §2.1); one adopted through a hello or
+	-- Link Devices has no proxy id yet.
+	local motion_filled = 0
+	for _, entry in pairs(state.motion and state.motion.registry or {}) do
+		if type(entry) == "table" and not entry.proxy_id and entry.device_id then
+			local consumers = C4:GetBoundConsumerDevices(entry.device_id, 5001)
+			local proxy = type(consumers) == "table" and next(consumers) or nil
+			if proxy then
+				entry.proxy_id = proxy
+				motion_filled = motion_filled + 1
+			end
+		end
+	end
+	if motion_filled > 0 then
+		state.motion:save()
+	end
+	return filled + motion_filled
 end
 
 dispatch.commands["Adopt_Hue_Names"] = function()
 	if can() then
 		fill_proxy_ids()
 		last_action(join_texts(state.lights:adopt_hue_names(), state.scenes:adopt_hue_names(),
-			state.zone_lights:adopt_hue_names()))
+			state.zone_lights:adopt_hue_names(), state.motion:adopt_hue_names()))
 	end
 end
 
 dispatch.commands["Accept_Names_As_They_Are"] = function()
 	if can() then
 		last_action(join_texts(state.lights:accept_names(), state.scenes:accept_names(),
-			state.zone_lights:accept_names()))
+			state.zone_lights:accept_names(), state.motion:accept_names()))
 	end
 end
 
@@ -1575,6 +1644,86 @@ dispatch.commands["Re-link_Zone_Light"] = function(params)
 	end
 	local _, text = state.zone_lights:relink(device, rid)
 	last_action(text)
+end
+
+-- Motion actions (docs/motion-design.md §4.4) --------------------------------
+
+function MotionSensorList() return picker(state.motion, "picker_sensors") end
+function MotionAreaList() return picker(state.motion, "picker_areas") end
+-- Re-link takes a sensor or an area; the module refuses a change of kind (D4).
+function MotionTargetList()
+	return join_pickers(picker(state.motion, "picker_sensors"), picker(state.motion, "picker_areas"))
+end
+function RelinkMotionDeviceList()
+	local list = picker(state.motion, "picker_relink_devices")
+	if #list == 0 then
+		return { { text = "(no motion device is gone or unbound)", value = "" } }
+	end
+	return list
+end
+function ForgetMotionDeviceList() return picker(state.motion, "picker_forget_devices") end
+
+dispatch.commands["Add_Motion_Sensor"] = function(params)
+	if not can() then return end
+	local rid = selection(params, "Sensor")
+	if not rid then
+		return last_action("Not added: pick a motion sensor first")
+	end
+	state.motion:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
+end
+
+dispatch.commands["Add_Motion_Area"] = function(params)
+	if not can() then return end
+	local rid = selection(params, "Area")
+	if not rid then
+		return last_action("Not added: pick a MotionAware area first")
+	end
+	state.motion:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
+end
+
+dispatch.commands["Re-link_Motion_Device"] = function(params)
+	if not can() then return end
+	local device, rid = tonumber(selection(params, "Device")), selection(params, "Target")
+	if not device or not rid then
+		return last_action("Not re-linked: pick a device and a sensor or area")
+	end
+	local _, text = state.motion:relink(device, rid)
+	last_action(text)
+end
+
+dispatch.commands["Forget_Motion_Device"] = function(params)
+	if not can() then return end
+	local device = tonumber(selection(params, "Device"))
+	if not device then
+		return last_action("Not forgotten: pick a device first")
+	end
+	local _, text = state.motion:forget(device)
+	last_action(text)
+	refresh_lights_props()
+end
+
+dispatch.commands["Log_Motion_Diagnostics"] = function()
+	if not can() then return end
+	state.motion_diag:run(function(_, text) last_action(text) end)
+end
+
+dispatch.commands["HUE_MOTION_HELLO"] = function(params)
+	params = params or {}
+	if not state.motion:hello(params) then
+		log.debug("HUE_MOTION_HELLO from unregistered motion device %q (device %s)", tostring(params.rid),
+			tostring(params.device_id))
+	end
+end
+
+dispatch.commands["HUE_MOTION_GOODBYE"] = function(params)
+	state.motion:goodbye(params or {})
+	refresh_lights_props()
+end
+
+dispatch.commands["HUE_MOTION_FORGET"] = function(params)
+	local _, text = state.motion:forget_request(params or {})
+	last_action(text)
+	refresh_lights_props()
 end
 
 -- Scene actions (docs/scenes-design.md §5) ----------------------------------
@@ -1807,6 +1956,7 @@ local function confirm_unbound_later()
 		state.lights:reconcile()
 		state.scenes:reconcile()
 		state.zone_lights:reconcile()
+		state.motion:reconcile()
 		refresh_lights_props()
 	end)
 end
@@ -1824,6 +1974,9 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 	end
 	if state.zone_lights then
 		state.zone_lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
+	end
+	if state.motion then
+		state.motion:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
 	end
 	if state.lights then
 		state.lights:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
@@ -1894,7 +2047,7 @@ end
 -- late init (Director's inter-driver order is not guaranteed) and the
 -- handlers index state that does not exist yet [code analysis 2026-10-22,
 -- H1]: hellos are queued and replayed after late init, anything else dropped.
-local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true }
+local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true }
 local EARLY_MAX = 200
 local early_commands = {}
 local execute_command = dispatch.execute_command
@@ -1963,6 +2116,24 @@ function OnDriverLateInit()
 	state.zone_lights:load()
 	state.zone_lights:configure_all()
 	state.zone_lights:reconcile()
+	state.motion = motion_mod.new(module_ctx({ groups = state.lights.groups }))
+	state.motion:load()
+	state.motion:configure_all()
+	state.motion:reconcile()
+	-- The diagnostics' output goes into public issues: everything that
+	-- identifies this bridge is scrubbed from every line (docs/motion-design.md §4.3).
+	-- Attention items that wait an hour (a sensor unreachable, an area
+	-- degraded, no motion reading: docs/motion-design.md D5) come due without
+	-- any event to refresh the rows: look again every five minutes. The rows
+	-- are sent only when they changed.
+	state.rows_timer = C4:SetTimer(300000, function() refresh_lights_props() end, true)
+	state.motion_diag = motion_diag_mod.new(module_ctx({
+		secrets = function()
+			return { key = state.creds and state.creds.key, ip = state.ip,
+				bridge_id = state.creds and state.creds.bridge_id }
+		end,
+		on_done = function(text) last_action(text) end,
+	}))
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).
 	local r = state.lights:reconcile()

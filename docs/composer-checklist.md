@@ -548,6 +548,312 @@ The scene dimmer (Shine):
     played (step 47), and a "when Shine turns on" event when Shine is played
     from the Hue app. **Open.**
 
+## J. Motion sensors and MotionAware areas (1.1 beta 1, #268)
+
+Written on 2026-10-26, before the build, from the contract
+(`docs/motion-design.md`) and the texts of `docs/edge-cases-motion.md`
+(EC) §6; check every quoted text against the build that ships as
+`v1.1-beta.1`. The owner's manual says the same in prose (chapter 14, and
+the Hue Motion Sensor's own Documentation tab). The house has the Hue
+Bridge Pro and no motion sensor or MotionAware area, so steps 50 to 60
+are the smoke test without sensors: EC §10 items 1 to 4 and the probes H1
+to H4 of `docs/motion-control4-research.md` (C4R) §8. H5 (a
+`C4:RecordHistory` probe in a dev build) is not part of beta 1 (contract
+D11). Steps 61 to 72 are the tester's first round: C4R T1 to T8, the
+questions of `docs/motion-hue-research.md` (HR) §7.1 and EC §10 items 5
+to 8. His results arrive as Beta feedback issues, or through the owner,
+and are summed up on #268.
+
+The house smoke test (no sensor; the Windows session, with the owner for
+the drag in step 59 and the reboot in step 58):
+
+50. **Install the prerelease** (C4R H1; contract §7). Use Driver » "Add or
+    Update Driver or Agent…" and select the four files of `v1.1-beta.1`
+    (`hue_bridge.c4z`, `hue_light.c4z`, `hue_motion.c4z`,
+    `hue_scene.c4z`), then Open. Expect Composer's "Update Succeeded"
+    message naming all four (paste it: the new driver may be listed as
+    added, the other three as updated) and **no "Restart Director?"**. The
+    motion driver declares no `<capabilities>`, and the other three change
+    none. Within a minute every Hue device shows the new `Driver Version`.
+    If Composer does ask, note which driver it names, then reboot as under
+    "Before you start".
+    - **Done:** open.
+51. **Nothing regresses** (contract §7). On the bridge, expect `Status`
+    "Paired", `Event Stream` "Connected since <HH:MM:SS>", and `Attention`,
+    `Lights`, `Scenes` and `Zone Lights` as before the install (step 2).
+    Shine plays and turns off from its tile, and the zone light Bedside
+    Lights switches from its tile. Disconnect Event Stream, then Connect
+    Event Stream: the feed is back within seconds. The full read then runs
+    lights, scenes, zone lights and then motion (contract §4.4), and the
+    rows are unchanged.
+    - **Done:** open.
+52. **The bridge's new row and actions.** Properties has a `Motion
+    Sensors` row right after `Zone Lights`: one drop-down for sensors and
+    areas together. Paste its summary and the lines of its list. The house
+    has no sensor and no area, so expect the summary "0 sensors and 0
+    areas on the bridge; 0 added" ("0 added" alone until the first full
+    read after the install) and no line under it. The Actions tab has Add
+    Motion Sensor, Add Motion Area, Re-link Motion Device, Forget Motion
+    Device and Log Motion Diagnostics. Paste the full order of the tab, 27
+    buttons on a release build (22 before), so that the quick reference in
+    the manual's chapter 13 and the caption of its picture in chapter 5 can
+    follow it.
+    - **Done:** open.
+53. **Add Motion Sensor and Add Motion Area with nothing to add** (EC §10
+    item 4; EC B5). Open Add Motion Sensor and open its `Sensor` list:
+    paste the one line it holds, since the house bridge has no sensor
+    (expected "(no motion sensors on the bridge)"; "(no motion sensors
+    fetched yet; connect the event stream)" before the first full read).
+    Its `Room` list has "(mapped room)" first. Cancel. Do the same with
+    Add Motion Area and its `Area` list: the Bridge Pro serves the area
+    types but has no area (expected "(no MotionAware areas on the
+    bridge)"). Then open each dialog again, leave the lists empty and click
+    OK: paste the refusal in `Last Action` (expected "Not added: pick a
+    motion sensor first" and "Not added: pick a MotionAware area first").
+    Nothing is created.
+    - **Done:** open.
+54. **Log Motion Diagnostics** (contract §4.3; HR §7.2 items 1 and 2).
+    Select the bridge and open its **Lua** tab, then its Actions tab. Click
+    Log Motion Diagnostics and return to the Lua tab within 20 seconds.
+    Expect `Last Action` "Motion diagnostics start in 20 seconds: open
+    this bridge's Lua tab now. The pass and 10 minutes of events follow;
+    copy them into the Beta feedback issue.", then in the Lua output (each
+    line of the diagnostics starts with "Hue Bridge: diag: ") the pass and
+    its last line "Motion diagnostics: pass done (0 sensors, 0 areas, <n>
+    automations); capturing events for 10 minutes." After the ten minutes
+    `Last Action`, and the Lua output, read "Motion diagnostics done: <n>
+    items of events logged. Copy the Lua output into the Beta feedback
+    issue." Paste the whole pass, and check:
+    - the bridge's model and firmware, and the types `/resource/clip`
+      serves, with `motion_area_configuration`, `convenience_area_motion`
+      and `security_area_motion` among them;
+    - `motion_area_configuration` answered with no items, and
+      `motion_area_candidate` with a list of the house's compatible lights
+      or a 404;
+    - whether any room or zone lists `grouped_motion` without a sensor
+      (expected: none);
+    - the type counts, cameras, contact sensors and grouped motion
+      included;
+    - the house's Hue automations (`behavior_instance`, at most 40), each
+      named by its script, with names as "name#N" and every time of day
+      shown as the literal text "<clock>";
+    - **the redaction on real data**: no room, zone or light name in clear
+      (names read "name#1", "name#2"), no id longer than its first 4
+      characters and "…", no MAC address, no bridge id, and no time of
+      day in any line (the capture counts seconds from the start of the
+      pass, "+12.40s");
+    - **Composer's pane** (`docs/composer-remote.md` rule 13): are the
+      lines of the pass all there, although the Actions tab was showing
+      when they were written? If some are missing, say which. The manual
+      (14.15) gives testers this same procedure and needs the answer.
+    - **Done:** open.
+55. **The stock proxy file** (C4R H4; read only). On the Windows PC, find
+    `contactsingle_motionsensor.c4i` among Composer's own drivers (search
+    Composer Pro's installation folder) and paste its path.
+    - **Done:** open.
+56. **A motion device added by hand** (C4R H2; contract §7). Select a
+    room, open Items » Search, type "Hue Motion" and double-click "Hue
+    Motion Sensor" (manufacturer Philips Hue; paste the driver's name and
+    model as the search lists them). Expect:
+    - in the tree, Control4's motion sensor icon, not a Hue icon;
+    - Properties: the proxy's rows first (Invert Sensor unticked, Enable
+      Debounce Timer, Debounce Time (ms) 100, State, Verified "No"), then
+      the driver's rows under Advanced Properties in the contract's order:
+      Driver Version, Status, Online, Enabled, Kind, Hue Name, Hue Room,
+      Model, Hue Motion, Light Level, Temperature, Battery, Occupancy Hold
+      Time (s) ("0"), Last Action, Debug Mode. Paste which of them a device
+      without a kind shows. `Status` reads "Not bound to a Hue Bridge";
+    - Actions: Refresh From Bridge, Test: Motion, Test: No Motion;
+    - Connections: a "Hue Bridge" control input and a "Temperature"
+      output, and no visible proxy connection;
+    - Programming, the device's events: senses motion, stops sensing
+      motion, Light Level Changed, Temperature Changed, Battery Low, Battery
+      Normal, Offline, Online, Switched Off In Hue, Switched On In Hue. Its
+      conditionals: is sensing motion, is not sensing motion, State is
+      Verified, then the driver's own, worded as in `driver.xml`: Online,
+      Enabled in the Hue app, Battery Low, Light Level (lux), Temperature C,
+      Battery Level (%). Its variables: ContactState, StateVerified,
+      LastActionTime, Online, Enabled, Light Level, Temperature C,
+      Temperature F, Battery Level, Battery Low.
+    - **Done:** open.
+57. **Test: Motion and Test: No Motion** (C4R H3; contract §7). Make two
+    NUMBER variables first (Agents » Variables, "Motion Test On" and
+    "Motion Test Off"). In Programming, add "when <test device> senses
+    motion: increment Motion Test On" and the same for "stops sensing
+    motion" with "Motion Test Off". Then:
+    - Test: Motion: State "Open", Verified "Yes", Motion Test On +1, and
+      `Last Action` saying it was a test (the build writes "Test: motion
+      sent; Hue's state returns within 30 s"; paste it);
+    - Test: No Motion within 30 s: State "Closed", Motion Test Off +1;
+    - Test: Motion, then wait 40 s without a click: expect State "Closed"
+      again 30 s after the click and Motion Test Off +1, since a device
+      that knows no Hue state goes back to what it showed before the first
+      test (Closed), as a change; paste State and both variables;
+    - the variables `ContactState` and `StateVerified` in Composer while
+      Open and while Closed (C4R §2.1 expects `ContactState` true while
+      Closed);
+    - in the Control4 app, Security » Locks & Sensors: the test device is
+      listed, with History entries for the changes (C4R T3, here without a
+      sensor). Note whether notifications can be switched on for it
+      (OS 3.4).
+    - **Done:** open.
+58. **Verified across a restart** (EC §10 item 1, as far as a device
+    without a sensor can show it; only when a reboot suits you). Leave the
+    test device Closed with Verified "Yes" (Test: No Motion). Reboot the
+    controller from System Manager, then read State, Verified and `Status`
+    on the test device, and the two variables. Verified "No" means the
+    proxy forgets at a restart and waits for the device's first state (EC
+    §0.2, assumed there). The device sends nothing after a start until the
+    bridge reports (EC C12), so with no sensor it stays that way until a
+    test. Expect neither event fired (the variables unchanged), and
+    `Status` "Not bound to a Hue Bridge" and `Online` "No" after the first
+    minute (it is not connected, and a device still unbound a minute after
+    its start treats that as a disconnection). EC §10 item 2, a state that
+    changed during the restart, needs a sensor: step 69.
+    - **Done:** open.
+59. **A hand-added device connected** (EC C1; optional, needs the owner's
+    hands, since the Windows session cannot drag). Connect the test
+    device's "Hue Bridge" input to the bridge's "Hue Lights" output.
+    `Status` reads "Bound; waiting for the bridge". On the bridge, Link
+    Devices: paste the motion part of `Last Action` (no unimported motion
+    sensor has the test device's name). Disconnect it again: `Status` "Not
+    bound to a Hue Bridge", and `Attention` gains no item, since the
+    device was never linked.
+    - **Done:** open.
+60. **Delete the test device** (EC §10 item 3; EC C4). Delete it in
+    Composer (select it, Delete, Yes). The test program's events go with
+    it: Programming no longer lists them. That is why the manual says
+    re-link, never delete. The bridge's `Motion Sensors` and `Attention`
+    stay as they were, since the device was never linked. Delete the two
+    test variables.
+    - **Done:** open.
+
+The tester's first round (his system, his sensors; he follows the manual's
+chapter 14, and the owner passes on these steps and the answers):
+
+61. **His setup** (C4R T1 and §9 questions 1 to 4; HR §7.1 item 1).
+    Collect:
+    - the Control4 OS and Composer Pro versions;
+    - the bridge's `Bridge Model` and `Bridge Firmware`;
+    - the sensors, by model id in the Hue app (indoor SML001 or SML003,
+      outdoor SML002 or SML004), and how many;
+    - the MotionAware areas, if any (Bridge Pro only);
+    - how he programs motion today (Timer agents, or a hold on the device);
+    - whether he wants temperature on Navigators or in a thermostat.
+    - **Done:** open.
+62. **Install** as in step 50 on his system: no "Restart Director?", every
+    Hue device on the new `Driver Version`, and a `Motion Sensors` row
+    that lists his sensors and areas. Paste the summary and the list.
+    - **Done:** open.
+63. **Diagnostics first** (C4R T8; HR §6 and §7.1 items 1 to 9; EC §10
+    item 5). Run Log Motion Diagnostics before adding any device,
+    following the manual's 14.15. During the ten minutes:
+    - walk past each sensor twice, waiting in between until it reports no
+      motion;
+    - switch on a lamp next to one sensor;
+    - walk through each area.
+
+    He reads the output for private data, then posts it in a Beta
+    feedback issue. From it we read:
+    - the served types, and whether the deprecated fields are still sent
+      (HR §7.1 item 2);
+    - the sensitivity and its status (item 5), and whether sensors are
+      children of rooms and which groups carry `grouped_motion` (item 7);
+    - the battery state (item 8);
+    - for an area: its group, participants and health, and which of its
+      two services changes on a walk-through (item 9; EC §10 item 7 in
+      part);
+    - the order and timing of the motion items around one walk past, and
+      whether `changed` is on every item (EC §10 item 5; EC R6);
+    - how long motion stays true after the last movement, and whether
+      anything arrives while movement continues (HR §7.1 item 3);
+    - how often light level and temperature arrive (item 4).
+    - **Done:** open.
+64. **One sensor added** (C4R T2). Add Motion Sensor with the sensor and
+    "(mapped room)" or a room: "Added <sensor> to <room> (device <id>)".
+    Its Properties: `Status` "Hue motion sensor <name> in <Hue room>",
+    `Kind` "Motion sensor", `Model` "<product name> (<model id>)", `Online`
+    "Yes", `Enabled` "Yes", and `Hue Motion`, `Light Level`, `Temperature`
+    and `Battery` filled; Verified "Yes" once the first state has arrived.
+    With a test program as in step 57: walk in, and State turns "Open" and
+    "senses motion" fires; leave, and it turns "Closed" and "stops sensing
+    motion" fires. Time, three times, from the last movement to Closed
+    (Hue's own hold).
+    - **Done:** open.
+65. **In the Control4 app** (C4R T3). Security » Locks & Sensors lists the
+    sensor, with its history, and notifications can be switched on for it
+    (OS 3.4).
+    - **Done:** open.
+66. **Occupancy Hold Time** (contract D10). Set it to 60 and click Set.
+    Walk past and leave: `Hue Motion` reads "No motion since <HH:MM>"
+    while State stays Open; about 60 s later State turns Closed and "stops
+    sensing motion" fires once. Walk past again during the hold: it stays
+    Open, and the hold starts again in full at the next "no motion". Set
+    it back to 0.
+    - **Done:** open.
+67. **The temperature output** (C4R T4; contract D16). Add the
+    Temperature Display driver to the sensor's room and connect its
+    "Temperature In" to the motion device's "Temperature" output. Expect
+    the display to show the temperature on a Navigator. Optionally,
+    connect the output to a thermostat with a remote sensor input: does it
+    take the value, and does it still use it after 20 minutes of steady
+    temperature? A thermostat is reported to drop readings older than 15
+    minutes, and the contract has no periodic re-send (only each full read
+    sends the last value again).
+    - **Done:** open.
+68. **Light level, temperature, battery** (C4R T5). The device's rows and
+    variables agree with the Hue app. Light Level Changed fires when a
+    lamp next to the sensor is switched on (a test program as in step 57).
+    - **Done:** open.
+69. **A restart** (C4R T6; EC §10 item 2; EC R4; only when a reboot suits
+    him). With the room empty and the sensor Closed, reboot the
+    controller. Afterwards State is Closed, Verified "Yes" once the bridge
+    has reported, and no event fired. Then reboot again while someone
+    walks in during the restart: "senses motion" fires once after the
+    start, late but never twice.
+    - **Done:** open.
+70. **Switched off, and unreachable** (EC §10 item 6; EC S7, S8, S9).
+    Switch the sensor off in the Hue app while it shows motion. Expect:
+    - State Closed at once, and "stops sensing motion" fires once;
+    - `Enabled` "Switched off in the Hue app", and Switched Off In Hue
+      fires;
+    - `Status` "Switched off in the Hue app; no motion is reported";
+    - `Attention` "1 motion sensor switched off in the Hue app: <name>".
+
+    Switch it on: `Enabled` "Yes", and Switched On In Hue fires. Then
+    remove its batteries and time how long it takes until `Online` reads
+    "No" and `Status` "Not reachable since <HH:MM>; motion not current",
+    with the contact left as it was. After an hour, at the bridge's next
+    refresh of its rows (click Room Audit), `Attention` shows "1 motion
+    sensor not reachable for more than 1 h: <name>". Put the batteries
+    back: `Online` "Yes", and the item leaves `Attention` at once.
+    - **Done:** open.
+71. **One MotionAware area** (C4R T7; EC §10 items 7 and 8; EC A5, A6,
+    A9; a Bridge Pro with an area only). Add Motion Area: "Added <area> to
+    <room> (device <id>)". `Kind` and `Model` read "MotionAware area", and
+    `Status` "MotionAware area <name> in <room or zone>" ("MotionAware area
+    <name> (whole home)" for the whole home). Walk through: Open, then
+    Closed, as in step 64. Pause the area in the Hue app and resume it:
+    "Paused in the Hue app; no motion is reported", `Enabled` and the two
+    events. Switch one of its lights off at the wall: `Status` "Area
+    degraded: <n> of its <m> lights not responding" (or "Area degraded in
+    Hue; check that its lights are powered", or "Area recovering in Hue");
+    is motion still reported? If he uses the area for security as well as
+    for lights, switch its use in the Hue app: does the device still
+    follow motion?
+    - **Done:** open.
+72. **Optional: a sensor deleted and paired again** (HR §7.1 item 10; EC
+    S5, S4, S6). With Log Motion Diagnostics capturing, delete the sensor
+    in the Hue app and pair it again. Expect:
+    - the device reads "Sensor deleted in Hue since <date>; re-link or
+      Forget", and fires "stops sensing motion" once if it showed motion;
+    - the new sensor appears in `Attention` at once, with a re-link hint:
+      "1 new motion sensor on the bridge: <label> (same radio as <name>,
+      device <id>; re-link?) (Add Motion Sensor)";
+    - Re-link Motion Device points the old device at it, and its
+      programming keeps working.
+    - **Done:** open.
+
 ## What to paste back
 
 For each step: the property texts as shown, what the Navigator, keypad or

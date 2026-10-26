@@ -771,6 +771,89 @@ local function new_c4(env)
 		return value
 	end
 
+	-- Driver variables [verified: API 36/_1 AddVariable, 36/_7 SetVariable]:
+	-- one added by name gets the next id from 1001 in the order added and
+	-- AddVariable answers true and the id; a name added twice fails (false).
+	-- c4.variables[name] = { id, value, type, read_only, hidden };
+	-- c4.variable_names lists the names in the order added. SetVariable on a
+	-- variable never added raises, to catch a driver that skipped OnDriverInit
+	-- [assumed: the controller would only log it].
+	c4.variables = {}
+	c4.variable_names = {}
+	c4.next_variable_id = 1001
+
+	function c4:AddVariable(name, value, var_type, read_only, hidden)
+		record("AddVariable", name, value, var_type, read_only, hidden)
+		if c4.variables[name] then
+			return false
+		end
+		local id = c4.next_variable_id
+		c4.next_variable_id = id + 1
+		c4.variables[name] = { id = id, value = value, type = var_type, read_only = read_only or false,
+			hidden = hidden or false }
+		table.insert(c4.variable_names, name)
+		return true, id
+	end
+
+	function c4:SetVariable(name, value)
+		record("SetVariable", name, value)
+		local var = assert(c4.variables[name], "C4:SetVariable: no variable " .. tostring(name)
+			.. " (AddVariable it in OnDriverInit)")
+		var.value = value
+	end
+
+	-- [verified: API 7/_4]; c4.events_fired lists the event ids in order.
+	c4.events_fired = {}
+	function c4:FireEventByID(id)
+		record("FireEventByID", id)
+		table.insert(c4.events_fired, id)
+	end
+
+	-- [verified: API 22/_27]: "2026-10-26T14:02:31.120Z", or with an offset
+	-- ("+01:00", "-0500"), answers a UTC date table (no isdst), the epoch
+	-- seconds and the microseconds; anything else answers nothing. Without
+	-- `strict`, surrounding whitespace is allowed.
+	local function days_from_civil(y, m, d)
+		y = m <= 2 and y - 1 or y
+		local era = math.floor(y / 400)
+		local yoe = y - era * 400
+		local doy = math.floor((153 * ((m + 9) % 12) + 2) / 5) + d - 1
+		local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+		return era * 146097 + doe - 719468
+	end
+
+	function c4:ParseIso8601DateTime(text, strict)
+		record("ParseIso8601DateTime", text, strict)
+		if type(text) ~= "string" then
+			return
+		end
+		local s = strict and text or text:match("^%s*(.-)%s*$")
+		local y, mo, d, h, mi, sec, rest = s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)(.*)$")
+		if not y then
+			return
+		end
+		local frac, zone = rest:match("^%.(%d+)(.*)$")
+		if not frac then
+			frac, zone = "", rest
+		end
+		local offset
+		if zone == "Z" then
+			offset = 0
+		else
+			local sign, oh, om = zone:match("^([%+%-])(%d%d):?(%d%d)$")
+			if not sign then
+				return
+			end
+			offset = (tonumber(oh) * 3600 + tonumber(om) * 60) * (sign == "-" and -1 or 1)
+		end
+		local epoch = days_from_civil(tonumber(y), tonumber(mo), tonumber(d)) * 86400 + tonumber(h) * 3600
+			+ tonumber(mi) * 60 + tonumber(sec) - offset
+		local t = os.date("!*t", epoch)
+		t.isdst = nil
+		local micro = frac ~= "" and math.floor(tonumber("0." .. frac) * 1000000 + 0.5) or 0
+		return t, epoch, micro
+	end
+
 	-- Every recorded call with the given name, in order.
 	function c4.calls_to(name)
 		local out = {}

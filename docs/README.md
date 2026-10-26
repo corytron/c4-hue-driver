@@ -107,6 +107,15 @@ are dated research; what was built from them is in the contracts and
   Snap One's and Signify's terms, the privacy findings, the license
   recommendation (Apache 2.0) and the publication checklist; the decision on
   the likeness icons was added on 2026-10-25.
+- [`motion-control4-research.md`](motion-control4-research.md): how Control4
+  models a motion sensor (proxy, connections, programming, temperature,
+  history), from the SDK and Snap One's public drivers (2026-10-26, #268).
+- [`motion-hue-research.md`](motion-hue-research.md): the Hue motion sensor
+  and MotionAware resources and events, from public sources, the fixtures
+  and the diagnostics plan (2026-10-26, #268).
+- [`edge-cases-motion.md`](edge-cases-motion.md): the lifecycle cases of
+  sensors and MotionAware areas on both sides, with a decision per case
+  (2026-10-26, #268).
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
@@ -143,6 +152,10 @@ are dated research; what was built from them is in the contracts and
   changelog (2026-10-25, #255): `CHANGELOG.md`'s format, `tools/changelog.py`
   (check, the release notes, the Documentation tab's Changelog chapter, the
   stamp), and where each release's entry appears.
+- [`motion-design.md`](motion-design.md): Hue motion sensors and MotionAware
+  areas as Control4 motion sensors (2026-10-26, #268): `hue_motion.c4z` as a
+  stock `contactsingle_motionsensor`, the decisions D1–D16, the messages
+  between the bridge and the device, the diagnostics for testers.
 - [`prerelease-design.md`](prerelease-design.md): prereleases for testers
   (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
   from `main` like every release, their notes, the one list of packages, the
