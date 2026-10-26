@@ -11,19 +11,29 @@
 The contract is docs/changelog-design.md (issue #255). CHANGELOG.md lists every release, newest
 first, below a "## Unreleased" entry that collects the changes of the next one (section 1).
 
+VERSION is MAJOR.MINOR for a release (1.0) or MAJOR.MINOR-beta.N for a prerelease (1.1-beta.1;
+docs/prerelease-design.md, issue #269). A prerelease is never an entry of CHANGELOG.md: html shows
+the Unreleased entry as '1.1 beta 1 "Cassian" (prerelease), build N (date)', never as the release;
+notes fills .github/prerelease-notes.md; stamp refuses it. A prerelease of a version the file lists
+already is refused: it comes before its release.
+
 check   validates section 1 and prints "CHANGELOG.md: ok (N releases)", or every problem as
         FILE:LINE: message on stderr.
 html    prints the fragment tools/build.sh puts in place of the <!-- CHANGELOG --> line of each
         driver's documentation.html: plain h2, h3, p, b, ul, li and code, no attribute but the h2's
         id, no script, no link, no external resource, ASCII only. A non-empty Unreleased entry
-        shows as the release with --release, as "Unreleased (development build N)" with
-        --dev-build, else as "Unreleased"; an empty one never shows.
+        shows as the release (or prerelease) with --release, as "Unreleased (development build N)"
+        with --dev-build, else as "Unreleased"; an empty one never shows.
 notes   prints the release's notes: the template with {version}, {codename}, {build}, {date},
         {this_build} (the Unreleased entry's categories and bullets) and {history} (the earlier
-        builds of the version) filled in. Refuses an empty Unreleased entry.
+        builds of the version) filled in. Refuses an empty Unreleased entry. For a prerelease the
+        template is .github/prerelease-notes.md, with {version} (1.1-beta.1), {release} (1.1),
+        {beta} (1), {codename}, {build}, {date}, {this_build}, {stable} (the heading of the newest
+        release in the file, the one the prerelease follows) and {stable_version} (its version), and
+        no {history}.
 stamp   turns "## Unreleased" into the release's heading below a new, empty "## Unreleased" and
-        writes the file only when the result passes check. Refuses an empty Unreleased entry and
-        a build that has an entry already.
+        writes the file only when the result passes check. Refuses an empty Unreleased entry, a
+        build that has an entry already and a prerelease.
 
 A release's codename is the one of the newest entry of its major version; the first release of a
 new major version names it with --codename. html, notes and stamp refuse a file that fails check,
@@ -44,6 +54,7 @@ EXIT_OK, EXIT_REFUSED = 0, 1  # argparse exits 2 on a usage error
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHANGELOG_FILE = os.path.join(ROOT, "CHANGELOG.md")
 TEMPLATE_FILE = os.path.join(ROOT, ".github", "release-notes.md")
+PRERELEASE_TEMPLATE_FILE = os.path.join(ROOT, ".github", "prerelease-notes.md")
 
 TITLE = "# Changelog"
 UNRELEASED = "## Unreleased"
@@ -53,7 +64,21 @@ RELEASE_RE = re.compile(r'^## (\d+)\.(\d+) "([^"]+)", build (\d+) \((\d{4}-\d{2}
 RELEASE_SHAPE = '## 1.0 "Cassian", build 349 (2026-10-25)'
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 PLACEHOLDERS = ("version", "codename", "build", "date", "this_build", "history")
+# A prerelease's notes have no {history}: prereleases are not entries of CHANGELOG.md.
+PRERELEASE_PLACEHOLDERS = (
+    "version",
+    "release",
+    "beta",
+    "codename",
+    "build",
+    "date",
+    "this_build",
+    "stable",
+    "stable_version",
+)
 PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
+# A release 1.0 or a prerelease 1.1-beta.1 (docs/prerelease-design.md, section 1), matched whole.
+VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)(?:-beta\.([1-9][0-9]*))?")
 
 # The sentence under the Documentation tab's "Changelog" heading.
 INTRO = (
@@ -98,6 +123,24 @@ INLINE_RULES = (
 
 class ChangelogError(Exception):
     """A refusal: printed to stderr, exit 1."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Version:
+    """A version from the command line: MAJOR.MINOR for a release, with beta N for a prerelease."""
+
+    major: int
+    minor: int
+    beta: int | None = None
+
+    @property
+    def release(self):
+        """(major, minor): the version as CHANGELOG.md's headings name it."""
+        return (self.major, self.minor)
+
+    def __str__(self):
+        text = "%d.%d" % self.release
+        return text if self.beta is None else "%s-beta.%d" % (text, self.beta)
 
 
 # ---------------------------------------------------------------------------
@@ -630,17 +673,18 @@ def fill(template, values, name):
     if unknown:
         raise ChangelogError(
             "%s names %s; the placeholders are %s"
-            % (name, ", ".join("{%s}" % key for key in unknown), ", ".join("{%s}" % key for key in PLACEHOLDERS))
+            % (name, ", ".join("{%s}" % key for key in unknown), ", ".join("{%s}" % key for key in values))
         )
     if "{this_build}" not in template:
         raise ChangelogError("%s has no {this_build}: the notes would not say what the release changes" % name)
     return PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template).rstrip("\n") + "\n"
 
 
-def release_title(changelog, version, build, date, codename):
-    """(codename, heading text without "## ") of the release the Unreleased entry becomes. Refuses
-    a build that has an entry already, a build or date older than the newest entry's, a codename
-    that is not the one of the major version, and a new major version's first release without one."""
+def entry_codename(changelog, major, build, date, codename):
+    """The codename of a new build of major version `major`: the file's, or --codename for the
+    first release of a new major version. Refuses a build that has an entry already, a build or
+    date older than the newest entry's, a codename that is not the one of the major version, and a
+    new major version's first release without one."""
     for entry in changelog.releases:
         if entry.build == build:
             raise ChangelogError("build %d has an entry already, on line %d" % (build, entry.line))
@@ -651,17 +695,41 @@ def release_title(changelog, version, build, date, codename):
         )
     if newest is not None and date < newest.date:
         raise ChangelogError("%s is before %s, the newest entry's date (line %d)" % (date, newest.date, newest.line))
-    named = next((entry for entry in changelog.releases if entry.version[0] == version[0]), None)
+    named = next((entry for entry in changelog.releases if entry.version[0] == major), None)
     if named is None:
         if codename is None:
-            raise ChangelogError("%d.x has no release yet: name its first one with --codename" % version[0])
+            raise ChangelogError("%d.x has no release yet: name its first one with --codename" % major)
     elif codename is not None and codename != named.codename:
-        raise ChangelogError(
-            '%d.x is named "%s" (line %d), not "%s"' % (version[0], named.codename, named.line, codename)
-        )
+        raise ChangelogError('%d.x is named "%s" (line %d), not "%s"' % (major, named.codename, named.line, codename))
     else:
         codename = named.codename
+    return codename
+
+
+def release_title(changelog, version, build, date, codename):
+    """(codename, heading text without "## ") of the release the Unreleased entry becomes; version
+    is (major, minor). Refuses what entry_codename refuses."""
+    codename = entry_codename(changelog, version[0], build, date, codename)
     return codename, '%d.%d "%s", build %d (%s)' % (version[0], version[1], codename, build, date)
+
+
+def prerelease_title(changelog, version, build, date, codename):
+    """(codename, heading text) of a prerelease (a Version with beta), which shows the Unreleased
+    entry as a build for testing, never as the release (docs/prerelease-design.md). Refuses what
+    entry_codename refuses, and a version CHANGELOG.md lists already: a prerelease comes before its
+    version's release."""
+    listed = [entry for entry in changelog.releases if entry.version >= version.release]
+    if listed:
+        newest = max(listed, key=lambda entry: (entry.version, entry.build))
+        major, minor = newest.version
+        raise ChangelogError(
+            "%s is a prerelease of %d.%d, but CHANGELOG.md lists %d.%d already (line %d): a prerelease comes before "
+            "its version's release, so name a later version, such as %d.%d-beta.1"
+            % (version, *version.release, major, minor, newest.line, major, minor + 1)
+        )
+    codename = entry_codename(changelog, version.major, build, date, codename)
+    title = '%d.%d beta %d "%s" (prerelease), build %d (%s)' % (*version.release, version.beta, codename, build, date)
+    return codename, title
 
 
 # ---------------------------------------------------------------------------
@@ -730,8 +798,10 @@ def cmd_html(args):
     changelog = checked(parse(read_text(args.file)), args.file)
     if args.release is not None:
         heading = None
-        if changelog.unreleased.bullet_count():
-            heading = release_title(changelog, args.release, args.build, args.date, args.codename)[1]
+        if changelog.unreleased.bullet_count() and args.release.beta is None:
+            heading = release_title(changelog, args.release.release, args.build, args.date, args.codename)[1]
+        elif changelog.unreleased.bullet_count():
+            heading = prerelease_title(changelog, args.release, args.build, args.date, args.codename)[1]
     elif args.dev_build is not None:
         heading = "Unreleased (development build %d)" % args.dev_build
     else:
@@ -743,30 +813,59 @@ def cmd_html(args):
 def cmd_notes(args):
     changelog = checked(parse(read_text(args.file)), args.file)
     unreleased = changelog.unreleased
+    version = args.version
     if not unreleased.bullet_count():
         raise ChangelogError(
-            "'## Unreleased' (line %d) has no bullets: a release must say what it changes" % unreleased.line
+            "'## Unreleased' (line %d) has no bullets: a %s must say what it changes"
+            % (unreleased.line, "release" if version.beta is None else "prerelease")
         )
-    codename, _title = release_title(changelog, args.version, args.build, args.date, args.codename)
-    values = {
-        "version": "%d.%d" % args.version,
-        "codename": codename,
-        "build": str(args.build),
-        "date": args.date,
-        "this_build": markdown_sections(unreleased),
-        "history": markdown_history(changelog, args.version, args.build),
-    }
-    emit(fill(read_text(args.template), values, display_path(args.template)))
+    if version.beta is None:
+        codename, _title = release_title(changelog, version.release, args.build, args.date, args.codename)
+        template = args.template or TEMPLATE_FILE
+        values = {
+            "version": "%d.%d" % version.release,
+            "codename": codename,
+            "build": str(args.build),
+            "date": args.date,
+            "this_build": markdown_sections(unreleased),
+            "history": markdown_history(changelog, version.release, args.build),
+        }
+    else:
+        codename, _title = prerelease_title(changelog, version, args.build, args.date, args.codename)
+        if not changelog.releases:
+            raise ChangelogError(
+                "%s: a prerelease's notes name the release it follows, and %s lists none"
+                % (version, display_path(args.file))
+            )
+        stable = changelog.releases[0]
+        template = args.template or PRERELEASE_TEMPLATE_FILE
+        values = {
+            "version": str(version),
+            "release": "%d.%d" % version.release,
+            "beta": str(version.beta),
+            "codename": codename,
+            "build": str(args.build),
+            "date": args.date,
+            "this_build": markdown_sections(unreleased),
+            "stable": stable.heading,
+            "stable_version": "%d.%d" % stable.version,
+        }
+    emit(fill(read_text(template), values, display_path(template)))
     return EXIT_OK
 
 
 def cmd_stamp(args):
+    if args.version.beta is not None:
+        raise ChangelogError(
+            "%s is a prerelease: CHANGELOG.md lists releases only, and the %d.%d entry will carry these changes "
+            "(docs/prerelease-design.md); nothing stamped" % (args.version, *args.version.release)
+        )
     text = read_text(args.file)
     changelog = checked(parse(text), args.file)
     unreleased = changelog.unreleased
     if not unreleased.bullet_count():
         raise ChangelogError("'## Unreleased' (line %d) has no bullets: nothing to stamp" % unreleased.line)
-    _codename, title = release_title(changelog, args.version, args.build, args.date, args.codename)
+    _codename, title = release_title(changelog, args.version.release, args.build, args.date, args.codename)
     lines = text.split("\n")
     ending = "\r" if lines[unreleased.line - 1].endswith("\r") else ""
     lines[unreleased.line - 1 : unreleased.line] = [UNRELEASED + ending, ending, "## " + title + ending]
@@ -785,10 +884,15 @@ def cmd_stamp(args):
 
 
 def version_arg(text):
-    match = re.fullmatch(r"([0-9]+)\.([0-9]+)", text)
+    """A Version: MAJOR.MINOR (1.0) or MAJOR.MINOR-beta.N for a prerelease (1.1-beta.1)."""
+    match = VERSION_RE.fullmatch(text)
     if not match:
-        raise argparse.ArgumentTypeError("a version is MAJOR.MINOR, such as 1.0, not %r" % text)
-    return (int(match.group(1)), int(match.group(2)))
+        raise argparse.ArgumentTypeError(
+            "a version is MAJOR.MINOR, such as 1.0, or MAJOR.MINOR-beta.N for a prerelease, such as 1.1-beta.1, "
+            "not %r" % text
+        )
+    beta = int(match.group(3)) if match.group(3) else None
+    return Version(int(match.group(1)), int(match.group(2)), beta)
 
 
 def build_arg(text):
@@ -815,7 +919,11 @@ def parse_args(argv):
 
     release = argparse.ArgumentParser(add_help=False)
     release.add_argument(
-        "--version", required=True, type=version_arg, metavar="VERSION", help="the release's version, such as 1.0"
+        "--version",
+        required=True,
+        type=version_arg,
+        metavar="VERSION",
+        help="the release's version, such as 1.0, or a prerelease's, such as 1.1-beta.1",
     )
     release.add_argument(
         "--build", required=True, type=build_arg, metavar="N", help="its build number (the Driver Version)"
@@ -848,7 +956,10 @@ def parse_args(argv):
         "Unreleased entry shows as Unreleased; an empty one never shows.",
     )
     html.add_argument(
-        "--release", type=version_arg, metavar="VERSION", help="show a non-empty Unreleased entry as this release"
+        "--release",
+        type=version_arg,
+        metavar="VERSION",
+        help="show a non-empty Unreleased entry as this release (1.0) or prerelease (1.1-beta.1)",
     )
     html.add_argument("--build", type=build_arg, metavar="N", help="the release's build number")
     html.add_argument("--date", type=date_arg, metavar="YYYY-MM-DD", help="the release's date")
@@ -873,9 +984,8 @@ def parse_args(argv):
     )
     p.add_argument(
         "--template",
-        default=TEMPLATE_FILE,
         metavar="PATH",
-        help="the notes' template (default .github/release-notes.md)",
+        help="the notes' template (default .github/release-notes.md, for a prerelease .github/prerelease-notes.md)",
     )
     p.set_defaults(func=cmd_notes)
 

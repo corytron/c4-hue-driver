@@ -66,6 +66,8 @@ jobs:
       - name: Lint and test (luacheck, busted)
         run: tools/check.sh --strict --only lua-lint lua-test
 
+  # The name is a required status check on main, so it keeps its words; the
+  # job builds and checks one package per src/<driver>/driver.xml, however many.
   build:
     name: Build the three .c4z packages
     needs: test
@@ -112,17 +114,19 @@ jobs:
 
       # docs/release-checklist.md, section 0: every package carries LICENSE and
       # NOTICE. build/manifest.json (docs/cicd-gitops-design.md, section 5.2)
-      # must describe exactly the packages that were built.
+      # must describe exactly the packages that were built: one per
+      # src/<driver>/driver.xml directory of this commit, the one list of the
+      # packages (docs/prerelease-design.md, section 2), which the Release
+      # workflow checks the same way.
       - name: Check the packages and the manifest
+        id: packages
         run: |
-          for d in hue_bridge hue_light hue_scene; do
-            test -f "build/$d.c4z"
-            unzip -Z1 "build/$d.c4z" | grep -qx LICENSE
-            unzip -Z1 "build/$d.c4z" | grep -qx NOTICE
-          done
           ls -l build/*.c4z build/manifest.json
-          python3 - <<'PY'
-          import hashlib, json, subprocess, sys
+          python3 -I - <<'PY'
+          import hashlib, json, os, re, subprocess, sys, zipfile
+          tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "src"], text=True)
+          found = (re.fullmatch(r"src/([^/]+)/driver\.xml", path) for path in tree.split("\0"))
+          expected = sorted(match.group(1) + ".c4z" for match in found if match)
           with open("build/manifest.json", encoding="utf-8") as f:
               m = json.load(f)
           count = int(subprocess.check_output(["git", "rev-list", "--count", "HEAD"], text=True))
@@ -136,28 +140,49 @@ jobs:
               problems.append(f"commit {m.get('commit')!r} is not HEAD {head}")
           if m.get("dev") is not False:
               problems.append("dev is not false")
-          for name in ("hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"):
-              entry = (m.get("packages") or {}).get(name)
-              if not entry:
-                  problems.append(f"{name} is missing from packages")
+          packages = m.get("packages") if isinstance(m.get("packages"), dict) else {}
+          names = sorted(packages)
+          if not names or names != expected:
+              problems.append(f"packages {names} are not those of this commit's src/*/driver.xml directories, {expected}")
+          for name in names:
+              if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*\.c4z", name):
+                  problems.append(f"{name!r} is not a package name")
                   continue
-              with open(f"build/{name}", "rb") as f:
+              path = os.path.join("build", name)
+              if not os.path.isfile(path):
+                  problems.append(f"{name} is missing")
+                  continue
+              with open(path, "rb") as f:
                   data = f.read()
+              try:
+                  with zipfile.ZipFile(path) as z:
+                      entries = set(z.namelist())
+              except zipfile.BadZipFile:
+                  problems.append(f"{name} is not a zip file")
+                  continue
+              for required in ("LICENSE", "NOTICE"):
+                  if required not in entries:
+                      problems.append(f"{name} lacks {required} (Apache License 2.0, section 4)")
+              entry = packages[name] if isinstance(packages[name], dict) else {}
               if entry.get("sha256") != hashlib.sha256(data).hexdigest():
                   problems.append(f"{name}: sha256 differs from the file")
               if entry.get("bytes") != len(data):
                   problems.append(f"{name}: bytes differs from the file")
           if problems:
               sys.exit("build/manifest.json: " + "; ".join(problems))
-          print(f"manifest.json: build {m['build']}, commit {m['commit'][:12]}, tag {m.get('tag')}")
+          # The packages' paths, one a line, for the upload below.
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("paths<<PATHS_END\n" + "\n".join("build/" + name for name in names) + "\nPATHS_END\n")
+          print(f"manifest.json: build {m['build']}, commit {m['commit'][:12]}, tag {m.get('tag')}, packages {', '.join(names)}")
           PY
 
       - name: Upload the packages and the manifest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hue-drivers-build-${{ github.run_number }}
+          # The packages build/manifest.json names, one path a line.
           path: |
-            build/*.c4z
+            ${{ steps.packages.outputs.paths }}
             build/manifest.json
           if-no-files-found: error
 

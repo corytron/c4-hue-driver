@@ -68,5 +68,10 @@
     "name": "dependencies",
     "color": "0366d6",
     "description": "Dependabot updates of pinned actions and check tools"
+  },
+  {
+    "name": "beta-feedback",
+    "color": "bfd4f2",
+    "description": "A tester's report on a prerelease (the Beta feedback form)"
   }
 ]

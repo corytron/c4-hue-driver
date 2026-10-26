@@ -143,6 +143,10 @@ are dated research; what was built from them is in the contracts and
   changelog (2026-10-25, #255): `CHANGELOG.md`'s format, `tools/changelog.py`
   (check, the release notes, the Documentation tab's Changelog chapter, the
   stamp), and where each release's entry appears.
+- [`prerelease-design.md`](prerelease-design.md): prereleases for testers
+  (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
+  from `main` like every release, their notes, the one list of packages, the
+  house on a prerelease, and the Beta feedback form.
 - [`doc-accuracy-design.md`](doc-accuracy-design.md): the contract of the
   documentation accuracy pass of 2026-10-25 (#231): every document a reader
   sees, checked against the drivers at build 316, and who checked which.

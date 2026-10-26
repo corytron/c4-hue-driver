@@ -4,9 +4,11 @@ the repository's CHANGELOG.md (docs/changelog-design.md).
 Run: python3 -m unittest discover -s tools/tests -v
 """
 
+import argparse
 import contextlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -76,6 +78,18 @@ TEMPLATE = (
 RELEASE = ("--version", "1.0", "--build", "360", "--date", "2026-11-02")
 HTML_RELEASE = ("--release", "1.0", "--build", "360", "--date", "2026-11-02")
 NEW_HEADING = '## 1.0 "Cassian", build 360 (2026-11-02)'
+
+# Prereleases (docs/prerelease-design.md): the same Unreleased entry, never shown as the release.
+PRERELEASE = ("--version", "1.1-beta.1", "--build", "360", "--date", "2026-11-02")
+HTML_PRERELEASE = ("--release", "1.1-beta.1", "--build", "360", "--date", "2026-11-02")
+PRERELEASE_H3 = "<h3>1.1 beta 1 &quot;Cassian&quot; (prerelease), build 360 (2026-11-02)</h3>"
+PRERELEASE_TEMPLATE = (
+    '## {release} beta {beta} "{codename}" (build {build})\n'
+    "\n"
+    "Version {version}, built {date}, follows [{stable}](https://example.com/v{stable_version}).\n"
+    "\n"
+    "{this_build}\n"
+)
 
 
 def text_of(*rows):
@@ -615,9 +629,41 @@ class HtmlTest(CliCase):
         self.assertNotIn("Unreleased", out)
         self.assertEqual(out.count("<h3>"), 4)
 
+    def test_unreleased_as_a_prerelease(self):
+        out = self.html(*HTML_PRERELEASE)
+        self.assertIn(PRERELEASE_H3 + "\n<p><b>Fixed</b></p>", out)
+        self.assertNotIn("Unreleased", out)
+        self.assertNotRegex(out, r"<h3>1\.1 &quot;Cassian&quot;")  # never as the release 1.1
+        self.assertEqual(out.count("<h3>"), 4)
+        self.assertLess(out.index(PRERELEASE_H3), out.index("build 349"))
+        out = self.html("--release", "2.0-beta.3", "--build", "360", "--date", "2026-11-02", "--codename", "Luthen")
+        self.assertIn("<h3>2.0 beta 3 &quot;Luthen&quot; (prerelease), build 360 (2026-11-02)</h3>", out)
+
+    def test_prerelease_refusals(self):
+        for argv, fragment in (
+            (
+                ("--release", "1.0-beta.1", "--build", "360", "--date", "2026-11-02"),
+                "1.0-beta.1 is a prerelease of 1.0, but CHANGELOG.md lists 1.0 already (line 12): a prerelease comes "
+                "before its version's release, so name a later version, such as 1.1-beta.1",
+            ),
+            (("--release", "0.9-beta.2", "--build", "360", "--date", "2026-11-02"), "lists 1.0 already (line 12)"),
+            (("--release", "1.1-beta.1", "--build", "349", "--date", "2026-11-02"), "build 349 has an entry already"),
+            (
+                ("--release", "1.1-beta.1", "--build", "300", "--date", "2026-11-02"),
+                "build 300 is older than build 349",
+            ),
+            (("--release", "1.1-beta.1", "--build", "360", "--date", "2026-10-01"), "2026-10-01 is before 2026-10-25"),
+            (("--release", "2.0-beta.1", "--build", "360", "--date", "2026-11-02"), "2.x has no release yet"),
+            (HTML_PRERELEASE + ("--codename", "Luthen"), '1.x is named "Cassian" (line 12), not "Luthen"'),
+        ):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_main("html", *argv)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(fragment, err)
+
     def test_empty_unreleased_never_shows(self):
         self.write(EMPTY_UNRELEASED)
-        for argv in ((), ("--dev-build", "412"), HTML_RELEASE):
+        for argv in ((), ("--dev-build", "412"), HTML_RELEASE, HTML_PRERELEASE):
             with self.subTest(argv=argv):
                 out = self.html(*argv)
                 self.assertNotIn("Unreleased", out)
@@ -654,7 +700,7 @@ class HtmlTest(CliCase):
 
     def test_composer_safe(self):
         self.write(SAMPLE.replace("- The first build.", "- `<script>alert(1)</script>` and `<img src=x>` stay text."))
-        for argv in ((), ("--dev-build", "412"), HTML_RELEASE):
+        for argv in ((), ("--dev-build", "412"), HTML_RELEASE, HTML_PRERELEASE):
             with self.subTest(argv=argv):
                 out = self.html(*argv)
                 collector = TagCollector()
@@ -686,6 +732,9 @@ class HtmlTest(CliCase):
             ("--codename", "Cassian"),
             ("--dev-build", "0"),
             ("--release", "1.0.1", "--build", "360", "--date", "2026-11-02"),
+            ("--release", "1.1-beta.0", "--build", "360", "--date", "2026-11-02"),
+            ("--release", "1.1-rc.1", "--build", "360", "--date", "2026-11-02"),
+            ("--release", "v1.1-beta.1", "--build", "360", "--date", "2026-11-02"),
         ):
             with self.subTest(argv=argv):
                 self.assertEqual(self.usage_error("html", *argv)[0], 2)
@@ -772,6 +821,99 @@ class NotesTest(CliCase):
         self.assertEqual(code, 1)
         self.assertIn("cannot read", err)
 
+    def test_prerelease_notes_from_the_template(self):
+        with open(self.template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE)
+        code, out, err = self.notes(*PRERELEASE)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(
+            out,
+            '## 1.1 beta 1 "Cassian" (build 360)\n'
+            "\n"
+            'Version 1.1-beta.1, built 2026-11-02, follows [1.0 "Cassian", build 349 (2026-10-25)]'
+            "(https://example.com/v1.0).\n"
+            "\n"
+            "**Fixed**\n"
+            "\n"
+            "- The scene slider no longer jumps back after a recall (#301).\n"
+            "- Keypad LEDs follow a scene recalled in the Hue app,\n"
+            "  also after a bridge restart (#302).\n",
+        )
+
+    def test_each_kind_has_its_default_template(self):
+        prerelease_template = os.path.join(self.tmp.name, "prerelease-notes.md")
+        with open(prerelease_template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE)
+        for name, path in (("TEMPLATE_FILE", self.template), ("PRERELEASE_TEMPLATE_FILE", prerelease_template)):
+            self.addCleanup(setattr, changelog, name, getattr(changelog, name))
+            setattr(changelog, name, path)
+        code, out, err = self.run_main("notes", *PRERELEASE)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith('## 1.1 beta 1 "Cassian" (build 360)\n'), out)
+        code, out, err = self.run_main("notes", *RELEASE)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith('## 1.0 "Cassian" (build 360)\n'), out)
+
+    def test_prerelease_refusals(self):
+        with open(self.template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE + "{history}\n")
+        code, out, err = self.notes(*PRERELEASE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            "names {history}; the placeholders are {version}, {release}, {beta}, {codename}, {build}, {date}, "
+            "{this_build}, {stable}, {stable_version}",
+            err,
+        )
+        with open(self.template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE)
+        code, out, err = self.notes("--version", "1.0-beta.2", "--build", "360", "--date", "2026-11-02")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("CHANGELOG.md lists 1.0 already (line 12)", err)
+        self.write(EMPTY_UNRELEASED)
+        code, out, err = self.notes(*PRERELEASE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("'## Unreleased' (line 5) has no bullets: a prerelease must say what it changes", err)
+        self.write(text_of("# Changelog", "## Unreleased", "### Added", "- The first thing."))
+        code, out, err = self.notes(*PRERELEASE, "--codename", "Cassian")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            "1.1-beta.1: a prerelease's notes name the release it follows, and %s lists none" % self.file, err
+        )
+
+    def test_the_repository_prerelease_template_fills(self):
+        code, out, err = self.run_main("notes", "--template", changelog.PRERELEASE_TEMPLATE_FILE, *PRERELEASE)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith('## 1.1 beta 1 "Cassian" (build 360)\n'), out[:80])
+        self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
+        self.assertIn(
+            "- Keypad LEDs follow a scene recalled in the Hue app,\n  also after a bridge restart (#302).", out
+        )
+        self.assertIn(
+            '[1.0 "Cassian", build 349 (2026-10-25)](https://github.com/corytron/c4-hue-driver/releases/tag/v1.0)', out
+        )
+        self.assertNotIn("build 259", out)  # no history: prereleases are not in CHANGELOG.md
+        # docs/prerelease-design.md, section 3, in this order: a prerelease for testing, the release it
+        # follows, install, going back, how to report, verify a download, the license.
+        marks = [
+            "**A prerelease for testing**",
+            "It follows the stable release",
+            'Driver ▸ "Add or Update Driver or Agent…"',
+            "[latest stable release](https://github.com/corytron/c4-hue-driver/releases/latest)",
+            "issues/new?template=beta-feedback.yml",
+            "sha256sum -c SHA256SUMS.txt",
+            "Apache License 2.0",
+        ]
+        self.assertEqual([out.find(mark) for mark in marks], sorted(out.find(mark) for mark in marks))
+        self.assertNotIn(-1, [out.find(mark) for mark in marks])
+
+    def test_the_repository_templates_count_no_packages(self):
+        for path in (changelog.TEMPLATE_FILE, changelog.PRERELEASE_TEMPLATE_FILE):
+            with self.subTest(path=path):
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+                self.assertIn("every `.c4z` file of", text)
+                self.assertIsNone(re.search(r"\bthree\b|hue_[a-z]+\.c4z", text, re.IGNORECASE))
+
     def test_the_repository_template_fills(self):
         code, out, err = self.run_main("notes", "--template", changelog.TEMPLATE_FILE, *RELEASE)
         self.assertEqual(code, 0, err)
@@ -808,6 +950,16 @@ class StampTest(CliCase):
         self.assertEqual((code, out), (1, ""))
         self.assertIn("'## Unreleased' (line 5) has no bullets: nothing to stamp", err)
         self.assertEqual(self.read(), stamped)
+
+    def test_refuses_a_prerelease(self):
+        code, out, err = self.run_main("stamp", *PRERELEASE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            "1.1-beta.1 is a prerelease: CHANGELOG.md lists releases only, and the 1.1 entry will carry these "
+            "changes (docs/prerelease-design.md); nothing stamped",
+            err,
+        )
+        self.assertEqual(self.read(), SAMPLE)
 
     def test_refuses_a_build_that_has_an_entry(self):
         code, out, err = self.run_main("stamp", "--version", "1.0", "--build", "349", "--date", "2026-11-02")
@@ -872,6 +1024,51 @@ class StampTest(CliCase):
         self.assertEqual(self.read(), broken)
 
 
+class VersionTest(unittest.TestCase):
+    """docs/prerelease-design.md, section 1: MAJOR.MINOR, or MAJOR.MINOR-beta.N for a prerelease, whole."""
+
+    def test_accepted(self):
+        for text, version in (
+            ("1.0", changelog.Version(1, 0)),
+            ("0.9", changelog.Version(0, 9)),
+            ("12.34", changelog.Version(12, 34)),
+            ("1.1-beta.1", changelog.Version(1, 1, 1)),
+            ("1.1-beta.10", changelog.Version(1, 1, 10)),
+            ("2.0-beta.123", changelog.Version(2, 0, 123)),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(changelog.version_arg(text), version)
+                self.assertEqual(str(version), text)
+                self.assertEqual(version.release, (version.major, version.minor))
+
+    def test_refused(self):
+        for text in (
+            "1",
+            "1.0.1",
+            "v1.0",
+            "1.1-beta",
+            "1.1-beta.",
+            "1.1-beta.0",
+            "1.1-beta.01",
+            "1.1-Beta.1",
+            "1.1-rc.1",
+            "1.1-alpha.1",
+            "1.1-beta.1.1",
+            "1.1beta1",
+            "1.1-beta-1",
+            "1.0+5",
+            " 1.0",
+            "1.0 ",
+            "1.0\n",
+            "1.1-beta.1\n",
+            "",
+            "\u0661.\u0660",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    changelog.version_arg(text)
+
+
 class CommandLineTest(CliCase):
     def test_help_of_the_tool_and_of_every_subcommand(self):
         env = dict(os.environ, NO_COLOR="1")
@@ -898,6 +1095,9 @@ class CommandLineTest(CliCase):
             ("stamp", "--version", "1.0", "--build", "0", "--date", "2026-11-02"),
             ("stamp", "--version", "1.0", "--build", "360", "--date", "2026-13-01"),
             ("stamp", "--version", "1.0", "--build", "360", "--date", "2026-11-2"),
+            ("stamp", "--version", "1.1-beta.0", "--build", "360", "--date", "2026-11-02"),
+            ("notes", "--version", "1.1-rc.1", "--build", "360", "--date", "2026-11-02"),
+            ("notes", "--version", "1.1-beta", "--build", "360", "--date", "2026-11-02"),
             ("stamp", *RELEASE, "--codename", 'Say "hi"'),
             ("stamp", *RELEASE, "--codename", " Luthen"),
             ("stamp", *RELEASE, "--codename", ""),

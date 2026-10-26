@@ -8,7 +8,10 @@
 # VM posts them), once a week (Monday 06:30 UTC) and on request. It never
 # installs anything: the controller has no install API and the Composer click
 # stays with the Windows session. Adding the issue to the project board needs a
-# user token, so the coordinator does that by hand.
+# user token, so the coordinator does that by hand. The desired state may name a
+# release or a prerelease (docs/prerelease-design.md, section 4), and the issue's
+# title names it either way: "Deploy v1.0 (build N) to the house" or
+# "Deploy v1.1-beta.1 (build N) to the house".
 name: Drift
 
 on:

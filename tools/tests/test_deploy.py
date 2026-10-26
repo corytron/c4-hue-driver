@@ -30,6 +30,40 @@ PACKAGE_BYTES = {
     "hue_light.c4z": b"light package bytes",
     "hue_scene.c4z": b"scene package bytes",
 }
+PACKAGES = sorted(PACKAGE_BYTES)
+# A prerelease that adds a fourth driver (#268): the package list is the manifest's, never three names.
+BETA_TAG = "v1.1-beta.1"
+BETA_BUILD = 412
+BETA_COMMIT = "b" * 40
+BETA_PACKAGE_BYTES = {
+    "hue_bridge.c4z": b"beta bridge package bytes",
+    "hue_light.c4z": b"beta light package bytes",
+    "hue_motion.c4z": b"beta motion package bytes",
+    "hue_scene.c4z": b"beta scene package bytes",
+}
+BETA_DRIVERS = "hue_bridge hue_light hue_motion hue_scene"
+# Release and prerelease tags (docs/prerelease-design.md, section 1).
+GOOD_TAGS = ("v1.0", "v1.1", "v0.9", "v12.34", "v1.1-beta.1", "v1.1-beta.9", "v1.1-beta.10", "v2.0-beta.123")
+BAD_TAGS = (
+    "1.0",
+    "v1",
+    "v1.0.1",
+    "v1.0-rc1",
+    "v1.1-rc.1",
+    "v1.1-alpha.1",
+    "v1.1-beta",
+    "v1.1-beta.",
+    "v1.1-beta.0",
+    "v1.1-beta.01",
+    "v1.1-Beta.1",
+    "v1.1-beta.1.1",
+    "v1.1beta1",
+    "v1.1-beta-1",
+    "V1.0",
+    "vv1.0",
+    "v1.0+build.5",
+    "v\u0661.\u0660",
+)
 HEX16 = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{16}(?![0-9a-fA-F])")
 
 
@@ -463,12 +497,16 @@ class ValidateHouseTest(unittest.TestCase):
     def test_every_failure_names_its_key(self):
         cases = {
             "environment": ["prod", "House"],
-            "release": ["1.0", "v1", "v1.0.1", "v1.0-rc1"],
+            "release": ["1.0", "v1", "v1.0.1", "v1.0-rc1", "v1.1-beta.0", "v1.1-beta", "v1.1-rc.1"],
             "build": ["0", "-3", "abc", "247.0", ""],
+            # Which drivers is the release's question (validate --online, start); offline only
+            # their form: driver names, each once.
             "drivers": [
-                "hue_bridge hue_light",
-                "hue_bridge hue_light hue_scene extra",
+                "",
                 "hue_bridge hue_light hue_light",
+                "hue_bridge.c4z hue_light.c4z hue_scene.c4z",
+                "hue_bridge ../hue_light",
+                "-hue_bridge hue_light",
             ],
             "stream_timeout_s": ["29", "86401", "-60", "soon", ""],
             "stream_watchdog_s": ["59", "3601", "30", "x", ""],
@@ -646,6 +684,53 @@ class VerificationTest(unittest.TestCase):
                 with self.assertRaises(deploy.DeployError):
                     deploy.read_manifest(path)
 
+    def test_read_manifest_refuses_names_that_are_not_packages(self):
+        good = {"sha256": "a" * 64, "bytes": 1}
+        path = os.path.join(self.dir, "manifest.json")
+        for packages in (
+            {},
+            {"../hue_bridge.c4z": good},
+            {"sub/hue_bridge.c4z": good},
+            {"hue_bridge.zip": good},
+            {".c4z": good},
+            {"-hue_bridge.c4z": good},
+            {"hue bridge.c4z": good},
+        ):
+            with self.subTest(packages=packages):
+                with open(path, "w") as handle:
+                    json.dump({"schema": 1, "build": 252, "commit": COMMIT, "packages": packages}, handle)
+                with self.assertRaises(deploy.DeployError) as ctx:
+                    deploy.read_manifest(path)
+                self.assertIn("manifest.json: ", str(ctx.exception))
+
+    def test_the_package_list_is_the_manifests(self):
+        """Four packages as well as three (docs/prerelease-design.md, section 2): nothing counts them."""
+        for packages in (PACKAGE_BYTES, BETA_PACKAGE_BYTES):
+            with self.subTest(count=len(packages)):
+                self.write_release(packages=packages)
+                manifest = deploy.read_manifest(os.path.join(self.dir, "manifest.json"))
+                self.assertEqual(deploy.manifest_packages(manifest), sorted(packages))
+                hashes = deploy.verify_packages(self.dir, manifest)
+                self.assertEqual(hashes, {name: sha(data) for name, data in packages.items()})
+
+    def test_sums_file_lists_a_package_the_manifest_does_not(self):
+        manifest = self.write_release(sums=sums_for() + "%s  hue_extra.c4z\n" % ("e" * 64))
+        with self.assertRaises(deploy.DeployError) as ctx:
+            deploy.verify_packages(self.dir, manifest)
+        self.assertIn("SHA256SUMS.txt lists hue_extra.c4z, which manifest.json does not", str(ctx.exception))
+
+    def test_check_drivers(self):
+        house = deploy.parse_house(house_text(drivers="hue_scene hue_bridge hue_light"))
+        deploy.check_drivers(house, manifest_for(), "v1.0")  # the order of the names does not matter
+        with self.assertRaises(deploy.DeployError) as ctx:
+            deploy.check_drivers(house, manifest_for(packages=BETA_PACKAGE_BYTES), BETA_TAG)
+        self.assertEqual(
+            str(ctx.exception),
+            "deploy/house.yaml names the drivers hue_bridge hue_light hue_scene, but the release v1.1-beta.1 carries "
+            "hue_bridge.c4z, hue_light.c4z, hue_motion.c4z, hue_scene.c4z (manifest.json): drivers: must name exactly "
+            "the release's packages",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Attestations and tags (through the fake gh)
@@ -746,7 +831,7 @@ class StartTest(DeployCase):
         self.assertEqual((record["id"], record["tag"], record["build"], record["commit"]), (501, "v1.0", 252, COMMIT))
         self.assertTrue(record["url"].endswith("/deployments/501"))
         self.assertTrue(record["created"])
-        for name in deploy.PACKAGES:
+        for name in PACKAGES:
             self.assertTrue(os.path.isfile(self.release_file(name)))
 
         lines = out.strip().splitlines()
@@ -825,14 +910,14 @@ class StartTest(DeployCase):
         code, out, err = self.run_main("start")
         self.assertEqual(code, 0, err)
         calls = self.gh.calls_matching("attestation", "verify")
-        self.assertEqual([args[2] for args, _ in calls], [self.release_file(name) for name in deploy.PACKAGES])
+        self.assertEqual([args[2] for args, _ in calls], [self.release_file(name) for name in PACKAGES])
         policy = ["--repo", "octo/hue", "--signer-workflow", "octo/hue/.github/workflows/release.yml"]
         for args, _ in calls:
             self.assertEqual(args[3:], policy + ["--format", "json"])
         signer = "https://github.com/octo/hue/.github/workflows/release.yml@refs/heads/main"
         self.assertIn("attestation hue_light.c4z: verified (gh 2.103.2), signed by " + signer, out)
         brief = self.read_brief()
-        for name in deploy.PACKAGES:
+        for name in PACKAGES:
             self.assertIn("- %s: provenance verified, signed by %s" % (name, signer), brief)
         self.assertIn(
             "Verified on the VM with gh 2.103.2: `gh attestation verify <file> --repo octo/hue --signer-workflow "
@@ -1300,6 +1385,239 @@ class DriftIssueTest(DeployCase):
         self.assertEqual(code, 3)
         self.assertEqual(self.gh.issues[other["number"]]["title"], "Some other deploy-labelled issue")
         self.assertEqual(len(self.gh.calls_matching("issue", "create")), 1)
+
+
+# ---------------------------------------------------------------------------
+# Prereleases (docs/prerelease-design.md, sections 1, 2 and 4)
+# ---------------------------------------------------------------------------
+
+
+class TagPatternTest(DeployCase):
+    """v1.0 and v1.1-beta.1, and nothing else, wherever a tag is taken."""
+
+    def test_is_tag(self):
+        for tag in GOOD_TAGS:
+            self.assertTrue(deploy.is_tag(tag), tag)
+        for tag in BAD_TAGS + ("", " v1.0", "v1.0 ", "v1.0\n", "v1.1-beta.1\n", None):
+            self.assertFalse(deploy.is_tag(tag), repr(tag))
+
+    def test_is_prerelease(self):
+        self.assertEqual([tag for tag in GOOD_TAGS if deploy.is_prerelease(tag)], [t for t in GOOD_TAGS if "-" in t])
+
+    def test_house_release(self):
+        for tag in GOOD_TAGS:
+            with self.subTest(tag=tag):
+                self.assertEqual(deploy.validate_house(deploy.parse_house(house_text(release=tag))), [])
+        for tag in BAD_TAGS:
+            with self.subTest(tag=tag):
+                self.assertEqual(
+                    deploy.validate_house(deploy.parse_house(house_text(release=tag))),
+                    ["release must look like v1.0 (a release) or v1.1-beta.1 (a prerelease), not %r" % tag],
+                )
+
+    def test_start_and_record_refuse_a_bad_tag_before_any_call(self):
+        for tag in ("v1.1-beta.0", "v1.0-rc1", "1.1-beta.1", "v1.1-beta.1\n"):
+            for argv in (
+                ("start", "--tag", tag),
+                ("record", "--tag", tag, "--build", "252", "--at", AT, "--note", "x"),
+            ):
+                with self.subTest(argv=argv):
+                    code, out, err = self.run_main(*argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn("--tag must look like v1.0 (a release) or v1.1-beta.1 (a prerelease)", err)
+        self.assertEqual(self.gh.calls, [])
+
+
+class DeployIssueTitleTest(unittest.TestCase):
+    """The drift issue's title (#244): "Deploy <tag> (build N) to the house" for a release or a
+    prerelease tag, and nothing else, so that no other issue with the deploy label is touched."""
+
+    def test_both_forms(self):
+        for tag, build in (("v1.0", 252), ("v1.1-beta.1", 412), ("v12.34-beta.10", 1)):
+            title = deploy.issue_title(tag, build)
+            self.assertEqual(title, "Deploy %s (build %d) to the house" % (tag, build))
+            self.assertTrue(deploy.DEPLOY_ISSUE_TITLE.fullmatch(title), title)
+
+    def test_nothing_else(self):
+        for title in (
+            "Deploy v1.0 (build 252) to the house!",
+            "Deploy v1.0 (build 252) to the house\n",
+            "deploy v1.0 (build 252) to the house",
+            "Re: Deploy v1.0 (build 252) to the house",
+            "Deploy v1.1-beta.1 (build 412) to the house, again",
+            "Deploy v1.0 (build) to the house",
+            "Deploy v1.0 (build 2a) to the house",
+            "Deploy v1.0 (build \u0662\u0665\u0662) to the house",
+            "Deploy v1.0 build 252 to the house",
+        ):
+            self.assertIsNone(deploy.DEPLOY_ISSUE_TITLE.fullmatch(title), repr(title))
+        for tag in BAD_TAGS:
+            self.assertIsNone(deploy.DEPLOY_ISSUE_TITLE.fullmatch("Deploy %s (build 1) to the house" % tag), tag)
+
+
+class PrereleaseTest(DeployCase):
+    """deploy/house.yaml names the prerelease v1.1-beta.1 (build 412), whose manifest lists four packages."""
+
+    TITLE = "Deploy v1.1-beta.1 (build 412) to the house"
+
+    def setUp(self):
+        super().setUp()
+        self.gh.tags[BETA_TAG] = BETA_COMMIT
+        manifest = manifest_for(build=BETA_BUILD, tag=BETA_TAG, commit=BETA_COMMIT, packages=BETA_PACKAGE_BYTES)
+        self.gh.assets[BETA_TAG] = release_assets(manifest, packages=BETA_PACKAGE_BYTES)
+        for name, data in BETA_PACKAGE_BYTES.items():
+            self.gh.attestations[sha(data)] = attestation_for(sha(data), name=name)
+        self.write_house(release=BETA_TAG, build=str(BETA_BUILD), drivers=BETA_DRIVERS)
+
+    def beta_file(self, name):
+        return os.path.join(deploy.RELEASE_DIR, BETA_TAG, name)
+
+    def open_issues(self):
+        return [issue for issue in self.gh.issues.values() if issue["state"] == "open"]
+
+    def test_validate_offline_and_online(self):
+        code, out, err = self.run_main("validate")
+        self.assertEqual(code, 0, err)
+        self.assertIn("valid (v1.1-beta.1 build 412;", out)
+        code, out, err = self.run_main("validate", "--online")
+        self.assertEqual(code, 0, err)
+        self.assertIn("release v1.1-beta.1: manifest.json build 412 matches", out)
+        self.assertIn("hue_bridge.c4z, hue_light.c4z, hue_motion.c4z, hue_scene.c4z", out)
+
+    def test_start_install_and_done(self):
+        issue = self.gh.add_issue(self.TITLE)
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 0, err)
+        names = sorted(BETA_PACKAGE_BYTES)
+        self.assertIn("downloaded 6 files", out)
+        # The manifest first, then exactly the packages it names.
+        downloads = [args for args, _ in self.gh.calls_matching("release", "download")]
+        patterns = [[args[i + 1] for i, arg in enumerate(args) if arg == "--pattern"] for args in downloads]
+        self.assertEqual(patterns, [["manifest.json", "SHA256SUMS.txt"], names])
+        body = self.gh.api_calls("POST", "deployments")[0][1]
+        self.assertEqual((body["ref"], body["description"]), (BETA_TAG, "Build 412 (v1.1-beta.1) to the house"))
+        self.assertEqual(body["payload"]["packages"], {name: sha(data) for name, data in BETA_PACKAGE_BYTES.items()})
+        verified = [args[2] for args, _ in self.gh.calls_matching("attestation", "verify")]
+        self.assertEqual(verified, [self.beta_file(name) for name in names])
+
+        with open(self.beta_file("BRIEF.md"), encoding="utf-8") as handle:
+            brief = handle.read()
+        self.assertTrue(brief.startswith("# Install build 412 (v1.1-beta.1, a prerelease) on the house\n"), brief[:80])
+        self.assertIn("v1.1-beta.1 is a prerelease: a build for testing, marked Pre-release on GitHub", brief)
+        self.assertEqual(brief.count("Invoke-WebRequest"), 4)
+        for name, data in BETA_PACKAGE_BYTES.items():
+            self.assertIn("https://github.com/octo/hue/releases/download/v1.1-beta.1/%s" % name, brief)
+            self.assertIn("    '%s' = '%s'" % (name, sha(data)), brief)
+            self.assertIn("- %s: provenance verified, signed by" % name, brief)
+        self.assertIn(
+            "Fetch the 4 packages of the release (hue_bridge.c4z, hue_light.c4z, hue_motion.c4z and hue_scene.c4z)",
+            brief,
+        )
+        self.assertIn("pick all 4 files from `C:\\c4-hue\\drivers\\v1.1-beta.1\\` at once", brief)
+        self.assertIn(
+            "`Driver Version` = 412 (every device of the drivers hue_bridge, hue_light, hue_motion and hue_scene)",
+            brief,
+        )
+        self.assertEqual({m.group(0).lower() for m in HEX16.finditer(brief)} - {"001788fffe123abc"}, set())
+
+        code, out, err = self.run_main("done", "--devices", "9")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.gh.issues[issue["number"]]["state"], "closed")
+        self.assertIn("in sync: build 412 (v1.1-beta.1)", out)
+        self.assertEqual(self.run_main("status")[0], 0)
+
+    def test_start_refuses_drivers_that_are_not_the_releases(self):
+        for drivers in (
+            "hue_bridge hue_light hue_scene",
+            "hue_bridge hue_light hue_motion hue_scene hue_extra",
+            "hue_bridge hue_light hue_sensor hue_scene",
+        ):
+            with self.subTest(drivers=drivers):
+                self.write_house(release=BETA_TAG, build=str(BETA_BUILD), drivers=drivers)
+                before = len(self.gh.calls)
+                code, out, err = self.run_main("start")
+                self.assertEqual(code, 1)
+                self.assertIn("deploy/house.yaml names the drivers %s, but" % " ".join(sorted(drivers.split())), err)
+                self.assertIn("v1.1-beta.1 carries hue_bridge.c4z, hue_light.c4z, hue_motion.c4z, hue_scene.c4z", err)
+                downloads = [args for args, _ in self.gh.calls[before:] if args[:2] == ["release", "download"]]
+                self.assertEqual(len(downloads), 1, "only manifest.json and SHA256SUMS.txt are downloaded")
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+
+    def test_online_checks_refuse_drivers_that_are_not_the_releases(self):
+        self.write_house(release=BETA_TAG, build=str(BETA_BUILD), drivers="hue_bridge hue_light hue_scene")
+        self.assertEqual(self.run_main("validate")[0], 0)  # offline only the form is checked
+        for argv in (("validate", "--online"), ("drift",), ("drift", "--issue")):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_main(*argv)
+                self.assertEqual(code, 1)
+                self.assertIn("names the drivers hue_bridge hue_light hue_scene, but the release v1.1-beta.1", err)
+        self.assertEqual(self.gh.calls_matching("issue"), [])
+
+    def test_drift_issue_names_the_prerelease(self):
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 3)
+        [issue] = self.open_issues()
+        self.assertEqual(issue["title"], self.TITLE)
+        self.assertIn("v1.1-beta.1 is a prerelease, a build for testing", issue["body"])
+        self.assertIn("https://github.com/octo/hue/releases/tag/v1.1-beta.1", issue["body"])
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 3)
+        self.assertIn("is current", out)
+        self.assertEqual(len(self.gh.calls_matching("issue", "create")), 1)
+
+    def test_going_back_to_the_release_retitles_the_issue(self):
+        issue = self.gh.add_issue(self.TITLE)
+        self.gh.add_deployment(BETA_TAG, BETA_BUILD, ["success"])
+        self.write_house()  # back to v1.0, build 252, three drivers: an ordinary desired-state change
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 3)
+        updated = self.gh.issues[issue["number"]]
+        self.assertEqual(updated["title"], "Deploy v1.0 (build 252) to the house")
+        self.assertNotIn("is a prerelease", updated["body"])
+        self.assertEqual(
+            updated["comments"],
+            ['desired state changed: now v1.0 (build 252); this issue was "%s".' % self.TITLE],
+        )
+
+    def test_only_the_two_title_forms_are_drift_issues(self):
+        lookalikes = [
+            self.gh.add_issue(title)
+            for title in (
+                "Deploy v1.1-beta.0 (build 412) to the house",
+                "Deploy v1.1-rc.1 (build 412) to the house",
+                "Deploy v1.1-beta.1 (build 412) to the house, again",
+            )
+        ]
+        drift_issue = self.gh.add_issue(self.TITLE)
+        self.gh.add_deployment(BETA_TAG, BETA_BUILD, ["success"])
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.gh.issues[drift_issue["number"]]["state"], "closed")
+        for issue in lookalikes:
+            self.assertEqual(self.gh.issues[issue["number"]]["state"], "open")
+            self.assertEqual(self.gh.issues[issue["number"]]["comments"], [])
+
+    def test_record_a_prerelease(self):
+        code, out, err = self.run_main(
+            "record", "--tag", BETA_TAG, "--build", str(BETA_BUILD), "--at", AT, "--note", "installed by hand"
+        )
+        self.assertEqual(code, 0, err)
+        deployment = self.gh.deployments[max(self.gh.deployments)]
+        self.assertEqual(deployment["ref"], BETA_TAG)
+        self.assertEqual(deployment["payload"]["commit"], BETA_COMMIT)
+        self.assertEqual(
+            deployment["payload"]["packages"], {name: sha(data) for name, data in BETA_PACKAGE_BYTES.items()}
+        )
+        self.assertIn("in sync: build 412 (v1.1-beta.1)", out)
+
+    def test_done_refuses_when_the_release_gained_a_package(self):
+        self.assertEqual(self.run_main("start")[0], 0)
+        more = dict(BETA_PACKAGE_BYTES, **{"hue_extra.c4z": b"extra package bytes"})
+        manifest = manifest_for(build=BETA_BUILD, tag=BETA_TAG, commit=BETA_COMMIT, packages=more)
+        self.gh.assets[BETA_TAG]["manifest.json"] = json.dumps(manifest).encode()
+        code, out, err = self.run_main("done")
+        self.assertEqual(code, 1)
+        self.assertIn("the release v1.1-beta.1 replaced hue_extra.c4z after start", err)
 
 
 if __name__ == "__main__":

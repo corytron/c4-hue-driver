@@ -2,7 +2,7 @@
 
 Codename: **{codename}**. Each major version of this project is named after something from Star Wars: Andor; every {version} build keeps the name. Released {date}.
 
-Install all three `.c4z` files at once through Driver ▸ "Add or Update Driver or Agent…" in Composer Pro, updating every device in place; never delete and re-add the Hue Bridge driver (that loses the pairing). When the changes below say a driver's capabilities changed, reboot the controller from System Manager afterwards: on OS 3.x, Composer's "Restart Director?" does not load them.
+Install every `.c4z` file of the release at once through Driver ▸ "Add or Update Driver or Agent…" in Composer Pro, updating every device in place; never delete and re-add the Hue Bridge driver (that loses the pairing). When the changes below say a driver's capabilities changed, reboot the controller from System Manager afterwards: on OS 3.x, Composer's "Restart Director?" does not load them.
 
 ### New in build {build}
 
@@ -25,10 +25,10 @@ Each driver's Documentation tab ends with the full list of releases.
 
 ```sh
 sha256sum -c SHA256SUMS.txt
-gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml
+for f in *.c4z; do gh attestation verify "$f" --repo corytron/c4-hue-driver --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml; done
 ```
 
-`gh` 2.102.0 or newer; repeat the second line for `hue_light.c4z` and `hue_scene.c4z`. `manifest.json` names the build, the commit and each package's sha256.
+`gh` 2.102.0 or newer, in the folder that holds every file of the release. `manifest.json` names the build, the commit and each package's sha256.
 
 ### Earlier builds of {version}
 

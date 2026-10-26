@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build build/hue_bridge.c4z, build/hue_light.c4z and build/hue_scene.c4z with Control4's dp3 packager.
+# Build one build/<driver>.c4z per src/<driver>/driver.xml (today hue_bridge, hue_light and
+# hue_scene) with Control4's dp3 packager. That directory list is the one list of the packages
+# (docs/prerelease-design.md, section 2): build/manifest.json names them, and the Release
+# workflow and tools/deploy.py read it from there.
 #
 # Usage: tools/build.sh [--dev]
 #   --dev   developer build: ships common/devloop.lua (the self-reloading dev
@@ -21,7 +24,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DP3="${DP3:-$HOME/c4-tools/drivers-driverpackager/dp3/driverpackager.py}"
-DRIVERS=(hue_bridge hue_light hue_scene)
+DRIVERS=()
+for xml in "$ROOT"/src/*/driver.xml; do
+	DRIVERS+=("$(basename "$(dirname "$xml")")")
+done
+if [[ ${#DRIVERS[@]} -eq 0 ]]; then
+	echo "build.sh: no src/*/driver.xml" >&2
+	exit 1
+fi
 
 extra_args=()
 dev_build=no
@@ -65,7 +75,9 @@ fi
 # The changelog at the bottom of every Documentation tab (docs/changelog-design.md
 # §3): rendered once from CHANGELOG.md, as this release when HEAD carries a
 # v* tag, as a development build in a --dev build, else as it stands.
-release_tag="$(git -C "$ROOT" describe --tags --exact-match --match 'v*' HEAD 2>/dev/null || true)"
+# The Release workflow names its tag in C4_HUE_RELEASE_TAG: a commit can carry both a
+# prerelease tag and a stable one, and describe would pick either.
+release_tag="${C4_HUE_RELEASE_TAG:-$(git -C "$ROOT" describe --tags --exact-match --match 'v*' HEAD 2>/dev/null || true)}"
 changelog_args=()
 if [[ "$dev_build" == yes ]]; then
 	changelog_args=(--dev-build "$version")
@@ -175,7 +187,7 @@ done
 # build/manifest.json: what this build is, for the release assets and for
 # tools/deploy.py (docs/cicd-gitops-design.md, section 5.2). The tag is the
 # exact release tag on HEAD, or null for a build between releases.
-tag="$(git -C "$ROOT" describe --tags --exact-match --match 'v*' HEAD 2>/dev/null || true)"
+tag="$release_tag"
 commit="$(git -C "$ROOT" rev-parse HEAD)"
 dev_json=false
 [[ "$dev_build" == yes ]] && dev_json=true

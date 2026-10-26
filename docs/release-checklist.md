@@ -320,3 +320,45 @@ build for the dev loop, a feature-branch build for a hardware test) also
 takes `--no-manifest`, and `--commit <sha>` names its commit; the drift
 issue then shows the house off its desired state until a release is
 installed again (`CLAUDE.md`, Deploy).
+
+## Prerelease
+
+A prerelease puts a feature in a tester's hands before the release that
+carries it (contract `docs/prerelease-design.md`, issue #269; the first is
+`1.1-beta.1`, with the motion sensors of #268). It is built, checked, attested
+and published as a release is ("How a release is cut" above), from `main`
+only. What differs:
+
+1. **Version and tag.** `X.Y-beta.N`: `X.Y` is the version still to come,
+   later than every version in `CHANGELOG.md`, and `N` counts from 1, a new
+   number for every build a tester gets. Start the Release workflow with that
+   version (Release ▸ Run workflow ▸ `1.1-beta.1`): it tags `main`'s head
+   `v1.1-beta.1`. The tag never moves, so a version whose tag exists fails
+   before anything is built; take the next `N`. A prerelease keeps its major
+   version's codename (1.1-beta.1 is "Cassian").
+2. **Changelog.** Nothing changes in `CHANGELOG.md`: the notes come from the
+   same `## Unreleased` entry, which holds everything since the last release,
+   and a prerelease is never stamped (`changelog.py stamp` refuses one); the
+   release lists it all later. An empty `Unreleased` fails the run, as for a
+   release.
+3. **What GitHub shows.** The release is marked Pre-release and never Latest,
+   so `releases/latest` and the README's download links keep serving the
+   release. Check the title, `1.1 beta 1 "Cassian" (build N)`, the
+   Pre-release mark, and the assets: every package, `SHA256SUMS.txt`,
+   `manifest.json` and the two provenance files. The notes come from
+   `.github/prerelease-notes.md`: what it is, the release it follows, the
+   changes, how to install, how to go back, where to report, how to verify,
+   the license.
+4. **Feedback.** The tester gets the release page's link. Reports come through
+   the "Beta feedback" issue form (label `beta-feedback`); feedback that
+   arrives another way is filed with the same form, with "Reported another way"
+   filled in. A fix is an ordinary pull request, then the next beta number.
+5. **The house**, when it runs the prerelease too: a desired-state pull request
+   sets `deploy/house.yaml` to it (`release: v1.1-beta.1`, its build, and
+   `drivers:` exactly the packages of its `manifest.json`), then "Deploy to the
+   house" above runs as for a release: the drift issue reads `Deploy
+   v1.1-beta.1 (build N) to the house`, and the brief says it is a
+   prerelease. Going back to the release is another desired-state pull request.
+6. **The release.** When testing is done, cut `X.Y` itself ("How a release is
+   cut"): its notes carry the same `Unreleased` entry, and its desired-state
+   pull request stamps `CHANGELOG.md`.

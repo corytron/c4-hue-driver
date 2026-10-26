@@ -1,0 +1,90 @@
+name: Beta feedback
+description: What you saw while testing a prerelease of the drivers (a version such as 1.1-beta.1)
+labels: [beta-feedback]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing a prerelease. Before you paste anything, **replace your LAN
+        addresses (the bridge's, the controller's) and the bridge id with placeholders**,
+        for example `10.0.2.143` for the bridge, `192.0.2.20` for the controller and
+        `001788fffe123abc` for the bridge id. The driver never shows the Hue application
+        key; **never paste one**. If you think you have found a security problem, do not
+        open an issue: see `SECURITY.md`.
+
+        To go back to the stable release, follow "Going back" on the prerelease's page.
+  - type: input
+    id: version
+    attributes:
+      label: Prerelease version
+      description: The version the prerelease's page names (its tag without the v), and the **Driver Version** of the Hue Bridge device.
+      placeholder: "1.1-beta.1, Driver Version 380"
+    validations:
+      required: true
+  - type: input
+    id: c4-os
+    attributes:
+      label: Control4 OS version
+      description: The controller's OS version as Composer Pro reports it.
+      placeholder: "3.4.2"
+    validations:
+      required: true
+  - type: input
+    id: composer
+    attributes:
+      label: Composer Pro version
+      placeholder: "3.4.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: bridge-model
+    attributes:
+      label: Bridge model
+      description: The **Bridge Model** property of the Hue Bridge device.
+      options:
+        - Hue Bridge Pro (BSB003)
+        - Hue Bridge v2, square (BSB002)
+        - Other, or not paired yet (say what Bridge Model shows)
+    validations:
+      required: true
+  - type: input
+    id: bridge-software
+    attributes:
+      label: Bridge software
+      description: The **Bridge Firmware** property of the Hue Bridge device (the bridge's software and API version).
+      placeholder: "1968096020 (API 1.68.0)"
+    validations:
+      required: true
+  - type: textarea
+    id: devices
+    attributes:
+      label: Devices involved
+      description: The devices this is about, each with its model as the Hue app shows it, for example the sensors, lights, scenes or keypads you tried.
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What you did and what you saw
+      description: The steps (a Composer action, a Navigator tile, a keypad, the Hue app, a sensor, ...), what the drivers did, and what you expected instead. Add the texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties when they matter.
+    validations:
+      required: true
+  - type: textarea
+    id: lua-output
+    attributes:
+      label: Lua output
+      description: Set **Debug Mode** to On on the device (Properties tab, then the row's Set button), do it again, paste the relevant lines of the device's Lua tab in Composer, and set Debug Mode back to Off. Addresses and ids replaced with placeholders; no application key.
+      render: text
+  - type: input
+    id: reported-by
+    attributes:
+      label: Reported another way
+      description: For the maintainer, when pasting feedback that came by another channel (a message, a call). Leave it empty for your own report.
+      placeholder: "By email from a tester"
+  - type: checkboxes
+    id: private-data
+    attributes:
+      label: Private data
+      options:
+        - label: I replaced LAN addresses and the bridge id with placeholders and did not paste an application key.
+          required: true

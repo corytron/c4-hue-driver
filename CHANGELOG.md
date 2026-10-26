@@ -12,6 +12,11 @@ listed.
 
 ## Unreleased
 
+### Added
+- Prereleases for testers: versions such as 1.1-beta.1 appear on the
+  Releases page marked Pre-release, with their own notes and a Beta feedback
+  form; the stable release stays the one marked Latest (#269).
+
 ### Changed
 - The manual says what to do when a device's Documentation tab still shows
   the page of the build before right after an update: select the device

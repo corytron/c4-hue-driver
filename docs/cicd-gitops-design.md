@@ -180,6 +180,11 @@ tests run before the build, as today.
 Current (2026-10-25, build 316): a dispatch from any ref but `main` is
 refused too, in both jobs' tag step, before anything is built
 (`.github/workflows/release.yml`).
+Current (2026-10-26, #269): the input also takes a prerelease version
+(`^[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$`, such as `1.1-beta.1`), and a pushed
+tag `v1.1-beta.1` is built the same way. A prerelease tag never moves: a
+dispatch whose prerelease tag exists already fails in the build job's tag
+step, before anything is built (§5.6).
 
 ### 5.2 `build/manifest.json`
 
@@ -222,6 +227,16 @@ the title being the notes' first heading without the build
 (`1.0 "Cassian"`). Nothing in the notes is edited by hand any more.
 Current (2026-10-25, build 316): `.github/release.yml` ends with a sixth
 category, "Other changes", for every other pull request.
+Current (2026-10-26, #269): the packages are named in one place, the
+directories `src/<driver>/` that hold a `driver.xml`: `tools/build.sh` builds
+exactly those and `packages` lists them, so there may be more than three. The
+workflow's checks, the `SHA256SUMS.txt` it writes, the provenance subjects,
+the in-toto check and the uploads take the list from the manifest, and both
+jobs check that list against those directories of the commit (`git
+ls-tree`); CI's build job does the same. The Build step names the tag in
+`C4_HUE_RELEASE_TAG`, which `tools/build.sh` writes into the manifest and the
+changelog (`git describe` could pick either of a prerelease's tag and a
+release's on one commit), so the build job no longer tags the commit locally.
 
 ### 5.3 Tag protection
 
@@ -261,6 +276,15 @@ No third-party code runs where the write token or the signing identity is:
 - `GH_TOKEN` (`github.token`) is set only on the steps that push the tag or
   call `gh`: the tag push and the release with its files, title and notes.
 
+Current (2026-10-26, #269): the publish job checks out this run's commit on
+both paths (without credentials; nothing in it is run, and `python3 -I`
+imports nothing from it or from the downloaded files) to read its
+`src/*/driver.xml` directories: it accepts exactly one package per directory,
+`SHA256SUMS.txt`, the manifest and the notes, and hands the list to the later
+steps as step outputs. For a prerelease, one more step with `GH_TOKEN` refuses,
+before anything is signed, a release of the tag that exists already and whose
+`manifest.json` names another commit (§5.6).
+
 What a compromised tool in the build job can still do: put its own code
 into the packages, which the attestation then truthfully describes as built
 by `release.yml` from this commit. What it can no longer do: push or move
@@ -298,6 +322,40 @@ release reaches a build only through a reviewed change:
 
 The packager and the rocks are no Dependabot ecosystem, so nothing proposes
 their updates: the weekly CI run keeps proving that the pinned set installs.
+
+### 5.6 Prereleases (#269)
+
+The contract is `docs/prerelease-design.md`; the Release workflow does this:
+
+- **Versions and tags**: `X.Y-beta.N`, N from 1, tagged `vX.Y-beta.N`, one
+  pattern everywhere (`^[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$`, with a leading
+  `v` for tags). A prerelease is built from `main` by the same two jobs, with
+  the same checks, attestation and assets as a release, and keeps its major
+  version's codename.
+- **The tag never moves**: a dispatch for a prerelease tag that exists fails in
+  the build job before anything is built (`git ls-remote --exit-code`); the
+  publish job pushes the new tag without `--force`, and leaves alone a tag that
+  already names this commit (the job runs again after a failure). Once its
+  release exists, a prerelease is continued only by a run of the commit it was
+  published from, so a tag moved by hand fails before anything is signed.
+- **Notes and title**: the build job writes the notes with `tools/changelog.py
+  notes --template .github/prerelease-notes.md` from the same `## Unreleased`
+  entry (an empty one fails, as for a release), and the Documentation tabs show
+  that entry as `1.1 beta 1 "Cassian" (prerelease), build N (date)`. The
+  title is the notes' first heading as it is: `1.1 beta 1 "Cassian" (build
+  412)`.
+- **On GitHub**: `gh release create --prerelease --latest=false` (a release
+  that exists is edited with `--prerelease`), so `releases/latest` and the
+  README's download links keep serving the release. `CHANGELOG.md` is not
+  stamped for a prerelease (`changelog.py stamp` refuses one): the release's
+  entry carries its changes later.
+- **The house** (§6, §7): `deploy/house.yaml` may name a prerelease tag, and
+  its `drivers:` must be the release manifest's packages (offline, `validate`
+  checks only their form, since the file may name an older release than the
+  tree builds; `validate --online`, `drift` and `start` compare them with the
+  manifest). The drift issue reads `Deploy vX.Y-beta.N (build N) to the house`,
+  and the brief says "prerelease" and lists every package of the manifest.
+  Going back to a release is an ordinary desired-state pull request.
 
 ## 6. Desired state: `deploy/house.yaml`
 

@@ -1,32 +1,43 @@
-# Cut a release (docs/cicd-gitops-design.md, section 5). Two ways in:
-# - a pushed tag v1.0, v1.1, ...: the tag must point at a commit on main, or
-#   the run fails before building anything;
-# - "Run workflow" from main with the version (1.0, 1.1, ...): the run builds
-#   main's head, then tags it v<version>, moving the tag when it exists (later
-#   releases of the same spike move the tag, docs/release-checklist.md), and
-#   pushes the tag, all in the same run, because a tag pushed with the
-#   workflow's own token starts no second workflow.
+# Cut a release or a prerelease (docs/cicd-gitops-design.md, section 5;
+# docs/prerelease-design.md). Two ways in:
+# - a pushed tag, v1.0, v1.1, ... for a release or v1.1-beta.1, ... for a
+#   prerelease: the tag must point at a commit on main, or the run fails before
+#   building anything;
+# - "Run workflow" from main with the version (1.0, or 1.1-beta.1 for a
+#   prerelease): the run builds main's head, then tags it v<version> and pushes
+#   the tag, all in the same run, because a tag pushed with the workflow's own
+#   token starts no second workflow. A release tag is moved when it exists
+#   (later builds of a version move it, docs/release-checklist.md); a
+#   prerelease tag never moves: each beta gets a new number, and a run for a
+#   prerelease tag that exists already fails before building anything.
 # Two jobs, so that no third-party code runs where the write token or the
 # signing identity is (security review 2026-10-25, finding 11; section 5.4):
 # - build (contents: read, no id-token, no GH_TOKEN): lint and test with the
-#   pinned luarocks tools, build the three .c4z files with the pinned
-#   packager, write SHA256SUMS.txt, check build/manifest.json against the
-#   packages, this commit and the tag, and hand the five files over as a
-#   workflow artifact;
+#   pinned luarocks tools, build one package per src/<driver>/driver.xml with
+#   the pinned packager, check build/manifest.json against the packages, this
+#   commit and the tag, write SHA256SUMS.txt and the notes, and hand the
+#   packages, SHA256SUMS.txt, the manifest and the notes over as a workflow
+#   artifact;
 # - publish (contents: write, id-token: write, attestations: write; nothing
-#   but actions/* pinned by SHA, git and gh): download and re-check those
-#   files, sign a build-provenance attestation for the packages (Sigstore,
-#   stored on GitHub), move or create the tag (dispatch only), and attach the
+#   but actions/* pinned by SHA, git, gh and short python3 steps of its own):
+#   check out this run's commit without credentials, download and re-check
+#   those files against it, refuse to change a prerelease that was published
+#   from another commit, sign a build-provenance attestation for the packages
+#   (Sigstore, stored on GitHub), push the tag (dispatch only), and attach the
 #   packages, the checksums, the manifest, the attestation bundle and its
 #   in-toto envelope to the GitHub release of the tag. GH_TOKEN is set only on
-#   the steps that push the tag or call gh.
-# The release is created when it does not exist yet, titled "<version>" with
-# generated notes (categories: .github/release.yml) and a first paragraph
-# naming the build number and the install rule. A tag that moves replaces
-# every attached file (--clobber); an existing release's title is never
-# touched (the coordinator edits the codename in by hand), and of its notes
-# only the build number that ends the first heading, "(build N)", follows the
-# packages (issue #239); the rest stays as the coordinator wrote it.
+#   the steps that call gh or push the tag.
+# The packages are named in one place, the src/<driver>/ directories that hold a
+# driver.xml (docs/prerelease-design.md, section 2): build/manifest.json lists
+# them, every check below takes the list from it, and both jobs check that list
+# against those directories of the commit. The release's title and notes come
+# from CHANGELOG.md on every run (docs/changelog-design.md, #255): the notes'
+# first heading without its "(build N)" is a release's title (1.0 "Cassian"),
+# and the whole heading a prerelease's (1.1 beta 1 "Cassian" (build 412)). The
+# release is created when it does not exist yet, otherwise its title and notes
+# are set again, and a tag that moves replaces every attached file (--clobber).
+# A new release becomes Latest (GitHub's default); a prerelease is created with
+# --prerelease --latest=false and is never Latest.
 name: Release
 
 on:
@@ -35,7 +46,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, for example 1.0: tags the head of main v1.0, moving the tag if it exists'
+        description: 'Version: 1.0 releases the head of main as v1.0, moving the tag if it exists; 1.1-beta.1 publishes it as the prerelease v1.1-beta.1, a new tag every time'
         required: true
         type: string
 
@@ -77,23 +88,34 @@ jobs:
                 echo "::error::Run this workflow from main, not from $REF_NAME: releases are built from main only"
                 exit 1
               fi
-              if [[ ! "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+$ ]]; then
-                echo "::error::The version must look like 1.0 (two numbers and a dot), not '$VERSION_INPUT'"
+              if [[ ! "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]]; then
+                echo "::error::The version must look like 1.0, or 1.1-beta.1 for a prerelease, not '$VERSION_INPUT'"
                 exit 1
               fi
               tag="v$VERSION_INPUT"
-              # A local tag only, so that tools/build.sh names it in
-              # build/manifest.json; the publish job pushes the real one.
-              # Annotated, as that one will be: git describe prefers the
-              # newest annotated tag when another one is on the same commit.
-              git -c user.name="github-actions[bot]" \
-                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                tag -f -a "$tag" -m "Release ${tag#v}" "$GITHUB_SHA"
+              # A prerelease tag never moves (docs/prerelease-design.md,
+              # section 1): each beta gets a new number, so a dispatch for one
+              # that exists ends here, before anything is built.
+              if [[ "$tag" == *-beta.* ]]; then
+                found=0
+                git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null || found=$?
+                case "$found" in
+                  0)
+                    echo "::error::$tag exists already: a prerelease tag never moves; run the workflow with the next beta number"
+                    exit 1
+                    ;;
+                  2) ;;
+                  *)
+                    echo "::error::Could not ask origin whether $tag exists (git ls-remote exited $found)"
+                    exit 1
+                    ;;
+                esac
+              fi
               ;;
             push)
               tag="$REF_NAME"
-              if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+$ ]]; then
-                echo "::error::Release tags look like v1.0 (docs/release-checklist.md, Naming), not '$tag'"
+              if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]]; then
+                echo "::error::Release tags look like v1.0, or v1.1-beta.1 for a prerelease (docs/release-checklist.md, Naming), not '$tag'"
                 exit 1
               fi
               git fetch --no-tags origin main
@@ -107,7 +129,12 @@ jobs:
               exit 1
               ;;
           esac
+          prerelease=false
+          if [[ "$tag" == *-beta.* ]]; then
+            prerelease=true
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "Building $tag from $GITHUB_SHA"
 
       # The same pinned rocks as ci.yml (the reasons, and how to move a pin,
@@ -148,29 +175,33 @@ jobs:
           git -C "$dir" checkout -q FETCH_HEAD
           test "$(git -C "$dir" rev-parse HEAD)" = "$PACKAGER_SHA"
 
+      # tools/build.sh names this tag in build/manifest.json and renders the
+      # changelog of every Documentation tab as this release or prerelease:
+      # told, not found with git describe, which could pick either of two tags
+      # on one commit (a prerelease and the release cut from it).
       - name: Build
+        env:
+          C4_HUE_RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: DP3="$RUNNER_TEMP/drivers-driverpackager/dp3/driverpackager.py" tools/build.sh
 
       # docs/release-checklist.md, section 0: every package carries LICENSE and
-      # NOTICE. SHA256SUMS.txt is what deploy.py and the install brief verify
-      # against; manifest.json (docs/cicd-gitops-design.md, section 5.2) must
-      # describe these packages, this commit and this tag.
+      # NOTICE. The packages are the ones build/manifest.json names, which must
+      # be the src/<driver>/driver.xml directories of this commit
+      # (docs/prerelease-design.md, section 2). SHA256SUMS.txt is what deploy.py
+      # and the install brief verify against; manifest.json
+      # (docs/cicd-gitops-design.md, section 5.2) must describe these packages,
+      # this commit and this tag.
       - name: Check the packages, write SHA256SUMS.txt and check the manifest
+        id: packages
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          (
-            cd build
-            for d in hue_bridge hue_light hue_scene; do
-              test -f "$d.c4z"
-              unzip -Z1 "$d.c4z" | grep -qx LICENSE
-              unzip -Z1 "$d.c4z" | grep -qx NOTICE
-            done
-            sha256sum hue_bridge.c4z hue_light.c4z hue_scene.c4z | tee SHA256SUMS.txt
-          )
-          python3 - "$TAG" <<'PY'
-          import hashlib, json, subprocess, sys
+          python3 -I - "$TAG" <<'PY'
+          import hashlib, json, os, re, subprocess, sys, zipfile
           tag = sys.argv[1]
+          tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", "src"], text=True)
+          found = (re.fullmatch(r"src/([^/]+)/driver\.xml", path) for path in tree.split("\0"))
+          expected = sorted(match.group(1) + ".c4z" for match in found if match)
           with open("build/manifest.json", encoding="utf-8") as f:
               m = json.load(f)
           count = int(subprocess.check_output(["git", "rev-list", "--count", "HEAD"], text=True))
@@ -188,31 +219,63 @@ jobs:
               problems.append(f"commit {m.get('commit')!r} is not HEAD {head}")
           if m.get("dev") is not False:
               problems.append("dev is not false: a development build is never released")
-          for name in ("hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"):
-              entry = (m.get("packages") or {}).get(name)
-              if not entry:
-                  problems.append(f"{name} is missing from packages")
+          packages = m.get("packages") if isinstance(m.get("packages"), dict) else {}
+          names = sorted(packages)
+          if not names or names != expected:
+              problems.append(f"packages {names} are not those of this commit's src/*/driver.xml directories, {expected}")
+          for name in names:
+              if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*\.c4z", name):
+                  problems.append(f"{name!r} is not a package name")
                   continue
-              with open(f"build/{name}", "rb") as f:
+              path = os.path.join("build", name)
+              if not os.path.isfile(path):
+                  problems.append(f"{name} is missing")
+                  continue
+              with open(path, "rb") as f:
                   data = f.read()
+              try:
+                  with zipfile.ZipFile(path) as z:
+                      entries = set(z.namelist())
+              except zipfile.BadZipFile:
+                  problems.append(f"{name} is not a zip file")
+                  continue
+              for required in ("LICENSE", "NOTICE"):
+                  if required not in entries:
+                      problems.append(f"{name} lacks {required} (Apache License 2.0, section 4)")
+              entry = packages[name] if isinstance(packages[name], dict) else {}
               if entry.get("sha256") != hashlib.sha256(data).hexdigest():
                   problems.append(f"{name}: sha256 differs from the file")
               if entry.get("bytes") != len(data):
                   problems.append(f"{name}: bytes differs from the file")
           if problems:
               sys.exit("build/manifest.json: " + "; ".join(problems))
-          print(f"manifest.json: build {m['build']}, {tag}, commit {m['commit'][:12]}")
+          with open("build/SHA256SUMS.txt", "w", encoding="utf-8") as f:
+              for name in names:
+                  f.write(f"{packages[name]['sha256']}  {name}\n")
+          with open("build/SHA256SUMS.txt", encoding="utf-8") as f:
+              print(f.read(), end="")
+          # The packages' paths, one a line, for the artifact upload below.
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("paths<<PATHS_END\n" + "\n".join("build/" + name for name in names) + "\nPATHS_END\n")
+          print(f"manifest.json: build {m['build']}, {tag}, commit {m['commit'][:12]}, packages {', '.join(names)}")
           PY
 
       # The release's notes are written from CHANGELOG.md on every run
       # (docs/changelog-design.md): the template .github/release-notes.md with
       # this build's changes (the Unreleased entry) and the earlier builds of
-      # the version. A release whose Unreleased entry is empty fails here.
+      # the version, or for a prerelease .github/prerelease-notes.md with the
+      # same entry and the release it follows (docs/prerelease-design.md,
+      # section 3). A run whose Unreleased entry is empty fails here.
       - name: Write the release notes from CHANGELOG.md
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
-          python3 -I tools/changelog.py notes --file CHANGELOG.md --template .github/release-notes.md \
+          template=.github/release-notes.md
+          if [[ "$PRERELEASE" == true ]]; then
+            template=.github/prerelease-notes.md
+          fi
+          python3 -I tools/changelog.py notes --file CHANGELOG.md --template "$template" \
             --version "${TAG#v}" --build "$(git rev-list --count HEAD)" --date "$(date -u +%F)" \
             > build/release-notes.md
           cat build/release-notes.md
@@ -221,10 +284,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hue-drivers-${{ steps.tag.outputs.tag }}-build
+          # The packages build/manifest.json names, one path a line.
           path: |
-            build/hue_bridge.c4z
-            build/hue_light.c4z
-            build/hue_scene.c4z
+            ${{ steps.packages.outputs.paths }}
             build/SHA256SUMS.txt
             build/manifest.json
             build/release-notes.md
@@ -267,17 +329,22 @@ jobs:
               exit 1
               ;;
           esac
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Release tags look like v1.0 (docs/release-checklist.md, Naming), not '$tag'"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$ ]]; then
+            echo "::error::Release tags look like v1.0, or v1.1-beta.1 for a prerelease (docs/release-checklist.md, Naming), not '$tag'"
             exit 1
           fi
+          prerelease=false
+          if [[ "$tag" == *-beta.* ]]; then
+            prerelease=true
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "Publishing $tag from $GITHUB_SHA"
 
-      # Only the dispatch path tags, and git needs the commit to tag it: this
-      # run's commit alone, checked out without credentials.
-      - name: Check out the commit to tag (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      # This run's commit alone, checked out without credentials: the package
+      # list is checked against its src/*/driver.xml directories, and the
+      # dispatch path tags it. Nothing in it is run.
+      - name: Check out this run's commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -290,30 +357,43 @@ jobs:
 
       # The build job ran third-party tools, so what it handed over is checked
       # here with the runner's own tools before anything is signed: exactly
-      # the five files, every package as SHA256SUMS.txt and the manifest
-      # describe it, and a manifest naming this tag and this run's commit.
+      # one package per src/<driver>/driver.xml directory of this run's commit,
+      # SHA256SUMS.txt, the manifest and the notes; every package as
+      # SHA256SUMS.txt and the manifest describe it; a manifest naming these
+      # packages, this tag and this run's commit. python3 -I imports nothing
+      # from the checkout or the downloaded files.
       - name: Check the files before signing them
+        id: check
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          cd build
-          listing="$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort | tr '\n' ' ')"
-          if [[ "$listing" != "SHA256SUMS.txt hue_bridge.c4z hue_light.c4z hue_scene.c4z manifest.json release-notes.md " ]]; then
-            echo "::error::The build job handed over something other than the five release files and the notes: $listing"
-            exit 1
-          fi
-          sha256sum --check --strict SHA256SUMS.txt
-          python3 - "$TAG" "$GITHUB_SHA" <<'PY'
-          import hashlib, json, sys
+          python3 -I - "$TAG" "$GITHUB_SHA" <<'PY'
+          import hashlib, json, os, re, subprocess, sys
           tag, commit = sys.argv[1], sys.argv[2]
-          names = ["hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"]
-          with open("SHA256SUMS.txt", encoding="utf-8") as f:
-              listed = sorted(line.split()[1] for line in f if line.strip())
-          with open("manifest.json", encoding="utf-8") as f:
+          tree = subprocess.check_output(["git", "ls-tree", "-r", "-z", "--name-only", commit, "--", "src"], text=True)
+          found = (re.fullmatch(r"src/([^/]+)/driver\.xml", path) for path in tree.split("\0"))
+          names = sorted(match.group(1) + ".c4z" for match in found if match)
+          if not names or not all(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*\.c4z", name) for name in names):
+              sys.exit(f"this commit's src/*/driver.xml directories give no usable package names: {names}")
+          listing = sorted(
+              os.path.relpath(os.path.join(root, entry), "build")
+              for root, dirs, files in os.walk("build")
+              for entry in dirs + files
+          )
+          wanted = sorted(names + ["SHA256SUMS.txt", "manifest.json", "release-notes.md"])
+          if listing != wanted:
+              sys.exit(f"the build job handed over {listing}, not the packages, SHA256SUMS.txt, the manifest and the notes: {wanted}")
+          with open("build/SHA256SUMS.txt", encoding="utf-8") as f:
+              sums = [line.split() for line in f if line.strip()]
+          with open("build/manifest.json", encoding="utf-8") as f:
               m = json.load(f)
           problems = []
-          if listed != names:
-              problems.append(f"SHA256SUMS.txt lists {listed}, not the three packages")
+          listed = sorted(fields[-1] for fields in sums)
+          if listed != names or any(len(fields) != 2 for fields in sums):
+              problems.append(f"SHA256SUMS.txt lists {listed}, not the packages {names}")
+          packages = m.get("packages") if isinstance(m.get("packages"), dict) else {}
+          if sorted(packages) != names:
+              problems.append(f"packages {sorted(packages)} are not the packages {names}")
           if m.get("schema") != 1:
               problems.append("schema is not 1")
           if m.get("tag") != tag or m.get("version") != tag[1:]:
@@ -325,18 +405,61 @@ jobs:
           if not isinstance(m.get("build"), int) or m["build"] <= 0:
               problems.append(f"build {m.get('build')!r} is not a positive integer")
           for name in names:
-              entry = (m.get("packages") or {}).get(name) or {}
-              with open(name, "rb") as f:
+              entry = packages.get(name) if isinstance(packages.get(name), dict) else {}
+              with open(os.path.join("build", name), "rb") as f:
                   data = f.read()
-              if entry.get("sha256") != hashlib.sha256(data).hexdigest() or entry.get("bytes") != len(data):
+              digest = hashlib.sha256(data).hexdigest()
+              if [fields[0] for fields in sums if fields[-1] == name] != [digest]:
+                  problems.append(f"{name} differs from its line in SHA256SUMS.txt")
+              if entry.get("sha256") != digest or entry.get("bytes") != len(data):
                   problems.append(f"{name} differs from its entry in packages")
           if problems:
               sys.exit("build/manifest.json: " + "; ".join(problems))
-          print(f"checked: {tag}, build {m['build']}, commit {commit[:12]}")
+          # The package list for the steps below: names on one line, paths one a line.
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write("packages=" + " ".join(names) + "\n")
+              f.write("paths<<PATHS_END\n" + "\n".join("build/" + name for name in names) + "\nPATHS_END\n")
+          print(f"checked: {tag}, build {m['build']}, commit {commit[:12]}, packages {', '.join(names)}")
           PY
+          cd build
+          sha256sum --check --strict SHA256SUMS.txt
 
-      # SLSA build provenance for the three packages, signed through Sigstore
-      # with this job's identity (the certificate names
+      # A prerelease never changes once published (docs/prerelease-design.md,
+      # section 1). When its release exists, only a run of the commit it was
+      # published from may go on, which is a run that failed half-way and runs
+      # again; a prerelease tag moved by hand ends here, before anything is
+      # signed.
+      - name: Check that a published prerelease came from this commit (prerelease only)
+        if: steps.tag.outputs.prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+              > "$RUNNER_TEMP/assets.txt" 2> "$RUNNER_TEMP/view.txt"; then
+            if grep -qx 'release not found' "$RUNNER_TEMP/view.txt"; then
+              echo "$TAG has no release yet"
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/view.txt" >&2
+            exit 1
+          fi
+          if ! grep -qx manifest.json "$RUNNER_TEMP/assets.txt"; then
+            echo "$TAG has a release without manifest.json (a run stopped before its upload): the files are attached again"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/published"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir "$RUNNER_TEMP/published"
+          published="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("commit"))' \
+            "$RUNNER_TEMP/published/manifest.json")"
+          if [[ "$published" != "$GITHUB_SHA" ]]; then
+            echo "::error::The prerelease $TAG was published from $published, not from $GITHUB_SHA: a prerelease never changes; release the next beta number instead"
+            exit 1
+          fi
+          echo "$TAG was published from this commit before (this run goes on after a failure): the files are attached again"
+
+      # SLSA build provenance for the packages, signed through Sigstore with
+      # this job's identity (the certificate names
       # .github/workflows/release.yml and this run's commit) and stored on
       # GitHub, where `gh attestation verify --signer-workflow` and
       # tools/deploy.py check it. The bundle is also attached to the release
@@ -346,10 +469,8 @@ jobs:
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: |
-            build/hue_bridge.c4z
-            build/hue_light.c4z
-            build/hue_scene.c4z
+          # The packages build/manifest.json names, one path a line (checked above).
+          subject-path: ${{ steps.check.outputs.paths }}
 
       - name: Keep the attestation bundle next to the packages
         env:
@@ -360,16 +481,18 @@ jobs:
           ls -l build/attestations.sigstore.json
 
       # The same provenance as SLSA's in-toto JSON lines: the bundle's DSSE
-      # envelope (an in-toto v1 statement with the SLSA provenance v1 of all
-      # three packages), one compact JSON line per envelope. Scorecard's
+      # envelope (an in-toto v1 statement with the SLSA provenance v1 of every
+      # package), one compact JSON line per envelope. Scorecard's
       # Signed-Releases check scores a release with an *.intoto.jsonl asset 10,
       # with the Sigstore bundle alone 8. Checked first: the envelope must name
-      # exactly the three packages with their digests.
+      # exactly the packages with their digests.
       - name: Write the provenance as hue-drivers.intoto.jsonl
+        env:
+          PACKAGES: ${{ steps.check.outputs.packages }}
         run: |
-          python3 - <<'PY'
+          python3 -I - "$PACKAGES" <<'PY'
           import base64, hashlib, json, sys
-          names = ["hue_bridge.c4z", "hue_light.c4z", "hue_scene.c4z"]
+          names = sys.argv[1].split()
           with open("build/attestations.sigstore.json", encoding="utf-8") as f:
               text = f.read()
           try:
@@ -390,8 +513,8 @@ jobs:
           for name in names:
               with open(f"build/{name}", "rb") as f:
                   wanted[name] = hashlib.sha256(f.read()).hexdigest()
-          if covered != wanted:
-              sys.exit(f"the provenance names {sorted(covered)}, not exactly the three packages and their digests")
+          if not names or covered != wanted:
+              sys.exit(f"the provenance names {sorted(covered)}, not exactly the packages {names} and their digests")
           with open("build/hue-drivers.intoto.jsonl", "w", encoding="utf-8") as f:
               for envelope in envelopes:
                   f.write(json.dumps(envelope, separators=(",", ":")) + "\n")
@@ -403,9 +526,7 @@ jobs:
         with:
           name: hue-drivers-${{ steps.tag.outputs.tag }}
           path: |
-            build/hue_bridge.c4z
-            build/hue_light.c4z
-            build/hue_scene.c4z
+            ${{ steps.check.outputs.paths }}
             build/SHA256SUMS.txt
             build/manifest.json
             build/attestations.sigstore.json
@@ -413,23 +534,44 @@ jobs:
           if-no-files-found: error
 
       # Only now, with the packages built, checked and attested, does the
-      # dispatch path move the tag, so that a run that fails earlier leaves it
-      # where it was. The checkout kept no credentials: the push authenticates
-      # with the workflow's token in the same header actions/checkout would
-      # have configured. The tag ruleset must let GitHub Actions create and
-      # update v* tags (docs/cicd-gitops-design.md, section 5.3).
+      # dispatch path tag the commit, so that a run that fails earlier leaves
+      # the tags where they were. A release tag is moved (--force). A
+      # prerelease tag is created and never moved (docs/prerelease-design.md,
+      # section 1): pushed without --force, so a tag that exists refuses the
+      # push, and one that already names this commit (this job runs again after
+      # a failure) is left as it is. The checkout kept no credentials: the push
+      # authenticates with the workflow's token in the same header
+      # actions/checkout would have configured. The tag ruleset must let GitHub
+      # Actions create and update v* tags (docs/cicd-gitops-design.md, section 5.3).
       - name: Tag this run's commit and push the tag (dispatch only)
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f -a "$TAG" -m "Release ${TAG#v}" "$GITHUB_SHA"
           auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
-            push --force origin "refs/tags/$TAG"
+          header="http.https://github.com/.extraheader=AUTHORIZATION: basic $auth"
+          if [[ "$PRERELEASE" == true ]]; then
+            existing="$(git -c "$header" ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
+            if [[ -z "$existing" ]]; then
+              existing="$(git -c "$header" ls-remote origin "refs/tags/$TAG" | cut -f1)"
+            fi
+            if [[ -z "$existing" ]]; then
+              git tag -a "$TAG" -m "Release ${TAG#v}" "$GITHUB_SHA"
+              git -c "$header" push origin "refs/tags/$TAG"
+            elif [[ "$existing" == "$GITHUB_SHA" ]]; then
+              echo "$TAG already names $GITHUB_SHA (this job runs again after a failure): left as it is"
+            else
+              echo "::error::$TAG exists and names $existing, not $GITHUB_SHA: a prerelease tag never moves"
+              exit 1
+            fi
+          else
+            git tag -f -a "$TAG" -m "Release ${TAG#v}" "$GITHUB_SHA"
+            git -c "$header" push --force origin "refs/tags/$TAG"
+          fi
           echo "$TAG now points at $(git ls-remote origin "refs/tags/$TAG^{}" | cut -f1)"
 
       - name: Create the release if it does not exist, then attach the files
@@ -437,28 +579,59 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          PACKAGES: ${{ steps.check.outputs.packages }}
         run: |
-          build="$(python3 -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
-          # Title and notes come from CHANGELOG.md through the notes file: the
-          # first heading reads '## <version> "<codename>" (build N)', the
-          # title is its text without the build. Both are set on every run,
+          build="$(python3 -I -c 'import json; print(json.load(open("build/manifest.json"))["build"])')"
+          # Title and notes come from CHANGELOG.md through the notes file: a
+          # release's first heading reads '## <version> "<codename>" (build N)'
+          # and its title is that text without the build; a prerelease's reads
+          # '## X.Y beta N "<codename>" (build N)' and is its title as it is
+          # (docs/prerelease-design.md, section 3). Both are set on every run,
           # so a moved tag never leaves notes written for an earlier build.
-          title="$(sed -nE '1s/^## (.*) \(build [0-9]+\)$/\1/p' build/release-notes.md)"
+          if [[ "$PRERELEASE" == true ]]; then
+            version="${TAG#v}"
+            title="$(sed -nE '1s/^## (.* \(build [0-9]+\))$/\1/p' build/release-notes.md)"
+            if [[ "$title" != "${version%-beta.*} beta ${version##*-beta.} \""* ]]; then
+              echo "::error::build/release-notes.md does not start with the heading of the prerelease $TAG: '$title'"
+              exit 1
+            fi
+          else
+            title="$(sed -nE '1s/^## (.*) \(build [0-9]+\)$/\1/p' build/release-notes.md)"
+          fi
           if [[ -z "$title" ]]; then
             echo "::error::build/release-notes.md does not start with the release heading"
             exit 1
           fi
+          read -r -a packages <<< "$PACKAGES"
+          if [[ ${#packages[@]} -eq 0 ]]; then
+            echo "::error::No packages to attach"
+            exit 1
+          fi
+          files=()
+          for name in "${packages[@]}"; do
+            files+=("build/$name")
+          done
           existed=true
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             existed=false
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "$title" --notes-file build/release-notes.md
+            if [[ "$PRERELEASE" == true ]]; then
+              # Never Latest: releases/latest and the README's download links
+              # keep serving the stable release.
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false \
+                --title "$title" --notes-file build/release-notes.md
+            else
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+                --title "$title" --notes-file build/release-notes.md
+            fi
+          elif [[ "$PRERELEASE" == true ]]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "$title" --notes-file build/release-notes.md
           else
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title" --notes-file build/release-notes.md
           fi
           echo "build $build: title $title, notes from CHANGELOG.md"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            build/hue_bridge.c4z build/hue_light.c4z build/hue_scene.c4z \
+            "${files[@]}" \
             build/SHA256SUMS.txt build/manifest.json build/attestations.sigstore.json \
             build/hue-drivers.intoto.jsonl
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json name,tagName,url,assets \
