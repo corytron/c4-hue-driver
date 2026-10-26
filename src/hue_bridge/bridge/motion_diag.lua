@@ -13,7 +13,7 @@
 -- (the list above motion_diag.new says what each is).
 --
 -- A run. `run(cb)` answers at once, cb(true, text) for Last Action ("Motion
--- diagnostics start at HH:MM:SS: open this bridge's Lua tab now. ..."), and
+-- diagnostics start in 20 seconds: open this bridge's Lua tab now. ..."), and
 -- waits WAIT_MS (20 s) on ctx.set_timer: Composer collects a device's Lua
 -- output only while its Lua tab is open, and the action is clicked on the
 -- Actions tab. Then the pass:
@@ -21,8 +21,9 @@
 --     "GET <type>" line (HTTP status, the errors array, the item count) and
 --     one line per item logged;
 --   - a "counts" line;
---   - the line "Motion diagnostics: pass done (N sensors, M areas); capturing
---     events until HH:MM." (or "pass failed" when the bridge never answered).
+--   - the line "Motion diagnostics: pass done (N sensors, M areas, K
+--     automations); capturing events for 10 minutes." (or "pass failed"
+--     when the bridge never answered).
 -- Then the capture: for CAPTURE_MS (10 minutes, measured by ctx.set_timer and
 -- by the ctx clock) every stream item of those types is logged the same way,
 -- at most CAPTURE_LINES (200) lines, closed by a "capture end" line. A second
@@ -41,8 +42,18 @@
 --   - camera_motion, contact, tamper: counted only.
 --   - room, zone, bridge_home: one summary line per group that lists a
 --     grouped_motion or grouped_light_level service or has a sensor child.
--- At most PASS_ITEMS items per type in the pass; the rest are counted. The
--- capture also logs an item of any other type that a sensor device owns.
+--   - behavior_script: one line listing every script by alias, name and
+--     category ("6b21… "Timers" (automation)"): a script's name is Signify's
+--     product text, never the owner's.
+--   - behavior_instance (the Hue automations, #280): every item, its header
+--     naming its script ("behavior_instance 9ad5… for "Timers"
+--     (automation)"); strings under `state` shown as enumerations;
+--     `migrated_from` as "/<word>/<number>" only; `configuration` walked
+--     like any other block, so its references read rtype:alias and the
+--     areas, rooms, lights and sensors it targets match the rest of the pass.
+-- At most PASS_ITEMS items per type in the pass (behavior_instance: 40); the
+-- rest are counted. The capture also logs an item of any other type that a
+-- sensor device owns.
 --
 -- An item's line: its type and redacted id, then every key path present,
 -- sorted, as path=value. The value's form gives its JSON type: true/false,
@@ -58,11 +69,15 @@
 --  1. Values are shown by their key. Booleans and numbers are shown.
 --     - Strings are shown only under the keys that HR §6.4 keeps: enumerations
 --       (`type`, `rtype`, `status`, `state`, `health`, `battery_state`,
---       archetypes, `capabilities`, `problems`) when they are snake_case
---       words, and the manufacturer's product data (`model_id`,
---       `product_name`, `manufacturer_name`, `software_version`,
---       `hardware_platform_type`) in a plain character set.
---     - `id_v1` is shown only as "/<word>/<number>".
+--       archetypes, `capabilities`, `problems`, a script's `category`, a
+--       dependee's `level`, and everything under an automation's `state`)
+--       when they are snake_case words, and the manufacturer's product data
+--       (`model_id`, `product_name`, `manufacturer_name`, `software_version`,
+--       `hardware_platform_type`, a behavior_script's name) in a plain
+--       character set.
+--     - `id_v1` and `migrated_from` are shown only as "/<word>/<number>".
+--     - A time of day (`hour`, `minute`, `second`) gives <clock>: an
+--       automation's times say when people wake, leave and come home.
 --     Keys are matched by their words ("extended_pan_id" is extended, pan,
 --     id; "participants" holds no "pan"):
 --     - A name key (`name`, a word ending in "name" or "names") gives
@@ -73,7 +88,8 @@
 --       Anything else there gives "id?N".
 --     - MAC, PAN, bridge-id, key, password, address, URL, serial and location
 --       keys give a placeholder (<mac>, <pan>, <bridge>, <secret>, <addr>,
---       <serial>, <geo>), whatever they hold.
+--       <serial>, <geo>), whatever they hold. Location covers coordinates,
+--       geofences, positions, time zones, cities, countries and postal codes.
 --     - Times (`changed`, `creationtime`, ...) become seconds relative to the
 --       pass's start.
 --     - Every other string is <str:N>: an unknown field shows its path and
@@ -81,8 +97,13 @@
 --  2. Every finished line is scrubbed before it is logged. Control characters
 --     become spaces, so a value never starts a line of its own. Then these are
 --     replaced: the strings ctx.secrets() names; UUIDs (by their alias); MAC-
---     and IPv6-like runs; IPv4 addresses; runs of 12 or more hex digits (a
---     bridge id is 16); and key-like tokens (20 or more letters and digits).
+--     and IPv6-like runs; IPv4 addresses; clock times ("07:15", "7:05:16.5")
+--     by <clock>; runs of 12 or more hex digits (a bridge id is 16); and
+--     key-like tokens (20 or more letters and digits).
+-- No logged line holds a wall-clock time: times are relative to the pass's
+-- start, and nothing logs when that was, since the two together would date
+-- the household's motion. Only the Last Action text that run() answers with
+-- (cb) says when the pass starts.
 -- Error descriptions from the bridge are shown only when every word is in a
 -- small vocabulary of error words, else as <text:N>. The raw body is never
 -- logged. Requests go out with `quiet`, so bridge/http.lua logs a failed GET
@@ -110,7 +131,7 @@ motion_diag.LINE_MAX = 400           -- bytes of one logged line
 motion_diag.ITEM_MAX = 2400          -- bytes of one item's text
 motion_diag.FIELDS_MAX = 60          -- fields shown per item
 motion_diag.ARRAY_MAX = 12           -- elements shown per array (and fields per object inside one)
-motion_diag.DEPTH_MAX = 6            -- nesting levels shown
+motion_diag.DEPTH_MAX = 10           -- nesting levels shown (an automation's configuration nests deep)
 motion_diag.PREFIX = "diag: "
 motion_diag.CONTINUED = "diag: + "
 motion_diag.RESOURCE_PATH = "/clip/v2/resource/"
@@ -122,8 +143,10 @@ motion_diag.RESOURCE_PATH = "/clip/v2/resource/"
 --   owned    items a sensor device owns
 --   count    the count only
 --   groups   a summary line per group with motion services or sensor children
+--   scripts  one line listing the scripts (each step's `max` caps its item lines)
 -- motion, light_level and temperature come before device: their owners are
--- sensors too.
+-- sensors too; behavior_script before behavior_instance, whose lines name
+-- their scripts.
 motion_diag.STEPS = {
 	{ type = "clip", mode = "clip" },
 	{ type = "motion", mode = "all" },
@@ -146,13 +169,16 @@ motion_diag.STEPS = {
 	{ type = "room", mode = "groups" },
 	{ type = "zone", mode = "groups" },
 	{ type = "bridge_home", mode = "groups" },
+	{ type = "behavior_script", mode = "scripts" },
+	{ type = "behavior_instance", mode = "all", max = 40 },
 }
 
--- The capture's rule per item type: the pass's (a type not listed is not logged).
+-- The capture's rule per item type: the pass's, a script logged as any item
+-- (a type not listed is not logged).
 motion_diag.CAPTURE_MODES = {}
 for _, step in ipairs(motion_diag.STEPS) do
 	if step.mode ~= "clip" then
-		motion_diag.CAPTURE_MODES[step.type] = step.mode
+		motion_diag.CAPTURE_MODES[step.type] = step.mode == "scripts" and "all" or step.mode
 	end
 end
 
@@ -169,8 +195,8 @@ local SENSOR_SERVICES = { motion = true, light_level = true, temperature = true 
 
 local LEGEND = "legend: \"x\" a string as sent; <str:N> a string withheld (N bytes); name#N a Hue name; "
 	.. "abcd… a resource id (its first 4 characters; …2 for a second id with the same 4); rtype:abcd… a "
-	.. "reference; ±N.NNs a time from the pass's start (bridge clock against controller clock); <mac> <pan> "
-	.. "<bridge> <secret> <addr> <ip> <hex> <token> <key> removed"
+	.. "reference; ±N.NNs a time from the pass's start (bridge clock against controller clock); <clock> a time "
+	.. "of day; <mac> <pan> <bridge> <secret> <addr> <geo> <ip> <hex> <token> <key> removed"
 
 -- Keys and values ---------------------------------------------------------------
 
@@ -181,12 +207,17 @@ local PRODUCT_KEYS = { model_id = "word", manufacturer_name = "text", product_na
 -- Enumerations, shown when they are snake_case words.
 local ENUM_KEYS = { type = true, rtype = true, status = true, state = true, health = true, battery_state = true,
 	archetype = true, product_archetype = true, capabilities = true, problems = true, resources = true,
-	["function"] = true, mode = true, action = true }
+	["function"] = true, mode = true, action = true, category = true, level = true }
+-- A time of day, as an automation's `time` block holds it.
+local CLOCK_KEYS = { hour = true, minute = true, second = true }
+-- Paths shown only as "/<word>/<number>".
+local PATH_KEYS = { id_v1 = true, migrated_from = true }
 -- Times, shown relative to the pass's start.
 local TIME_KEYS = { changed = true, creationtime = true, last_recall = true, last_changed = true, updated = true }
 -- Arrays, so an empty one reads [] rather than {}.
 local ARRAY_KEYS = { services = true, children = true, participants = true, problems = true, capabilities = true,
-	resources = true, errors = true, data = true }
+	resources = true, errors = true, data = true, dependees = true, timeslots = true, recurrence_days = true,
+	who = true, what = true, where = true, items = true }
 
 local function has(k, word)
 	return k:find(word, 1, true) ~= nil
@@ -216,12 +247,15 @@ local SECRET_WORDS = { key = true, keys = true, token = true, secret = true, pas
 local ADDRESS_WORDS = { ip = true, ipv4 = true, ipv6 = true, ipaddress = true, address = true, addr = true,
 	host = true, hostname = true, url = true, uri = true, href = true }
 local GEO_WORDS = { latitude = true, longitude = true, lat = true, lon = true, lng = true, geo = true,
-	geolocation = true, location = true, geometry = true }
+	geolocation = true, location = true, locations = true, geometry = true, geofence = true, geofences = true,
+	geofencing = true, coordinates = true, coordinate = true, coords = true, position = true, positions = true,
+	gps = true, altitude = true, elevation = true, timezone = true, tz = true, country = true, city = true,
+	postal = true, postcode = true, zip = true, zipcode = true, street = true, region = true }
 
 -- The placeholder a key's value becomes, whatever it holds; nil for a key
 -- that is shown. `k` is lower-cased.
 local function withheld(k)
-	if k == "id_v1" or PRODUCT_KEYS[k] then
+	if PATH_KEYS[k] or PRODUCT_KEYS[k] then
 		return nil
 	end
 	local w = words(k)
@@ -237,7 +271,7 @@ local function withheld(k)
 		return "<addr>"
 	elseif any_word(w, function(x) return x:sub(1, 6) == "serial" end) then
 		return "<serial>"
-	elseif any_word(w, function(x) return GEO_WORDS[x] end) then
+	elseif (w.time and w.zone) or any_word(w, function(x) return GEO_WORDS[x] or x:sub(1, 3) == "geo" end) then
 		return "<geo>"
 	end
 	return nil
@@ -254,7 +288,7 @@ end
 -- `id`, `rid`, `owner_id`, "uuid"; not `id_v1` (shown as a path) nor
 -- `model_id` (product data).
 local function id_key(k)
-	if k == "id_v1" or PRODUCT_KEYS[k] then
+	if PATH_KEYS[k] or PRODUCT_KEYS[k] then
 		return false
 	end
 	local w = words(k)
@@ -263,7 +297,8 @@ end
 
 -- A key whose value is never walked into as an object.
 local function special(k)
-	return withheld(k) ~= nil or name_key(k) or id_key(k) or k == "id_v1" or TIME_KEYS[k] == true
+	return withheld(k) ~= nil or name_key(k) or id_key(k) or PATH_KEYS[k] == true or TIME_KEYS[k] == true
+		or CLOCK_KEYS[k] == true
 end
 
 local SNAKE = "^[a-z][a-z0-9_]*$"
@@ -646,6 +681,8 @@ function motion_diag:reset_aliases()
 	self.sensors = {}          -- sensor device rid → true
 	self.sensor_services = {}  -- rid of a service a sensor device owns → true
 	self.sensor_groups = {}    -- rid of a group with motion services or sensor children → true
+	self.scripts = {}          -- behavior_script rid → { name, category, text } (learn_script)
+	self.instance_scripts = {} -- behavior_instance rid → its script's rid
 	self.results = {}
 end
 
@@ -687,12 +724,6 @@ local function cancel(timer)
 	end
 end
 
--- The local time of a millisecond timestamp.
-local function clock_text(format, ms)
-	local ok, text = pcall(os.date, format, math.floor(ms / 1000))
-	return ok and type(text) == "string" and text or "?"
-end
-
 -- The secrets ctx.secrets() names, longest first.
 function motion_diag:secrets()
 	local fn = self.ctx.secrets
@@ -715,8 +746,10 @@ function motion_diag:secrets()
 	return list
 end
 
--- Layer 2 (see the header): the last pass over every line before it is logged.
-function motion_diag:scrub(text)
+-- Layer 2 (see the header): the last pass over every line before it is
+-- logged. `keep_clock` leaves clock times alone: only for the Last Action
+-- text run() answers with.
+function motion_diag:scrub(text, keep_clock)
 	text = tostring(text):gsub("%c", " ")
 	for _, secret in ipairs(self:secrets()) do
 		text = replace_plain(text, secret.value, secret.label)
@@ -726,6 +759,11 @@ function motion_diag:scrub(text)
 	end)
 	text = text:gsub("[%x:%-]+", address_run)
 	text = text:gsub("%d+%.%d+%.%d+%.%d+", ipv4_run)
+	if not keep_clock then
+		text = text:gsub("%f[%w]%d%d?:%d%d[%d:%.]*", function(run)
+			return "<clock>" .. run:match("[:%.]*$")  -- a separator after the time stays
+		end)
+	end
 	text = text:gsub("%x+", hex_run)
 	text = text:gsub("[%w%-_]+", token_run)
 	return text
@@ -800,7 +838,8 @@ function motion_diag:time_text(v)
 	return string.format("%+.2fs", s - self.t0 / 1000)
 end
 
-function motion_diag.scalar_text(_, k, v)
+-- `enum`: every string here is an enumeration (an automation's `state`).
+function motion_diag.scalar_text(_, k, v, enum)
 	local tv = type(v)
 	if tv == "boolean" then
 		return tostring(v)
@@ -809,7 +848,7 @@ function motion_diag.scalar_text(_, k, v)
 	elseif tv == "string" then
 		if k and PRODUCT_KEYS[k] then
 			return product_text(PRODUCT_KEYS[k], v)
-		elseif k and ENUM_KEYS[k] then
+		elseif enum or (k and ENUM_KEYS[k]) then
 			return enum_text(v)
 		end
 		return withheld_string(v)
@@ -817,7 +856,7 @@ function motion_diag.scalar_text(_, k, v)
 	return "<" .. tv .. ">"
 end
 
-function motion_diag:table_text(k, t, depth)
+function motion_diag:table_text(k, t, depth, enum)
 	if next(t) == nil then
 		return (k and ARRAY_KEYS[k]) and "[]" or "{}"
 	elseif is_ref(t) then
@@ -827,25 +866,28 @@ function motion_diag:table_text(k, t, depth)
 	elseif is_array(t) then
 		local parts, n = {}, #t
 		for i = 1, math.min(n, motion_diag.ARRAY_MAX) do
-			parts[i] = self:value_text(k, t[i], depth + 1)
+			parts[i] = self:value_text(k, t[i], depth + 1, enum)
 		end
 		if n > motion_diag.ARRAY_MAX then
 			parts[#parts + 1] = string.format("+%d more", n - motion_diag.ARRAY_MAX)
 		end
 		return "[" .. table.concat(parts, ",") .. "]"
 	end
-	return "{" .. table.concat(self:fields(t, depth + 1, motion_diag.ARRAY_MAX), " ") .. "}"
+	return "{" .. table.concat(self:fields(t, depth + 1, motion_diag.ARRAY_MAX, nil, enum or nil), " ") .. "}"
 end
 
--- One value under the (lower-cased) key `k`, nil for a key that is not a string.
-function motion_diag:value_text(k, v, depth)
+-- One value under the (lower-cased) key `k`, nil for a key that is not a
+-- string; `enum` as for scalar_text.
+function motion_diag:value_text(k, v, depth, enum)
 	if k then
 		local placeholder = withheld(k)
 		if placeholder then
 			return placeholder
+		elseif CLOCK_KEYS[k] then
+			return "<clock>"
 		end
 		local list = type(v) == "table" and is_array(v)
-		if k == "id_v1" then
+		if PATH_KEYS[k] then
 			return v1_text(v)
 		elseif name_key(k) and not list then
 			return self:name_alias(v)
@@ -856,34 +898,37 @@ function motion_diag:value_text(k, v, depth)
 		end
 	end
 	if type(v) == "table" then
-		return self:table_text(k, v, depth)
+		return self:table_text(k, v, depth, enum)
 	end
-	return self:scalar_text(k, v)
+	return self:scalar_text(k, v, enum)
 end
 
 -- Every field of `obj` as "path=value", objects walked into, in key order
--- (so sorted by path); at most `max`, the rest counted in out.more.
-function motion_diag:collect(obj, prefix, out, depth, max, skip)
+-- (so sorted by path); at most `max`, the rest counted in out.more. `enums`:
+-- true when every string below is an enumeration, or (at the top) the set of
+-- keys whose values are.
+function motion_diag:collect(obj, prefix, out, depth, max, skip, enums)
 	for _, key in ipairs(sorted_keys(obj)) do
 		local v = obj[key]
 		if not (skip and skip[key]) then
+			local enum = enums == true or (type(enums) == "table" and enums[key] == true)
 			local k = type(key) == "string" and key:lower() or nil
 			local path = prefix and (prefix .. "." .. key_text(key)) or key_text(key)
 			if k and type(v) == "table" and next(v) ~= nil and not is_array(v) and not is_ref(v) and not special(k)
 				and depth < motion_diag.DEPTH_MAX then
-				self:collect(v, path, out, depth + 1, max)
+				self:collect(v, path, out, depth + 1, max, nil, enum or nil)
 			elseif #out >= max then
 				out.more = out.more + 1
 			else
-				out[#out + 1] = path .. "=" .. self:value_text(k, v, depth)
+				out[#out + 1] = path .. "=" .. self:value_text(k, v, depth, enum)
 			end
 		end
 	end
 end
 
-function motion_diag:fields(obj, depth, max, skip)
+function motion_diag:fields(obj, depth, max, skip, enums)
 	local out = { more = 0 }
-	self:collect(obj, nil, out, depth, max, skip)
+	self:collect(obj, nil, out, depth, max, skip, enums)
 	local more = out.more
 	out.more = nil
 	if more > 0 then
@@ -893,15 +938,67 @@ function motion_diag:fields(obj, depth, max, skip)
 end
 
 local TOP = { id = true, type = true }
+local INSTANCE_ENUMS = { state = true }
 
 -- An item's header: its type and redacted id ("motion a0f3…").
 function motion_diag:item_header(item)
 	return type_word(item.type) .. " " .. self:id_alias(item.id)
 end
 
--- An item's fields, id and type left to the header.
+-- A behavior_script as the pass lists it and an automation names it: its
+-- name, Signify's product text, and its category ("Timers" (automation)).
+-- A partial item (a stream update) keeps what the script showed before.
+function motion_diag:learn_script(item)
+	local id = type(item.id) == "string" and item.id or nil
+	local known = id and self.scripts[id] or {}
+	local meta = type(item.metadata) == "table" and item.metadata or {}
+	local name, category = known.name, known.category
+	if meta.name ~= nil then
+		name = type(meta.name) == "string" and product_text("text", meta.name) or ("<name:" .. type(meta.name) .. ">")
+	end
+	if meta.category ~= nil then
+		category = word_of(meta.category)
+			or (type(meta.category) == "string" and withheld_string(meta.category) or "<category?>")
+	end
+	local script = { name = name or "<no name>", category = category or "no category" }
+	script.text = script.name .. " (" .. script.category .. ")"
+	if id then
+		self.scripts[id] = script
+	end
+	return script
+end
+
+-- An automation's script, remembered so its later partial items and its
+-- delete still name it.
+function motion_diag:learn_instance(item)
+	if type(item.id) == "string" and type(item.script_id) == "string" then
+		self.instance_scripts[item.id] = item.script_id
+	end
+end
+
+-- What follows an automation's header: " for "Timers" (automation)".
+function motion_diag:item_note(item)
+	if item.type ~= "behavior_instance" then
+		return ""
+	end
+	local sid = item.script_id
+	if type(sid) ~= "string" then
+		sid = type(item.id) == "string" and self.instance_scripts[item.id] or nil
+	end
+	if not sid then
+		return ""
+	end
+	local script = self.scripts[sid]
+	return script and (" for " .. script.text) or " for an unknown script"
+end
+
+-- An item's fields, id and type left to the header; a script as its name and category.
 function motion_diag:item_body(item)
-	local body = table.concat(self:fields(item, 1, motion_diag.FIELDS_MAX, TOP), " ")
+	if item.type == "behavior_script" then
+		return self:learn_script(item).text
+	end
+	local enums = item.type == "behavior_instance" and INSTANCE_ENUMS or nil
+	local body = table.concat(self:fields(item, 1, motion_diag.FIELDS_MAX, TOP, enums), " ")
 	if body == "" then
 		body = "(no fields)"
 	end
@@ -1117,12 +1214,13 @@ function motion_diag:emit_items(step, list, head, rec, what)
 	else
 		self:emit(string.format("%s, %s", head, util.plural(rec.items, "item")))
 	end
-	rec.logged = math.min(#list, motion_diag.PASS_ITEMS)
+	local max = step.max or motion_diag.PASS_ITEMS
+	rec.logged = math.min(#list, max)
 	for i = 1, rec.logged do
-		self:emit(self:item_header(list[i]) .. " " .. self:item_body(list[i]))
+		self:emit(self:item_header(list[i]) .. self:item_note(list[i]) .. " " .. self:item_body(list[i]))
 	end
-	if #list > motion_diag.PASS_ITEMS then
-		self:emit(string.format("%s: %d more not shown", step.type, #list - motion_diag.PASS_ITEMS))
+	if #list > max then
+		self:emit(string.format("%s: %d more not shown", step.type, #list - max))
 	end
 end
 
@@ -1133,10 +1231,23 @@ function MODES.all(self, step, data, head, rec)
 			if SENSOR_SERVICES[item.type] then
 				self:learn_owner(item)
 			end
+			self:learn_instance(item)
 			list[#list + 1] = item
 		end
 	end
 	self:emit_items(step, list, head, rec)
+end
+
+-- The scripts in one line, by alias, name and category.
+function MODES.scripts(self, _, data, head, rec)
+	local entries = {}
+	for _, item in ipairs(data) do
+		if type(item) == "table" then
+			entries[#entries + 1] = self:id_alias(item.id) .. " " .. self:learn_script(item).text
+		end
+	end
+	self:emit(string.format("%s, %s%s", head, util.plural(rec.items, "item"),
+		#entries > 0 and (": " .. util.some(entries, 40)) or ""))
 end
 
 function MODES.sensors(self, step, data, head, rec)
@@ -1263,7 +1374,7 @@ function motion_diag:counts_text()
 			text = string.format("%d (%d owned by sensors)", rec.items, rec.matched or 0)
 		elseif step.mode == "groups" then
 			text = string.format("%d (%d with sensors)", rec.items, rec.matched or 0)
-		else
+		else  -- all, count, scripts
 			text = tostring(rec.items)
 		end
 		parts[#parts + 1] = step.type .. " " .. text
@@ -1282,8 +1393,11 @@ function motion_diag:found()
 			sensors = sensors + 1
 		end
 	end
-	local areas = self.results.motion_area_configuration
-	return sensors, (areas and not areas.failed and areas.code >= 200 and areas.code <= 299 and areas.items) or 0
+	local function items(t)
+		local rec = self.results[t]
+		return (rec and not rec.failed and rec.code >= 200 and rec.code <= 299 and rec.items) or 0
+	end
+	return sensors, items("motion_area_configuration"), items("behavior_instance")
 end
 
 function motion_diag:done(text)
@@ -1304,10 +1418,11 @@ function motion_diag:finish(pass)
 		return self:done(string.format("Motion diagnostics stopped: the bridge did not answer (%s). See the Lua output.",
 			why))
 	end
-	local sensors, areas = self:found()
-	local until_text = self:start_capture()
-	self:emit(string.format("Motion diagnostics: pass done (%s, %s); capturing events until %s.",
-		util.plural(sensors, "sensor"), util.plural(areas, "area"), until_text))
+	local sensors, areas, automations = self:found()
+	self:start_capture()
+	self:emit(string.format("Motion diagnostics: pass done (%s, %s, %s); capturing events for %d minutes.",
+		util.plural(sensors, "sensor"), util.plural(areas, "area"), util.plural(automations, "automation"),
+		motion_diag.CAPTURE_MS / 60000))
 end
 
 function motion_diag:next_step(pass, i)
@@ -1393,14 +1508,17 @@ function motion_diag:run(cb)
 	if not wait.timer then
 		wait.at = now
 	end
-	local at_text = clock_text("%H:%M:%S", wait.at)
 	if restarted then
-		self:emit("restarted: the pass starts again at " .. at_text)
+		self:emit(string.format("restarted: the pass starts again in %d s", (wait.at - now) / 1000))
 	end
 	if type(cb) == "function" then
-		local ok, err = pcall(cb, true, self:scrub(string.format("Motion diagnostics start at %s: open this bridge's "
-			.. "Lua tab now. The pass and 10 minutes of events follow; copy them into the Beta feedback issue.",
-			at_text)))
+		-- No clock time: the bridge's last_action() also writes this text to the
+		-- Lua output, and a start time there would anchor the relative times of
+		-- every line that follows.
+		local secs = math.floor((wait.at - now) / 1000 + 0.5)
+		local when = secs > 0 and string.format("start in %d seconds", secs) or "start now"
+		local ok, err = pcall(cb, true, self:scrub(string.format("Motion diagnostics %s: open this bridge's Lua tab "
+			.. "now. The pass and 10 minutes of events follow; copy them into the Beta feedback issue.", when), true))
 		if not ok then
 			self:failed("run callback", err)
 		end
@@ -1440,8 +1558,6 @@ function motion_diag:start_capture()
 			end
 		end)
 	end)
-	cap.until_text = clock_text("%H:%M", now + motion_diag.CAPTURE_MS)
-	return cap.until_text
 end
 
 function motion_diag:end_text(cap, why, now)
@@ -1485,8 +1601,8 @@ function motion_diag:end_capture(why)
 		table.remove(pieces)
 	end
 	cap.lines = cap.lines + self:write(pieces)
-	self:done(string.format("Motion diagnostics done at %s: %s of events logged. Copy the Lua output into the Beta "
-		.. "feedback issue.", clock_text("%H:%M", now), util.plural(cap.logged, "item")))
+	self:done(string.format("Motion diagnostics done: %s of events logged. Copy the Lua output into the Beta "
+		.. "feedback issue.", util.plural(cap.logged, "item")))
 end
 
 -- Whether the capture runs; one that is past its time ends here (its timer
@@ -1514,6 +1630,7 @@ function motion_diag:verdict(item, kind)
 		if SENSOR_SERVICES[item.type] and kind ~= "delete" then
 			self:learn_owner(item)
 		end
+		self:learn_instance(item)
 		return "log"
 	elseif mode == "sensors" then
 		local id = type(item.id) == "string" and item.id or nil
@@ -1547,7 +1664,8 @@ function motion_diag:capture_item(cap, item, kind, cnum, now, created)
 		return false
 	end
 	local since = last and string.format("(%.2fs after its last)", (now - last) / 1000) or "(first)"
-	local parts = { string.format("%s c#%d %s %s %s", self:elapsed(now), cnum, type_word(kind), header, since) }
+	local parts = { string.format("%s c#%d %s %s%s %s", self:elapsed(now), cnum, type_word(kind), header,
+		self:item_note(item), since) }
 	if created ~= nil then
 		parts[#parts + 1] = "created=" .. self:time_text(created)
 	end
@@ -1556,8 +1674,8 @@ function motion_diag:capture_item(cap, item, kind, cnum, now, created)
 	if cap.lines + #pieces > motion_diag.CAPTURE_LINES - motion_diag.CAPTURE_RESERVE then
 		cap.full = true
 		cap.dropped = cap.dropped + 1
-		cap.lines = cap.lines + self:emit(string.format("capture: line limit (%d) reached at %s; counting until %s",
-			motion_diag.CAPTURE_LINES, self:elapsed(now), cap.until_text))
+		cap.lines = cap.lines + self:emit(string.format("capture: line limit (%d) reached at %s; counting until the "
+			.. "capture ends", motion_diag.CAPTURE_LINES, self:elapsed(now)))
 		return false
 	end
 	cap.lines = cap.lines + self:write(pieces)

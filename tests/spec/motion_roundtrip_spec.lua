@@ -645,9 +645,8 @@ describe("motion round trip", function()
 			-- The click answers at once; nothing is fetched for 20 s (time to
 			-- open the bridge's Lua tab).
 			local first, transfers = #logged + 1, #bc4.transfers
-			assert.equal("Motion diagnostics start at " .. os.date("%H:%M:%S", (START_MS + 20000) / 1000) .. ": open "
-				.. "this bridge's Lua tab now. The pass and 10 minutes of events follow; copy them into the Beta "
-				.. "feedback issue.", action("Log Motion Diagnostics"))
+			assert.equal("Motion diagnostics start in 20 seconds: open this bridge's Lua tab now. The pass and 10 "
+				.. "minutes of events follow; copy them into the Beta feedback issue.", action("Log Motion Diagnostics"))
 			assert.equal(transfers, #bc4.transfers, "nothing fetched before the 20 s are up")
 
 			-- 20 s later the pass: one GET at a time (each answered before the
@@ -671,9 +670,8 @@ describe("motion round trip", function()
 					if logged[i]:find(text, 1, true) then return logged[i] end
 				end
 			end
-			local until_text = os.date("%H:%M", (START_MS + 20000 + 600000) / 1000)
 			local done = line_with("diag: Motion diagnostics: pass done (2 sensors, 1 area")
-			assert.truthy(done and done:find("; capturing events until " .. until_text .. ".", 1, true), done)
+			assert.truthy(done and done:find("; capturing events for 10 minutes.", 1, true), done)
 			assert.truthy(line_with("diag: counts: clip 20 types, motion 2,"))
 
 			-- During the capture the stream's items are logged as they come
@@ -692,8 +690,8 @@ describe("motion round trip", function()
 				capture.active = false
 				capture.callback(capture, 0)
 			end)
-			assert.equal("Motion diagnostics done at " .. until_text .. ": 3 items of events logged. Copy the Lua "
-				.. "output into the Beta feedback issue.", fake.last_action(bridge))
+			assert.equal("Motion diagnostics done: 3 items of events logged. Copy the Lua output into the Beta "
+				.. "feedback issue.", fake.last_action(bridge))
 
 			-- Every line the run logged, and both Last Action texts: no key,
 			-- address, bridge id, full resource id, MAC or Hue name.

@@ -36,7 +36,10 @@ local OBJECTS = {
 	"area1", "conv1", "sec1", "cand11", "cand12", "cand13", "cand14", "dev12", "dev13", "dev14",
 	-- the clip resource, event containers, and the hostile fixtures' objects
 	"clip", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11", "e12", "e13", "e14",
-	"dev9", "motion9", "zig9",
+	"dev9", "motion9", "zig9", "script9",
+	-- the Hue automations (#280): four scripts, three instances, what they point at, and a hostile instance
+	"script1", "script2", "script3", "script4", "inst1", "inst2", "inst3", "inst4", "inst9", "recipe1", "scene1",
+	"geo1", "e15", "e16", "e17", "e18",
 }
 
 local V = {}
@@ -51,6 +54,8 @@ local NAMES = {
 	name_dev11 = "Quorn lamp 1", name_dev21 = "Vexa lamp", name_devb = "Zubb bridge", name_dev31 = "Quorn dimmer",
 	name_dev41 = "Quorn back door", name_room1 = "Vexa Hallway", name_room2 = "Quorn Kitchen",
 	name_zone1 = "Quorn Downstairs", name_area1 = "Quorn kitchen motion area", name_sg1 = "Zubb sensor group",
+	name_inst1 = "Vexa tea timer", name_inst2 = "Quorn kitchen MotionAware", name_inst3 = "Zubb welcome home",
+	name_inst4 = "Quorn after the film",
 }
 local MACS = {
 	mac1 = "00:17:88:01:0c:00:00:01-02", mac2 = "00:17:88:01:0c:00:00:02-02", mac3 = "00:17:88:01:0c:00:00:03-02",
@@ -62,9 +67,13 @@ local BRIDGE_ID = "001788fffe123abc"
 local BRIDGE_IP = "10.0.2.143"
 local APP_SECRET = "zzzz0000zzzz0000zzzz0000zzzz00"
 
--- JSON text with $<object>, $name_<object> and $mac<n> filled in.
+-- JSON text with $<object>, $name_<object> and $mac<n> filled in (a JSON
+-- schema's "$ref" key stays).
 local function fill(text)
 	return (text:gsub("%$([%w_]+)", function(k)
+		if k == "ref" then
+			return nil
+		end
 		local v = V[k] or NAMES[k] or MACS[k]
 		assert(v, "fixture: no value for $" .. k)
 		return v
@@ -85,7 +94,8 @@ local BODY = {}
 
 BODY.clip = fill([[
 {"errors":[],"data":[{"id":"$clip","type":"clip","resources":["behavior_instance","bridge","bridge_home","button",
-"camera_motion","contact","convenience_area_motion","device","device_power","device_software_update","grouped_light",
+"behavior_script","camera_motion","contact","convenience_area_motion","device","device_power","device_software_update",
+"grouped_light",
 "grouped_light_level","grouped_motion","light","light_level","motion","motion_area_configuration","room","scene",
 "security_area_motion","service_group","tamper","temperature","zigbee_connectivity","zone"]}]}
 ]])
@@ -379,6 +389,58 @@ BODY.bridge_home = fill([[
 ]}
 ]])
 
+-- The Hue automations (#280). The shapes follow aiohue's models and the one
+-- instance and eight scripts recorded in Home Assistant's fixture (a Timers
+-- instance: duration, what with a recipe, where, dependees, state.timer_state).
+-- The MotionAware script's name and its instance's configuration are
+-- invented: no public source shows the automation the Hue app adds to an
+-- area; the tester's bridge and the house will.
+BODY.behavior_script = fill([[
+{"errors":[],"data":[
+{"id":"$script1","type":"behavior_script","version":"0.0.1","description":"Countdown timer",
+ "metadata":{"name":"Timers","category":"automation"},"configuration_schema":{"$ref":"timer_config.json#"},
+ "trigger_schema":{"$ref":"trigger.json#"},"state_schema":{"$ref":"timer_state.json#"}},
+{"id":"$script2","type":"behavior_script","version":"0.0.1","description":"Lights on when someone comes home",
+ "metadata":{"name":"Coming home"},"configuration_schema":{"$ref":"coming_home_config.json#"},
+ "trigger_schema":{"$ref":"trigger.json#"},"state_schema":{}},
+{"id":"$script3","type":"behavior_script","version":"0.0.1","description":"Lights follow motion in an area",
+ "metadata":{"name":"MotionAware","category":"automation"},
+ "configuration_schema":{"$ref":"motion_aware_config.json#"},"trigger_schema":{},"state_schema":{}},
+{"id":"$script4","type":"behavior_script","version":"0.0.1","description":"Light state after streaming",
+ "metadata":{"name":"Light state after streaming","category":"entertainment"},
+ "configuration_schema":{"$ref":"lights_state_after_streaming_config.json#"},"trigger_schema":{},
+ "state_schema":{}}
+]}
+]])
+
+BODY.behavior_instance = fill([[
+{"errors":[],"data":[
+{"id":"$inst1","type":"behavior_instance","script_id":"$script1","enabled":true,
+ "state":{"timer_state":"stopped"},
+ "configuration":{"duration":{"seconds":60},
+  "what":[{"group":{"rid":"$room1","rtype":"room"},"recall":{"rid":"$recipe1","rtype":"recipe"}}],
+  "where":[{"group":{"rid":"$room1","rtype":"room"}}]},
+ "dependees":[{"target":{"rid":"$room1","rtype":"room"},"level":"critical","type":"ResourceDependee"}],
+ "status":"running","last_error":"","metadata":{"name":"$name_inst1"}},
+{"id":"$inst2","type":"behavior_instance","script_id":"$script3","enabled":true,
+ "configuration":{"source":{"rid":"$area1","rtype":"motion_area_configuration"},
+  "settings":{"daylight_sensitivity":{"dark_threshold":16000,"offset":7000}},
+  "when":{"timeslots":[{"start_time":{"kind":"time","time":{"hour":7,"minute":0,"second":0}},
+   "on":{"recall":{"rid":"$scene1","rtype":"scene"}},"off_after":{"seconds":300}}]},
+  "where":[{"group":{"rid":"$room2","rtype":"room"}}]},
+ "dependees":[{"target":{"rid":"$area1","rtype":"motion_area_configuration"},"level":"critical",
+  "type":"ResourceDependee"},{"target":{"rid":"$room2","rtype":"room"},"level":"non_critical",
+  "type":"ResourceDependee"}],
+ "status":"running","last_error":"","metadata":{"name":"$name_inst2"}},
+{"id":"$inst3","type":"behavior_instance","script_id":"$script2","enabled":false,
+ "migrated_from":"/resourcelinks/12345",
+ "configuration":{"who":[{"rid":"$geo1","rtype":"geofence_client"}],
+  "when":{"time_point":{"type":"time","time":{"hour":18,"minute":30}},"recurrence_days":["monday","friday"]},
+  "where":[{"group":{"rid":"$room1","rtype":"room"}}]},
+ "dependees":[],"status":"disabled","last_error":"","metadata":{"name":"$name_inst3"}}
+]}
+]])
+
 -- HR §5.4, one SSE data line (an array of containers) each; E13 is the
 -- traffic of the other resources.
 local E = {}
@@ -481,6 +543,25 @@ E[13] = fill([[
 "state":"no_contact"},"owner":{"rid":"$dev41","rtype":"device"},"type":"contact"}],"id":"$e2","type":"update"}]
 ]])
 
+-- An automation switched off, its timer started, a new one added, the first deleted.
+E[14] = fill([[
+[{"creationtime":"2026-10-26T07:16:00Z","data":[{"enabled":false,"id":"$inst1","type":"behavior_instance"}],
+"id":"$e15","type":"update"}]
+]])
+E[15] = fill([[
+[{"creationtime":"2026-10-26T07:16:10Z","data":[{"id":"$inst1","state":{"timer_state":"running"},
+"status":"running","type":"behavior_instance"}],"id":"$e16","type":"update"}]
+]])
+E[16] = fill([[
+[{"creationtime":"2026-10-26T07:16:20Z","data":[{"configuration":{"where":[{"group":{"rid":"$room2",
+"rtype":"room"}}]},"dependees":[],"enabled":true,"id":"$inst4","last_error":"","metadata":{"name":"$name_inst4"},
+"script_id":"$script4","status":"running","type":"behavior_instance"}],"id":"$e17","type":"add"}]
+]])
+E[17] = fill([[
+[{"creationtime":"2026-10-26T07:16:30Z","data":[{"id":"$inst1","type":"behavior_instance"}],"id":"$e18",
+"type":"delete"}]
+]])
+
 -- Hostile values (no bridge sends these): names holding ids and MACs, names
 -- nested in unknown objects and arrays, unknown fields holding names, ids,
 -- URLs, addresses and the key, keys that are names or ids, odd id_v1 paths,
@@ -512,6 +593,38 @@ local HOSTILE_DEVICE = fill([[
  "usertest":{"status":"set","usertest":false,"comment":"$name_dev2"},
  "type":"device"}
 ]])
+-- An automation whose configuration holds names, ids inside strings, times
+-- and location data, and a script with an id in its name.
+local HOSTILE_INSTANCE = fill([[
+{"id":"$inst9","script_id":"$script9","enabled":true,
+ "metadata":{"name":"Wake $name_room1 at 06:45 $dev1"},
+ "state":{"timer_state":"$name_dev2","last_run":"2026-10-26T06:45:00Z","nested":{"name":"$name_room2"}},
+ "migrated_from":"/resourcelinks/$name_room1",
+ "configuration":{
+  "when":{"time_point":{"type":"time","time":{"hour":6,"minute":45,"second":0}},"start_at":"2026-10-27T06:45:00",
+   "recurrence_days":["monday","friday"],"changed":"2026-10-26T06:45:00.000Z"},
+  "where":[{"group":{"rid":"$room1","rtype":"room"},"label":{"name":"$name_room1"},"note":"near $dev1"},
+   {"items":[{"rid":"$lamp21","rtype":"light"}]}],
+  "who":[{"rid":"$geo1","rtype":"geofence_client"}],
+  "geofence":{"radius":120,"center":{"latitude":-27.4705,"longitude":153.0260}},
+  "home_location":{"lat":-27.4705,"lon":153.0260},
+  "coordinates":[-27.4705,153.0260],
+  "time_zone":"Australia/Brisbane",
+  "position":{"x":0.25,"y":-27.4705},
+  "address":"12 Vexa Street",
+  "target":"/clip/v2/resource/light/$lamp21",
+  "resource_id":"$lamp11",
+  "names":["$name_dev1"],
+  "mac":"$mac1"},
+ "dependees":[{"target":{"rid":"$room1","rtype":"room"},"level":"critical","type":"ResourceDependee"}],
+ "status":"running","last_error":"Group $name_room1 ($room1) not reachable",
+ "type":"behavior_instance"}
+]])
+local HOSTILE_SCRIPT = fill([[
+{"id":"$script9","type":"behavior_script","metadata":{"name":"Wake up $dev1","category":"$name_room1"},
+ "description":"$name_room2"}
+]])
+
 local HOSTILE_ZIGBEE = fill([[
 {"id":"$zig9","id_v1":"/sensors/99","owner":{"rid":"$dev9","rtype":"device"},
  "status":"connected","mac_address":"$mac9","type":"zigbee_connectivity"}
@@ -532,6 +645,9 @@ local function deep_copy(v)
 	end
 	return out
 end
+
+local START_TEXT = "Motion diagnostics start in 20 seconds: open this bridge's Lua tab now. The pass and 10 "
+	.. "minutes of events follow; copy them into the Beta feedback issue."
 
 describe("bridge.motion_diag", function()
 	local motion_diag, c4, M, logged, pending, answers, dones
@@ -673,8 +789,9 @@ describe("bridge.motion_diag", function()
 		assert.is_nil(text:lower():find(secret:lower(), 1, true), (what or secret) .. " leaked:\n" .. text)
 	end
 
-	-- The sweep's checks over everything logged and answered.
-	local function assert_redacted(extra_text)
+	-- The sweep's checks over everything logged and answered; `forbidden`
+	-- lists more texts that must not appear.
+	local function assert_redacted(extra_text, forbidden)
 		local text = output() .. "\n" .. table.concat(dones, "\n") .. "\n" .. (extra_text or "")
 		for _, a in ipairs(answers) do
 			text = text .. "\n" .. a.text
@@ -698,8 +815,12 @@ describe("bridge.motion_diag", function()
 		absent(text, "fffe123abc")
 		absent(text, BRIDGE_IP)
 		absent(text, APP_SECRET)
+		for _, f in ipairs(forbidden or {}) do
+			absent(text, f)
+		end
 		for _, l in ipairs(logged) do
 			assert.is_nil(l:find("%c"), "a control character in: " .. l)
+			assert.is_nil(l:find("%d%d:%d%d"), "a clock time in: " .. l)
 			assert.equal("diag: ", l:sub(1, 6))
 			assert.is_true(#l <= #motion_diag.CONTINUED + motion_diag.LINE_MAX, "too long: " .. l)
 		end
@@ -736,9 +857,7 @@ describe("bridge.motion_diag", function()
 	describe("run", function()
 		it("answers at once with the start time and waits 20 s on the ctx timer before the first GET", function()
 			M:run(answered)
-			assert.same({ { ok = true, text = "Motion diagnostics start at " .. os.date("%H:%M:%S", PASS_MS / 1000)
-				.. ": open this bridge's Lua tab now. The pass and 10 minutes of events follow; copy them into "
-				.. "the Beta feedback issue." } }, answers)
+			assert.same({ { ok = true, text = START_TEXT } }, answers)
 			assert.equal(0, #pending, "nothing fetched during the wait")
 			assert.equal(0, #logged)
 			local timers = c4.active_timers()
@@ -760,7 +879,8 @@ describe("bridge.motion_diag", function()
 			assert.same({ "clip", "motion", "light_level", "temperature", "device", "device_power", "zigbee_connectivity",
 				"device_software_update", "grouped_motion", "grouped_light_level", "service_group",
 				"motion_area_configuration", "convenience_area_motion", "security_area_motion", "motion_area_candidate",
-				"camera_motion", "contact", "tamper", "room", "zone", "bridge_home" }, types)
+				"camera_motion", "contact", "tamper", "room", "zone", "bridge_home", "behavior_script",
+				"behavior_instance" }, types)
 			for i, step in ipairs(motion_diag.STEPS) do
 				assert.equal(step.type, types[i])
 			end
@@ -768,15 +888,14 @@ describe("bridge.motion_diag", function()
 
 		it("ends the pass with the counts and the pass-done line, then captures for 10 minutes", function()
 			run_pass()
-			local until_text = os.date("%H:%M", (PASS_MS + 600000) / 1000)
-			assert.equal("diag: Motion diagnostics: pass done (2 sensors, 1 area); capturing events until "
-				.. until_text .. ".", logged[#logged])
-			assert.equal("diag: counts: clip 25 types, motion 2, light_level 2, temperature 2, device 6 (2 sensors), "
+			assert.equal("diag: Motion diagnostics: pass done (2 sensors, 1 area, 3 automations); capturing events "
+				.. "for 10 minutes.", logged[#logged])
+			assert.equal("diag: counts: clip 26 types, motion 2, light_level 2, temperature 2, device 6 (2 sensors), "
 				.. "device_power 3 (2 owned by sensors), zigbee_connectivity 5 (2 owned by sensors), "
 				.. "device_software_update 3 (2 owned by sensors), grouped_motion 3, grouped_light_level 3, "
 				.. "service_group 1, motion_area_configuration 1, convenience_area_motion 1, security_area_motion 1, "
 				.. "motion_area_candidate 4, camera_motion 0, contact 1, tamper 0, room 2 (1 with sensors), zone 1 (0 "
-				.. "with sensors), bridge_home 1 (1 with sensors)", whole("counts:"))
+				.. "with sensors), bridge_home 1 (1 with sensors), behavior_script 4, behavior_instance 3", whole("counts:"))
 			assert.is_true(M:capturing())
 			local timers = c4.active_timers()
 			assert.equal(1, #timers)
@@ -793,11 +912,8 @@ describe("bridge.motion_diag", function()
 			assert.is_false(first.active, "the first wait is cancelled")
 			assert.equal(1, #c4.active_timers())
 			assert.equal(2, #answers)
-			assert.equal("Motion diagnostics start at " .. os.date("%H:%M:%S", (PASS_MS + 5000) / 1000)
-				.. ": open this bridge's Lua tab now. The pass and 10 minutes of events follow; copy them into the "
-				.. "Beta feedback issue.", answers[2].text)
-			assert.equal("diag: restarted: the pass starts again at " .. os.date("%H:%M:%S", (PASS_MS + 5000) / 1000),
-				logged[1])
+			assert.equal(START_TEXT, answers[2].text)
+			assert.equal("diag: restarted: the pass starts again in 20 s", logged[1])
 			c4.now_ms = PASS_MS + 5000
 			assert.equal(1, c4.fire_timers())
 			assert.equal(1, #pending, "one pass")
@@ -845,8 +961,8 @@ describe("bridge.motion_diag", function()
 			local timers = c4.active_timers()
 			assert.equal(1, #timers)
 			assert.equal(600000, timers[1].delay)
-			assert.equal("diag: Motion diagnostics: pass done (2 sensors, 1 area); capturing events until "
-				.. os.date("%H:%M", (PASS_MS + 50000 + 600000) / 1000) .. ".", logged[#logged])
+			assert.equal("diag: Motion diagnostics: pass done (2 sensors, 1 area, 3 automations); capturing events "
+				.. "for 10 minutes.", logged[#logged])
 			c4.now_ms = PASS_MS + 50000 + 599000
 			assert.is_true(M:capturing(), "the new window runs from the new pass")
 			assert.equal(1, feed(E[6]))
@@ -898,9 +1014,7 @@ describe("bridge.motion_diag", function()
 		it("runs the pass at once when no timer can be made", function()
 			M = new_diag({ set_timer = function() error("no timers here") end })
 			M:run(answered)
-			assert.equal("Motion diagnostics start at " .. os.date("%H:%M:%S", RUN_MS / 1000) .. ": open this bridge's "
-				.. "Lua tab now. The pass and 10 minutes of events follow; copy them into the Beta feedback issue.",
-				answers[1].text)
+			assert.equal(START_TEXT:gsub("start in 20 seconds", "start now"), answers[1].text)
 			assert.equal(1, #pending)
 			answer_all()
 			assert.is_true(M:capturing(), "the clock still ends it")
@@ -915,7 +1029,8 @@ describe("bridge.motion_diag", function()
 			run_pass()
 			assert.equal("diag: bridge: model \"Hue Bridge Pro (BSB003)\", firmware \"1.77.2071353020 (API 1.77.0)\"; "
 				.. "controller OS \"3.4.2 build 746094\"; driver version \"271\"", line("bridge:"))
-			assert.equal("diag: GET clip: HTTP 200, errors 0, 25 types: behavior_instance bridge bridge_home button "
+			assert.equal("diag: GET clip: HTTP 200, errors 0, 26 types: behavior_instance behavior_script bridge "
+				.. "bridge_home button "
 				.. "camera_motion contact convenience_area_motion device device_power device_software_update "
 				.. "grouped_light grouped_light_level grouped_motion light light_level motion motion_area_configuration "
 				.. "room scene security_area_motion service_group tamper temperature zigbee_connectivity zone",
@@ -1072,8 +1187,8 @@ describe("bridge.motion_diag", function()
 			assert.equal("diag: GET motion_area_configuration: HTTP 404, errors 1: \"Not Found\", 0 items",
 				line("GET motion_area_configuration:"))
 			assert.truthy(saw("motion_area_configuration HTTP 404, convenience_area_motion HTTP 404"))
-			assert.equal("diag: Motion diagnostics: pass done (2 sensors, 0 areas); capturing events until "
-				.. os.date("%H:%M", (PASS_MS + 600000) / 1000) .. ".", logged[#logged])
+			assert.equal("diag: Motion diagnostics: pass done (2 sensors, 0 areas, 3 automations); capturing events "
+				.. "for 10 minutes.", logged[#logged])
 		end)
 
 		it("shows an error description only when it holds nothing but error words", function()
@@ -1101,6 +1216,58 @@ describe("bridge.motion_diag", function()
 			assert.truthy(saw("clip HTTP 503, motion HTTP 503,"))
 		end)
 
+		it("lists the scripts, and logs every automation with its script, state and configuration (#280)", function()
+			run_pass()
+			assert.equal("diag: GET behavior_script: HTTP 200, errors 0, 4 items: " .. A("script1") .. " \"Timers\" "
+				.. "(automation), " .. A("script2") .. " \"Coming home\" (no category), " .. A("script3")
+				.. " \"MotionAware\" (automation), " .. A("script4") .. " \"Light state after streaming\" "
+				.. "(entertainment)", line("GET behavior_script:"))
+			assert.equal("diag: GET behavior_instance: HTTP 200, errors 0, 3 items", line("GET behavior_instance:"))
+			assert.equal("diag: behavior_instance " .. A("inst1") .. " for \"Timers\" (automation) "
+				.. "configuration.duration.seconds=60 configuration.what=[{group=room:" .. A("room1")
+				.. " recall=recipe:" .. A("recipe1") .. "}] configuration.where=[{group=room:" .. A("room1") .. "}] "
+				.. "dependees=[{level=\"critical\" target=room:" .. A("room1") .. " type=<str:16>}] enabled=true "
+				.. "last_error=<str:0> metadata.name=name#5 script_id=" .. A("script1")
+				.. " state.timer_state=\"stopped\" status=\"running\"", whole("behavior_instance " .. A("inst1")))
+			assert.equal("diag: behavior_instance " .. A("inst2") .. " for \"MotionAware\" (automation) "
+				.. "configuration.settings.daylight_sensitivity.dark_threshold=16000 "
+				.. "configuration.settings.daylight_sensitivity.offset=7000 configuration.source="
+				.. "motion_area_configuration:" .. A("area1") .. " configuration.when.timeslots=[{off_after.seconds=300 "
+				.. "on.recall=scene:" .. A("scene1") .. " start_time.kind=<str:4> start_time.time.hour=<clock> "
+				.. "start_time.time.minute=<clock> start_time.time.second=<clock>}] configuration.where=[{group=room:"
+				.. A("room2") .. "}] dependees=[{level=\"critical\" target=motion_area_configuration:" .. A("area1")
+				.. " type=<str:16>},{level=\"non_critical\" target=room:" .. A("room2") .. " type=<str:16>}] "
+				.. "enabled=true last_error=<str:0> metadata.name=name#6 script_id=" .. A("script3")
+				.. " status=\"running\"", whole("behavior_instance " .. A("inst2")))
+			assert.equal("diag: behavior_instance " .. A("inst3") .. " for \"Coming home\" (no category) "
+				.. "configuration.when.recurrence_days=[<str:6>,<str:6>] configuration.when.time_point.time.hour=<clock> "
+				.. "configuration.when.time_point.time.minute=<clock> configuration.when.time_point.type=\"time\" "
+				.. "configuration.where=[{group=room:" .. A("room1") .. "}] configuration.who=[geofence_client:"
+				.. A("geo1") .. "] dependees=[] enabled=false last_error=<str:0> metadata.name=name#7 "
+				.. "migrated_from=\"/resourcelinks/12345\" script_id=" .. A("script2") .. " status=\"disabled\"",
+				whole("behavior_instance " .. A("inst3")))
+			assert_redacted()
+		end)
+
+		it("logs at most 40 automations and counts the rest", function()
+			local items = {}
+			for i = 1, 45 do
+				items[i] = string.format('{"id":"%s","script_id":"%s","enabled":true,"type":"behavior_instance"}',
+					invent(3000 + i), V.script1)
+			end
+			run_pass({ behavior_instance = '{"errors":[],"data":[' .. table.concat(items, ",") .. "]}" })
+			assert.equal(40, #lines_with("diag: behavior_instance ", " for \"Timers\" (automation) enabled=true"))
+			assert.equal("diag: behavior_instance: 5 more not shown", line("behavior_instance: 5 more"))
+			assert.truthy(saw("pass done (2 sensors, 1 area, 45 automations)"))
+		end)
+
+		it("names an automation's script as unknown when the scripts are not to be had", function()
+			run_pass({ behavior_script = { ok = false, code = 404, json = { errors = {}, data = {} } } })
+			assert.truthy(line("behavior_instance " .. A("inst1")):find(A("inst1") .. " for an unknown script "
+				.. "configuration.duration.seconds=60", 1, true))
+			assert.truthy(saw("behavior_script HTTP 404, behavior_instance 3"))
+		end)
+
 		it("logs at most 20 items of a type and counts the rest", function()
 			local items = {}
 			for i = 1, 25 do
@@ -1117,7 +1284,7 @@ describe("bridge.motion_diag", function()
 			end
 			assert.equal(20, item_lines)
 			assert.equal("diag: motion: 5 more not shown", line("motion: 5 more"))
-			assert.truthy(saw("counts: clip 25 types, motion 25, "))
+			assert.truthy(saw("counts: clip 26 types, motion 25, "))
 		end)
 	end)
 
@@ -1185,7 +1352,7 @@ describe("bridge.motion_diag", function()
 			run_pass()
 			assert.equal(7, feed(E[10], 60000))
 			assert.equal("diag: +60.00s c#1 add device " .. A("dev3") .. " (first) created=+3000.00s id_v1=\"/sensors/30\" "
-				.. "identify={} metadata.archetype=\"unknown_archetype\" metadata.name=name#5 product_data.certified=true "
+				.. "identify={} metadata.archetype=\"unknown_archetype\" metadata.name=name#8 product_data.certified=true "
 				.. "product_data.hardware_platform_type=\"100b-10d\" product_data.manufacturer_name=\"Signify "
 				.. "Netherlands B.V.\" product_data.model_id=\"SML001\" product_data.product_archetype="
 				.. "\"unknown_archetype\" product_data.product_name=\"Hue motion sensor\" "
@@ -1220,9 +1387,34 @@ describe("bridge.motion_diag", function()
 				.. " 1, motion " .. A("motion1") .. " 1; counted only: camera_motion 0, contact 1, tamper 0; "
 				.. "other items: 3", logged[#logged])
 			assert.is_false(M:capturing())
-			assert.same({ "Motion diagnostics done at " .. os.date("%H:%M", (PASS_MS + 600000) / 1000) .. ": 3 items "
-				.. "of events logged. Copy the Lua output into the Beta feedback issue." }, dones)
+			assert.same({ "Motion diagnostics done: 3 items of events logged. Copy the Lua output into the Beta "
+				.. "feedback issue." }, dones)
 			assert.equal(0, feed(E[1], 601000), "nothing after the end")
+		end)
+
+		it("follows the automations: switched off, a timer started, one added with its script, one deleted", function()
+			run_pass()
+			assert.equal(1, feed(E[14], 60000))
+			assert.equal("diag: +60.00s c#1 update behavior_instance " .. A("inst1") .. " for \"Timers\" (automation) "
+				.. "(first) created=+60.00s enabled=false", line("+60.00s"))
+			assert.equal(1, feed(E[15], 70000))
+			assert.equal("diag: +70.00s c#2 update behavior_instance " .. A("inst1") .. " for \"Timers\" (automation) "
+				.. "(10.00s after its last) created=+70.00s state.timer_state=\"running\" status=\"running\"",
+				line("+70.00s"))
+			assert.equal(1, feed(E[16], 80000))
+			assert.equal("diag: +80.00s c#3 add behavior_instance " .. A("inst4") .. " for \"Light state after "
+				.. "streaming\" (entertainment) (first) created=+80.00s configuration.where=[{group=room:" .. A("room2")
+				.. "}] dependees=[] enabled=true last_error=<str:0> metadata.name=name#8 script_id=" .. A("script4")
+				.. " status=\"running\"", whole("+80.00s"))
+			assert.equal(1, feed(E[17], 90000))
+			assert.equal("diag: +90.00s c#4 delete behavior_instance " .. A("inst1") .. " for \"Timers\" (automation) "
+				.. "(20.00s after its last) created=+90.00s (no fields)", line("+90.00s"))
+			local script = '[{"creationtime":"2026-10-26T07:16:40Z","data":[' .. BODY.behavior_script:match(
+				'({"id":"' .. V.script4:gsub("%-", "%%-") .. '".-"state_schema":{}})') .. '],"type":"update"}]'
+			assert.equal(1, feed(script, 100000))
+			assert.equal("diag: +100.00s c#5 update behavior_script " .. A("script4") .. " (first) created=+100.00s "
+				.. "\"Light state after streaming\" (entertainment)", line("+100.00s"))
+			assert_redacted()
 		end)
 
 		it("logs an item of any other type that a sensor owns", function()
@@ -1253,8 +1445,8 @@ describe("bridge.motion_diag", function()
 				feed(container, i * 1000)
 			end
 			assert.equal(198, count_from(first), "197 item lines and the limit line")
-			assert.equal("diag: capture: line limit (200) reached at +198.00s; counting until "
-				.. os.date("%H:%M", (PASS_MS + 600000) / 1000), logged[#logged])
+			assert.equal("diag: capture: line limit (200) reached at +198.00s; counting until the capture ends",
+				logged[#logged])
 			c4.fire_timers()
 			assert.is_true(count_from(first) <= motion_diag.CAPTURE_LINES)
 			assert.equal(1, #lines_with("capture end (time) at +300.00s: 197 items logged (103 more after the line "
@@ -1272,8 +1464,8 @@ describe("bridge.motion_diag", function()
 			assert.equal(2, #lines_with("+1.00s c#1 update device ") + #lines_with("diag: + product_data.software"),
 				"one item, two lines")
 			assert.equal(197, count_from(first), "98 items of two lines and the limit line")
-			assert.equal("diag: capture: line limit (200) reached at +99.00s; counting until "
-				.. os.date("%H:%M", (PASS_MS + 600000) / 1000), logged[#logged])
+			assert.equal("diag: capture: line limit (200) reached at +99.00s; counting until the capture ends",
+				logged[#logged])
 			c4.fire_timers()
 			assert.is_true(count_from(first) <= motion_diag.CAPTURE_LINES)
 			assert.equal(1, #lines_with("98 items logged (22 more after the line limit) from 98 of 120 containers"))
@@ -1317,7 +1509,7 @@ describe("bridge.motion_diag", function()
 		it("the HR §5 sweep: no name, full id, MAC, bridge id, address or key in anything logged or answered",
 			function()
 				run_pass()
-				for i = 1, 13 do
+				for i = 1, #E do
 					feed(E[i], i * 10000)
 				end
 				c4.fire_timers()
@@ -1356,6 +1548,31 @@ describe("bridge.motion_diag", function()
 			assert_redacted()
 		end)
 
+		it("an automation's names, ids in strings, times and location data are redacted (#280)", function()
+			run_pass({
+				behavior_script = with_item(BODY.behavior_script, HOSTILE_SCRIPT),
+				behavior_instance = with_item(BODY.behavior_instance, HOSTILE_INSTANCE),
+			})
+			assert.truthy(line("GET behavior_script:"):find(A("script9") .. " \"Wake up " .. A("dev1")
+				.. "\" (<str:12>)", 1, true))
+			local inst = whole("behavior_instance " .. A("inst9"))
+			assert.truthy(inst:find("behavior_instance " .. A("inst9") .. " for \"Wake up " .. A("dev1")
+				.. "\" (<str:12>) ", 1, true))
+			for _, part in ipairs({ "configuration.when.time_point.time.hour=<clock>",
+				"configuration.when.time_point.time.minute=<clock>", "configuration.when.time_point.time.second=<clock>",
+				"configuration.when.start_at=<str:19>", "configuration.when.recurrence_days=[<str:6>,<str:6>]",
+				"configuration.when.changed=-1800.00s", "configuration.where=[{group=room:" .. A("room1") .. " label.name=name#",
+				" note=<str:", "{items=[light:" .. A("lamp21") .. "]}", "configuration.who=[geofence_client:" .. A("geo1"),
+				"configuration.geofence=<geo>", "configuration.home_location=<geo>", "configuration.coordinates=<geo>",
+				"configuration.time_zone=<geo>", "configuration.position=<geo>", "configuration.address=<addr>",
+				"configuration.target=<str:", "configuration.resource_id=" .. A("lamp11"), "configuration.names=[name#",
+				"configuration.mac=<mac>", "last_error=<str:", "metadata.name=name#", "migrated_from=<v1:",
+				"state.last_run=<str:20>", "state.nested.name=name#", "state.timer_state=<str:18>" }) do
+				assert.truthy(inst:find(part, 1, true), part .. " in " .. inst)
+			end
+			assert_redacted(nil, { "27.47", "153.02", "Brisbane", "Australia", "06:45", "12 Vexa" })
+		end)
+
 		it("hostile values in the capture are redacted the same way", function()
 			run_pass()
 			local container = '[{"creationtime":"2026-10-26T07:15:30Z","data":[' .. HOSTILE_MOTION .. '],"id":"'
@@ -1366,7 +1583,10 @@ describe("bridge.motion_diag", function()
 			assert.truthy(saw("+30.00s c#2 <type?> device " .. A("dev9") .. " (first) created=<time?> id_v1=<v1:21>"))
 			assert.equal(1, feed('[{"data":[' .. HOSTILE_DEVICE .. '],"type":"update"}]', 31000))
 			assert.truthy(saw("+31.00s c#3 update device " .. A("dev9") .. " (1.00s after its last) id_v1=<v1:21>"))
-			assert_redacted()
+			assert.equal(2, feed('[{"data":[' .. HOSTILE_SCRIPT .. "," .. HOSTILE_INSTANCE .. '],"type":"add"}]', 32000))
+			assert.truthy(saw("+32.00s c#4 add behavior_instance " .. A("inst9") .. " for \"Wake up " .. A("dev1")
+				.. "\" (<str:12>) (first) configuration.address=<addr>"))
+			assert_redacted(nil, { "27.47", "153.02", "Brisbane", "Australia", "06:45", "12 Vexa" })
 		end)
 
 		it("replaces the strings ctx.secrets() names in every line, a transfer's failure text included", function()
@@ -1388,8 +1608,10 @@ describe("bridge.motion_diag", function()
 			assert.equal("id <hex> and <hex>, not 2071353020",
 				M:scrub("id 001788fffe123abc and 001788FFFE123ABC, not 2071353020"))
 			assert.equal("key <token> and <token>", M:scrub("key zzzz0000zzzz0000zzzz0000zzzz00 and Ab1Cd2Ef3Gh4Ij5Kl6Mn7"))
-			assert.equal("motion_area_configuration device_software_update 14:12:30: kept",
-				M:scrub("motion_area_configuration device_software_update 14:12:30: kept"))
+			assert.equal("motion_area_configuration device_software_update auth_v1:12ab… kept",
+				M:scrub("motion_area_configuration device_software_update auth_v1:12ab… kept"))
+			assert.equal("at <clock>, <clock> and <clock>:", M:scrub("at 07:15, 7:05:16.502 and 14:12:30:"))
+			assert.equal("at 07:15", M:scrub("at 07:15", true), "the Last Action answer keeps its clock")
 			assert.equal("one line", M:scrub("one\nline"))
 		end)
 
@@ -1401,6 +1623,37 @@ describe("bridge.motion_diag", function()
 			assert.equal("diag: bridge: model \"BSB003 INJECTED line\", firmware \"1.77.2071353020 (API 1.77.0)\"; "
 				.. "controller OS \"3.4.2 build 746094\"; driver version \"271\"", line("bridge:"))
 			assert_redacted()
+		end)
+	end)
+
+	describe("clock times", function()
+		it("no logged line holds one: a restart, the pass, a clock in an error, the line limit, the end", function()
+			M:run(answered)
+			M:run(answered)
+			c4.now_ms = PASS_MS
+			assert.equal(1, c4.fire_timers())
+			answer_all({ zone = { ok = false, code = 503, json = { errors = { { description = "Timeout at 07:15" } } } } })
+			assert.equal("diag: GET zone: HTTP 503, errors 1: \"Timeout at <clock>\", no data array", line("GET zone:"))
+			for i = 1, 210 do
+				feed(string.format('[{"creationtime":"2026-10-26T07:15:02Z","data":[{"id":"%s","enabled":true,'
+					.. '"type":"motion"}],"type":"update"}]', V.motion1), i * 1000)
+			end
+			M:run(answered)  -- the capture ends (restarted), and the new run's pass fails
+			c4.now_ms = PASS_MS + 300000
+			c4.fire_timers()
+			answer_all({ clip = { ok = false, err = "timed out at 07:20:01" }, motion = { ok = false, err = "x" },
+				light_level = { ok = false, err = "x" } })
+			assert.truthy(saw("restarted: the pass starts again in 20 s"))
+			assert.truthy(saw("pass done (2 sensors, 1 area, 3 automations); capturing events for 10 minutes."))
+			assert.truthy(saw("counting until the capture ends"))
+			assert.truthy(saw("capture end (restarted) at +210.00s"))
+			assert.truthy(saw("GET clip: no answer (timed out at <clock>)"))
+			assert.truthy(#logged > 200)
+			for _, l in ipairs(logged) do
+				assert.is_nil(l:find("%d%d:%d%d"), "a clock time in: " .. l)
+				assert.is_nil(l:find("%d:%d%d"), "a clock time in: " .. l)
+			end
+			assert.is_nil(answers[1].text:find("%d:%d%d"), "no clock time in the Last Action answer either")
 		end)
 	end)
 
