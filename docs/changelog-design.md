@@ -104,6 +104,17 @@ changelog.py stamp  [--file F] --version VERSION --build N --date YYYY-MM-DD
   `Unreleased` is empty or when the build already has an entry. Writes the
   file only after the result passes `check`.
 
+Prereleases (#269, `docs/prerelease-design.md`): `--version` and `html
+--release` also take `X.Y-beta.N`, which is never an entry of `CHANGELOG.md`.
+`html` shows a non-empty `Unreleased` entry as `1.1 beta 1 "Cassian"
+(prerelease), build N (date)`, never as the release. `notes` fills
+`.github/prerelease-notes.md` (its default for a prerelease) with `{version}`
+(`1.1-beta.1`), `{release}` (`1.1`), `{beta}`, `{codename}`, `{build}`,
+`{date}`, `{this_build}`, `{stable}` and `{stable_version}` (the newest
+released entry, which the prerelease follows), and with no `{history}`.
+`stamp` refuses a prerelease, and `html` and `notes` refuse a prerelease of a
+version the file lists already: a prerelease comes before its release.
+
 Exit codes: 0 done, 1 refused or invalid, 2 usage.
 
 ## 3. Where it shows

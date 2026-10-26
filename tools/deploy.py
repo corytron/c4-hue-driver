@@ -14,14 +14,21 @@ The GitOps roles (docs/cicd-gitops-design.md, sections 6, 7 and 7.1):
                   release and writes the brief the coordinator sends to that session, and `done`
                   or `failed` records what the session reported.
 
+A release is named by its tag: v1.0 for a release, v1.1-beta.1 for a prerelease, which never moves
+(docs/prerelease-design.md); deploy/house.yaml may name either. Its packages are the ones its
+manifest.json lists, the one list that the src/<driver>/driver.xml directories give the build
+(section 2 of that contract): deploy/house.yaml's drivers must be exactly those.
+
 Subcommands (exit codes: 0 success or in sync, 1 error, 3 drift; a usage error exits 2):
 
   validate [--online]
       Schema and value checks of deploy/house.yaml (section 6). --online also downloads the
-      release's manifest.json and fails when its build differs from the file's.
+      release's manifest.json and fails when its build differs from the file's, or its packages
+      from the file's drivers.
   start [--tag TAG] [--supersede] [--note TEXT] [--no-attestation]
-      Downloads manifest.json, SHA256SUMS.txt and the three packages of the release into
-      build/release/<tag>/ (a fresh directory); verifies every sha256 against both files, that
+      Downloads manifest.json and SHA256SUMS.txt of the release, then every package the manifest
+      names (deploy/house.yaml's drivers must be exactly those), into build/release/<tag>/ (a
+      fresh directory); verifies every sha256 against both files, that
       manifest.build is deploy/house.yaml's build and manifest.commit the tag's commit, and that
       each package's provenance attestation names it and was signed by the release workflow:
       `gh attestation verify <file> --repo OWNER/NAME --signer-workflow
@@ -67,9 +74,8 @@ import tempfile
 EXIT_OK, EXIT_ERROR, EXIT_DRIFT = 0, 1, 3
 
 ENVIRONMENT = "house"
-DRIVERS = ("hue_bridge", "hue_light", "hue_scene")
-PACKAGES = tuple(name + ".c4z" for name in DRIVERS)
-RELEASE_FILES = ("manifest.json", "SHA256SUMS.txt") + PACKAGES
+# What start downloads first: the manifest names the release's packages, which come next.
+META_FILES = ("manifest.json", "SHA256SUMS.txt")
 HOUSE_KEYS = ("environment", "release", "build", "drivers", "stream_timeout_s", "stream_watchdog_s", "debug_mode")
 
 # The minimum and maximum src/hue_bridge/driver.xml declares for the bridge's RANGED_INTEGER
@@ -89,7 +95,16 @@ RELEASE_DIR = os.path.join(ROOT, "build", "release")
 SIGNER_WORKFLOW = ".github/workflows/release.yml"
 GH_MIN_FOR_VERIFY = (2, 102, 0)
 
-TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+$")
+# Release tags v1.0 and prerelease tags v1.1-beta.1 (docs/prerelease-design.md, section 1): for
+# deploy/house.yaml's release, --tag and the deploy issue's title, always matched whole.
+TAG_PATTERN = r"v[0-9]+\.[0-9]+(?:-beta\.[1-9][0-9]*)?"
+TAG_RE = re.compile(TAG_PATTERN)
+TAG_SHAPE = "v1.0 (a release) or v1.1-beta.1 (a prerelease)"
+# A driver is a directory src/<name>/ that holds a driver.xml, and its package is <name>.c4z
+# (docs/prerelease-design.md, section 2). The pattern keeps a name usable as a file name, in a
+# command line and in the brief's PowerShell.
+DRIVER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+PACKAGE_SUFFIX = ".c4z"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 DESCRIPTION_LIMIT = 140  # GitHub's limit for a deployment status description
@@ -212,6 +227,31 @@ def refuse_private(text, what):
         raise DeployError("%s holds private data: %s" % (what, "; ".join(problems)))
 
 
+def is_tag(text):
+    """Whether text, whole, is a release tag (v1.0) or a prerelease tag (v1.1-beta.1)."""
+    return isinstance(text, str) and TAG_RE.fullmatch(text) is not None
+
+
+def is_prerelease(tag):
+    """Whether a tag that is_tag() accepts names a prerelease."""
+    return "-beta." in tag
+
+
+def package_driver(name):
+    """The driver of a package name <driver>.c4z, or None when name is not one."""
+    if isinstance(name, str) and name.endswith(PACKAGE_SUFFIX):
+        driver = name[: -len(PACKAGE_SUFFIX)]
+        if DRIVER_RE.fullmatch(driver):
+            return driver
+    return None
+
+
+def listing(names):
+    """Names as English: "a", "a and b", "a, b and c"."""
+    names = list(names)
+    return names[0] if len(names) == 1 else "%s and %s" % (", ".join(names[:-1]), names[-1])
+
+
 # ---------------------------------------------------------------------------
 # Desired state: deploy/house.yaml
 # ---------------------------------------------------------------------------
@@ -247,6 +287,26 @@ def _in_range(value, bounds):
     return number if number is not None and bounds[0] <= number <= bounds[1] else None
 
 
+def drivers_problems(text):
+    """What is wrong with deploy/house.yaml's drivers by itself: driver names, each once. Whether they
+    are the right drivers is the release's question (check_drivers): the file may name an older
+    release than the tree builds, with other drivers."""
+    names = text.split()
+    if not names:
+        return ["drivers must name the release's drivers, separated by spaces, not %r" % text]
+    problems = []
+    bad = [name for name in names if not DRIVER_RE.fullmatch(name)]
+    if bad:
+        problems.append(
+            "drivers must be driver names, the directories src/<name>/ that hold a driver.xml (hue_bridge, "
+            "not hue_bridge.c4z), not %s" % ", ".join(repr(name) for name in bad)
+        )
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        problems.append("drivers names %s more than once" % ", ".join(repeated))
+    return problems
+
+
 def _range_problem(key, prop, bounds, values):
     return "%s must be an integer from %d to %d (%s in src/hue_bridge/driver.xml), not %r" % (
         key,
@@ -268,14 +328,14 @@ def validate_house(values):
             problems.append("unknown key %s" % key)
     if "environment" in values and values["environment"] != ENVIRONMENT:
         problems.append("environment must be %s, not %r" % (ENVIRONMENT, values["environment"]))
-    if "release" in values and not TAG_RE.match(values["release"]):
-        problems.append("release must look like v1.0, not %r" % values["release"])
+    if "release" in values and not is_tag(values["release"]):
+        problems.append("release must look like %s, not %r" % (TAG_SHAPE, values["release"]))
     if "build" in values:
         build = _integer(values["build"])
         if build is None or build <= 0:
             problems.append("build must be a positive integer, not %r" % values["build"])
-    if "drivers" in values and sorted(values["drivers"].split()) != sorted(DRIVERS):
-        problems.append("drivers must be exactly: %s (got %r)" % (" ".join(DRIVERS), values["drivers"]))
+    if "drivers" in values:
+        problems.extend(drivers_problems(values["drivers"]))
     timeout = watchdog = None
     if "stream_timeout_s" in values:
         timeout = _in_range(values["stream_timeout_s"], STREAM_TIMEOUT_RANGE)
@@ -344,14 +404,33 @@ def read_manifest(path):
     if not isinstance(manifest.get("commit"), str) or not COMMIT_RE.match(manifest["commit"]):
         raise DeployError("manifest.json: commit must be a 40-digit sha, not %r" % (manifest.get("commit"),))
     packages = manifest.get("packages")
-    if not isinstance(packages, dict):
-        raise DeployError("manifest.json: packages must be an object")
-    for name in PACKAGES:
-        entry = packages.get(name)
+    if not isinstance(packages, dict) or not packages:
+        raise DeployError("manifest.json: packages must be an object that names at least one package")
+    for name in sorted(packages):
+        if package_driver(name) is None:
+            raise DeployError("manifest.json: %r is not a package name (<driver>.c4z)" % (name,))
+        entry = packages[name]
         digest = entry.get("sha256") if isinstance(entry, dict) else None
         if not isinstance(digest, str) or not SHA256_RE.match(digest.lower()):
             raise DeployError("manifest.json: no sha256 for %s" % name)
     return manifest
+
+
+def manifest_packages(manifest):
+    """The release's packages, sorted: the names its manifest.json lists (checked by read_manifest)."""
+    return sorted(manifest["packages"])
+
+
+def check_drivers(house, manifest, tag):
+    """deploy/house.yaml's drivers against the release's packages (docs/prerelease-design.md,
+    section 2): exactly the same drivers, or a DeployError."""
+    wanted = sorted(house["drivers"].split())
+    shipped = sorted(package_driver(name) for name in manifest["packages"])
+    if wanted != shipped:
+        raise DeployError(
+            "deploy/house.yaml names the drivers %s, but the release %s carries %s (manifest.json): drivers: "
+            "must name exactly the release's packages" % (" ".join(wanted), tag, ", ".join(manifest_packages(manifest)))
+        )
 
 
 def fetch_manifest(repo, tag):
@@ -387,9 +466,10 @@ def sha256_file(path):
 def verify_packages(directory, manifest):
     """Every package's sha256 against SHA256SUMS.txt and manifest.json. Returns {name: sha256}."""
     sums = parse_sums(os.path.join(directory, "SHA256SUMS.txt"))
+    names = manifest_packages(manifest)
     hashes = {}
     problems = []
-    for name in PACKAGES:
+    for name in names:
         path = os.path.join(directory, name)
         if not os.path.isfile(path):
             problems.append("%s is missing" % name)
@@ -405,6 +485,9 @@ def verify_packages(directory, manifest):
             problems.append("%s: sha256 %s, but manifest.json says %s" % (name, actual, entry["sha256"]))
         if isinstance(entry.get("bytes"), int) and entry["bytes"] != os.path.getsize(path):
             problems.append("%s: %d bytes, but manifest.json says %d" % (name, os.path.getsize(path), entry["bytes"]))
+    extra = sorted(set(sums) - set(names))
+    if extra:
+        problems.append("SHA256SUMS.txt lists %s, which manifest.json does not" % ", ".join(extra))
     if problems:
         raise DeployError("the packages failed verification:\n  %s" % "\n  ".join(problems))
     return hashes
@@ -679,7 +762,7 @@ def open_deploy_issues(repo):
     # gives it: another issue that merely carries the label (a tooling bug
     # about deploys, say) is never edited or closed. Seen on 2026-10-25:
     # `done` closed #237, which only shared the label.
-    issues = [issue for issue in issues if DEPLOY_ISSUE_TITLE.match(issue.get("title") or "")]
+    issues = [issue for issue in issues if DEPLOY_ISSUE_TITLE.fullmatch(issue.get("title") or "")]
     return sorted(issues, key=lambda issue: issue["number"])
 
 
@@ -702,7 +785,9 @@ def close_issue(repo, number, comment):
     run_gh(["issue", "close", str(number), "--repo", repo, "--comment", comment])
 
 
-DEPLOY_ISSUE_TITLE = re.compile(r"^Deploy v\d+\.\d+ \(build \d+\) to the house$")
+# issue_title()'s two forms and nothing else (#244; docs/prerelease-design.md, section 4), matched
+# whole: "Deploy v1.0 (build 359) to the house", "Deploy v1.1-beta.1 (build 412) to the house".
+DEPLOY_ISSUE_TITLE = re.compile(r"Deploy %s \(build [0-9]+\) to the house" % TAG_PATTERN)
 
 
 def issue_title(tag, build):
@@ -738,9 +823,16 @@ def issue_body(repo, tag, build, observed):
             observed_url(observed),
             observed["status"].get("description") or "",
         )
+    prerelease = ""
+    if is_prerelease(tag):
+        prerelease = (
+            "%s is a prerelease, a build for testing (docs/prerelease-design.md); going back to a stable release "
+            "is another pull request that changes `deploy/house.yaml`.\n" % tag
+        )
     return (
         "**Desired** (`deploy/house.yaml` on `main`): release **%s**, build **%d**.\n"
         "**Observed** (GitHub Deployments, environment `%s`): %s\n"
+        "%s"
         "\n"
         "Release: https://github.com/%s/releases/tag/%s\n"
         "Environment: %s\n"
@@ -758,7 +850,7 @@ def issue_body(repo, tag, build, observed):
         "\n"
         "Opened by `tools/deploy.py drift --issue` (docs/cicd-gitops-design.md, section 7.1); it is closed by the tool "
         "when a deployment records build %d.\n"
-        % (tag, build, ENVIRONMENT, seen, repo, tag, environment_page(repo), tag, build)
+        % (tag, build, ENVIRONMENT, seen, prerelease, repo, tag, environment_page(repo), tag, build)
     )
 
 
@@ -823,6 +915,7 @@ def online_check(repo, house, strict):
             "deploy/house.yaml says build %d, but the release %s carries build %d (manifest.json)"
             % (build, tag, manifest["build"])
         )
+    check_drivers(house, manifest, tag)
     return manifest
 
 
@@ -834,9 +927,13 @@ def online_check(repo, house, strict):
 def render_brief(repo, tag, build, commit, house, deployment, hashes, attestations, note, verified_with=None):
     base = "https://github.com/%s/releases/download/%s/" % (repo, tag)
     folder = "C:\\c4-hue\\drivers\\%s" % tag
+    packages = sorted(hashes)
     lines = []
     add = lines.append
-    add("# Install build %d (%s) on the house" % (build, tag))
+    if is_prerelease(tag):
+        add("# Install build %d (%s, a prerelease) on the house" % (build, tag))
+    else:
+        add("# Install build %d (%s) on the house" % (build, tag))
     add("")
     add(
         "Deployment %s on the GitHub environment `%s`, created %s by `tools/deploy.py start` (%s; environment page %s)."
@@ -848,6 +945,13 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
             environment_page(repo),
         )
     )
+    if is_prerelease(tag):
+        add("")
+        add(
+            "%s is a prerelease: a build for testing, marked Pre-release on GitHub and never Latest "
+            "(docs/prerelease-design.md). Going back to a stable release is another pull request that changes "
+            "deploy/house.yaml, then the same install with that release's files." % tag
+        )
     add("")
     add("The owner's standing approval covers this install: act without asking again.")
     add(
@@ -865,16 +969,19 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("")
     add("## 1. Download and verify (PowerShell)")
     add("")
-    add("Fetch the three packages from the GitHub release into `%s\\` and check every sha256:" % folder)
+    add(
+        "Fetch the %d packages of the release (%s) into `%s\\` and check every sha256:"
+        % (len(packages), listing(packages), folder)
+    )
     add("")
     add("```powershell")
     add("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12")
     add("$dir = '%s'" % folder)
     add("New-Item -ItemType Directory -Force -Path $dir | Out-Null")
-    for name in PACKAGES:
+    for name in packages:
         add("Invoke-WebRequest -UseBasicParsing -Uri '%s%s' -OutFile \"$dir\\%s\"" % (base, name, name))
     add("$expected = @{")
-    for name in PACKAGES:
+    for name in packages:
         add("    '%s' = '%s'" % (name, hashes[name]))
     add("}")
     add("foreach ($name in $expected.Keys) {")
@@ -888,7 +995,7 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("")
     add("| File | URL | sha256 |")
     add("| --- | --- | --- |")
-    for name in PACKAGES:
+    for name in packages:
         add("| %s | %s%s | `%s` |" % (name, base, name, hashes[name]))
     add("")
     add("A hash that differs ends the round: report it and install nothing.")
@@ -896,8 +1003,8 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("## 2. Install in Composer Pro")
     add("")
     add(
-        '1. Driver ▸ "Add or Update Driver or Agent…"; pick all three files from `%s\\` at once. Composer updates '
-        "every existing Hue Bridge, Hue Light and Hue Scene device in place." % folder
+        '1. Driver ▸ "Add or Update Driver or Agent…"; pick all %d files from `%s\\` at once (%s). Composer '
+        "updates every existing device of these drivers in place." % (len(packages), folder, listing(packages))
     )
     add("2. Never delete and re-add a device: the bridge's pairing would be lost, and the devices' bindings with it.")
     add(
@@ -913,8 +1020,8 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("## 3. Read back and report")
     add("")
     add(
-        "- Every device's `Driver Version` = %d (the bridge, every Hue Light and every Hue Scene device); name any "
-        "device that shows another value." % build
+        "- Every device's `Driver Version` = %d (every device of the drivers %s); name any device that shows "
+        "another value." % (build, listing(package_driver(name) for name in packages))
     )
     add(
         "- The bridge's `Stream Timeout (s)` = %s, `Stream Watchdog (s)` = %s and `Debug Mode` = %s "
@@ -934,7 +1041,7 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("")
     add("## 4. Provenance")
     add("")
-    for name in PACKAGES:
+    for name in packages:
         found = attestations.get(name)
         if found is None:
             add(
@@ -1056,15 +1163,18 @@ def cmd_validate(args):
     if args.online:
         repo = resolve_repo(args.repo)
         manifest = online_check(repo, house, strict=True)
-        print("release %s: manifest.json build %d matches (commit %s)" % (tag, manifest["build"], manifest["commit"]))
+        print(
+            "release %s: manifest.json build %d matches (commit %s), and its packages are the drivers: %s"
+            % (tag, manifest["build"], manifest["commit"], ", ".join(manifest_packages(manifest)))
+        )
     return EXIT_OK
 
 
 def cmd_start(args):
     house = load_house(args.file)
     tag = args.tag or house["release"]
-    if not TAG_RE.match(tag):
-        raise DeployError("--tag must look like v1.0, not %r" % tag)
+    if not is_tag(tag):
+        raise DeployError("--tag must look like %s, not %r" % (TAG_SHAPE, tag))
     build = int(house["build"])
     if args.note:
         refuse_private(args.note, "--note")
@@ -1085,15 +1195,22 @@ def cmd_start(args):
     directory = release_dir(tag)
     shutil.rmtree(directory, ignore_errors=True)
     os.makedirs(directory)
-    missing = download_assets(repo, tag, RELEASE_FILES, directory)
+    missing = download_assets(repo, tag, META_FILES, directory)
     if missing:
         hint = ""
         if "manifest.json" in missing:
             hint = " (a release built before the release workflow wrote manifest.json; re-cut it from main)"
         raise DeployError("the release %s lacks %s%s" % (tag, ", ".join(missing), hint))
-    print("downloaded %d files into %s" % (len(RELEASE_FILES), display_path(directory)))
-
+    # The packages are the ones the manifest names (docs/prerelease-design.md, section 2), and the
+    # desired state must name the same drivers before anything else is downloaded.
     manifest = read_manifest(os.path.join(directory, "manifest.json"))
+    packages = manifest_packages(manifest)
+    check_drivers(house, manifest, tag)
+    missing = download_assets(repo, tag, packages, directory)
+    if missing:
+        raise DeployError("the release %s lacks %s, which its manifest.json names" % (tag, ", ".join(missing)))
+    print("downloaded %d files into %s" % (len(META_FILES) + len(packages), display_path(directory)))
+
     hashes = verify_packages(directory, manifest)
     commit = tag_commit(repo, tag)
     check_manifest(manifest, tag, build, commit)
@@ -1101,7 +1218,7 @@ def cmd_start(args):
 
     attestations = {}
     unattested = []
-    for name in PACKAGES:
+    for name in packages:
         found = attestation_check(repo, name, hashes[name])
         attestations[name] = found
         if found is None:
@@ -1122,7 +1239,7 @@ def cmd_start(args):
         )
     # Who signed: an attestation that exists must verify, --no-attestation or not.
     verified_with = None
-    attested = [name for name in PACKAGES if attestations[name] is not None]
+    attested = [name for name in packages if attestations[name] is not None]
     if attested:
         verified_with = require_gh_for_verify()
         for name in attested:
@@ -1185,9 +1302,10 @@ def cmd_done(args):
             "start; run `deploy.py start` again" % (tag, manifest["build"], record["id"], build)
         )
     recorded = record.get("packages") or {}
-    changed = [
-        name for name in PACKAGES if name in recorded and recorded[name] != manifest["packages"][name]["sha256"].lower()
-    ]
+    current = {name: entry["sha256"].lower() for name, entry in manifest["packages"].items()}
+    changed = []
+    if recorded:  # a package added, removed or rebuilt since start
+        changed = sorted(name for name in set(recorded) | set(current) if recorded.get(name) != current.get(name))
     if changed:
         raise DeployError(
             "the release %s replaced %s after start; run `deploy.py start` again" % (tag, ", ".join(changed))
@@ -1225,8 +1343,8 @@ def cmd_failed(args):
 
 def cmd_record(args):
     house = load_house(args.file)
-    if not TAG_RE.match(args.tag):
-        raise DeployError("--tag must look like v1.0, not %r" % args.tag)
+    if not is_tag(args.tag):
+        raise DeployError("--tag must look like %s, not %r" % (TAG_SHAPE, args.tag))
     if args.build <= 0:
         raise DeployError("--build must be a positive integer")
     installed_at = parse_time(args.at)
@@ -1262,7 +1380,7 @@ def cmd_record(args):
             file=sys.stderr,
         )
     else:
-        packages = {name: manifest["packages"][name]["sha256"].lower() for name in PACKAGES}
+        packages = {name: manifest["packages"][name]["sha256"].lower() for name in manifest_packages(manifest)}
         commit = commit or manifest["commit"]
 
     extra = {"recorded": True, "installed_at": installed_at}
