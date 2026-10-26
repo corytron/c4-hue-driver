@@ -484,7 +484,8 @@ class ParseHouseTest(unittest.TestCase):
     def test_committed_house_file_is_valid(self):
         house = deploy.load_house(deploy.HOUSE_FILE)
         self.assertEqual(house["environment"], "house")
-        self.assertRegex(house["release"], r"^v\d+\.\d+$")
+        # A stable tag or a prerelease (docs/prerelease-design.md §4).
+        self.assertRegex(house["release"], deploy.TAG_RE)
 
 
 class ValidateHouseTest(unittest.TestCase):
