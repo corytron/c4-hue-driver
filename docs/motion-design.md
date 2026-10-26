@@ -168,6 +168,7 @@ This module parses resources into records. It does no I/O.
   
   Missing fields stay nil. Deprecated fields are used only when the new ones are missing (HR §1.3–§1.7).
 - **`area_motion(record, readings)`:** an area's motion is the reading of whichever enabled service changed last (EC rule 7, HR §2.5).
+  Superseded on 2026-10-26 (#288): both services report the same walk a few seconds apart, so following the last change flapped the contact on the house. An area now shows motion while any enabled service reports it, and no motion only when all report none.
 
 ### 4.2 `bridge/motion.lua` (new): the fourth registry owner, on `owner.lua`
 
