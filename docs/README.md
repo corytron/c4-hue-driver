@@ -116,6 +116,14 @@ are dated research; what was built from them is in the contracts and
 - [`edge-cases-motion.md`](edge-cases-motion.md): the lifecycle cases of
   sensors and MotionAware areas on both sides, with a decision per case
   (2026-10-26, #268).
+- [`hue-automations-research.md`](hue-automations-research.md): Hue's
+  automations in CLIP v2 (`behavior_script`, `behavior_instance`), what a
+  client can read and switch off, MotionAware's own automation and the v1
+  blind spot, from public sources (2026-10-26, #280).
+- [`edge-cases-automations.md`](edge-cases-automations.md): the lifecycle of
+  a Hue automation audit on both sides, with a decision per case: detection
+  automatic and read-only, remedies only on a click and reversible
+  (2026-10-26, #280).
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
