@@ -62,10 +62,10 @@ behalf, not the owner.
    opening a dialog to inspect its pickers and cancelling it, taking
    screenshots: always allowed.
 2. **Hard-to-undo steps are named in the brief**: deleting a device,
-   Update Driver, Connections changes, Load/Save project, OK in a dialog
-   that creates or changes a device. They are covered by the owner's
-   standing approval (rule 8); the brief names them so the session knows
-   what it is about to change.
+   Update Driver, Connections and Programming changes, Load/Save project,
+   OK in a dialog that creates or changes a device. They are covered by
+   the owner's standing approval (rule 8); the brief names them so the
+   session knows what it is about to change.
 3. **Stop on surprises**: any unexpected dialog, error or prompt ends the
    round with a report, not a guess.
 4. **Report exact texts** (UIA Names, property values) and keep screenshots
@@ -139,6 +139,15 @@ behalf, not the owner.
 16. **To find a stale driver copy**, compare the downloaded `.c4z`,
     Composer's driver store (`Documents\Control4\Drivers`) and the device's
     `Driver Version`.
+17. **Never turn the mouse wheel over a property page.** It steps the
+    drop-down under the pointer: on 2026-10-27 (#312) it moved Engraving
+    Size on the project root's Lighting Defaults from Standard to Large
+    (set back afterwards). Scroll with clicks on the scrollbar only.
+18. **Check every drag twice.** Mid-drag, `GetGUIThreadInfo` must report
+    a capture window and the drop or no-drop cursor, or the release drops
+    nothing; afterwards the Connections lists, or a Script's Copy All
+    (XML), must show the binding or the line where it was meant to go
+    ("Learned 2026-10-27" below).
 
 ## The helper module
 
@@ -163,9 +172,17 @@ input at the reported rectangles.
 | Screenshots | `Save-ComposerShot`, `Save-ScreenShot`, `Save-RegionShot`, `Save-ElementShot`, `Save-PropertyRowShot` (unscaled crops for the manual, round 12), `Send-DocShot` (PUT `/img/<name>` to `tools/collect.py` on this VM, port 8090) |
 | Manual pictures (`tools/composer/Shots.ps1`, dot-sourced after the module; #61, `docs/screenshots-plan.md`) | `Initialize-Shots` (the `raw\`, `doc\` and `hold\` folders), `Get-HouseTerms` (the house's names for the deny check, in memory only), `Save-PaneShot` (captures one pane, dialog or row, a window by its visible frame; refuses a crop that shows the title bar, the status bar or the tree), `Get-TextRegions`, `Set-TextReplacement` (paints a neutral text in the measured font), `Save-ShotResult` (to `doc\`, or to `hold\` with the reasons), `Invoke-ShotPlan`, `Export-ShotPlanFromDoc`, `Export-ShotTexts` (the per-picture text list) |
 
-Connections cannot be made with synthesized input (two drag attempts
-started no OLE drag); a binding is made from the bridge with `C4:Bind`
-in a dev build, or by the owner (`docs/design.md`, Composer UI).
+Connections and Programming can be changed with synthesized drags since
+2026-10-27 (#312, "Learned 2026-10-27" below): a binding when the drag
+starts on the selected device's own row in the top pane of Connections,
+a Script line by dragging an action's green arrow into the Script. The
+two attempts of 2026-10-22 that "started no OLE drag" (`docs/design.md`,
+Composer UI) began in the lower list, where no drag starts. The verified
+method moves with relative input (`MOUSEEVENTF_MOVE`); the repo copy of
+`Invoke-MouseDrag` steps with absolute `SetCursorPos` instead, so until
+the module has a function for the verified method, a brief that binds or
+programs spells it out. A binding can still be made from the bridge with
+`C4:Bind` in a dev build (`docs/design.md`, Project APIs).
 
 ## Workflow
 
@@ -200,7 +217,9 @@ things to verify; its steps are briefs for the Windows session. The brief
 names the steps that are hard to undo (rule 2) and the standing approval
 covers them (rule 8); only what needs the owner's hands (a controller
 reboot from System Manager, rule 9; a keypad, a lamp, the phone) waits for
-him.
+him. Since 2026-10-27 (#312) Connections and Programming are not among
+them: the session binds and writes Script lines by synthetic drag and
+reads the result back (rule 18).
 
 ## History
 
@@ -260,3 +279,67 @@ PSScriptAnalyzer runs in CI. `Close-ComposerDialog`'s Escape goes through
 `Send-KeysTo -ExpectedHwnd <dialog> -Within` (new: focus on any control
 inside that top-level window, which must be in the foreground); raw
 `Send-Keys` remains only inside `Send-KeysTo`.
+
+## Learned 2026-10-27: Connections and Programming by synthetic drag (#312)
+
+Verified on the house by the Windows session (Composer Pro 3.4.2, OS
+3.4.3). It corrects the finding of 2026-10-22 that synthesized input
+cannot make a connection (`docs/design.md`, Composer UI, where a
+Superseded line now says so).
+
+- **Connections: drag from the top pane.** Select the device whose
+  connection is to be made: the top pane lists its own connection rows
+  (for a keypad, its "\<button> Button Link" Control Inputs). Drag that
+  row onto the matching connection's row in the lower list ("BUTTON_LINK
+  Output Devices" for a Button Link) and the binding is made. A drag that
+  starts in the lower list never begins, from the row's text or from its
+  icon (no capture, `IDC_ARROW`); double-clicking a lower row does
+  nothing, and the right-click menu of either row offers only Disconnect.
+- **The drag that works**: relative moves through `SendInput` or
+  `mouse_event` (`MOUSEEVENTF_MOVE`). Press, wait 300 ms, move at least
+  10 px of real travel in the first steps, then about 30 steps of 20 ms
+  to the target, hover 500 ms, release. Windows scales relative moves:
+  eight 1 px moves travelled 4 px, exactly the edge of the list's drag
+  rectangle (`SM_CXDRAG`, 4 px either side of the press point), and
+  started nothing. Once a drag has begun, `GetGUIThreadInfo` reports a
+  capture window and the cursor is the no-drop (`IDC_NO`) or the drop
+  cursor (rule 18).
+- **Disconnect** asks "Are you sure you want to disconnect \<device A>
+  from \<device B>?": it names the devices, not the connection, so the
+  row right-clicked decides which binding goes; read both lists again
+  afterwards.
+- **A keypad button follows its link by itself.** Making a button's link
+  switched that button's LED Behavior to Follow Connection;
+  disconnecting did not switch it back. LED Behavior offers Follow
+  Connection, Follow Load, Push/Release and Programmed; Button Behavior
+  offers Load On, Load Off, Toggle Load and Keypad.
+- **Test one binding before building on a driver's links.** A third-party
+  fan driver's BUTTON_LINK connections bound normally and did nothing,
+  neither for presses nor for the LED: a driver can declare links it does
+  not implement. That is a bug of that driver, not a Composer limit.
+- **Programming: drag an action's green arrow into the Script**, with
+  the same drag (the capture holds, the drop cursor shows). A command
+  nests inside an If only when dropped on the If's blue "?" icon, and
+  each further drop there appends it as the If's last child; dropped on
+  the If row's text, it lands at top level, before the If (upper half of
+  the row) or after it (lower half).
+- **The right-click menu of a Script line**: Move Up, Move Down, Disable
+  Event, Disable Item (Enable Item once disabled), Insert Comment, View
+  Code Item Description, Copy All, Copy Selected, Paste, Find and
+  Replace, Delete, Delete All, Change to Customer. Delete asks "Are you
+  sure you want to delete the code item: \<text>", Delete All "Are you
+  sure you want to delete all code items?". A disabled line shows a grey
+  arrow with a small red ×; disabling an If greys its children.
+- **Copy All reads a Script back**: the clipboard gets the whole script
+  as XML, `<cutitems>` holding `<item>` elements, each with its Type, its
+  Description and its child items nested inside, so the nesting can be
+  checked exactly (rule 18).
+- **Keypad LED commands**: "Set LED On" and "Set LED Off" only choose the
+  colour a button shows when lit or dark (the line reads "Set \<button>
+  LED on the \<keypad> to \<colour> when on"); "Use the on color for
+  \<button>" and "Use the off color for \<button>" light and darken it;
+  "Set LED Current" shows a colour now.
+- **The mouse wheel changes property values** (rule 17): over a property
+  page it stepped the drop-down under the pointer, and Engraving Size on
+  the project root's Lighting Defaults went from Standard to Large (set
+  back afterwards). Scroll with clicks on the scrollbar only.

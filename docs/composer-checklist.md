@@ -863,7 +863,9 @@ prose (chapter 10, with this setup as its example, and the Hue Light's own
 Documentation tab). The commands change no `<capabilities>`, so the
 install needs no reboot. The Windows session reads Composer; the owner
 makes the Programming drags (synthesized drags start no OLE drag,
-`docs/composer-remote.md`) and walks.
+`docs/composer-remote.md`) and walks. Superseded (2026-10-27, #312): the
+Windows session's drags build programming and bind Connections too
+(`docs/composer-remote.md`, "Learned 2026-10-27"); the owner only walks.
 
 73. **The house setup** (contract §3): the two Foyer lamps get 30 points
     brighter when the MotionAware area senses motion, and go back to their
