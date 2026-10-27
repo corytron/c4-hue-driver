@@ -119,7 +119,10 @@ Current (2026-10-25, build 316): the shared machine has its own spec,
 `tests/spec/device_spec.lua`.
 Hardware: bind a switch's buttons to a light's Button Links in Composer's
 Connections (a drag; by hand), tap and hold; the manual's chapter "Using
-the lights from Control4" describes the setup.
+the lights from Control4" describes the setup. Superseded (2026-10-27,
+#312): the Windows session can make the binding by a synthesized drag
+from the keypad's own row (`docs/composer-remote.md`, "Learned
+2026-10-27").
 
 ## Hardware findings (2026-10-22, builds 144 and 146 installed)
 
@@ -270,7 +273,9 @@ Decision 9).
   the same 1 s click suppression after a hold.
 
 The switch's own "LED Behavior" may need its option that follows the bound
-device instead of "Push/Release" (owner checks on the switch).
+device instead of "Push/Release" (owner checks on the switch). Answered
+(2026-10-27, #312): binding a keypad button's link sets its LED Behavior
+to "Follow Connection" by itself; disconnecting does not set it back.
 
 Both `driver.xml` declare `has_leds` True so Composer offers the button LED
 colour settings (which arrive as `SET_BUTTON_COLOR`); the scene's also

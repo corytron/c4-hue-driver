@@ -179,7 +179,7 @@ the project is the owner's; nothing is lost by waiting (import-design §1).
 | Driver updated | Lua only; `hue_kind` persisted; no reboot; a device created under this build keeps the light icon | — | — |
 | Two devices for one group | Prevented: `Add Light` answers "Not added: Bedside Lights (zone) is already imported (device N)"; a second claimant via hello is a conflict in Attention | `Forget Light` on one | Adopting the second |
 | The same group also has Hue Scene devices | Allowed and expected (Decision 10) | — | — |
-| Bridge driver deleted and re-added | Devices read "Not bound to a Hue Bridge", keep `hue_rid`/`hue_kind`; after pairing, a bound device's hello adopts it | Bind in Connections (owner's drag), `Link Devices` | — |
+| Bridge driver deleted and re-added | Devices read "Not bound to a Hue Bridge", keep `hue_rid`/`hue_kind`; after pairing, a bound device's hello adopts it | Bind in Connections (a drag, by the owner or since 2026-10-27 the Windows session, #312), `Link Devices` | — |
 | Control4 room of the mapping deleted | `Add Light` refuses as lights do ("mapped to a Control4 room that no longer exists") | `Set Room Mapping` | A silent fallback room |
 
 ### Rooms as group lights (recommendation: yes, in v1)

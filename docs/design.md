@@ -896,6 +896,12 @@ loop on OS 3.4.2:
   exist only in dev builds (`docs/code-analysis-2026-10-22.md`, item 10),
   and the house runs release builds: binding there is the owner's drag in
   Connections, or a dev build installed for the purpose.
+  Superseded (2026-10-27, #312): the Windows session's synthesized drag
+  binds too, once it starts on the consumer's own row in the upper pane
+  of Connections (verified with a keypad's Button Link; from a light's
+  `Hue Bridge` input **[assumed]**), so a binding on a release build need
+  not wait for the owner (`docs/composer-remote.md`, "Learned 2026-10-27:
+  Connections and Programming by synthetic drag (#312)").
 - Hue side: 16 rooms (9.9 KB), 7 zones (6.6 KB), 1 bridge_home (1.3 KB),
   125 scenes (351 KB). The single `GET /clip/v2/resource` returns 497
   items, 588 KB, in 1 s. Room `children` are devices, zone `children`
@@ -1171,6 +1177,13 @@ project:
   (Project APIs section).
   Superseded (2026-10-22): release builds have no `Probe Call`; the keypad
   bindings on the house were made by hand in Connections.
+  Superseded (2026-10-27, #312): a synthesized drag does bind when it
+  starts on the selected device's own row in the upper pane and drops on
+  the matching row of the lower list (verified with a keypad's Button
+  Link); a drag from the lower list, where both attempts above started,
+  never begins. Method and the day's other Connections and Programming
+  findings: `docs/composer-remote.md`, "Learned 2026-10-27: Connections
+  and Programming by synthetic drag (#312)".
 - **The "Action Parameter List" dialog remembers the last values per
   action** (seen 2026-10-21 21:30: a later `Add Scene` opened pre-filled
   with the previous Scene and Room). An empty `Room` therefore cannot be
