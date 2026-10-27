@@ -415,6 +415,23 @@ describe("bridge.motion", function()
 			assert.same({ "Kitchen motion area (MotionAware) [Kitchen] #ac00" }, texts(D:picker_areas()))
 		end)
 
+		it("#318: a 503 on the area types (a Hue Bridge v2) means none too, unless areas were served in this run", function()
+			assert.same({ "motion", "light_level", "temperature", "device_power", "zigbee_connectivity",
+				"motion_area_configuration" }, resync({ motion_area_configuration = { code = 503,
+				body = '{"errors":[{"description":"Service Unavailable"}],"data":[]}' } }))
+			assert.truthy(D:summary():find("MotionAware not supported by this bridge", 1, true), D:summary())
+			assert.is_true(saw_log("this bridge offers no MotionAware areas (GET /clip/v2/resource/"
+				.. "motion_area_configuration answered 503)"))
+		end)
+
+		it("#318: a 503 after the areas were served is a failed GET, not a bridge without MotionAware", function()
+			add_both()
+			resync()
+			resync({ motion_area_configuration = { code = 503,
+				body = '{"errors":[{"description":"Service Unavailable"}],"data":[]}' } })
+			assert.is_nil(D:summary():find("not supported", 1, true), D:summary())
+		end)
+
 		it("B5: a 404 on the area types means this bridge offers none: nothing is gone, the rest is not asked", function()
 			add_both()
 			assert.same({ "motion", "light_level", "temperature", "device_power", "zigbee_connectivity",
