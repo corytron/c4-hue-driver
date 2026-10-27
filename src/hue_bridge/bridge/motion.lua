@@ -67,6 +67,9 @@
 --   m:add(rid, room_id, done)       Add Motion Sensor / Add Motion Area: one AddDevice into room_id
 --                                   (nil: the Hue room's mapping); done(ok, text) once; returns true
 --                                   when the AddDevice was started
+--   m:add_all_new(done)             Add All New Motion Sensors (#319): one AddDevice per sensor without a
+--                                   device, into the room its Hue room maps to, one at a time; the rest
+--                                   listed, never an area; done(ok, text) once; returns true when it ran
 --   m:relink(device_id, rid)        Re-link Motion Device; a sensor's device takes a sensor, an
 --                                   area's an area (D4); returns ok, text
 --   m:forget(device_id)             Forget Motion Device; returns ok, text
@@ -2069,6 +2072,138 @@ function motion:add(rid, room_id, done)
 		end
 		self.ctx.log.always("motion: %s", text)
 		self:protect("add done", done, created[1] ~= nil, text)
+		self:run_pending_resync()
+	end)
+	return true
+end
+
+-- Add All New Motion Sensors (#319) ---------------------------------------------------------------------
+
+-- "Hallway sensor #12": a sensor by its Hue name and number, without its
+-- room, as the bulk add's text names one (the lights' "Garage White #4"); an
+-- unnamed sensor's name already holds its tag ("Hue motion sensor #12").
+local function short_label(record)
+	local name = util.sanitise(name_of(record))
+	if has_name(record) then
+		return name .. " " .. motion_model.tag(record)
+	end
+	return name
+end
+
+-- Add All New Motion Sensors: Import All New Lights for the motion sensors
+-- (docs/import-design.md §6 and its Q 1 and Q 4; EC §7). One AddDevice per
+-- sensor without a device, into the Control4 room its Hue room maps to (the
+-- lights' room mappings), in name order and one at a time through the
+-- creation add() uses, under add()'s busy flag. Skipped and listed, never
+-- guessed: a sensor whose device was deleted in Composer (its tombstone,
+-- C4); one that looks like the replacement of a device (relink_hint: S4,
+-- S6), since Re-link keeps that device and its programming (rule 3) where a
+-- second device would leave them behind; one in no Hue room, in an unmapped
+-- one, or in one mapped to a Control4 room that no longer exists (C1). A
+-- MotionAware area is never added here: its group is often the whole home,
+-- which needs a room picked (A15), so areas come one at a time from Add
+-- Motion Area and the text only counts the new ones. It works from the
+-- caches the stream keeps current, as add() and its picker do (the scenes'
+-- Add All Scenes Of Room fetches nothing either), and runs only from the
+-- bridge action, never from an event, a resync or a start. Idempotent by
+-- rid; it never renames, moves or rebinds a device. done(ok, text) once,
+-- ok false when it was refused, an AddDevice failed or the run stopped
+-- early (what it created is kept); returns true when it ran.
+function motion:add_all_new(done)
+	done = done or function() end
+	local busy = self:busy_text()
+	if busy then
+		done(false, busy)
+		return false
+	end
+	if not (self.got.motion and self:devices_loaded()) and next(self.sensor_records) == nil then
+		done(false, "Not added: no motion sensors fetched yet (connect the event stream and try again)")
+		return false
+	end
+	local rooms, tombs = self.project:rooms(), self.reg:tombstones()
+	local jobs, replacing, unmapped, deleted, on_bridge = {}, {}, {}, {}, 0
+	for _, record in ipairs(sorted(self.sensor_records)) do
+		local addable = self:addable(record)
+		if addable then
+			on_bridge = on_bridge + 1
+		end
+		if addable and not self.registry[record.rid] then  -- one with a device stays as it is
+			local label, tomb = short_label(record), tombs[record.rid]
+			local hint = not tomb and self:hint_text(record) or nil
+			if tomb then
+				deleted[#deleted + 1] = string.format("%s (deleted %s)", label, util.date_of(tomb.deleted_at))
+			elseif hint then
+				replacing[#replacing + 1] = label .. hint
+			else
+				local room_id, room_name = self:default_room(record, rooms)
+				if room_id then
+					jobs[#jobs + 1] = { record = record, room_id = room_id, room_name = room_name }
+				else
+					unmapped[#unmapped + 1] = string.format("%s (%s)", label, room_name)
+				end
+			end
+		end
+	end
+	local new_areas = #self:new_records("area")
+
+	local function summary(created, failed, err)
+		local parts = {}
+		if #created > 0 then
+			local names = {}
+			for _, c in ipairs(created) do
+				names[#names + 1] = string.format("%s to %s (device %d)", short_label(c.record), tostring(c.room_name),
+					c.device_id)
+			end
+			parts[#parts + 1] = string.format("Added %s: %s", util.plural(#created, "new motion sensor"),
+				table.concat(names, ", "))
+		elseif #jobs == 0 and #replacing == 0 and #unmapped == 0 and #deleted == 0 then
+			local added = 0
+			for _, entry in pairs(self.registry) do
+				if kind_of(entry) == "sensor" then
+					added = added + 1
+				end
+			end
+			parts[#parts + 1] = string.format("No new motion sensors on the bridge (%d on bridge, %d added)", on_bridge, added)
+		else
+			parts[#parts + 1] = "Added no motion sensors"
+		end
+		if #failed > 0 then
+			local names = {}
+			for _, record in ipairs(failed) do
+				names[#names + 1] = short_label(record)
+			end
+			parts[#parts + 1] = string.format("AddDevice failed for %d: %s", #failed, table.concat(names, ", "))
+		end
+		if err then
+			parts[#parts + 1] = "stopped early: " .. err
+		end
+		if #replacing > 0 then
+			parts[#parts + 1] = string.format("skipped %d that may be %s (Re-link Motion Device or Add Motion Sensor): %s",
+				#replacing, #replacing == 1 and "a replacement" or "replacements", table.concat(replacing, ", "))
+		end
+		if #unmapped > 0 then
+			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add Motion Sensor): %s",
+				#unmapped, table.concat(unmapped, ", "))
+		end
+		if #deleted > 0 then
+			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add Motion Sensor re-creates one): %s",
+				#deleted, table.concat(deleted, ", "))
+		end
+		if new_areas > 0 then
+			parts[#parts + 1] = string.format("not included: %s (Add Motion Area adds areas one at a time)",
+				util.plural(new_areas, "new motion area"))
+		end
+		return table.concat(parts, "; ")
+	end
+
+	self.adding, self.adding_since = true, os.time()
+	self:create(jobs, function(created, failed, err)
+		self.adding = false
+		self:reconcile(true, owner.created_set(created))
+		self:flush()
+		local text = summary(created, failed, err)
+		self.ctx.log.always("motion: %s", text)
+		self:protect("add_all_new done", done, err == nil and #failed == 0, text)
 		self:run_pending_resync()
 	end)
 	return true
