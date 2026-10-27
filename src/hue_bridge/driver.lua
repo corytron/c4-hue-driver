@@ -12,6 +12,7 @@ local http = require("bridge.http")
 local credentials = require("bridge.credentials")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
+local netstream = require("bridge.netstream")
 local lights_mod = require("bridge.lights")
 local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
@@ -281,6 +282,14 @@ end
 -- review 2026-10-25 row 6): nothing keyed to an unverified bridge, after a
 -- failed TLS check, or with a rejected key. The second value is the stream's
 -- status text.
+-- The stream's transport (docs/raw-stream-design.md §0, #317): a network
+-- connection unless the owner chose Web transfer, the C4:url stream of 1.0.
+local NETSTREAM_TEXT = "%s (network connection, binding " .. tostring(netstream.BINDING or 6001) .. ")"
+
+local function use_netstream()
+	return not (Properties and Properties["Event Stream Transport"] == "Web transfer")
+end
+
 local function stream_connection()
 	local refusal = stream_refusal()
 	if refusal and refusal ~= "not paired" then
@@ -288,7 +297,12 @@ local function stream_connection()
 		return nil, "Not connected: " .. refusal
 	end
 	local conn = connection()
-	if conn then
+	if conn and use_netstream() then
+		-- Off C4:url the address spelling buys nothing: the dotted one.
+		state.stream_ip = conn.ip
+		conn.stream_ip = conn.ip
+		prop("Stream Address", string.format(NETSTREAM_TEXT, conn.ip))
+	elseif conn then
 		state.stream_ip = next_stream_address(true)
 		conn.stream_ip = state.stream_ip
 		if dual_queue() then
@@ -669,7 +683,7 @@ local function new_group_queue()
 end
 
 local function new_stream()
-	return stream.new({
+	return (use_netstream() and netstream or stream).new({
 		connection = stream_connection,
 		abandoned = state.stream_abandoned,
 		timeout = stream_timeout(),
@@ -1001,6 +1015,13 @@ local function choose_stream_address(callback)
 			end
 		end)
 	end
+	if use_netstream() then
+		-- No queue to share off C4:url (#317): no spelling, no self-check.
+		state.stream_family = nil
+		state.stream_ip = state.ip
+		prop("Stream Address", string.format(NETSTREAM_TEXT, state.ip))
+		return callback()
+	end
 	if not family or not check_ip then
 		return single("no octet below 8 to pad")
 	end
@@ -1115,6 +1136,12 @@ end
 
 dispatch.properties["Stream_Timeout_(s)"] = function()
 	if state.late_init_done then restart_stream() end
+end
+
+dispatch.properties["Event_Stream_Transport"] = function()
+	if state.late_init_done then
+		choose_stream_address(function() restart_stream(true) end)
+	end
 end
 
 dispatch.properties["Stream_Watchdog_(s)"] = function()
@@ -1930,6 +1957,8 @@ dispatch.commands["Forget_Pairing"] = function()
 	state.identity_text = nil
 	reset_identity_check()
 	state.stream:stop()
+	-- No stale bridge address left on the stream's network binding (#317).
+	netstream.clear_address()
 	credentials.clear()
 	state.creds = nil
 	state.stream_ip = nil
@@ -2197,5 +2226,22 @@ function OnDriverDestroyed()
 	end
 	if state.group_queue then
 		state.group_queue:stop()
+	end
+end
+
+-- The network-connection stream's callbacks (docs/raw-stream-design.md §0,
+-- #317): Director calls these globals for binding 6001; a Web transfer
+-- stream has no such entry points and ignores them.
+function OnConnectionStatusChanged(idBinding, nPort, strStatus)
+	local s = state.stream
+	if s and s.on_status_changed then
+		s:on_status_changed(idBinding, nPort, strStatus)
+	end
+end
+
+function ReceivedFromNetwork(idBinding, _nPort, strData)
+	local s = state.stream
+	if s and s.on_data then
+		s:on_data(idBinding, strData)
 	end
 end

@@ -49,6 +49,10 @@ listed.
   the three drivers of the latest release (#266).
 
 ### Fixed
+- On a controller where other drivers keep web transfers open, every Hue
+  command and read timed out while the event feed was connected. The feed
+  now uses a network connection of its own (a new Event Stream Transport
+  setting; Web transfer, the old way, stays as a fallback) (#317).
 - A Hue Bridge v2 now shows "MotionAware not supported by this bridge":
   it answers the MotionAware requests with "Service Unavailable", which was
   taken for a failed request (#318).

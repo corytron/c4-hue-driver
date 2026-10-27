@@ -30,7 +30,8 @@ local function signed(command, params)
 end
 
 local function paired_driver(extra)
-	local props = { ["Bridge IP Address"] = "192.0.2.10" }
+	-- The C4:url stream (Web transfer); the network-connection stream has its own specs.
+	local props = { ["Event Stream Transport"] = "Web transfer", ["Bridge IP Address"] = "192.0.2.10" }
 	for k, v in pairs(extra or {}) do props[k] = v end
 	local env, c4 = fake.load_driver("hue_bridge", props)
 	c4.persist.hue_app_key = "abc123"
@@ -69,7 +70,8 @@ describe("Hue Bridge driver", function()
 	before_each(quiet)
 
 	it("asks for an IP address when none is set", function()
-		local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "" })
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "" })
 		env.OnDriverInit("DIT_ADDING")
 		env.OnDriverLateInit("DIT_ADDING")
 		assert.equal("Enter the bridge IP address", env.Properties["Status"])
@@ -79,7 +81,8 @@ describe("Hue Bridge driver", function()
 	end)
 
 	it("asks for pairing once a valid IP is entered", function()
-		local env = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "" })
+		local env = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "" })
 		env.OnDriverLateInit("DIT_STARTUP")
 		env.Properties["Bridge IP Address"] = "192.0.2.10"
 		env.OnPropertyChanged("Bridge IP Address")
@@ -87,13 +90,40 @@ describe("Hue Bridge driver", function()
 	end)
 
 	it("ignores an invalid IP", function()
-		local env = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "not-an-ip" })
+		local env = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "not-an-ip" })
 		env.OnDriverLateInit("DIT_STARTUP")
 		assert.equal("Enter the bridge IP address", env.Properties["Status"])
 	end)
 
-	it("pairs from the Composer action, self-checks, then streams on the padded spelling", function()
+	it("#317: streams on a network connection by default, with no address spelling or self-check", function()
 		local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "192.0.2.10" })
+		assert.equal("Network connection", env.Properties["Event Stream Transport"], "driver.xml default")
+		env.OnDriverLateInit("DIT_STARTUP")
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+		c4.transfers[1]:respond(200, CONFIG)
+		c4.transfers[2]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
+		answer_identity(c4)
+		assert.equal("Paired", env.Properties["Status"])
+		for _, t in ipairs(c4.transfers) do
+			assert.is_nil(t.url:find("/eventstream/", 1, true), "no C4:url stream: " .. t.url)
+			assert.is_nil(t.url:find("192.00", 1, true), "no padded self-check: " .. t.url)
+		end
+		local created = c4.calls_to("CreateNetworkConnection")
+		assert.equal(1, #created)
+		assert.same({ 6001, "192.0.2.10", "SSL" }, { created[1][1], created[1][2], created[1][3] })
+		assert.equal(1, #c4.calls_to("NetConnect"))
+		assert.equal("192.0.2.10 (network connection, binding 6001)", env.Properties["Stream Address"])
+
+		-- Forget Pairing leaves no address on the binding.
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing" })
+		local addr = c4.calls_to("SetBindingAddress")
+		assert.same({ 6001, "" }, { addr[#addr][1], addr[#addr][2] })
+	end)
+
+	it("pairs from the Composer action, self-checks, then streams on the padded spelling", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "192.0.2.10" })
 		env.OnDriverLateInit("DIT_STARTUP")
 		assert.equal(0, #c4.transfers, "no network activity before pairing")
 
@@ -212,7 +242,8 @@ describe("Hue Bridge driver", function()
 	end)
 
 	it("stays paired after pairing even when the store is not readable yet", function()
-		local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "192.0.2.10" })
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "192.0.2.10" })
 		env.OnDriverLateInit("DIT_STARTUP")
 		c4.PersistGetValue = function() return nil end
 
@@ -1094,7 +1125,7 @@ describe("Hue Bridge driver", function()
 
 		-- Paired with PAIRED at IP; `props` adds or overrides properties.
 		local function house(props)
-			local all = { ["Bridge IP Address"] = IP }
+			local all = { ["Event Stream Transport"] = "Web transfer", ["Bridge IP Address"] = IP }
 			for k, v in pairs(props or {}) do all[k] = v end
 			local env, c4 = fake.load_driver("hue_bridge", all)
 			c4.persist.hue_app_key = "abc123"
@@ -1310,7 +1341,8 @@ describe("Hue Bridge driver", function()
 		end)
 
 		it("a key request without an answer reads Pairing failed once (item 3)", function()
-			local env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = IP })
+			local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+				["Bridge IP Address"] = IP })
 			env.OnDriverLateInit("DIT_STARTUP")
 			pair(env)
 			identity(c4)
@@ -1403,7 +1435,8 @@ describe("Hue Bridge driver", function()
 
 	describe("messages before late init", function()
 		it("queues hellos and drops the rest instead of indexing missing state", function()
-			local env = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "" })
+			local env = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+				["Bridge IP Address"] = "" })
 			assert.has_no.errors(function()
 				env.ExecuteCommand("HUE_HELLO", { device_id = "2001" })
 				env.ExecuteCommand("HUE_SET", { rid = "l1", on = "true" })

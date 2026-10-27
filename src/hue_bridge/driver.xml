@@ -208,6 +208,20 @@
 				<default>3600</default>
 				<readonly>false</readonly>
 			</property>
+			<!-- docs/raw-stream-design.md §0 (#317): the stream on a network connection
+				 (binding 6001) leaves Director's four C4:url transfers to the commands;
+				 Web transfer is the C4:url stream of 1.0, kept as a fallback. Stream
+				 Timeout (s) applies to Web transfer only. -->
+			<property>
+				<name>Event Stream Transport</name>
+				<type>LIST</type>
+				<items>
+					<item>Network connection</item>
+					<item>Web transfer</item>
+				</items>
+				<default>Network connection</default>
+				<readonly>false</readonly>
+			</property>
 			<property>
 				<name>Stream Watchdog (s)</name>
 				<type>RANGED_INTEGER</type>
