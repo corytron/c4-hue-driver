@@ -1,14 +1,22 @@
-# Status of the Hue driver (2026-10-26)
+# Status of the Hue driver (2026-10-27)
 
 **1.1 betas since 2026-10-26** (prereleases, never Latest; `docs/prerelease-design.md`, #269):
 `v1.1-beta.1` (build 376) and `v1.1-beta.2` (build 381) add a fourth driver,
 `hue_motion.c4z`: Hue motion sensors and MotionAware areas (Hue Bridge Pro) as
 stock Control4 motion sensors (#268, `docs/motion-design.md`), built for an
 outside tester who owns sensors (the house has none). Beta 2 fixes a
-MotionAware area flapping between motion and no motion (#288). The stable
-release, and the README's download links, stay 1.0 build 359. Design north
-star (owner, 2026-10-26): Control4, not the Hue app, is the source of truth
-for automations; the Hue automation audit (#280) follows.
+MotionAware area flapping between motion and no motion (#288).
+`v1.1-beta.3` (build 394, 2026-10-26; the tester's round is #305) adds the
+Hue Light's Raise Level By and Restore Saved Level programming commands
+(#297, `docs/relative-level-design.md`) and fixes a newly added light or
+scene device that failed its start (#298). `v1.1-beta.4` (build 400, cut
+2026-10-27 from `main` at 508452d) adds On State Follows to every Hue Scene
+device: by default its tile and keypad LEDs follow the lights of its Hue
+room or zone, not only its own scene (#310, PR #311,
+`docs/scene-led-design.md`). The stable release, and the README's download
+links, stay 1.0 build 359. Design north star (owner, 2026-10-26): Control4,
+not the Hue app, is the source of truth for automations; the Hue automation
+audit (#280) follows.
 
 **Release 1.0 "Cassian", build 359, tag `v1.0`** (cut 2026-10-25 by the
 two-job Release workflow from `main` at ad0ad7c; build 349 plus the changelog
@@ -53,16 +61,31 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Prerelease v1.1-beta.2, build 381, since 2026-10-26 20:05** (Composer
-  round through the Windows session; deployment recorded, `deploy.py status`
-  in sync): all four drivers, Driver Version 381 on six devices (the bridge,
-  two scenes, two zone lights and one motion device), no reboot (no
-  capability change since 1.0). Beta 1 (build 376) ran from 16:17 the same
-  day. The motion device stands for the house's one MotionAware area (the
-  bridge has no motion sensors); its Hue automation is set to do nothing on
-  motion and on no motion, so Control4 alone decides what the lights do, and
-  the walk test of 2026-10-26 showed motion reaching Control4 within about a
-  second (#288, Discussions #290). Going back to 1.0 is a desired-state PR.
+- **Prerelease v1.1-beta.4, build 400, installed (2026-10-27)**: the
+  desired-state PR #313 sets `deploy/house.yaml` to it; the Windows session
+  installed all four drivers in place (the flow below), no Restart Director
+  prompt, Driver Version 400 on eight devices, deployment 7370529823
+  recorded as success (17:14 local), and both scene devices read On State
+  Follows `Room/zone lights`. Since beta 3
+  only the Hue Scene driver's code changed (On State Follows, #310, PR #311;
+  the manual too), not its capabilities, so no reboot is needed. Going back
+  to 1.0 is a desired-state PR.
+- **Prerelease v1.1-beta.3, build 394, before that** (PR #301; deployment
+  recorded 2026-10-26 21:05, closing #302; the Composer round is
+  Discussions #307): all four drivers, Driver Version 394 on eight devices
+  (the bridge, two scenes, two zone lights, two single lights and the motion
+  device), no reboot (no capability change since 1.0). Its walk test ran the
+  first Control4 motion programming, built in Composer by the Windows
+  session (two walks, both correct): two lamps raised by 30 points when the
+  MotionAware area senses motion and restored to their saved level when it
+  stops (#297); the motion device's hold time is 300 s since then. A light
+  that had failed its start on build 381 came up by itself (#298). Beta 2
+  (build 381) ran from 20:05 that day, beta 1 (build 376) from 16:17. The
+  motion device stands for the house's one MotionAware area (the bridge has
+  no motion sensors); its Hue automation is set to do nothing on motion and
+  on no motion, so Control4 alone decides what the lights do, and beta 2's
+  walk test showed motion reaching Control4 within about a second (#288,
+  Discussions #290).
 - **Controller OS:** the diagnostics of 2026-10-26 report OS
   3.4.3.727848-res (earlier notes say 3.4.2).
 - **The proxy's settings on the devices since 2026-10-25** (#59): the owner
@@ -101,15 +124,21 @@ this page disagree about the present, this page and the code win.
   room's time-of-day scene, created 2026-10-24 12:06); two zone lights
   in the Master Bedroom, created with Add Zone Light on 2026-10-24: "Bedside
   Lights" (device 1166, the Hue zone of the two bedside lamps) and "Master
-  Bedroom Lights" (device 1168, the whole Hue room). No single-light Hue
-  Light devices: all 47 lights were deleted in Composer on 2026-10-22 and are
-  remembered as deleted (Add Light brings any of them back). 126 + 15
-  time-based scenes on the bridge, 2 imported (the two Hue Scene devices
-  above).
+  Bedroom Lights" (device 1168, the whole Hue room). Since 2026-10-26 a Hue
+  Motion device stands for the MotionAware area, and two single-light Hue
+  Light devices, made with Add Light that day under build 381 (the first
+  one hit #298), are the two lamps of the motion programming. The other
+  lights have no device: all 47 were deleted in Composer on 2026-10-22, and
+  a deleted light stays remembered as deleted until Add Light brings it
+  back. 126 + 15 time-based scenes on the bridge, 2 imported (the two Hue
+  Scene devices above).
 - **Keypads.** The "Bedside Lights Switch" (a Control4 switch run as a
   2-button keypad, Buttons Control Load off) has its top and bottom buttons
-  bound to Shine's Top and Bottom Button Links. The "Floor Lamp Switch" is
-  not bound to anything.
+  bound to Golden hours' Top and Bottom Button Links (read in Composer on
+  2026-10-27); since build 400 its LEDs follow the lights of that scene's
+  room (On State Follows at its default, #310), the owner's check pending.
+  The "Floor Lamp Switch" rocker is bound to a Control4 dimmer, not to a
+  Hue device.
 - **Composer project** has been left unsaved through the test rounds; the
   owner saves and backs it up (#38).
 
@@ -198,11 +227,13 @@ this page disagree about the present, this page and the code win.
   current slot, OFF stops it and turns the room off, slider and holds dim
   the room while it runs (a whole-room dim keeps it running, verified);
   from off a level or a held top button starts it and then moves or
-  brightens; on exactly while Hue's state is active (ends on room off,
-  another scene of the room, another schedule on its lights, or its own
-  OFF); Recall As hidden; Status "Hue time-based scene Golden hours in
-  Master Bedroom; now Arise (from 07:00)" / "…; not running". Contract
-  `docs/smart-scenes-design.md`, checks `docs/smart-scenes-research.md` §7.
+  brightens; on while Hue's state is active (ends on room off, another
+  scene of the room, another schedule on its lights, or its own OFF):
+  exactly then with On State Follows `This scene`, by default also while
+  the room's or zone's lights are on (below); Recall As hidden; Status
+  "Hue time-based scene Golden hours in Master Bedroom; now Arise (from
+  07:00)" / "…; not running". Contract `docs/smart-scenes-design.md`,
+  checks `docs/smart-scenes-research.md` §7.
 - **Hue Scene** (light_v2 proxy, **dimmer** since build 160): ON plays the
   scene (Recall As: As set in Hue / Static / Dynamic), OFF turns its room or
   zone off (a zone with no lights, which has no group light, only reports
@@ -210,15 +241,30 @@ this page disagree about the present, this page and the code win.
   the room relative to it (keeping the scene's colours and per-light
   differences; while the room's level is not yet known it sets one absolute
   level for all its lights instead), 0 % = off, a level from off plays the
-  scene at that level, 100 % from off plays it as designed. **On rule**: on
-  from any activation (Control4, keypad, Hue app) until the room/zone turns
-  off, another scene of it is played, or the device itself is turned off;
+  scene at that level, 100 % from off plays it as designed. **On rule** (the
+  whole on state with On State Follows `This scene`, below): on from any
+  activation (Control4, keypad, Hue app) until the room/zone turns off,
+  another scene of it is played, or the device itself is turned off;
   persisted across restarts. ON is one request (dropped back if it fails);
   OFF and slider moves go through the group queue and are retried like
   light commands. Keypad: tap top plays, tap bottom turns off (taps are
   immediate: the scene declares no click rates), hold dims the room
   (relative), hold top while off plays at 1 % and brightens; LEDs follow
   the on state.
+- **On State Follows** (Hue Scene, since build 400; #310, PR #311, contract
+  `docs/scene-led-design.md`): a property on every Hue Scene device.
+  `Room/zone lights`, the default (also for existing devices after the
+  update), shows the device on while the on rule holds **or** any light of
+  its Hue room or zone is on (the group's on/off, which the bridge already
+  sends; not persisted, it comes again with the answer to the device's
+  hello): another scene of the room, or a light of it turned on from the
+  Hue app, a Hue switch or a Hue Light device, keeps it on, and it shows
+  off once they are all off. `This scene` is the on rule alone, as before.
+  That one on state drives the tile and slider, the keypad LEDs, the on and
+  off events, TOGGLE, whether the slider moves the room or plays the scene,
+  and which way a hold goes; what ON, OFF and the taps do is unchanged. A
+  whole-home scene or an empty zone gets no group state, so its on rule
+  alone decides.
 - **Keypad settings** (since build 296, #59; on the house since the
   owner's reboot of 2026-10-25): both device drivers declare
   `hide_proxy_properties` False, so the proxy's own settings show in
@@ -274,8 +320,8 @@ The house runs a GitHub release, never a VM build
 1. The Release workflow (Actions ▸ Release ▸ Run workflow with the version,
    or a pushed tag; every 1.x release moves the tag `v1.0`) lints, tests and
    builds from `main` in a job without write access, then attests and
-   publishes in a second job: the three `.c4z`, `SHA256SUMS.txt`,
-   `manifest.json`, `attestations.sigstore.json` and
+   publishes in a second job: the `.c4z` of every driver (four since 1.1),
+   `SHA256SUMS.txt`, `manifest.json`, `attestations.sigstore.json` and
    `hue-drivers.intoto.jsonl`.
 2. A pull request sets `deploy/house.yaml` (the desired state) to that
    build; on merge the drift workflow opens one issue labelled `deploy`.
@@ -287,7 +333,7 @@ The house runs a GitHub release, never a VM build
    `build/release/<tag>/BRIEF.md`.
 4. The Windows Composer session follows the brief: it fetches the files
    from the release URLs into `C:\c4-hue\drivers\<tag>\`, checks the hashes,
-   installs all three at once with Driver ▸ "Add or Update Driver or Agent…"
+   installs them all at once with Driver ▸ "Add or Update Driver or Agent…"
    (every existing device is updated in place; never delete and re-add, the
    pairing would be lost) and reads back every device's `Driver Version`
    and the bridge's `Stream Timeout (s)`, `Stream Watchdog (s)` and `Debug
@@ -389,16 +435,26 @@ What was left is under "Open" (#38, #61, #62).
 ## Open
 
 Every open item is an issue (`gh issue list --state open`); this list says
-where each stands on 2026-10-26.
+where each stands on 2026-10-27.
 
-- **The tester's first round** of 1.1 beta 2 (motion sensors): the owner
-  relays it from Discord; it comes back as Beta feedback issues, and the
-  diagnostics' output settles the open Hue questions of
-  `docs/motion-hue-research.md` §7.1.
+- **On State Follows on the house** (#310, closed by PR #311; report in
+  Discussions #314): once beta 4 is installed, the owner checks a scene
+  keypad with the room changed from the Hue app.
+- **#305** The tester's round of 1.1 beta 3 (motion sensors): it comes back
+  as Beta feedback issues, and the diagnostics' output settles the open Hue
+  questions of `docs/motion-hue-research.md` §7.1. The first is **#309**,
+  "Motion sensors not detected" (a square Hue Bridge v2, BSB002): the
+  tester reports that the bridge's GETs time out while the event stream is
+  connected and answer while it is stopped.
 - **#280** The Hue automation audit (Control4 is the source of truth):
   research done (`docs/hue-automations-research.md`,
   `docs/edge-cases-automations.md`, draft PR #285); the contract and the
   owner's decisions come next.
+- **#312** Composer automation notes: since 2026-10-27 the Windows session
+  binds Connections by synthetic drag (from the top pane onto the lower
+  list), which `docs/composer-remote.md` and `docs/design.md` still say
+  cannot be done with synthesized input, and it builds programming by drag;
+  PR #316 documents the rules.
 - **#249** Holds on scenes, zone and room lights jump to the end of the
   range (Hue ignores `dynamics.duration` on grouped_light dims); 1.1.
 - **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness; 1.1.
@@ -411,6 +467,9 @@ where each stands on 2026-10-26.
 - **#238** After the next reboot from System Manager: no device marked
   unbound at startup.
 - **#237** Tooling: the tag ruleset (a command for the owner).
+- **#308** A Hue Light turned on from off reports its old level for an
+  instant (70 % for about 16 ms before 30 %, on the first turn-on after
+  beta 3's install; no flash on the lamps); low priority.
 - **#243, #246, #247** Smaller bugs: a scene hold from mid-range, two
   texts, dev reloads and the four-transfer limit.
 
