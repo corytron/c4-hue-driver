@@ -997,6 +997,21 @@ local function new_c4(env)
 		return out
 	end
 
+	-- Fire, as fire_timers does, only the active timers armed for exactly
+	-- `delay_ms` (the 1 ms deferrals, say), leaving every other one armed.
+	-- Returns how many fired.
+	function c4.fire_timers_of(delay_ms)
+		local due = {}
+		for _, timer in ipairs(c4.timers) do
+			if timer.active and timer.delay == delay_ms then table.insert(due, timer) end
+		end
+		for _, timer in ipairs(due) do
+			if not timer.repeating then timer.active = false end
+			timer.callback(timer, 0)
+		end
+		return #due
+	end
+
 	return c4
 end
 

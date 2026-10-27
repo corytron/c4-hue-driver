@@ -105,14 +105,22 @@ describe("Hue Bridge driver", function()
 		c4.transfers[2]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
 		answer_identity(c4)
 		assert.equal("Paired", env.Properties["Status"])
+		-- The network connection's TLS check comes first (bridge/netcheck.lua):
+		-- its unkeyed control request, then the probe on binding 6002 with the
+		-- decoy CA file, which the controller refuses (OFFLINE); the verdict
+		-- arrives from a 1 ms timer.
+		answer_identity(c4)
+		c4.net_status(6002, 443, "OFFLINE")
+		c4.fire_timers_of(1)
 		for _, t in ipairs(c4.transfers) do
 			assert.is_nil(t.url:find("/eventstream/", 1, true), "no C4:url stream: " .. t.url)
 			assert.is_nil(t.url:find("192.00", 1, true), "no padded self-check: " .. t.url)
 		end
 		local created = c4.calls_to("CreateNetworkConnection")
-		assert.equal(1, #created)
-		assert.same({ 6001, "192.0.2.10", "SSL" }, { created[1][1], created[1][2], created[1][3] })
-		assert.equal(1, #c4.calls_to("NetConnect"))
+		assert.equal(2, #created, "the probe's, then the stream's")
+		assert.same({ 6002, "192.0.2.10", "SSL" }, { created[1][1], created[1][2], created[1][3] })
+		assert.same({ 6001, "192.0.2.10", "SSL" }, { created[2][1], created[2][2], created[2][3] })
+		assert.equal(2, #c4.calls_to("NetConnect"))
 		assert.equal("192.0.2.10 (network connection, binding 6001)", env.Properties["Stream Address"])
 
 		-- Forget Pairing leaves no address on the binding.

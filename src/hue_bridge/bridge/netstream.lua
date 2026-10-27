@@ -88,7 +88,11 @@
 --
 -- The application key is in the request text only, which no log line and
 -- no status text carries; an error raised while sending it is reported with
--- the key replaced by "<key>".
+-- the key replaced by "<key>". And it goes out only once the network
+-- connection's TLS self-check has passed (bridge/netcheck.lua): every
+-- connect asks opts.tls_checked() first, and without a true answer nothing
+-- is created, connected or sent. A stream built without that option never
+-- connects.
 --
 -- Two rules carry over from stream.lua. on_connected is deferred out of the
 -- data callback to a 1 ms C4:SetTimer, so the owner's resync GET never
@@ -415,6 +419,11 @@ end
 --   watchdog        seconds, see DEFAULT_WATCHDOG
 --   on_container(container, event), on_status(text, per_event),
 --   on_connected(), on_key_rejected(code)    as in stream.lua
+-- and one stream.lua has not:
+--   tls_checked()   true once the network connection's TLS self-check
+--                   (bridge/netcheck.lua) lets the key go out on it; asked
+--                   again for every connect. Missing, false or raising: the
+--                   stream does not connect (see the header).
 --
 -- stats, as stream.lua's: containers, events, keepalives, reconnects (every
 -- reconnect scheduled since netstream.new), last_event, connected_since,
@@ -448,6 +457,15 @@ end
 
 local function clock()
 	return os.date("%H:%M:%S")
+end
+
+-- opts.tls_checked() under pcall: only a true answer lets the stream connect.
+local function tls_checked(opts)
+	if type(opts.tls_checked) ~= "function" then
+		return false
+	end
+	local ok, passed = pcall(opts.tls_checked)
+	return ok and passed == true
 end
 
 -- Milliseconds (C4:GetTime, SDK 34_timer/_2-GetTime; OS 3.2.3 and later),
@@ -605,6 +623,14 @@ function netstream:connect()
 		log.warn("event stream: the %s cannot go into the request; not connecting", what)
 		self.state = "stopped"
 		self:status("Not connected: invalid " .. what)
+		return
+	end
+	-- The last guard (the driver gates every start already): nothing keyed
+	-- on a network connection whose TLS check has not passed (#317).
+	if not tls_checked(self.opts) then
+		log.warn("event stream: the network connection's TLS check has not passed; not connecting")
+		self.state = "stopped"
+		self:status("Not connected: network connection TLS check pending")
 		return
 	end
 

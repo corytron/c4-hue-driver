@@ -70,6 +70,9 @@ describe("bridge.netstream", function()
 			on_status = function(t) table.insert(seen.status, t) end,
 			on_connected = function() seen.connected = seen.connected + 1 end,
 			on_key_rejected = function(code) table.insert(seen.rejected, code) end,
+			-- The network connection's TLS check has passed (bridge/netcheck.lua);
+			-- "the TLS check gate" below covers the rest.
+			tls_checked = function() return true end,
 		}
 		for k, v in pairs(overrides or {}) do opts[k] = v end
 		return netstream.new(opts)
@@ -286,6 +289,51 @@ describe("bridge.netstream", function()
 			assert.equal(1, count("NetConnect"))
 			assert.equal(1, #sent())
 			assert.equal("connected", s.state)
+		end)
+	end)
+
+	-- The network connection's TLS self-check (bridge/netcheck.lua, #317): the
+	-- key goes out on a network connection only once it has passed.
+	describe("the TLS check gate", function()
+		it("connects nothing, and sends nothing, until tls_checked() answers true", function()
+			local checked = false
+			s = new_stream({ tls_checked = function() return checked end })
+			s:start()
+			assert.same({}, net_calls(), "no connection created, connected or sent on")
+			assert.equal("stopped", s.state)
+			assert.equal("Not connected: network connection TLS check pending", last_status())
+			assert.same({}, timer_delays(), "no retry: the driver starts the stream once the check passed")
+			checked = true
+			s:start()
+			online()
+			assert.same({ REQUEST }, sent())
+		end)
+
+		it("asks again at every connect: a reconnect after the answer turned connects nothing", function()
+			local checked = true
+			s = new_stream({ tls_checked = function() return checked end })
+			connect_ok()
+			offline()
+			checked = false
+			local connects = count("NetConnect")
+			retry()
+			assert.equal(connects, count("NetConnect"))
+			assert.equal("stopped", s.state)
+			assert.equal(1, #sent(), "the key went out once, while the check had passed")
+		end)
+
+		it("never connects without the option, or when it raises or answers anything but true", function()
+			for _, answer in ipairs({ false, "", "yes", 1, function() error("check failed") end }) do
+				local opts = { tls_checked = type(answer) == "function" and answer or function() return answer end }
+				s = new_stream(opts)
+				s:start()
+				assert.equal("stopped", s.state)
+			end
+			s = new_stream()
+			s.opts.tls_checked = nil
+			s:start()
+			assert.equal("stopped", s.state)
+			assert.same({}, net_calls())
 		end)
 	end)
 
