@@ -1,4 +1,14 @@
-# Status of the Hue driver (2026-10-25)
+# Status of the Hue driver (2026-10-26)
+
+**1.1 betas since 2026-10-26** (prereleases, never Latest; `docs/prerelease-design.md`, #269):
+`v1.1-beta.1` (build 376) and `v1.1-beta.2` (build 381) add a fourth driver,
+`hue_motion.c4z`: Hue motion sensors and MotionAware areas (Hue Bridge Pro) as
+stock Control4 motion sensors (#268, `docs/motion-design.md`), built for an
+outside tester who owns sensors (the house has none). Beta 2 fixes a
+MotionAware area flapping between motion and no motion (#288). The stable
+release, and the README's download links, stay 1.0 build 359. Design north
+star (owner, 2026-10-26): Control4, not the Hue app, is the source of truth
+for automations; the Hue automation audit (#280) follows.
 
 **Release 1.0 "Cassian", build 359, tag `v1.0`** (cut 2026-10-25 by the
 two-job Release workflow from `main` at ad0ad7c; build 349 plus the changelog
@@ -44,15 +54,18 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Dev build 309 since 2026-10-25 03:24** (Composer round 43): `main` at
-  d13e287 built with `tools/build.sh --dev`, installed in place on all five
-  devices (no reboot: no capability change) so the signed dev loop (#52,
-  with the fixes of #217) serves the hardware checks of #40. It carries the
-  dev key; the release install replaces it. Recorded on the environment
-  `house` as deployment 7310056842; `python3 tools/deploy.py status` reports
-  drift (desired 329, observed 309) until then, and issue #228 stays open.
-  Its three `driver.xml` files are build 329's, so the release install
-  needs no reboot.
+- **Prerelease v1.1-beta.2, build 381, since 2026-10-26 20:05** (Composer
+  round through the Windows session; deployment recorded, `deploy.py status`
+  in sync): all four drivers, Driver Version 381 on six devices (the bridge,
+  two scenes, two zone lights and one motion device), no reboot (no
+  capability change since 1.0). Beta 1 (build 376) ran from 16:17 the same
+  day. The motion device stands for the house's one MotionAware area (the
+  bridge has no motion sensors); its Hue automation is set to do nothing on
+  motion and on no motion, so Control4 alone decides what the lights do, and
+  the walk test of 2026-10-26 showed motion reaching Control4 within about a
+  second (#288, Discussions #290). Going back to 1.0 is a desired-state PR.
+- **Controller OS:** the diagnostics of 2026-10-26 report OS
+  3.4.3.727848-res (earlier notes say 3.4.2).
 - **The proxy's settings on the devices since 2026-10-25** (#59): the owner
   rebooted the controller from System Manager during the night's hardware
   pass (dev build 284), which loaded the capability change of #59
@@ -377,37 +390,30 @@ What was left is under "Open" (#38, #61, #62).
 ## Open
 
 Every open item is an issue (`gh issue list --state open`); this list says
-where each stands on 2026-10-25.
+where each stands on 2026-10-26.
 
-- **#228** Install release 1.0 build 329 on the house after the #40
-  checks (`deploy.py start`, the Windows session, `deploy.py done`; no
-  reboot); then Debug Mode Off and the dev loop ends.
-- **#40** Time-of-day scenes, parked for the next major release
-  (milestone 2.0) on 2026-10-25: the keypad works on a time-based scene
-  (taps, holds from off, the short hold), see `docs/smart-scenes-research.md`
-  §7b; whether API-made schedules advance, a dim before an app-made slot
-  boundary, Recall As after a cross-kind re-link and V8 stay open.
+- **The tester's first round** of 1.1 beta 2 (motion sensors): the owner
+  relays it from Discord; it comes back as Beta feedback issues, and the
+  diagnostics' output settles the open Hue questions of
+  `docs/motion-hue-research.md` §7.1.
+- **#280** The Hue automation audit (Control4 is the source of truth):
+  research done (`docs/hue-automations-research.md`,
+  `docs/edge-cases-automations.md`, draft PR #285); the contract and the
+  owner's decisions come next.
 - **#249** Holds on scenes, zone and room lights jump to the end of the
-  range: Hue ignores `dynamics.duration` on grouped_light dims (measured
-  2026-10-25); the fix is a design choice for the owner.
-- **#61** Retake the manual's pictures with `tools/composer/Shots.ps1`
-  (`docs/screenshots-plan.md`) after the release install.
-- **#65** Read the Event Stream reconnect count after a day on the release.
+  range (Hue ignores `dynamics.duration` on grouped_light dims); 1.1.
+- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness; 1.1.
+- **#40** Time-of-day scenes, parked for the next major release.
+- **#65** Read the Event Stream reconnect count after a day on a build.
 - **#38** The owner's pass on the phone and keypads, and saving and backing
-  up the Composer project (still unsaved through the test rounds).
+  up the Composer project.
 - **#62** The owner deletes the old edit revisions on PRs #6 and #2;
   GitHub Support ticket for the purge is pending.
-- **#224** Decision: the OpenSSF Best Practices badge, or Scorecard's CII
-  check stays at 0.
-- **#238** After the next reboot from System Manager: the bridge's log
-  right after it shows no "is not bound to this bridge" lines and Attention
-  no unbound devices (diff review 2026-10-25 row 2).
-- **#232, #234, #236** Code bugs found by the documentation pass: a light or
-  zone light hold from mid-range ramps faster than its tile; device-driver
-  persistence and setting edge cases; pairing and Status edge cases.
-- **#237, #239** Tooling: `deploy.py`'s watchdog range and the tag ruleset;
-  `devctl`, `Composer.psm1` and release-note leftovers.
-- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness.
+- **#238** After the next reboot from System Manager: no device marked
+  unbound at startup.
+- **#237** Tooling: the tag ruleset (a command for the owner).
+- **#243, #246, #247** Smaller bugs: a scene hold from mid-range, two
+  texts, dev reloads and the four-transfer limit.
 
 Decided, not open:
 
