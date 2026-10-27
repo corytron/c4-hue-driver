@@ -33,7 +33,8 @@
 # against those directories of the commit. The release's title and notes come
 # from CHANGELOG.md on every run (docs/changelog-design.md, #255): the notes'
 # first heading without its "(build N)" is a release's title (1.0 "Cassian"),
-# and the whole heading a prerelease's (1.1 beta 1 "Cassian" (build 412)). The
+# and the whole heading a prerelease's (1.1 beta 1 "Brasso" (build 412)). Each
+# X.Y has its own codename, the one .github/codenames.json gives it (#304). The
 # release is created when it does not exist yet, otherwise its title and notes
 # are set again, and a tag that moves replaces every attached file (--clobber).
 # A new release becomes Latest (GitHub's default); a prerelease is created with
@@ -178,7 +179,9 @@ jobs:
       # tools/build.sh names this tag in build/manifest.json and renders the
       # changelog of every Documentation tab as this release or prerelease:
       # told, not found with git describe, which could pick either of two tags
-      # on one commit (a prerelease and the release cut from it).
+      # on one commit (a prerelease and the release cut from it). Its heading
+      # takes the codename .github/codenames.json gives the version's X.Y: a
+      # version the file does not name fails here, before any package is built.
       - name: Build
         env:
           C4_HUE_RELEASE_TAG: ${{ steps.tag.outputs.tag }}

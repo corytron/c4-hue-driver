@@ -3,8 +3,9 @@
 Every published release of the Hue Bridge, Hue Light, Hue Scene and (from
 1.1) Hue Motion drivers,
 newest first, with what changed since the release before it. A version X.Y
-is the GitHub release of the tag `vX.Y` and carries its major version's
-codename from Star Wars: Andor (every 1.x release is "Cassian"). A version
+is the GitHub release of the tag `vX.Y` and carries its own codename from
+Star Wars: Andor (`.github/codenames.json`: a major character for an X.0, a
+lesser one for a point release; 1.0 is "Cassian", 1.1 "Brasso"). A version
 can be released as several builds: the build number is the commit count of
 the released commit and the Driver Version that Composer shows for every
 driver, and each newer build of a version replaces the files of its

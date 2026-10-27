@@ -186,10 +186,12 @@ The release of this spike is **1.0 "Cassian"** (owner, 2026-10-24): git tag
 `v1.0`, a GitHub release titled `1.0 "Cassian"` with the Release workflow's
 seven assets attached (the three `.c4z` files, `SHA256SUMS.txt`,
 `manifest.json` and the provenance in two forms; "How a release is cut"
-below). Major versions are codenamed after Star Wars: Andor and every
-1.x release keeps "Cassian"; before a new major version the coordinator
-proposes a widely recognised character, place or object from the show and
-the owner approves it (used so far: Cassian). The driver files carry the
+below). Since 2026-10-26 (#304) every X.Y has its own codename from Star
+Wars: Andor, kept by all its builds and betas: an X.0 a widely recognised
+character, place or object, a point release a decidedly less important one.
+Before the first build of a new X.Y the coordinator proposes one and the
+owner approves it; it goes into `.github/codenames.json`, which
+`tools/changelog.py` reads (used so far: 1.0 Cassian, 1.1 Brasso). The driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
 integer there); it is named in the release's `manifest.json`, in the
 release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the
@@ -334,8 +336,9 @@ only. What differs:
    number for every build a tester gets. Start the Release workflow with that
    version (Release ▸ Run workflow ▸ `1.1-beta.1`): it tags `main`'s head
    `v1.1-beta.1`. The tag never moves, so a version whose tag exists fails
-   before anything is built; take the next `N`. A prerelease keeps its major
-   version's codename (1.1-beta.1 is "Cassian").
+   before anything is built; take the next `N`. A prerelease carries its X.Y's
+   codename from `.github/codenames.json` (1.1-beta.1 is "Brasso"); a new
+   X.Y needs its name there first.
 2. **Changelog.** Nothing changes in `CHANGELOG.md`: the notes come from the
    same `## Unreleased` entry, which holds everything since the last release,
    and a prerelease is never stamped (`changelog.py stamp` refuses one); the
@@ -343,7 +346,7 @@ only. What differs:
    release.
 3. **What GitHub shows.** The release is marked Pre-release and never Latest,
    so `releases/latest` and the README's download links keep serving the
-   release. Check the title, `1.1 beta 1 "Cassian" (build N)`, the
+   release. Check the title, `1.1 beta 1 "Brasso" (build N)`, the
    Pre-release mark, and the assets: every package, `SHA256SUMS.txt`,
    `manifest.json` and the two provenance files. The notes come from
    `.github/prerelease-notes.md`: what it is, the release it follows, the

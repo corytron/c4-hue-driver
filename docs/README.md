@@ -27,7 +27,7 @@ the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
 - [`release-checklist.md`](release-checklist.md): what a build must pass on
   the development machine, on the dev loop, in Composer and on the owner's
   phone and keypads before it is called good, and what to check after a
-  controller OS upgrade; the naming of the releases (1.x is "Cassian"), how a
+  controller OS upgrade; the naming of the releases (one Andor codename per X.Y: 1.0 "Cassian", 1.1 "Brasso"), how a
   release is cut (the Release workflow) and how it reaches the house
   (`tools/deploy.py`).
 
