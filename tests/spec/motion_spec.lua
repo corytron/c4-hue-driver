@@ -101,6 +101,19 @@ local function hallway_children(...)
 		table.concat(children, ",")))
 end
 
+-- The Hue room Garden, created in the Hue app with these device children; no
+-- Control4 room maps to it until a spec says so (#319).
+local GARDEN = "40000000-0000-4000-8000-000000000003"
+
+local function garden_room(...)
+	local children = {}
+	for _, rid in ipairs({ ... }) do
+		children[#children + 1] = string.format('{"rid":"%s","rtype":"device"}', rid)
+	end
+	return container("add", string.format('{"id":"%s","id_v1":"/groups/9","children":[%s],"services":[],'
+		.. '"metadata":{"name":"Garden","archetype":"garden"},"type":"room"}', GARDEN, table.concat(children, ",")))
+end
+
 describe("bridge.motion", function()
 	local motion, lights, http, c4, L, D, results, logged, now, timers
 
@@ -604,6 +617,200 @@ describe("bridge.motion", function()
 			D:add(M.devices.hallway, nil, done)
 			assert.equal("Added Hallway sensor to Hall (device 2003)", last_result().text)
 			assert.is_nil(D.reg:tombstones()[M.devices.hallway])
+		end)
+	end)
+
+	describe("add_all_new: Add All New Motion Sensors (#319, EC §7)", function()
+		-- The text's tail while the Kitchen motion area has no device, and its
+		-- part for the Porch sensor, which is in no Hue room.
+		local AREA_NOTE = "not included: 1 new motion area (Add Motion Area adds areas one at a time)"
+		local NO_ROOM = "skipped 1 with no mapped room (Set Room Mapping or Add Motion Sensor): Porch sensor #20 "
+			.. "(no Hue room)"
+
+		it("C1: adds every new sensor whose Hue room is mapped into that room, and lists the ones in no Hue room or an "
+			.. "unmapped one, never guessing a room; never from an event, never an area (A15)", function()
+			resync()
+			-- A third sensor, paired in the Hue app and placed in the Hue room Garden, which nothing maps.
+			feed(new_sensor_add("Garden sensor", "00:17:88:01:0c:00:00:31-02"))
+			feed(garden_room(NEW.device))
+			assert.same({}, c4.added, "nothing is added from an event (S1)")
+			assert.is_true(D:add_all_new(done))
+			assert.same({ { id = 2001, driver = "hue_motion.c4z", room = HALL, name = "Hallway sensor" } }, c4.added)
+			assert.same({ ok = true, text = "Added 1 new motion sensor: Hallway sensor #12 to Hall (device 2001); skipped 2 "
+				.. "with no mapped room (Set Room Mapping or Add Motion Sensor): Garden sensor #31 (Hue room Garden not "
+				.. "mapped), Porch sensor #20 (no Hue room); " .. AREA_NOTE }, last_result())
+			assert.same({ { provider = 15, provider_binding = 1, consumer = 2001, consumer_binding = 1, class = "HUE_BRIDGE" } },
+				c4.bindings)
+			assert.same({ "HUE_MOTION_CONFIGURE@2001", "HUE_MOTION_STATE@2001" }, commands())
+			assert.equal("linked", D:entry(M.devices.hallway).state)
+			assert.equal(HALL, D:entry(M.devices.hallway).created_room_id)
+			assert.is_nil(D:entry(M.area), "an area comes one at a time from Add Motion Area, even in a mapped room")
+			assert.is_false(D.adding)
+			assert.is_true(saw_log("motion: Added 1 new motion sensor: Hallway sensor #12 to Hall (device 2001); skipped 2"))
+
+			-- A mapping to a Control4 room that no longer exists is no mapping.
+			L.reg:set_room_mapping(GARDEN, { c4_room_id = 99, c4_room_name = "Shed", hue_name = "Garden", type = "room" })
+			assert.is_true(D:add_all_new(done))
+			assert.same({ ok = true, text = "Added no motion sensors; skipped 2 with no mapped room (Set Room Mapping or Add "
+				.. "Motion Sensor): Garden sensor #31 (Hue room Garden mapped to a Control4 room that no longer exists), Porch "
+				.. "sensor #20 (no Hue room); " .. AREA_NOTE }, last_result())
+			assert.equal(1, #c4.added)
+
+			-- Mapped now: the next click adds it, and only it.
+			L.reg:set_room_mapping(GARDEN, { c4_room_id = PORCH, c4_room_name = "Porch", hue_name = "Garden", type = "room" })
+			D:add_all_new(done)
+			assert.same({ ok = true, text = "Added 1 new motion sensor: Garden sensor #31 to Porch (device 2002); " .. NO_ROOM
+				.. "; " .. AREA_NOTE }, last_result())
+			assert.same({ id = 2002, driver = "hue_motion.c4z", room = PORCH, name = "Garden sensor" }, c4.added[2])
+			assert.equal(2, #c4.added)
+		end)
+
+		it("C4, C15: idempotent by rid: a second click and one after a restart add nothing; a sensor deleted in Composer "
+			.. "is skipped and listed, never re-created", function()
+			resync()
+			D:add_all_new(done)
+			D:add(M.devices.porch, PORCH, done)
+			D:add(M.area, nil, done)
+			assert.equal(3, #c4.added)
+			c4.sent, c4.calls = {}, {}
+			assert.is_true(D:add_all_new(done))
+			assert.same({ ok = true, text = "No new motion sensors on the bridge (2 on bridge, 2 added)" }, last_result())
+			assert.equal(3, #c4.added)
+			assert.same({}, c4.calls_to("Bind"))
+			assert.same({}, c4.calls_to("Unbind"))
+			assert.same({}, c4.calls_to("RenameDevice"))
+			assert.same({}, c4.calls_to("PersistSetValue"), "the registry is unchanged")
+			assert.same({}, commands(), "the devices hear nothing")
+
+			-- After a restart: a fresh instance from the persisted registry.
+			D = new_motion()
+			D:load()
+			resync()
+			D:add_all_new(done)
+			assert.same({ ok = true, text = "No new motion sensors on the bridge (2 on bridge, 2 added)" }, last_result())
+			assert.equal(3, #c4.added)
+
+			-- C4: the hallway sensor's device deleted in Composer.
+			now = T0 + 86400
+			assert.is_not_nil(D:goodbye({ device_id = "2001", rid = M.devices.hallway }))
+			D:add_all_new(done)
+			assert.same({ ok = true, text = string.format("Added no motion sensors; skipped 1 deleted in Composer (Add Motion "
+				.. "Sensor re-creates one): Hallway sensor #12 (deleted %s)", date(now)) }, last_result())
+			assert.equal(3, #c4.added)
+			assert.is_nil(D:entry(M.devices.hallway))
+			-- Add Motion Sensor re-creates it on purpose; then nothing is left.
+			D:add(M.devices.hallway, nil, done)
+			assert.equal("Added Hallway sensor to Hall (device 2004)", last_result().text)
+			D:add_all_new(done)
+			assert.equal("No new motion sensors on the bridge (2 on bridge, 2 added)", last_result().text)
+		end)
+
+		it("S4, S6: a sensor that looks like the replacement of a device is skipped and listed, so that Re-link keeps "
+			.. "that device and its programming (rule 3)", function()
+			add_both()
+			feed(container("delete", '{"id":"' .. M.motion.hallway .. '","type":"motion"}', '{"id":"' .. M.devices.hallway
+				.. '","type":"device"}'))
+			assert.equal("gone", D:entry(M.devices.hallway).state)
+			-- The sensor reset and paired again (the same radio), back in its mapped Hue room.
+			feed(new_sensor_add("Hallway sensor", M.macs.hallway))
+			feed(hallway_children(M.devices.lamp, NEW.device))
+			assert.is_true(D:add_all_new(done))
+			assert.equal(2, #c4.added, "no second device for the sensor")
+			assert.same({ ok = true, text = "Added no motion sensors; skipped 1 that may be a replacement (Re-link Motion "
+				.. "Device or Add Motion Sensor): Hallway sensor #31 (same radio as Hallway sensor, device 2001; re-link?); "
+				.. NO_ROOM }, last_result())
+			assert.same({ true, "Re-linked device 2001 (was Hallway sensor) to Hallway sensor [Hallway] #31" },
+				{ D:relink(2001, NEW.device) })
+			D:add_all_new(done)
+			assert.same({ ok = true, text = "Added no motion sensors; " .. NO_ROOM }, last_result())
+			assert.equal(2, #c4.added)
+		end)
+
+		it("B1: refused before the first GET and while an add or a resync runs; while it runs, the other actions are "
+			.. "refused and a resync waits for it", function()
+			local held = {}
+			D = new_motion({ add_device = function(driver, room, name, cb)
+				held[#held + 1] = function() C4:AddDevice(driver, room, name, cb) end
+			end })
+			D:load()
+			assert.is_false(D:add_all_new(done))
+			assert.same({ ok = false, text = "Not added: no motion sensors fetched yet (connect the event stream and try "
+				.. "again)" }, last_result())
+			D:resync(done)
+			assert.is_false(D:add_all_new(done))
+			assert.same({ ok = false, text = "Busy: resyncing motion devices; try again in a moment" }, last_result())
+			answer()
+			assert.is_true(D:add(M.devices.porch, PORCH, done))
+			assert.is_false(D:add_all_new(done))
+			assert.same({ ok = false, text = "Busy: adding a motion device; try again in a moment" }, last_result())
+			held[1]()
+			assert.equal("Added Porch sensor to Porch (device 2001)", last_result().text)
+
+			assert.is_true(D:add_all_new(done))
+			assert.equal(2, #held, "its one AddDevice waits for Director")
+			local busy = "Busy: adding a motion device; try again in a moment"
+			assert.is_false(D:add_all_new(done))
+			assert.equal(busy, last_result().text)
+			assert.is_false(D:add(M.area, nil, done))
+			assert.equal(busy, last_result().text)
+			assert.same({ false, busy }, { D:relink(2001, M.devices.hallway) })
+			assert.same({ false, busy }, { D:forget(2001) })
+			local transfers = #c4.transfers
+			D:resync(function(ok) done(ok, "the resync asked for meanwhile") end)
+			assert.equal(transfers, #c4.transfers, "the resync waits")
+			held[2]()
+			assert.same({ ok = true, text = "Added 1 new motion sensor: Hallway sensor #12 to Hall (device 2002); "
+				.. AREA_NOTE }, last_result())
+			assert.equal(transfers + 1, #c4.transfers, "then it runs")
+			answer()
+			assert.same({ ok = true, text = "the resync asked for meanwhile" }, last_result())
+			assert.is_true(D:add_all_new(done), "accepted again once finished")
+			assert.same({ ok = true, text = "No new motion sensors on the bridge (2 on bridge, 2 added); " .. AREA_NOTE },
+				last_result())
+		end)
+
+		it("C9: an AddDevice that fails is listed and the others carry on; one that raises stops the run early and keeps "
+			.. "what it created", function()
+			local refuse, raise = {}, {}
+			D = new_motion({ add_device = function(driver, room, name, cb)
+				if raise[name] then
+					error("Director refused " .. name, 0)
+				elseif refuse[name] then
+					return cb(0, {})
+				end
+				C4:AddDevice(driver, room, name, cb)
+			end })
+			D:load()
+			resync()
+			feed(new_sensor_add("Landing sensor", "00:17:88:01:0c:00:00:31-02"))
+			feed(hallway_children(M.devices.lamp, M.devices.hallway, NEW.device))
+			refuse["Hallway sensor"] = true
+			D:add_all_new(done)
+			assert.same({ ok = false, text = "Added 1 new motion sensor: Landing sensor #31 to Hall (device 2001); AddDevice "
+				.. "failed for 1: Hallway sensor #12; " .. NO_ROOM .. "; " .. AREA_NOTE }, last_result())
+			assert.same({ NEW.device }, D:registered_rids())
+
+			-- The porch sensor placed in the Hue room Garden, mapped to Porch; its AddDevice raises.
+			refuse["Hallway sensor"], raise["Porch sensor"] = nil, true
+			feed(garden_room(M.devices.porch))
+			L.reg:set_room_mapping(GARDEN, { c4_room_id = PORCH, c4_room_name = "Porch", hue_name = "Garden", type = "room" })
+			assert.is_true(D:add_all_new(done))
+			assert.same({ ok = false, text = "Added 1 new motion sensor: Hallway sensor #12 to Hall (device 2002); stopped "
+				.. "early: Director refused Porch sensor; " .. AREA_NOTE }, last_result())
+			assert.equal(2002, D:entry(M.devices.hallway).device_id)
+			assert.is_nil(D:entry(M.devices.porch))
+			assert.is_false(D.adding, "the busy flag is released")
+			raise["Porch sensor"] = nil
+			D:add_all_new(done)
+			assert.same({ ok = true, text = "Added 1 new motion sensor: Porch sensor #20 to Porch (device 2003); "
+				.. AREA_NOTE }, last_result())
+		end)
+
+		it("B5: a bridge without MotionAware has no areas to mention", function()
+			resync({ motion_area_configuration = { code = 404, body = M.not_found } })
+			D:add_all_new(done)
+			assert.same({ ok = true, text = "Added 1 new motion sensor: Hallway sensor #12 to Hall (device 2001); " .. NO_ROOM },
+				last_result())
 		end)
 	end)
 

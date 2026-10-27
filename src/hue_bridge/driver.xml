@@ -429,9 +429,15 @@
 				</params>
 			</action>
 			<action>
+				<name>Add All New Motion Sensors</name>
+				<command>Add All New Motion Sensors</command>
+				<sort_order>20</sort_order>
+				<params/>
+			</action>
+			<action>
 				<name>Add Motion Area</name>
 				<command>Add Motion Area</command>
-				<sort_order>20</sort_order>
+				<sort_order>21</sort_order>
 				<params>
 					<param>
 						<name>Area</name>
@@ -446,7 +452,7 @@
 			<action>
 				<name>Re-link Motion Device</name>
 				<command>Re-link Motion Device</command>
-				<sort_order>21</sort_order>
+				<sort_order>22</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -461,7 +467,7 @@
 			<action>
 				<name>Forget Motion Device</name>
 				<command>Forget Motion Device</command>
-				<sort_order>22</sort_order>
+				<sort_order>23</sort_order>
 				<params>
 					<param>
 						<name>Device</name>
@@ -472,25 +478,25 @@
 			<action>
 				<name>Log Motion Diagnostics</name>
 				<command>Log Motion Diagnostics</command>
-				<sort_order>23</sort_order>
+				<sort_order>24</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Test Connection</name>
 				<command>Test Connection</command>
-				<sort_order>24</sort_order>
+				<sort_order>25</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Connect Event Stream</name>
 				<command>Connect Event Stream</command>
-				<sort_order>25</sort_order>
+				<sort_order>26</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Disconnect Event Stream</name>
 				<command>Disconnect Event Stream</command>
-				<sort_order>26</sort_order>
+				<sort_order>27</sort_order>
 				<params/>
 			</action>
 			<!-- DEV-ONLY BEGIN: diagnostics for development builds only;
@@ -498,7 +504,7 @@
 			<action>
 				<name>Connection Test</name>
 				<command>Connection Test</command>
-				<sort_order>27</sort_order>
+				<sort_order>28</sort_order>
 				<params>
 					<param>
 						<name>Target</name>
@@ -513,20 +519,20 @@
 			<action>
 				<name>Reload Credentials</name>
 				<command>Reload Credentials</command>
-				<sort_order>28</sort_order>
+				<sort_order>29</sort_order>
 				<params/>
 			</action>
 			<action>
 				<name>Check CA Pinning</name>
 				<command>Check CA Pinning</command>
-				<sort_order>29</sort_order>
+				<sort_order>30</sort_order>
 				<params/>
 			</action>
 			<!-- DEV-ONLY END -->
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
-				<sort_order>30</sort_order>
+				<sort_order>31</sort_order>
 				<params/>
 			</action>
 		</actions>
