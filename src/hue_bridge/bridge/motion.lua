@@ -1320,9 +1320,14 @@ function motion:fetch_all(cb)
 			if type(data) == "table" then
 				res[spec.type] = data
 				answered = true
-			elseif spec.type == motion.CONFIG_TYPE and r.code == 404 then
+			elseif spec.type == motion.CONFIG_TYPE
+					and (r.code == 404 or (r.code == 503 and self.areas_supported ~= true)) then
 				-- Not "every area was deleted" (EC B5): this bridge serves none.
+				-- A Hue Bridge v2 answers 503 "Service Unavailable" there, not
+				-- 404 (#318); a bridge that has served areas in this run keeps
+				-- them over a 503, which may then be a busy moment.
 				res.unsupported = true
+				res.unsupported_code = r.code
 				answered = true
 			else
 				if r.code ~= nil then
@@ -1375,8 +1380,8 @@ function motion:absorb(res)
 	end
 	if res.unsupported then
 		if self.areas_supported ~= false then
-			self.ctx.log.info("motion: this bridge offers no MotionAware areas (GET %s%s answered 404)", motion.PATH,
-				motion.CONFIG_TYPE)
+			self.ctx.log.info("motion: this bridge offers no MotionAware areas (GET %s%s answered %s)", motion.PATH,
+				motion.CONFIG_TYPE, tostring(res.unsupported_code or 404))
 		end
 		self.areas_supported = false
 		for rtype in pairs(AREA_TYPES) do
