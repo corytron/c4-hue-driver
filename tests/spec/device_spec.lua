@@ -737,6 +737,16 @@ describe("common.device", function()
 			end
 		end)
 
+		it("#298: loads on a new device, where Director's PersistGetValue returns no value at all", function()
+			local dev, c4 = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up", "hold_down" } })
+			-- Director answers a key never written with nothing (not nil);
+			-- tonumber() without an argument raises.
+			c4.PersistGetValue = function() end
+			assert.has_no.errors(function() dev.load_settings() end)
+			assert.same({ 100, 250, 250, 5000, 5000 }, { dev.setting("preset"), dev.setting("click_up"),
+				dev.setting("click_down"), dev.setting("hold_up"), dev.setting("hold_down") })
+		end)
+
 		it("takes the declared settings: defaults, persisted values, and the proxy's commands that set them", function()
 			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up",
 				"hold_down" } })
