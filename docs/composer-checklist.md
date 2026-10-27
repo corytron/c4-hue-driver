@@ -854,6 +854,60 @@ chapter 14, and the owner passes on these steps and the answers):
       programming keeps working.
     - **Done:** open.
 
+## K. Raise Level By and Restore Saved Level (#297)
+
+Written on 2026-10-26, before the build, from the contract
+(`docs/relative-level-design.md`); check every quoted text against the
+build that brings the two commands. The owner's manual says the same in
+prose (chapter 10, with this setup as its example, and the Hue Light's own
+Documentation tab). The commands change no `<capabilities>`, so the
+install needs no reboot. The Windows session reads Composer; the owner
+makes the Programming drags (synthesized drags start no OLE drag,
+`docs/composer-remote.md`) and walks.
+
+73. **The house setup** (contract §3): the two Foyer lamps get 30 points
+    brighter when the MotionAware area senses motion, and go back to their
+    own levels 5 minutes after the last movement.
+    - Install the build in place, all four files, as in step 50. Expect no
+      "Restart Director?" and every Hue device on the new `Driver Version`.
+    - The house has no Hue Light device for a single lamp (all deleted on
+      2026-10-22, step 21). Add each Foyer lamp with Add Light and `Room`
+      "(mapped room)" (Foyer → Foyer): "Added <name> #<n> to Foyer
+      (device <id>)". Paste both.
+    - On the area's motion device, set `Occupancy Hold Time (s)` to 30 for
+      the checks below and click Set (300 at the end). The area's Hue
+      automation stays at "do nothing" on motion and on no motion
+      (`docs/status.md`), so only Control4 moves the lamps.
+    - Programming: select a Foyer lamp among the actions and paste where
+      Composer lists Raise Level By and Restore Saved Level, the two
+      commands' parameters with their ranges (expected `Points` 1 to 100
+      and `Ramp (ms)` 0 to 60000), the values Composer fills in before any
+      change (whether it offers the defaults 30 and 1000 is not known), and
+      how a dragged line reads in the script. Then the four drags: on the
+      motion device's event "senses motion", Raise Level By with `Points`
+      30 and `Ramp (ms)` 1000 for each lamp; on its event "stops sensing
+      motion", Restore Saved Level with `Ramp (ms)` 1000 for each.
+    - The walk: set one lamp to 40 % and switch the other off, then walk
+      through the Foyer. Within about two seconds the first fades to
+      70 %, `Last Action` "Raised from 40 % to 70 % (saved 40 %)", and the
+      second comes on at 30 % (paste its `Last Action`). Leave: about 10 s
+      after the last movement the motion device's `Hue Motion` reads "No
+      motion since <HH:MM>" while State stays Open; 30 s later "stops
+      sensing motion" fires, the first lamp fades back to 40 %
+      ("Restored to 40 %") and the second goes off (paste its `Last
+      Action`). Note the time from the last movement to the restore
+      (expected about 40 s).
+    - Changed meanwhile: walk through again and, before the restore, set
+      the first lamp to 55 % in the Hue app. When the motion stops it
+      stays at 55 % ("Not restored: changed to 55 % since the raise; saved
+      level forgotten"), and the second goes off as before. The next walk
+      raises the first from 55 % to 85 %, `Last Action` "Raised from
+      55 % to 85 % (saved 55 %)".
+    - Set `Occupancy Hold Time (s)` to 300 and click Set: the house setup.
+      From the next end of motion the lamps go back about 5 min 10 s after
+      the last movement.
+    - **Done:** open.
+
 ## What to paste back
 
 For each step: the property texts as shown, what the Navigator, keypad or

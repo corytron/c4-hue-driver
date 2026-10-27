@@ -7,7 +7,9 @@
 -- HUE_BRIDGE) with C4:SendToDevice, and the bridge pushes configuration and
 -- state back through ExecuteCommand. The message contract is in
 -- docs/lights-design.md, docs/import-design.md §4/§13 and
--- docs/zone-light-design.md §5; the light_v2 facts in docs/design.md.
+-- docs/zone-light-design.md §5; the light_v2 facts in docs/design.md; the
+-- programming commands (Raise Level By, Restore Saved Level) in
+-- docs/relative-level-design.md.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -610,6 +612,207 @@ dispatch.commands["Forget_This_Light"] = function()
 	result(string.format("Asked the bridge to forget this %s; its answer sets Status", what()))
 end
 
+-- Programming commands -------------------------------------------------------
+-- Raise Level By and Restore Saved Level (docs/relative-level-design.md,
+-- #297): two primitives stock programming lacks, for "when motion is
+-- sensed, raise the lamp by 30 points; when it stops, put it back".
+-- Programming decides when; nothing here runs on its own. driver.xml
+-- declares them in <commands>; Director hands each to ExecuteCommand under
+-- its name, spaces and all ("Raise Level By", which common.dispatch keys as
+-- Raise_Level_By), with the parameters keyed by their names [verified: API
+-- 5/_1, "includes commands created in Composer programming"; FUND 15/_4;
+-- FUND 12.3/_1, whose sample reads tParams["Select List Item"] for its
+-- programming command "CUSTOM_SELECT List"]. Values are read with tonumber,
+-- strings and numbers alike [assumed: Director sends strings].
+--
+-- Both drive the light through set_brightness, the slider's own path
+-- (CHANGING, HUE_SET, the fallback), so the bridge queues, coalesces and
+-- rate-limits them as it does the slider. A device blocker() names (gone,
+-- unbound, forgotten, no Hue light assigned yet, a zone or room without
+-- lights) refuses both and keeps what was saved. Like the bridge's
+-- messages they wait for late init, before which UpdateProperty is not safe
+-- (after_late_init), and every outcome ends in Last Action and a log line
+-- (result).
+
+-- What a Raise saved, until a Restore uses or drops it: { level = the level
+-- it started from (0 off), target = the level the last Raise set, at =
+-- os.time() of the save, nil when unknown }. Persisted as one table, so a
+-- driver restart or update in between keeps it [verified: API 26.5/_4,
+-- tables allowed].
+local SAVED_KEY = "saved_level"
+local saved = nil
+
+-- The parameters as driver.xml declares them; one absent or empty is the
+-- default.
+local POINTS = { name = "Points", min = 1, max = 100, default = 30 }
+local RAMP = { name = "Ramp (ms)", min = 0, max = 60000, default = 1000 }
+
+-- A parameter as a whole number (rounded) inside its range; otherwise nil
+-- and why, for Last Action. Composer's RANGED_INTEGER never sends anything
+-- else; a value from elsewhere is refused rather than guessed at (a
+-- negative Points would lower the lamp).
+local function param(params, spec)
+	local raw = params[spec.name]
+	if raw == nil or raw == "" then
+		return spec.default
+	end
+	local n = tonumber(raw)
+	n = n and math.floor(n + 0.5)
+	if not (n and n >= spec.min and n <= spec.max) then -- NaN fails both
+		return nil, string.format("%s must be %d to %d, not %s", spec.name, spec.min, spec.max, tostring(raw))
+	end
+	return n
+end
+
+-- "40 %"; "off" for 0.
+local function level_text(level)
+	if level == 0 then
+		return "off"
+	end
+	return string.format("%d %%", level)
+end
+
+-- When the saved level was saved: "at 14:02" today, "2026-10-24 14:02" on
+-- another day (a Restore that never came); nil when unknown.
+local function saved_when(at)
+	if not at then
+		return nil
+	end
+	if os.date("%Y-%m-%d", at) == os.date("%Y-%m-%d") then
+		return "at " .. os.date("%H:%M", at)
+	end
+	return os.date("%Y-%m-%d %H:%M", at)
+end
+
+-- The memory and the stored copy are separate tables: the database keeps
+-- what was written, not a live reference.
+local function save(level, target, at)
+	saved = { level = level, target = target, at = at }
+	C4:PersistSetValue(SAVED_KEY, { level = level, target = target, at = at })
+end
+
+local function forget_saved()
+	saved = nil
+	C4:PersistDeleteValue(SAVED_KEY)
+end
+
+-- At late init, before the buffered messages and commands run: what a Raise
+-- saved before the restart. Anything else under the key (not a table, a
+-- level out of range) is dropped with a warning, never restored.
+local function load_saved()
+	saved = nil
+	local value = C4:PersistGetValue(SAVED_KEY)
+	if value == nil then
+		return
+	end
+	local level = type(value) == "table" and tonumber(value.level) or nil
+	local target = type(value) == "table" and tonumber(value.target) or nil
+	if level and target and level >= 0 and level <= 100 and target >= 1 and target <= 100 then
+		saved = { level = math.floor(level + 0.5), target = math.floor(target + 0.5), at = tonumber(value.at) }
+	else
+		log.warn("stored %s is not a saved level (%s); dropped", SAVED_KEY, tostring(value))
+		C4:PersistDeleteValue(SAVED_KEY)
+	end
+end
+
+-- " (capped; saved 40 %)": the notes after a Raise, "" without any.
+local function notes(list)
+	if #list == 0 then
+		return ""
+	end
+	return " (" .. table.concat(list, "; ") .. ")"
+end
+
+-- Nothing saved: the level the light shows (0 while off) is saved with the
+-- time, and the light goes to it plus Points, capped at 100. Saved already:
+-- the light goes to the saved level plus Points again, so a Raise repeated
+-- before the Restore never climbs; the saved level and its time stay, only
+-- the target follows this Raise. Saved, but the light stands neither where
+-- the last Raise put it nor at the saved level (someone changed it since):
+-- that change is the new
+-- starting point, so a Raise never lowers a light turned up by hand; the
+-- old saved level is dropped and the current one saved. Nothing is saved when the command never
+-- reached the bridge (set_brightness logs it and closes the proxy's
+-- CHANGING).
+dispatch.commands["Raise_Level_By"] = after_late_init("Raise Level By", function(params)
+	local points, ramp, why
+	points, why = param(params, POINTS)
+	if points then
+		ramp, why = param(params, RAMP)
+	end
+	why = why or blocker()
+	if why then
+		return result("Not raised: " .. why)
+	end
+	local now = state.to_proxy_brightness(st)
+	local restarted = nil
+	-- Still at the saved level counts as unchanged too: the bridge may not
+	-- have reported the last Raise's level yet.
+	if saved and now ~= nil and math.abs(now - saved.target) > 1 and math.abs(now - saved.level) > 1 then
+		restarted = level_text(saved.level)
+		forget_saved()
+	end
+	local from = saved and saved.level or now
+	if from == nil then
+		return result(string.format("Not raised: the %s's level is not known yet", what()))
+	end
+	local target = math.min(100, from + points)
+	if not set_brightness(target, ramp) then
+		return result("Not raised: the command did not reach the bridge")
+	end
+	local list = {}
+	if target < from + points then
+		list[1] = "capped"
+	end
+	if saved then
+		if saved.target ~= target then
+			save(saved.level, target, saved.at)
+		end
+		local when = saved_when(saved.at)
+		list[#list + 1] = when and ("saved " .. when) or nil
+		return result(string.format("Raised from %s to %d %% again%s", level_text(from), target, notes(list)))
+	end
+	save(from, target, os.time())
+	list[#list + 1] = "saved " .. level_text(from)
+	if restarted then
+		list[#list + 1] = "changed since the last raise; " .. restarted .. " no longer kept"
+	end
+	result(string.format("Raised from %s to %d %%%s", level_text(from), target, notes(list)))
+end)
+
+-- Only a light still where the last Raise put it goes back: within a point
+-- of the target, since Hue reports its Zigbee level (a requested 70 comes
+-- back as 70.08). Any other level, or off, is someone's change, which a
+-- Restore must not undo: the light stays, and the saved level is dropped.
+-- A level not known yet (a restart the bridge has not answered) is no
+-- change: the saved level stays for the next Restore.
+dispatch.commands["Restore_Saved_Level"] = after_late_init("Restore Saved Level", function(params)
+	if not saved then
+		return result("Nothing to restore")
+	end
+	local kept = string.format(" (saved %s kept)", level_text(saved.level))
+	local ramp, why = param(params, RAMP)
+	why = why or blocker()
+	if why then
+		return result("Not restored: " .. why .. kept)
+	end
+	local now = state.to_proxy_brightness(st)
+	if now == nil then
+		return result(string.format("Not restored: the %s's level is not known yet%s", what(), kept))
+	end
+	if now == 0 or math.abs(now - saved.target) > 1 then
+		forget_saved()
+		return result(string.format("Not restored: %s since the raise; saved level forgotten",
+			now == 0 and "turned off" or string.format("changed to %d %%", now)))
+	end
+	local level = saved.level
+	if not set_brightness(level, ramp) then
+		return result("Not restored: the command did not reach the bridge" .. kept)
+	end
+	forget_saved()
+	result("Restored to " .. level_text(level))
+end)
+
 -- From the proxy (ReceivedFromProxy) ------------------------------------------
 -- Commands without a handler are logged at debug by common.dispatch.
 
@@ -812,6 +1015,7 @@ local schedule_recheck, cancel_recheck = dev.schedule_recheck, dev.cancel_rechec
 
 function OnDriverLateInit()
 	load_identity()
+	load_saved() -- before dev.late_init() runs a Restore that arrived early
 	dev.load_settings()
 	dev.load_colors()
 	dispatch.replay_properties(Properties)

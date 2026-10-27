@@ -19,6 +19,10 @@ listed.
   programming, light level, temperature, battery and an occupancy hold time,
   added from the bridge's Add Motion Sensor and Add Motion Area actions, and
   a Log Motion Diagnostics action for testers (#268).
+- Two programming commands on every Hue Light device: Raise Level By
+  (points over the current level, remembering it) and Restore Saved Level
+  (back to it, unless someone changed the light since), for motion
+  programming that raises lamps and puts them back (#297).
 - Prereleases for testers: versions such as 1.1-beta.1 appear on the
   Releases page marked Pre-release, with their own notes and a Beta feedback
   form; the stable release stays the one marked Latest (#269).

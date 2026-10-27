@@ -156,6 +156,9 @@ are dated research; what was built from them is in the contracts and
   areas as Control4 motion sensors (2026-10-26, #268): `hue_motion.c4z` as a
   stock `contactsingle_motionsensor`, the decisions D1–D16, the messages
   between the bridge and the device, the diagnostics for testers.
+- [`relative-level-design.md`](relative-level-design.md): the Hue Light's
+  Raise Level By and Restore Saved Level programming commands (2026-10-26,
+  #297), for motion programming that raises lamps and puts them back.
 - [`prerelease-design.md`](prerelease-design.md): prereleases for testers
   (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
   from `main` like every release, their notes, the one list of packages, the
