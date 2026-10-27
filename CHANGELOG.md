@@ -46,6 +46,9 @@ listed.
   the three drivers of the latest release (#266).
 
 ### Fixed
+- A Hue Bridge v2 now shows "MotionAware not supported by this bridge":
+  it answers the MotionAware requests with "Service Unavailable", which was
+  taken for a failed request (#318).
 - A Hue Light or Hue Scene device newly added no longer fails its start
   with a Lua error and shows no state: a keypad setting never saved was
   read as an error (#298).
