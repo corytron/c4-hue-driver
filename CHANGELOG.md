@@ -27,6 +27,12 @@ listed.
 - Prereleases for testers: versions such as 1.1-beta.1 appear on the
   Releases page marked Pre-release, with their own notes and a Beta feedback
   form; the stable release stays the one marked Latest (#269).
+- A setting on every Hue Scene device, On State Follows: by default its
+  tile and keypad LEDs now show on while any light of the scene's room or
+  zone is on, whatever turned it on (another scene, the Hue app, a Hue
+  switch, a Hue Light in Control4), and off once they are all off. Choose
+  This scene for the earlier behaviour, on only while that scene is the one
+  played. This changes existing scene keypads after the update (#310).
 
 ### Changed
 - The manual says what to do when a device's Documentation tab still shows

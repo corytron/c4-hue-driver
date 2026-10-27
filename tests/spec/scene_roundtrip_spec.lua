@@ -71,8 +71,10 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		now = T0
 
 		-- The scene driver first, then the bridge runtime (its globals stay in
-		-- place), then the project.
-		scene = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+		-- place), then the project. On State Follows "This scene": the loop pins
+		-- the on rule, and the fixture's room is lit (the lights mode is pinned
+		-- in scene_driver_spec.lua, docs/scene-led-design.md).
+		scene = fake.load_driver("hue_scene", { ["On State Follows"] = "This scene" }, { device_id = SCENE_ID })
 		local env
 		bc4, env = fake.install_c4()
 		bridge = env
@@ -302,6 +304,19 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.is_nil(bc4.persist.hue_scene_tombstones[F.scene_rids.savanna])
 		assert.equal(2002, bc4.persist.hue_scenes[F.scene_rids.savanna].device_id)
 		assert.equal("4 + 1 time-based on bridge, 1 imported, 0 deleted", S:summary())
+	end)
+
+	it("with On State Follows on the room's lights, the hello's group report shows the inactive scene on", function()
+		S:resync()
+		answer_scene_gets()
+		S:add_scene(F.scene_rids.relax, nil, function() end)
+		fake.pair(bridge, scene, { light_id = SCENE_ID, bind = false })
+		scene.Properties["On State Follows"] = "Room/zone lights"
+		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		assert.equal("inactive", S:scene(F.scene_rids.relax).active)
+		local br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
+		assert.is_true(br[#br].LIGHT_BRIGHTNESS_CURRENT > 0, "the fixture's room is lit, so the device reads on")
 	end)
 
 	it("a dynamic scene recalled from the proxy ends up dynamic_palette, and Recall As Static makes it static", function()
