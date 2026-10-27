@@ -49,6 +49,9 @@ of it is live.
   scene, created only by the owner; the on rule and the room or zone OFF.
 - [`scene-dimmer-design.md`](scene-dimmer-design.md): the Hue Scene as a
   dimmer whose level is the room or zone's brightness, kept in sync with Hue.
+- [`scene-led-design.md`](scene-led-design.md): On State Follows: a scene
+  device's tile and keypad LEDs follow its room or zone's lights, or the
+  scene alone (#310).
 - [`smart-scenes-design.md`](smart-scenes-design.md): Hue's time-of-day
   ("smart") scenes as Hue Scene devices: start, stop, dim while running,
   listing and naming.

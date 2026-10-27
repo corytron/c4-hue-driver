@@ -71,6 +71,19 @@
 				<default>As set in Hue</default>
 				<readonly>false</readonly>
 			</property>
+			<!-- What the tile and the keypad LEDs follow: the scene's room or zone
+			     lights as well as the scene, or the scene alone
+			     (docs/scene-led-design.md). -->
+			<property>
+				<name>On State Follows</name>
+				<type>LIST</type>
+				<items>
+					<item>Room/zone lights</item>
+					<item>This scene</item>
+				</items>
+				<default>Room/zone lights</default>
+				<readonly>false</readonly>
+			</property>
 			<property>
 				<name>Online</name>
 				<default></default>

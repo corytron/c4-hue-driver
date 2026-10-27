@@ -51,6 +51,10 @@ local RECALL_ACTIONS = {
 }
 local DEFAULT_RECALL = "active"
 
+-- On State Follows property values (docs/scene-led-design.md): the room or
+-- zone's lights (the default) or this scene alone (the on rule).
+local FOLLOW_LIGHTS, FOLLOW_SCENE = "Room/zone lights", "This scene"
+
 -- The device's kinds (docs/smart-scenes-design.md, Decision 1): an ordinary
 -- Hue scene, or a time-based one (CLIP v2 smart_scene). The configure names
 -- the kind; a device never told one is an ordinary scene.
@@ -95,7 +99,14 @@ local recall_action = DEFAULT_RECALL
 -- Persisted under "held_on", so it survives a restart. Ordinary scenes only:
 -- a time-based scene is on exactly while Hue says it runs (held() below).
 local held_on = false
-local level_seq = 0        -- counts lit level reports, to tell whether one arrived since a recall
+-- The lights mode (docs/scene-led-design.md): the device also reads on while
+-- its room or zone is on, whatever turned it on. group_on is the group's
+-- on/off from HUE_SCENE_GROUP (nil until the bridge sends it; not persisted,
+-- the hello's answer carries it again); follow_lights is the On State Follows
+-- property.
+local group_on = nil
+local follow_lights = true
+local level_seq = 0       -- counts lit level reports, to tell whether one arrived since a recall
 local last_reported = nil  -- the LIGHT_BRIGHTNESS_CURRENT last sent to the proxy
 local level_window = nil   -- { timer, dirty } for LEVEL_REPORT_MS after a level report went out
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
@@ -272,6 +283,19 @@ local function effective_on()
 	return is_on() or held()
 end
 
+-- The device's one on state: the tile, the LEDs, TOGGLE, the slider's choice
+-- and the holds follow it. In the lights mode the scene's own state or its
+-- group being on; the union keeps the tile from blinking off between a
+-- recall's status and its group report (docs/scene-led-design.md).
+local function shown_on()
+	return effective_on() or (follow_lights and group_on == true)
+end
+
+-- Whether the lights mode knows the group's on/off.
+local function group_known()
+	return follow_lights and group_on ~= nil
+end
+
 local function set_held(on)
 	if held_on == on then
 		return
@@ -305,10 +329,10 @@ end
 -- while none is known yet), 0 while off, nil until the bridge has reported
 -- (or a hold turned it on, or held_on came back from a restart).
 local function brightness()
-	if st.active == nil and not held() then
+	if st.active == nil and not held() and not group_known() then
 		return nil
 	end
-	if not effective_on() then
+	if not shown_on() then
 		return 0
 	end
 	return st.level and whole_percent(st.level) or 100
@@ -317,13 +341,13 @@ end
 -- Keypad LEDs ----------------------------------------------------------------
 -- MATCH_LED_STATE on each Button Link and BUTTON_INFO per button follow the
 -- scene (common/device.lua, docs/keypad-design.md "Keypad LEDs"): what they
--- follow here is effective_on(), nil while neither a status nor a held-on
--- state is known yet.
+-- follow here is shown_on(), nil while neither a status, a held-on state nor
+-- (in the lights mode) the group's on/off is known yet.
 function dev.is_on()
 	if brightness() == nil then
 		return nil
 	end
-	return effective_on()
+	return shown_on()
 end
 
 -- The report_* functions return true when they had something to report.
@@ -727,7 +751,7 @@ local function set_target(target, rate)
 		log.info("level: %d %% once the time-based scene has started", level)
 		return follow_with_level(level, rate)
 	end
-	if (pending and pending.kind == "switch") or not effective_on() then
+	if (pending and pending.kind == "switch") or not shown_on() then
 		return turn_on(rate, level)
 	end
 	move_level(level, rate)
@@ -806,6 +830,19 @@ dispatch.properties["Recall_As"] = function(value)
 	log.info("Recall As %q -> recall action %s", tostring(value), action)
 end
 
+-- What the device's on state follows (docs/scene-led-design.md): the room or
+-- zone's lights as well as the scene (the default, also when Director has no
+-- value yet after an update), or the scene alone. A change shows at once.
+dispatch.properties["On_State_Follows"] = function(value)
+	if value ~= FOLLOW_LIGHTS and value ~= FOLLOW_SCENE and value ~= nil and value ~= "" then
+		log.warn("On State Follows %q is not a known choice; using %q", tostring(value), FOLLOW_LIGHTS)
+	end
+	local before = brightness()
+	follow_lights = value ~= FOLLOW_SCENE
+	log.debug("On State Follows %q", follow_lights and FOLLOW_LIGHTS or FOLLOW_SCENE)
+	report_if_changed(before)
+end
+
 -- Recall As means nothing to a time-based scene (its start has no action to
 -- choose), so Composer hides it there and shows it on ordinary scenes
 -- (docs/smart-scenes-design.md, Decision 12) [verified: API 24_properties/_4,
@@ -871,6 +908,9 @@ end
 dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE", function(params)
 	params = params or {}
 	if text(params.rid) then
+		if params.rid ~= st.rid then
+			group_on = nil -- another scene's group: its first group message refills it
+		end
 		st.rid = params.rid
 	end
 	st.name = text(params.name) or st.name
@@ -980,6 +1020,9 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 		level_seq = level_seq + 1
 	end
 	local on = to_bool(params.on)
+	if on ~= nil then
+		group_on = on
+	end
 	-- A time-based scene started from here: the group on with a level means
 	-- the slot's look is on, so what was to follow goes now; the group off
 	-- means the start was undone (a dropped slider level closes the proxy's
@@ -1015,7 +1058,10 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 		end
 	elseif ended then
 		report_if_changed(before)
-	elseif level and level > 0 and effective_on() then
+	elseif on ~= nil and group_known() and (before or 0) == 0 and brightness() ~= before then
+		-- The lights mode: the group came on, so the tile and LEDs go on at once.
+		report_brightness()
+	elseif level and level > 0 and shown_on() then
 		report_level()
 	end
 end)
@@ -1111,7 +1157,7 @@ dispatch.proxy["TOGGLE"] = function()
 	if pending then
 		on = pending.on
 	else
-		on = effective_on()
+		on = shown_on()
 	end
 	if on then
 		turn_off(0)

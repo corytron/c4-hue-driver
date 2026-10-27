@@ -37,10 +37,17 @@ local function stub_attribs(c4)
 end
 
 -- opts.bind=false leaves the device unbound; opts.rid persists a rid first,
--- opts.name a name and opts.kind a kind.
+-- opts.name a name and opts.kind a kind. On State Follows is "This scene"
+-- (the on rule these cases pin) unless opts.props names it; opts.follow =
+-- false leaves it unset (the driver's default, the lights mode).
 local function load_scene(opts)
 	opts = opts or {}
-	local env, c4 = fake.load_driver("hue_scene", opts.props or {}, { device_id = SCENE_ID })
+	local props = {}
+	for k, v in pairs(opts.props or {}) do props[k] = v end
+	if props["On State Follows"] == nil and opts.follow ~= false then
+		props["On State Follows"] = "This scene"
+	end
+	local env, c4 = fake.load_driver("hue_scene", props, { device_id = SCENE_ID })
 	stub_attribs(c4)
 	if opts.bind ~= false then
 		c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
@@ -2076,6 +2083,107 @@ describe("Hue Scene driver", function()
 			local recalls = messages(c4, "HUE_SCENE_RECALL")
 			assert.equal(1, #recalls)
 			assert.is_nil(recalls[1].params.brightness)
+		end)
+	end)
+
+	describe("On State Follows (docs/scene-led-design.md)", function()
+		-- A scene Hue calls inactive, in the lights mode (the driver's default:
+		-- the property unset), with the recording cleared.
+		local function lights_scene()
+			return known_scene("inactive", { rid = "s1", follow = false })
+		end
+
+		local function group(env, params)
+			params.rid = "s1"
+			env.ExecuteCommand("HUE_SCENE_GROUP", params)
+		end
+
+		it("defaults to the room/zone lights: the group on lights the tile and the LEDs, off clears them", function()
+			local env, c4 = lights_scene()
+			local proxy = capture_proxy(c4)
+			group(env, { on = "true", level = "40" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
+			group(env, { on = "false" })
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
+			local m = with_command(proxy, "MATCH_LED_STATE")
+			assert.same(leds(false), { m[4], m[5], m[6] })
+		end)
+
+		it("stays on when another scene of the group is played, and follows the group's level", function()
+			local env, c4 = lights_scene()
+			state(env, "static")
+			group(env, { on = "true", level = "70" })
+			c4.calls = {}
+			group(env, { other_active = "true" })
+			state(env, "inactive")
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "still on: nothing to report")
+			group(env, { level = "30" })
+			fire(c4, 1000) -- the level reports' one-second window (LEVEL_REPORT_MS)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 30 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("in This scene, a group on alone changes nothing (the on rule)", function()
+			local env, c4 = known_scene("inactive", { rid = "s1", props = { ["On State Follows"] = "This scene" } })
+			local proxy = capture_proxy(c4)
+			group(env, { on = "true", level = "40" })
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same({}, with_command(proxy, "MATCH_LED_STATE"))
+		end)
+
+		it("TOGGLE while only the group is on turns the room or zone off", function()
+			local env, c4 = lights_scene()
+			group(env, { on = "true", level = "40" })
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
+			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+		end)
+
+		it("the slider while only the group is on moves the group's level instead of playing the scene", function()
+			local env, c4 = lights_scene()
+			group(env, { on = "true", level = "40" })
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+			assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
+			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+		end)
+
+		it("a property change shows at once, both ways", function()
+			local env, c4 = lights_scene()
+			group(env, { on = "true", level = "40" })
+			c4.calls = {}
+			local proxy = capture_proxy(c4)
+			env.Properties["On State Follows"] = "This scene"
+			env.OnPropertyChanged("On State Follows")
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
+			env.Properties["On State Follows"] = "Room/zone lights"
+			env.OnPropertyChanged("On State Follows")
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
+		end)
+
+		it("an unknown value warns and follows the lights", function()
+			local env, c4 = lights_scene()
+			local warned = {}
+			log.sink = function(line) if line:find("[WARN]", 1, true) then warned[#warned + 1] = line end end
+			env.Properties["On State Follows"] = "Sometimes"
+			env.OnPropertyChanged("On State Follows")
+			quiet()
+			assert.equal(1, #warned)
+			group(env, { on = "true", level = "40" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("a configure for another scene forgets the old group's on state", function()
+			local env, c4 = lights_scene()
+			group(env, { on = "true", level = "40" })
+			c4.calls = {}
+			configure(env, { rid = "s2" })
+			state(env, "inactive", { rid = "s2" })
+			env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+			local changed = notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, changed[#changed], "off: the new scene is inactive, its group unknown")
 		end)
 	end)
 
