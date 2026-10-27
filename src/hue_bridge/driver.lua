@@ -1013,8 +1013,9 @@ end
 
 -- The TLS check of the network connection (#317, bridge/netcheck.lua):
 -- before the event stream's first keyed connect on a network connection in
--- a run, a probe with a decoy CA file and no key must fail. Its answer
--- holds for the run (state.net_check), whatever the address: it is the
+-- a run, unkeyed probes on binding 6002 (the Signify roots, a decoy CA file,
+-- the Signify roots again) must show the decoy refused. Its answer holds
+-- for the run (state.net_check), whatever the address: it is the
 -- controller's. pinned, or inconclusive on a Director version that answered
 -- pinned before ("accepted"), lets the stream connect; not_pinned moves it
 -- to Web transfer with an Attention item until the next start (the Event
@@ -1022,7 +1023,7 @@ end
 -- again after a Director upgrade); any other inconclusive answer holds it
 -- and asks again after a backoff. `continue` re-enters choose_stream_address:
 -- once the check passed or fell back, or after the backoff. One waiter, the
--- latest; one probe at a time, the latest address's.
+-- latest; one check at a time, the latest address's.
 local net_waiter, net_running, net_timer, net_attempts = nil, nil, nil, 0
 
 local function reset_net_gate()
@@ -1044,6 +1045,7 @@ local function net_gate(continue)
 		net_timer = nil
 	end
 	net_running = gen
+	prop("Event Stream", "Not connected: network connection TLS check running") -- about 20 s
 	netcheck.run(ip, function(verdict, detail)
 		if gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
