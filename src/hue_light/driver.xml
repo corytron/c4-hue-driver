@@ -91,7 +91,53 @@
 				<params/>
 			</action>
 		</actions>
-		<commands/>
+		<!-- Programming commands (docs/relative-level-design.md, #297): Composer lists
+		     them under the device in Programming as device specific commands
+		     [verified: FUND 15/_7], and Director hands each to ExecuteCommand under
+		     its name, with the parameters keyed by theirs [verified: API 5/_1;
+		     FUND 15/_4, 12.3/_1]. Programming refers to them by name, so names and
+		     parameters never change once released. RANGED_INTEGER with minimum and
+		     maximum, and sort_order zero-based on every command or on none
+		     [verified: FUND 9/_1]. A parameter's default is [assumed]: the SDK shows
+		     one for a command parameter only in Jumpstart's JSON (FUND 26.5/_2.5);
+		     the driver applies the same defaults to an absent value. -->
+		<commands>
+			<command>
+				<name>Raise Level By</name>
+				<description>Raise NAME by PARAM1 points over PARAM2 ms</description>
+				<sort_order>0</sort_order>
+				<params>
+					<param>
+						<name>Points</name>
+						<type>RANGED_INTEGER</type>
+						<minimum>1</minimum>
+						<maximum>100</maximum>
+						<default>30</default>
+					</param>
+					<param>
+						<name>Ramp (ms)</name>
+						<type>RANGED_INTEGER</type>
+						<minimum>0</minimum>
+						<maximum>60000</maximum>
+						<default>1000</default>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Restore Saved Level</name>
+				<description>Restore NAME to its saved level over PARAM1 ms</description>
+				<sort_order>1</sort_order>
+				<params>
+					<param>
+						<name>Ramp (ms)</name>
+						<type>RANGED_INTEGER</type>
+						<minimum>0</minimum>
+						<maximum>60000</maximum>
+						<default>1000</default>
+					</param>
+				</params>
+			</command>
+		</commands>
 	</config>
 	<proxies>
 		<proxy proxybindingid="5001" name="Hue Light" image_source="c4z" small_image="images/devices_sm/hue_light_16.png" large_image="images/devices_lg/hue_light_32.png">light_v2</proxy>

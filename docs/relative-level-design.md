@@ -15,7 +15,7 @@ released:
 
 | Command | Params | Does |
 | --- | --- | --- |
-| `Raise Level By` | `Points`: RANGED_INTEGER 1–100, default 30; `Ramp (ms)`: RANGED_INTEGER 0–60000, default 1000 | If no level is saved: saves the current level (0 when off) and the time. Then sets the level to min(100, saved + Points) with that ramp. A second Raise while a level is saved raises from the **saved** level again (idempotent: the lamp never climbs). |
+| `Raise Level By` | `Points`: RANGED_INTEGER 1–100, default 30; `Ramp (ms)`: RANGED_INTEGER 0–60000, default 1000 | If no level is saved: saves the current level (0 when off) and the time. Then sets the level to min(100, saved + Points) with that ramp. A second Raise while a level is saved raises from the **saved** level again (idempotent: the lamp never climbs). If the lamp stands neither at the last Raise's target nor at the saved level (someone changed it since), that level is the new starting point: the old saved level is dropped and the current one saved, so a Raise never lowers a lamp turned up by hand. |
 | `Restore Saved Level` | `Ramp (ms)`: as above | If a level is saved and the lamp still stands at the level the last Raise set (within 1 point; the light's reported level): ramps back to the saved level (off when it was 0) and forgets it. If someone changed the lamp since (any other level, or off): leaves the lamp alone and forgets the saved level. With nothing saved: does nothing. |
 
 Every outcome writes one line to `Last Action` (for example "Raised from 40 %
