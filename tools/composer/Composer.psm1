@@ -257,7 +257,7 @@ function Get-ComposerProperties {
         $r = $c.BoundingRectangle
         $rows += [pscustomobject]@{ Name = $c.Name; X = [int]$r.X; Y = [int]$r.Y; Class = $c.ClassName }
     }
-    $split = [int]($page.Current.BoundingRectangle.X + 120)  # the value column starts at +143 at 1280 px wide, about +185 at 1512 px (#294)
+    $split = [int]($page.Current.BoundingRectangle.X + 120)  # the value column starts at +143 at 1280 px wide (#294); +180 also worked at 1512 px
     $labels = $rows | Where-Object { $_.X -lt $split } | Sort-Object Y
     $result = [ordered]@{}
     foreach ($l in $labels) {
