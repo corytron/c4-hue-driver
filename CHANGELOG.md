@@ -39,10 +39,14 @@ listed.
   the three drivers of the latest release (#266).
 
 ### Fixed
+- A Hue Light or Hue Scene device newly added no longer fails its start
+  with a Lua error and shows no state: a keypad setting never saved was
+  read as an error (#298).
 - A MotionAware area's device no longer flips to "no motion" in the middle
   of a walk: it shows motion while either of the area's two Hue motion
   reports does, and the manual says how to make the area's Hue automation
   do nothing so that Control4 alone decides what the lights do (#288).
+
 
 ## 1.0 "Cassian", build 359 (2026-10-25)
 
