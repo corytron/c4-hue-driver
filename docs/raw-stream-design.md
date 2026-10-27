@@ -1,6 +1,37 @@
 # Event stream over a raw SSL network connection
 
-> **Historical design (2026-10-21), never built.** The stream stayed on `C4:url` on padded address spellings (decision A of 2026-10-21, `docs/design.md`, "Two ways to keep commands flowing while the stream is open" and "Stream address rotation"); this design remains the documented alternative. The present is in `docs/status.md`.
+> **Contract since 2026-10-27 (#317).** On a tester's controller every bridge request timed out while the `C4:url` event stream was open: Director runs at most four `C4:url` transfers controller-wide, across all drivers (`docs/design.md`, "Concurrent transfers"), and the stream holds one of them for good. The owner decided to build this design. §0 below holds the decisions of 2026-10-27; where it and the rest of this file disagree, §0 wins. The 2026-10-21 text that follows was the research.
+
+## 0. Decisions of 2026-10-27 (the contract)
+
+1. **A setting.** A new bridge property, **Event Stream Transport**. Its values are **Network connection** (the default) and **Web transfer** (the `C4:url` stream of today, kept as a fallback). Changing it restarts the stream, the way the other stream properties do. With Network connection:
+   - the stream uses the dotted bridge address, because spellings don't matter off `C4:url`;
+   - `Stream Address` reads `<ip> (network connection, binding 6001)`;
+   - `Stream Timeout (s)` does not apply, and its row says so in its description.
+2. **API A of §1.** `C4:CreateNetworkConnection(6001, ip, "SSL")`, then `C4:NetPortOptions(6001, 443, "SSL", { CACERTFILE = "certs/hue_ca_bundle.pem", VERIFY_MODE = "peer", KEEP_ALIVE = true, AUTO_CONNECT = false, MONITOR_CONNECTION = false, SUPPRESS_CONNECTION_EVENTS = false })`, then `C4:NetConnect(6001, 443)`.
+   - The exact keys and values follow the SDK file cited in §2. Never invent one.
+   - The address moves with `C4:SetBindingAddress` on an IP change.
+   - `C4:NetDisconnect(6001, 443)` runs on stop, and the address is cleared on Forget Pairing.
+3. **A new module, `bridge/netstream.lua`.** Its `new(opts)` takes the **same opts** as `bridge/stream.lua`'s and has the **same public surface**:
+   - `start`, `stop`, `running`, `status`, `stats` with the same fields;
+   - the same `on_container`, `on_status`, `on_connected` and `on_key_rejected` callbacks, with the same texts where they apply;
+   - the same watchdog and the same backoff.
+   
+   `driver.lua` builds one or the other from the setting, and the rest of the driver does not change. The module also has the entry points the driver's globals call: `netstream:on_status_changed(binding, port, status)` for `OnConnectionStatusChanged` and `netstream:on_data(binding, data)` for `ReceivedFromNetwork`. It reuses `bridge/sse.lua` for the event parsing.
+4. **HTTP.**
+   - On ONLINE, send `GET /eventstream/clip/v2 HTTP/1.1` with the headers `Host`, `hue-application-key`, `Accept: text/event-stream` and `Connection: keep-alive`.
+   - Parse the status line and the headers, then decode the chunked body across arbitrary splits (a chunk-size line split between two calls, CRLFs split, several chunks in one call), and hand the payload to the SSE parser.
+   - 200 is connected. 401/403 calls `on_key_rejected`, then stops, as today. Any other status, or a body that ends, means a reconnect with backoff.
+   - A connect that reports nothing for 10 s counts as failed. Nothing starts a `C4:url` transfer from inside `on_data`: `on_connected` hops through a timer, as today.
+5. **No `<capabilities>` change,** and no `<connection>` in `driver.xml` (the connection is dynamic), so an update needs no reboot.
+6. **Hardware.** The unknowns of §5 are tested through the dev loop on the house in order 1 → 9 before beta 6, and the results are recorded in §5. If test 2 (`CACERTFILE` and `peer`) cannot be made to work, ship with **Web transfer** as the default until it does, and report that. Never ship `VERIFY_MODE = "none"`.
+
+## 0.1 Who writes what
+
+| Files | Owner |
+| --- | --- |
+| `src/hue_bridge/bridge/netstream.lua`, `tests/spec/netstream_spec.lua`, `tests/helpers/fake_c4.lua` (additions only: the network calls and the two callbacks) | agent **netstream** |
+| `src/hue_bridge/driver.lua`, `src/hue_bridge/driver.xml`, the manual, `CHANGELOG.md`, `docs/design.md`, `docs/status.md`, this file | coordinator |
 
 Design for moving `GET /eventstream/clip/v2` off `C4:url()` onto Director's
 network-connection API, so `C4:url()` stays free for light commands. Follows
