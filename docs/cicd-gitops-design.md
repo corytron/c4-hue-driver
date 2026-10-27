@@ -330,8 +330,8 @@ The contract is `docs/prerelease-design.md`; the Release workflow does this:
 - **Versions and tags**: `X.Y-beta.N`, N from 1, tagged `vX.Y-beta.N`, one
   pattern everywhere (`^[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$`, with a leading
   `v` for tags). A prerelease is built from `main` by the same two jobs, with
-  the same checks, attestation and assets as a release, and keeps its major
-  version's codename.
+  the same checks, attestation and assets as a release, and carries its X.Y's
+  codename from `.github/codenames.json` (#304).
 - **The tag never moves**: a dispatch for a prerelease tag that exists fails in
   the build job before anything is built (`git ls-remote --exit-code`); the
   publish job pushes the new tag without `--force`, and leaves alone a tag that
@@ -341,8 +341,8 @@ The contract is `docs/prerelease-design.md`; the Release workflow does this:
 - **Notes and title**: the build job writes the notes with `tools/changelog.py
   notes --template .github/prerelease-notes.md` from the same `## Unreleased`
   entry (an empty one fails, as for a release), and the Documentation tabs show
-  that entry as `1.1 beta 1 "Cassian" (prerelease), build N (date)`. The
-  title is the notes' first heading as it is: `1.1 beta 1 "Cassian" (build
+  that entry as `1.1 beta 1 "Brasso" (prerelease), build N (date)`. The
+  title is the notes' first heading as it is: `1.1 beta 1 "Brasso" (build
   412)`.
 - **On GitHub**: `gh release create --prerelease --latest=false` (a release
   that exists is edited with `--prerelease`), so `releases/latest` and the

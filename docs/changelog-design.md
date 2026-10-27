@@ -48,8 +48,8 @@ Rules the checker enforces:
   `^## (\d+)\.(\d+) "([^"]+)", build (\d+) \((\d{4}-\d{2}-\d{2})\)$`:
   version, codename, build number, date.
 - Released entries are ordered by build number, strictly decreasing; dates
-  never increase going down; a version's codename is the same for every
-  entry of that major version.
+  never increase going down; every entry carries the codename that
+  `.github/codenames.json` gives its version X.Y (below).
 - Inside an entry only `###` headings from this list, in this order, each
   at most once: `Added`, `Changed`, `Fixed`, `Security`, `Known limits`.
 - Under a `###` heading only bullet lines (`- `) and their continuation
@@ -58,20 +58,58 @@ Rules the checker enforces:
   PR references `#123`. Links `[text](url)` render as their text.
 - Every released entry has at least one bullet.
 
+### Codenames: `.github/codenames.json` (#304)
+
+Owner, 2026-10-26: each X.Y release has its own codename from Star Wars:
+Andor, instead of one per major version. An X.0 gets a widely recognised
+character, place or object from the show, a point release (X.Y with Y of 1
+or more) a decidedly less important one. 1.0 is "Cassian" and 1.1 is
+"Brasso". One file names them, and the tool takes every codename from it:
+
+```json
+{
+  "1.0": "Cassian",
+  "1.1": "Brasso"
+}
+```
+
+- One JSON object. Each key is a version X.Y without leading zeros, once. A
+  prerelease X.Y-beta.N has no key of its own: every build of X.Y, its
+  betas included, takes the name of X.Y.
+- Each name is plain, ASCII letters and digits joined by single spaces or
+  hyphens (`Mon Mothma`, `K-2SO`), and no two versions share one, whatever
+  the letter case.
+- `check` reports what breaks these rules, each as
+  `.github/codenames.json: message`, and every released entry whose X.Y
+  the file does not name or whose codename is not the file's, at the
+  entry's line.
+- A version the file does not name cannot be built as a release or a
+  prerelease: `html`, `notes` and `stamp` refuse it (§2), and the Release
+  workflow's build fails before any package is packed. Renaming an X.Y that
+  has published builds also means correcting those releases' titles and
+  notes and their Discussions announcements, as #304 did for the 1.1 betas.
+
 ## 2. The tool: `tools/changelog.py` (Python 3.12, standard library only)
 
 ```
-changelog.py check  [--file CHANGELOG.md]
-changelog.py html   [--file F] [--release VERSION --build N --date YYYY-MM-DD]
+changelog.py check  [--file CHANGELOG.md] [--codenames .github/codenames.json]
+changelog.py html   [--file F] [--codenames C]
+                    [--release VERSION --build N --date YYYY-MM-DD]
                     [--dev-build N] [--codename NAME]
-changelog.py notes  [--file F] --version VERSION --build N --date YYYY-MM-DD
+changelog.py notes  [--file F] [--codenames C]
+                    --version VERSION --build N --date YYYY-MM-DD
                     [--codename NAME] [--template .github/release-notes.md]
-changelog.py stamp  [--file F] --version VERSION --build N --date YYYY-MM-DD
+changelog.py stamp  [--file F] [--codenames C]
+                    --version VERSION --build N --date YYYY-MM-DD
                     [--codename NAME]
 ```
 
-- `check`: validates §1; prints `CHANGELOG.md: ok (N releases)` or every
-  problem with its line number and exits 1.
+`--codenames` names another codenames file than `.github/codenames.json`
+(the tests use their own).
+
+- `check`: validates §1, the codenames file included; prints
+  `CHANGELOG.md: ok (N releases)` or every problem (in `CHANGELOG.md` with
+  its line number) and the number of each file's problems, and exits 1.
 - `html`: prints an HTML fragment (no `<html>`/`<body>`) for a
   Documentation tab:
   `<h2 id="changelog">Changelog</h2>`, one sentence of introduction, then
@@ -81,10 +119,11 @@ changelog.py stamp  [--file F] --version VERSION --build N --date YYYY-MM-DD
   text.
   - With `--release`: the `Unreleased` entry, if it has bullets, is
     rendered as that release (`1.0 "Cassian", build N (date)`). The
-    codename is taken from the newest released entry of the same major
-    version; for the first release of a new major version `--codename` is
-    required (`html`, `notes` and `stamp` all accept it). If `Unreleased` is
-    empty, it is left out.
+    codename is the one `.github/codenames.json` gives the version's X.Y
+    (§1), and a version the file does not name is refused. `--codename`
+    (`html`, `notes` and `stamp` all accept it) only confirms that name:
+    any other is refused, and it never names a version the file does not.
+    If `Unreleased` is empty, it is left out.
   - With `--dev-build N`: a non-empty `Unreleased` renders as
     `Unreleased (development build N)`.
   - With neither: a non-empty `Unreleased` renders as `Unreleased`.
@@ -99,16 +138,16 @@ changelog.py stamp  [--file F] --version VERSION --build N --date YYYY-MM-DD
   has no bullets: a release must say what it changes.
 - `stamp`: rewrites the file: the `Unreleased` heading becomes the
   released heading for `--version`, `--build` and `--date` (codename from
-  the file, or `--codename` for the first entry of a new major version),
-  and a new empty `## Unreleased` is inserted above it. Refuses when
-  `Unreleased` is empty or when the build already has an entry. Writes the
-  file only after the result passes `check`.
+  `.github/codenames.json`), and a new empty `## Unreleased` is inserted
+  above it. Refuses when `Unreleased` is empty or when the build already
+  has an entry. Writes the file only after the result passes `check`.
 
 Prereleases (#269, `docs/prerelease-design.md`): `--version` and `html
 --release` also take `X.Y-beta.N`, which is never an entry of `CHANGELOG.md`.
-`html` shows a non-empty `Unreleased` entry as `1.1 beta 1 "Cassian"
-(prerelease), build N (date)`, never as the release. `notes` fills
-`.github/prerelease-notes.md` (its default for a prerelease) with `{version}`
+`html` shows a non-empty `Unreleased` entry as `1.1 beta 1 "Brasso"
+(prerelease), build N (date)`, with the codename of 1.1, never as the
+release. `notes` fills `.github/prerelease-notes.md` (its default for a
+prerelease) with `{version}`
 (`1.1-beta.1`), `{release}` (`1.1`), `{beta}`, `{codename}`, `{build}`,
 `{date}`, `{this_build}`, `{stable}` and `{stable_version}` (the newest
 released entry, which the prerelease follows), and with no `{history}`.
@@ -155,6 +194,10 @@ heading "New in build {build}" and `{history}` under "Earlier builds of
   `CHANGELOG.md` names the build that was published.
 - `tools/check.sh` gains the check `changelog` (`changelog.py check`),
   run by CI's tooling job.
+- Before the first build of a new X.Y, its first prerelease included, the
+  coordinator proposes its codename by the rule of §1 and waits for the
+  owner's approval; a pull request then adds it to `.github/codenames.json`
+  (#304).
 
 ## 6. Who owns which file
 

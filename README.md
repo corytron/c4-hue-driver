@@ -144,8 +144,9 @@ The bridge's actions, adding a Hue zone as one light, and a scene device
 Take the release marked **Latest** on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases)
 (<https://github.com/corytron/c4-hue-driver/releases/latest> always points at
-it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
-codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
+it). Releases are numbered `X.Y` and tagged `vX.Y`; each X.Y carries its own
+codename from Star Wars: Andor, a major character for an X.0 and a lesser one
+for a point release: 1.0 is **"Cassian"**, 1.1 **"Brasso"**.
 Prereleases for testers (`X.Y-beta.N`) are on the same page, marked
 **Pre-release**; they are never **Latest**, and the Download links above
 never serve them. The 1.1 prereleases carry a fourth driver,

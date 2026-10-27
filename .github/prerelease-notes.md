@@ -1,6 +1,6 @@
 ## {release} beta {beta} "{codename}" (build {build})
 
-**A prerelease for testing**, not a release: version {version}, built {date}, with what is coming in {release}, published so that it can be tried before it is released. GitHub marks it Pre-release and never Latest, so the project's download links keep serving the stable release. Codename **{codename}**, as every {release} build.
+**A prerelease for testing**, not a release: version {version}, built {date}, with what is coming in {release}, published so that it can be tried before it is released. GitHub marks it Pre-release and never Latest, so the project's download links keep serving the stable release. Codename **{codename}**: each X.Y release of this project has its own codename from Star Wars: Andor (a widely recognised name for an X.0, a lesser character, place or object for a point release), and every build of {release}, prereleases included, keeps it.
 
 It follows the stable release [{stable}](https://github.com/corytron/c4-hue-driver/releases/tag/v{stable_version}). The changes below are everything since then: they are what to try.
 

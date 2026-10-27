@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """Check CHANGELOG.md and render it for the Documentation tabs, the release notes and a release.
 
-  changelog.py check  [--file CHANGELOG.md]
-  changelog.py html   [--file F] [--release VERSION --build N --date YYYY-MM-DD] [--dev-build N]
+  changelog.py check  [--file CHANGELOG.md] [--codenames .github/codenames.json]
+  changelog.py html   [--file F] [--codenames C] [--release VERSION --build N --date YYYY-MM-DD]
+                      [--dev-build N] [--codename NAME]
+  changelog.py notes  [--file F] [--codenames C] --version VERSION --build N --date YYYY-MM-DD
+                      [--codename NAME] [--template .github/release-notes.md]
+  changelog.py stamp  [--file F] [--codenames C] --version VERSION --build N --date YYYY-MM-DD
                       [--codename NAME]
-  changelog.py notes  [--file F] --version VERSION --build N --date YYYY-MM-DD [--codename NAME]
-                      [--template .github/release-notes.md]
-  changelog.py stamp  [--file F] --version VERSION --build N --date YYYY-MM-DD [--codename NAME]
 
 The contract is docs/changelog-design.md (issue #255). CHANGELOG.md lists every release, newest
 first, below a "## Unreleased" entry that collects the changes of the next one (section 1).
 
 VERSION is MAJOR.MINOR for a release (1.0) or MAJOR.MINOR-beta.N for a prerelease (1.1-beta.1;
 docs/prerelease-design.md, issue #269). A prerelease is never an entry of CHANGELOG.md: html shows
-the Unreleased entry as '1.1 beta 1 "Cassian" (prerelease), build N (date)', never as the release;
+the Unreleased entry as '1.1 beta 1 "Brasso" (prerelease), build N (date)', never as the release;
 notes fills .github/prerelease-notes.md; stamp refuses it. A prerelease of a version the file lists
 already is refused: it comes before its release.
 
-check   validates section 1 and prints "CHANGELOG.md: ok (N releases)", or every problem as
-        FILE:LINE: message on stderr.
+check   validates section 1, the codenames file included, and prints "CHANGELOG.md: ok (N
+        releases)", or every problem on stderr (FILE:LINE: message for the changelog, FILE: message
+        for the codenames file) and the number of each file's problems.
 html    prints the fragment tools/build.sh puts in place of the <!-- CHANGELOG --> line of each
         driver's documentation.html: plain h2, h3, p, b, ul, li and code, no attribute but the h2's
         id, no script, no link, no external resource, ASCII only. A non-empty Unreleased entry
@@ -35,9 +37,14 @@ stamp   turns "## Unreleased" into the release's heading below a new, empty "## 
         writes the file only when the result passes check. Refuses an empty Unreleased entry, a
         build that has an entry already and a prerelease.
 
-A release's codename is the one of the newest entry of its major version; the first release of a
-new major version names it with --codename. html, notes and stamp refuse a file that fails check,
-and a release whose build or date would not make it the newest entry.
+Codenames (issue #304): each version X.Y has its own codename from Star Wars: Andor, named in one
+place, .github/codenames.json: a JSON object such as {"1.0": "Cassian", "1.1": "Brasso"}, its keys
+X.Y without leading zeros, its names ASCII letters and digits joined by single spaces or hyphens, no
+name twice whatever the letter case. Every release heading carries the name the file gives its X.Y,
+and every build of X.Y takes that name, its prereleases X.Y-beta.N included; html, notes and stamp
+refuse a version the file does not name, and --codename only confirms: it must be the file's name.
+html, notes and stamp refuse a changelog or codenames file that fails check, and a release whose
+build or date would not make it the newest entry.
 
 Standard library only. Exit codes: 0 done, 1 refused or invalid, 2 usage.
 """
@@ -45,6 +52,7 @@ Standard library only. Exit codes: 0 done, 1 refused or invalid, 2 usage.
 import argparse
 import dataclasses
 import datetime
+import json
 import os
 import re
 import sys
@@ -55,6 +63,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHANGELOG_FILE = os.path.join(ROOT, "CHANGELOG.md")
 TEMPLATE_FILE = os.path.join(ROOT, ".github", "release-notes.md")
 PRERELEASE_TEMPLATE_FILE = os.path.join(ROOT, ".github", "prerelease-notes.md")
+CODENAMES_FILE = os.path.join(ROOT, ".github", "codenames.json")
 
 TITLE = "# Changelog"
 UNRELEASED = "## Unreleased"
@@ -79,6 +88,11 @@ PRERELEASE_PLACEHOLDERS = (
 PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 # A release 1.0 or a prerelease 1.1-beta.1 (docs/prerelease-design.md, section 1), matched whole.
 VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)(?:-beta\.([1-9][0-9]*))?")
+# .github/codenames.json (docs/changelog-design.md, section 1; issue #304): each key a version X.Y
+# without leading zeros, each name ASCII letters and digits joined by single spaces or hyphens.
+CODENAMES_KEY_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+CODENAME_RE = re.compile(r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*")
+CODENAME_SHAPE = 'letters, digits, single spaces and hyphens, such as "Cassian", "Mon Mothma" or "K-2SO"'
 
 # The sentence under the Documentation tab's "Changelog" heading.
 INTRO = (
@@ -223,6 +237,96 @@ class Changelog:
 
 
 # ---------------------------------------------------------------------------
+# The codenames file (section 1)
+# ---------------------------------------------------------------------------
+
+
+class JsonObject(list):
+    """A JSON object as its (key, value) pairs in file order; a key written twice is kept twice."""
+
+
+@dataclasses.dataclass
+class Codenames:
+    """The codenames file at path. names maps each version (major, minor) a well-formed key names to
+    the value there, a plain name unless problems says otherwise; problems are messages, in file
+    order."""
+
+    path: str
+    names: dict
+    problems: list
+
+
+def json_text(value):
+    """A value of the codenames file as a message shows it."""
+    if isinstance(value, JsonObject):
+        return "an object"
+    if isinstance(value, list):
+        return "an array"
+    return json.dumps(value)
+
+
+def parse_codenames(text, path=CODENAMES_FILE):
+    """text, the codenames file at path, as Codenames with every problem of its rules (section 1).
+    Refuses text that is not one JSON object."""
+    try:
+        data = json.loads(text, object_pairs_hook=JsonObject)
+    except ValueError as err:  # json.JSONDecodeError among them
+        raise ChangelogError("%s is not JSON: %s" % (display_path(path), err)) from err
+    if not isinstance(data, JsonObject):
+        raise ChangelogError(
+            '%s holds one JSON object that names each version X.Y, such as {"1.1": "Brasso"}, not %s'
+            % (display_path(path), json_text(data))
+        )
+    names, problems, first = {}, [], {}  # first: a name, casefolded, to the (key, name) that has it
+    for key, value in data:
+        match = CODENAMES_KEY_RE.fullmatch(key)
+        if not match:
+            problems.append(
+                '%s: a key is a version X.Y, such as "1.1", without leading zeros; a beta takes the codename '
+                "of its X.Y" % json.dumps(key)
+            )
+            continue
+        version = (int(match.group(1)), int(match.group(2)))
+        if version in names:
+            problems.append("%s is a key twice: each X.Y has one codename" % json.dumps(key))
+            continue
+        names[version] = value
+        if not isinstance(value, str) or not CODENAME_RE.fullmatch(value):
+            problems.append("%s: a codename is %s, not %s" % (json.dumps(key), CODENAME_SHAPE, json_text(value)))
+            continue
+        owner, name = first.setdefault(value.casefold(), (key, value))
+        if owner != key:
+            problems.append(
+                '%s: "%s" names %s already%s: each X.Y has its own codename'
+                % (json.dumps(key), value, owner, "" if name == value else ' (as "%s")' % name)
+            )
+    return Codenames(path, names, problems)
+
+
+def read_codenames(path):
+    """The codenames file at path as Codenames; refuses one that cannot be read or is not a JSON object."""
+    return parse_codenames(read_text(path), path)
+
+
+def missing_codename(codenames, version):
+    """Why a version (major, minor) that the codenames file does not name is refused."""
+    return "%d.%d has no codename in %s: each X.Y gets its own there before its first build" % (
+        *version,
+        display_path(codenames.path),
+    )
+
+
+def other_codename(codenames, version, codename):
+    """Why codename is not the one the codenames file gives version (major, minor)."""
+    return '%d.%d is named %s in %s, not "%s"' % (
+        *version,
+        json_text(codenames.names[version]),
+        display_path(codenames.path),
+        codename,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Parsing and checking (section 1)
 # ---------------------------------------------------------------------------
 
@@ -237,14 +341,15 @@ def is_date(text):
     return True
 
 
-def parse(text):
+def parse(text, codenames=None):
     """The text of a changelog as a Changelog: its entries, and every problem of section 1 of the
-    contract with its line number. Line endings may be LF or CRLF."""
+    contract with its line number; with codenames (Codenames), also every release heading whose
+    codename is not the one the codenames file gives its version. Line endings may be LF or CRLF."""
     lines = text.split("\n")
     if lines[-1] == "":
         lines.pop()
     lines = [line[:-1] if line.endswith("\r") else line for line in lines]
-    parser = Parser()
+    parser = Parser(codenames)
     if not lines or lines[0] != TITLE:
         parser.problem(1, "the first line must be %r, not %r" % (TITLE, lines[0] if lines else ""))
     for number, line in enumerate(lines, 1):
@@ -257,7 +362,8 @@ def parse(text):
 class Parser:
     """One pass over the lines of the file, collecting entries and problems; parse() drives it."""
 
-    def __init__(self):
+    def __init__(self, codenames=None):
+        self.codenames = codenames  # Codenames, or None to leave the codenames unchecked
         self.problems = []
         self.entries = []
         self.entry = self.section = self.bullet = None
@@ -394,8 +500,9 @@ class Parser:
         self.order([entry for entry in self.entries if entry.kind == "release"])
 
     def order(self, releases):
-        """Builds strictly decreasing, dates never increasing, one codename per major version."""
-        builds, named = {}, {}
+        """Builds strictly decreasing, dates never increasing and, with a codenames file, each
+        codename the one the file gives the entry's version."""
+        builds = {}
         previous = None
         for entry in releases:
             if entry.build in builds:
@@ -414,14 +521,10 @@ class Parser:
                     "%s is below %s on line %d: newest first, dates never go up"
                     % (entry.date, previous.date, previous.line),
                 )
-            major = entry.version[0]
-            first = named.setdefault(major, entry)
-            if first.codename != entry.codename:
-                self.problem(
-                    entry.line,
-                    '%d.x is named "%s" on line %d, not "%s": one codename per major version'
-                    % (major, first.codename, first.line, entry.codename),
-                )
+            if self.codenames is not None and entry.version not in self.codenames.names:
+                self.problem(entry.line, missing_codename(self.codenames, entry.version))
+            elif self.codenames is not None and self.codenames.names[entry.version] != entry.codename:
+                self.problem(entry.line, other_codename(self.codenames, entry.version, entry.codename))
             builds.setdefault(entry.build, entry.line)
             previous = entry
 
@@ -681,11 +784,10 @@ def fill(template, values, name):
     return PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template).rstrip("\n") + "\n"
 
 
-def entry_codename(changelog, major, build, date, codename):
-    """The codename of a new build of major version `major`: the file's, or --codename for the
-    first release of a new major version. Refuses a build that has an entry already, a build or
-    date older than the newest entry's, a codename that is not the one of the major version, and a
-    new major version's first release without one."""
+def entry_codename(changelog, codenames, version, build, date, codename):
+    """The codename of a new build of version (major, minor): the one the codenames file gives it.
+    Refuses a build that has an entry already, a build or date older than the newest entry's, a
+    version the codenames file does not name, and a codename (--codename) that is not the file's."""
     for entry in changelog.releases:
         if entry.build == build:
             raise ChangelogError("build %d has an entry already, on line %d" % (build, entry.line))
@@ -696,25 +798,21 @@ def entry_codename(changelog, major, build, date, codename):
         )
     if newest is not None and date < newest.date:
         raise ChangelogError("%s is before %s, the newest entry's date (line %d)" % (date, newest.date, newest.line))
-    named = next((entry for entry in changelog.releases if entry.version[0] == major), None)
-    if named is None:
-        if codename is None:
-            raise ChangelogError("%d.x has no release yet: name its first one with --codename" % major)
-    elif codename is not None and codename != named.codename:
-        raise ChangelogError('%d.x is named "%s" (line %d), not "%s"' % (major, named.codename, named.line, codename))
-    else:
-        codename = named.codename
-    return codename
+    if version not in codenames.names:
+        raise ChangelogError(missing_codename(codenames, version))
+    if codename is not None and codename != codenames.names[version]:
+        raise ChangelogError(other_codename(codenames, version, codename))
+    return codenames.names[version]
 
 
-def release_title(changelog, version, build, date, codename):
+def release_title(changelog, codenames, version, build, date, codename):
     """(codename, heading text without "## ") of the release the Unreleased entry becomes; version
     is (major, minor). Refuses what entry_codename refuses."""
-    codename = entry_codename(changelog, version[0], build, date, codename)
+    codename = entry_codename(changelog, codenames, version, build, date, codename)
     return codename, '%d.%d "%s", build %d (%s)' % (version[0], version[1], codename, build, date)
 
 
-def prerelease_title(changelog, version, build, date, codename):
+def prerelease_title(changelog, codenames, version, build, date, codename):
     """(codename, heading text) of a prerelease (a Version with beta), which shows the Unreleased
     entry as a build for testing, never as the release (docs/prerelease-design.md). Refuses what
     entry_codename refuses, and a version CHANGELOG.md lists already: a prerelease comes before its
@@ -728,7 +826,7 @@ def prerelease_title(changelog, version, build, date, codename):
             "its version's release, so name a later version, such as %d.%d-beta.1"
             % (version, *version.release, major, minor, newest.line, major, minor + 1)
         )
-    codename = entry_codename(changelog, version.major, build, date, codename)
+    codename = entry_codename(changelog, codenames, version.release, build, date, codename)
     title = '%d.%d beta %d "%s" (prerelease), build %d (%s)' % (*version.release, version.beta, codename, build, date)
     return codename, title
 
@@ -757,11 +855,22 @@ def report(problems, path):
         print("%s:%d: %s" % (display_path(path), number, message), file=sys.stderr)
 
 
-def checked(changelog, path):
-    """changelog, refused with every problem printed unless it passes check."""
-    if changelog.problems:
-        report(changelog.problems, path)
-        raise ChangelogError("%s fails check: nothing done" % display_path(path))
+def report_all(changelog, codenames, path):
+    """Print every problem of the changelog at path and of the codenames file; return (shown path,
+    number of problems) of each that has some, the changelog first."""
+    report(changelog.problems, path)
+    for message in codenames.problems:
+        print("%s: %s" % (display_path(codenames.path), message), file=sys.stderr)
+    files = ((path, changelog.problems), (codenames.path, codenames.problems))
+    return [(display_path(name), len(problems)) for name, problems in files if problems]
+
+
+def checked(changelog, codenames, path):
+    """changelog, refused with every problem printed unless it and the codenames file pass check."""
+    failed = report_all(changelog, codenames, path)
+    if failed:
+        names = " and ".join(name for name, _count in failed)
+        raise ChangelogError("%s %s check: nothing done" % (names, "fails" if len(failed) == 1 else "fail"))
     return changelog
 
 
@@ -786,23 +895,34 @@ def plural(count, noun):
 
 
 def cmd_check(args):
-    changelog = parse(read_text(args.file))
-    if changelog.problems:
-        report(changelog.problems, args.file)
-        print("%s: %s" % (display_path(args.file), plural(len(changelog.problems), "problem")), file=sys.stderr)
+    text = read_text(args.file)
+    codenames = read_codenames(args.codenames)
+    changelog = parse(text, codenames)
+    failed = report_all(changelog, codenames, args.file)
+    for name, count in failed:
+        print("%s: %s" % (name, plural(count, "problem")), file=sys.stderr)
+    if failed:
         return EXIT_REFUSED
     print("%s: ok (%s)" % (display_path(args.file), plural(len(changelog.releases), "release")))
     return EXIT_OK
 
 
+def load(args):
+    """(text, Changelog, Codenames) of args.file and args.codenames; refused unless both pass check."""
+    text = read_text(args.file)
+    codenames = read_codenames(args.codenames)
+    return text, checked(parse(text, codenames), codenames, args.file), codenames
+
+
 def cmd_html(args):
-    changelog = checked(parse(read_text(args.file)), args.file)
+    _text, changelog, codenames = load(args)
     if args.release is not None:
         heading = None
         if changelog.unreleased.bullet_count() and args.release.beta is None:
-            heading = release_title(changelog, args.release.release, args.build, args.date, args.codename)[1]
+            version = args.release.release
+            heading = release_title(changelog, codenames, version, args.build, args.date, args.codename)[1]
         elif changelog.unreleased.bullet_count():
-            heading = prerelease_title(changelog, args.release, args.build, args.date, args.codename)[1]
+            heading = prerelease_title(changelog, codenames, args.release, args.build, args.date, args.codename)[1]
     elif args.dev_build is not None:
         heading = "Unreleased (development build %d)" % args.dev_build
     else:
@@ -812,7 +932,7 @@ def cmd_html(args):
 
 
 def cmd_notes(args):
-    changelog = checked(parse(read_text(args.file)), args.file)
+    _text, changelog, codenames = load(args)
     unreleased = changelog.unreleased
     version = args.version
     if not unreleased.bullet_count():
@@ -821,7 +941,7 @@ def cmd_notes(args):
             % (unreleased.line, "release" if version.beta is None else "prerelease")
         )
     if version.beta is None:
-        codename, _title = release_title(changelog, version.release, args.build, args.date, args.codename)
+        codename, _title = release_title(changelog, codenames, version.release, args.build, args.date, args.codename)
         template = args.template or TEMPLATE_FILE
         values = {
             "version": "%d.%d" % version.release,
@@ -832,7 +952,7 @@ def cmd_notes(args):
             "history": markdown_history(changelog, version.release, args.build),
         }
     else:
-        codename, _title = prerelease_title(changelog, version, args.build, args.date, args.codename)
+        codename, _title = prerelease_title(changelog, codenames, version, args.build, args.date, args.codename)
         if not changelog.releases:
             raise ChangelogError(
                 "%s: a prerelease's notes name the release it follows, and %s lists none"
@@ -861,17 +981,17 @@ def cmd_stamp(args):
             "%s is a prerelease: CHANGELOG.md lists releases only, and the %d.%d entry will carry these changes "
             "(docs/prerelease-design.md); nothing stamped" % (args.version, *args.version.release)
         )
-    text = read_text(args.file)
-    changelog = checked(parse(text), args.file)
+    text, changelog, codenames = load(args)
     unreleased = changelog.unreleased
     if not unreleased.bullet_count():
         raise ChangelogError("'## Unreleased' (line %d) has no bullets: nothing to stamp" % unreleased.line)
-    _codename, title = release_title(changelog, args.version.release, args.build, args.date, args.codename)
+    version = args.version.release
+    _codename, title = release_title(changelog, codenames, version, args.build, args.date, args.codename)
     lines = text.split("\n")
     ending = "\r" if lines[unreleased.line - 1].endswith("\r") else ""
     lines[unreleased.line - 1 : unreleased.line] = [UNRELEASED + ending, ending, "## " + title + ending]
     stamped = "\n".join(lines)
-    result = parse(stamped)
+    result = parse(stamped, codenames)
     if result.problems:
         report(result.problems, args.file)
         raise ChangelogError("stamped, the file would fail check (above): %s is unchanged" % display_path(args.file))
@@ -909,14 +1029,20 @@ def date_arg(text):
 
 
 def codename_arg(text):
-    if not text.strip() or text != text.strip() or any(char in text for char in '"\r\n'):
-        raise argparse.ArgumentTypeError("a codename is a name without quotes, such as Cassian, not %r" % text)
+    if not CODENAME_RE.fullmatch(text):
+        raise argparse.ArgumentTypeError("a codename is %s, not %r" % (CODENAME_SHAPE, text))
     return text
 
 
 def parse_args(argv):
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--file", default=CHANGELOG_FILE, metavar="PATH", help="the changelog (default CHANGELOG.md)")
+    common.add_argument(
+        "--codenames",
+        default=CODENAMES_FILE,
+        metavar="PATH",
+        help="the codename of each version X.Y (default .github/codenames.json)",
+    )
 
     release = argparse.ArgumentParser(add_help=False)
     release.add_argument(
@@ -934,7 +1060,7 @@ def parse_args(argv):
         "--codename",
         type=codename_arg,
         metavar="NAME",
-        help="the codename of a new major version's first release (default: its major version's, from the file)",
+        help="the version's codename, which must be the one the codenames file gives its X.Y (default: that one)",
     )
 
     parser = argparse.ArgumentParser(
@@ -974,7 +1100,7 @@ def parse_args(argv):
         "--codename",
         type=codename_arg,
         metavar="NAME",
-        help="with --release: the codename of a new major version's first release",
+        help="with --release: the version's codename, which must be the one the codenames file gives its X.Y",
     )
     html.set_defaults(func=cmd_html)
 

@@ -32,9 +32,8 @@ work, and the open items below are issues (one hardware check still waits
 for its own). The milestone `1.0 "Cassian"` holds the project's history: 37
 pull requests (36 merged, #7 closed unmerged) and 98 closed issues
 (#71–#187) describing every problem found and fixed, each naming its fix;
-the project board holds them all. Major
-versions are codenamed after Star Wars: Andor; every 1.x release keeps
-"Cassian". **Since 2026-10-25 the project is run as CI/CD and GitOps**
+the project board holds them all. Every X.Y release has its own codename from Star Wars: Andor (1.0 "Cassian",
+1.1 "Brasso"; `.github/codenames.json`, #304). **Since 2026-10-25 the project is run as CI/CD and GitOps**
 (`docs/cicd-gitops-design.md`, PR #205): one script, `tools/check.sh`, runs
 every check on the VM and in CI; releases are cut by the Release workflow
 and carry `manifest.json` and provenance attestations; `deploy/house.yaml`
