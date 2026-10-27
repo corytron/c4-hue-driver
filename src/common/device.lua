@@ -516,7 +516,10 @@ function device.new(opts)
 	-- reason to edit the field and overwrite it).
 	function dev.load_settings()
 		for _, name in ipairs(setting_names) do
-			local value = tonumber(C4:PersistGetValue(SETTINGS[name].key))
+			-- The extra parentheses keep one value: Director's PersistGetValue
+			-- returns none at all for a key never written, and tonumber() with no
+			-- argument raises (a new device failed its late init on the house, #298).
+			local value = tonumber((C4:PersistGetValue(SETTINGS[name].key)))
 			if value ~= nil and not in_range(name, value) then
 				log.warn("%s %s is out of range; using %s", SETTINGS[name].key, tostring(value),
 					tostring(SETTINGS[name].default))
