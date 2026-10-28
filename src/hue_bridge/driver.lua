@@ -1017,9 +1017,10 @@ end
 
 -- The TLS check of the network connection (#317, bridge/netcheck.lua):
 -- before the event stream's first keyed connect on a network connection in
--- a run, unkeyed probes (a decoy CA file on binding 6002, then the Signify
--- roots on 6003) must show the decoy refused. Its answer holds
--- for the run (state.net_check), whatever the address: it is the
+-- a run, unkeyed probes on fresh binding ids (a decoy CA file, then the
+-- Signify roots) must show the decoy refused; on a Director version that
+-- answered pinned before, netcheck answers pinned without a probe. Its answer
+-- holds for the run (state.net_check), whatever the address: it is the
 -- controller's. pinned, or inconclusive on a Director version that answered
 -- pinned before ("accepted"), lets the stream connect; not_pinned moves it
 -- to Web transfer with an Attention item until the next start (the Event
@@ -2340,7 +2341,7 @@ function OnDriverDestroyed()
 		state.unbound_confirm_timer = nil
 	end
 	cancel_identity_retry()
-	reset_net_gate() -- closes and clears the probe bindings (6002, 6003) of a check in flight
+	reset_net_gate() -- closes and clears the probe binding of a check in flight
 	if version_timer then
 		version_timer:Cancel()
 		version_timer = nil
@@ -2358,7 +2359,7 @@ end
 
 -- The network-connection stream's callbacks (docs/raw-stream-design.md §0,
 -- #317): Director calls these globals for binding 6001; a Web transfer
--- stream has no such entry points and ignores them. Bindings 6002 and 6003
+-- stream has no such entry points and ignores them. Bindings 6100 to 6999
 -- are the network connection's TLS check (bridge/netcheck.lua), never the stream.
 function OnConnectionStatusChanged(idBinding, nPort, strStatus)
 	if netcheck.on_status_changed(idBinding, nPort, strStatus) then

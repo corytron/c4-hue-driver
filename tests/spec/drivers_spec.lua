@@ -106,15 +106,15 @@ describe("Hue Bridge driver", function()
 		answer_identity(c4)
 		assert.equal("Paired", env.Properties["Status"])
 		-- The network connection's TLS check comes first (bridge/netcheck.lua):
-		-- the decoy CA file on binding 6002 gets silence for 10 s (a refused
-		-- handshake, OS 3.4.3); 1.5 s after its close the Signify roots answer
-		-- on binding 6003. Each step and the verdict run from timers.
+		-- the decoy CA file on fresh binding 6100 gets silence for 10 s (a
+		-- refused handshake, OS 3.4.3); 1.5 s after its close the Signify roots
+		-- answer on fresh binding 6101. Each step and the verdict run from timers.
 		c4.fire_timers_of(10000)
 		c4.fire_timers_of(1)
 		c4.now_ms = c4.now_ms + 1500
 		c4.fire_timers_of(1500)
-		c4.net_status(6003, 443, "ONLINE")
-		c4.net_receive(6003, 443, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+		c4.net_status(6101, 443, "ONLINE")
+		c4.net_receive(6101, 443, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 		c4.fire_timers_of(1)
 		c4.fire_timers_of(1)
 		for _, t in ipairs(c4.transfers) do
@@ -123,8 +123,8 @@ describe("Hue Bridge driver", function()
 		end
 		local created = c4.calls_to("CreateNetworkConnection")
 		assert.equal(3, #created, "the decoy, the control, then the stream")
-		assert.same({ 6002, "192.0.2.10", "SSL" }, { created[1][1], created[1][2], created[1][3] })
-		assert.same({ 6003, "192.0.2.10", "SSL" }, { created[2][1], created[2][2], created[2][3] })
+		assert.same({ 6100, "192.0.2.10", "SSL" }, { created[1][1], created[1][2], created[1][3] })
+		assert.same({ 6101, "192.0.2.10", "SSL" }, { created[2][1], created[2][2], created[2][3] })
 		assert.same({ 6001, "192.0.2.10", "SSL" }, { created[3][1], created[3][2], created[3][3] })
 		assert.equal(3, #c4.calls_to("NetConnect"))
 		assert.equal("192.0.2.10 (network connection, binding 6001)", env.Properties["Stream Address"])
