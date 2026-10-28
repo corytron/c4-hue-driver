@@ -11,70 +11,72 @@
 -- OS release, the key would go to any peer that answers on the bridge's
 -- address.
 --
--- What the house showed (build 414, OS 3.4.3, Bridge Pro, 2026-10-27)
--- [verified: hardware]: a connection whose CA file does not verify the
--- bridge reports nothing at all, neither "ONLINE" nor "OFFLINE" (the only
--- two, SDK 32/_27): a refused handshake is silent. And Director logged
--- OnNetworkBindingRegistered for binding 6002 once, at the first probe,
--- although every probe called CreateNetworkConnection: after the address
--- had been cleared, the later probes may have run on a binding Director had
--- dropped. So silence alone cannot tell a refusal from a connect that was
--- never made.
+-- What the house showed (OS 3.4.3, Bridge Pro, 2026-10-27) [verified:
+-- hardware]:
+--  * build 414: a probe whose CA file does not verify the bridge reports
+--    nothing at all, neither "ONLINE" nor "OFFLINE" (the only two, SDK
+--    32/_27): a refused handshake is silent;
+--  * build 415: a probe with the decoy CA file on the binding a probe with
+--    the Signify roots had just used went "ONLINE" and answered 43 ms later:
+--    Director reused that connection or its TLS session, or kept the first
+--    CA file of the binding. And the first probe's close, made inside
+--    ReceivedFromNetwork, took effect only when the next probe recreated the
+--    binding 1.5 s later.
+-- Hence two bindings that never share a CA file, nothing done inside
+-- Director's callbacks, and the gap between probes kept by the clock.
 --
--- netcheck.run(ip, callback): up to three probes on binding 6002, one after
--- the other, each sending the same unkeyed request:
---   1. control  with the Signify roots (netstream.port_options()). It must
---               go "ONLINE" and answer with an HTTP status line within
---               TIMEOUT (10 s); otherwise "inconclusive": the path itself
---               does not work, so nothing can be learnt.
---   2. decoy    the same options with CACERTFILE = certs/decoy_ca.pem
---               (tlscheck.DECOY_CA: a self-signed CA that has signed nothing
---               and verifies nothing).
---   3. confirm  the control again, only after a decoy that failed (silent
---               for TIMEOUT, or "OFFLINE" without an answer).
--- Every probe recreates the binding: CreateNetworkConnection, then
--- SetBindingAddress with the bridge's address, NetPortOptions, NetConnect.
--- No NetDisconnect before the connect: its "OFFLINE" could be taken for the
--- probe's. On "ONLINE" a probe sends GET /api/0/config with a Host header and
--- no key (probe_request). After every probe the binding is closed and
--- cleared (NetDisconnect, then SetBindingAddress with '', as
--- netstream.clear_address does for 6001), and the next one opens GAP_MS
--- later.
+-- netcheck.run(ip, callback):
+--  1. The decoy, first: binding DECOY_BINDING (6002), port 443, "SSL", with
+--     netstream.port_options() except CACERTFILE = certs/decoy_ca.pem
+--     (tlscheck.DECOY_CA: a self-signed CA that has signed nothing and
+--     verifies nothing). Binding 6002 never gets another CA file, so no
+--     connection or session of ours verified with the Signify roots exists
+--     on it.
+--  2. Only after a decoy that failed (silent, "OFFLINE", or no answer within
+--     TIMEOUT), the control: binding CONTROL_BINDING (6003) with the
+--     stream's own options, the Signify roots. It must go "ONLINE" and
+--     answer within TIMEOUT. Binding 6003 never gets the decoy.
+-- Each probe recreates its binding (CreateNetworkConnection, then
+-- SetBindingAddress with the bridge's address, NetPortOptions, NetConnect;
+-- no NetDisconnect first: its "OFFLINE" could be taken for the probe's), and
+-- on "ONLINE" sends GET /api/0/config with a Host header and no key
+-- (probe_request).
 --
 -- The verdict, callback(verdict, detail), once, from a 1 ms timer:
---   "not_pinned"    the decoy got an HTTP status line, whatever the status:
---                   the handshake succeeded without the Signify roots
---   "pinned"        the decoy got none (silent for TIMEOUT, or "OFFLINE"
---                   before or after "ONLINE"), and the controls before and
---                   after it both connected and answered
---   "inconclusive"  anything else: a control that did not answer, a decoy
---                   that went "ONLINE" and then neither answered nor closed
---                   within TIMEOUT, data that is no HTTP answer, a C4 call
---                   that raised, no CA configuration, an address that cannot
---                   go into a request
--- `detail` says which probe did what, for the log and the Event Stream row.
--- run() remembers nothing itself: the driver calls remember_pinned() on
--- "pinned" (hue_bridge/driver.lua, net_gate).
+--   "not_pinned"    the decoy got an HTTP status line, whatever the status,
+--                   QUICK_MS (150 ms) or more after its "ONLINE": the
+--                   handshake succeeded without the Signify roots
+--   "pinned"        the decoy got none (silent, "OFFLINE" before or after
+--                   "ONLINE", or no answer within TIMEOUT) and the control
+--                   then connected and answered
+--   "inconclusive"  anything else: a decoy answer sooner than QUICK_MS after
+--                   "ONLINE" (or before it), the control not answering,
+--                   data that is no HTTP answer, a C4 call that raised, no CA
+--                   configuration, an address that cannot go into a request
+-- `detail` says what happened (with the timing of a decoy answer), for the
+-- log and the Event Stream row. run() remembers nothing itself: the driver
+-- calls remember_pinned() on "pinned" (hue_bridge/driver.lua, net_gate).
 --
--- Why a silent decoy reads "pinned". The decoy differs from the controls in
--- its CA file and in nothing else: the same binding, recreated by the same
--- calls, the same address, port, options and request. The control before it
--- shows that the path connects and answers seconds earlier. The control
--- after it was closed, cleared, recreated and connected exactly as the decoy
--- was, from the same state, so its answer shows that the decoy's connect was
--- made too [assumed: that what held for the probe after the decoy held for
--- the decoy]. A decoy that then stays silent was refused for its CA file.
--- Only an HTTP status line proves that the decoy's handshake succeeded;
--- whether "ONLINE" comes before or after the handshake is not documented
--- (on OS 3.4.3 a refused decoy reported none), so a decoy that went "ONLINE"
--- and then nothing is not counted as silent.
+-- Why a silent decoy reads "pinned": on OS 3.4.3 a refused handshake is
+-- silent, and silence alone could also be a connect that was never made. The
+-- control, made on the same path seconds later (the same address and port,
+-- the same calls, the same options but the CA file), shows that it is made
+-- and answered; so the decoy failed for its CA file [assumed: that a binding
+-- of the same driver connects as the other one does].
 --
--- Re-addressing [assumed]: SetBindingAddress is the documented call that
--- gives an existing connection its address (SDK 32/_16), and it comes after
--- every CreateNetworkConnection so that a binding a clear dropped gets its
--- address back. Whether it does, on a given OS, is what the controls find
--- out: if not, a probe after a clear never answers, the check reads
--- "inconclusive", and nothing keyed goes out on the network connection.
+-- The QUICK_MS rule [owner's rule, 2026-10-27; assumed]: an answer that
+-- quick is taken for a reused connection or session, which skips the
+-- certificate check, not for a handshake. Whether "ONLINE" comes before or
+-- after the handshake is not documented; a refused decoy reported none on OS
+-- 3.4.3, which suggests after, so a genuine quick answer may read
+-- "inconclusive" too: the side on which nothing keyed is sent.
+--
+-- Timing: a probe's end is noted inside Director's callbacks and acted on
+-- from a 1 ms timer (close, next probe, verdict); no binding is created less
+-- than GAP_MS after the last close of either probe binding, checked against
+-- the clock (C4:GetTime) whatever the timer did. After the verdict both
+-- bindings get NetDisconnect and SetBindingAddress with '' (as
+-- netstream.clear_address does for 6001), before the verdict is delivered.
 --
 -- What the check cannot prove:
 --  (a) As tlscheck's (a): that the file replaces the system's CA store
@@ -90,29 +92,24 @@
 --      tlscheck's does.
 --
 -- Stale reports. Director's callbacks carry no connection identity, and the
--- "OFFLINE" of a closed probe taken for the decoy's would read as a failed
--- decoy. Every close may bring one [assumed, as in netstream]: it is owed for
--- STALE_MS, and an "OFFLINE" while one is owed is taken for it, whenever it
--- comes, also after the next probe's "ONLINE" (netstream lets "ONLINE" clear
--- the debt; here the safe side matters more). A probe's own "OFFLINE" taken
--- so leaves the probe to its timeout, which never makes a failure an answer:
--- a decoy then reads silent (and needs the confirm), a decoy that went
--- "ONLINE" reads inconclusive. A predecessor's close (the driver updated
--- while a check ran; OnDriverDestroyed cancels it) is not counted: its
--- report comes long before this run's first probe, which waits for the
--- identity check and the C4:url TLS check [assumed].
+-- "OFFLINE" of a closed connection taken for the decoy's own would read as a
+-- failed decoy. Every close of a probe binding that was connected may bring
+-- one [assumed, as in netstream]: it is owed, per binding, for STALE_MS, and
+-- an "OFFLINE" while one is owed is taken for it, whenever it comes, also
+-- after the next probe's "ONLINE" (netstream lets "ONLINE" clear the debt;
+-- here the safe side matters more). A probe's own "OFFLINE" taken so leaves
+-- it to its timeout, which never makes a failure an answer. A predecessor's
+-- close (the driver updated while a check ran; OnDriverDestroyed cancels it)
+-- is not counted: its report comes long before this run's first probe, which
+-- waits for the identity check and the C4:url TLS check [assumed].
 --
--- The driver's globals feed two entry points, for BINDING only:
+-- The driver's globals feed two entry points, for the two probe bindings:
 --   OnConnectionStatusChanged(idBinding, nPort, strStatus)
 --       -> netcheck.on_status_changed(idBinding, nPort, strStatus)
 --   ReceivedFromNetwork(idBinding, nPort, strData)
 --       -> netcheck.on_data(idBinding, strData)
--- Each returns true when the binding is the probes' (handled, whatever the
--- state) and false for any other. Neither the next probe nor the verdict
--- starts inside them (timers of GAP_MS and 1 ms): the driver starts the
--- event stream from the verdict, and whether a transfer or a connection may
--- start inside ReceivedFromNetwork is not known (netstream's header, §5
--- test 6).
+-- Each returns true for 6002 and 6003 (handled, whatever the state) and
+-- false for any other binding.
 --
 -- DriverWorks calls: those of bridge/netstream.lua, whose header cites the
 -- SDK file of each (CreateNetworkConnection, SetBindingAddress,
@@ -135,13 +132,15 @@ local tlscheck = require("bridge.tlscheck")
 
 local netcheck = {}
 
-netcheck.BINDING = 6002                         -- the probes' own; the stream's is netstream.BINDING (6001)
-netcheck.PORT = netstream.PORT                  -- 443
+netcheck.DECOY_BINDING = 6002       -- only ever with the decoy CA file
+netcheck.CONTROL_BINDING = 6003     -- only ever with the Signify roots; the stream's is 6001
+netcheck.PORT = netstream.PORT      -- 443
 netcheck.CONNECTION_TYPE = netstream.CONNECTION_TYPE -- "SSL"
-netcheck.DECOY_CA = tlscheck.DECOY_CA           -- "certs/decoy_ca.pem"
+netcheck.DECOY_CA = tlscheck.DECOY_CA -- "certs/decoy_ca.pem"
 netcheck.PATH = "/api/0/config"
-netcheck.TIMEOUT = 10        -- seconds per probe: a control's answer, the decoy's silence
-netcheck.GAP_MS = 1500       -- from a probe's close to the next probe [assumed: the closed one has wound down]
+netcheck.TIMEOUT = 10        -- seconds per probe: the decoy's silence, the control's answer
+netcheck.GAP_MS = 1500       -- at least this long from a close to the next creation
+netcheck.QUICK_MS = 150      -- a decoy answer sooner than this after "ONLINE" is no handshake's
 netcheck.STALE_MS = 5000     -- a close's "OFFLINE" not come by then never will [assumed]
 netcheck.MAX_ANSWER = 1024   -- bytes of a probe's answer kept for the verdict; a status line is far shorter
 netcheck.RETRY_MIN = 30      -- seconds before the driver asks again after an inconclusive answer, doubling
@@ -149,13 +148,18 @@ netcheck.RETRY_MAX = 300
 -- The persisted Director version on which the check answered "pinned".
 netcheck.STORE_NAME = "netstream_pinned_on"
 
--- The check in flight: { ip, callback, step = "control" | "decoy" | "confirm",
--- phase = "opening" | "open" | "gap" | "done", online, received, timer,
--- gap_timer, decoy (how the decoy failed) }.
+local BINDINGS = { netcheck.DECOY_BINDING, netcheck.CONTROL_BINDING }
+
+-- The check in flight: { ip, callback, step = "decoy" | "control",
+-- phase = "waiting" | "opening" | "open" | "closing" | "done", online_at,
+-- answer_after, received, timer (the probe's TIMEOUT), wait_timer (the gap,
+-- or the 1 ms step after a probe's end), open = { [binding] = true },
+-- decoy (how the decoy failed) }.
 local current = nil
 local delivery = nil      -- the 1 ms timer that delivers a verdict
-local owed_offline = 0    -- "OFFLINE" reports the probes' own closes may still bring
-local closed_at = nil     -- ms clock of the last close
+local owed = {}           -- binding -> "OFFLINE" reports its closes may still bring
+local closed_at = {}      -- binding -> ms clock of its last close after a connect
+local last_close = nil    -- ms clock of the last close of either probe binding
 local remembered = nil    -- what remember_pinned() wrote in this run
 
 -- Milliseconds, as netstream: C4:GetTime, or os.time() where it is missing.
@@ -194,8 +198,13 @@ local function status_code(text)
 	return trimmed:match("^HTTP/[%d%.]+[ \t]+(%d%d%d)")
 end
 
+local function binding_of(step)
+	return step == "decoy" and netcheck.DECOY_BINDING or netcheck.CONTROL_BINDING
+end
+
 -- The decoy's tPortParams: the stream's (netstream.port_options, a new table
 -- per call) with the decoy as CACERTFILE; nil without a CA configuration.
+-- The control's are the stream's own.
 function netcheck.port_options()
 	local options = netstream.port_options()
 	if not options then
@@ -217,52 +226,58 @@ local function cancel_timers(check)
 		check.timer:Cancel()
 		check.timer = nil
 	end
-	if check.gap_timer then
-		check.gap_timer:Cancel()
-		check.gap_timer = nil
+	if check.wait_timer then
+		check.wait_timer:Cancel()
+		check.wait_timer = nil
 	end
 end
 
--- True while a probe's connection is opening or open.
+-- True while the probe's connection is opening or open.
 local function connected(check)
 	return check.phase == "opening" or check.phase == "open"
 end
 
--- Close the probe's connection and clear the binding's address, each call
--- under pcall, and owe the "OFFLINE" the close may bring (see the header).
-local function close()
+-- NetDisconnect a probe binding and clear its address, each call under
+-- pcall. `was_connected`: a probe connected it, so the close may bring an
+-- "OFFLINE" (owed, see the header).
+local function close(binding, was_connected)
 	local now = now_ms()
-	if closed_at and now - closed_at >= netcheck.STALE_MS then
-		owed_offline = 0
+	if was_connected then
+		if closed_at[binding] and now - closed_at[binding] >= netcheck.STALE_MS then
+			owed[binding] = 0
+		end
+		owed[binding] = (owed[binding] or 0) + 1
+		closed_at[binding] = now
 	end
-	owed_offline = owed_offline + 1
-	closed_at = now
+	last_close = now
 	local ok, err = pcall(function()
-		C4:NetDisconnect(netcheck.BINDING, netcheck.PORT)
+		C4:NetDisconnect(binding, netcheck.PORT)
 	end)
 	if not ok then
-		log.warn("network connection TLS check: NetDisconnect failed: %s", tostring(err))
+		log.warn("network connection TLS check: NetDisconnect of binding %d failed: %s", binding, tostring(err))
 	end
 	ok, err = pcall(function()
-		C4:SetBindingAddress(netcheck.BINDING, "")
+		C4:SetBindingAddress(binding, "")
 	end)
 	if not ok then
-		log.warn("network connection TLS check: could not clear the probe binding's address: %s", tostring(err))
+		log.warn("network connection TLS check: could not clear binding %d: %s", binding, tostring(err))
 	end
 end
 
--- The verdict: close and clear a probe still open, then deliver from a 1 ms
--- timer. Once per check; nothing for a check cancelled or replaced.
+-- The verdict: both probe bindings closed and cleared, then the verdict from
+-- a 1 ms timer. Once per check; nothing for a check cancelled or replaced.
+-- Never called inside Director's callbacks (see the header).
 local function finish(check, verdict, detail)
 	if current ~= check then
 		return
 	end
 	current = nil
 	cancel_timers(check)
-	if connected(check) then
-		close()
-	end
 	check.phase = "done"
+	for _, binding in ipairs(BINDINGS) do
+		close(binding, check.open[binding] == true)
+		check.open[binding] = nil
+	end
 	log.debug("network connection TLS check: %s (%s)", verdict, detail)
 	delivery = C4:SetTimer(1, function()
 		delivery = nil
@@ -270,69 +285,75 @@ local function finish(check, verdict, detail)
 	end)
 end
 
--- What a probe did, for the detail: `outcome` and `extra` as for step_ended.
+-- What a probe did, for the detail.
 local function outcome_text(check, outcome, extra)
 	if outcome == "silence" then
 		return string.format("was silent for %d s", netcheck.TIMEOUT)
 	elseif outcome == "no_answer" then
 		return string.format("went ONLINE, then gave no answer within %d s", netcheck.TIMEOUT)
 	elseif outcome == "offline" then
-		return check.online and "went ONLINE, then OFFLINE without an answer" or "went OFFLINE before ONLINE"
+		return check.online_at and "went ONLINE, then OFFLINE without an answer" or "went OFFLINE before ONLINE"
 	elseif outcome == "garbage" then
 		return string.format("got an answer that is no HTTP answer (%s bytes)", tostring(extra))
+	elseif outcome == "answered" then
+		return string.format("answered HTTP %s %s", tostring(extra), check.answer_after
+			and string.format("%d ms after ONLINE", check.answer_after) or "before ONLINE")
 	end
 	return tostring(extra) -- "error": the caller's own words
 end
 
 local open_step
 
--- The next probe, GAP_MS after this one's close.
-local function next_step(check, step)
-	check.gap_timer = C4:SetTimer(netcheck.GAP_MS, function()
-		check.gap_timer = nil
-		if current == check then
-			open_step(check, step)
+-- What a probe's end means (see the header); from a 1 ms timer.
+local function decide(check, outcome, extra)
+	local text = outcome_text(check, outcome, extra)
+	log.debug("network connection TLS check: the %s probe %s", check.step, text)
+	if check.step == "decoy" then
+		if outcome == "answered" then
+			if check.answer_after and check.answer_after >= netcheck.QUICK_MS then
+				return finish(check, "not_pinned", "the probe with the decoy CA file " .. text)
+			end
+			return finish(check, "inconclusive", string.format("the probe with the decoy CA file %s: too soon for a "
+				.. "handshake, taken for a reused connection or session", text))
 		end
-	end)
+		if outcome == "silence" or outcome == "no_answer" or outcome == "offline" then
+			check.decoy = text
+			close(netcheck.DECOY_BINDING, true)
+			check.open[netcheck.DECOY_BINDING] = nil
+			return open_step(check, "control")
+		end
+		return finish(check, "inconclusive", "the probe with the decoy CA file " .. text)
+	end
+	if outcome == "answered" then
+		return finish(check, "pinned", string.format("the probe with the decoy CA file %s; the Signify roots answered "
+			.. "on binding %d", check.decoy, netcheck.CONTROL_BINDING))
+	end
+	finish(check, "inconclusive", "the control with the Signify roots " .. text)
 end
 
--- The open probe ended: `outcome` is "answered" (`extra` the status code),
+-- The probe ended: `outcome` is "answered" (`extra` the status code),
 -- "silence", "no_answer", "offline", "garbage" (`extra` the byte count) or
--- "error" (`extra` what went wrong). Close and clear, then the next probe or
--- the verdict (see the header). A no-op once the probe has ended.
+-- "error" (`extra` what went wrong). Noted now, acted on from a 1 ms timer.
+-- A no-op once the probe has ended.
 local function step_ended(check, outcome, extra)
 	if current ~= check or not connected(check) then
 		return
 	end
-	cancel_timers(check)
-	close()
-	check.phase = "gap"
-	local step = check.step
-	log.debug("network connection TLS check: the %s probe ended: %s", step, outcome)
-	if step == "control" then
-		if outcome == "answered" then
-			return next_step(check, "decoy")
-		end
-		return finish(check, "inconclusive", "the control with the Signify roots " .. outcome_text(check, outcome, extra))
-	elseif step == "decoy" then
-		if outcome == "answered" then
-			return finish(check, "not_pinned", string.format("HTTP %s with the decoy CA file", tostring(extra)))
-		end
-		if outcome == "silence" or outcome == "offline" then
-			check.decoy = outcome_text(check, outcome, extra)
-			return next_step(check, "confirm")
-		end
-		return finish(check, "inconclusive", "the probe with the decoy CA file " .. outcome_text(check, outcome, extra))
+	if check.timer then
+		check.timer:Cancel()
+		check.timer = nil
 	end
-	if outcome == "answered" then
-		return finish(check, "pinned", string.format("the probe with the decoy CA file %s; the Signify roots answered "
-			.. "before and after it", check.decoy))
-	end
-	finish(check, "inconclusive", string.format("the control after the decoy %s, so the decoy's failure proves nothing",
-		outcome_text(check, outcome, extra)))
+	check.phase = "closing"
+	check.wait_timer = C4:SetTimer(1, function()
+		check.wait_timer = nil
+		if current == check then
+			decide(check, outcome, extra)
+		end
+	end)
 end
 
--- Open probe `step` (see the header): recreate the binding and connect.
+-- Open probe `step` (see the header), GAP_MS after the last close at the
+-- earliest: recreate its binding and connect.
 open_step = function(check, step)
 	local options
 	if step == "decoy" then
@@ -343,20 +364,32 @@ open_step = function(check, step)
 	if not options then
 		return finish(check, "inconclusive", "no CA configuration")
 	end
-	check.step, check.phase, check.online, check.received = step, "opening", false, ""
-	if closed_at and now_ms() - closed_at >= netcheck.STALE_MS then
-		owed_offline = 0 -- what the last close brought has come by now, or never will [assumed]
+	local wait = last_close and netcheck.GAP_MS - (now_ms() - last_close) or 0
+	if wait > 0 then
+		check.phase = "waiting"
+		check.wait_timer = C4:SetTimer(wait, function()
+			check.wait_timer = nil
+			if current == check then
+				open_step(check, step)
+			end
+		end)
+		return
+	end
+	local binding = binding_of(step)
+	check.step, check.phase, check.online_at, check.answer_after, check.received = step, "opening", nil, nil, ""
+	if closed_at[binding] and now_ms() - closed_at[binding] >= netcheck.STALE_MS then
+		owed[binding] = 0 -- what its last close brought has come by now, or never will [assumed]
 	end
 	check.timer = C4:SetTimer(netcheck.TIMEOUT * 1000, function()
 		check.timer = nil
-		step_ended(check, check.online and "no_answer" or "silence")
+		step_ended(check, check.online_at and "no_answer" or "silence")
 	end)
+	check.open[binding] = true
 	local ok, err = pcall(function()
-		local binding, port, kind = netcheck.BINDING, netcheck.PORT, netcheck.CONNECTION_TYPE
-		C4:CreateNetworkConnection(binding, check.ip, kind)
+		C4:CreateNetworkConnection(binding, check.ip, netcheck.CONNECTION_TYPE)
 		C4:SetBindingAddress(binding, check.ip)
-		C4:NetPortOptions(binding, port, kind, options)
-		C4:NetConnect(binding, port)
+		C4:NetPortOptions(binding, netcheck.PORT, netcheck.CONNECTION_TYPE, options)
+		C4:NetConnect(binding, netcheck.PORT)
 	end)
 	if not ok then
 		-- A no-op when Director reported from inside a call and that decided.
@@ -369,16 +402,16 @@ end
 -- in flight is cancelled.
 function netcheck.run(ip, callback)
 	netcheck.cancel()
-	local check = { ip = ip, callback = callback, phase = "gap" }
+	local check = { ip = ip, callback = callback, phase = "waiting", open = {} }
 	current = check
 	if not header_safe(ip) then
 		return finish(check, "inconclusive", "the bridge address cannot go into a request")
 	end
-	open_step(check, "control")
+	open_step(check, "decoy")
 end
 
--- Drop the check in flight, and a verdict not yet delivered: no callback. A
--- probe still open is closed and its address cleared.
+-- Drop the check in flight, and a verdict not yet delivered: no callback.
+-- A probe binding it connected is closed and cleared.
 function netcheck.cancel()
 	if delivery then
 		delivery:Cancel()
@@ -390,8 +423,11 @@ function netcheck.cancel()
 	end
 	current = nil
 	cancel_timers(check)
-	if connected(check) then
-		close()
+	for _, binding in ipairs(BINDINGS) do
+		if check.open[binding] then
+			close(binding, true)
+			check.open[binding] = nil
+		end
 	end
 	check.phase = "done"
 	log.debug("network connection TLS check cancelled")
@@ -402,10 +438,10 @@ local function on_online(check)
 		log.debug("network connection TLS check: ONLINE ignored (already online)")
 		return
 	end
-	check.phase, check.online = "open", true
+	check.phase, check.online_at = "open", now_ms()
 	local request = probe_request(check.ip)
 	local ok, err = pcall(function()
-		C4:SendToNetwork(netcheck.BINDING, netcheck.PORT, request)
+		C4:SendToNetwork(binding_of(check.step), netcheck.PORT, request)
 	end)
 	if not ok then
 		return step_ended(check, "error", "could not send its request: " .. tostring(err))
@@ -413,30 +449,45 @@ local function on_online(check)
 	log.debug("network connection TLS check: the %s probe is online; GET %s sent, no key", check.step, netcheck.PATH)
 end
 
+-- The probe binding `binding` stands for, or nil.
+local function probe_binding(binding)
+	local id = tonumber(binding)
+	if id == netcheck.DECOY_BINDING or id == netcheck.CONTROL_BINDING then
+		return id
+	end
+	return nil
+end
+
+-- True when `check` has a probe connecting or connected on binding `id`.
+local function probing_on(check, id)
+	return check ~= nil and connected(check) and binding_of(check.step) == id
+end
+
 -- Director's OnConnectionStatusChanged, routed by the driver.
 function netcheck.on_status_changed(binding, port, status)
-	if tonumber(binding) ~= netcheck.BINDING then
+	local id = probe_binding(binding)
+	if not id then
 		return false
 	end
 	status = tostring(status):upper()
 	local check = current
 	if status == "OFFLINE" then
-		if owed_offline > 0 then
-			owed_offline = owed_offline - 1
-			log.debug("network connection TLS check: OFFLINE taken for a closed probe's")
-		elseif check and connected(check) then
+		if (owed[id] or 0) > 0 then
+			owed[id] = owed[id] - 1
+			log.debug("network connection TLS check: OFFLINE on %d taken for a closed connection's", id)
+		elseif probing_on(check, id) then
 			step_ended(check, check.received ~= "" and "garbage" or "offline", #check.received)
 		else
-			log.debug("network connection TLS check: OFFLINE with no probe open ignored")
+			log.debug("network connection TLS check: OFFLINE on %d with no probe open ignored", id)
 		end
 	elseif status == "ONLINE" then
-		if check and connected(check) then
+		if probing_on(check, id) then
 			on_online(check)
 		else
-			log.debug("network connection TLS check: ONLINE with no probe open ignored")
+			log.debug("network connection TLS check: ONLINE on %d with no probe open ignored", id)
 		end
 	else
-		log.debug("network connection TLS check: connection status %s on port %s ignored", status, tostring(port))
+		log.debug("network connection TLS check: connection status %s on %d port %s ignored", status, id, tostring(port))
 	end
 	return true
 end
@@ -444,15 +495,16 @@ end
 -- Director's ReceivedFromNetwork, routed by the driver: a probe's answer, in
 -- pieces of any size. Never logged, only counted.
 function netcheck.on_data(binding, data)
-	if tonumber(binding) ~= netcheck.BINDING then
+	local id = probe_binding(binding)
+	if not id then
 		return false
 	end
 	if type(data) ~= "string" or data == "" then
 		return true
 	end
 	local check = current
-	if not (check and connected(check)) then
-		log.debug("network connection TLS check: %d byte(s) with no probe open ignored", #data)
+	if not probing_on(check, id) then
+		log.debug("network connection TLS check: %d byte(s) on %d with no probe open ignored", #data, id)
 		return true
 	end
 	if #check.received < netcheck.MAX_ANSWER then
@@ -460,6 +512,7 @@ function netcheck.on_data(binding, data)
 	end
 	local code = status_code(check.received)
 	if code then
+		check.answer_after = check.online_at and (now_ms() - check.online_at) or nil
 		step_ended(check, "answered", code)
 	elseif check.received:gsub("^[\r\n]+", ""):find("\n", 1, true) or #check.received >= netcheck.MAX_ANSWER then
 		step_ended(check, "garbage", #check.received)

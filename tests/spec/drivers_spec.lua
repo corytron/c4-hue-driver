@@ -105,33 +105,28 @@ describe("Hue Bridge driver", function()
 		c4.transfers[2]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
 		answer_identity(c4)
 		assert.equal("Paired", env.Properties["Status"])
-		-- The network connection's TLS check comes first (bridge/netcheck.lua),
-		-- unkeyed probes on binding 6002, 1.5 s apart: the Signify roots answer,
-		-- the decoy CA file gets silence for 10 s (a refused handshake, OS
-		-- 3.4.3), the Signify roots answer again; the verdict comes from a 1 ms
-		-- timer.
-		local function probe_answers()
-			c4.net_status(6002, 443, "ONLINE")
-			c4.net_receive(6002, 443, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-			c4.net_status(6002, 443, "OFFLINE")
-		end
-		probe_answers()
-		c4.fire_timers_of(1500)
+		-- The network connection's TLS check comes first (bridge/netcheck.lua):
+		-- the decoy CA file on binding 6002 gets silence for 10 s (a refused
+		-- handshake, OS 3.4.3); 1.5 s after its close the Signify roots answer
+		-- on binding 6003. Each step and the verdict run from timers.
 		c4.fire_timers_of(10000)
+		c4.fire_timers_of(1)
+		c4.now_ms = c4.now_ms + 1500
 		c4.fire_timers_of(1500)
-		probe_answers()
+		c4.net_status(6003, 443, "ONLINE")
+		c4.net_receive(6003, 443, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+		c4.fire_timers_of(1)
 		c4.fire_timers_of(1)
 		for _, t in ipairs(c4.transfers) do
 			assert.is_nil(t.url:find("/eventstream/", 1, true), "no C4:url stream: " .. t.url)
 			assert.is_nil(t.url:find("192.00", 1, true), "no padded self-check: " .. t.url)
 		end
 		local created = c4.calls_to("CreateNetworkConnection")
-		assert.equal(4, #created, "the check's three probes, then the stream")
-		for i = 1, 3 do
-			assert.same({ 6002, "192.0.2.10", "SSL" }, { created[i][1], created[i][2], created[i][3] })
-		end
-		assert.same({ 6001, "192.0.2.10", "SSL" }, { created[4][1], created[4][2], created[4][3] })
-		assert.equal(4, #c4.calls_to("NetConnect"))
+		assert.equal(3, #created, "the decoy, the control, then the stream")
+		assert.same({ 6002, "192.0.2.10", "SSL" }, { created[1][1], created[1][2], created[1][3] })
+		assert.same({ 6003, "192.0.2.10", "SSL" }, { created[2][1], created[2][2], created[2][3] })
+		assert.same({ 6001, "192.0.2.10", "SSL" }, { created[3][1], created[3][2], created[3][3] })
+		assert.equal(3, #c4.calls_to("NetConnect"))
 		assert.equal("192.0.2.10 (network connection, binding 6001)", env.Properties["Stream Address"])
 
 		-- Forget Pairing leaves no address on the binding.

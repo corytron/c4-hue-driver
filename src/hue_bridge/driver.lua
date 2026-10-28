@@ -1013,8 +1013,8 @@ end
 
 -- The TLS check of the network connection (#317, bridge/netcheck.lua):
 -- before the event stream's first keyed connect on a network connection in
--- a run, unkeyed probes on binding 6002 (the Signify roots, a decoy CA file,
--- the Signify roots again) must show the decoy refused. Its answer holds
+-- a run, unkeyed probes (a decoy CA file on binding 6002, then the Signify
+-- roots on 6003) must show the decoy refused. Its answer holds
 -- for the run (state.net_check), whatever the address: it is the
 -- controller's. pinned, or inconclusive on a Director version that answered
 -- pinned before ("accepted"), lets the stream connect; not_pinned moves it
@@ -1045,7 +1045,7 @@ local function net_gate(continue)
 		net_timer = nil
 	end
 	net_running = gen
-	prop("Event Stream", "Not connected: network connection TLS check running") -- about 20 s
+	prop("Event Stream", "Not connected: network connection TLS check running") -- about 12 s
 	netcheck.run(ip, function(verdict, detail)
 		if gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
@@ -2322,7 +2322,7 @@ function OnDriverDestroyed()
 		state.unbound_confirm_timer = nil
 	end
 	cancel_identity_retry()
-	reset_net_gate() -- closes and clears the probe's binding 6002 if a probe is in flight
+	reset_net_gate() -- closes and clears the probe bindings (6002, 6003) of a check in flight
 	if version_timer then
 		version_timer:Cancel()
 		version_timer = nil
@@ -2340,8 +2340,8 @@ end
 
 -- The network-connection stream's callbacks (docs/raw-stream-design.md §0,
 -- #317): Director calls these globals for binding 6001; a Web transfer
--- stream has no such entry points and ignores them. Binding 6002 is the
--- network connection's TLS check (bridge/netcheck.lua), never the stream.
+-- stream has no such entry points and ignores them. Bindings 6002 and 6003
+-- are the network connection's TLS check (bridge/netcheck.lua), never the stream.
 function OnConnectionStatusChanged(idBinding, nPort, strStatus)
 	if netcheck.on_status_changed(idBinding, nPort, strStatus) then
 		return
