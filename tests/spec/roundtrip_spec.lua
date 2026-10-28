@@ -94,7 +94,8 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- The light first, so the bridge's globals are the ones left in place;
 		-- the project (a Garage next to the default Living Room) after both.
 		light = fake.load_driver("hue_light", {}, { device_id = LIVING_ID })
-		bridge = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = "192.0.2.10" })
+		bridge = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "192.0.2.10" })
 		fake.add_room(GARAGE_ROOM, "Garage")
 		bridge.C4.persist.hue_app_key = "abc123"
 		bridge.C4.persist.hue_bridge_id = "001788fffe25b8f8"

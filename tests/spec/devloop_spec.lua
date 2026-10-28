@@ -2179,7 +2179,8 @@ describe("bridge/devtools.lua development requests", function()
 	-- bridge/devtools.lua is installed), paired, its identity checked unless
 	-- `answer` is false.
 	local function paired(answer)
-		env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = IP })
+		env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = IP })
 		c4.persist.hue_app_key = "abc123"
 		c4.persist.hue_bridge_id = "001788fffe123abc"
 		env.OnDriverLateInit("DIT_STARTUP")

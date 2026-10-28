@@ -12,6 +12,7 @@ local http = require("bridge.http")
 local credentials = require("bridge.credentials")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
+local netstream = require("bridge.netstream")
 local lights_mod = require("bridge.lights")
 local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
@@ -19,6 +20,7 @@ local motion_mod = require("bridge.motion")
 local motion_diag_mod = require("bridge.motion_diag")
 local commands = require("bridge.commands")
 local tlscheck = require("bridge.tlscheck")
+local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
 local util = require("bridge.util")
 
@@ -62,7 +64,8 @@ local state = {
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
 	key_rejected = nil,  -- HTTP code (401/403) once the bridge refused the key; cleared by Pair Bridge or a new address
 	tls_verdict = nil,   -- the TLS self-check's answer for this start and address (bridge/tlscheck.lua)
-	identity_ok = nil,   -- true once the identity check (with the TLS check) passed for this address; false when it failed
+	net_check = nil,     -- the network connection's TLS check for this run (net_gate): pinned, accepted, not_pinned
+	identity_ok = nil,  -- true once the identity check (with the TLS check) passed for this address; false when it failed
 	identity_text = nil, -- the Status text of the identity check's failure, kept for refresh_status (#236)
 	attention_sent = nil, -- the Attention text last written, so an unchanged one is not written again
 	limits_sent = {},    -- light rid -> the limits last given to the command queue
@@ -73,6 +76,10 @@ local state = {
 -- The Attention text of a failed TLS self-check (issue #53, tls_gate below).
 local TLS_ATTENTION = "TLS check failed: the controller accepted the bridge without its Signify roots; "
 	.. "keyed requests stopped (see the manual)"
+
+-- The Attention text of a failed TLS check of the network connection (#317, net_gate below).
+local NET_ATTENTION = "Event stream: the network connection did not verify the bridge's certificate on this "
+	.. "controller; using Web transfer (#317)"
 
 -- Stream timeout in single-queue mode: commands wait for the stream to
 -- end, so it must end often.
@@ -279,16 +286,41 @@ end
 -- so each connection gets the next spelling. Every path that starts the
 -- stream checks first; this is the last guard for a path added later (diff
 -- review 2026-10-25 row 6): nothing keyed to an unverified bridge, after a
--- failed TLS check, or with a rejected key. The second value is the stream's
+-- failed TLS check, with a rejected key, or on a network connection whose
+-- own TLS check has not passed (net_gate). The second value is the stream's
 -- status text.
+-- The stream's transport (docs/raw-stream-design.md §0, #317): a network
+-- connection unless the owner chose Web transfer, the C4:url stream of 1.0,
+-- or the network connection's TLS check failed in this run (net_gate; the
+-- property is left as the owner set it).
+local NETSTREAM_TEXT = "%s (network connection, binding " .. tostring(netstream.BINDING or 6001) .. ")"
+
+local function use_netstream()
+	return state.net_check ~= "not_pinned"
+		and not (Properties and Properties["Event Stream Transport"] == "Web transfer")
+end
+
+-- True once the network connection's TLS check lets the key go out on it in this run (net_gate).
+local function net_cleared()
+	return state.net_check == "pinned" or state.net_check == "accepted"
+end
+
 local function stream_connection()
 	local refusal = stream_refusal()
+	if refusal == nil and use_netstream() and not net_cleared() then
+		refusal = "network connection TLS check pending"
+	end
 	if refusal and refusal ~= "not paired" then
 		log.warn("event stream not connected: %s", refusal)
 		return nil, "Not connected: " .. refusal
 	end
 	local conn = connection()
-	if conn then
+	if conn and use_netstream() then
+		-- Off C4:url the address spelling buys nothing: the dotted one.
+		state.stream_ip = conn.ip
+		conn.stream_ip = conn.ip
+		prop("Stream Address", string.format(NETSTREAM_TEXT, conn.ip))
+	elseif conn then
 		state.stream_ip = next_stream_address(true)
 		conn.stream_ip = state.stream_ip
 		if dual_queue() then
@@ -559,6 +591,9 @@ local function attention_text()
 	if state.tls_verdict == "not_pinned" then
 		items[1] = TLS_ATTENTION
 	end
+	if state.net_check == "not_pinned" then
+		items[#items + 1] = NET_ATTENTION
+	end
 	local text = state.lights:attention()
 	if text and text ~= "" and text ~= "None" then
 		items[#items + 1] = text
@@ -668,9 +703,49 @@ local function new_group_queue()
 	})
 end
 
+-- Every module's resync, one GET at a time: at every stream connect, and
+-- from Refresh All (#324), which needs no stream. Runs from a timer or an
+-- action, never inside a transfer's callbacks. The scenes follow the lights
+-- (their catalogue GET is the large one, 351 KB on the house bridge, and
+-- their groups and room mappings come from the lights' resync), the zone
+-- lights the scenes (their grouped_light GET is small, and the scenes hand
+-- theirs on), the motion devices last (their sensors come from the lights'
+-- device cache, docs/motion-design.md §4.2); the owner-facing rows are
+-- refreshed after the lights and once more after the chain. done(failures)
+-- gets the list of "<part>: <error>" texts, empty when every part worked.
+local function resync_all(done)
+	local failures = {}
+	local function note(part, ok, err, sent)
+		if ok then
+			log.info("%s resync done: %d state messages", part, tonumber(sent) or 0)
+		else
+			log.warn("%s resync failed: %s", part, tostring(err))
+			failures[#failures + 1] = part .. ": " .. tostring(err)
+		end
+	end
+	state.lights:resync(function(ok, err, sent)
+		note("light", ok, err, sent)
+		refresh_lights_props()
+		state.scenes:resync(function(sok, serr, ssent, grouped)
+			note("scene", sok, serr, ssent)
+			state.zone_lights:resync(function(zok, zerr, zsent)
+				note("zone light", zok, zerr, zsent)
+				state.motion:resync(function(mok, merr, msent)
+					note("motion", mok, merr, msent)
+					refresh_lights_props()
+					if done then
+						done(failures)
+					end
+				end)
+			end, grouped)
+		end)
+	end)
+end
+
 local function new_stream()
-	return stream.new({
+	return (use_netstream() and netstream or stream).new({
 		connection = stream_connection,
+		tls_checked = net_cleared, -- netstream's own guard (#317); stream.lua ignores it
 		abandoned = state.stream_abandoned,
 		timeout = stream_timeout(),
 		watchdog = math.max(WATCHDOG_MIN, number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG)),
@@ -713,42 +788,7 @@ local function new_stream()
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
 			state.motion:on_stream_state(true)
-			state.lights:resync(function(ok, err, sent)
-				if ok then
-					log.info("resync done: %d state messages", tonumber(sent) or 0)
-				else
-					log.warn("resync failed: %s", tostring(err))
-				end
-				-- The lights' rows at once (the scene catalogue GET that
-				-- follows is the slow one), then once more after the chain.
-				refresh_lights_props()
-				-- The scenes hand their grouped_light items on, so the zone
-				-- lights skip their own GET of the same resource.
-				state.scenes:resync(function(sok, serr, ssent, grouped)
-					if sok then
-						log.info("scene resync done: %d state messages", tonumber(ssent) or 0)
-					else
-						log.warn("scene resync failed: %s", tostring(serr))
-					end
-					state.zone_lights:resync(function(zok, zerr, zsent)
-						if zok then
-							log.info("zone light resync done: %d state messages", tonumber(zsent) or 0)
-						else
-							log.warn("zone light resync failed: %s", tostring(zerr))
-						end
-						-- The motion devices last (docs/motion-design.md §4.2):
-						-- their sensors come from the lights' device cache.
-						state.motion:resync(function(mok, merr, msent)
-							if mok then
-								log.info("motion resync done: %d state messages", tonumber(msent) or 0)
-							else
-								log.warn("motion resync failed: %s", tostring(merr))
-							end
-							refresh_lights_props()
-						end)
-					end, grouped)
-				end)
-			end)
+			resync_all()
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
@@ -975,6 +1015,86 @@ local function verify_identity(purpose, callback)
 	end)
 end
 
+-- The TLS check of the network connection (#317, bridge/netcheck.lua):
+-- before the event stream's first keyed connect on a network connection in
+-- a run, unkeyed probes on fresh binding ids (a decoy CA file, then the
+-- Signify roots) must show the decoy refused; on a Director version that
+-- answered pinned before, netcheck answers pinned without a probe. Its answer
+-- holds for the run (state.net_check), whatever the address: it is the
+-- controller's. pinned, or inconclusive on a Director version that answered
+-- pinned before ("accepted"), lets the stream connect; not_pinned moves it
+-- to Web transfer with an Attention item until the next start (the Event
+-- Stream Transport property stays as the owner set it, so the check runs
+-- again after a Director upgrade); any other inconclusive answer holds it
+-- and asks again after a backoff. `continue` re-enters choose_stream_address:
+-- once the check passed or fell back, or after the backoff. One waiter, the
+-- latest; one check at a time, the latest address's.
+local net_waiter, net_running, net_timer, net_attempts = nil, nil, nil, 0
+
+local function reset_net_gate()
+	if net_timer then
+		net_timer:Cancel()
+	end
+	net_waiter, net_running, net_timer, net_attempts = nil, nil, nil, 0
+	netcheck.cancel()
+end
+
+local function net_gate(continue)
+	net_waiter = continue
+	local gen, ip = state.address_gen, state.ip
+	if net_running == gen then
+		return -- the probe in flight answers this waiter too
+	end
+	if net_timer then
+		net_timer:Cancel()
+		net_timer = nil
+	end
+	net_running = gen
+	prop("Event Stream", "Not connected: network connection TLS check running") -- about 12 s
+	netcheck.run(ip, function(verdict, detail)
+		if gen ~= state.address_gen then
+			return -- the address changed meanwhile; its own check runs
+		end
+		net_running = nil
+		detail = tostring(detail)
+		local function wake()
+			local waiter = net_waiter
+			net_waiter = nil
+			if waiter then
+				waiter()
+			end
+		end
+		if verdict == "pinned" then
+			state.net_check = verdict
+			netcheck.remember_pinned()
+			log.debug("network connection TLS check: the decoy CA file was refused (%s)", detail)
+		elseif verdict == "not_pinned" then
+			state.net_check = verdict
+			log.warn("network connection TLS check: the bridge at %s was accepted with a decoy CA file (%s); the event "
+				.. "stream uses Web transfer until the driver restarts", ip, detail)
+			refresh_lights_props() -- the Attention item
+		elseif netcheck.pinned_before() then
+			state.net_check = "accepted"
+			log.warn("network connection TLS check inconclusive (%s); this Director version answered pinned before, so "
+				.. "it passes", detail)
+		else
+			net_attempts = net_attempts + 1
+			local delay = netcheck.retry_delay(net_attempts)
+			prop("Event Stream", string.format("Not connected: network connection TLS check inconclusive (%s); "
+				.. "checking again in %d s", detail, delay))
+			log.warn("network connection TLS check inconclusive (%s) on a Director version that has not answered pinned: "
+				.. "nothing keyed is sent on it; again in %d s", detail, delay)
+			net_timer = C4:SetTimer(delay * 1000, function()
+				net_timer = nil
+				wake()
+			end)
+			return
+		end
+		net_attempts = 0
+		wake()
+	end)
+end
+
 local function choose_stream_address(callback)
 	local gen = state.address_gen
 	local check_ip = altaddr.for_check(state.ip)
@@ -1000,6 +1120,17 @@ local function choose_stream_address(callback)
 				choose_stream_address(callback)
 			end
 		end)
+	end
+	if use_netstream() then
+		if not net_cleared() then
+			-- The network connection's own TLS check first (#317, net_gate).
+			return net_gate(function() choose_stream_address(callback) end)
+		end
+		-- No queue to share off C4:url (#317): no spelling, no self-check.
+		state.stream_family = nil
+		state.stream_ip = state.ip
+		prop("Stream Address", string.format(NETSTREAM_TEXT, state.ip))
+		return callback()
 	end
 	if not family or not check_ip then
 		return single("no octet below 8 to pad")
@@ -1095,6 +1226,7 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		state.stream_ip = nil
 		state.stream_family = nil
 		reset_identity_check()
+		reset_net_gate() -- a probe of the old address; the run's verdict stays
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
@@ -1115,6 +1247,13 @@ end
 
 dispatch.properties["Stream_Timeout_(s)"] = function()
 	if state.late_init_done then restart_stream() end
+end
+
+dispatch.properties["Event_Stream_Transport"] = function()
+	if state.late_init_done then
+		reset_net_gate() -- a probe in flight served the previous choice; its answer would restart the stream twice
+		choose_stream_address(function() restart_stream(true) end)
+	end
 end
 
 dispatch.properties["Stream_Watchdog_(s)"] = function()
@@ -1773,6 +1912,20 @@ dispatch.commands["Forget_Scene"] = function(params)
 	last_action(text)
 end
 
+-- Refresh All (#324): every list read from the bridge now, stream or not.
+dispatch.commands["Refresh_All"] = function()
+	if not can() then return end
+	resync_all(function(failures)
+		if #failures == 0 then
+			last_action(string.format("Refreshed from the bridge: Lights: %s | Scenes: %s | Zone lights: %s | Motion: %s",
+				tostring(state.lights:summary()), tostring(state.scenes:summary()),
+				tostring(state.zone_lights:summary()), tostring(state.motion:summary())))
+		else
+			last_action("Refresh All: " .. table.concat(failures, "; "))
+		end
+	end)
+end
+
 dispatch.commands["Refresh_Scenes"] = function()
 	if not can() then return end
 	state.scenes:resync(function(ok, err)
@@ -1929,7 +2082,10 @@ dispatch.commands["Forget_Pairing"] = function()
 	state.identity_ok = nil
 	state.identity_text = nil
 	reset_identity_check()
+	reset_net_gate()
 	state.stream:stop()
+	-- No stale bridge address left on the stream's network binding (#317).
+	netstream.clear_address()
 	credentials.clear()
 	state.creds = nil
 	state.stream_ip = nil
@@ -2185,6 +2341,7 @@ function OnDriverDestroyed()
 		state.unbound_confirm_timer = nil
 	end
 	cancel_identity_retry()
+	reset_net_gate() -- closes and clears the probe binding of a check in flight
 	if version_timer then
 		version_timer:Cancel()
 		version_timer = nil
@@ -2197,5 +2354,29 @@ function OnDriverDestroyed()
 	end
 	if state.group_queue then
 		state.group_queue:stop()
+	end
+end
+
+-- The network-connection stream's callbacks (docs/raw-stream-design.md §0,
+-- #317): Director calls these globals for binding 6001; a Web transfer
+-- stream has no such entry points and ignores them. Bindings 6100 to 6999
+-- are the network connection's TLS check (bridge/netcheck.lua), never the stream.
+function OnConnectionStatusChanged(idBinding, nPort, strStatus)
+	if netcheck.on_status_changed(idBinding, nPort, strStatus) then
+		return
+	end
+	local s = state.stream
+	if s and s.on_status_changed then
+		s:on_status_changed(idBinding, nPort, strStatus)
+	end
+end
+
+function ReceivedFromNetwork(idBinding, _nPort, strData)
+	if netcheck.on_data(idBinding, strData) then
+		return
+	end
+	local s = state.stream
+	if s and s.on_data then
+		s:on_data(idBinding, strData)
 	end
 end

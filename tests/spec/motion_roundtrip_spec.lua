@@ -228,7 +228,8 @@ describe("motion round trip", function()
 		fake.as(sensor, sensor.OnDriverInit, identity and "DIT_STARTUP" or "DIT_ADDING")
 		area = fake.load_driver("hue_motion", {}, { device_id = AREA_ID })
 		fake.as(area, area.OnDriverInit, "DIT_ADDING")
-		bridge = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = BRIDGE_IP })
+		bridge = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = BRIDGE_IP })
 		bc4 = bridge.C4
 		bc4.now_ms = START_MS
 		fake.add_room(HALLWAY, "Hallway")

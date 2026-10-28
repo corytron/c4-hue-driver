@@ -854,6 +854,111 @@ local function new_c4(env)
 		return t, epoch, micro
 	end
 
+	-- Dynamic network connections [verified: API 32/_1 CreateNetworkConnection,
+	-- 32/_25 NetPortOptions, 32/_23 NetConnect, 32/_24 NetDisconnect, 32/_20
+	-- SendToNetwork, 32/_16 SetBindingAddress, 32/_2 GetBindingAddress]:
+	--   c4.network[binding] = { address, type, ports = { [port] = port } }
+	--   port = { ip_type, options, state, connects, sent }
+	-- NetPortOptions keeps a copy of its table as options; NetConnect makes
+	-- the port "connecting" (connects counts them), NetDisconnect "closed";
+	-- SendToNetwork appends its data to sent. NetPortOptions, NetConnect and
+	-- SendToNetwork on a binding never created raise; NetDisconnect and
+	-- SetBindingAddress there only record the call [assumed: Director ignores
+	-- them]. Creating a binding again changes its address and type and keeps
+	-- its ports [assumed].
+	--
+	-- Director's side is the spec's: c4.net_status(binding, port,
+	-- "ONLINE"|"OFFLINE") makes the port "online" or "closed" and calls the
+	-- driver's OnConnectionStatusChanged; c4.net_receive(binding, port, data)
+	-- calls its ReceivedFromNetwork. A module spec routes them by setting
+	-- env.OnConnectionStatusChanged and env.ReceivedFromNetwork on the env
+	-- fake.install_c4 returns, as a driver's globals do. Nothing is delivered
+	-- on its own: whether Director reports OFFLINE after a driver's own
+	-- NetDisconnect is not documented [assumed: it does,
+	-- docs/raw-stream-design.md §3], so a spec delivers it when it wants it.
+	c4.network = {}
+
+	local function net_port(binding, port, what)
+		local conn = c4.network[binding]
+		assert(conn, "C4:" .. what .. ": network binding " .. tostring(binding)
+			.. " was never created (C4:CreateNetworkConnection)")
+		local p = conn.ports[port]
+		if not p then
+			p = { connects = 0, sent = {} }
+			conn.ports[port] = p
+		end
+		return p
+	end
+
+	function c4:CreateNetworkConnection(binding, address, conn_type)
+		record("CreateNetworkConnection", binding, address, conn_type)
+		assert(type(binding) == "number" and binding >= 6000 and binding <= 6999,
+			"C4:CreateNetworkConnection: network bindings are 6000-6999 [API 32/_1]")
+		local conn = c4.network[binding] or { ports = {} }
+		conn.address, conn.type = address, conn_type
+		c4.network[binding] = conn
+	end
+
+	function c4:NetPortOptions(binding, port, ip_type, options)
+		record("NetPortOptions", binding, port, ip_type, options)
+		local p = net_port(binding, port, "NetPortOptions")
+		p.ip_type, p.options = ip_type, {}
+		for k, v in pairs(options or {}) do
+			p.options[k] = v
+		end
+	end
+
+	function c4:NetConnect(binding, port, ip_type, suppress)
+		record("NetConnect", binding, port, ip_type, suppress)
+		local p = net_port(binding, port, "NetConnect")
+		p.state = "connecting"
+		p.connects = p.connects + 1
+	end
+
+	function c4:NetDisconnect(binding, port)
+		record("NetDisconnect", binding, port)
+		local conn = c4.network[binding]
+		if conn and conn.ports[port] then
+			conn.ports[port].state = "closed"
+		end
+	end
+
+	function c4:SendToNetwork(binding, port, data)
+		record("SendToNetwork", binding, port, data)
+		table.insert(net_port(binding, port, "SendToNetwork").sent, data)
+	end
+
+	function c4:SetBindingAddress(binding, address)
+		record("SetBindingAddress", binding, address)
+		if c4.network[binding] then
+			c4.network[binding].address = address
+		end
+	end
+
+	-- nil for a binding never created [assumed].
+	function c4:GetBindingAddress(binding)
+		record("GetBindingAddress", binding)
+		return c4.network[binding] and c4.network[binding].address or nil
+	end
+
+	-- Director reports a connection's status (see above).
+	function c4.net_status(binding, port, status)
+		local conn = c4.network[binding]
+		if conn and conn.ports[port] then
+			conn.ports[port].state = status == "ONLINE" and "online" or "closed"
+		end
+		if type(env.OnConnectionStatusChanged) == "function" then
+			as(env, env.OnConnectionStatusChanged, binding, port, status)
+		end
+	end
+
+	-- Director hands over data received on a connection (see above).
+	function c4.net_receive(binding, port, data)
+		if type(env.ReceivedFromNetwork) == "function" then
+			as(env, env.ReceivedFromNetwork, binding, port, data)
+		end
+	end
+
 	-- Every recorded call with the given name, in order.
 	function c4.calls_to(name)
 		local out = {}
@@ -890,6 +995,21 @@ local function new_c4(env)
 			if timer.active then table.insert(out, timer) end
 		end
 		return out
+	end
+
+	-- Fire, as fire_timers does, only the active timers armed for exactly
+	-- `delay_ms` (the 1 ms deferrals, say), leaving every other one armed.
+	-- Returns how many fired.
+	function c4.fire_timers_of(delay_ms)
+		local due = {}
+		for _, timer in ipairs(c4.timers) do
+			if timer.active and timer.delay == delay_ms then table.insert(due, timer) end
+		end
+		for _, timer in ipairs(due) do
+			if not timer.repeating then timer.active = false end
+			timer.callback(timer, 0)
+		end
+		return #due
 	end
 
 	return c4

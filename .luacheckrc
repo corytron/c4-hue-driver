@@ -14,7 +14,7 @@ files["src/hue_bridge/driver.lua"] = {
 	globals = {
 		"OnDriverInit", "OnDriverLateInit", "OnDriverDestroyed", "OnDriverRemovedFromProject",
 		"ExecuteCommand", "OnPropertyChanged", "ReceivedFromProxy", "OnBindingChanged", "OnBindingValidate",
-		"OnSystemEvent",
+		"OnSystemEvent", "OnConnectionStatusChanged", "ReceivedFromNetwork",
 		-- CUSTOM_SELECT list functions named in the bridge's driver.xml.
 		"HueLightList", "RoomList", "RelinkDeviceList", "ForgetDeviceList", "HueRoomList", "MappingTargetList",
 		"SceneList", "SceneGroupList", "RelinkSceneList", "ForgetSceneList", "ZoneGroupList", "RelinkZoneLightList",
