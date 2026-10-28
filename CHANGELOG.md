@@ -41,6 +41,10 @@ listed.
   played. This changes existing scene keypads after the update (#310).
 
 ### Changed
+- One wording on the Hue Bridge: Add All New Motion Sensors is now Import
+  All New Motion Sensors, and the Lights, Scenes, Zone Lights and Motion
+  Sensors rows all read "… on bridge, N imported, N new, N missing, N
+  unbound, N deleted" (#325).
 - The manual says what to do when a device's Documentation tab still shows
   the page of the build before right after an update: select the device
   again (#260).
