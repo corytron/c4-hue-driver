@@ -3,8 +3,8 @@
 # .github/workflows/drift.yml opens one issue labelled "deploy" when they differ.
 # docs/cicd-gitops-design.md, section 6. Flat key: value lines only.
 environment: house
-release: v1.1-beta.4        # the GitHub release whose assets are installed
-build: 400           # the build number its packages carry (Driver Version in Composer)
+release: v1.1-beta.6        # the GitHub release whose assets are installed
+build: 420           # the build number its packages carry (Driver Version in Composer)
 drivers: hue_bridge hue_light hue_motion hue_scene
 stream_timeout_s: 3600
 stream_watchdog_s: 600
