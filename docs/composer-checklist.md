@@ -67,18 +67,23 @@ device for a single lamp, and the switches bound as above.
      259 on 2026-10-24 (259 the first from a GitHub release through
      `tools/deploy.py`, round 34) and dev builds 276, 284 and 309 on
      2026-10-25 (`docs/composer-remote.md`, History).
-2. The update is **in place**. Never delete and re-add the bridge: a re-added
-   bridge has a new device id and an empty store, so the pairing and every
-   device link are lost. Expect on the bridge within a minute: `Status`
-   "Paired"; `Event Stream` "Connected since <HH:MM:SS>" (with ", <n>
-   containers, last <HH:MM:SS>" once events arrive, and the reconnect count
-   after a reconnect); `Attention` "None"; `Lights` "47 on bridge, 0
-   imported, 0 new, 0 missing, 0 unbound, 47 deleted" (the house today);
-   `Scenes` "<n> + <m> time-based on bridge, <k> imported, <d> deleted"
-   ("<g> missing" and "<u> unbound" appear only when not zero; 126 + 15 on
-   the bridge and 2 imported on 2026-10-25); `Zone Lights` "7 zones, 16
-   rooms on bridge; 2 imported". Corrected 2026-10-25: this step was written
-   when `Scenes` read "<n> on bridge, 1 imported, 0 missing, 0 unbound, <d>
+2. The update is **in place**. Never delete and re-add the bridge: a
+   re-added bridge has a new device id and an empty store, so the pairing
+   and every device link are lost. Expect on the bridge within a minute:
+   `Status` "Paired"; `Event Stream` "Connected since <HH:MM:SS>" (with ",
+   <n> containers, last <HH:MM:SS>" once events arrive, and the reconnect
+   count after a reconnect); `Attention` "None"; `Lights` "47 lights on
+   bridge, 0 imported, 0 new, 47 deleted" (the house today); `Scenes` "<n>
+   scenes + <m> time-based on bridge, <k> imported, <w> new" (126 + 15 on
+   the bridge and 2 imported on 2026-10-25); `Zone Lights` "7 zones + 16
+   rooms on bridge, 2 imported, <w> new", <w> counting the zones and rooms
+   that have lights and no device; `Motion Sensors` in the same wording
+   (step 52). Since #325 the four rows share it: what is on the bridge,
+   imported and new, then ", <g> missing", ", <u> unbound" and ", <d>
+   deleted" only when not 0; before, `Zone Lights` read "7 zones, 16 rooms
+   on bridge; 2 imported" and `Scenes` "<n> + <m> time-based on bridge, <k>
+   imported, <d> deleted". Corrected 2026-10-25: this step was written when
+   `Scenes` read "<n> on bridge, 1 imported, 0 missing, 0 unbound, <d>
    deleted" and a release build still showed the `Dev Server` and
    `Diagnostic Server` rows; the release builds of 1.0 and later have
    neither row.
@@ -234,12 +239,12 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
 
 16. Bridge Properties: `Attention` ("None" when nothing needs you), `Last
     Action` (the result of your last click, continued on `Last Action (2)`
-    to `(6)` when long), `Room Mappings` and `Lights` ("47 on bridge, 0
-    imported, 0 new, 0 missing, 0 unbound, 47 deleted" today). Since
-    2026-10-24 `Room Mappings`, `Lights`, `Scenes` and `Zone Lights` are
-    drop-downs (`docs/status.md`, "Composer properties fit the column"):
-    the row shows the summary and the list every item, and a pick snaps
-    back to the summary. `Room Mappings` reads "<n> Hue rooms and zones;
+    to `(6)` when long), `Room Mappings` and `Lights` ("47 lights on bridge,
+    0 imported, 0 new, 47 deleted" today). Since 2026-10-24 `Room Mappings`,
+    `Lights`, `Scenes` and `Zone Lights` are drop-downs (`docs/status.md`,
+    "Composer properties fit the column"): the row shows the summary and the
+    list every item, and a pick snaps back to the summary. `Room Mappings`
+    reads "<n> Hue rooms and zones;
     <u> unmapped (open the list to read)", and its list holds one "<Hue
     room> → <Control4 room>" line each ("Dining → Dining", "Basement
     Hallway → (unmapped)", a zone ending "(zone)"). When this step was
@@ -333,16 +338,18 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
 device. Verified through the dev loop on 2026-10-21: the scene catalogue GET
 at every resync, recall and status events, the bridge's scene actions.
 
-25. Bridge Properties: `Scenes` "<n> + <t> time-based on bridge, <m>
-    imported, <d> deleted" once the stream has done its first full read
-    ("<m> imported" alone before; "<t>" is "?" until the time-based scenes
-    are read; "<g> missing" and "<u> unbound" appear only when not zero).
-    Written when it read "<n> on bridge, <m> imported, 0 missing, 0
+25. Bridge Properties: `Scenes` "<n> scenes + <t> time-based on bridge, <m>
+    imported, <w> new" once the stream has done its first full read, then ",
+    <g> missing", ", <u> unbound" and ", <d> deleted" when not 0 ("<m>
+    imported" alone before; "<t>" is "?" until the time-based scenes are
+    read). Written when it read "<n> on bridge, <m> imported, 0 missing, 0
     unbound, <d> deleted"; reworded 2026-10-24 (time-based scenes, build
-    180, and Composer's column). The Actions tab has Add Scene, Add All
-    Scenes Of Room, Re-link Scene, Forget Scene and Refresh Scenes between
-    Room Audit and Test Connection. **Done 2026-10-21** (the scene actions
-    run from Composer).
+    180, and Composer's column) and for #325 (one wording for the four list
+    rows; "<n> + <t> time-based on bridge, <m> imported, <d> deleted"
+    before, missing and unbound only when not zero). The Actions tab has Add
+    Scene, Add All Scenes Of Room, Re-link Scene, Forget Scene and Refresh
+    Scenes between Room Audit and Test Connection. **Done 2026-10-21** (the
+    scene actions run from Composer).
 26. **Add Scene**: the `Scene` list holds every scene without a device as
     "<Room>: <Scene>", zones as "<Zone> (zone): <Scene>", dynamic ones ending
     " (dynamic)", grouped by room, those deleted in Composer last; since
@@ -587,17 +594,17 @@ the drag in step 59 and the reboot in step 58):
     lights, scenes, zone lights and then motion (contract §4.4), and the
     rows are unchanged.
     - **Done:** open.
-52. **The bridge's new row and actions.** Properties has a `Motion
-    Sensors` row right after `Zone Lights`: one drop-down for sensors and
-    areas together. Paste its summary and the lines of its list. The house
-    has no sensor and no area, so expect the summary "0 sensors and 0
-    areas on the bridge; 0 added" ("0 added" alone until the first full
-    read after the install) and no line under it. The Actions tab has Add
-    Motion Sensor, Add Motion Area, Re-link Motion Device, Forget Motion
-    Device and Log Motion Diagnostics. Paste the full order of the tab, 27
-    buttons on a release build (22 before), so that the quick reference in
-    the manual's chapter 13 and the caption of its picture in chapter 5 can
-    follow it.
+52. **The bridge's new row and actions.** Properties has a `Motion Sensors`
+    row right after `Zone Lights`: one drop-down for sensors and areas
+    together. Paste its summary and the lines of its list. The house has no
+    sensor and no area, so expect the summary "0 sensors + 0 areas on
+    bridge, 0 imported, 0 new" ("0 imported" alone until the first full read
+    after the install; it read "0 sensors and 0 areas on the bridge; 0
+    added" before #325) and no line under it. The Actions tab has Add Motion
+    Sensor, Add Motion Area, Re-link Motion Device, Forget Motion Device and
+    Log Motion Diagnostics. Paste the full order of the tab, 27 buttons on a
+    release build (22 before), so that the quick reference in the manual's
+    chapter 13 and the caption of its picture in chapter 5 can follow it.
     - **Done:** open.
 53. **Add Motion Sensor and Add Motion Area with nothing to add** (EC §10
     item 4; EC B5). Open Add Motion Sensor and open its `Sensor` list:

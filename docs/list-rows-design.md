@@ -10,17 +10,19 @@ Status: contract, 2026-10-28 (#325). Asked for by the tester in #309. The rows a
 
 ## 2. The list rows (Lights, Scenes, Zone Lights, Motion Sensors)
 
-Every row's summary reads, with every count always present, even 0, and in this order:
+Every row's summary reads, in this order:
 
 `<what is on the bridge> on bridge, N imported, N new, N missing, N unbound, N deleted`
 
+- **Always present:** `<what is on the bridge> on bridge, N imported, N new`, even when a count is 0.
+- **Only when not 0:** `, N missing`, `, N unbound` and `, N deleted`, always in that order. Composer clips a row's value at about 75 characters, and with every count shown the house's Scenes, Zone Lights and Motion Sensors rows ran to 80 to 90. So the house reads `129 scenes + 15 time-based on bridge, 3 imported, 141 new` and `47 lights on bridge, 2 imported, 0 new, 45 deleted`; the motion row keeps its `; MotionAware not supported by this bridge` ending when it applies.
 - **What is on the bridge, by row:**
   - Lights: `47 lights`
   - Scenes: `129 scenes + 15 time-based`
   - Zone Lights: `7 zones + 16 rooms`
   - Motion Sensors: `6 sensors + 1 area`, with singular and plural as the counts say. On a bridge without MotionAware it is `6 sensors` and the row ends with `; MotionAware not supported by this bridge`.
 - **imported:** Control4 devices the module holds, the one word everywhere ("added" goes).
-- **new:** resources on the bridge that are neither imported nor deleted (tombstoned).
+- **new:** resources on the bridge that are neither imported nor deleted (tombstoned), and that the module's Add action would accept: for Zone Lights only the zones and rooms with lights, since Add Zone Light refuses an empty one.
 - **missing:** imported devices whose Hue resource is gone from the bridge.
 - **unbound:** imported devices no longer bound to the bridge.
 - **deleted:** devices deleted in Composer and remembered (tombstones).

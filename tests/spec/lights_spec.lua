@@ -255,7 +255,7 @@ describe("bridge.lights", function()
 				.. "Hallway Ambiance #3 to Living Room (device 2002), Living Room Lamp #1 to Living Room (device 2003); "
 				.. "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)" },
 				last_result())
-			assert.equal("4 on bridge, 3 imported, 1 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 3 imported, 1 new", L:summary())
 			assert.is_true(saw_log("one-time Map Rooms By Name"))
 		end)
 
@@ -532,7 +532,7 @@ describe("bridge.lights", function()
 			assert.equal(LIVING_ROOM, c4.added[4].room)
 			assert.same({ "HUE_CONFIGURE@2004", "HUE_STATE@2004" }, commands_sent())
 			assert.equal(LIVING_ROOM, L.registry[F.rids.kitchen].created_room_id)
-			assert.equal("4 on bridge, 4 imported, 0 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 4 imported, 0 new", L:summary())
 		end)
 
 		it("defaults to the mapped room of the light's Hue room", function()
@@ -696,7 +696,7 @@ describe("bridge.lights", function()
 			assert.same({ { rid = F.rids.garage, online = "false", reason = "resync" } },
 				{ sent_to(ID.garage, "HUE_STATE")[1].params })
 			assert.equal(1, #sent_to(ID.garage, "HUE_STATE"), "no full state for a light that is not there")
-			assert.equal("3 on bridge, 4 imported, 0 new, 1 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("3 lights on bridge, 4 imported, 0 new, 1 missing", L:summary())
 			assert.equal("1 light missing from the bridge: Garage White #4 (device 2001, since " .. os.date("%Y-%m-%d", T0 + 60)
 				.. ") (Re-link Device To Light or Forget Light)", L:attention())
 			assert.same({ "Garage White (device 2001, gone since " .. os.date("%m-%d", T0 + 60) .. ")" },
@@ -725,7 +725,7 @@ describe("bridge.lights", function()
 			-- Garage White was deleted and re-added in the Hue app: new rid, same radio.
 			logged = {}
 			resync(replaced_bulb())
-			assert.equal("4 on bridge, 4 imported, 1 new, 1 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 4 imported, 1 new, 1 missing", L:summary())
 			assert.is_true(saw_log("new light Garage White [Garage] #4 on the bridge; use Add Light or Import All New Lights; "
 				.. "it looks like Garage White #4 (device 2001): re-link?"))
 			assert.same({ "Garage White [Garage] #4 (looks like Garage White #4, device 2001; re-link?)" },
@@ -790,7 +790,7 @@ describe("bridge.lights", function()
 			assert.same({ "HUE_CONFIGURE@2001", "HUE_STATE@2001", "HUE_STATE@2004", "HUE_CONFIGURE@2003", "HUE_STATE@2003" },
 				commands_sent())
 			assert.equal("Garage", sent_to(ID.living, "HUE_CONFIGURE")[1].params.hue_room)
-			assert.equal("2 on bridge, 3 imported, 0 new, 1 missing, 0 unbound, 1 deleted", L:summary())
+			assert.equal("2 lights on bridge, 3 imported, 0 new, 1 missing, 1 deleted", L:summary())
 		end)
 	end)
 
@@ -864,7 +864,7 @@ describe("bridge.lights", function()
 			assert.equal(0, L:on_container(container(F.events.add)))
 			assert.equal(0, #c4.sent)
 			assert.equal(4, #c4.added)
-			assert.equal("5 on bridge, 4 imported, 1 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("5 lights on bridge, 4 imported, 1 new", L:summary())
 			assert.same({ { text = "New Bulb #5", value = NEW_BULB } }, L:picker_lights())
 			assert.equal("1 new light on the bridge: New Bulb #5 (Add Light or Import All New Lights)", L:attention())
 			assert.is_true(saw_log("new light New Bulb #5 on the bridge; use Add Light or Import All New Lights"))
@@ -886,7 +886,7 @@ describe("bridge.lights", function()
 			assert.equal(tostring(T0 + 5), c4.sent[1].params.gone_since)
 			assert.same({ rid = F.rids.garage, online = "false", reason = "event" }, c4.sent[2].params)
 			assert.is_nil(L.models[F.rids.garage])
-			assert.equal("3 on bridge, 4 imported, 0 new, 1 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("3 lights on bridge, 4 imported, 0 new, 1 missing", L:summary())
 			-- Idempotent.
 			c4.sent = {}
 			assert.equal(0, L:on_container(del))
@@ -1009,7 +1009,7 @@ describe("bridge.lights", function()
 			assert.equal(REPLACED, c4.sent[1].params.rid)
 			assert.is_nil(c4.sent[1].params.state)
 			assert.equal(REPLACED, c4.sent[2].params.rid)
-			assert.equal("4 on bridge, 4 imported, 0 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 4 imported, 0 new", L:summary())
 			assert.equal("None", L:attention())
 			assert.same({ "(no gone or unbound devices)" }, texts(L:picker_relink_devices()))
 			assert.equal(4, #c4.calls_to("Bind"), "the import's bindings only: untouched")
@@ -1253,7 +1253,7 @@ describe("bridge.lights", function()
 			assert.same({ { id = ID.garage, command = "HUE_FORGOTTEN",
 				params = { rid = F.rids.garage, name = "Garage White" } } }, c4.sent)
 			assert.same({ "Garage White [Garage] #4" }, texts(L:picker_lights()))
-			assert.equal("4 on bridge, 3 imported, 1 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 3 imported, 1 new", L:summary())
 			assert.truthy(fake.project.devices[ID.garage], "the device stays for the owner to delete")
 			-- The device is still in the project: the next import would add the
 			-- light again as a new device, which is the owner's call.
@@ -1681,7 +1681,7 @@ describe("bridge.lights", function()
 			assert.is_true(saw_log("device 2002 claims Garage White #4, which device 2001 holds"))
 			-- Forgetting (or deleting) either device ends the conflict.
 			L:forget(ID.hallway)
-			assert.equal("4 on bridge, 3 imported, 1 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 3 imported, 1 new", L:summary())
 			assert.equal("1 new light on the bridge: Hallway Ambiance [Living Room] #3 (Add Light or Import All New Lights)",
 				L:attention())
 
@@ -1746,7 +1746,7 @@ describe("bridge.lights", function()
 			assert.is_nil(L.registry[F.rids.garage])
 			assert.same(tomb, c4.persist.hue_tombstones[F.rids.garage])
 			assert.is_nil(c4.persist.hue_lights[F.rids.garage])
-			assert.equal("4 on bridge, 3 imported, 0 new, 0 missing, 0 unbound, 1 deleted", L:summary())
+			assert.equal("4 lights on bridge, 3 imported, 0 new, 1 deleted", L:summary())
 			assert.equal("None", L:attention(), "a deletion the owner made is not a nag")
 			assert.is_true(saw_log("Garage White #4 (device 2001) was deleted in Composer"))
 			local date = os.date("%Y-%m-%d", T0 + 100)
@@ -1796,7 +1796,7 @@ describe("bridge.lights", function()
 			assert.equal("unbound", entry.state)
 			assert.equal(T0 + 7, entry.unbound_since)
 			assert.equal("unbound", c4.persist.hue_lights[F.rids.garage].state)
-			assert.equal("4 on bridge, 4 imported, 0 new, 0 missing, 1 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 4 imported, 0 new, 1 unbound", L:summary())
 			assert.equal("1 unbound device: Garage White #4 (device 2001) (bind it to this bridge in Composer, or Forget Light)",
 				L:attention())
 			assert.same({ "Garage White (device 2001, unbound since " .. os.date("%m-%d", T0 + 7) .. ")" },
@@ -1941,7 +1941,23 @@ describe("bridge.lights", function()
 			L:load()
 			assert.equal("4 imported", L:summary())
 			resync()
-			assert.equal("4 on bridge, 4 imported, 0 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 4 imported, 0 new", L:summary())
+		end)
+
+		it("#325: the row's one wording: imported and new always, missing, unbound and deleted only when not 0, "
+			.. "singular and plural", function()
+			resync({ light = '{"errors":[],"data":[]}' })
+			assert.equal("0 lights on bridge, 0 imported, 0 new", L:summary())
+			resync({ light = lights_json({ "garage" }) })
+			assert.equal("1 light on bridge, 0 imported, 1 new", L:summary())
+			L:add_light(F.rids.garage, GARAGE_ROOM, done)
+			assert.equal("Added Garage White #4 to Garage (device 2001)", last_result().text)
+			assert.equal("1 light on bridge, 1 imported, 0 new", L:summary())
+			resync({ light = lights_json({ "garage", "kitchen" }) })
+			assert.equal("2 lights on bridge, 1 imported, 1 new", L:summary())
+			-- Deleted in Composer: the deleted count appears, the zero missing and unbound stay out.
+			assert.truthy(L:goodbye({ device_id = "2001" }))
+			assert.equal("2 lights on bridge, 0 imported, 1 new, 1 deleted", L:summary())
 		end)
 
 		it("attention nags about lights offline for more than 24 h [Q 8] and is None otherwise", function()
@@ -2062,7 +2078,7 @@ describe("bridge.lights", function()
 				"Living Room: Hallway Ambiance" .. deleted(T0 + 100),
 				"Living Room: Living Room Lamp → device 2003",
 			}, L:list_items())
-			assert.equal("3 on bridge, 3 imported, 0 new, 1 missing, 1 unbound, 1 deleted", L:summary())
+			assert.equal("3 lights on bridge, 3 imported, 0 new, 1 missing, 1 unbound, 1 deleted", L:summary())
 			-- Deleted on the bridge as well: a tombstone without a light is nothing to list.
 			resync({ light = lights_json({ "living", "kitchen" }) })
 			assert.same({
@@ -2178,7 +2194,7 @@ describe("bridge.lights", function()
 			assert.equal(0, #c4.sent)
 			assert.is_false(saw_log("is not bound to this bridge"))
 			assert.is_true(saw_log("lights: reconcile skipped: the bound-device lookup answered no list"))
-			assert.equal("4 on bridge, 4 imported, 0 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 4 imported, 0 new", L:summary())
 			-- Link Devices finds nothing to adopt either way and says so as before.
 			assert.equal("No devices are bound to this bridge", L:link_devices())
 
@@ -2257,7 +2273,7 @@ describe("bridge.lights", function()
 			assert.same({ rid = F.rids.kitchen, online = "false", reason = "resync" }, c4.sent[2].params)
 			assert.is_true(saw_log("Kitchen Strip #2 (device 2001) was deleted on the bridge while its device was being "
 				.. "added; marked gone (Re-link Device To Light or Forget Light)"))
-			assert.equal("3 on bridge, 1 imported, 3 new, 1 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("3 lights on bridge, 1 imported, 3 new, 1 missing", L:summary())
 			-- Its hello is answered with the gone configuration.
 			c4.sent = {}
 			assert.is_true(L:hello(nil, { device_id = "2001" }))
@@ -2362,7 +2378,7 @@ describe("bridge.lights", function()
 				sorted = sorted + 1
 				return unimported(...)
 			end
-			assert.equal("4 on bridge, 0 imported, 4 new, 0 missing, 0 unbound, 0 deleted", L:summary())
+			assert.equal("4 lights on bridge, 0 imported, 4 new", L:summary())
 			assert.equal(0, sorted)
 			assert.truthy(L:attention():find("^4 new lights on the bridge: Garage White %[Garage%] #4, "))
 			assert.equal(1, sorted)

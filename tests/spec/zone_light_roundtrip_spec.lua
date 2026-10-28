@@ -166,7 +166,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		-- The resync reads the groups' on/off and levels; nothing is created.
 		Z:resync()
 		answer_grouped_light_get()
-		assert.equal("2 zones, 2 rooms on bridge; 0 imported", Z:summary())
+		assert.equal("2 zones + 2 rooms on bridge, 0 imported, 3 new", Z:summary())
 		assert.equal(0, #bc4.added)
 
 		-- Add Zone Light for Downstairs with "(mapped room)": one AddDevice
@@ -188,7 +188,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		local st = sent_params(bc4, "HUE_STATE")
 		assert.equal("true", st.on)
 		assert.equal("73.52", st.brightness)
-		assert.equal("2 zones, 2 rooms on bridge; 1 imported", Z:summary())
+		assert.equal("2 zones + 2 rooms on bridge, 1 imported, 2 new", Z:summary())
 		assert.equal(GARAGE_ROOM, fake.project.devices[DEVICE_ID].room_id)
 
 		-- A second Add for the same zone is refused.
@@ -295,7 +295,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; re-link or Forget",
 			light.Properties["Status"])
 		assert.equal("Offline", light.Properties["Online"])
-		assert.equal("1 zone, 2 rooms on bridge; 1 imported, 1 missing", Z:summary())
+		assert.equal("1 zone + 2 rooms on bridge, 1 imported, 2 new, 1 missing", Z:summary())
 		assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", now)
 			.. ") (Re-link Zone Light or Forget Light)", Z:attention())
 		bc4.sent = {}
@@ -325,7 +325,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		fake.delete_device(DEVICE_ID)
 		assert.is_nil(bc4.persist.hue_zone_lights[F.group_rids.garage])
 		assert.equal("Garage", bc4.persist.hue_zone_light_tombstones[F.group_rids.garage].name)
-		assert.equal("1 zone, 2 rooms on bridge; 0 imported, 1 deleted", Z:summary())
+		assert.equal("1 zone + 2 rooms on bridge, 0 imported, 1 new, 1 deleted", Z:summary())
 		local list = Z:picker_groups()
 		assert.truthy(list[#list].text:find("^Garage %(room, 1 light%) %(deleted from Composer "))
 		results = {}

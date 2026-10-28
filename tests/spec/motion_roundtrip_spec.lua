@@ -276,7 +276,8 @@ describe("motion round trip", function()
 
 		it("adds a sensor and an area with the pickers' values; each hello is answered; motion opens and closes "
 			.. "them", function()
-			assert.equal("2 sensors and 1 area on the bridge; 0 added", bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 3 new",
+				bridge.Properties["Motion Sensors"])
 
 			-- Add Motion Sensor: one AddDevice of hue_motion.c4z into the room
 			-- the Hue room Hallway maps to, bound to the bridge's binding 1,
@@ -293,7 +294,8 @@ describe("motion round trip", function()
 				model = "Hue motion sensor (SML003)", hue_room = "Hallway", id_v1 = "/sensors/12", gone = "false",
 				has_light_level = "true", has_temperature = "true", has_battery = "true" },
 				last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE"))
-			assert.equal("2 sensors and 1 area on the bridge; 1 added", bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new",
+				bridge.Properties["Motion Sensors"])
 
 			-- The device comes up: its hello (no rid yet) is answered from its
 			-- device id with the configuration and the full state.
@@ -360,7 +362,8 @@ describe("motion round trip", function()
 			assert.same({ "OPENED", "CLOSED" }, contact(area))
 			assert.same({}, contact(sensor))
 			assert.same({}, messages_to(SENSOR_ID))
-			assert.equal("2 sensors and 1 area on the bridge; 2 added", bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 2 imported‚ 1 new",
+				bridge.Properties["Motion Sensors"])
 		end)
 
 		it("holds Hue's no motion for the device's Occupancy Hold Time before it closes (D10)", function()
@@ -404,7 +407,8 @@ describe("motion round trip", function()
 			assert.equal(since, sensor.Properties["Status"])
 			assert.equal("No", sensor.Properties["Online"])
 			-- (A list row: Composer splits the drop-down at commas, so "‚" stands for ",".)
-			assert.equal("1 sensor and 1 area on the bridge; 1 added‚ 1 missing", bridge.Properties["Motion Sensors"])
+			assert.equal("1 sensor + 1 area on bridge‚ 1 imported‚ 2 new‚ 1 missing",
+				bridge.Properties["Motion Sensors"])
 			assert.truthy(bridge.Properties["Attention"]:find("1 motion sensor missing from the bridge: Hallway sensor "
 				.. "(device 2001, since " .. os.date("%Y-%m-%d") .. ") (Re-link Motion Device or Forget Motion Device)", 1,
 				true), bridge.Properties["Attention"])
@@ -431,7 +435,8 @@ describe("motion round trip", function()
 			assert.same({ "OPENED", "CLOSED" }, contact(sensor))
 			assert.equal("Not bound to a Hue Bridge", sensor.Properties["Status"])
 			assert.equal("No", sensor.Properties["Online"])
-			assert.equal("2 sensors and 1 area on the bridge; 1 added‚ 1 unbound", bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new‚ 1 unbound",
+				bridge.Properties["Motion Sensors"])
 			assert.truthy(bridge.Properties["Attention"]:find("1 unbound motion device: Hallway sensor (device 2001) "
 				.. "(bind it to this bridge in Composer, or Forget Motion Device)", 1, true), bridge.Properties["Attention"])
 			bc4.sent = {}
@@ -446,13 +451,29 @@ describe("motion round trip", function()
 			assert.equal("false", last_sent(SENSOR_ID, "HUE_MOTION_STATE").motion)
 			assert.same({ "OPENED", "CLOSED" }, contact(sensor), "no motion, as it shows")
 			assert.equal("Hue motion sensor Hallway sensor in Hallway", sensor.Properties["Status"])
-			assert.equal("2 sensors and 1 area on the bridge; 1 added", bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new",
+				bridge.Properties["Motion Sensors"])
+		end)
+
+		it("#325: Import All New Motion Sensors, the bulk add's one name, imports every new sensor in a mapped room",
+			function()
+			local xml = assert(io.open("src/hue_bridge/driver.xml")):read("*a")
+			assert.truthy(xml:find("<action>%s*<name>Import All New Motion Sensors</name>%s*"
+				.. "<command>Import All New Motion Sensors</command>"))
+			assert.is_nil(xml:find("Add All New Motion Sensors", 1, true), "the old name is gone")
+			assert.equal("Added 1 new motion sensor: Hallway sensor #12 to Hallway (device 2001); skipped 1 with no mapped "
+				.. "room (Set Room Mapping or Add Motion Sensor): Porch sensor #20 (no Hue room); not included: 1 new "
+				.. "motion area (Add Motion Area adds areas one at a time)", action("Import All New Motion Sensors"))
+			assert.same({ { id = SENSOR_ID, driver = "hue_motion.c4z", room = HALLWAY, name = "Hallway sensor" } },
+				bc4.added)
 		end)
 
 		it("shows the sensors and areas in the Motion Sensors row, and a low battery in Attention", function()
-			assert.equal("2 sensors and 1 area on the bridge; 0 added", bridge.Properties["Motion Sensors"])
-			assert.equal("2 sensors and 1 area on the bridge; 0 added,Hallway sensor [Hallway] #12,Porch sensor #20,"
-				.. "Kitchen motion area (MotionAware) [Kitchen] #ac00", bc4.property_lists["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 3 new",
+				bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 3 new,"
+				.. "Hallway sensor [Hallway] #12,Porch sensor #20,Kitchen motion area (MotionAware) [Kitchen] #ac00",
+				bc4.property_lists["Motion Sensors"])
 			local attention = bridge.Properties["Attention"]
 			assert.truthy(attention:find("2 new motion sensors on the bridge: Hallway sensor [Hallway] #12, Porch sensor "
 				.. "#20 (Add Motion Sensor)", 1, true), attention)
@@ -460,9 +481,11 @@ describe("motion round trip", function()
 				.. "#ac00 (Add Motion Area)", 1, true), attention)
 
 			add_sensor()
-			assert.equal("2 sensors and 1 area on the bridge; 1 added", bridge.Properties["Motion Sensors"])
-			assert.equal("2 sensors and 1 area on the bridge; 1 added,Hallway sensor [Hallway] #12 → device 2001,"
-				.. "Porch sensor #20,Kitchen motion area (MotionAware) [Kitchen] #ac00", bc4.property_lists["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new",
+				bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new,"
+				.. "Hallway sensor [Hallway] #12 → device 2001,Porch sensor #20,"
+				.. "Kitchen motion area (MotionAware) [Kitchen] #ac00", bc4.property_lists["Motion Sensors"])
 			assert.is_nil(bridge.Properties["Attention"]:find("Hallway sensor", 1, true), "no longer new")
 
 			-- Seven weeks later the sensor's battery runs low (E12): the device
@@ -543,7 +566,8 @@ describe("motion round trip", function()
 				sensor.Properties["Last Action"])
 			assert.equal("No", sensor.Properties["Online"])
 			assert.same({}, contact(sensor))
-			assert.equal("1 sensor and 1 area on the bridge; 0 added", bridge.Properties["Motion Sensors"])
+			assert.equal("1 sensor + 1 area on bridge‚ 0 imported‚ 2 new",
+				bridge.Properties["Motion Sensors"])
 			assert.equal(M.devices.porch, pick("MotionSensorList", "Porch sensor").value)
 			assert.equal("(no motion device is gone or unbound)",
 				fake.custom_select(bridge, "RelinkMotionDeviceList")[1].text)
@@ -609,7 +633,8 @@ describe("motion round trip", function()
 			assert.is_nil(bc4.persist.hue_motion[M.devices.hallway])
 			assert.equal("Hallway sensor", bc4.persist.hue_motion_tombstones[M.devices.hallway].name)
 			assert.same({}, bc4.bindings)
-			assert.equal("2 sensors and 1 area on the bridge; 0 added‚ 1 deleted", bridge.Properties["Motion Sensors"])
+			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 2 new‚ 1 deleted",
+				bridge.Properties["Motion Sensors"])
 
 			local list = fake.custom_select(bridge, "MotionSensorList")
 			assert.same({ text = "Hallway sensor [Hallway] #12 (deleted from Composer " .. os.date("%Y-%m-%d") .. ")",
