@@ -15,6 +15,9 @@ listed.
 ## Unreleased
 
 ### Added
+- Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
+  and motion sensors from the bridge now, without needing the event stream
+  (#324).
 - Hue motion sensors and MotionAware areas (Hue Bridge Pro) as Control4
   motion sensors: a fourth driver, Hue Motion, with the stock motion
   programming, light level, temperature, battery and an occupancy hold time,

@@ -1053,6 +1053,28 @@ describe("Hue Bridge driver", function()
 			assert.same({}, keyed(c42), "another version (an upgraded OS) proves nothing")
 		end)
 
+		it("#324: Refresh All reads every module from the bridge with the stream not connected", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():done(28, "Timeout was reached") -- the stream never connects
+			local before = #c4.transfers
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh All" })
+			local paths = {}
+			for _ = 1, 30 do
+				local t = c4.transfers[#c4.transfers]
+				if #c4.transfers == before or t.answered then break end
+				paths[#paths + 1] = t.url:match("/clip/v2/resource/([%w_]+)") or t.url
+				t:respond(200, '{"errors":[],"data":[]}')
+				t.answered = true
+			end
+			assert.truthy(#paths >= 4, "one GET at a time through the chain: " .. table.concat(paths, ", "))
+			assert.equal("light", paths[1], "the lights first")
+			assert.truthy(table.concat(paths, ","):find("motion", 1, true), "the motion module last")
+			assert.truthy(env.Properties["Last Action"]:find("^Refreshed from the bridge: Lights: "),
+				env.Properties["Last Action"])
+		end)
+
 		it("confirms a REST 401/403 with one GET of the bridge resource before it locks", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")

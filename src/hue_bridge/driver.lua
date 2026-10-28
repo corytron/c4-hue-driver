@@ -703,6 +703,45 @@ local function new_group_queue()
 	})
 end
 
+-- Every module's resync, one GET at a time: at every stream connect, and
+-- from Refresh All (#324), which needs no stream. Runs from a timer or an
+-- action, never inside a transfer's callbacks. The scenes follow the lights
+-- (their catalogue GET is the large one, 351 KB on the house bridge, and
+-- their groups and room mappings come from the lights' resync), the zone
+-- lights the scenes (their grouped_light GET is small, and the scenes hand
+-- theirs on), the motion devices last (their sensors come from the lights'
+-- device cache, docs/motion-design.md §4.2); the owner-facing rows are
+-- refreshed after the lights and once more after the chain. done(failures)
+-- gets the list of "<part>: <error>" texts, empty when every part worked.
+local function resync_all(done)
+	local failures = {}
+	local function note(part, ok, err, sent)
+		if ok then
+			log.info("%s resync done: %d state messages", part, tonumber(sent) or 0)
+		else
+			log.warn("%s resync failed: %s", part, tostring(err))
+			failures[#failures + 1] = part .. ": " .. tostring(err)
+		end
+	end
+	state.lights:resync(function(ok, err, sent)
+		note("light", ok, err, sent)
+		refresh_lights_props()
+		state.scenes:resync(function(sok, serr, ssent, grouped)
+			note("scene", sok, serr, ssent)
+			state.zone_lights:resync(function(zok, zerr, zsent)
+				note("zone light", zok, zerr, zsent)
+				state.motion:resync(function(mok, merr, msent)
+					note("motion", mok, merr, msent)
+					refresh_lights_props()
+					if done then
+						done(failures)
+					end
+				end)
+			end, grouped)
+		end)
+	end)
+end
+
 local function new_stream()
 	return (use_netstream() and netstream or stream).new({
 		connection = stream_connection,
@@ -749,42 +788,7 @@ local function new_stream()
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
 			state.motion:on_stream_state(true)
-			state.lights:resync(function(ok, err, sent)
-				if ok then
-					log.info("resync done: %d state messages", tonumber(sent) or 0)
-				else
-					log.warn("resync failed: %s", tostring(err))
-				end
-				-- The lights' rows at once (the scene catalogue GET that
-				-- follows is the slow one), then once more after the chain.
-				refresh_lights_props()
-				-- The scenes hand their grouped_light items on, so the zone
-				-- lights skip their own GET of the same resource.
-				state.scenes:resync(function(sok, serr, ssent, grouped)
-					if sok then
-						log.info("scene resync done: %d state messages", tonumber(ssent) or 0)
-					else
-						log.warn("scene resync failed: %s", tostring(serr))
-					end
-					state.zone_lights:resync(function(zok, zerr, zsent)
-						if zok then
-							log.info("zone light resync done: %d state messages", tonumber(zsent) or 0)
-						else
-							log.warn("zone light resync failed: %s", tostring(zerr))
-						end
-						-- The motion devices last (docs/motion-design.md §4.2):
-						-- their sensors come from the lights' device cache.
-						state.motion:resync(function(mok, merr, msent)
-							if mok then
-								log.info("motion resync done: %d state messages", tonumber(msent) or 0)
-							else
-								log.warn("motion resync failed: %s", tostring(merr))
-							end
-							refresh_lights_props()
-						end)
-					end, grouped)
-				end)
-			end)
+			resync_all()
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
@@ -1905,6 +1909,20 @@ dispatch.commands["Forget_Scene"] = function(params)
 	end
 	local _, text = state.scenes:forget(device)
 	last_action(text)
+end
+
+-- Refresh All (#324): every list read from the bridge now, stream or not.
+dispatch.commands["Refresh_All"] = function()
+	if not can() then return end
+	resync_all(function(failures)
+		if #failures == 0 then
+			last_action(string.format("Refreshed from the bridge: Lights: %s | Scenes: %s | Zone lights: %s | Motion: %s",
+				tostring(state.lights:summary()), tostring(state.scenes:summary()),
+				tostring(state.zone_lights:summary()), tostring(state.motion:summary())))
+		else
+			last_action("Refresh All: " .. table.concat(failures, "; "))
+		end
+	end)
 end
 
 dispatch.commands["Refresh_Scenes"] = function()
