@@ -26,6 +26,13 @@
 5. **No `<capabilities>` change,** and no `<connection>` in `driver.xml` (the connection is dynamic), so an update needs no reboot.
 6. **Hardware.** The unknowns of §5 are tested through the dev loop on the house in order 1 → 9 before beta 6, and the results are recorded in §5. If test 2 (`CACERTFILE` and `peer`) cannot be made to work, ship with **Web transfer** as the default until it does, and report that. Never ship `VERIFY_MODE = "none"`.
 
+## 0.2 Results on the house (2026-10-27, OS 3.4.3, Bridge Pro)
+
+- **Tests 1–2 and 5–6 of §5:** build 413. The stream connected about 3 s after the install, with `VERIFY_MODE = "peer"` and `CACERTFILE` = the bundle. Events arrived live, and lamp commands were confirmed in under 250 ms while the stream was open.
+- **Test 3, verification is real,** through `bridge/netcheck.lua`. A refused handshake is **silent**: Director reports neither ONLINE nor OFFLINE. So the check needs a positive control, and each probe on a binding id that was **never used before**. A reused id is only renamed by Director, and then either inherits the old connection (build 415: the "decoy" answered 43 ms after ONLINE) or does nothing (build 416).
+  - Build 418: the decoy on a fresh 6100 was registered, then silent; the real CA on a fresh 6101 went online in 182 ms and answered. The verdict was pinned, and the stream connected on 6001.
+  - A later reconnect used the remembered verdict: no probe, connected in 0.5 s.
+
 ## 0.1 Who writes what
 
 | Files | Owner |
