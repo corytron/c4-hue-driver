@@ -162,6 +162,9 @@ are dated research; what was built from them is in the contracts and
 - [`relative-level-design.md`](relative-level-design.md): the Hue Light's
   Raise Level By and Restore Saved Level programming commands (2026-10-26,
   #297), for motion programming that raises lamps and puts them back.
+- [`list-rows-design.md`](list-rows-design.md): one wording for the bridge's
+  bulk actions (Import All New …) and one format for its four list rows
+  (2026-10-28, #325).
 - [`prerelease-design.md`](prerelease-design.md): prereleases for testers
   (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
   from `main` like every release, their notes, the one list of packages, the

@@ -23,7 +23,7 @@ listed.
   programming, light level, temperature, battery and an occupancy hold time,
   added from the bridge's Add Motion Sensor and Add Motion Area actions, and
   a Log Motion Diagnostics action for testers (#268).
-- Add All New Motion Sensors: one click adds every Hue motion sensor not
+- Import All New Motion Sensors: one click adds every Hue motion sensor not
   added yet to the Control4 room its Hue room maps to, and lists the ones it
   skips (#319).
 - Two programming commands on every Hue Light device: Raise Level By
@@ -41,6 +41,10 @@ listed.
   played. This changes existing scene keypads after the update (#310).
 
 ### Changed
+- One wording on the Hue Bridge's Lights, Scenes, Zone Lights and Motion
+  Sensors rows: "… on bridge, N imported, N new", then the missing, unbound
+  and deleted counts when there are any; the bulk add of motion sensors is
+  named like the lights' one (#325).
 - The manual says what to do when a device's Documentation tab still shows
   the page of the build before right after an update: select the device
   again (#260).

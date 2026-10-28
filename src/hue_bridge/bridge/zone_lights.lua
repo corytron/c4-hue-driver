@@ -1392,28 +1392,30 @@ end
 
 -- Texts ---------------------------------------------------------------------------
 
--- The Zone Lights property: "7 zones, 16 rooms on bridge; 1 imported" with
--- ", n missing" / ", n unbound" / ", n deleted" appended only when not zero
--- (under 60 characters for the usual counts); "<n> imported" before the
--- groups are fetched.
+-- The zones and rooms Add Zone Light would accept: on the bridge with
+-- lights (a grouped_light), no device, not deleted in Composer. The Zone
+-- Lights row's "new" (docs/list-rows-design.md); an empty zone is not new.
+function zone_lights:new_count()
+	local tombs, n = self.reg:tombstones(), 0
+	for _, group in ipairs(self:groups():groups()) do
+		if not self.registry[group.rid] and tombs[group.rid] == nil and self:grouped_light_of(group.rid) ~= nil then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- The Zone Lights row (owner:row_summary, docs/list-rows-design.md): "7
+-- zones + 16 rooms on bridge, 1 imported, 22 new", then ", n missing", ", n
+-- unbound", ", n deleted" when not 0; "<n> imported" before the groups are
+-- fetched.
 function zone_lights:summary()
 	if not self:groups_loaded() then
-		return string.format("%d imported", self:count())
+		return self:row_summary()
 	end
-	local cache = self:groups()
-	local c = self.reg:counts()
-	local text = string.format("%s, %s on bridge; %d imported", util.plural(#cache:groups("zone"), "zone"),
-		util.plural(#cache:groups("room"), "room"), self:count())
-	if c.gone > 0 then
-		text = text .. string.format(", %d missing", c.gone)
-	end
-	if c.unbound > 0 then
-		text = text .. string.format(", %d unbound", c.unbound)
-	end
-	if c.tombstones > 0 then
-		text = text .. string.format(", %d deleted", c.tombstones)
-	end
-	return text
+	local on_bridge = self:groups():counts()
+	return self:row_summary(string.format("%s + %s", util.plural(on_bridge.zone or 0, "zone"),
+		util.plural(on_bridge.room or 0, "room")), self:new_count())
 end
 
 -- The Attention items (driver.lua joins them after the lights' and the

@@ -1630,15 +1630,15 @@ end
 
 -- Texts (§6) -----------------------------------------------------------------------
 
--- The Lights property: "47 on bridge, 47 imported, 2 new, 1 missing, 0
--- unbound, 1 deleted"; "<n> imported" before the first full GET.
+-- The Lights row (owner:row_summary, docs/list-rows-design.md): "47 lights
+-- on bridge, 45 imported, 2 new, 1 missing, 1 deleted" (missing, unbound and
+-- deleted only when not 0), new as new_count() counts it; "<n> imported"
+-- before the first full GET.
 function lights:summary()
 	if not self.synced then
-		return string.format("%d imported", self:count())
+		return self:row_summary()
 	end
-	local c = self.reg:counts()
-	return string.format("%d on bridge, %d imported, %d new, %d missing, %d unbound, %d deleted", self:bridge_count(),
-		self:count(), self:new_count(), c.gone, c.unbound, c.tombstones)
+	return self:row_summary(plural(self:bridge_count(), "light"), self:new_count())
 end
 
 -- How Attention names a claimed rid: "light Desk Lamp #12" (its entry),

@@ -1811,10 +1811,11 @@ dispatch.commands["Add_Motion_Sensor"] = function(params)
 	state.motion:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
 end
 
--- Every new sensor into the room its Hue room maps to; the rest listed (#319).
-dispatch.commands["Add_All_New_Motion_Sensors"] = function()
+-- Every new sensor into the room its Hue room maps to; the rest listed (#319;
+-- Add All New Motion Sensors until #325).
+dispatch.commands["Import_All_New_Motion_Sensors"] = function()
 	if can() then
-		state.motion:add_all_new(function(_, text) last_action(text) end)
+		state.motion:import_new(function(_, text) last_action(text) end)
 	end
 end
 

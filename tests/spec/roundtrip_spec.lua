@@ -126,7 +126,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(9, answer_resource_gets(bridge, 1))
 		assert.equal(0, #bc4.sent, "nothing registered yet")
 		-- List rows carry "‚" for "," (Composer splits a list at commas).
-		assert.equal("4 on bridge‚ 0 imported‚ 4 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
+		assert.equal("4 lights on bridge‚ 0 imported‚ 4 new", bridge.Properties["Lights"])
 		-- Room Mappings is a drop-down: the row shows the summary, the list
 		-- one mapping per line, and a pick in Composer snaps back.
 		local summary = "4 Hue rooms and zones; 2 unmapped (open the list to read)"
@@ -152,7 +152,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(LIVING_ROOM, bc4.added[3].room)
 		assert.equal(LIVING_ID, bc4.added[3].id)
 		assert.equal(3, #bc4.bindings)
-		assert.equal("4 on bridge‚ 3 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
+		assert.equal("4 lights on bridge‚ 3 imported‚ 1 new", bridge.Properties["Lights"])
 		-- A long Last Action is word-wrapped onto the continuation rows,
 		-- which are shown only while used; fake.last_action joins them.
 		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001), Hallway Ambiance #3 to Living Room "
@@ -274,7 +274,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		fake.delete_device(LIVING_ID)
 		assert.is_nil(bc4.persist.hue_lights[F.rids.living])
 		assert.equal("Living Room Lamp", bc4.persist.hue_tombstones[F.rids.living].name)
-		assert.equal("4 on bridge‚ 2 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 1 deleted", bridge.Properties["Lights"])
+		assert.equal("4 lights on bridge‚ 2 imported‚ 1 new‚ 1 deleted", bridge.Properties["Lights"])
 		local list = fake.custom_select(bridge, "HueLightList")
 		assert.equal(2, #list)
 		assert.equal(F.rids.kitchen, list[1].value)
@@ -287,6 +287,6 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(GARAGE_ROOM, bc4.added[4].room, "the mapped room of its new Hue room")
 		assert.is_nil(bc4.persist.hue_tombstones[F.rids.living])
 		assert.equal(2004, bc4.persist.hue_lights[F.rids.living].device_id)
-		assert.equal("4 on bridge‚ 3 imported‚ 1 new‚ 0 missing‚ 0 unbound‚ 0 deleted", bridge.Properties["Lights"])
+		assert.equal("4 lights on bridge‚ 3 imported‚ 1 new", bridge.Properties["Lights"])
 	end)
 end)

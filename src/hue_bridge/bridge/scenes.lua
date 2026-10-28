@@ -2235,31 +2235,32 @@ end
 
 -- Texts ---------------------------------------------------------------------------
 
--- The Scenes property: "125 scenes and 15 time-based on bridge, 3 imported,
--- 0 missing, 0 unbound, 0 deleted", the devices of both kinds counted
--- together (docs/smart-scenes-design.md Decision 14); "?" time-based until a
+-- Scenes of both kinds on the bridge with no device and not deleted in
+-- Composer: the Scenes row's "new" (docs/list-rows-design.md), counted
+-- without building or sorting unimported_scenes().
+function scenes:new_count()
+	local tombs, n = self.reg:tombstones(), 0
+	for _, catalogue in ipairs({ self.catalogue, self.smart_catalogue }) do
+		for rid in pairs(catalogue) do
+			if not self.registry[rid] and tombs[rid] == nil then
+				n = n + 1
+			end
+		end
+	end
+	return n
+end
+
+-- The Scenes row (owner:row_summary, docs/list-rows-design.md): "129 scenes
+-- + 15 time-based on bridge, 3 imported, 141 new" (missing, unbound and
+-- deleted only when not 0), the scenes of both kinds counted together in
+-- every count (docs/smart-scenes-design.md Decision 14); "? time-based" until a
 -- /smart_scene GET has succeeded; "<n> imported" before the first GET.
 function scenes:summary()
 	if not self.synced then
-		return string.format("%d imported", self:count())
+		return self:row_summary()
 	end
-	local c = self.reg:counts()
-	-- Short enough for Composer's value column (about 75 characters, no
-	-- wrapping): missing and unbound appear only when not zero; Attention
-	-- lists them then.
-	local parts = {
-		string.format("%d + %s time-based on bridge", self:bridge_count(),
-			self.smart_synced and tostring(self:smart_count()) or "?"),
-		string.format("%d imported", self:count()),
-	}
-	if c.gone > 0 then
-		parts[#parts + 1] = string.format("%d missing", c.gone)
-	end
-	if c.unbound > 0 then
-		parts[#parts + 1] = string.format("%d unbound", c.unbound)
-	end
-	parts[#parts + 1] = string.format("%d deleted", c.tombstones)
-	return table.concat(parts, ", ")
+	return self:row_summary(string.format("%s + %s time-based", util.plural(self:bridge_count(), "scene"),
+		self.smart_synced and tostring(self:smart_count()) or "?"), self:new_count())
 end
 
 -- The Attention items (driver.lua joins them after the lights') are

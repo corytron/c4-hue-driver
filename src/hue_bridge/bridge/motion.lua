@@ -67,9 +67,10 @@
 --   m:add(rid, room_id, done)       Add Motion Sensor / Add Motion Area: one AddDevice into room_id
 --                                   (nil: the Hue room's mapping); done(ok, text) once; returns true
 --                                   when the AddDevice was started
---   m:add_all_new(done)             Add All New Motion Sensors (#319): one AddDevice per sensor without a
---                                   device, into the room its Hue room maps to, one at a time; the rest
---                                   listed, never an area; done(ok, text) once; returns true when it ran
+--   m:import_new(done)              Import All New Motion Sensors (#319; named Add All New Motion Sensors
+--                                   until #325): one AddDevice per sensor without a device, into the room
+--                                   its Hue room maps to, one at a time; the rest listed, never an area;
+--                                   done(ok, text) once; returns true when it ran
 --   m:relink(device_id, rid)        Re-link Motion Device; a sensor's device takes a sensor, an
 --                                   area's an area (D4); returns ok, text
 --   m:forget(device_id)             Forget Motion Device; returns ok, text
@@ -80,7 +81,8 @@
 --                                   with value "" when there is nothing to pick
 --   m:picker_relink_devices()       the gone, unbound and long-unreachable devices; {} when none
 --   m:picker_forget_devices()       every registered device, or one placeholder entry
---   m:summary()                     the Motion Sensors row: "2 sensors and 1 area on the bridge; 1 added"
+--   m:summary()                     the Motion Sensors row: "2 sensors + 1 area on bridge, 1 imported, 2 new"
+--                                   and any missing, unbound or deleted count (owner:row_summary, #325)
 --   m:list_items()                  its drop-down: one line per sensor and area, commas made "‚"
 --
 -- ctx fields (all but http optional; driver.lua's module_ctx gives the rest):
@@ -2077,7 +2079,7 @@ function motion:add(rid, room_id, done)
 	return true
 end
 
--- Add All New Motion Sensors (#319) ---------------------------------------------------------------------
+-- Import All New Motion Sensors (#319, #325) -------------------------------------------------------------
 
 -- "Hallway sensor #12": a sensor by its Hue name and number, without its
 -- room, as the bulk add's text names one (the lights' "Garage White #4"); an
@@ -2090,7 +2092,7 @@ local function short_label(record)
 	return name
 end
 
--- Add All New Motion Sensors: Import All New Lights for the motion sensors
+-- Import All New Motion Sensors: Import All New Lights for the motion sensors
 -- (docs/import-design.md §6 and its Q 1 and Q 4; EC §7). One AddDevice per
 -- sensor without a device, into the Control4 room its Hue room maps to (the
 -- lights' room mappings), in name order and one at a time through the
@@ -2109,7 +2111,7 @@ end
 -- rid; it never renames, moves or rebinds a device. done(ok, text) once,
 -- ok false when it was refused, an AddDevice failed or the run stopped
 -- early (what it created is kept); returns true when it ran.
-function motion:add_all_new(done)
+function motion:import_new(done)
 	done = done or function() end
 	local busy = self:busy_text()
 	if busy then
@@ -2157,13 +2159,14 @@ function motion:add_all_new(done)
 			parts[#parts + 1] = string.format("Added %s: %s", util.plural(#created, "new motion sensor"),
 				table.concat(names, ", "))
 		elseif #jobs == 0 and #replacing == 0 and #unmapped == 0 and #deleted == 0 then
-			local added = 0
+			local imported = 0
 			for _, entry in pairs(self.registry) do
 				if kind_of(entry) == "sensor" then
-					added = added + 1
+					imported = imported + 1
 				end
 			end
-			parts[#parts + 1] = string.format("No new motion sensors on the bridge (%d on bridge, %d added)", on_bridge, added)
+			parts[#parts + 1] = string.format("No new motion sensors on the bridge (%d on bridge, %d imported)", on_bridge,
+				imported)
 		else
 			parts[#parts + 1] = "Added no motion sensors"
 		end
@@ -2203,7 +2206,7 @@ function motion:add_all_new(done)
 		self:flush()
 		local text = summary(created, failed, err)
 		self.ctx.log.always("motion: %s", text)
-		self:protect("add_all_new done", done, err == nil and #failed == 0, text)
+		self:protect("import_new done", done, err == nil and #failed == 0, text)
 		self:run_pending_resync()
 	end)
 	return true
@@ -2211,7 +2214,7 @@ end
 
 -- New on the bridge, and re-link hints (S1, S4, S6, A1, A13) -------------------------------------------
 
--- The sensors and areas of `kind` not added and not deleted from Composer.
+-- The sensors and areas of `kind` not imported and not deleted from Composer.
 function motion:new_records(kind)
 	local out, tombs = {}, self.reg:tombstones()
 	for _, record in ipairs(sorted(kind == "area" and self.area_records or self.sensor_records)) do
@@ -2220,6 +2223,20 @@ function motion:new_records(kind)
 		end
 	end
 	return out
+end
+
+-- #new_records("sensor") + #new_records("area") without building or sorting
+-- the lists: the Motion Sensors row's "new" (docs/list-rows-design.md).
+function motion:new_count()
+	local tombs, n = self.reg:tombstones(), 0
+	for _, records in ipairs({ self.sensor_records, self.area_records }) do
+		for _, record in pairs(records) do
+			if not self.registry[record.rid] and tombs[record.rid] == nil and self:addable(record) then
+				n = n + 1
+			end
+		end
+	end
+	return n
 end
 
 -- Whether a linked sensor has been unreachable for an hour (S9; EC §8 item 8).
@@ -2467,10 +2484,11 @@ function motion:picker(kind)
 	end
 	if #hinted == 0 then
 		if kind == "area" then
-			return util.empty_list(any and "(every MotionAware area on the bridge is added)"
+			return util.empty_list(any and "(every MotionAware area on the bridge is imported)"
 				or "(no MotionAware areas on the bridge)")
 		end
-		return util.empty_list(any and "(every motion sensor on the bridge is added)" or "(no motion sensors on the bridge)")
+		return util.empty_list(any and "(every motion sensor on the bridge is imported)"
+			or "(no motion sensors on the bridge)")
 	end
 	return hinted
 end
@@ -2492,13 +2510,15 @@ end
 
 -- Texts ------------------------------------------------------------------------------------------
 
--- The Motion Sensors row: "2 sensors and 1 area on the bridge; 1 added",
--- with ", n missing" / ", n unbound" / ", n deleted" when not zero, and
--- "; MotionAware not supported by this bridge" without the area types;
--- "<n> added" before the sensors are fetched.
+-- The Motion Sensors row (owner:row_summary, docs/list-rows-design.md): "2
+-- sensors + 1 area on bridge, 1 imported, 2 new" (missing, unbound and
+-- deleted only when not 0), sensors and areas counted together in every
+-- count; "? areas" until the area types have answered; on a bridge without
+-- them "2 sensors on bridge, …" ending in "; MotionAware not supported by
+-- this bridge"; "<n> imported" before the sensors are fetched.
 function motion:summary()
 	if not (self.got.motion and self:devices_loaded()) then
-		return string.format("%d added", self:count())
+		return self:row_summary()
 	end
 	local sensors, areas = 0, 0
 	for _, record in pairs(self.sensor_records) do
@@ -2509,29 +2529,15 @@ function motion:summary()
 	for _ in pairs(self.area_records) do
 		areas = areas + 1
 	end
-	local text
+	local what = util.plural(sensors, "sensor")
 	if self.areas_supported == false then
-		text = string.format("%s on the bridge; %d added", util.plural(sensors, "sensor"), self:count())
+		return self:row_summary(what, self:new_count()) .. "; MotionAware not supported by this bridge"
 	elseif self.got[motion.CONFIG_TYPE] then
-		text = string.format("%s and %s on the bridge; %d added", util.plural(sensors, "sensor"), util.plural(areas, "area"),
-			self:count())
+		what = what .. " + " .. util.plural(areas, "area")
 	else
-		text = string.format("%s and ? areas on the bridge; %d added", util.plural(sensors, "sensor"), self:count())
+		what = what .. " + ? areas"
 	end
-	local c = self.reg:counts()
-	if c.gone > 0 then
-		text = text .. string.format(", %d missing", c.gone)
-	end
-	if c.unbound > 0 then
-		text = text .. string.format(", %d unbound", c.unbound)
-	end
-	if c.tombstones > 0 then
-		text = text .. string.format(", %d deleted", c.tombstones)
-	end
-	if self.areas_supported == false then
-		text = text .. "; MotionAware not supported by this bridge"
-	end
-	return text
+	return self:row_summary(what, self:new_count())
 end
 
 local function entry_suffix(entry)
@@ -2544,7 +2550,7 @@ local function entry_suffix(entry)
 end
 
 -- The Motion Sensors drop-down: every sensor then every area on the bridge
--- as the pickers label them, with " → device N" when added, " (unbound;
+-- as the pickers label them, with " → device N" when imported, " (unbound;
 -- device N)", " (deleted from Composer <date>)"; then the registered ones
 -- the bridge lacks, "(missing; device N)". Commas become "‚" (U+201A): the
 -- list is comma-delimited.

@@ -450,8 +450,8 @@
 				</params>
 			</action>
 			<action>
-				<name>Add All New Motion Sensors</name>
-				<command>Add All New Motion Sensors</command>
+				<name>Import All New Motion Sensors</name>
+				<command>Import All New Motion Sensors</command>
 				<sort_order>21</sort_order>
 				<params/>
 			</action>

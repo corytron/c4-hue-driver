@@ -7,7 +7,8 @@
 -- configuration and state plumbing, hello / goodbye / binding changes and
 -- the project-side reconcile, the busy flags and the pending resyncs, room
 -- resolution, device creation, the names trio, the Attention items, the
--- relink / forget pickers, Re-link, Forget and Link Devices.
+-- relink / forget pickers, Re-link, Forget and Link Devices, and the one
+-- wording of the list rows' summaries (row_summary, #325).
 --
 -- Mechanism (slim-scenes-zones §4 Q7): a mixin. Each module sets
 -- `setmetatable(module, { __index = owner })`, so an instance (whose
@@ -298,6 +299,31 @@ function owner:count()
 		n = n + 1
 	end
 	return n
+end
+
+-- A list row's summary (Lights, Scenes, Zone Lights, Motion Sensors; one
+-- wording for the four, docs/list-rows-design.md, #325): `what` is what is
+-- on the bridge ("47 lights"), `new` the module's count of the resources on
+-- the bridge it could add, neither imported nor deleted in Composer.
+-- Imported and new always appear; missing, unbound and deleted follow in
+-- that order only when not 0, so the row fits Composer's value column
+-- (about 75 characters): "47 lights on bridge, 2 imported, 0 new, 45
+-- deleted". Imported is every device the module holds, missing those whose
+-- resource is gone, unbound those no longer bound to the bridge, deleted the
+-- tombstones. With no `what` (the module has not read the bridge yet) the
+-- row is "<n> imported" alone.
+function owner:row_summary(what, new)
+	if what == nil then
+		return string.format("%d imported", self:count())
+	end
+	local c = self.reg:counts()
+	local text = string.format("%s on bridge, %d imported, %d new", tostring(what), self:count(), tonumber(new) or 0)
+	for _, part in ipairs({ { c.gone, "missing" }, { c.unbound, "unbound" }, { c.tombstones, "deleted" } }) do
+		if part[1] > 0 then
+			text = text .. string.format(", %d %s", part[1], part[2])
+		end
+	end
+	return text
 end
 
 -- Messages -----------------------------------------------------------------------
