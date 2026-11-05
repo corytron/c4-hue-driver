@@ -249,7 +249,7 @@ Actions (all plain `LUA_ACTION`s; the two with pickers carry
 | Action | Params | Does |
 | --- | --- | --- |
 | `Add Light` | `Light` (unimported + tombstoned rids), `Room` (Control4 rooms, default "(mapped room)") | one `AddDevice` into the chosen room; mapping only pre-selects [Q 9]; clears a tombstone |
-| `Import All New Lights` (renames `Import Lights`) | — | every unimported, non-tombstoned rid into its mapped room; **skips** lights whose Hue room is unmapped and lists them in `Last Action` [Q 1]; idempotent by rid; never renames, moves or rebinds |
+| `Import All New Lights` (renames `Import Lights`) | — | every unimported, non-tombstoned rid into its mapped room; **skips** lights whose Hue room is unmapped and lists them in `Last Action` [Q 1]; since #344 (2026-11-05) also **skips** a light that looks like the replacement of a gone or unbound device (`relink_hint`: same MAC, else same name) and lists it for Re-link; idempotent by rid; never renames, moves or rebinds |
 | `Re-link Device To Light` | `Device` (gone + unbound entries), `Light` (unimported rids) | swaps the rid in the entry; `HUE_CONFIGURE` with the new caps; device, name, room, bindings, programming untouched |
 | `Link Devices` | — | adopts bound `hue_light` devices the registry lacks: by the rid they announce, else by exact unique name; reports each |
 | `Forget Light` | `Device` (any entry) | removes the entry, `C4:Unbind(device, 1)` [verified: API 9/_19], sends `HUE_FORGOTTEN`; the device stays for the owner to delete; the rid returns to `Add Light` |

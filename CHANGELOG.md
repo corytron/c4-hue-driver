@@ -56,6 +56,16 @@ listed.
   the three drivers of the latest release (#266).
 
 ### Fixed
+- Import All New Lights no longer adds a light that looks like the
+  replacement of a gone or unbound Hue Light device (the same radio
+  hardware or the same name) as a second device: it leaves it out and lists
+  it for Re-link Device To Light, as Import All New Motion Sensors already
+  did (#344).
+- The Hue Bridge manual no longer asks for a bridge address with a number
+  below 8: since 1.1 beta 6 the event stream has its own network
+  connection and any address works; the advice now applies only to the
+  Web transfer fallback. Its action counts now match a release build: 29
+  on the Hue Bridge (#344).
 - On a controller where other drivers keep web transfers open, every Hue
   command and read timed out while the event feed was connected. The feed
   now uses a network connection of its own (a new Event Stream Transport
