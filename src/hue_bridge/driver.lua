@@ -1380,6 +1380,11 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 			state.stream_paused_by_address = (state.stream and state.stream:running()) or nil
 			restart_stream()
 		end
+		-- A driver that was never paired opens the pairing window as soon as
+		-- an address is entered (contract §1.2, action 1).
+		if ip and not paired() and not (state.creds and state.creds.bridge_id) and not state.pair_until then
+			dispatch.commands["Pair_Bridge"]()
+		end
 	end
 end
 
@@ -1401,17 +1406,32 @@ end
 
 -- Actions ------------------------------------------------------------------
 
-dispatch.commands["Pair_Bridge"] = function()
-	if not state.ip then
-		prop("Status", "Enter the bridge IP address first")
-		return
+-- Pair Bridge waits up to PAIR_WINDOW_S for the link button (contract §1.2,
+-- action 1): while the bridge answers "link button not pressed", the key is
+-- asked for again every PAIR_RETRY_MS and Status counts down.
+local PAIR_WINDOW_S = 120
+local PAIR_RETRY_MS = 3000
+local pair_timer = nil
+
+local function close_pairing_window()
+	if pair_timer then
+		pair_timer:Cancel()
+		pair_timer = nil
 	end
-	prop("Status", "Pairing: contacting bridge")
+	state.pair_until = nil
+	state.pairing_active = false
+end
+
+local function pair_attempt(first)
+	if first then
+		prop("Status", "Pairing: contacting bridge")
+	end
 	state.pairing_active = true
 	local gen = state.address_gen
 	local function stale()
 		if gen ~= state.address_gen then
 			log.info("pairing result for an earlier bridge address ignored")
+			close_pairing_window()
 			return true
 		end
 	end
@@ -1423,16 +1443,30 @@ dispatch.commands["Pair_Bridge"] = function()
 		on_probed = function(info)
 			if stale() then return end
 			show_bridge_info(info)
-			prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
-				info.bridge_id))
+			if first then
+				prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
+					info.bridge_id))
+			end
 		end,
 		on_link_button = function()
-			state.pairing_active = false
 			if stale() then return end
-			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
+			local left = math.ceil(((state.pair_until or 0) - C4:GetTime()) / 1000)
+			if left <= 0 then
+				close_pairing_window()
+				return prop("Status", "Pairing window closed: press the link button on the Hue bridge, then run "
+					.. "Pair Bridge again")
+			end
+			prop("Status", string.format("Press the link button on the Hue bridge (waiting %d:%02d)",
+				math.floor(left / 60), left % 60))
+			pair_timer = C4:SetTimer(PAIR_RETRY_MS, function()
+				pair_timer = nil
+				if state.pair_until then
+					pair_attempt(false)
+				end
+			end)
 		end,
 		on_paired = function(creds)
-			state.pairing_active = false
+			close_pairing_window()
 			if stale() then return end
 			local previous_id = state.creds and state.creds.bridge_id
 			-- Use the in-memory result: the store writes on its own thread
@@ -1454,11 +1488,21 @@ dispatch.commands["Pair_Bridge"] = function()
 			choose_stream_address(function() restart_stream(true) end)
 		end,
 		on_error = function(message)
-			state.pairing_active = false
+			close_pairing_window()
 			if stale() then return end
 			prop("Status", "Pairing failed: " .. message)
 		end,
 	}, paired_id)
+end
+
+dispatch.commands["Pair_Bridge"] = function()
+	if not state.ip then
+		prop("Status", "Enter the bridge IP address first")
+		return
+	end
+	close_pairing_window()
+	state.pair_until = C4:GetTime() + PAIR_WINDOW_S * 1000
+	pair_attempt(true)
 end
 
 -- GET /clip/v2/resource/bridge with the key via `host` (the dotted address;
@@ -2259,6 +2303,7 @@ dispatch.commands["Disconnect_Event_Stream"] = function()
 end
 
 dispatch.commands["Forget_Pairing"] = function()
+	close_pairing_window()
 	if state.hk then
 		state.hk:reset(state.address_gen, true)
 	end
@@ -2667,8 +2712,10 @@ local function pick_bridge(item)
 		return last_action(string.format("Bridge IP Address set to %s, where the paired bridge answers", item.ip))
 	end
 	set_bridge_address(item.ip)
-	last_action("Bridge IP Address set to " .. tostring(item.ip) .. ": pairing")
-	dispatch.commands["Pair_Bridge"]()
+	last_action("Bridge IP Address set to " .. tostring(item.ip) .. ": press the link button on the Hue bridge")
+	if not state.pair_until then
+		dispatch.commands["Pair_Bridge"]()
+	end
 end
 
 dispatch.properties["Bridges_Found"] = function(value)
@@ -2902,6 +2949,7 @@ function OnDriverLateInit(dit)
 end
 
 function OnDriverDestroyed()
+	close_pairing_window()
 	if state.hk then
 		state.hk:stop()
 	end

@@ -80,13 +80,98 @@ describe("Hue Bridge driver", function()
 		assert.equal(0, #c4.transfers)
 	end)
 
-	it("asks for pairing once a valid IP is entered", function()
-		local env = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+	it("opens the pairing window once a valid IP is entered on a never-paired driver (§1.2 action 1)", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
 			["Bridge IP Address"] = "" })
 		env.OnDriverLateInit("DIT_STARTUP")
 		env.Properties["Bridge IP Address"] = "192.0.2.10"
 		env.OnPropertyChanged("Bridge IP Address")
-		assert.truthy(env.Properties["Status"]:find("^Not paired"))
+		assert.equal("Pairing: contacting bridge", env.Properties["Status"])
+		assert.equal("https://192.0.2.10/api/0/config", c4.last_transfer().url)
+	end)
+
+	it("waits up to 2 minutes for the link button, asking again every 3 s, then pairs", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "192.0.2.10" })
+		env.OnDriverLateInit("DIT_STARTUP")
+		local LINK = '[{"error":{"type":101,"address":"","description":"link button not pressed"}}]'
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+		c4.last_transfer():respond(200, CONFIG)
+		c4.last_transfer():respond(200, LINK)
+		assert.truthy(env.Properties["Status"]:find("^Press the link button on the Hue bridge %(waiting [12]:%d%d%)"),
+			env.Properties["Status"])
+		local count = #c4.transfers
+		c4.advance(3000)
+		assert.equal(count + 1, #c4.transfers, "the next attempt after 3 s")
+		c4.last_transfer():respond(200, CONFIG)
+		c4.last_transfer():respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
+		answer_identity(c4)
+		assert.equal("abc123", c4.persist.hue_app_key)
+	end)
+
+	it("closes the pairing window after 2 minutes without the link button", function()
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "192.0.2.10" })
+		env.OnDriverLateInit("DIT_STARTUP")
+		local LINK = '[{"error":{"type":101,"address":"","description":"link button not pressed"}}]'
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+		for _ = 1, 60 do
+			local t = c4.last_transfer()
+			if not t.answered and t.url:find("/api/0/config", 1, true) then
+				t.answered = true
+				t:respond(200, CONFIG)
+			end
+			t = c4.last_transfer()
+			if not t.answered and t.url:find("/api$") then
+				t.answered = true
+				t:respond(200, LINK)
+			end
+			if env.Properties["Status"]:find("^Pairing window closed") then break end
+			c4.now_ms = c4.now_ms + 3000
+			c4.fire_timers_of(3000)
+		end
+		assert.equal("Pairing window closed: press the link button on the Hue bridge, then run Pair Bridge again",
+			env.Properties["Status"])
+	end)
+
+	it("lists the bridges that answer mDNS at the first load; a pick sets the address and pairs (D5)", function()
+		local mdns_packet = require("helpers.mdns_packet")
+		local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = "" })
+		env.OnDriverLateInit("DIT_STARTUP")
+		assert.equal("No Hue bridge answered: type its address in Bridge IP Address", env.Properties["Bridges Found"])
+		c4.advance(3000)
+		assert.equal("Looking for Hue bridges on the network...", env.Properties["Bridges Found"])
+		c4.net_status(6008, 5353, "ONLINE")
+		c4.advance(10)
+		local sent = c4.network[6008].ports[5353].sent
+		assert.truthy(#sent >= 1, "the mDNS query went out on binding 6008")
+		local qid = sent[#sent]:byte(1) * 256 + sent[#sent]:byte(2)
+		c4.net_receive(6008, 5353, mdns_packet.answer({ id = "001788fffe25b8f8", model = "BSB002",
+			ips = { "192.0.2.10" } }, qid))
+		-- The search window ends, then the identity check of the answer (no key).
+		for _ = 1, 20 do
+			local t = c4.last_transfer()
+			if t and not t.answered and t.url == "https://192.0.2.10/api/0/config" then
+				t.answered = true
+				assert.is_nil(t.headers["hue-application-key"])
+				t:respond(200, CONFIG)
+			end
+			if env.Properties["Bridges Found"]:find("found: pick one", 1, true) then break end
+			c4.advance(500)
+		end
+		assert.equal("1 Hue bridge found: pick one and click Set to pair", env.Properties["Bridges Found"])
+		local lists = c4.calls_to("UpdatePropertyList")
+		local items = lists[#lists][2]
+		local label = items:match("([^,]*192%.0%.2%.10[^,]*)")
+		assert.truthy(label, items)
+		assert.truthy(items:find("Search again", 1, true), items)
+
+		env.Properties["Bridges Found"] = label
+		env.OnPropertyChanged("Bridges Found")
+		assert.equal("192.0.2.10", env.Properties["Bridge IP Address"])
+		assert.equal("Pairing: contacting bridge", env.Properties["Status"])
+		assert.equal("https://192.0.2.10/api/0/config", c4.last_transfer().url)
 	end)
 
 	it("ignores an invalid IP", function()
