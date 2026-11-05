@@ -669,6 +669,18 @@ describe("bridge.names", function()
 			assert.is_nil(pair("light", "l2").held)
 		end)
 
+		it("N17 + N1: a device renamed in Composer before its first look sends the new name to Hue", function()
+			-- Imported, then renamed at once (a dealer's usual order): the rename
+			-- is a person's act, not the seed (found integrating 1.2, #334).
+			n = new_names()
+			n:pass("light") -- the lights' first resync of this run came before the import
+			add("light", "l1", "Desk Lamp", "Reading Lamp", { device = 1000, proxy = 6000 })
+			n:added("light", "l1", "Desk Lamp")
+			n:on_composer_rename(6000)
+			advance(3000)
+			assert.same({ "Reading Lamp" }, put_names())
+		end)
+
 		it("forgets a device's pair and its queued writes", function()
 			paired_light()
 			auto_answer = false

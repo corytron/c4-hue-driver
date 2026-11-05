@@ -181,11 +181,24 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		end
 		for _, rec in ipairs(lamp_records) do rec.name = "Lamp" end
 		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
-		assert.truthy(bridge.Properties["Attention"]:find("Lamp is Living Room Lamp in Hue", 1, true),
+		-- Since 1.2 the rename goes to Hue (names N1, #334): the lamp's device
+		-- name and its light's own name, paced, never listed as a difference.
+		assert.is_nil(bridge.Properties["Attention"]:find("Lamp is Living Room Lamp in Hue", 1, true),
 			bridge.Properties["Attention"])
-		for _, rec in ipairs(lamp_records) do rec.name = "Living Room Lamp" end
-		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
-		assert.is_nil(bridge.Properties["Attention"]:find("differ", 1, true), bridge.Properties["Attention"])
+		bc4.advance(3000)
+		local puts = {}
+		for _, t in ipairs(bc4.transfers) do
+			if t.method == "PUT" and tostring(t.data):find('"name":"Lamp"', 1, true) then
+				puts[#puts + 1] = t.url:match("/clip/v2/resource/(%w+)/")
+				if not t.answered then
+					t.answered = true
+					t:respond(200, '{"errors":[],"data":[]}')
+					bc4.advance(1100)
+				end
+			end
+		end
+		assert.truthy(#puts >= 1, "the Composer name went to Hue")
+		assert.equal("device", puts[1], "the lamp's device name first")
 
 		-- Now the Living Room Lamp is a real driver bound to this bridge.
 		fake.pair(bridge, light, { light_id = LIVING_ID, bind = false })
@@ -267,7 +280,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- (The swapped event also left Hallway Ambiance's device in no room, so
 		-- two lights have a mapped Hue room to audit.)
 		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
-		assert.equal("1 of 2 are not in the room their Hue room maps to: Living Room Lamp is in Living Room; Hue says "
+		assert.equal("1 of 2 are not in the room their Hue room maps to: Lamp is in Living Room; Hue says "
 			.. "Garage → drag it to Garage in Composer if you want it there", fake.last_action(bridge))
 
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the

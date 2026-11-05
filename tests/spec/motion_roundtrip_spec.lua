@@ -541,7 +541,9 @@ describe("motion round trip", function()
 			sensor.C4.calls = {}
 			text = action("Re-link Motion Device", { Device = device.value,
 				Target = pick("MotionTargetList", "Porch sensor").value })
-			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20", text)
+			-- Since 1.2 the Hue thing takes the Composer name (names N16, #334).
+			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20; Hue gets the Composer name "
+				.. "Hallway sensor", text)
 			fake.pump()
 			assert.equal(M.devices.porch, last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").rid)
 			assert.equal("Porch sensor", last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").name)
@@ -577,30 +579,25 @@ describe("motion round trip", function()
 			add_sensor()
 			stream(hallway_deleted())
 			bc4.sent = {}
-			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20",
-				action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch }))
+			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20; Hue gets the Composer name "
+				.. "Hallway sensor", action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch }))
 			fake.pump()
 			assert.is_nil(last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").hue_room, "the Porch sensor is in no Hue room")
 			assert.equal("", sensor.Properties["Hue Room"])
 			assert.equal("Hue motion sensor Porch sensor", sensor.Properties["Status"])
 		end)
 
-		it("renames a re-linked device's proxy with Adopt Hue Names: driver.lua finds a motion device's proxy id",
+		it("gives a re-linked device's Hue sensor the Composer name; Adopt Hue Names then has nothing to do (1.2)",
 			function()
 			add_sensor()
 			stream(hallway_deleted())
 			action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch })
-			assert.truthy(bridge.Properties["Attention"]:find("1 motion device name differs from the Composer names: "
-				.. "Hallway sensor is Porch sensor in Hue (Adopt Hue Names or Accept Names As They Are)", 1, true),
-				bridge.Properties["Attention"])
-
-			-- The entry has no proxy id (the fake's AddDevice reports none); the
-			-- contact proxy is the consumer of the device's binding 5001.
-			local text = action("Adopt Hue Names")
-			assert.truthy(text:find("Motion: Renamed 1 motion device: Hallway sensor → Porch sensor (device 2001)", 1,
-				true), text)
-			assert.same({ { id = fake.project.devices[SENSOR_ID].proxy_id, name = "Porch sensor" } }, bc4.renamed)
+			-- Names N16 (#334): the device and its name are Control4's, so the
+			-- Hue sensor is renamed, not the Composer device.
 			assert.is_nil(bridge.Properties["Attention"]:find("differ", 1, true), bridge.Properties["Attention"])
+			local text = action("Adopt Hue Names")
+			assert.truthy(text:find("No names wait for Resolve Names", 1, true), text)
+			assert.same({}, bc4.renamed, "no Composer rename")
 		end)
 
 		it("links a device bound by hand to the Hue sensor of its Composer name with Link Devices", function()

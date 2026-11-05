@@ -1624,7 +1624,9 @@ describe("Hue Bridge driver", function()
 			c4:RenameDevice(id, "Reading Lamp")
 			c4:RenameDevice(fake.project.devices[id].proxy_id, "Reading Lamp")
 			env.OnSystemEvent("OnItemNameChanged")
-			assert.truthy(env.Properties["Attention"]:find("Reading Lamp is ", 1, true), env.Properties["Attention"])
+			-- Since 1.2 a Composer rename is sent to Hue (names N1, #334), not
+			-- listed as a difference.
+			assert.is_nil(env.Properties["Attention"]:find("Reading Lamp is ", 1, true), env.Properties["Attention"])
 		end)
 	end)
 

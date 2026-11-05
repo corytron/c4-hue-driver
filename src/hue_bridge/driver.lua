@@ -26,6 +26,7 @@ local util = require("bridge.util")
 local housekeeping = require("bridge.housekeeping")
 local discovery_mod = require("bridge.discovery")
 local actions_mod = require("bridge.actions")
+local names_mod = require("bridge.names")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -624,6 +625,13 @@ local function attention_text()
 	end
 	if state.motion then
 		for _, item in ipairs(state.motion:attention_items() or {}) do
+			items[#items + 1] = item
+		end
+	end
+	-- Names that wait for the bridge, that Hue refused, or that changed in
+	-- bulk (bridge/names.lua; each ends in "(Resolve Names)").
+	if state.names then
+		for _, item in ipairs(state.names:attention() or {}) do
 			items[#items + 1] = item
 		end
 	end
@@ -2428,6 +2436,14 @@ function OnSystemEvent(data)
 	-- A rename in Composer changes what Attention compares; without this it
 	-- stayed stale until the next action or resync [hardware 2026-10-22].
 	if state.late_init_done and type(data) == "string" and data:find("OnItemNameChanged", 1, true) then
+		-- Two-way names (owner's answer D6): a light, scene or motion device
+		-- renamed in Composer is renamed on the bridge (bridge/names.lua reads
+		-- the new name itself; other items' ids are ignored there).
+		local id = tonumber(data:match('name="iditem"[^>]*>%s*(%d+)') or data:match('iditem="?(%d+)')
+			or data:match("<iditem>%s*(%d+)%s*</iditem>"))
+		if state.names and id then
+			state.names:on_composer_rename(id)
+		end
 		refresh_lights_props()
 	end
 end
@@ -2912,6 +2928,38 @@ function OnDriverLateInit(dit)
 		end,
 		on_done = function(text) last_action(text) end,
 	}))
+	-- Two-way names (D6, D11; bridge/names.lua). Its writes go through
+	-- bridge_request like a person's, so the background tasks give way.
+	local registries = { light = state.lights, scene = state.scenes, motion = state.motion,
+		zone_light = state.zone_lights }
+	state.names = names_mod.new({
+		persist_get = function(key) return C4:PersistGetValue(key) end,
+		persist_set = function(key, value) C4:PersistSetValue(key, value) end,
+		registries = registries,
+		put_name = names_mod.put_via(registries, bridge_request, log),
+		rename_device = function(id, name) C4:RenameDevice(id, name) end,
+		display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+		proxy_of = function(device_id)
+			local consumers = C4:GetBoundConsumerDevices(device_id, 5001)
+			return type(consumers) == "table" and next(consumers) or nil
+		end,
+		user_active = user_active,
+		bridge_ready = function()
+			return connection() ~= nil and state.identity_ok == true and keyed_refusal() == nil
+		end,
+		last_action = function(text) last_action(text) end,
+		attention_changed = function() refresh_lights_props() end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end,
+		now_ms = function() return C4:GetTime() end,
+		wall = os.time,
+		log = log,
+	})
+	for _, m in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+		m:set_names(state.names)
+		-- The re-link by radio (D7) says what it did in Last Action.
+		m.ctx.last_action = last_action
+	end
+	state.names:migrate(driver_version())
 	state.actions = new_actions()
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).

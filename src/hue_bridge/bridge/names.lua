@@ -509,6 +509,12 @@ function names:judge(kind, rid, mode, shared)
 	if not pair or pair.c == nil then
 		local agree, pre, post = names.related(C, H, form)
 		if pair and pair.fresh then
+			-- A Composer rename before the first look (imported, then renamed at
+			-- once, as dealers do): a person's act, sent to Hue (N1), not taken
+			-- as the agreed name. Any other first look seeds what Composer shows.
+			if explicit and not agree then
+				return { op = "push", key = key, target = names.g(C, nil, form), c = C, was = H, reason = "composer" }
+			end
 			return { op = "seed", key = key, h = H, c = C, pre = pre, post = post, zp = form.prefix }
 		end
 		if agree and entry.name_dismissed == nil then
