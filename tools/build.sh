@@ -107,15 +107,16 @@ for driver in "${DRIVERS[@]}"; do
 		(umask 077 && printf 'return "%s"\n' "$dev_key" > "$stage/common/devkey.lua")
 	else
 		# Release builds: no dev loop, none of the bridge's development
-		# handlers (bridge/devtools.lua) nor the connection experiment and
-		# pinning check modules they drive, and none of the DEV-ONLY
+		# handlers (bridge/devtools.lua) nor the connection experiment,
+		# pinning check and 1.2 probe modules they drive, and none of the DEV-ONLY
 		# properties and actions.
 		rm -f "$stage/common/devloop.lua" "$stage/bridge/devtools.lua" \
-			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua"
+			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua" "$stage/bridge/probe12.lua"
 		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
 			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
 		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" \
-			|| -e "$stage/common/devkey.lua" || -e "$stage/bridge/conntest.lua" || -e "$stage/bridge/pinning.lua" ]]; then
+			|| -e "$stage/common/devkey.lua" || -e "$stage/bridge/conntest.lua" || -e "$stage/bridge/pinning.lua" \
+			|| -e "$stage/bridge/probe12.lua" ]]; then
 			echo "release build still carries development items in $driver" >&2
 			exit 1
 		fi
