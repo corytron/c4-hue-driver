@@ -264,7 +264,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("Offline", scene.Properties["Online"])
 		assert.equal("4 scenes + 1 time-based on bridge, 1 imported, 5 new, 1 missing", S:summary())
 		assert.equal("1 scene missing from the bridge: Relax (device 2001, since " .. os.date("%Y-%m-%d", now)
-			.. ") (Re-link Scene or Forget Scene)", S:attention())
+			.. ") (Link or Forget Device)", S:attention())
 		bc4.sent = {}
 		before = #bc4.transfers
 		fake.as(scene, scene.ReceivedFromProxy, 5001, "ON", {})

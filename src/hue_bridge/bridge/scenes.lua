@@ -116,7 +116,7 @@ scenes.WORDS = {
 	busy_resync = "resyncing scenes",
 	kind = "scene",
 	unbound_kind = "unbound scene device",
-	relink_or_forget = "Re-link Scene or Forget Scene",
+	relink_or_forget = "Link or Forget Device",
 	forget_action = "Forget Scene",
 	name_kind = "Hue scene name",
 	hue_names = "Hue scene names",
@@ -136,6 +136,7 @@ scenes.WORDS = {
 	link_none = "Hue scene",
 }
 scenes.DEVICE_DRIVER = scenes.SCENE_DRIVER
+scenes.NAMES_KIND = "scene"  -- bridge/names.lua syncs the scenes' names (D6)
 scenes.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Scene's flag first
 scenes.MESSAGES = { configure = "HUE_SCENE_CONFIGURE", hello = "HUE_SCENE_HELLO", goodbye = "HUE_SCENE_GOODBYE",
 	forgotten = "HUE_SCENE_FORGOTTEN" }
@@ -668,7 +669,8 @@ function scenes:absorb(res)
 	self:refresh_registry()
 end
 
--- The entry's cached name follows Hue's; the Composer device keeps its own.
+-- The entry's cached name follows Hue's; the Composer device keeps its own
+-- here, and the names sync (bridge/names.lua) hears of it and decides.
 function scenes:take_name(entry, scene)
 	if entry.name == scene.name then
 		return false
@@ -676,7 +678,61 @@ function scenes:take_name(entry, scene)
 	self.ctx.log.info("scenes: %s was renamed to %s in Hue (Composer name unchanged)", tostring(entry.name),
 		tostring(scene.name))
 	entry.name = scene.name
+	self:hue_named(scene.rid)
 	return true
+end
+
+-- Names (bridge/names.lua, D6; names-sync §5.2) ----------------------------------
+
+-- A scene's Composer form: a zone scene carries the zone in front, a
+-- time-based scene its base name ("Golden hours 4" → "Golden hours").
+function scenes:name_form(_rid, entry)
+	local name, gtype = self:group_info(entry.group_rid, entry)
+	local form = { smart = is_smart(entry) }
+	if gtype == "zone" and name ~= nil and name ~= "" then
+		form.prefix = tostring(name) .. " "
+	end
+	return form
+end
+
+-- The PUT that names a scene, or a time-based scene (V, E11), on the bridge.
+-- Hue takes a name another scene of the room has [verified: house 2026-11-05].
+function scenes:name_requests(rid, name)
+	local entry = self.registry[rid]
+	if not entry then
+		return nil
+	end
+	local path = (is_smart(entry) and scenes.SMART_SCENE_PATH or scenes.SCENE_PATH) .. "/" .. rid
+	return { { method = "PUT", path = path, body = { metadata = { name = name } } } }
+end
+
+-- M9 / S4: a gone scene and an unimported one of the same kind with its name
+-- in the same group (Hue deleted and re-made it): suggested only, never
+-- automatic (scenes have no radio).
+function scenes:name_suggestions(seen)
+	local out = {}
+	local gone = self.reg:rids("gone")
+	if #gone == 0 then
+		return out
+	end
+	local tombs = self.reg:tombstones()
+	for _, record in ipairs(self:unimported_scenes()) do
+		if not tombs[record.rid] then
+			local matches = {}
+			for _, rid in ipairs(gone) do
+				local entry = self.registry[rid]
+				if not seen[rid] and self:record_of(rid) == nil and entry.group_rid == record.group_rid
+					and is_smart(entry) == is_smart(record) and name_of(entry) == name_of(record) then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = record.rid, why = "same name in the same group",
+					ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
 end
 
 -- The identity fields of one entry from its catalogue record (of either
@@ -1205,7 +1261,7 @@ function scenes:reconcile_scenes()
 				self:entry_label(rid, entry), entry.device_id)
 		elseif entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
-			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Re-link Scene or Forget Scene)",
+			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Link or Forget Device)",
 				self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
@@ -1293,7 +1349,7 @@ function scenes:scene_deleted(rid, entry)
 		if self.reg:set_state(rid, "gone") then
 			self:mark()
 		end
-		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Re-link Scene or Forget Scene)",
+		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Link or Forget Device)",
 			self:entry_label(rid, entry), entry.device_id)
 		return self:announce_gone(rid, "event") and 1 or 0
 	end

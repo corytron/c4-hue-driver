@@ -297,7 +297,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal("Offline", light.Properties["Online"])
 		assert.equal("1 zone + 2 rooms on bridge, 1 imported, 2 new, 1 missing", Z:summary())
 		assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", now)
-			.. ") (Re-link Zone Light or Forget Light)", Z:attention())
+			.. ") (Link or Forget Device)", Z:attention())
 		bc4.sent = {}
 		before = #bc4.transfers
 		fake.as(light, light.ReceivedFromProxy, 5001, "ON", {})

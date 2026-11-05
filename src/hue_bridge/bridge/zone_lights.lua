@@ -82,7 +82,7 @@ zone_lights.WORDS = {
 	busy_resync = "resyncing zone lights",
 	kind = "zone light",
 	unbound_kind = "unbound zone light device",
-	relink_or_forget = "Re-link Zone Light or Forget Light",
+	relink_or_forget = "Link or Forget Device",
 	forget_action = "Forget Light",
 	name_kind = "zone light name",
 	hue_names = "Hue zone and room names",
@@ -694,7 +694,7 @@ function zone_lights:reconcile_groups()
 		elseif self:groups_loaded() and entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
 			self.ctx.log.warn("zone_lights: %s (device %d) is no longer on the bridge; marked gone "
-				.. "(Re-link Zone Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+				.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
 	end
@@ -860,7 +860,7 @@ function zone_lights:refresh_all(carried, touched)
 				if entry.state == "linked" and self:groups_loaded() and self.reg:set_state(rid, "gone") then
 					self:mark()
 					self.ctx.log.warn("zone_lights: %s (device %d) was deleted on the bridge; marked gone "
-						.. "(Re-link Zone Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+						.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 					if self:announce_gone(rid, "event") then
 						sent = sent + 1
 					end
@@ -1066,8 +1066,8 @@ function zone_lights:entry_for_command(params, what)
 		return nil
 	end
 	if entry.state == "gone" then
-		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Re-link Zone Light "
-			.. "or Forget Light)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
+		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Link or Forget "
+			.. "Device)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
 			util.date_of(entry.gone_since))
 		return nil
 	end

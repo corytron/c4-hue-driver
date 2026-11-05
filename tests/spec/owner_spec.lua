@@ -263,11 +263,11 @@ describe("bridge.owner", function()
 			assert.equal("gone", sent[1].params.state)
 			assert.same({ rid = F.group_rids.downstairs, online = "false", reason = "resync" }, sent[2].params)
 			assert.is_true(saw_log("zone_lights: Downstairs (zone) (device 2001) was deleted on the bridge while its device "
-				.. "was being added; marked gone (Re-link Zone Light or Forget Light)"))
+				.. "was being added; marked gone (Link or Forget Device)"))
 			assert.same({ true, "Added Downstairs (zone) to Garage (device 2001)" }, result)
 			assert.equal("gone", store.hue_zone_lights[F.group_rids.downstairs].state, "saved")
 			assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", T0)
-				.. ") (Re-link Zone Light or Forget Light)", Z:attention())
+				.. ") (Link or Forget Device)", Z:attention())
 		end)
 
 		it("is registered linked and told its state when the zone is still there", function()

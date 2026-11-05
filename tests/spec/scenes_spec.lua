@@ -642,7 +642,7 @@ describe("bridge.scenes", function()
 			assert.equal("gone", S:entry(F.scene_rids.relax).state)
 			assert.equal("4 scenes + 1 time-based on bridge, 1 imported, 5 new, 1 missing", S:summary())
 			assert.equal("1 scene missing from the bridge: Relax (device 2001, since " .. os.date("%Y-%m-%d", T0 + 50)
-				.. ") (Re-link Scene or Forget Scene)", S:attention())
+				.. ") (Link or Forget Device)", S:attention())
 			assert.is_true(saw_log("Relax (device 2001) was deleted on the bridge; marked gone"))
 			assert.equal("gone", c4.persist.hue_scenes[F.scene_rids.relax].state)
 
@@ -703,7 +703,7 @@ describe("bridge.scenes", function()
 			assert.equal("inactive", c4.sent[2].params.active)
 			assert.equal("resync", c4.sent[2].params.reason)
 			assert.is_true(saw_log("Relax (device 2001) is no longer on the bridge; marked gone "
-				.. "(Re-link Scene or Forget Scene)"))
+				.. "(Link or Forget Device)"))
 			assert.same({ "Living Room: Relax (device 2001, gone since " .. os.date("%m-%d", T0 + 10) .. ")" },
 				texts(S:picker_relink_devices()))
 			c4.sent = {}
@@ -1858,6 +1858,71 @@ describe("bridge.scenes", function()
 	-- the names a scene device shows (HUE_SCENE_CONFIGURE, the slot name,
 	-- HUE_SCENE_FORGOTTEN) get display names; the registry keeps Hue's own.
 	-- bridge/owner_spec.lua has the upgrade cases.
+	describe("the names sync's hooks and suggestions (1.2, bridge/names.lua, §3.2 M9)", function()
+		local NEW_RELAX = "5e4d3c2b-0000-4000-8000-00000000s0a1"
+
+		-- Relax made again in the Hue app under a new rid (same name, same room).
+		local function relax_again()
+			local item
+			for _, it in ipairs(json.decode(F.scene).data) do
+				if it.id == F.scene_rids.relax then item = it end
+			end
+			item.id = NEW_RELAX
+			return { type = "add", data = { item } }
+		end
+
+		it("gives the Composer form of each scene and the PUT that names it", function()
+			resync()
+			S:add_scene(F.scene_rids.relax, nil, done)
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			local relax, night = S.registry[F.scene_rids.relax], S.registry[F.scene_rids.nightlight]
+			assert.same({ smart = false }, S:name_form(F.scene_rids.relax, relax))
+			assert.same({ smart = false, prefix = "Downstairs " }, S:name_form(F.scene_rids.nightlight, night))
+			assert.same({ { method = "PUT", path = "/clip/v2/resource/scene/" .. F.scene_rids.relax,
+				body = { metadata = { name = "Chill" } } } }, S:name_requests(F.scene_rids.relax, "Chill"))
+			S.registry[F.scene_rids.relax].kind = "smart_scene"
+			assert.same({ smart = true }, S:name_form(F.scene_rids.relax, relax))
+			assert.equal("/clip/v2/resource/smart_scene/" .. F.scene_rids.relax,
+				S:name_requests(F.scene_rids.relax, "Evening")[1].path)
+			assert.is_nil(S:name_requests("nope", "x"))
+		end)
+
+		it("tells the names sync of a Hue rename, the pass after a resync, a re-link and a forget", function()
+			local calls = {}
+			S:set_names(setmetatable({}, { __index = function(_, method)
+				return function(_, ...) calls[#calls + 1] = { method, ... } end
+			end }))
+			add_relax()
+			calls = {}
+			S:on_container(container(F.events.scene_renamed))
+			assert.same({ { "on_hue_name", "scene", F.scene_rids.relax } }, calls)
+			calls = {}
+			resync()  -- the fixture names it Relax again: told too, and names ignores it while the resync runs
+			assert.same({ "pass", "scene" }, calls[#calls])
+			calls = {}
+			S:on_container(container(F.events.scene_deleted))
+			assert.is_true((S:relink(2001, F.scene_rids.bright)))
+			assert.same({ "relinked", "scene", F.scene_rids.relax, F.scene_rids.bright }, calls[1])
+			S:forget(2001)
+			assert.same({ "forgotten", "scene", F.scene_rids.bright }, calls[2])
+		end)
+
+		it("S4: a scene deleted and made again under its name in its room is suggested, never re-linked by itself",
+			function()
+			add_relax()
+			S:on_container(container(F.events.scene_deleted))
+			S:on_container(relax_again())
+			resync({ body = F.scene:gsub(F.scene_rids.relax:gsub("%W", "%%%0"), NEW_RELAX) })
+			assert.equal("gone", S.registry[F.scene_rids.relax].state)
+			assert.is_nil(S.registry[NEW_RELAX])
+			local s = S:suggestions()
+			assert.equal(1, #s)
+			assert.same({ 2001, NEW_RELAX, "same name in the same group", true }, { s[1].device_id, s[1].rid, s[1].why,
+				s[1].apply })
+			assert.equal("Relax (device 2001) → Living Room: Relax, same name in the same group", s[1].text)
+		end)
+	end)
+
 	describe("names that reach Control4 (security review 2026-10-25 finding 8)", function()
 		-- The Downstairs zone and its Nightlight scene called at length, with
 		-- control characters, in an app paired with the bridge (JSON contents).
@@ -2010,7 +2075,7 @@ describe("bridge.scenes", function()
 				auto_dynamic = "true", state = "gone", gone_since = tostring(T0 - 5), kind = "scene" }, c4.sent[1].params)
 			assert.equal("3 imported", S:summary())
 			assert.equal("1 scene missing from the bridge: Nightlight (device 2002, since " .. os.date("%Y-%m-%d", T0 - 5)
-				.. ") (Re-link Scene or Forget Scene); 1 unbound scene device: Bright (device 2003) (bind it to this bridge in "
+				.. ") (Link or Forget Device); 1 unbound scene device: Bright (device 2003) (bind it to this bridge in "
 				.. "Composer, or Forget Scene)", S:attention())
 		end)
 
@@ -2510,7 +2575,7 @@ describe("bridge.scenes", function()
 				assert.same({ rid = SMART.living, active = "inactive", reason = "event" }, c4.sent[2].params)
 				assert.equal("5 scenes + 2 time-based on bridge, 1 imported, 7 new, 1 missing", S:summary())
 				assert.equal("1 scene missing from the bridge: Golden hours (device 2001, since " .. os.date("%Y-%m-%d", T0 + 50)
-					.. ") (Re-link Scene or Forget Scene)", S:attention())
+					.. ") (Link or Forget Device)", S:attention())
 				c4.sent = {}
 				resync_smart()
 				assert.equal("linked", S:entry(SMART.living).state)

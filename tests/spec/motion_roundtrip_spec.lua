@@ -397,7 +397,7 @@ describe("motion round trip", function()
 
 			bc4.sent = {}
 			stream(hallway_deleted())
-			local since = "Sensor deleted in Hue since " .. os.date("%m-%d") .. "; re-link or Forget"
+			local since = "Sensor deleted in Hue since " .. os.date("%m-%d") .. "; Link or Forget Device"
 			assert.same({ "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
 			assert.equal("true", last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").gone)
 			assert.same({ rid = M.devices.hallway, reason = "event", online = "false", ended = "deleted", status = since },
@@ -410,7 +410,7 @@ describe("motion round trip", function()
 			assert.equal("1 sensor + 1 area on bridge‚ 1 imported‚ 2 new‚ 1 missing",
 				bridge.Properties["Motion Sensors"])
 			assert.truthy(bridge.Properties["Attention"]:find("1 motion sensor missing from the bridge: Hallway sensor "
-				.. "(device 2001, since " .. os.date("%Y-%m-%d") .. ") (Re-link Motion Device or Forget Motion Device)", 1,
+				.. "(device 2001, since " .. os.date("%Y-%m-%d") .. ") (Link or Forget Device)", 1,
 				true), bridge.Properties["Attention"])
 
 			-- Once: the device asking again (Refresh From Bridge) hears the

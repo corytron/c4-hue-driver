@@ -74,7 +74,7 @@ lights.WORDS = {
 	busy_resync = "resyncing",
 	kind = "light",
 	unbound_kind = "unbound device",
-	relink_or_forget = "Re-link Device To Light or Forget Light",
+	relink_or_forget = "Link or Forget Device",
 	forget_action = "Forget Light",
 	name_kind = "Hue name",
 	hue_names = "Hue names",
@@ -94,6 +94,8 @@ lights.WORDS = {
 	link_none = "Hue light",
 }
 lights.DEVICE_DRIVER = lights.LIGHT_DRIVER
+lights.NAMES_KIND = "light"                       -- bridge/names.lua syncs the lights' names (D6)
+lights.RADIO_WORDS = { thing = "its bulb" }       -- D7's Last Action: "Re-linked Desk Lamp to its bulb (…)"
 lights.BUSY_FLAGS = { "importing", "resyncing" }  -- the import's flag first
 lights.MESSAGES = { configure = "HUE_CONFIGURE", hello = "HUE_HELLO", goodbye = "HUE_GOODBYE",
 	forgotten = "HUE_FORGOTTEN" }
@@ -461,18 +463,50 @@ function lights:new_count()
 	return n
 end
 
--- The gone entry a new light may be the replacement of: the same
--- mac_address (a re-added bulb keeps its radio) or the same name. Returns
--- rid, entry or nil.
+-- The entry a new light may be the return or replacement of: one Re-link
+-- offers (gone or unbound, bridge/owner.lua's RELINK_STATES) whose light the
+-- bridge is known to lack. A gone entry always is; an unbound one is never
+-- marked gone, so it counts once its light has left too (owner:known_missing),
+-- never while the light is still there. The same mac_address first (a
+-- re-added bulb keeps its radio; on a multi-light device at the same
+-- position, §3.2 M3), else the same name in the same Hue room when both
+-- rooms are known (M8); gone entries before unbound ones, each in name
+-- order. Never another module's device. Returns rid, entry or nil. The
+-- new-light log line, Attention, the Add Light picker and Import All New
+-- Lights (which skips such a light, #344) go by it; D7 re-links the
+-- unambiguous radio matches before any of them looks (auto_relink).
+local HINT_STATES = { "gone", "unbound" }
+
+-- Whether an entry and a light are in the same Hue room, or one of the two
+-- rooms is not known.
+function lights:same_room(entry, model)
+	local room = self:hue_room_of(model)
+	return entry.hue_room_rid == nil or room == nil or entry.hue_room_rid == room
+end
+
+-- True when the light's device carries more than one light (§3.2 M3).
+function lights:multi(model)
+	local device = self.devices[model.device_rid]
+	return device ~= nil and #device.light_rids > 1
+end
+
 function lights:relink_hint(model)
 	local mac = self.macs[model.device_rid]
+	local multi = self:multi(model)
 	local by_mac, by_name_rid
-	for _, rid in ipairs(self.reg:rids("gone")) do
-		local entry = self.registry[rid]
-		if mac and entry.mac_address == mac then
-			by_mac = by_mac or rid
-		elseif entry.name == model.name then
-			by_name_rid = by_name_rid or rid
+	for _, state in ipairs(HINT_STATES) do
+		for _, rid in ipairs(self.reg:rids(state)) do
+			local entry = self.registry[rid]
+			if (state == "gone" or self:known_missing(rid)) and not self:foreign(entry.device_id) then
+				if mac and entry.mac_address == mac then
+					if not multi or entry.service_id == nil or model.service_id == nil
+						or tostring(entry.service_id) == tostring(model.service_id) then
+						by_mac = by_mac or rid
+					end
+				elseif entry.name == model.name and self:same_room(entry, model) then
+					by_name_rid = by_name_rid or rid
+				end
+			end
 		end
 	end
 	local rid = by_mac or by_name_rid
@@ -693,7 +727,8 @@ function lights:absorb(res)
 end
 
 -- Bring the registry entry's cached name up to the model's. True when it
--- changed (the caller saves). The Composer device keeps its own name.
+-- changed (the caller saves). The Composer device keeps its own name here;
+-- the names sync (bridge/names.lua, D6) hears of it and decides.
 function lights:take_name(entry, model)
 	if entry.name == model.name then
 		return false
@@ -701,6 +736,7 @@ function lights:take_name(entry, model)
 	self.ctx.log.info("lights: %s was renamed to %s in Hue (Composer name unchanged)",
 		tostring(entry.name), tostring(model.name))
 	entry.name = model.name
+	self:hue_named(model.rid)
 	return true
 end
 
@@ -863,7 +899,7 @@ function lights:reconcile_lights()
 		elseif entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
 			self.ctx.log.warn("lights: %s (device %d) is no longer on the bridge; marked gone "
-				.. "(Re-link Device To Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+				.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
 	end
@@ -942,6 +978,7 @@ function lights:settle(reason, with_configure)
 	self.synced = true
 	self:reconcile(true)
 	self:reconcile_lights()
+	self:auto_relink("resync")  -- D7 (§3.2): a gone light's bulb back under a new rid
 	self:reconcile_rooms()
 	self:automap_once()
 	local sent = self:fanout(reason, with_configure)
@@ -1002,7 +1039,7 @@ function lights:on_light_item(item, kind)
 				self:mark()
 			end
 			self.ctx.log.warn("lights: %s (device %d) was deleted on the bridge; marked gone "
-				.. "(Re-link Device To Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+				.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 			return self:announce_gone(rid, "event") and 1 or 0
 		end
 		if not entry then
@@ -1073,6 +1110,7 @@ function lights:on_device_item(item, kind)
 				if entry and entry.device_name ~= device.name then
 					self.reg:update(rid, { device_name = device.name })
 					self:mark()
+					self:hue_named(rid)  -- a single-light lamp's Hue name is its device's (names)
 				end
 			end
 		end
@@ -1104,10 +1142,13 @@ local function on_container_body(self, container)
 	-- first use) rather than once per message; dropped before returning, and
 	-- reset here so an error that escaped the last container leaves no stale one.
 	self.skip_cache = false
-	local sent, groups_changed = 0, false
+	local sent, groups_changed, radio = 0, false, false
 	local kind = container.type
 	for _, item in ipairs(container.data) do
 		if type(item) == "table" and item.id ~= nil then
+			if kind == "add" and (item.type == "light" or item.type == "device" or item.type == "zigbee_connectivity") then
+				radio = true
+			end
 			if item.type == "light" then
 				sent = sent + self:on_light_item(item, kind)
 			elseif item.type == "zigbee_connectivity" then
@@ -1123,6 +1164,11 @@ local function on_container_body(self, container)
 	end
 	if groups_changed then
 		sent = sent + self:on_groups_changed()
+	end
+	if radio then
+		-- D7 at a stream add (§3.2), once the container's light, device and
+		-- radio are all in: re-link and push only, no transfer (OnBodyChunk).
+		self:auto_relink("event")
 	end
 	self:flush()
 	self.skip_cache = nil
@@ -1221,8 +1267,13 @@ end
 -- Import All New Lights: the six GETs, the reconciliation, then one
 -- AddDevice per unimported, non-tombstoned light with a mapped Hue room,
 -- into that room; lights in an unmapped room, in no room, or deleted in
--- Composer are skipped and listed [Q 1, Q 4]. Idempotent by rid; never
--- renames, moves or rebinds. done(ok, text) once, at the end.
+-- Composer are skipped and listed [Q 1, Q 4], and so is one that looks like
+-- the return or replacement of a gone or unbound device (relink_hint, #344):
+-- Link Device keeps that device and its programming (§1 rule 3)
+-- where a second device would leave them behind, as Import All New Motion
+-- Sensors does. A light D7 re-links by its radio (settle, §3.2) is no new
+-- one by then. Idempotent by rid; never renames, moves or rebinds.
+-- done(ok, text) once, at the end.
 function lights:import_new(done)
 	done = done or function() end
 	local busy = self:busy_text()
@@ -1257,20 +1308,23 @@ end
 function lights:import_fetched(res, finish)
 	self:absorb(res)
 	self:settle("resync", not self.configured_once)
+	self:names_pass()  -- a full read, as a resync's
 
-	local rooms = self.project:rooms()
-	local jobs, unmapped, deleted = {}, {}, {}
+	local rooms, tombs = self.project:rooms(), self.reg:tombstones()
+	local jobs, replacing, unmapped, deleted = {}, {}, {}, {}
 	for _, model in ipairs(self:unimported_models()) do
-		if self:is_tombstoned(model.rid) then
-			local tomb = self.reg:tombstones()[model.rid]
-			deleted[#deleted + 1] = string.format("%s (deleted %s)", self:light_label(model, false),
-				date_of(tomb.deleted_at))
+		local label, tomb = self:light_label(model, false), tombs[model.rid]
+		local hint = not tomb and self:hint_text(model) or nil
+		if tomb then
+			deleted[#deleted + 1] = string.format("%s (deleted %s)", label, date_of(tomb.deleted_at))
+		elseif hint then
+			replacing[#replacing + 1] = label .. hint
 		else
 			local room_id, why = self:default_room(model, rooms)
 			if room_id then
 				jobs[#jobs + 1] = { record = model, room_id = room_id, room_name = why }
 			else
-				unmapped[#unmapped + 1] = string.format("%s (%s)", self:light_label(model, false), why)
+				unmapped[#unmapped + 1] = string.format("%s (%s)", label, why)
 			end
 		end
 	end
@@ -1284,7 +1338,7 @@ function lights:import_fetched(res, finish)
 					tostring(c.room_name), c.device_id)
 			end
 			parts[#parts + 1] = string.format("Added %s: %s", plural(#created, "new light"), table.concat(names, ", "))
-		elseif #jobs == 0 and #unmapped == 0 and #deleted == 0 then
+		elseif #jobs == 0 and #replacing == 0 and #unmapped == 0 and #deleted == 0 then
 			parts[#parts + 1] = string.format("No new lights on the bridge (%d on bridge, %d imported)",
 				self:bridge_count(), self:count())
 		else
@@ -1299,6 +1353,10 @@ function lights:import_fetched(res, finish)
 		end
 		if err then
 			parts[#parts + 1] = "stopped early: " .. err
+		end
+		if #replacing > 0 then
+			parts[#parts + 1] = string.format("skipped %d that may be %s (Link Device or Add From Hue): %s",
+				#replacing, #replacing == 1 and "a replacement" or "replacements", table.concat(replacing, ", "))
 		end
 		if #unmapped > 0 then
 			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add Light): %s",
@@ -1397,6 +1455,107 @@ function lights:agreeing_names(_rid, entry)
 		return { entry.name }
 	end
 	return { entry.name, entry.device_name }
+end
+
+-- Names (bridge/names.lua, D6) --------------------------------------------------
+
+-- The Hue name a light's Composer name follows: its creation name's source,
+-- the device's name for the only light of its device, else the light's own
+-- (#236). nil while neither is known.
+function lights:hue_name(_rid, entry)
+	local device = self.devices[entry.device_rid]
+	if device and util.display_name(device.name) ~= "" and #device.light_rids <= 1 then
+		return device.name
+	end
+	return entry.name
+end
+
+-- Where Hue keeps that name: the device for a single-light lamp (a motion
+-- sensor on the same device would share it, N15), else the light.
+function lights:name_source(rid, entry)
+	local device = self.devices[entry.device_rid]
+	if device and #device.light_rids <= 1 then
+		return "device:" .. tostring(entry.device_rid)
+	end
+	return "light:" .. tostring(rid)
+end
+
+-- The PUTs that give a light `name` on the bridge. A single-light lamp's
+-- device name and its light's own name are independent on the bridge
+-- [verified: house, 2026-11-05, docs/simplify-actions-design.md §2.3], and
+-- both are read: the Hue app and this driver's creation name show the
+-- device's, the light's own is the Hue Name row, the labels and every v1
+-- client. So both are written, the device first (it decides; a refused
+-- light name is only logged, names.put_via); a light on a multi-light
+-- device has its own name only (N31, the house's test settled it).
+function lights:name_requests(rid, name)
+	local entry = self.registry[rid]
+	if not entry then
+		return nil
+	end
+	local body = { metadata = { name = name } }
+	local light = { method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }
+	local device = self.devices[entry.device_rid]
+	if entry.device_rid and device and #device.light_rids <= 1 then
+		return { { method = "PUT", path = "/clip/v2/resource/device/" .. entry.device_rid, body = body }, light }
+	end
+	return { light }
+end
+
+-- Re-link by radio (D7) ---------------------------------------------------------
+
+-- Every light on the bridge with a known radio (owner:radio_scan), in rid order.
+function lights:radio_records()
+	local out = {}
+	for rid, model in pairs(self.models) do
+		local mac = self.macs[model.device_rid]
+		if mac then
+			out[#out + 1] = { rid = rid, mac = mac, multi = self:multi(model), position = model.service_id,
+				record = model }
+		end
+	end
+	table.sort(out, function(a, b)
+		return a.rid < b.rid
+	end)
+	return out
+end
+
+-- A full read of this run brought the lights, their devices and radios.
+function lights:radio_ready()
+	return self.synced == true
+end
+
+-- M8: a new light with the name of exactly one gone (or unbound and known
+-- missing) light in the same Hue room, and no radio offer: suggested only.
+function lights:name_suggestions(seen)
+	local sources = {}
+	for _, state in ipairs(HINT_STATES) do
+		for _, rid in ipairs(self.reg:rids(state)) do
+			local entry = self.registry[rid]
+			if not seen[rid] and self.models[rid] == nil and (state == "gone" or self:known_missing(rid))
+				and not self:foreign(entry.device_id) then
+				sources[#sources + 1] = rid
+			end
+		end
+	end
+	local out = {}
+	if #sources == 0 then
+		return out
+	end
+	for _, model in ipairs(self:new_models()) do
+		local matches = {}
+		for _, rid in ipairs(sources) do
+			local entry = self.registry[rid]
+			if entry.name == model.name and self:same_room(entry, model) then
+				matches[#matches + 1] = rid
+			end
+		end
+		for _, rid in ipairs(matches) do
+			out[#out + 1] = { entry_rid = rid, rid = model.rid, why = "same name in the same Hue room",
+				ambiguous = #matches > 1 }
+		end
+	end
+	return out
 end
 
 -- The label of a Hue group for mapping texts: the cached group's, or the

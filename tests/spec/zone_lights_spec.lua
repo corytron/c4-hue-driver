@@ -456,11 +456,11 @@ describe("bridge.zone_lights", function()
 			assert.equal("Downstairs", c4.sent[1].params.name, "the entry remembers the name")
 			assert.same({ rid = DOWNSTAIRS, online = "false", reason = "resync" }, c4.sent[2].params)
 			assert.is_true(saw_log("Downstairs (zone) (device 2001) is no longer on the bridge; marked gone "
-				.. "(Re-link Zone Light or Forget Light)"))
+				.. "(Link or Forget Device)"))
 			assert.equal("2 zones + 2 rooms on bridge, 1 imported, 3 new, 1 missing", Z:summary(),
 				"the zone came back under a new rid, new to the bridge")
 			assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", T0 + 10)
-				.. ") (Re-link Zone Light or Forget Light)", Z:attention())
+				.. ") (Link or Forget Device)", Z:attention())
 			c4.sent = {}
 			resync()
 			assert.same({}, c4.sent, "a gone group hears nothing while nothing changes")
@@ -758,7 +758,7 @@ describe("bridge.zone_lights", function()
 			assert.equal("gone", c4.persist.hue_zone_lights[DOWNSTAIRS].state)
 			assert.equal("1 zone + 2 rooms on bridge, 1 imported, 2 new, 1 missing", Z:summary())
 			assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", T0 + 50)
-				.. ") (Re-link Zone Light or Forget Light)", Z:attention())
+				.. ") (Link or Forget Device)", Z:attention())
 			assert.is_true(saw_log("Downstairs (zone) (device 2001) was deleted on the bridge; marked gone"))
 			assert.is_false(Z:set({ rid = DOWNSTAIRS, on = "true" }))
 			assert.is_true(saw_log("HUE_SET for Downstairs (zone) (device 2001) ignored: zone deleted in Hue since"))
@@ -1317,6 +1317,21 @@ describe("bridge.zone_lights", function()
 			assert.equal("None", Z:attention())
 		end)
 
+		it("never syncs with the names sync of 1.2 (D11): its differences point to Resolve Names, its pair stays",
+			function()
+			import_two()
+			local calls = 0
+			Z:set_names(setmetatable({}, { __index = function()
+				return function() calls = calls + 1 end
+			end }))
+			fake.project.devices[3001].name = "Bedside"
+			assert.equal("1 zone light name differs from the Composer names: Bedside is Downstairs in Hue (Resolve Names)",
+				Z:attention())
+			assert.equal("Accepted 1 zone light name difference: Bedside (Hue: Downstairs)", Z:accept_names())
+			Z:resync(done)
+			assert.equal(0, calls, "no pass, no hooks: zone lights are rooms for D6")
+		end)
+
 		it("accepts differences until the Hue name changes, and skips devices without a proxy id", function()
 			import_two()
 			fake.project.devices[3001].name = "Bedside"
@@ -1466,7 +1481,7 @@ describe("bridge.zone_lights", function()
 			local items = Z:attention_items()
 			assert.same({
 				"1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", T0 + 60)
-					.. ") (Re-link Zone Light or Forget Light)",
+					.. ") (Link or Forget Device)",
 				"1 unbound zone light device: Garage (device 2003) (bind it to this bridge in Composer, or Forget Light)",
 				"2 devices claim Hue room Living Room: 2002 and 2099 (Forget Light on one of them)",
 				"1 zone light name differs from the Composer names: Lounge is Living Room Lights in Hue "
@@ -1500,7 +1515,7 @@ describe("bridge.zone_lights", function()
 				min_dim = "1", state = "gone", gone_since = tostring(T0 - 5) }, c4.sent[1].params)
 			assert.equal("3 imported", Z:summary())
 			assert.equal("1 zone light missing from the bridge: Cellar (device 2002, since " .. os.date("%Y-%m-%d", T0 - 5)
-				.. ") (Re-link Zone Light or Forget Light); 1 unbound zone light device: Garage (device 2003) (bind it to "
+				.. ") (Link or Forget Device); 1 unbound zone light device: Garage (device 2003) (bind it to "
 				.. "this bridge in Composer, or Forget Light)", Z:attention())
 			assert.is_true(Z.configured_once)
 		end)

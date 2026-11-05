@@ -431,6 +431,21 @@ F.unauthorized = '{"errors":[{"description":"unauthorized user"}],"data":[]}'
 -- each as the bridge sends it: only the fields that changed.
 F.events = {}
 
+-- Garage White's Hue device renamed in the Hue app (two-way names, D6; the
+-- device item carries only what changed [assumed: as the light's updates]).
+F.events.device_rename = '[{"creationtime":"2026-11-05T10:00:00Z","id":"9de116fc-00a1-4a2b-8c3d-0000000000a1",'
+	.. '"type":"update","data":[{"id":"' .. F.device_rids.garage .. '","id_v1":"/lights/4",'
+	.. '"metadata":{"name":"Garage Spot"},"type":"device"}]}]'
+
+-- Garage White's light added again under `new_rid` on its own device (a
+-- delete and re-add in the Hue app: the same radio, D7 at a stream add).
+function F.events.light_readded(new_rid)
+	return '[{"creationtime":"2026-11-05T10:01:00Z","id":"9de116fc-00a2-4a2b-8c3d-0000000000a2","type":"add",'
+		.. '"data":[{"id":"' .. new_rid .. '","id_v1":"/lights/9","owner":{"rid":"' .. F.device_rids.garage
+		.. '","rtype":"device"},"service_id":0,"metadata":{"name":"' .. F.names.garage .. '","archetype":"classic_bulb"},'
+		.. '"on":{"on":false},"dimming":{"brightness":100.0,"min_dim_level":2.0},"type":"light"}]}]'
+end
+
 -- Living Room Lamp dimmed to 50 %.
 F.events.brightness = '[{"creationtime":"2026-10-21T18:04:55Z","id":"9de116fc-0001-4a2b-8c3d-000000000001","type":"update",'
 	.. '"data":[{"id":"' .. F.rids.living .. '","id_v1":"/lights/1","owner":{"rid":"' .. F.device_rids.living

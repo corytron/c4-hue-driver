@@ -516,15 +516,15 @@ describe("bridge.motion", function()
 			assert.equal("gone", D:entry(M.area).state)
 			assert.equal("true", sent_to(2001, "HUE_MOTION_CONFIGURE")[1].gone)
 			assert.same({ rid = M.devices.hallway, reason = "resync", online = "false", ended = "deleted",
-				status = string.format("Sensor deleted in Hue since %s; re-link or Forget", day(now)) }, states(2001)[1])
+				status = string.format("Sensor deleted in Hue since %s; Link or Forget Device", day(now)) }, states(2001)[1])
 			assert.same({ rid = M.area, reason = "resync", online = "false", ended = "deleted",
-				status = string.format("Area deleted in Hue since %s; re-link or Forget", day(now)) }, states(2002)[1])
+				status = string.format("Area deleted in Hue since %s; Link or Forget Device", day(now)) }, states(2002)[1])
 			assert.is_true(saw_log("motion: Hallway sensor (device 2001) is no longer on the bridge; marked gone"))
 			local items = attention()
 			assert.is_true(has_item(items, string.format("1 motion sensor missing from the bridge: Hallway sensor (device 2001, "
-				.. "since %s) (Re-link Motion Device or Forget Motion Device)", date(now))))
+				.. "since %s) (Link or Forget Device)", date(now))))
 			assert.is_true(has_item(items, string.format("1 motion area missing from the bridge: Kitchen motion area (device "
-				.. "2002, since %s) (Re-link Motion Device or Forget Motion Device)", date(now))))
+				.. "2002, since %s) (Link or Forget Device)", date(now))))
 			assert.equal("1 sensor + 0 areas on bridge, 2 imported, 1 new, 2 missing", D:summary())
 
 			L.devices[M.devices.hallway] = device
@@ -723,19 +723,20 @@ describe("bridge.motion", function()
 			assert.equal("No new motion sensors on the bridge (2 on bridge, 2 imported)", last_result().text)
 		end)
 
-		it("S4, S6: a sensor that looks like the replacement of a device is skipped and listed, so that Re-link keeps "
-			.. "that device and its programming (rule 3)", function()
+		it("S4: a sensor that looks like the replacement of a device (its name, its Hue room) is skipped and listed, so "
+			.. "that Re-link keeps that device and its programming (rule 3)", function()
 			add_both()
 			feed(container("delete", '{"id":"' .. M.motion.hallway .. '","type":"motion"}', '{"id":"' .. M.devices.hallway
 				.. '","type":"device"}'))
 			assert.equal("gone", D:entry(M.devices.hallway).state)
-			-- The sensor reset and paired again (the same radio), back in its mapped Hue room.
-			feed(new_sensor_add("Hallway sensor", M.macs.hallway))
+			-- Another sensor paired under its name, in its mapped Hue room.
+			feed(new_sensor_add("Hallway sensor", "00:17:88:01:0c:aa:bb:ff-02-0406"))
 			feed(hallway_children(M.devices.lamp, NEW.device))
+			assert.equal("gone", D:entry(M.devices.hallway).state, "another radio: never re-linked by itself (M8)")
 			assert.is_true(D:import_new(done))
 			assert.equal(2, #c4.added, "no second device for the sensor")
-			assert.same({ ok = true, text = "Added no motion sensors; skipped 1 that may be a replacement (Re-link Motion "
-				.. "Device or Add Motion Sensor): Hallway sensor #31 (same radio as Hallway sensor, device 2001; re-link?); "
+			assert.same({ ok = true, text = "Added no motion sensors; skipped 1 that may be a replacement (Link Device or "
+				.. "Add From Hue): Hallway sensor #31 (looks like Hallway sensor, device 2001; re-link?); "
 				.. NO_ROOM }, last_result())
 			assert.same({ true, "Re-linked device 2001 (was Hallway sensor) to Hallway sensor [Hallway] #31" },
 				{ D:relink(2001, NEW.device) })
@@ -880,6 +881,40 @@ describe("bridge.motion", function()
 			assert.equal("true", states(2001)[1].motion)
 		end)
 
+		it("#247: a resync the bridge answers ends the bridge away while the stream is still down, and every device hears "
+			.. "so", function()
+			add_both()
+			feed("e1")
+			c4.sent = {}
+			D:on_stream_state(false)
+			now = T0 + 60
+			fire(GRACE)
+			local away = string.format("Bridge not answering since %s; motion not current", clock(T0))
+			assert.equal(away, states(2001)[1].status)
+			-- Refresh All (or the stream-down poll): no stream yet, but the GETs answer.
+			c4.sent = {}
+			resync()
+			assert.is_nil(D.away_since)
+			assert.is_nil(states(2001)[1].status)
+			assert.is_nil(states(2002)[1].status)
+			assert.equal("true", states(2001)[1].motion)
+			assert.is_true(saw_log("the bridge answers again"))
+		end)
+
+		it("#247: a device whose state is not known still loses a stale away status at the resync", function()
+			add_both()
+			D.sent[M.area] = { status = "Bridge not answering since 07:00; motion not current" }
+			D.areas_supported, D.area_records = nil, {}
+			local state_known = D.state_known
+			D.state_known = function(self, rid)
+				if rid == M.area then return false end
+				return state_known(self, rid)
+			end
+			c4.sent = {}
+			D:fanout("resync")
+			assert.same({ { rid = M.area, reason = "resync" } }, states(2002))
+		end)
+
 		it("S9: unreachable: Online false and the status, the contact as it is; back, the status clears (R8)", function()
 			resync()
 			D:add(M.devices.porch, PORCH, done)
@@ -1008,7 +1043,7 @@ describe("bridge.motion", function()
 			assert.same({ "HUE_MOTION_CONFIGURE@2001", "HUE_MOTION_STATE@2001" }, commands())
 			assert.equal("true", c4.sent[1].params.gone)
 			assert.same({ rid = M.devices.new, reason = "event", online = "false", ended = "deleted",
-				status = string.format("Sensor deleted in Hue since %s; re-link or Forget", day(now)) }, c4.sent[2].params)
+				status = string.format("Sensor deleted in Hue since %s; Link or Forget Device", day(now)) }, c4.sent[2].params)
 			assert.same({ { text = string.format("Hue motion sensor 1 (motion sensor, device 2001, gone since %s)", day(now)),
 				value = "2001" } }, D:picker_relink_devices())
 			assert.equal("Hue motion sensor 1 (motion sensor, device 2001) gone", D:picker_forget_devices()[1].text)
@@ -1019,7 +1054,7 @@ describe("bridge.motion", function()
 			feed("area_deleted")
 			assert.equal("gone", D:entry(M.area).state)
 			assert.equal("deleted", states(2002)[1].ended)
-			assert.equal("Area deleted in Hue since " .. day(now) .. "; re-link or Forget", states(2002)[1].status)
+			assert.equal("Area deleted in Hue since " .. day(now) .. "; Link or Forget Device", states(2002)[1].status)
 			assert.equal("linked", D:entry(M.devices.hallway).state)
 		end)
 
@@ -1391,8 +1426,8 @@ describe("bridge.motion", function()
 	end)
 
 	describe("relink (D4, S4, S6, A13, B1)", function()
-		it("B1, B3: a bridge replaced or reset: entries whose rids left go gone, the new resources are hinted, nothing "
-			.. "is matched on its own", function()
+		it("B1, B3, M6, M9: a bridge replaced or reset: the sensor is re-linked by its radio, the area (no radio) is "
+			.. "hinted and suggested only", function()
 			add_both()
 			local new_area = "ac000000-0000-4000-8000-000000000009"
 			-- The hallway sensor and the area under new rids, as a bridge that
@@ -1408,15 +1443,22 @@ describe("bridge.motion", function()
 				zigbee_connectivity = moved(M.zigbee_connectivity),
 				motion_area_configuration = moved(M.motion_area_configuration),
 				convenience_area_motion = moved(M.convenience_area_motion), security_area_motion = moved(M.security_area_motion) })
-			assert.equal("gone", D:entry(M.devices.hallway).state)
+			assert.is_nil(D:entry(M.devices.hallway))
+			assert.equal(2001, D:entry(NEW.device).device_id)
+			assert.equal("linked", D:entry(NEW.device).state)
+			assert.is_true(saw_log("motion: Re-linked Hallway sensor to its sensor (same radio, new Hue id)"))
 			assert.equal("gone", D:entry(M.area).state)
-			assert.same({ "Hallway sensor [Hallway] #12 (same radio as Hallway sensor, device 2001; re-link?)",
-				"Porch sensor #20" }, texts(D:picker_sensors()))
+			assert.same({ "Porch sensor #20" }, texts(D:picker_sensors()))
 			assert.same({ "Kitchen motion area (MotionAware) [Kitchen] #ac00 (looks like Kitchen motion area, device 2002; "
 				.. "re-link?)" }, texts(D:picker_areas()))
+			local s = D:suggestions()
+			assert.equal(1, #s)
+			assert.same({ 2002, new_area, "same name in the same Hue room", true }, { s[1].device_id, s[1].rid, s[1].why,
+				s[1].apply })
 			assert.equal(2, #c4.added, "nothing created")
-			assert.same({ true, "Re-linked device 2001 (was Hallway sensor) to Hallway sensor [Hallway] #12" },
-				{ D:relink(2001, NEW.device) })
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+			assert.same({ true, "Re-linked device 2002 (was Kitchen motion area) to Kitchen motion area (MotionAware) "
+				.. "[Kitchen] #ac00" }, { D:relink(2002, new_area) })
 		end)
 
 		it("D4: refuses a change of kind", function()
@@ -1429,21 +1471,20 @@ describe("bridge.motion", function()
 				.. "and try again)" }, { D:relink(2001, "nope") })
 		end)
 
-		it("S6: a sensor deleted and paired again (same radio) is hinted; Re-link keeps the device", function()
+		it("S6, M7: a sensor deleted and paired again (same radio) is re-linked by itself; the device keeps everything",
+			function()
+			local actions = {}
+			D.ctx.last_action = function(text) actions[#actions + 1] = text end
 			add_both()
 			feed(container("delete", '{"id":"' .. M.motion.hallway .. '","type":"motion"}', '{"id":"' .. M.devices.hallway
 				.. '","type":"device"}'))
 			assert.equal("gone", D:entry(M.devices.hallway).state)
-			feed(new_sensor_add("Hallway sensor", M.macs.hallway))
-			local hinted = "Hallway sensor #31 (same radio as Hallway sensor, device 2001; re-link?)"
-			assert.equal(hinted, D:picker_sensors()[1].text)
-			assert.is_true(has_item(attention(), "2 new motion sensors on the bridge: " .. hinted
-				.. ", Porch sensor #20 (Add Motion Sensor)"))
-			assert.is_true(saw_log("motion: new motion sensor Hallway sensor #31 on the bridge; use Add Motion Sensor (same "
-				.. "radio as Hallway sensor, device 2001; re-link?)"))
 			c4.sent = {}
-			assert.same({ true, "Re-linked device 2001 (was Hallway sensor) to Hallway sensor #31" },
-				{ D:relink(2001, NEW.device) })
+			logged = {}
+			feed(new_sensor_add("Hallway sensor", M.macs.hallway))
+			assert.same({ "Re-linked Hallway sensor to its sensor (same radio, new Hue id)" }, actions)
+			assert.same({ "Porch sensor #20" }, texts(D:picker_sensors()))
+			assert.is_false(saw_log("new motion sensor Hallway sensor"))
 			assert.is_nil(D:entry(M.devices.hallway))
 			assert.equal(2001, D:entry(NEW.device).device_id)
 			assert.equal("linked", D:entry(NEW.device).state)
@@ -1591,6 +1632,33 @@ describe("bridge.motion", function()
 				"Porch sensor #20 (unbound; device 2003)",
 				"Hallway sensor (motion sensor) (missing; device 2001)",
 			}, D:list_items())
+		end)
+
+		it("names (bridge/names.lua): a sensor's name is its device's, an area's its configuration's; a Hue rename is told",
+			function()
+			add_both()
+			local calls = {}
+			D:set_names(setmetatable({}, { __index = function(_, method)
+				return function(_, ...) calls[#calls + 1] = { method, ... } end
+			end }))
+			assert.equal("Hallway sensor", D:hue_name(M.devices.hallway, D.registry[M.devices.hallway]))
+			assert.same({ { method = "PUT", path = "/clip/v2/resource/device/" .. M.devices.hallway,
+				body = { metadata = { name = "Hall Motion" } } } }, D:name_requests(M.devices.hallway, "Hall Motion"))
+			assert.same({ { method = "PUT", path = "/clip/v2/resource/motion_area_configuration/" .. M.area,
+				body = { name = "Kitchen Motion" } } }, D:name_requests(M.area, "Kitchen Motion"))
+			assert.equal("device:" .. M.devices.hallway, D:name_source(M.devices.hallway, D.registry[M.devices.hallway]))
+			assert.equal("area:" .. M.area, D:name_source(M.area, D.registry[M.area]))
+			L.devices[M.devices.hallway].name = "Hall Motion"
+			D:rebuild()
+			D:refresh(M.devices.hallway, "event")
+			assert.same({ { "on_hue_name", "motion", M.devices.hallway } }, calls)
+			calls = {}
+			resync()
+			local passes = 0
+			for _, c in ipairs(calls) do
+				if c[1] == "pass" then passes = passes + 1 end
+			end
+			assert.equal(1, passes, "the pass after a successful resync")
 		end)
 
 		it("keeps commas out of the comma-delimited lists", function()

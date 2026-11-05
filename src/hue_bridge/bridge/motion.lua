@@ -175,7 +175,7 @@ motion.WORDS = {
 	busy_resync = "resyncing motion devices",
 	kind = "motion device",
 	unbound_kind = "unbound motion device",
-	relink_or_forget = "Re-link Motion Device or Forget Motion Device",
+	relink_or_forget = "Link or Forget Device",
 	forget_action = "Forget Motion Device",
 	name_kind = "motion device name",
 	hue_names = "Hue sensor and area names",
@@ -202,6 +202,8 @@ motion.KIND_WORDS = {
 		forget_tail = "; the MotionAware area is listed under Add Motion Area again", pick = "an area" },
 }
 motion.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Motion Sensor / Area's flag first
+motion.NAMES_KIND = "motion"                   -- bridge/names.lua syncs the sensors' and areas' names (D6, Q7)
+motion.RADIO_WORDS = { thing = "its sensor" }  -- D7's Last Action (§3.2 M7)
 motion.MESSAGES = { configure = "HUE_MOTION_CONFIGURE", state = "HUE_MOTION_STATE", hello = "HUE_MOTION_HELLO",
 	goodbye = "HUE_MOTION_GOODBYE", forget = "HUE_MOTION_FORGET", forgotten = "HUE_MOTION_FORGOTTEN" }
 -- bridge/owner.lua's options (its header lists what each keeps).
@@ -730,6 +732,91 @@ function motion:new_device_name(record)
 	return name
 end
 
+-- Names (bridge/names.lua, D6; motion's "no writes" lifted for names only, Q7) -------------------
+
+-- The Hue name a device's Composer name follows: the sensor's or area's, an
+-- unnamed area by its tag (A16).
+function motion.hue_name(_self, rid, entry)
+	return name_of(entry, rid)
+end
+
+-- A sensor's name is its Hue device's (the services carry none, EC §0.1); an
+-- area's is its configuration's.
+function motion.name_source(_self, rid, entry)
+	return (kind_of(entry) == "area" and "area:" or "device:") .. tostring(rid)
+end
+
+-- The PUT that names a sensor (its device, N26) or a MotionAware area
+-- (`name` on the configuration: 200 on the house, §2.3; N27).
+function motion:name_requests(rid, name)
+	local entry = self.registry[rid]
+	if not entry then
+		return nil
+	end
+	if kind_of(entry) == "area" then
+		return { { method = "PUT", path = motion.PATH .. motion.CONFIG_TYPE .. "/" .. rid, body = { name = name } } }
+	end
+	return { { method = "PUT", path = motion.PATH .. "device/" .. rid, body = { metadata = { name = name } } } }
+end
+
+-- Re-link by radio (D7, §3.2 M7) ---------------------------------------------------------------------
+
+-- Every sensor on the bridge with its device's radio (a sensor is one device:
+-- never multi), in rid order. Areas have none (M9).
+function motion:radio_records()
+	local out = {}
+	for rid, record in pairs(self.sensor_records) do
+		local mac = self:mac_of(rid)
+		if mac and self:addable(record) then
+			out[#out + 1] = { rid = rid, mac = mac, multi = false, record = record }
+		end
+	end
+	table.sort(out, function(a, b)
+		return a.rid < b.rid
+	end)
+	return out
+end
+
+function motion:radio_ready()
+	return self:devices_loaded() and self.got.motion == true
+end
+
+function motion.same_kind(_self, entry, record)
+	return kind_of(entry) == kind_of(record)
+end
+
+-- S4, A13: a new sensor or area with the name of exactly one gone device of
+-- its kind in the same Hue room or zone (the radio offers come first).
+function motion:name_suggestions(seen)
+	local out, sources = {}, {}
+	for _, rid in ipairs(self.reg:rids("gone")) do
+		if not seen[rid] and self:record_of(rid) == nil then
+			sources[#sources + 1] = rid
+		end
+	end
+	if #sources == 0 then
+		return out
+	end
+	for _, kind in ipairs({ "sensor", "area" }) do
+		for _, record in ipairs(self:new_records(kind)) do
+			local room = record.kind == "area" and (record.group and record.group.rid) or record.room
+			local matches = {}
+			for _, rid in ipairs(sources) do
+				local entry = self.registry[rid]
+				if kind_of(entry) == kind and record.name ~= nil and entry.name == record.name
+					and entry.hue_room_rid == room then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = record.rid, why = "same name in the same Hue room",
+					ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
+end
+
 -- Registry fields ---------------------------------------------------------------------------------
 
 -- (owner hook) The registry fields a record supplies.
@@ -785,6 +872,7 @@ function motion:refresh_entry(rid)
 			tostring(record.name))
 		entry.name = record.name
 		changed = true
+		self:hue_named(rid)  -- the names sync decides (D6)
 	end
 	local fields = self:fields_of(record)
 	fields.name = nil
@@ -896,7 +984,8 @@ end
 function motion:sensor_state(rid, entry)
 	if entry.state == "gone" then
 		return { online = "false", ended = "deleted",
-			status = string.format("Sensor deleted in Hue since %s; re-link or Forget", util.short_date_of(entry.gone_since)) }
+			status = string.format("Sensor deleted in Hue since %s; Link or Forget Device",
+				util.short_date_of(entry.gone_since)) }
 	end
 	local record = self.sensor_records[rid]
 	local out = {}
@@ -963,7 +1052,8 @@ end
 function motion:area_state(rid, entry)
 	if entry.state == "gone" then
 		return { online = "false", ended = "deleted",
-			status = string.format("Area deleted in Hue since %s; re-link or Forget", util.short_date_of(entry.gone_since)) }
+			status = string.format("Area deleted in Hue since %s; Link or Forget Device",
+				util.short_date_of(entry.gone_since)) }
 	end
 	if self.areas_supported == false then
 		-- B5: an area entry on a bridge that serves no areas. Not gone (only a
@@ -1293,6 +1383,13 @@ function motion:fetch_all(cb)
 	local step
 
 	local function finish()
+		if answered or #errors == 0 then
+			-- The bridge answers: every device hears so from the settle's fan-out.
+			-- A resync (Refresh All, a stream-down poll) clears a "Bridge not
+			-- answering" the stream's absence left, which only a container or a
+			-- reconnect cleared before (#247's side finding).
+			self:clear_away(true)
+		end
 		if #errors == 0 then
 			return cb(res)
 		end
@@ -1464,6 +1561,7 @@ function motion:settle(reason, with_configure)
 	self:reconcile(true)
 	self:rebuild()
 	self:reconcile_records()
+	self:auto_relink("resync")  -- D7 (§3.2 M7): a gone sensor back on its radio under a new rid
 	self:refresh_registry()
 	self:log_missed()
 	self:announce_new_all()
@@ -1479,8 +1577,17 @@ function motion:fanout(reason, with_configure)
 	local sent = 0
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
-		if entry.state ~= "unbound" and self:push(rid, reason, with_configure) then
-			sent = sent + 1
+		if entry.state ~= "unbound" then
+			if self:push(rid, reason, with_configure) then
+				sent = sent + 1
+			elseif not self.away_since and self.sent[rid] and self.sent[rid].status ~= nil
+				and not self:state_known(rid) then
+				-- Its last status (the bridge away) is over, though its state is not
+				-- known yet: a state without one clears it (§3: absent means fine).
+				if self:send_state(rid, reason, {}) then
+					sent = sent + 1
+				end
+			end
 		end
 	end
 	self.configured_once = true
@@ -1612,6 +1719,7 @@ function motion:on_container(container)
 		end
 	end
 	if kind == "add" then
+		sent = sent + self:auto_relink("event")  -- D7 at a stream add (M7): re-link and push only
 		self:announce_new_all()
 	end
 	self:flush()
@@ -1920,10 +2028,12 @@ end
 
 -- Re-link (D4: a sensor's device takes a sensor, an area's an area; EC S4,
 -- S6, A13). The device keeps its proxy, programming and name.
-function motion:relink(device_id, new_rid)
-	local busy = self:busy_text()
-	if busy then
-		return false, busy
+function motion:relink(device_id, new_rid, internal)
+	if not internal then
+		local busy = self:busy_text()
+		if busy then
+			return false, busy
+		end
 	end
 	local id = util.positive(device_id)
 	local _, entry = self.reg:by_device(id)
@@ -1935,7 +2045,7 @@ function motion:relink(device_id, new_rid)
 	if record and not self:addable(record) then
 		return false, string.format("Not re-linked: %s has no motion service on the bridge", self:label_of(record))
 	end
-	return owner.relink(self, device_id, new_rid)
+	return owner.relink(self, device_id, new_rid, internal)
 end
 
 function motion.relink_refusal(_self, _device_id, new_rid)
@@ -2122,6 +2232,9 @@ function motion:import_new(done)
 		done(false, "Not added: no motion sensors fetched yet (connect the event stream and try again)")
 		return false
 	end
+	-- D7 first (§3.2): a sensor M7 re-links is no new one; what it only
+	-- suggests is skipped below as a likely replacement (hint_text).
+	self:auto_relink("import")
 	local rooms, tombs = self.project:rooms(), self.reg:tombstones()
 	local jobs, replacing, unmapped, deleted, on_bridge = {}, {}, {}, {}, 0
 	for _, record in ipairs(sorted(self.sensor_records)) do
@@ -2181,7 +2294,7 @@ function motion:import_new(done)
 			parts[#parts + 1] = "stopped early: " .. err
 		end
 		if #replacing > 0 then
-			parts[#parts + 1] = string.format("skipped %d that may be %s (Re-link Motion Device or Add Motion Sensor): %s",
+			parts[#parts + 1] = string.format("skipped %d that may be %s (Link Device or Add From Hue): %s",
 				#replacing, #replacing == 1 and "a replacement" or "replacements", table.concat(replacing, ", "))
 		end
 		if #unmapped > 0 then
