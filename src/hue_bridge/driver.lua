@@ -24,6 +24,7 @@ local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
 local util = require("bridge.util")
 local housekeeping = require("bridge.housekeeping")
+local discovery_mod = require("bridge.discovery")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -831,6 +832,20 @@ local function want_resync(tier, why, done)
 	state.hk:poke("resync", why, done)
 end
 
+-- Finding the paired bridge at a new address (owner's answers D5, D12;
+-- bridge/discovery.lua): asked for once the bridge has not answered at the
+-- address where it last did for FIND_AFTER_S, or another bridge answers
+-- there. Never for an address typed by hand that never answered: there the
+-- owner's Bridges Found list offers the fix.
+local LAST_GOOD_IP_KEY = "hue_bridge_last_good_ip"
+local FIND_AFTER_S = 300
+
+local function want_find_bridge()
+	if state.hk and paired() and state.ip ~= nil and state.ip == state.last_good_ip then
+		state.hk:poke("find_bridge", "error")
+	end
+end
+
 local function new_stream()
 	return (use_netstream() and netstream or stream).new({
 		connection = stream_connection,
@@ -857,6 +872,9 @@ local function new_stream()
 					state.stream_down_at = state.stream_down_at or os.time()
 					if state.stream_down_reason == nil and tostring(text):find("^Disconnected") then
 						state.stream_down_reason = tostring(text)
+					end
+					if os.time() - state.stream_down_at >= FIND_AFTER_S then
+						want_find_bridge()
 					end
 				end
 			end
@@ -944,6 +962,7 @@ end
 -- is sent; an unreachable bridge is asked again every 30 s, a different
 -- bridge never (it does not become ours by waiting).
 local IDENTITY_RETRY_MS = 30000
+
 local identity_timer = nil
 
 local function cancel_identity_retry()
@@ -1097,6 +1116,13 @@ local function verify_identity(purpose, callback)
 				end
 				if trusted then
 					state.identity_text = nil
+					state.unreachable_since = nil
+					-- The address the paired bridge last answered at: where the
+					-- address follow-up starts looking (D5, discovery research §2.5).
+					if state.last_good_ip ~= ip then
+						state.last_good_ip = ip
+						C4:PersistSetValue(LAST_GOOD_IP_KEY, ip)
+					end
 				end
 				refresh_status()
 				answer_identity(trusted)
@@ -1107,11 +1133,17 @@ local function verify_identity(purpose, callback)
 			identity_status(string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
 				.. "is corrected", ip, reported, state.creds.bridge_id))
 			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
+			-- Another bridge where ours answered (a DHCP swap, research T3).
+			want_find_bridge()
 			return answer_identity(false)
 		end
 		identity_status(string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
 			tostring(r.ok and "no bridge id in the answer" or r.err), IDENTITY_RETRY_MS / 1000))
 		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
+		state.unreachable_since = state.unreachable_since or os.time()
+		if os.time() - state.unreachable_since >= FIND_AFTER_S then
+			want_find_bridge()
+		end
 		again()
 	end)
 end
@@ -1320,6 +1352,7 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		if state.hk then
 			state.hk:reset(state.address_gen)
 		end
+		state.unreachable_since = nil
 		state.key_rejected = nil
 		state.tls_verdict = nil
 		state.identity_ok = nil
@@ -2411,6 +2444,147 @@ if devtools then
 	})
 end
 
+-- Bridges Found (owner's answer D5; discovery research §2.4): the bridges
+-- that answered on the local network, never the internet. Searched for at
+-- the first load (3 s, 1 min, 5 min, then every 15 min until paired) and on
+-- "Search again"; a pick sets Bridge IP Address and runs Pair Bridge.
+local BRIDGES_ROW = "Bridges Found"
+local SEARCH_AGAIN = "Search again"
+local FIRST_SEARCH_MS = { 3000, 60000, 300000 }
+local SEARCH_EVERY_MS = 900000
+local bridges = { items = {}, by_label = {}, searching = false }
+
+local function subnet_item()
+	local ip = C4.GetControllerNetworkAddress and C4:GetControllerNetworkAddress() or nil
+	local a, b, c = tostring(ip or ""):match("^(%d+)%.(%d+)%.(%d+)%.%d+$")
+	if not a then
+		return nil
+	end
+	return string.format("Search every address of %s.%s.%s.x (about 2 minutes)", a, b, c)
+end
+
+local function show_bridges()
+	local paired_id = state.creds and state.creds.bridge_id or nil
+	local labels, by_label = {}, {}
+	local function add(label, value)
+		label = commaless(label)
+		labels[#labels + 1] = label
+		by_label[label] = value
+	end
+	for _, item in ipairs(bridges.items) do
+		if paired_id and item.id == paired_id then
+			add(discovery_mod.item_label(item, paired_id), item)
+		end
+	end
+	for _, item in ipairs(bridges.items) do
+		if not (paired_id and item.id == paired_id) then
+			add(discovery_mod.item_label(item, paired_id), item)
+		end
+	end
+	local n = #bridges.items
+	local summary
+	if bridges.searching then
+		summary = "Looking for Hue bridges on the network..."
+	elseif paired() and state.ip then
+		summary = string.format("Paired with %s at %s", config.model_label(state.creds.model), state.ip)
+	elseif n > 0 then
+		summary = string.format("%d Hue bridge%s found: pick one and click Set to pair", n, n == 1 and "" or "s")
+	else
+		summary = "No Hue bridge answered: type its address in Bridge IP Address"
+	end
+	add(SEARCH_AGAIN, "search")
+	local subnet = subnet_item()
+	if subnet and not bridges.searching and n == 0 then
+		add(subnet, "subnet")
+	end
+	bridges.by_label = by_label
+	show_list(BRIDGES_ROW, summary, labels)
+end
+
+local function search_bridges(subnet)
+	if not state.discovery then
+		return
+	end
+	bridges.searching = true
+	show_bridges()
+	local function found(list, detail)
+		bridges.searching = false
+		bridges.items = type(list) == "table" and list or {}
+		show_bridges()
+		if detail and detail.text then
+			last_action("Bridges Found: " .. tostring(detail.text))
+		end
+	end
+	if subnet then
+		state.discovery:find_subnet(found, state.ip)
+	else
+		state.discovery:find_all(found)
+	end
+end
+
+local function schedule_searches(i)
+	i = i or 1
+	if paired() then
+		return
+	end
+	state.search_timer = C4:SetTimer(FIRST_SEARCH_MS[i] or SEARCH_EVERY_MS, function()
+		state.search_timer = nil
+		if paired() then
+			return show_bridges()
+		end
+		search_bridges(false)
+		schedule_searches(i + 1)
+	end)
+end
+
+-- The driver's own UpdateProperty fires no OnPropertyChanged, so the
+-- property's handler runs here (discovery research finding 7).
+local function set_bridge_address(ip)
+	C4:UpdateProperty("Bridge IP Address", ip)
+	dispatch.properties["Bridge_IP_Address"](ip)
+end
+
+local function pick_bridge(item)
+	local paired_id = state.creds and state.creds.bridge_id or nil
+	local where = string.format("%s at %s", config.model_label(item.model), tostring(item.ip))
+	if item.supported == false then
+		return last_action(where .. " is a first-generation bridge without the CLIP v2 API: this driver cannot use it")
+	end
+	if paired() and paired_id then
+		if item.id ~= paired_id then
+			if item.replaces == paired_id then
+				return last_action(where .. " replaces the paired bridge: run Forget Pairing, then pick it here again")
+			end
+			return last_action("Not changed: " .. where .. " is another bridge; to pair it instead, run Forget "
+				.. "Pairing first")
+		end
+		if item.ip == state.ip then
+			return last_action("Already paired with this bridge at " .. tostring(item.ip))
+		end
+		set_bridge_address(item.ip)
+		return last_action(string.format("Bridge IP Address set to %s, where the paired bridge answers", item.ip))
+	end
+	set_bridge_address(item.ip)
+	last_action("Bridge IP Address set to " .. tostring(item.ip) .. ": pairing")
+	dispatch.commands["Pair_Bridge"]()
+end
+
+dispatch.properties["Bridges_Found"] = function(value)
+	local pick = bridges.by_label[tostring(value)]
+	if pick == nil then
+		return -- the summary itself, or a list that changed meanwhile
+	end
+	list_rows_sent[BRIDGES_ROW] = nil -- the row snaps back to its summary
+	if pick == "search" then
+		search_bridges(false)
+	elseif pick == "subnet" then
+		search_bridges(true)
+	else
+		pick_bridge(pick)
+	end
+	show_bridges()
+end
+
 -- The background tasks (contract §1.3, §3.1; scheduler research §5). Every
 -- run reports to the log (Debug Mode shows each one, owner's answer D4).
 local function modules_busy()
@@ -2518,6 +2692,31 @@ local function start_housekeeping(dit)
 			end)
 		end,
 	})
+	-- The paired bridge at a new address (D5, D12): mDNS first, a sweep of
+	-- at most two /24 networks at most hourly (bridge/discovery.lua); only
+	-- the paired id's address is ever taken, and Last Action says what moved.
+	hk:define({
+		name = "find_bridge", class = "essential", triggers = { "error" },
+		debounce_s = 5, min_gap_s = 300, timeout_s = 360, guards = { "paired", "not_pairing" },
+		run = function(_job, done)
+			local creds, gen, old = state.creds, state.address_gen, state.ip
+			if not (state.discovery and creds and creds.bridge_id) then
+				return done(true, "nothing to look for")
+			end
+			state.discovery:find_paired(creds.bridge_id, state.last_good_ip or old, function(ip, how, detail)
+				local text = detail and detail.text or tostring(how)
+				if gen ~= state.address_gen then
+					return done(true, "the address changed meanwhile")
+				end
+				if ip and ip ~= old then
+					last_action(string.format("The bridge moved from %s to %s (%s): Bridge IP Address updated; "
+						.. "reserve its address in the router", tostring(old), ip, text))
+					set_bridge_address(ip)
+				end
+				done(ip ~= nil, text)
+			end)
+		end,
+	})
 	state.hk = hk
 	hk:start(dit)
 	if state.key_rejected then
@@ -2577,7 +2776,11 @@ function OnDriverLateInit(dit)
 	settle_last_action_rows()
 	state.stream = new_stream()
 	state.late_init_done = true
+	state.last_good_ip = C4:PersistGetValue(LAST_GOOD_IP_KEY)
+	state.discovery = discovery_mod.new({ identify = pairing.probe, log = log })
 	start_housekeeping(dit)
+	show_bridges()
+	schedule_searches()
 	replay_early_commands()
 	register_probe_events()
 	refresh_status()
@@ -2598,6 +2801,13 @@ end
 function OnDriverDestroyed()
 	if state.hk then
 		state.hk:stop()
+	end
+	if state.discovery then
+		state.discovery:stop()
+	end
+	if state.search_timer then
+		state.search_timer:Cancel()
+		state.search_timer = nil
 	end
 	if prop_soon_timer then
 		prop_soon_timer:Cancel()
@@ -2636,14 +2846,23 @@ function OnConnectionStatusChanged(idBinding, nPort, strStatus)
 	if netcheck.on_status_changed(idBinding, nPort, strStatus) then
 		return
 	end
+	-- Binding 6008: the mDNS search of bridge/discovery.lua.
+	if state.discovery and state.discovery:status_changed(idBinding, nPort, strStatus) then
+		return
+	end
 	local s = state.stream
 	if s and s.on_status_changed then
 		s:on_status_changed(idBinding, nPort, strStatus)
 	end
 end
 
-function ReceivedFromNetwork(idBinding, _nPort, strData)
+-- `from` (the sender) is passed from OS 4.0.0 on only [verified: SDK
+-- 32_serial_network_device/_15-ReceivedFromNetwork].
+function ReceivedFromNetwork(idBinding, nPort, strData, from)
 	if netcheck.on_data(idBinding, strData) then
+		return
+	end
+	if state.discovery and state.discovery:received(idBinding, nPort, strData, from) then
 		return
 	end
 	local s = state.stream

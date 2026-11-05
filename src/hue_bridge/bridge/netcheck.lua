@@ -27,8 +27,9 @@
 --
 -- Probe binding ids: every probe takes a fresh one, never used before in the
 -- project, from a persisted counter (COUNTER_NAME), FIRST_ID (6100) up to
--- LAST_ID (6999); 6001 is the stream's, and 6002 and 6003 were used by
--- earlier builds. Each id is used once: CreateNetworkConnection, then
+-- LAST_ID (6999); 6001 is the stream's, 6002 and 6003 were used by
+-- earlier builds, 6004 to 6007 are the dev-only 1.2 probe's, 6008 is
+-- bridge/discovery.lua's mDNS binding and 6009 its spare. Each id is used once: CreateNetworkConnection, then
 -- SetBindingAddress with the bridge's address, NetPortOptions, NetConnect;
 -- NetDisconnect and SetBindingAddress with '' (as netstream.clear_address
 -- does for 6001) when its probe is done; then never touched again. The

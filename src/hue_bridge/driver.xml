@@ -46,6 +46,15 @@
 				<type>STRING</type>
 				<readonly>false</readonly>
 			</property>
+			<!-- Bridges Found (owner's answer D5, docs/simplify-actions-design.md
+			     §1.8): the Hue bridges that answered on the local network (mDNS,
+			     and a sweep on request); a pick sets the address and pairs. -->
+			<property>
+				<name>Bridges Found</name>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
+				<tooltip>Pick the Hue bridge to use, then click Set; "Search again" looks once more</tooltip>
+			</property>
 			<property>
 				<name>Bridge ID</name>
 				<default></default>

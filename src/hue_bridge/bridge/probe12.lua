@@ -90,7 +90,7 @@ local probe12 = {}
 
 -- Bindings (see the header).
 probe12.BINDING_FIRST = 6004
-probe12.BINDING_LAST = 6009
+probe12.BINDING_LAST = 6007 -- 6008 is bridge/discovery.lua's mDNS binding, 6009 its spare
 probe12.BINDINGS = { mdns = 6004, ssdp = 6005, mdns5353 = 6006, multicast = 6007 }
 
 probe12.MDNS_GROUP, probe12.MDNS_PORT = "224.0.0.251", 5353

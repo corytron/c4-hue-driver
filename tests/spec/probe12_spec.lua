@@ -437,7 +437,7 @@ describe("bridge/probe12.lua (#334, the 1.2 probe)", function()
 	describe("binding ids", function()
 		before_each(function() setup() end)
 
-		it("takes 6004 to 6009 only: never the stream's 6001, never netcheck's 6100 to 6999", function()
+		it("takes 6004 to 6007 only: never the stream's 6001, discovery's 6008 or netcheck's 6100 to 6999", function()
 			local netstream = require("bridge.netstream")
 			local netcheck = require("bridge.netcheck")
 			local seen = {}
@@ -448,13 +448,14 @@ describe("bridge/probe12.lua (#334, the 1.2 probe)", function()
 				assert.is_true(probe12.owns(id))
 			end
 			assert.equal(6004, probe12.BINDING_FIRST)
-			assert.equal(6009, probe12.BINDING_LAST)
+			assert.equal(6007, probe12.BINDING_LAST)
+			assert.is_false(probe12.owns(6008), "discovery's mDNS binding")
 			assert.is_true(probe12.BINDING_FIRST > netstream.BINDING)
 			assert.is_true(probe12.BINDING_LAST < netcheck.FIRST_ID)
 			assert.is_false(probe12.owns(netstream.BINDING))
 			assert.is_false(probe12.owns(netcheck.FIRST_ID))
 			assert.is_false(probe12.owns(6003))
-			assert.is_false(probe12.owns(6010))
+			assert.is_false(probe12.owns(6009))
 		end)
 
 		it("creates each once per run of the driver's Lua, never clears one, and creates again after a reload", function()
@@ -463,7 +464,7 @@ describe("bridge/probe12.lua (#334, the 1.2 probe)", function()
 			local first = {}
 			for _, args in ipairs(calls_on("CreateNetworkConnection")) do
 				first[#first + 1] = args[1]
-				assert.is_true(args[1] >= 6004 and args[1] <= 6009, "binding " .. tostring(args[1]))
+				assert.is_true(args[1] >= 6004 and args[1] <= 6007, "binding " .. tostring(args[1]))
 			end
 			table.sort(first)
 			assert.same({ 6004, 6005, 6006, 6007 }, first)
