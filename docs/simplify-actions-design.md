@@ -226,7 +226,7 @@ scenes, motion): 11 bridge actions instead of 9.
 One module, `bridge/housekeeping.lua`, runs every background job: one job
 at a time, reads only, user commands always first (no housekeeping request
 while a command queue is busy or within 1.5 s of a user write), nothing
-optional in the first 5 minutes after a Director restart, at most 60 optional
+optional in the first 5 minutes after a Director restart, at most 100 optional
 requests an hour, due times persisted because timers die at every restart and
 update. It never creates, renames, binds, moves or deletes a device, except
 where the owner opts in (Names From Hue = Follow; D7).
@@ -583,7 +583,7 @@ D5 promised them, and the code never had them.
 | 4 | Picking a bridge in Bridges Found does not pass its id to the pairing, so another bridge answering at that address in the window would be paired | The pick's id is the expected one: a different id at the address is refused as Pair Bridge refuses one today | H |
 | 5 | The Link Device row names the device twice | The suggestion suffix names only the Hue thing and the reason | I |
 | 6 | Not built: Attention when the paired bridge is missing (D5: "If nothing local works, Attention says the bridge is missing"), the bridge or stream away an hour (§1.3), and the identity re-check before the key goes out again after an outage of 60 s or more (§1.3) | Build them as §1.3 and D5 say; the discovery research (simplify-research-discovery.md) has the texts of the missing, moved and typed-address-wrong cases, and its texts are used where they fit | H |
-| 7 | safety_quick, safety_full and stream_down_read are not counted against the hourly budget of optional requests | They are counted; stream_down_read stays every 10 minutes while the stream is down and the bridge answers | H |
+| 7 | safety_quick, safety_full and stream_down_read are not counted against the hourly budget of optional requests | They are counted; stream_down_read stays every 10 minutes while the stream is down and the bridge answers. A quick read costs 15 requests on a Bridge Pro, so six an hour cannot fit under 60: the hourly budget is 100 (piece H; at most one request every 36 s on average) | H |
 | 8 | A new light with a re-link hint is told "(Import All New or Add From Hue)", which Import All New skips; a new motion sensor is told "(Add From Hue)", which Import All New imports | Hinted lights end "(Link Device)"; sensors end "(Import All New or Add From Hue)" | I |
 | 9 | Name suggestions need the same Hue room or group id, so after a bridge reset nothing is suggested; zone lights have none | The same room is the same id or, failing that, the same room name; zone lights get suggestions by the same rule if their module allows it without a new picker, otherwise an issue for 1.3 | I |
 | 10 | Inside Import All New the automatic re-link's Last Action is overwritten by the import's, and the import result never names the re-linked devices | Import All New's result names them ("re-linked 2: Lamp 3, Lamp 4"), and the re-link run inside an import writes no Last Action of its own | I |

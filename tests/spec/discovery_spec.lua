@@ -494,6 +494,24 @@ describe("bridge/discovery.lua (#334, D5 and D12)", function()
 			assert_clean()
 		end)
 
+		-- Bridges Found's item names what this searches, in its order (#334
+		-- §4 finding 12): the given address's /24 first, then the controller's.
+		it("names its networks in subnet_nets and subnet_label, in the order it searches them", function()
+			assert.same({ "198.51.100", "192.0.2" }, d:subnet_nets("198.51.100.75"))
+			assert.equal("Search every address of 198.51.100.x and 192.0.2.x (about 4 minutes)",
+				discovery.subnet_label(d:subnet_nets("198.51.100.75")))
+			local answers = run(function(done) d:find_subnet(done, "198.51.100.75") end)
+			assert.same(d:subnet_nets("198.51.100.75"), answers[1][2].sweep.nets, "the label's networks are the sweep's")
+			assert.same({ "192.0.2" }, d:subnet_nets("192.0.2.61"), "one network when both are the same")
+			assert.same({ "192.0.2" }, d:subnet_nets(nil))
+			assert.same({ "192.0.2" }, d:subnet_nets("1.2.3.4"), "a public address is never searched, nor named")
+			assert.equal("Search every address of 192.0.2.x (about 2 minutes)", discovery.subnet_label({ "192.0.2" }))
+			lan.controller = nil
+			assert.same({}, d:subnet_nets(nil))
+			assert.is_nil(discovery.subnet_label(d:subnet_nets(nil)))
+			assert.is_nil(discovery.subnet_label(nil))
+		end)
+
 		it("refuses to search a network that could be on the internet", function()
 			lan.controller = nil
 			local answers = run(function(done) d:find_subnet(done, "1.2.3.4") end)

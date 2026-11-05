@@ -4,7 +4,8 @@
 -- interface and rules of docs/simplify-research-scheduler.md §3.1 to §3.7
 -- with three amendments: background tasks are always on (no enable(), owner's
 -- answer D4), the engine only reads (every request it makes is a GET), and
--- nothing is wired into driver.lua yet.
+-- the tasks themselves are hue_bridge/driver.lua's (start_housekeeping); §4
+-- of the contract adds job.charge and the hourly budget of 100 (finding 7).
 --
 --   local hk = housekeeping.new(ctx)
 --   hk:define(task)           a task (fields below); before or after start()
@@ -78,6 +79,14 @@
 --
 -- Inside run: job.http(req, cb) is the gated, counted GET; job.note(text)
 -- adds a line to the run's report; job.name, job.trigger, job.click.
+-- job.charge() counts one request the run sends by another path (the
+-- driver's resync chain goes through bridge_request, which calls it for
+-- each of its GETs, #334 §4 finding 7): in the run's report and, for an
+-- optional run, in the rolling hour, so the hourly budget holds the next
+-- optional run back as job.http's requests would. It refuses nothing: that
+-- path also carries a person's requests (a click's GETs while the read
+-- runs), which the engine must never fail. The start rule bounds such a
+-- run all the same: it starts only when its whole budget fits the hour.
 --
 -- The rules (research §3.3 to §3.5):
 --  * One job at a time: a global lock; the others wait their turn. Clicks
@@ -100,7 +109,11 @@
 --    poked often).
 --  * Budgets: job.http refuses a request beyond the run's budget; optional
 --    runs (unless a click asked) count against HOUR_BUDGET requests in any
---    rolling hour, and one starts only when its whole budget fits.
+--    rolling hour (job.charge's too), and one starts only when its whole
+--    budget fits. HOUR_BUDGET is 100, not the research's 60: the contract
+--    keeps the stream-down read every 10 minutes (§1.3, §4 finding 7), six
+--    quick reads of 15 GETs an hour on a Bridge Pro, and the sixth starts
+--    only when its budget of 25 fits beside the five before it.
 --  * User first: each request waits while ctx.user_active(quiet_ms) is true,
 --    looking again every GATE_POLL_MS, and goes after GATE_MAX_MS whatever,
 --    so a long slider session cannot starve the resync after a reconnect. A
@@ -149,7 +162,7 @@ housekeeping.STORE_NAME = "hue_housekeeping"
 housekeeping.STORE_VERSION = 1
 housekeeping.MAX_ARM_MS = 3600000       -- one arm of the alarm, at most an hour
 housekeeping.HOUR_MS = 3600000
-housekeeping.HOUR_BUDGET = 60           -- optional requests in any rolling hour
+housekeeping.HOUR_BUDGET = 100          -- optional requests in any rolling hour (see "Budgets" above)
 housekeeping.OPTIONAL_GAP_MS = 30000    -- from the end of any run to the next optional start
 housekeeping.GATE_POLL_MS = 250         -- the user gate looks again this often
 housekeeping.GATE_MAX_MS = 10000        -- and lets a request go after this long
@@ -687,6 +700,9 @@ function housekeeping:start_run(t, now)
 	job.note = function(text)
 		job.notes[#job.notes + 1] = tostring(text)
 	end
+	job.charge = function()
+		return self:charge(job)
+	end
 	job.timer = self.set_timer(math.max(1, t.timeout_ms), function()
 		if self:alive(job) then
 			self:protect("timeout", self.finish, self, job, false,
@@ -792,6 +808,23 @@ function housekeeping:request(job, req, cb)
 	job.used = job.used + 1
 	job.queue[#job.queue + 1] = { req = req, cb = cb }
 	self:pump(job)
+end
+
+-- job.charge: one request sent outside job.http, counted as job.http counts
+-- (the report, and the rolling hour for an optional run), never refused.
+-- After the run's end (a timeout, a reset) its chain may still be sending:
+-- the hour still sees those requests.
+function housekeeping:charge(job)
+	if job.counted then
+		self.hour_log[#self.hour_log + 1] = self.now()
+	end
+	if self:alive(job) then
+		job.used = job.used + 1
+		job.sent = job.sent + 1
+		if job.used == job.budget + 1 then
+			self.log.debug("housekeeping: %s sent more than its budget of %d by another path", job.name, job.budget)
+		end
+	end
 end
 
 function housekeeping:pump(job)

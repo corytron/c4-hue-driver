@@ -21,7 +21,10 @@
 --       each true for discovery's binding (handled, whatever the state),
 --       false for any other: the driver passes everything else on.
 --   d:owns(binding), d:busy(), d:sweep_wait_ms(), d:stop()
+--   d:subnet_nets(around_ip)                the /24 networks find_subnet would
+--                                           search, in order ("10.0.2", ...)
 --   discovery.item_label(item, paired_id)   the Bridges Found text of an item
+--   discovery.subnet_label(nets)            the text of the offered search
 --
 -- list items: { id, name, model, ip, how = "mdns" | "sweep", sw_version,
 -- api_version, supported (bridge/config.lua model_supported), replaces (a
@@ -857,8 +860,8 @@ local function sweep_summary(result, plan, task)
 		skipped = plan.skipped }
 end
 
--- The plan of a sweep around `first` (may be nil) and the controller.
-function D:_plan(first)
+-- The controller's address, or nil (and why, logged).
+function D:_controller()
 	local ok, controller = pcall(self.ctx.controller_ip)
 	if not ok then
 		self.log.warn("discovery: the controller's address could not be read: %s", tostring(controller))
@@ -867,8 +870,38 @@ function D:_plan(first)
 	if type(controller) ~= "string" or controller == "" then
 		controller = nil
 	end
+	return controller
+end
+
+-- The plan of a sweep around `first` (may be nil) and the controller.
+function D:_plan(first)
+	local controller = self:_controller()
 	local plan = sweep.plan({ first, controller }, { controller }, 2)
 	return plan, controller
+end
+
+-- The networks find_subnet(done, around_ip) would search, in its order
+-- ("10.0.2", ...): the /24 of around_ip first, then the controller's.
+function D:subnet_nets(around_ip)
+	local nets = sweep.nets({ around_ip, self:_controller() }, 2)
+	local out = {}
+	for i, entry in ipairs(nets) do
+		out[i] = entry.net
+	end
+	return out
+end
+
+-- Bridges Found's offered search of every address, naming the networks it
+-- searches in their order (#334 §4 finding 12), or nil for none. Each /24
+-- takes about 90 s (the house: 83 s, bridge/sweep.lua), hence the minutes.
+function discovery.subnet_label(nets)
+	nets = nets or {}
+	if #nets == 0 then
+		return nil
+	elseif #nets == 1 then
+		return string.format("Search every address of %s.x (about 2 minutes)", nets[1])
+	end
+	return string.format("Search every address of %s.x and %s.x (about 4 minutes)", nets[1], nets[2])
 end
 
 local function plan_refusal(plan, controller)

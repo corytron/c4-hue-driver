@@ -1003,7 +1003,7 @@ describe("Hue Bridge driver", function()
 			s:respond_headers(200, {})
 			assert.truthy(env.Properties["Event Stream"]:match("^Connected since %d%d:%d%d:%d%d$"))
 			s:done(7, "Couldn't connect to server")
-			c4.fire_timers()
+			c4.advance(1000) -- the reconnect after 1 s (within a minute: no outage check)
 			local s2 = c4.last_transfer()
 			assert.are_not.equal(s, s2)
 			s2:respond_headers(200, {})
@@ -1663,6 +1663,537 @@ describe("Hue Bridge driver", function()
 			-- listed as a difference.
 			assert.is_nil(fake.attention(env):find("Reading Lamp is ", 1, true), fake.attention(env))
 		end)
+	end)
+
+	-- Wave 3 of 1.2, the bridge's core (#334, docs/simplify-actions-design.md
+	-- §4 findings 1, 2, 3, 4, 6, 7 and 12), against a small simulated network:
+	-- which bridge answers at which address, its event stream, mDNS, and a
+	-- LAN where every address refuses port 443 (the sweep finds nothing).
+	describe("bridge core of 1.2 (#334 §4)", function()
+		local mdns_packet = require("helpers.mdns_packet")
+		local F = require("fixtures.hue_resources")
+		local IP, PAIRED, OTHER = "10.0.2.143", "001788fffe123abc", "001788fffe456def"
+		local MIN = 60000
+		local EMPTY = '{"errors":[],"data":[]}'
+		local LINK = '[{"error":{"type":101,"address":"","description":"link button not pressed"}}]'
+		-- Noon local time, so that no "since 12:01" of a spec crosses midnight.
+		local NOON = os.time({ year = 2026, month = 11, day = 5, hour = 12, min = 0, sec = 0 }) * 1000
+
+		local function config_of(id)
+			return '{"bridgeid":"' .. id:upper() .. '","modelid":"BSB003","name":"Hue","swversion":"1968096020",'
+				.. '"apiversion":"1.68.0"}'
+		end
+
+		local function dotted(host)
+			local parts = {}
+			for n in tostring(host):gmatch("%d+") do parts[#parts + 1] = tostring(tonumber(n)) end
+			return table.concat(parts, ".")
+		end
+
+		local function at_noon(c4)
+			c4.now_ms = NOON
+			c4.GetControllerNetworkAddress = function() return "192.0.2.7" end
+		end
+
+		-- Paired with PAIRED at IP; `props` adds or overrides properties.
+		local function house(props)
+			local all = { ["Event Stream Transport"] = "Web transfer", ["Bridge IP Address"] = IP }
+			for k, v in pairs(props or {}) do all[k] = v end
+			local env, c4 = fake.load_driver("hue_bridge", all)
+			c4.persist.hue_app_key = "abc123"
+			c4.persist.hue_bridge_id = PAIRED
+			at_noon(c4)
+			return env, c4
+		end
+
+		local function unpaired(ip)
+			local env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+				["Bridge IP Address"] = ip or "" })
+			at_noon(c4)
+			return env, c4
+		end
+
+		-- The network (`w`): the bridge id answering at each address (`w.at`,
+		-- nothing: no answer), whether the paired bridge's stream opens
+		-- (`w.stream`), the mDNS answers (`w.mdns`, { id, model, ips }) and
+		-- the resource bodies (`w.bodies`, default empty). w.serve() answers
+		-- every request not answered yet, except the key requests, which wait
+		-- in w.posts; w.run(ms, step) moves the clock on, serving after every
+		-- step; w.drop() ends the open event stream.
+		local function world(c4)
+			local w = { at = { [IP] = PAIRED }, stream = true, mdns = {}, bodies = {}, next = 1, posts = {}, queries = 0,
+				tcp = 0 }
+			c4.CreateTCPClient = function()
+				local cl = { cb = {} }
+				function cl:OnConnect(fn) self.cb.connect = fn; return self end
+				function cl:OnError(fn) self.cb.error = fn; return self end
+				function cl:Connect()
+					w.tcp = w.tcp + 1
+					self.pending = true
+					c4:SetTimer(3, function()
+						if self.pending then
+							self.pending = false
+							self.cb.error(self, 111, "Connection refused")
+						end
+					end)
+					return self
+				end
+				function cl:Close() self.pending = false; return self end
+				return cl
+			end
+			local real_connect, real_send = c4.NetConnect, c4.SendToNetwork
+			c4.NetConnect = function(self, binding, port, ...)
+				real_connect(self, binding, port, ...)
+				if binding == 6008 then
+					c4:SetTimer(4, function() c4.net_status(binding, port, "ONLINE") end)
+				end
+			end
+			c4.SendToNetwork = function(self, binding, port, data)
+				real_send(self, binding, port, data)
+				if binding ~= 6008 then return end
+				w.queries = w.queries + 1
+				local qid = data:byte(1) * 256 + data:byte(2)
+				for _, r in ipairs(w.mdns) do
+					c4:SetTimer(1, function() c4.net_receive(binding, port, mdns_packet.answer(r, qid)) end)
+				end
+			end
+			local function handle(t)
+				local host, path = t.url:match("^https://([^/]+)(/.*)$")
+				if path == "/api" then
+					w.posts[#w.posts + 1] = t
+					return
+				end
+				local id = w.at[dotted(host)]
+				if not id then
+					return t:done(7, "Couldn't connect to server")
+				elseif path == "/api/0/config" then
+					return t:respond(200, config_of(id))
+				elseif path:find("^/eventstream/") then
+					if id == PAIRED and w.stream then
+						w.stream_t = t
+						return t:respond_headers(200, {})
+					end
+					return t:done(7, "Couldn't connect to server")
+				elseif path == "/clip/v2/resource/bridge" then
+					return t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"' .. id .. '"}]}')
+				end
+				t:respond(200, w.bodies[path:match("^/clip/v2/resource/([%w_]+)$")] or EMPTY)
+			end
+			function w.serve()
+				while w.next <= #c4.transfers do
+					local t = c4.transfers[w.next]
+					w.next = w.next + 1
+					handle(t)
+				end
+			end
+			function w.run(ms, step)
+				local stop = c4.now_ms + ms
+				w.serve()
+				while c4.now_ms < stop do
+					c4.advance(math.min(step or 1000, stop - c4.now_ms))
+					w.serve()
+				end
+			end
+			function w.drop()
+				local s = w.stream_t
+				w.stream_t = nil
+				s:done(7, "Couldn't connect to server")
+				w.serve()
+			end
+			function w.identity_checks()
+				local n = 0
+				for _, t in ipairs(c4.transfers) do
+					if t.url:find("/api/0/config$") then n = n + 1 end
+				end
+				return n
+			end
+			return w
+		end
+
+		-- Pick the Bridges Found item that contains `text`.
+		local function pick(env, c4, text)
+			for item in (c4.property_lists["Bridges Found"] or ""):gmatch("[^,]+") do
+				if item:find(text, 1, true) then
+					env.Properties["Bridges Found"] = item
+					return env.OnPropertyChanged("Bridges Found")
+				end
+			end
+			error("no Bridges Found item with " .. text .. ": " .. tostring(c4.property_lists["Bridges Found"]))
+		end
+
+		local function set_address(env, value)
+			env.Properties["Bridge IP Address"] = value
+			env.OnPropertyChanged("Bridge IP Address")
+		end
+
+		local function attention_has(env, text)
+			return fake.attention(env):find(text, 1, true) ~= nil
+		end
+
+		it("logs an Attention text longer than six rows in full, whatever Debug Mode says (finding 1)", function()
+			local lines = {}
+			local env, c4 = house()
+			local w = world(c4)
+			local long = ("Garage White "):rep(39) .. "Garage White"
+			w.bodies = { light = (F.light:gsub("Garage White", long)), device = (F.device:gsub("Garage White", long)),
+				zigbee_connectivity = F.zigbee_connectivity, room = F.room, zone = F.zone, bridge_home = F.bridge_home }
+			log.sink = function(line) lines[#lines + 1] = line end
+			env.OnDriverLateInit("DIT_STARTUP")
+			w.run(5000)
+			assert.equal("Off", env.Properties["Debug Mode"])
+			assert.truthy(fake.attention(env):find("… (Lua output)", 1, true), fake.attention(env))
+			local full
+			for _, line in ipairs(lines) do
+				if line:find("Hue Bridge: Attention: 4 new lights on the bridge: ", 1, true) == 1 then full = line end
+			end
+			assert.truthy(full, "the whole Attention text in the Lua output")
+			assert.truthy(full:find(long, 1, true), full)
+		end)
+
+		describe("Bridges Found", function()
+			it("reads the unpaired summary at once after Forget Pairing, and searches again from 3 s (finding 2)",
+				function()
+					local env, c4 = house()
+					local w = world(c4)
+					env.OnDriverLateInit("DIT_STARTUP")
+					w.run(5000)
+					assert.equal("Paired with Hue Bridge Pro (BSB003) at 10.0.2.143", env.Properties["Bridges Found"])
+					assert.equal(0, w.queries, "no search while paired")
+					w.mdns = { { id = PAIRED, model = "BSB003", ips = { IP } } }
+					env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing", Confirm = "Yes, forget" })
+					assert.equal("No Hue bridge answered: type its address in Bridge IP Address",
+						env.Properties["Bridges Found"])
+					w.run(2900)
+					assert.equal(0, w.queries, "nothing before 3 s")
+					w.run(100)
+					assert.equal("Looking for Hue bridges on the network...", env.Properties["Bridges Found"])
+					w.run(10000)
+					assert.equal("1 Hue bridge found: pick one and click Set to pair", env.Properties["Bridges Found"])
+					local first = w.queries
+					assert.truthy(first > 0)
+					w.run(MIN)
+					assert.truthy(w.queries > first, "the next search a minute later")
+					local second = w.queries
+					w.run(4 * MIN)
+					assert.equal(second, w.queries)
+					w.run(MIN + 5000)
+					assert.truthy(w.queries > second, "then five minutes after that")
+				end)
+
+			it("reads Paired with at once when a pick pairs, and stops searching (finding 2)", function()
+				local env, c4 = unpaired()
+				local w = world(c4)
+				w.mdns = { { id = PAIRED, model = "BSB003", ips = { IP } } }
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(10000)
+				assert.equal("1 Hue bridge found: pick one and click Set to pair", env.Properties["Bridges Found"])
+				pick(env, c4, IP)
+				w.serve()
+				assert.equal(1, #w.posts, "the key request")
+				w.posts[1]:respond(200, '[{"success":{"username":"abc123","clientkey":"00"}}]')
+				assert.equal("Paired with Hue Bridge Pro (BSB003) at 10.0.2.143", env.Properties["Bridges Found"])
+				local queries = w.queries
+				w.run(20 * MIN, 5000)
+				assert.equal(queries, w.queries, "no first-load search once paired")
+			end)
+
+			it("pairs only the bridge picked: another one answering at its address in the window is refused (finding 4)",
+				function()
+					local env, c4 = unpaired()
+					local w = world(c4)
+					w.mdns = { { id = PAIRED, model = "BSB003", ips = { IP } } }
+					env.OnDriverLateInit("DIT_STARTUP")
+					w.run(10000)
+					pick(env, c4, IP)
+					w.serve()
+					assert.equal(1, #w.posts)
+					w.posts[1]:respond(200, LINK)
+					assert.truthy(env.Properties["Status"]:find("^Press the link button"), env.Properties["Status"])
+					-- Another bridge answers at the address before the next attempt.
+					w.at[IP] = OTHER
+					w.run(3000)
+					assert.equal("Pairing failed: Bridge at 10.0.2.143 reports ID 001788fffe456def, expected "
+						.. "001788fffe123abc; run Forget Pairing first to pair with another bridge", env.Properties["Status"])
+					assert.equal(1, #w.posts, "no key asked of the other bridge")
+					assert.is_nil(c4.persist.hue_app_key)
+
+					-- The same refusal at once, when the other bridge answers the first probe.
+					env, c4 = unpaired()
+					w = world(c4)
+					w.mdns = { { id = PAIRED, model = "BSB003", ips = { IP } } }
+					env.OnDriverLateInit("DIT_STARTUP")
+					w.run(10000)
+					w.at[IP] = OTHER
+					pick(env, c4, IP)
+					w.serve()
+					assert.equal(0, #w.posts)
+					assert.truthy(env.Properties["Status"]:find("expected 001788fffe123abc", 1, true), env.Properties["Status"])
+					-- Pair Bridge clicked by hand expects nothing: it pairs what answers.
+					env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
+					w.serve()
+					assert.equal(1, #w.posts)
+				end)
+
+			it("writes Last Action only for a search the owner picked; the automatic ones keep it (finding 3)", function()
+				local lines = {}
+				local env, c4 = unpaired()
+				local w = world(c4)
+				env.Properties["Debug Mode"] = "On"
+				log.sink = function(line) lines[#lines + 1] = line end
+				env.OnDriverLateInit("DIT_STARTUP")
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing" })
+				local owners = fake.last_action(env)
+				assert.equal("Not forgotten: choose Yes, forget", owners)
+				w.run(22 * MIN, 5000) -- the searches 3 s after the start, then 1, 5 and 15 minutes after the one before
+				assert.truthy(w.queries >= 4, "the automatic searches ran: " .. w.queries)
+				assert.equal(owners, fake.last_action(env), "the owner's last result stays")
+				assert.equal("No Hue bridge answered: type its address in Bridge IP Address", env.Properties["Bridges Found"])
+				local logged = 0
+				for _, line in ipairs(lines) do
+					if line:find("Bridges Found (automatic search): no Hue bridge answered", 1, true) then logged = logged + 1 end
+				end
+				assert.truthy(logged >= 4, "each automatic search in the log: " .. logged)
+				pick(env, c4, "Search again")
+				w.run(10000)
+				assert.equal("Bridges Found: no Hue bridge answered", fake.last_action(env))
+			end)
+
+			it("names the networks of the offered search, the Bridge IP Address's first (finding 12)", function()
+				local env, c4 = unpaired()
+				local w = world(c4)
+				w.at = {}
+				env.OnDriverLateInit("DIT_STARTUP")
+				local function items() return c4.property_lists["Bridges Found"] end
+				assert.truthy(items():find(",Search every address of 192.0.2.x (about 2 minutes)", 1, true), items())
+				set_address(env, IP) -- typed; nothing answers there
+				w.serve()
+				assert.truthy(items():find(",Search every address of 10.0.2.x and 192.0.2.x (about 4 minutes)", 1, true),
+					items())
+				set_address(env, "192.0.2.61") -- in the controller's own network
+				w.serve()
+				assert.truthy(items():find(",Search every address of 192.0.2.x (about 2 minutes)", 1, true), items())
+				set_address(env, IP)
+				w.serve()
+				-- What it searches, in that order: 10.0.2.x from the typed address outward.
+				local connects = {}
+				c4.CreateTCPClient = function()
+					local cl = {}
+					function cl:OnConnect() return self end
+					function cl:OnError() return self end
+					function cl:Connect(host) connects[#connects + 1] = host; return self end
+					function cl:Close() return self end
+					return cl
+				end
+				pick(env, c4, "Search every address of 10.0.2.x")
+				c4.advance(1)
+				assert.equal(IP, connects[1])
+			end)
+		end)
+
+		describe("the bridge away (finding 6)", function()
+			it("checks the bridge's identity again after a stream outage of 60 s, before the key goes out", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				assert.truthy(env.Properties["Event Stream"]:find("^Connected since"), env.Properties["Event Stream"])
+				local checks = w.identity_checks()
+				-- An outage under a minute: no check.
+				w.drop()
+				w.run(2000)
+				assert.truthy(env.Properties["Event Stream"]:find("^Connected since"), env.Properties["Event Stream"])
+				w.run(2 * MIN)
+				assert.equal(checks, w.identity_checks(), "a short outage is not checked")
+
+				-- A longer one: at 60 s the unkeyed identity check is the next request.
+				w.stream = false
+				w.drop()
+				w.run(59 * 1000)
+				local n = #c4.transfers
+				w.run(1000)
+				local t = c4.transfers[n + 1]
+				assert.truthy(t and t.url == "https://10.0.2.143/api/0/config", t and t.url)
+				assert.is_nil(t.headers["hue-application-key"])
+				assert.equal("Paired", env.Properties["Status"], "the bridge answered with its id")
+				w.stream = true
+				w.run(MIN)
+				assert.truthy(env.Properties["Event Stream"]:find("^Connected since"), env.Properties["Event Stream"])
+			end)
+
+			it("sends nothing keyed when another bridge answers after an outage", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				w.stream = false
+				w.drop()
+				w.at[IP] = OTHER
+				w.run(61 * 1000)
+				assert.equal("Bridge at 10.0.2.143 reports ID 001788fffe456def, expected 001788fffe123abc; nothing is sent "
+					.. "until the address is corrected", env.Properties["Status"])
+				local n = #c4.transfers
+				env.ExecuteCommand("HUE_SET", { rid = "l1", on = "true" })
+				w.run(10 * MIN, 5000)
+				for i = n + 1, #c4.transfers do
+					assert.is_nil(c4.transfers[i].headers["hue-application-key"], c4.transfers[i].url)
+				end
+				assert.equal(IP, env.Properties["Bridge IP Address"], "another bridge's address is never taken")
+			end)
+
+			it("says the stream has been down an hour while the bridge answers, until it is back", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				w.stream = false
+				local since = os.date("%H:%M", math.floor(c4.now_ms / 1000))
+				w.drop()
+				w.run(59 * MIN, 5000)
+				assert.is_false(attention_has(env, "Event stream down"), fake.attention(env))
+				w.run(6 * MIN, 5000) -- the rows look again every 5 minutes
+				local text = "Event stream down since " .. since .. " while the bridge answers (lists read every 10 minutes): "
+					.. "set Event Stream Transport to Network connection if it stays"
+				assert.is_true(attention_has(env, text), fake.attention(env))
+				assert.equal("Paired", env.Properties["Status"])
+				w.stream = true
+				w.run(2 * MIN, 5000)
+				assert.truthy(env.Properties["Event Stream"]:find("^Connected since"), env.Properties["Event Stream"])
+				assert.is_false(attention_has(env, "Event stream down"), fake.attention(env))
+
+				-- On a network connection (never "ONLINE" here) the remedy is Web
+				-- transfer; this Director version's TLS check answered pinned before.
+				env, c4 = house({ ["Event Stream Transport"] = "Network connection" })
+				c4.persist.netcheck_pinned_on_v2 = c4.director_version
+				w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(66 * MIN, 5000)
+				assert.truthy(env.Properties["Stream Address"]:find("network connection", 1, true),
+					env.Properties["Stream Address"])
+				assert.is_true(attention_has(env, "while the bridge answers (lists read every 10 minutes): set Event Stream "
+					.. "Transport to Web transfer if it stays"), fake.attention(env))
+			end)
+
+			it("says the paired bridge is missing once away an hour and found nowhere, until it answers again", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				assert.equal(IP, c4.persist.hue_bridge_last_good_ip)
+				w.at[IP] = nil
+				w.drop()
+				w.run(2 * MIN, 5000)
+				assert.truthy(env.Properties["Status"]:find("^Bridge at 10.0.2.143 not reachable"), env.Properties["Status"])
+				w.run(58 * MIN, 5000)
+				assert.truthy(w.queries > 0 and w.tcp > 0, "mDNS, then the sweep, looked for it")
+				assert.is_false(attention_has(env, "missing since"), fake.attention(env))
+				w.run(6 * MIN, 5000)
+				local pattern = "Bridge 123ABC missing since 12:01: not found on the network %(searched 1[23]:%d%d%); "
+					.. "check its power, or type its address in Bridge IP Address"
+				assert.truthy(fake.attention(env):find(pattern), fake.attention(env))
+				assert.equal(IP, env.Properties["Bridge IP Address"])
+				-- It answers again: the item goes at once, the feed comes back.
+				w.at[IP] = PAIRED
+				w.run(MIN)
+				assert.is_false(attention_has(env, "missing since"), fake.attention(env))
+				assert.equal("Paired", env.Properties["Status"])
+				assert.truthy(env.Properties["Event Stream"]:find("^Connected since"), env.Properties["Event Stream"])
+			end)
+
+			it("says a bridge away an hour at a typed address is not answering there, and never searches for it", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				set_address(env, "192.0.2.75") -- typed: nothing answers there, and mDNS hears nothing
+				w.run(59 * MIN, 5000)
+				assert.is_false(attention_has(env, "not answering"), fake.attention(env))
+				w.run(6 * MIN, 5000)
+				assert.is_true(attention_has(env, "Bridge 123ABC not answering at 192.0.2.75 since 12:00: check its power, "
+					.. "or type its address in Bridge IP Address"), fake.attention(env))
+				assert.equal(0, w.tcp, "no sweep for an address typed by hand")
+				assert.equal("192.0.2.75", env.Properties["Bridge IP Address"])
+			end)
+
+			it("offers where the paired bridge answers when a typed address does not, never rewriting it", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				local before = fake.last_action(env)
+				w.mdns = { { id = PAIRED, model = "BSB003", ips = { IP } } }
+				set_address(env, "192.0.2.75")
+				w.run(10000)
+				assert.equal("192.0.2.75", env.Properties["Bridge IP Address"])
+				assert.is_true(attention_has(env, "Bridge 123ABC answers at 10.0.2.143, not at the typed 192.0.2.75: pick it "
+					.. "in Bridges Found"), fake.attention(env))
+				assert.truthy(c4.property_lists["Bridges Found"]:find("(paired) Hue Bridge Pro - Hue - 10.0.2.143 - 123ABC",
+					1, true), c4.property_lists["Bridges Found"])
+				assert.equal(before, fake.last_action(env), "the automatic search writes no Last Action")
+				assert.equal(1, w.queries > 0 and 1 or 0)
+				local queries = w.queries
+				w.run(10 * MIN, 5000)
+				assert.equal(queries, w.queries, "one search per typed address")
+				pick(env, c4, "(paired)")
+				w.run(5000)
+				assert.equal(IP, env.Properties["Bridge IP Address"])
+				assert.equal("Bridge IP Address set to 10.0.2.143, where the paired bridge answers", fake.last_action(env))
+				assert.equal("Paired", env.Properties["Status"])
+				assert.is_false(attention_has(env, "not at the typed"), fake.attention(env))
+			end)
+
+			it("follows the paired bridge to a new address and says so in Attention for a day", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				w.at = { ["192.0.2.150"] = PAIRED }
+				w.mdns = { { id = PAIRED, model = "BSB003", ips = { "192.0.2.150" } } }
+				w.drop()
+				w.run(8 * MIN, 5000)
+				local text = "The bridge moved from 10.0.2.143 to 192.0.2.150 (found by mDNS): Bridge IP Address updated; "
+					.. "reserve its address in the router"
+				assert.equal("192.0.2.150", env.Properties["Bridge IP Address"])
+				assert.equal(text, fake.last_action(env))
+				assert.is_true(attention_has(env, text), fake.attention(env))
+				assert.equal(text, c4.persist.hue_bridge_moved.text)
+				assert.equal("Paired", env.Properties["Status"])
+				-- Across a restart, then gone after a day.
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				assert.is_true(attention_has(env, text), fake.attention(env))
+				w.run(24 * 60 * MIN, 10 * MIN)
+				assert.is_false(attention_has(env, "moved from"), fake.attention(env))
+				-- Forget Pairing forgets it.
+				assert.is_table(c4.persist.hue_bridge_moved)
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing", Confirm = "Yes, forget" })
+				assert.is_nil(c4.persist.hue_bridge_moved)
+			end)
+		end)
+
+		it("counts the stream-down read's requests against the hourly budget, still every 10 minutes (finding 7)",
+			function()
+				local lines = {}
+				local env, c4 = house({ ["Debug Mode"] = "On" })
+				local w = world(c4)
+				log.sink = function(line) lines[#lines + 1] = { at = c4.now_ms, text = line } end
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				w.stream = false
+				w.drop()
+				w.run(40 * MIN, 5000)
+				local reads = {}
+				for _, line in ipairs(lines) do
+					local n = line.text:match("housekeeping: stream_down_read %(%a+%): OK: quick resync; (%d+) requests")
+					if n then reads[#reads + 1] = { at = line.at, n = tonumber(n) } end
+				end
+				assert.truthy(#reads >= 3, "a read every 10 minutes: " .. #reads)
+				for i, r in ipairs(reads) do
+					assert.truthy(r.n >= 10, "the quick chain's GETs are counted: " .. r.n)
+					if i > 1 then
+						assert.truthy(r.at - reads[i - 1].at <= 12 * MIN, "every 10 minutes or so")
+					end
+				end
+			end)
 	end)
 
 	describe("messages before late init", function()

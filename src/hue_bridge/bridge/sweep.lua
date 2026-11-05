@@ -102,6 +102,28 @@ end
 -- skipped = { { ip, why } } }. `centres` is a list (nil holes allowed, up
 -- to n) of addresses whose /24 to cover, in order; `skip` a list of
 -- addresses never tried.
+-- The networks of a plan, in its order, without its hosts: { { net =
+-- "a.b.c", centre = d }, ... } and the skipped centres, as sweep.plan
+-- takes them (Bridges Found names them, #334 §4 finding 12).
+function sweep.nets(centres, n)
+	local nets, skipped, seen = {}, {}, {}
+	for i = 1, n or 2 do
+		local ip = centres and centres[i]
+		if ip ~= nil and ip ~= "" then
+			local o = sweep.octets(ip)
+			local ok, why = sweep.searchable(ip)
+			local net = o and string.format("%d.%d.%d", o[1], o[2], o[3])
+			if not ok then
+				skipped[#skipped + 1] = { ip = tostring(ip), why = why }
+			elseif not seen[net] and #nets < sweep.MAX_NETS then
+				seen[net] = true
+				nets[#nets + 1] = { net = net, centre = o[4] }
+			end
+		end
+	end
+	return nets, skipped
+end
+
 function sweep.plan(centres, skip, n)
 	local out = { hosts = {}, nets = {}, skipped = {} }
 	local never = {}
@@ -111,31 +133,22 @@ function sweep.plan(centres, skip, n)
 			never[table.concat(o, ".")] = true
 		end
 	end
-	local seen = {}
-	for i = 1, n or 2 do
-		local ip = centres and centres[i]
-		if ip ~= nil and ip ~= "" then
-			local o = sweep.octets(ip)
-			local ok, why = sweep.searchable(ip)
-			local net = o and string.format("%d.%d.%d", o[1], o[2], o[3])
-			if not ok then
-				out.skipped[#out.skipped + 1] = { ip = tostring(ip), why = why }
-			elseif not seen[net] and #out.nets < sweep.MAX_NETS then
-				seen[net] = true
-				out.nets[#out.nets + 1] = net
-				local centre = o[4] >= 1 and o[4] <= 254 and o[4] or 1
-				local function add(h)
-					local addr = net .. "." .. h
-					if h >= 1 and h <= 254 and not never[addr] then
-						out.hosts[#out.hosts + 1] = addr
-					end
-				end
-				add(centre)
-				for d = 1, 253 do
-					add(centre + d)
-					add(centre - d)
-				end
+	local nets
+	nets, out.skipped = sweep.nets(centres, n)
+	for _, entry in ipairs(nets) do
+		local net = entry.net
+		out.nets[#out.nets + 1] = net
+		local centre = entry.centre >= 1 and entry.centre <= 254 and entry.centre or 1
+		local function add(h)
+			local addr = net .. "." .. h
+			if h >= 1 and h <= 254 and not never[addr] then
+				out.hosts[#out.hosts + 1] = addr
 			end
+		end
+		add(centre)
+		for d = 1, 253 do
+			add(centre + d)
+			add(centre - d)
 		end
 	end
 	return out
