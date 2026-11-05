@@ -196,7 +196,7 @@ motion.WORDS = {
 }
 -- The words that differ between the two kinds (D2: one driver, two kinds).
 motion.KIND_WORDS = {
-	sensor = { kind = "motion sensor", fallback = "Hue motion sensor", add_action = "Add From Hue",
+	sensor = { kind = "motion sensor", fallback = "Hue motion sensor", add_action = "Import All New or Add From Hue",
 		forget_tail = "; the Hue motion sensor is listed under Add From Hue again", pick = "a sensor" },
 	area = { kind = "motion area", fallback = "MotionAware area", add_action = "Add From Hue",
 		forget_tail = "; the MotionAware area is listed under Add From Hue again", pick = "an area" },
@@ -2459,7 +2459,7 @@ function motion:attention_items(items)
 		local w = motion.KIND_WORDS[kind]
 		if #names > 0 then
 			items[#items + 1] = string.format("%s on the bridge: %s (%s)", util.plural(#names, "new " .. w.kind),
-				named(names), kind == "sensor" and "Import All New or Add From Hue" or w.add_action)
+				named(names), w.add_action)
 		end
 		if #hinted > 0 then
 			items[#items + 1] = string.format("%s on the bridge may be %s: %s (Link Device)",

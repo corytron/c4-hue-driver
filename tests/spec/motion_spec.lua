@@ -1274,7 +1274,8 @@ describe("bridge.motion", function()
 			resync()
 			feed("e10")
 			feed("e10")
-			assert.equal(1, count_log("motion: new motion sensor Hue motion sensor 1 #30 on the bridge; use Add From Hue"))
+			assert.equal(1, count_log("motion: new motion sensor Hue motion sensor 1 #30 on the bridge; use Import All New "
+				.. "or Add From Hue"))
 			assert.same({}, c4.added)
 			-- Import All New imports sensors; areas only come one at a time (§4 finding 8).
 			assert.is_true(has_item(attention(), "3 new motion sensors on the bridge: Hallway sensor [Hallway] #12, Hue motion "

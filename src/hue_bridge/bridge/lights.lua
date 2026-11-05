@@ -568,7 +568,7 @@ function lights:announce_new(model)
 	end
 	self.announced_new[model.rid] = true
 	local hint_rid, hint = self:relink_hint(model)
-	self.ctx.log.always("lights: new light %s on the bridge; use Add Light or Import All New Lights%s",
+	self.ctx.log.always("lights: new light %s on the bridge; use Import All New or Add From Hue%s",
 		self:light_label(model), hint and string.format("; it looks like %s (device %d): re-link?",
 			self:entry_label(hint_rid, hint), hint.device_id) or "")
 end

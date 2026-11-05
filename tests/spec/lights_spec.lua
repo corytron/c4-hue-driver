@@ -1166,7 +1166,7 @@ describe("bridge.lights", function()
 			logged = {}
 			resync(new_bulb())
 			assert.equal("4 lights on bridge, 4 imported, 1 new, 1 missing", L:summary())
-			assert.is_true(saw_log("new light Garage White [Garage] #4 on the bridge; use Add Light or Import All New Lights; "
+			assert.is_true(saw_log("new light Garage White [Garage] #4 on the bridge; use Import All New or Add From Hue; "
 				.. "it looks like Garage White #4 (device 2001): re-link?"))
 			assert.same({ "Garage White [Garage] #4 (looks like Garage White #4, device 2001; re-link?)" },
 				texts(L:picker_lights()))
@@ -1338,7 +1338,7 @@ describe("bridge.lights", function()
 			assert.equal("5 lights on bridge, 4 imported, 1 new", L:summary())
 			assert.same({ { text = "New Bulb #5", value = NEW_BULB } }, L:picker_lights())
 			assert.equal("1 new light on the bridge: New Bulb #5 (Import All New or Add From Hue)", L:attention())
-			assert.is_true(saw_log("new light New Bulb #5 on the bridge; use Add Light or Import All New Lights"))
+			assert.is_true(saw_log("new light New Bulb #5 on the bridge; use Import All New or Add From Hue"))
 			-- Again: idempotent, logged once.
 			logged = {}
 			assert.equal(0, L:on_container(container(F.events.add)))
