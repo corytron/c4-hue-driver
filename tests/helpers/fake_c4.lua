@@ -1373,4 +1373,17 @@ function fake.custom_select(env, fn_name, ...)
 	return fake.as(env, fn, ...)
 end
 
+-- The bridge's Attention as one text: the row and its continuation rows
+-- "Attention (2)" to "Attention (6)", word-wrapped as Last Action's (#334).
+function fake.attention(env)
+	local parts = { env.Properties["Attention"] or "" }
+	for i = 2, 6 do
+		local row = env.Properties[string.format("Attention (%d)", i)]
+		if row ~= nil and row ~= "" then
+			parts[#parts + 1] = row
+		end
+	end
+	return table.concat(parts, " ")
+end
+
 return fake

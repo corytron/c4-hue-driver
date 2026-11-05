@@ -871,7 +871,7 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		assert.truthy(stream_sent[1]:find("hue-application-key: " .. KEY, 1, true), "the stream's own request")
 		assert.same({}, sent_on(c4, 6100), "the silent decoy never went online")
 		assert.same({ PROBE_REQUEST }, sent_on(c4, 6101))
-		assert.equal("None", env.Properties["Attention"])
+		assert.equal("None", fake.attention(env))
 	end)
 
 	it("a restart on the same Director version spends no id; one on a new version probes with the next ids",
@@ -902,7 +902,7 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		assert.equal(1, web_streams(c4), "the Web transfer stream")
 		assert.is_false(stream_created(c4), "never a keyed network connection")
 		assert.same({ 6100 }, probe_ids(c4), "no control after a decoy that answered")
-		assert.equal(NET_ATTENTION, env.Properties["Attention"])
+		assert.equal(NET_ATTENTION, fake.attention(env))
 		assert.equal("Network connection", env.Properties["Event Stream Transport"], "the owner's choice is kept")
 		assert.equal("Paired", env.Properties["Status"])
 		assert.is_nil(c4.persist.netcheck_pinned_on_v2)
@@ -915,7 +915,7 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		wait_gap(c4)
 		assert.same({ 6100 }, probe_ids(c4))
 		assert.is_false(stream_created(c4))
-		assert.equal(NET_ATTENTION, env.Properties["Attention"])
+		assert.equal(NET_ATTENTION, fake.attention(env))
 
 		-- The next run checks again, on the next id: nothing of the fallback is stored.
 		local env2, c42 = paired_bridge(nil, c4.persist)
@@ -935,7 +935,7 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 			.. "answered HTTP 200 40 ms after ONLINE: too soon for a handshake, taken for a reused connection or "
 			.. "session); checking again in 30 s", env.Properties["Event Stream"])
 		assert.is_true(warned("40 ms after ONLINE"))
-		assert.is_nil(env.Properties["Attention"]:find("Event stream", 1, true))
+		assert.is_nil(fake.attention(env):find("Event stream", 1, true))
 		assert.same({ 6100 }, probe_ids(c4))
 	end)
 

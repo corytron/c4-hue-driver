@@ -409,9 +409,9 @@ describe("motion round trip", function()
 			-- (A list row: Composer splits the drop-down at commas, so "‚" stands for ",".)
 			assert.equal("1 sensor + 1 area on bridge‚ 1 imported‚ 2 new‚ 1 missing",
 				bridge.Properties["Motion Sensors"])
-			assert.truthy(bridge.Properties["Attention"]:find("1 motion sensor missing from the bridge: Hallway sensor "
+			assert.truthy(fake.attention(bridge):find("1 motion sensor missing from the bridge: Hallway sensor "
 				.. "(device 2001, since " .. os.date("%Y-%m-%d") .. ") (Link or Forget Device)", 1,
-				true), bridge.Properties["Attention"])
+				true), fake.attention(bridge))
 
 			-- Once: the device asking again (Refresh From Bridge) hears the
 			-- same end, and its proxy hears nothing more.
@@ -437,8 +437,8 @@ describe("motion round trip", function()
 			assert.equal("No", sensor.Properties["Online"])
 			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new‚ 1 unbound",
 				bridge.Properties["Motion Sensors"])
-			assert.truthy(bridge.Properties["Attention"]:find("1 unbound motion device: Hallway sensor (device 2001) "
-				.. "(bind it to this bridge in Composer, or Forget Device)", 1, true), bridge.Properties["Attention"])
+			assert.truthy(fake.attention(bridge):find("1 unbound motion device: Hallway sensor (device 2001) "
+				.. "(bind it to this bridge in Composer, or Forget Device)", 1, true), fake.attention(bridge))
 			bc4.sent = {}
 			stream(M.events.e2)
 			assert.same({}, messages_to(SENSOR_ID), "nothing goes to an unbound device")
@@ -474,7 +474,7 @@ describe("motion round trip", function()
 			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 3 new,"
 				.. "Hallway sensor [Hallway] #12,Porch sensor #20,Kitchen motion area (MotionAware) [Kitchen] #ac00",
 				bc4.property_lists["Motion Sensors"])
-			local attention = bridge.Properties["Attention"]
+			local attention = fake.attention(bridge)
 			assert.truthy(attention:find("2 new motion sensors on the bridge: Hallway sensor [Hallway] #12, Porch sensor "
 				.. "#20 (Add From Hue)", 1, true), attention)
 			assert.truthy(attention:find("1 new motion area on the bridge: Kitchen motion area (MotionAware) [Kitchen] "
@@ -486,7 +486,7 @@ describe("motion round trip", function()
 			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new,"
 				.. "Hallway sensor [Hallway] #12 → device 2001,Porch sensor #20,"
 				.. "Kitchen motion area (MotionAware) [Kitchen] #ac00", bc4.property_lists["Motion Sensors"])
-			assert.is_nil(bridge.Properties["Attention"]:find("Hallway sensor", 1, true), "no longer new")
+			assert.is_nil(fake.attention(bridge):find("Hallway sensor", 1, true), "no longer new")
 
 			-- Seven weeks later the sensor's battery runs low (E12): the device
 			-- shows it and fires Battery Low; the bridge's Attention lists it
@@ -500,15 +500,15 @@ describe("motion round trip", function()
 			assert.same({ 3 }, sensor.C4.events_fired, "Battery Low")
 			assert.equal("1", sensor.C4.variables["Battery Low"].value)
 			action("Accept Names As They Are")
-			assert.truthy(bridge.Properties["Attention"]:find("1 motion sensor battery low: Hallway sensor 9 %", 1, true),
-				bridge.Properties["Attention"])
+			assert.truthy(fake.attention(bridge):find("1 motion sensor battery low: Hallway sensor 9 %", 1, true),
+				fake.attention(bridge))
 		end)
 
 		it("lists a low battery in Attention as soon as its event arrives (D5: listed at once)", function()
 			add_sensor()
 			stream(M.events.e12)
-			assert.truthy(bridge.Properties["Attention"]:find("1 motion sensor battery low: Hallway sensor 9 %", 1, true),
-				"Attention reads: " .. bridge.Properties["Attention"])
+			assert.truthy(fake.attention(bridge):find("1 motion sensor battery low: Hallway sensor 9 %", 1, true),
+				"Attention reads: " .. fake.attention(bridge))
 		end)
 
 		it("puts the Motion Sensors row back to its summary after a pick in Composer, as the other list rows", function()
@@ -594,7 +594,7 @@ describe("motion round trip", function()
 			action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch })
 			-- Names N16 (#334): the device and its name are Control4's, so the
 			-- Hue sensor is renamed, not the Composer device.
-			assert.is_nil(bridge.Properties["Attention"]:find("differ", 1, true), bridge.Properties["Attention"])
+			assert.is_nil(fake.attention(bridge):find("differ", 1, true), fake.attention(bridge))
 			local text = action("Adopt Hue Names")
 			assert.truthy(text:find("No names wait for Resolve Names", 1, true), text)
 			assert.same({}, bc4.renamed, "no Composer rename")

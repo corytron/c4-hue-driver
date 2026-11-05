@@ -683,6 +683,85 @@ local function show_module_list(name, module)
 	show_list(name, module:summary(), module:list_items())
 end
 
+local function wrap_text(text, width)
+	local lines, line = {}, ""
+	for word in text:gmatch("%S+") do
+		while #word > width do
+			if line ~= "" then
+				lines[#lines + 1] = line
+				line = ""
+			end
+			lines[#lines + 1] = word:sub(1, width)
+			word = word:sub(width + 1)
+		end
+		if line == "" then
+			line = word
+		elseif #line + 1 + #word <= width then
+			line = line .. " " .. word
+		else
+			lines[#lines + 1] = line
+			line = word
+		end
+	end
+	if line ~= "" then
+		lines[#lines + 1] = line
+	end
+	return lines
+end
+
+local function row_visible(name, visible)
+	if C4.SetPropertyAttribs then
+		pcall(C4.SetPropertyAttribs, C4, name, visible and 0 or 1)
+	end
+end
+
+-- Attention, word-wrapped onto its continuation rows like Last Action
+-- (#68, contract §1.3: the action hint at the end is never cut): Composer
+-- clips a value at about 75 characters. Unused rows are hidden; their
+-- visibility is asserted again 400 ms and 1.5 s later, as Last Action's is,
+-- because Composer dropped a show or hide that came in the same burst as the
+-- texts [hardware 2026-10-24].
+local ATTENTION_ROWS, ROW_WIDTH = 6, 72
+local attention_shown = {}
+local attention_timer = nil
+
+local function attention_row(i)
+	return string.format("Attention (%d)", i)
+end
+
+local function assert_attention_rows()
+	for i = 2, ATTENTION_ROWS do
+		row_visible(attention_row(i), attention_shown[i] == true)
+	end
+end
+
+local function assert_attention_rows_soon()
+	if attention_timer then
+		attention_timer:Cancel()
+	end
+	attention_timer = C4:SetTimer(400, function()
+		assert_attention_rows()
+		attention_timer = C4:SetTimer(1500, function()
+			attention_timer = nil
+			assert_attention_rows()
+		end)
+	end)
+end
+
+local function show_attention(text)
+	local lines = wrap_text(text, ROW_WIDTH)
+	if #lines > ATTENTION_ROWS then
+		log.info("Attention: %s", text)
+		lines[ATTENTION_ROWS] = lines[ATTENTION_ROWS]:sub(1, ROW_WIDTH - 16) .. " … (Lua output)"
+	end
+	prop("Attention", lines[1] or "None")
+	for i = 2, ATTENTION_ROWS do
+		prop(attention_row(i), lines[i] or "")
+		attention_shown[i] = lines[i] ~= nil
+	end
+	assert_attention_rows_soon()
+end
+
 local function refresh_lights_props()
 	if not state.zone_lights then
 		return -- before late init created the modules
@@ -691,7 +770,7 @@ local function refresh_lights_props()
 	local attention = attention_text()
 	if attention ~= state.attention_sent then
 		state.attention_sent = attention
-		prop("Attention", attention)
+		show_attention(attention)
 	end
 	refresh_room_mappings()
 	show_module_list("Scenes", state.scenes)
@@ -1051,7 +1130,7 @@ local function tls_gate(gen, ip, done)
 				ip, tostring(detail))
 			refresh_status()
 			show_stream_waiting() -- "Not connected: TLS check failed", as Connect Event Stream would say
-			C4:UpdateProperty("Attention", TLS_ATTENTION)
+			show_attention(TLS_ATTENTION)
 			state.attention_sent = TLS_ATTENTION
 			return done(false)
 		end
@@ -1633,37 +1712,7 @@ local LAST_ACTION_ROWS, LAST_ACTION_WIDTH = 6, 72
 local last_action_shown = {}   -- row index → true while the row holds text
 local last_action_timer = nil
 
-local function wrap_text(text, width)
-	local lines, line = {}, ""
-	for word in text:gmatch("%S+") do
-		while #word > width do
-			if line ~= "" then
-				lines[#lines + 1] = line
-				line = ""
-			end
-			lines[#lines + 1] = word:sub(1, width)
-			word = word:sub(width + 1)
-		end
-		if line == "" then
-			line = word
-		elseif #line + 1 + #word <= width then
-			line = line .. " " .. word
-		else
-			lines[#lines + 1] = line
-			line = word
-		end
-	end
-	if line ~= "" then
-		lines[#lines + 1] = line
-	end
-	return lines
-end
 
-local function row_visible(name, visible)
-	if C4.SetPropertyAttribs then
-		pcall(C4.SetPropertyAttribs, C4, name, visible and 0 or 1)
-	end
-end
 
 local function last_action_row(i)
 	return string.format("Last Action (%d)", i)
@@ -2998,6 +3047,10 @@ end
 
 function OnDriverDestroyed()
 	close_pairing_window()
+	if attention_timer then
+		attention_timer:Cancel()
+		attention_timer = nil
+	end
 	if state.hk then
 		state.hk:stop()
 	end

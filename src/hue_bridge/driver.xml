@@ -102,6 +102,39 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- A long Attention continues on the rows (2) to (6), word-wrapped at
+				 about 70 characters like Last Action's, so the action named at the
+				 end is never cut (#334); unused rows are hidden with SetPropertyAttribs. -->
+			<property>
+				<name>Attention (2)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Attention (3)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Attention (4)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Attention (5)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Attention (6)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
 			<!-- A list (summary on the row, every item in the drop-down), since
 				 Composer clips a value at about 75 characters; a pick changes nothing. -->
 			<!-- A long result continues on the rows (2) to (6), word-wrapped at

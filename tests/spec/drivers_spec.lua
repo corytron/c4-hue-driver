@@ -816,6 +816,30 @@ describe("Hue Bridge driver", function()
 		end)
 	end)
 
+	it("wraps a long Attention onto its continuation rows and hides the unused ones (#334)", function()
+		local env, c4 = paired_driver()
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_check(c4)
+		c4.advance(2000)
+		assert.equal("None", env.Properties["Attention"])
+		for i = 2, 6 do
+			assert.equal(1, c4.property_attribs["Attention (" .. i .. ")"], "row " .. i .. " hidden")
+		end
+		-- A failed TLS check: its Attention item is longer than one row.
+		local env2, c42 = paired_driver()
+		c42.tls_ignores_cabundle = true
+		env2.OnDriverLateInit("DIT_STARTUP")
+		answer_identity(c42)
+		c42.last_transfer():respond(200, CONFIG)
+		c42.advance(2000)
+		assert.truthy(#env2.Properties["Attention"] <= 72, env2.Properties["Attention"])
+		assert.truthy(env2.Properties["Attention (2)"] ~= "", "the text continues on row 2")
+		assert.equal(0, c42.property_attribs["Attention (2)"], "row 2 shown")
+		assert.equal(1, c42.property_attribs["Attention (6)"], "row 6 hidden")
+		assert.truthy(fake.attention(env2):find("keyed requests stopped (see the manual)", 1, true),
+			"the end of the item is on a row, not cut")
+	end)
+
 	it("Forget Pairing stops the stream and clears the key", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
@@ -950,7 +974,7 @@ describe("Hue Bridge driver", function()
 			assert.equal("certs/decoy_ca.pem", decoy.options.ssl_cabundle)
 			decoy:respond(200, CONFIG)
 			assert.equal("TLS check failed: nothing is sent (see Attention)", env.Properties["Status"])
-			assert.truthy(env.Properties["Attention"]:find("^TLS check failed: the controller accepted the bridge"))
+			assert.truthy(fake.attention(env):find("^TLS check failed: the controller accepted the bridge"))
 			assert.equal(decoy, c4.last_transfer(), "no self-check and no stream")
 			for _, t in ipairs(c4.transfers) do
 				assert.is_nil(t.headers["hue-application-key"], "no request carried the key")
@@ -1619,14 +1643,14 @@ describe("Hue Bridge driver", function()
 			c4.persist.hue_lights = { ["rid-1"] = { device_id = id, name = "Hue color lamp 1", device_name = "Desk Lamp",
 				device_rid = "dev-1", model = "Hue color lamp", caps = {} } }
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.equal("None", env.Properties["Attention"])
+			assert.equal("None", fake.attention(env))
 			-- Composer renames both halves [verified: hardware]; the fake one id at a time.
 			c4:RenameDevice(id, "Reading Lamp")
 			c4:RenameDevice(fake.project.devices[id].proxy_id, "Reading Lamp")
 			env.OnSystemEvent("OnItemNameChanged")
 			-- Since 1.2 a Composer rename is sent to Hue (names N1, #334), not
 			-- listed as a difference.
-			assert.is_nil(env.Properties["Attention"]:find("Reading Lamp is ", 1, true), env.Properties["Attention"])
+			assert.is_nil(fake.attention(env):find("Reading Lamp is ", 1, true), fake.attention(env))
 		end)
 	end)
 

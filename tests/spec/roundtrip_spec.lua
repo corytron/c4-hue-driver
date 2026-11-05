@@ -140,7 +140,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(summary, bridge.Properties["Room Mappings"])
 		-- (read-only lists: a pick leaves no Last Action note)
 		assert.equal("done", bc4.persist.hue_rooms_automapped)
-		assert.truthy(bridge.Properties["Attention"]:find("^4 new lights on the bridge: "))
+		assert.truthy(fake.attention(bridge):find("^4 new lights on the bridge: "))
 
 		-- Import All New Lights: six GETs, three AddDevice calls in name order
 		-- into the mapped rooms, each bound and told its configuration and
@@ -166,7 +166,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(0, bc4.property_attribs["Last Action (2)"], "a continuation row shown")
 		assert.equal(1, bc4.property_attribs["Last Action (6)"], "an unused row hidden")
 		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Import All New or Add From Hue)",
-			bridge.Properties["Attention"])
+			fake.attention(bridge))
 		assert.same({ "HUE_CONFIGURE", "HUE_STATE" }, messages_to(bc4, LIVING_ID))
 		assert.equal(LIVING_ROOM, fake.project.devices[LIVING_ID].room_id)
 
@@ -183,8 +183,8 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
 		-- Since 1.2 the rename goes to Hue (names N1, #334): the lamp's device
 		-- name and its light's own name, paced, never listed as a difference.
-		assert.is_nil(bridge.Properties["Attention"]:find("Lamp is Living Room Lamp in Hue", 1, true),
-			bridge.Properties["Attention"])
+		assert.is_nil(fake.attention(bridge):find("Lamp is Living Room Lamp in Hue", 1, true),
+			fake.attention(bridge))
 		bc4.advance(3000)
 		local puts = {}
 		for _, t in ipairs(bc4.transfers) do
