@@ -3,12 +3,34 @@
 # runs the bridge's read-only actions through tools/devctl.py against a
 # --dev build on the house, prints each action's Status and Last Action, and
 # scans the shipped log for errors. Needs tools/devserver.py running and the
-# dev bridge polling it (devctl.py status). Creates nothing, deletes nothing.
+# dev bridge polling it (devctl.py status). Creates nothing, deletes nothing,
+# and renames nothing unless --with-renames is given (#344).
 #
-# Usage: tools/regress.sh [--server http://127.0.0.1:8080]
+# Usage: tools/regress.sh [--with-renames] [--server http://127.0.0.1:8080]
+#   --with-renames  also run Adopt Hue Names and Accept Names As They Are,
+#                   which change the live project: the first renames every
+#                   device whose Composer name differs from its Hue name, the
+#                   second accepts the differences. Off by default.
+#   --server URL    passed on to tools/devctl.py (default: build/dev/server.json)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEVCTL=(python3 -I "$ROOT/tools/devctl.py" "$@")
+
+usage() {
+	sed -n '2,/^set -u$/{/^set -u$/d;s/^# \{0,1\}//;p}' "$0"
+}
+
+with_renames=no
+devctl_args=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--with-renames) with_renames=yes ;;
+		-h | --help) usage; exit 0 ;;
+		--server) devctl_args+=("$1" "${2:?--server needs a URL}"); shift ;;
+		*) devctl_args+=("$1") ;;
+	esac
+	shift
+done
+DEVCTL=(python3 -I "$ROOT/tools/devctl.py" "${devctl_args[@]}")
 fail=0
 
 say() { printf '\n== %s\n' "$*"; }
@@ -65,10 +87,14 @@ out="$(run_action "Link Devices")"; echo "$out" | grep -E "Last Action" | head -
 expect "registered|Linked|No .* devices|bound" "$out" "Link Devices reports"
 
 say "Adopt Hue Names / Accept Names As They Are"
-out="$(run_action "Adopt Hue Names")"; echo "$out" | grep -E "Last Action" | head -2
-expect "names|Renamed|differ" "$out" "Adopt Hue Names reports"
-out="$(run_action "Accept Names As They Are")"; echo "$out" | grep -E "Last Action" | head -2
-expect "names|Accepted|differ" "$out" "Accept Names reports"
+if [[ "$with_renames" == yes ]]; then
+	out="$(run_action "Adopt Hue Names")"; echo "$out" | grep -E "Last Action" | head -2
+	expect "names|Renamed|differ" "$out" "Adopt Hue Names reports"
+	out="$(run_action "Accept Names As They Are")"; echo "$out" | grep -E "Last Action" | head -2
+	expect "names|Accepted|differ" "$out" "Accept Names reports"
+else
+	echo "SKIP  Adopt Hue Names and Accept Names As They Are: they act on the device names of the live project (--with-renames runs them)"
+fi
 
 say "Lights Report (dev action: the summaries in the log)"
 out="$(run_action "Lights Report")"; echo "$out" | grep -E "Status|Last Action" | head -2
@@ -81,7 +107,7 @@ if [[ -n "$errors" ]]; then
 else
 	echo "PASS  no error lines in the last 400 log lines"
 fi
-echo "$log" | grep -E "resync done|scene resync done|zone light resync done|stream will use|event stream connected" | tail -6
+echo "$log" | grep -E "resync done|scene resync done|zone light resync done|stream will use|event stream: connecting to|event stream connected" | tail -6
 
 say "result"
 if [[ $fail -eq 0 ]]; then echo "ALL PASS"; else echo "$fail check(s) failed"; fi
