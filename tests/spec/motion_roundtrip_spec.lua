@@ -252,7 +252,7 @@ describe("motion round trip", function()
 		stream_t = bc4.last_transfer()
 		assert.truthy(stream_t.url:find("/eventstream/clip/v2$"), stream_t.url)
 		fake.as(bridge, function() stream_t:respond_headers(200, {}) end)
-		assert.equal(1, fire(bridge, 1), "the on_connected deferral")
+		bc4.advance(2500) -- the on_connected deferral, then the background resync's 2 s debounce
 		assert.same(CHAIN, answer_gets(BODIES))
 		-- The motion module's bridge-away grace, armed while the stream was
 		-- down, ended with the connect.
@@ -775,7 +775,7 @@ describe("motion round trip", function()
 			fake.as(bridge, function() stream_t:respond_headers(200, {}) end)
 			bc4.sent = {}
 			local first = #logged + 1
-			assert.equal(1, fire(bridge, 1), "the on_connected deferral")
+			bc4.advance(2500) -- the on_connected deferral, then the background resync's 2 s debounce
 			local order = {}
 			for kind in answer_next, BODIES do
 				order[#order + 1] = kind

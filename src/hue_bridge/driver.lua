@@ -23,6 +23,7 @@ local tlscheck = require("bridge.tlscheck")
 local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
 local util = require("bridge.util")
+local housekeeping = require("bridge.housekeeping")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -158,7 +159,8 @@ local function refresh_status()
 	elseif not paired() then
 		prop("Status", "Not paired: press the link button, then run Pair Bridge")
 	elseif state.key_rejected then
-		prop("Status", string.format("Key rejected by the bridge (HTTP %d): re-pair with Pair Bridge", state.key_rejected))
+		prop("Status", string.format("Key rejected by the bridge (HTTP %d): checked again by itself; re-pair with "
+			.. "Pair Bridge if it stays", state.key_rejected))
 	elseif state.tls_verdict == "not_pinned" then
 		prop("Status", "TLS check failed: nothing is sent (see Attention)")
 	elseif state.identity_ok ~= true then
@@ -168,6 +170,10 @@ local function refresh_status()
 		prop("Status", "Paired")
 	end
 	prop("Bridge ID", paired() and state.creds.bridge_id or "")
+	-- Every change of what the background tasks' guards read passes here.
+	if state.hk then
+		state.hk:wake()
+	end
 end
 
 -- A Status text of the identity check or of the TLS check it waits for: shown
@@ -365,6 +371,11 @@ local function key_rejected(code)
 	end
 	C4:UpdateProperty("Event Stream", string.format("Stopped: key rejected (HTTP %d)", code))
 	refresh_status()
+	-- The background re-check (owner's answer D8): 5 min, 15 min, 1 h, then
+	-- hourly, until the bridge accepts the key again or the driver re-pairs.
+	if state.hk then
+		state.hk:poke("key_recheck", "error")
+	end
 end
 
 -- A 401/403 to a keyed module request is not proof that the key is gone:
@@ -406,6 +417,11 @@ local function bridge_request(req, callback)
 	req.ip = state.ip
 	req.key = state.creds.key
 	req.tls = nil
+	-- Every write here is a person's (commands, recalls, renames): the
+	-- background tasks keep 1.5 s clear of the last one (§1.3).
+	if req.method ~= nil and req.method ~= "GET" then
+		state.last_write_ms = C4:GetTime()
+	end
 	return http.request(req, function(r)
 		if type(r) == "table" and (r.code == 401 or r.code == 403) then
 			confirm_key_rejected(r.code)
@@ -713,7 +729,7 @@ end
 -- device cache, docs/motion-design.md §4.2); the owner-facing rows are
 -- refreshed after the lights and once more after the chain. done(failures)
 -- gets the list of "<part>: <error>" texts, empty when every part worked.
-local function resync_all(done)
+local function resync_all(done, tier)
 	local failures = {}
 	local function note(part, ok, err, sent)
 		if ok then
@@ -723,11 +739,22 @@ local function resync_all(done)
 			failures[#failures + 1] = part .. ": " .. tostring(err)
 		end
 	end
+	-- A quick resync (after a silence reconnect, contract §3.1) leaves out the
+	-- scene catalogue; the zone lights then read /grouped_light themselves.
+	local function scenes_step(cb)
+		if tier == "quick" then
+			log.info("scene resync skipped (quick resync)")
+			return cb(true, nil, 0, nil)
+		end
+		state.scenes:resync(cb)
+	end
 	state.lights:resync(function(ok, err, sent)
 		note("light", ok, err, sent)
 		refresh_lights_props()
-		state.scenes:resync(function(sok, serr, ssent, grouped)
-			note("scene", sok, serr, ssent)
+		scenes_step(function(sok, serr, ssent, grouped)
+			if tier ~= "quick" then
+				note("scene", sok, serr, ssent)
+			end
 			state.zone_lights:resync(function(zok, zerr, zsent)
 				note("zone light", zok, zerr, zsent)
 				state.motion:resync(function(mok, merr, msent)
@@ -740,6 +767,68 @@ local function resync_all(done)
 			end, grouped)
 		end)
 	end)
+end
+
+-- Background tasks (docs/simplify-actions-design.md §1.3, §3.1; the engine
+-- is bridge/housekeeping.lua, the tasks are defined in start_housekeeping
+-- below). The resync chain's GETs go through bridge_request as before, not
+-- through the engine's job.http: the engine schedules, retries and
+-- coalesces the chain, and the user-first rule is applied once, before the
+-- chain starts.
+
+-- True while a command queue holds work or a person's write went out in the
+-- last quiet_ms (the engine's gate, research §3.4).
+local function user_active(quiet_ms)
+	if (state.queue and state.queue:busy()) or (state.group_queue and state.group_queue:busy()) then
+		return true
+	end
+	return state.last_write_ms ~= nil
+		and C4:GetTime() - state.last_write_ms < (quiet_ms or housekeeping.USER_QUIET_MS)
+end
+
+-- fn once no user command is waiting, or after GATE_MAX_MS whatever, so a
+-- long slider session cannot starve the resync after a reconnect.
+local function after_user(fn)
+	local waited = 0
+	local function look()
+		if waited >= housekeeping.GATE_MAX_MS or not user_active() then
+			return fn()
+		end
+		waited = waited + housekeeping.GATE_POLL_MS
+		C4:SetTimer(housekeeping.GATE_POLL_MS, look)
+	end
+	look()
+end
+
+-- The resync a connect needs (contract §3.1, #65): full at the first connect
+-- of this run, after an error and after an outage of RESYNC_FULL_OUTAGE_S or
+-- more; quick (no scene catalogue) after a silence (watchdog) reconnect.
+local RESYNC_FULL_OUTAGE_S = 600
+
+local function connect_tier()
+	state.resync_connects = (state.resync_connects or 0) + 1
+	local down_s = state.stream_down_at and (os.time() - state.stream_down_at) or nil
+	local reason = state.stream_down_reason or ""
+	state.stream_down_at, state.stream_down_reason = nil, nil
+	if state.resync_connects > 1 and down_s ~= nil and down_s < RESYNC_FULL_OUTAGE_S and reason:find("watchdog") then
+		return "quick"
+	end
+	return "full"
+end
+
+-- Ask for a resync; a full one wins over a quick one still waiting.
+-- done(ok, text) once, by the run that serves it.
+local function want_resync(tier, why, done)
+	if state.resync_tier ~= "full" then
+		state.resync_tier = tier
+	end
+	if not state.hk then
+		-- Not started yet (cannot happen after late init): as beta 8 did.
+		return resync_all(function(failures)
+			if done then done(#failures == 0, table.concat(failures, "; ")) end
+		end, tier)
+	end
+	state.hk:poke("resync", why, done)
 end
 
 local function new_stream()
@@ -758,6 +847,18 @@ local function new_stream()
 			-- is down (docs/edge-cases-motion.md §6).
 			if not per_event and state.motion and not tostring(text):find("^Connected since") then
 				state.motion:on_stream_state(false)
+			end
+			-- What the next connect's resync needs (contract §3.1): when the
+			-- outage began and the reason it began with.
+			if not per_event then
+				local up = tostring(text):find("^Connected since") ~= nil
+				state.stream_connected = up
+				if not up then
+					state.stream_down_at = state.stream_down_at or os.time()
+					if state.stream_down_reason == nil and tostring(text):find("^Disconnected") then
+						state.stream_down_reason = tostring(text)
+					end
+				end
 			end
 			if not per_event and tostring(text):find("^Connected since") then
 				state.stream_connects = (state.stream_connects or 0) + 1
@@ -788,7 +889,7 @@ local function new_stream()
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
 			state.motion:on_stream_state(true)
-			resync_all()
+			want_resync(connect_tier(), "connect")
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
@@ -1216,6 +1317,9 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		-- Everything learnt about the old address goes; the checks run afresh,
 		-- and until they pass Status does not read "Paired" (#236).
 		state.address_gen = state.address_gen + 1
+		if state.hk then
+			state.hk:reset(state.address_gen)
+		end
 		state.key_rejected = nil
 		state.tls_verdict = nil
 		state.identity_ok = nil
@@ -1269,6 +1373,7 @@ dispatch.commands["Pair_Bridge"] = function()
 		return
 	end
 	prop("Status", "Pairing: contacting bridge")
+	state.pairing_active = true
 	local gen = state.address_gen
 	local function stale()
 		if gen ~= state.address_gen then
@@ -1288,10 +1393,12 @@ dispatch.commands["Pair_Bridge"] = function()
 				info.bridge_id))
 		end,
 		on_link_button = function()
+			state.pairing_active = false
 			if stale() then return end
 			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
 		end,
 		on_paired = function(creds)
+			state.pairing_active = false
 			if stale() then return end
 			local previous_id = state.creds and state.creds.bridge_id
 			-- Use the in-memory result: the store writes on its own thread
@@ -1313,6 +1420,7 @@ dispatch.commands["Pair_Bridge"] = function()
 			choose_stream_address(function() restart_stream(true) end)
 		end,
 		on_error = function(message)
+			state.pairing_active = false
 			if stale() then return end
 			prop("Status", "Pairing failed: " .. message)
 		end,
@@ -1328,6 +1436,51 @@ end
 -- /api/0/config without the key. A rejected key does not stop it: a 200 with
 -- the paired bridge id is how the key is shown to work again, which clears
 -- the lock and starts the stream (finding 4).
+-- The bridge accepts the key again (Test Connection, or the background
+-- re-check of D8): the lock goes and the stream starts again.
+local function key_accepted_again()
+	state.key_rejected = nil
+	refresh_status()
+	if state.stream_ip then
+		restart_stream(true)
+	else
+		choose_stream_address(function() restart_stream(true) end)
+	end
+end
+
+-- The background key re-check (owner's answer D8): one keyed GET of the
+-- bridge resource, which any valid key may read, sent although the key is
+-- locked (the lock is what it tests), only after the identity check passed
+-- (the task's guards). done(ok, text, cleared): cleared when this check
+-- lifted the lock.
+local function recheck_key(done)
+	if not state.key_rejected then
+		return done(true, "the key is not rejected")
+	end
+	local gen, creds = state.address_gen, state.creds
+	http.request({ ip = state.ip, key = creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+		if gen ~= state.address_gen or creds ~= state.creds then
+			return done(false, "cancelled: the address or the pairing changed")
+		end
+		if r.code == 401 or r.code == 403 then
+			return done(false, string.format("the bridge still refuses the key (HTTP %d)", r.code))
+		elseif not r.ok then
+			return done(false, "no answer: " .. tostring(r.err))
+		end
+		local item = r.json and r.json.data and r.json.data[1] or {}
+		local reported = config.normalise_bridge_id(item.bridge_id)
+		if reported and reported ~= creds.bridge_id then
+			return done(false, string.format("the bridge reports ID %s, expected %s", reported, creds.bridge_id))
+		end
+		if state.key_rejected then
+			log.warn("key re-check: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
+			key_accepted_again()
+			return done(true, "the bridge accepts the key again", true)
+		end
+		done(true, "the bridge accepts the key")
+	end)
+end
+
 local function test_connection(host)
 	local refusal = keyed_refusal(true)
 	if refusal == "not paired" then
@@ -1371,12 +1524,7 @@ local function test_connection(host)
 		end
 		if state.key_rejected then
 			log.warn("Test Connection: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
-			state.key_rejected = nil
-			if state.stream_ip then
-				restart_stream(true)
-			else
-				choose_stream_address(function() restart_stream(true) end)
-			end
+			key_accepted_again()
 		end
 		prop("Status", string.format("Test OK: HTTP 200 via %s in %d s, bridge %s", host, secs,
 			tostring(reported or state.creds.bridge_id)))
@@ -1916,13 +2064,13 @@ end
 -- Refresh All (#324): every list read from the bridge now, stream or not.
 dispatch.commands["Refresh_All"] = function()
 	if not can() then return end
-	resync_all(function(failures)
-		if #failures == 0 then
+	want_resync("full", "click", function(ok, text)
+		if ok then
 			last_action(string.format("Refreshed from the bridge: Lights: %s | Scenes: %s | Zone lights: %s | Motion: %s",
 				tostring(state.lights:summary()), tostring(state.scenes:summary()),
 				tostring(state.zone_lights:summary()), tostring(state.motion:summary())))
 		else
-			last_action("Refresh All: " .. table.concat(failures, "; "))
+			last_action("Refresh All: " .. tostring(text))
 		end
 	end)
 end
@@ -2080,6 +2228,9 @@ dispatch.commands["Disconnect_Event_Stream"] = function()
 end
 
 dispatch.commands["Forget_Pairing"] = function()
+	if state.hk then
+		state.hk:reset(state.address_gen, true)
+	end
 	state.identity_ok = nil
 	state.identity_text = nil
 	reset_identity_check()
@@ -2260,10 +2411,124 @@ if devtools then
 	})
 end
 
+-- The background tasks (contract §1.3, §3.1; scheduler research §5). Every
+-- run reports to the log (Debug Mode shows each one, owner's answer D4).
+local function modules_busy()
+	for _, m in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+		if m and (m.resyncing or (m.BUSY_FLAGS and m[m.BUSY_FLAGS[1]])) then
+			return true
+		end
+	end
+	return false
+end
+
+local SAFETY_GUARDS = { "paired", "identity_ok", "key_ok", "not_pairing", "stream_up", "modules_idle" }
+
+local function start_housekeeping(dit)
+	local hk = housekeeping.new({
+		http = bridge_request,
+		log = log,
+		user_active = user_active,
+		bridge_id = function() return state.creds and state.creds.bridge_id or nil end,
+		state = function()
+			return {
+				paired = connection() ~= nil,
+				identity_ok = state.identity_ok == true,
+				key_ok = state.key_rejected == nil and keyed_refusal() == nil,
+				stream_up = state.stream_connected == true,
+				not_pairing = not state.pairing_active,
+				modules_idle = not modules_busy(),
+			}
+		end,
+		on_status = function(report)
+			local line = string.format("background %s (%s): %s in %d ms%s", tostring(report.task),
+				tostring(report.trigger), report.ok and "OK" or "failed", tonumber(report.ms) or 0,
+				report.text and (": " .. tostring(report.text)) or "")
+			if report.ok then
+				log.debug("%s", line)
+			else
+				log.info("%s", line)
+			end
+		end,
+	})
+	-- The resync after every connect (as beta 8 did), now retried after a
+	-- failure (60 s doubling to 15 min); also Refresh All (a click). A full
+	-- one counts as both safety reads, a quick one as the quick one.
+	local function run_resync(tier, done)
+		after_user(function()
+			resync_all(function(failures)
+				if #failures > 0 then
+					state.resync_tier = state.resync_tier == "full" and "full" or tier
+					return done(false, table.concat(failures, "; "))
+				end
+				hk:mark_fresh("safety_quick")
+				if tier == "full" then
+					hk:mark_fresh("safety_full")
+				end
+				done(true, tier .. " resync")
+			end, tier)
+		end)
+	end
+	hk:define({
+		name = "resync", class = "essential", triggers = { "connect", "click", "error" },
+		debounce_s = 2, backoff_max_s = 900,
+		run = function(_job, done)
+			local tier = state.resync_tier or "full"
+			state.resync_tier = nil
+			run_resync(tier, done)
+		end,
+	})
+	-- The net under the stream: a quick read when none for 6 h, a full one
+	-- when none for 24 h.
+	hk:define({
+		name = "safety_quick", class = "optional", triggers = { "timer" }, interval_s = 6 * 3600,
+		persist = true, guards = SAFETY_GUARDS,
+		run = function(_job, done) run_resync("quick", done) end,
+	})
+	hk:define({
+		name = "safety_full", class = "optional", triggers = { "timer" }, interval_s = 24 * 3600,
+		persist = true, guards = SAFETY_GUARDS,
+		run = function(_job, done) run_resync("full", done) end,
+	})
+	-- The lists stay current while the stream is down but the bridge answers:
+	-- a quick read every 10 minutes once the stream has been down 5 minutes.
+	hk:define({
+		name = "stream_down_read", class = "optional", triggers = { "timer" }, interval_s = 600,
+		guards = { "paired", "identity_ok", "key_ok", "not_pairing", "modules_idle" },
+		run = function(_job, done)
+			if state.stream_connected or state.stream_down_at == nil then
+				return done(true, "the event stream is connected")
+			elseif os.time() - state.stream_down_at < 300 then
+				return done(true, "the event stream is down for less than 5 minutes")
+			end
+			run_resync("quick", done)
+		end,
+	})
+	-- A rejected key is checked again by itself (D8): 5 min after the
+	-- refusal, then 15 min, then an hour, then hourly.
+	hk:define({
+		name = "key_recheck", class = "essential", triggers = { "error" },
+		debounce_s = 300, backoff_s = { 900, 3600 }, guards = { "paired", "identity_ok", "not_pairing" },
+		run = function(_job, done)
+			recheck_key(function(ok, text, cleared)
+				if cleared then
+					last_action("The bridge accepts the application key again: event stream restarting")
+				end
+				done(ok, text)
+			end)
+		end,
+	})
+	state.hk = hk
+	hk:start(dit)
+	if state.key_rejected then
+		hk:poke("key_recheck", "error")
+	end
+end
+
 function OnDriverInit()
 end
 
-function OnDriverLateInit()
+function OnDriverLateInit(dit)
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
 	state.lights = new_lights()
@@ -2312,6 +2577,7 @@ function OnDriverLateInit()
 	settle_last_action_rows()
 	state.stream = new_stream()
 	state.late_init_done = true
+	start_housekeeping(dit)
 	replay_early_commands()
 	register_probe_events()
 	refresh_status()
@@ -2330,6 +2596,9 @@ function OnDriverLateInit()
 end
 
 function OnDriverDestroyed()
+	if state.hk then
+		state.hk:stop()
+	end
 	if prop_soon_timer then
 		prop_soon_timer:Cancel()
 		prop_soon_timer = nil

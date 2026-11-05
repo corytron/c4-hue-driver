@@ -543,9 +543,10 @@ d:find_paired(bridge_id, last_ip, done(ip|nil, how))   -- the follow-up (D5, D12
 -- ReceivedFromNetwork(binding, port, data) is forwarded by driver.lua to d:received(...)
 ```
 
-**Modules (piece B)** keep their public methods and add: `resync(done,
-tier)` where `tier` is `"full"` or `"quick"` (scenes ignore quick:
-`done` at once); motion's resync also sends every motion device the
+**Modules (piece B)** keep their public methods and resync signatures
+(amended 2026-11-05: `driver.lua`'s `resync_all(done, tier)` makes the
+quick tier itself by leaving out `scenes:resync`; the zone lights then read
+`/grouped_light` themselves, as they already can). Motion's resync also sends every motion device the
 bridge's answering state (the #247 side finding); lights and motion apply
 3.2 inside their registry refresh and expose `suggested()` for
 `dev:suggested`.

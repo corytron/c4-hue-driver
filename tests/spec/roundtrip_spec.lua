@@ -120,7 +120,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		local stream_t = bc4.last_transfer()
 		assert.equal(STREAM_URL, stream_t.url)
 		stream_t:respond_headers(200, {})
-		assert.equal(1, fire_fast_timers(bridge, 1), "on_connected deferral")
+		-- The on_connected deferral, then the background resync after its 2 s
+		-- debounce (bridge/housekeeping.lua, contract §3.1).
+		bc4.advance(2500)
 		-- 6 for the lights, scene + smart_scene + grouped_light for the scenes;
 		-- the zone lights take the scenes' grouped_light items instead of a GET.
 		assert.equal(9, answer_resource_gets(bridge, 1))

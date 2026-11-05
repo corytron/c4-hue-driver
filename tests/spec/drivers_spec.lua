@@ -763,7 +763,8 @@ describe("Hue Bridge driver", function()
 	end)
 
 	describe("review leftovers (docs/review-leftovers-design.md)", function()
-		local KEY_STATUS = "Key rejected by the bridge (HTTP 403): re-pair with Pair Bridge"
+		local KEY_STATUS = "Key rejected by the bridge (HTTP 403): checked again by itself; re-pair with "
+			.. "Pair Bridge if it stays"
 
 		it("stops the stream for good on a 403 and says the key was rejected; Pair Bridge clears it", function()
 			local env, c4 = paired_driver()
@@ -785,6 +786,44 @@ describe("Hue Bridge driver", function()
 			answer_check(c4)
 			assert.equal("Paired", env.Properties["Status"])
 			assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true), "the stream starts again")
+		end)
+
+		it("checks a rejected key again by itself, 5 min, then 15 min later, and lifts the lock (D8)", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			assert.equal(KEY_STATUS, env.Properties["Status"])
+			local count = #c4.transfers
+			c4.advance(299 * 1000)
+			assert.equal(count, #c4.transfers, "nothing before 5 minutes")
+			c4.advance(2000)
+			local t = c4.last_transfer()
+			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
+			assert.equal("abc123", t.headers["hue-application-key"], "the re-check carries the key it tests")
+			t:respond(403, "<html>unauthorized</html>")
+			assert.equal(KEY_STATUS, env.Properties["Status"], "still locked")
+			count = #c4.transfers
+			c4.advance(899 * 1000)
+			assert.equal(count, #c4.transfers, "the second check waits 15 minutes")
+			c4.advance(2000)
+			t = c4.last_transfer()
+			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
+			t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
+			assert.equal("Paired", env.Properties["Status"])
+			assert.truthy(env.Properties["Last Action"]:find("accepts the application key again", 1, true),
+				env.Properties["Last Action"])
+			assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true), "the stream starts again")
+		end)
+
+		it("never re-checks a key that a re-check found refused at another bridge id", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			c4.advance(301 * 1000)
+			c4.last_transfer():respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe999999"}]}')
+			assert.equal(KEY_STATUS, env.Properties["Status"], "a different bridge id does not lift the lock")
 		end)
 
 		it("treats a keyed request answered 403 as a rejected key and starts no stream", function()
@@ -929,7 +968,8 @@ describe("Hue Bridge driver", function()
 	end)
 
 	describe("security fixes (docs/security-fixes-design.md)", function()
-		local KEY_STATUS = "Key rejected by the bridge (HTTP 403): re-pair with Pair Bridge"
+		local KEY_STATUS = "Key rejected by the bridge (HTTP 403): checked again by itself; re-pair with "
+			.. "Pair Bridge if it stays"
 		local TEST_URL = "https://192.0.2.10/clip/v2/resource/bridge"
 		local BRIDGE_OK = '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}'
 
@@ -1053,6 +1093,39 @@ describe("Hue Bridge driver", function()
 			assert.same({}, keyed(c42), "another version (an upgraded OS) proves nothing")
 		end)
 
+		it("retries a failed resync after a connect by itself, 60 s later (contract §1.3)", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():respond_headers(200, {})
+			-- Answer every GET of the chain the same way, one at a time.
+			local function answer_chain(code)
+				local paths = {}
+				for _ = 1, 40 do
+					local t = c4.transfers[#c4.transfers]
+					if t.answered or not t.url:find("/clip/v2/resource/", 1, true) then break end
+					paths[#paths + 1] = t.url:match("/clip/v2/resource/([%w_]+)")
+					t.answered = true
+					if code == 200 then
+						t:respond(200, '{"errors":[],"data":[]}')
+					else
+						t:respond(code, '{"errors":[{"description":"busy"}],"data":[]}')
+					end
+				end
+				return paths
+			end
+			c4.advance(2500)
+			local failed = answer_chain(503)
+			assert.truthy(#failed >= 1, "the resync after the connect ran")
+			local count = #c4.transfers
+			c4.advance(58 * 1000)
+			assert.equal(count, #c4.transfers, "no retry before 60 s")
+			c4.advance(3000)
+			local retried = answer_chain(200)
+			assert.truthy(#retried >= 4, "the retry read the chain again: " .. table.concat(retried, ", "))
+			assert.equal("light", retried[1])
+		end)
+
 		it("#324: Refresh All reads every module from the bridge with the stream not connected", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")
@@ -1060,6 +1133,7 @@ describe("Hue Bridge driver", function()
 			c4.last_transfer():done(28, "Timeout was reached") -- the stream never connects
 			local before = #c4.transfers
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh All" })
+			c4.advance(1) -- a click goes through the background engine at once
 			local paths = {}
 			for _ = 1, 30 do
 				local t = c4.transfers[#c4.transfers]
@@ -1610,7 +1684,7 @@ describe("Hue Motion driver (driver.xml)", function()
 			"5 NUMBER NUMBER_BATTERY_LEVEL 0..100" }, conditionals)
 	end)
 
-	it("offers the actions of §2.6, each with a handler", function()
+	it("offers one action, Test Motion Programming (docs/simplify-actions-design.md §3.3), with a handler", function()
 		local env, c4 = fake.load_driver("hue_motion", {}, { device_id = 2101 })
 		env.OnDriverInit("DIT_ADDING")
 		env.OnDriverLateInit("DIT_ADDING")
@@ -1621,7 +1695,7 @@ describe("Hue Motion driver (driver.xml)", function()
 			env.ExecuteCommand("LUA_ACTION", { ACTION = field(body, "command") })
 			assert.equal(1, #c4.calls_to("UpdateProperty"), field(body, "name") .. " writes Last Action")
 		end
-		assert.same({ "Refresh From Bridge", "Test: Motion", "Test: No Motion" }, actions)
+		assert.same({ "Test Motion Programming" }, actions)
 	end)
 
 	it("loads from Composer's driver search, unbound, and says so", function()
