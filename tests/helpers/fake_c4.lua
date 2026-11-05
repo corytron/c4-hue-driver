@@ -366,9 +366,12 @@ local function new_c4(env)
 		return new_transfer(c4)
 	end
 
+	-- A timer remembers when it was armed and when it falls due on the fake
+	-- clock (c4.now_ms), for c4.advance; fire_timers ignores both.
 	function c4:SetTimer(delay_ms, callback, repeating)
 		assert(delay_ms > 0, "timer delay must be > 0")
-		local timer = { delay = delay_ms, callback = callback, repeating = repeating or false, active = true }
+		local timer = { delay = delay_ms, callback = callback, repeating = repeating or false, active = true,
+			armed_at = c4.now_ms, due = c4.now_ms + delay_ms }
 		function timer:Cancel()
 			self.active = false
 		end
@@ -1012,6 +1015,47 @@ local function new_c4(env)
 		return #due
 	end
 
+	-- The fake clock (#334, docs/simplify-research-scheduler.md §6): move
+	-- c4.now_ms forward by `ms`, firing on the way every active timer that
+	-- falls due by then, one at a time in due order (ties in the order they
+	-- were armed), with c4.now_ms at the timer's due time while its callback
+	-- runs. A one-shot timer is retired before its callback; a repeating one
+	-- is re-armed one period on (skips 0). A timer armed by a callback fires
+	-- in the same call when it falls due by the end. Ends at start + ms (or
+	-- later, if a callback moved the clock on). Returns how many fired, and
+	-- fails after 200000 in one call (a timer that re-arms itself without
+	-- end). fire_timers, active_timers and fire_timers_of are unchanged by it.
+	-- A timer once inactive never fires again, so the search starts at the
+	-- first active one (c4.advance_from).
+	function c4.advance(ms)
+		local target = c4.now_ms + (tonumber(ms) or 0)
+		local fired = 0
+		while true do
+			local first = c4.advance_from or 1
+			while c4.timers[first] and not c4.timers[first].active do first = first + 1 end
+			c4.advance_from = first
+			local next_timer
+			for i = first, #c4.timers do
+				local timer = c4.timers[i]
+				if timer.active and timer.due <= target and (next_timer == nil or timer.due < next_timer.due) then
+					next_timer = timer
+				end
+			end
+			if not next_timer then break end
+			fired = fired + 1
+			assert(fired <= 200000, "c4.advance: 200000 timers fired in one call; does a timer re-arm itself without end?")
+			if next_timer.due > c4.now_ms then c4.now_ms = next_timer.due end
+			if next_timer.repeating then
+				next_timer.due = next_timer.due + next_timer.delay
+			else
+				next_timer.active = false
+			end
+			next_timer.callback(next_timer, 0)
+		end
+		if target > c4.now_ms then c4.now_ms = target end
+		return fired
+	end
+
 	return c4
 end
 
@@ -1139,7 +1183,8 @@ end
 as = fake.as
 
 -- Make two loaded drivers see each other: shared bindings, routed
--- SendToDevice, and c4.fire_timers that runs with the right globals. With
+-- SendToDevice, and c4.fire_timers and c4.advance that run with the right
+-- globals (each runtime keeps its own clock, c4.now_ms). With
 -- opts.bind (default true) the light's binding 1 is bound to the bridge's
 -- binding 1, class HUE_BRIDGE, as Composer or C4:Bind would. Both drivers'
 -- devices are registered in the project (an entry AddDevice made is kept).
@@ -1162,6 +1207,11 @@ function fake.pair(bridge_env, light_env, opts)
 			local orig = env.C4.fire_timers
 			env.C4.fire_timers = function() return fake.as(env, orig) end
 			env.C4.fire_timers_wrapped = true
+		end
+		if not env.C4.advance_wrapped then
+			local orig = env.C4.advance
+			env.C4.advance = function(ms) return fake.as(env, orig, ms) end
+			env.C4.advance_wrapped = true
 		end
 	end
 	return l.device_id
