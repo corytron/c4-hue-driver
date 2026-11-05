@@ -30,13 +30,13 @@ findings as comments), and `docs/status.md` sums them up.
   and `hue_scene.c4z` 0, and `hue_motion.c4z` 1 (Test Motion Programming);
   the bridge has no `Dev Server` or `Diagnostic Server` property (the
   `DEV-ONLY` blocks of `src/hue_bridge/driver.xml`, which `tools/build.sh`
-  strips) and its Diagnostics list no development entry (connection
-  experiment, reload credentials, check CA pinning: they come from
+  strips) and its Diagnostics list no "(dev) …" entry (two connection
+  experiments, reload credentials, check CA pinning: they come from
   `bridge/devtools.lua`, which a release does not carry); no
   package holds `common/devloop.lua` or `common/devkey.lua`, and the bridge
   no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua`
   (`tools/build.sh` refuses to package a release stage that still has one).
-  The dev build has all of them (the same 9 actions, with the three
+  The dev build has all of them (the same 9 actions, with the four
   development entries inside the Diagnostics list; 32 actions before 1.2,
   the three diagnostics before `Forget Pairing`); each package carries the dev
   key as `common/devkey.lua` and is written 0600). `build/manifest.json`
@@ -81,11 +81,14 @@ calls the old names keeps working, and step 11 checks that it does:
 2. `Diagnostics` with "Check the connection now" → `Status` "Test OK: HTTP
    200 via … bridge …".
 3. `Diagnostics` with "Read everything from the bridge now" → `Last Action`
-   with the four list summaries, the scenes' "126 + 15 time-based on
-   bridge, 2 imported, 2 deleted" (counts as on the house).
+   "Read everything from the bridge now: started", then "Refreshed from the bridge: Lights: … | Scenes: …
+   | Zone lights: … | Motion: …" with the four list summaries, the scenes'
+   "126 scenes + 15 time-based on bridge, 2 imported, 2 deleted" (counts as
+   on the house).
 4. The background tasks of 1.2 in the log (with `Debug Mode` On): one line
-   per run (the task, its trigger, the requests used), the reads behind the
-   stream, the mapping of rooms by name, the room marks on the list rows;
+   per run, "background <task> (<trigger>): OK in <ms> ms: <what it did>"
+   ("failed in" for a failed run), the reads behind the stream, the
+   mapping of rooms by name, the room marks on the list rows;
    nothing created, renamed, bound or moved by them. The pickers of `Add
    From Hue`, `Link Device`, `Forget Device` and `Resolve Names` answer
    their folders (`tools/devctl.py` can call each list function); nothing
@@ -120,8 +123,12 @@ calls the old names keeps working, and step 11 checks that it does:
    that show it; `Events Received` rises; no error line in the log.
 10. Thirty minutes idle: no reconnect storms (the `Event Stream` row counts
     the reconnects since start), no timer errors, and the background tasks
-    within their budget (at most 60 optional requests an hour, none in the
-    first five minutes after a start). Memory is not measured: nothing in
+    quiet: no safety read in the first five minutes after a start (plus up
+    to a minute of jitter; a minute after a driver update), and none while
+    the stream is up and the last read is younger than 6 hours. (The
+    engine's hourly budget of 60 optional requests counts only requests
+    sent through its own `job.http`; the safety reads run the resync chain,
+    which is not counted.) Memory is not measured: nothing in
     the drivers or the dev loop reports the Lua memory.
 11. The old command strings (1.2, #334): `tools/devctl.py run "Test
     Connection"`, `"Refresh Scenes"` and `"Room Audit"` answer as before
@@ -144,15 +151,15 @@ reboots the controller). Read:
    row shows the summary and the list one line per item (47 lights; 141
    scenes; 23 zones and rooms; 23 mappings), and a pick snaps back to the
    summary and changes nothing. `Last Action` is a read-only text that
-   continues on `Last Action (2)` to `(6)`, rows shown only while they hold
-   text.
+   continues on `Last Action (2)` to `(6)`, and `Attention` the same on
+   `Attention (2)` to `(6)`, rows shown only while they hold text.
 3. The Actions tab: 9 actions (Pair Bridge, Import All New, Add From Hue,
    Link Device, Forget Device, Resolve Names, Set Room Mapping, Diagnostics,
    Forget Pairing; 29 before 1.2), and the Diagnostics list without the
-   three development entries; a Hue Light's and a Hue Scene's Actions tab
+   four "(dev) …" entries; a Hue Light's and a Hue Scene's Actions tab
    empty, a Hue Motion Sensor's with Test Motion Programming alone.
    `Bridges Found` below `Bridge IP Address`, reading "Paired with Hue
-   Bridge Pro at …".
+   Bridge Pro (BSB003) at …".
 4. `Add From Hue` of a throwaway zone (its zones and rooms folder), Driver
    Version at once, `Forget Device` with Confirm "Yes, forget", delete: as
    in round 25 (`docs/composer-remote.md`), with the 1.2 actions.

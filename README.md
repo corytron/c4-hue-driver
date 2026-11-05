@@ -99,7 +99,7 @@ has the release notes and the provenance attestations. How to install them:
 - **Readable Composer properties.** Status, Event Stream, Lights, Scenes, Zone
   Lights, Room Mappings and Last Action say in plain words what the driver is
   doing and what it did; long lists open as drop-downs, and a long Last Action
-  continues on up to five more rows.
+  or Attention continues on up to five more rows.
 - **Polite to the bridge.** Commands are coalesced per light (a fast slider
   drag sends only the latest value) and paced at Hue's limits: about ten light
   commands a second, one grouped command a second.
@@ -255,20 +255,23 @@ chapters 3 to 7 and 9 are the long version of this list.
 4. On the bridge's **Properties** tab, open **Bridges Found**, pick your
    bridge and click the row's **Set** button; or type the bridge's address
    into **Bridge IP Address** (the Hue app shows it under Settings > My Hue
-   system) and click that row's **Set**. On a new driver either one opens
-   the pairing window: Status reads *Press the link button on the Hue bridge
-   (waiting 1:59)* and counts down (**Pair Bridge** on the **Actions** tab
-   opens it again).
+   system) and click that row's **Set**. On a driver that is not paired
+   either one opens the pairing window: Status reads *Pairing: found Hue
+   Bridge Pro (BSB003) ..., requesting key*, then *Press the link button on
+   the Hue bridge (waiting 1:57)* and counts down (**Pair Bridge** on the
+   **Actions** tab opens it again).
 5. Press the round **link button** on the bridge within those two minutes.
-   Status goes on to *Pairing: found Hue Bridge Pro (BSB003) ..., requesting
-   key*, *Checking the bridge at ... before anything is sent*, **Paired**;
-   Bridge ID, Bridge Model, Bridge Name and Bridge Firmware fill in, Event
-   Stream reads *Connected since ...*, Lights reads for example *47 on
-   bridge, 0 imported, 47 new, ...*, Attention lists the new lights, and Room
-   Mappings maps every Hue room whose name exactly one Control4 room has.
+   Status goes on to *Checking the bridge at ... before anything is sent*,
+   then **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware
+   fill in, Event Stream reads *Connected since ...*, Lights reads for
+   example *47 lights on bridge, 0 imported, 47 new*, Attention lists the
+   new lights, and Room Mappings maps every Hue room whose name exactly one
+   Control4 room has (on a new installation; an update from an earlier
+   release keeps its mappings and maps nothing by itself).
 6. **Rooms.** Open the Room Mappings drop-down; map what is still
    *(unmapped)* with **Set Room Mapping** (zones too). A Hue room that
-   appears later is mapped by name by itself. A mapping decides only where
+   appears later is mapped by name by itself, and Last Action says so. A
+   mapping decides only where
    new devices land; it never moves anything.
 7. **Lights.** **Import All New** creates every new light whose Hue room is
    mapped. **Add From Hue** creates one light, or a Hue zone or room as one
@@ -372,8 +375,9 @@ never done without a click.
 ### Reporting a problem
 
 Open a GitHub issue with the **Driver Version**, the Control4 OS version, the
-bridge model, the texts of **Status**, **Event Stream**, **Attention** and
-**Last Action** (with **Last Action (2)** to **(6)** when shown), and the
+bridge model, the texts of **Status**, **Event Stream**, **Attention** (with
+**Attention (2)** to **(6)** when shown) and **Last Action** (with **Last
+Action (2)** to **(6)** when shown), and the
 relevant lines of the Lua output (the device's Lua tab in Composer; **Debug
 Mode** On if asked, and Off again afterwards). Replace your LAN addresses and
 the bridge id with placeholders. The driver never shows the application key;

@@ -16,30 +16,36 @@ listed.
 
 ### Added
 - The Hue Bridge finds Hue bridges on the local network: a new Bridges
-  Found row lists them when the driver is first loaded, and picking one
-  sets the address and opens the pairing window. When the paired bridge
-  later moves to another address, the driver finds it again by its bridge
-  id and updates Bridge IP Address by itself, saying so in Last Action and
-  Attention. Local network only (mDNS, then a bounded search of nearby
-  addresses), never the internet (#334).
+  Found row lists them (a driver that is not paired searches by itself a
+  few seconds after it starts and then every 15 minutes, each search
+  reported in Last Action; Search again searches at once), and picking
+  one sets the address and opens the pairing window. When the paired
+  bridge stops answering for 5 minutes at the address where it last
+  answered, the driver looks for it by its bridge id, updates Bridge IP
+  Address by itself and says so in Last Action; an address typed by hand
+  that never answered is never overwritten. Local network only (mDNS,
+  then a search of at most two blocks of nearby addresses, at most once
+  an hour), never the internet (#334).
 - Names follow each other both ways for lights, scenes and motion sensors:
   a rename in Composer renames the light, scene or sensor in the Hue app,
   and a rename in the Hue app renames the Control4 device; when both
   changed, the Composer name wins. Hue rooms, zones and zone lights are
   not synced, a name Hue refuses (longer than 32 bytes) waits for Resolve
-  Names, and names that already differ when 1.2 is installed are offered
-  once in Resolve Names instead of being changed (#334).
+  Names, and names that already differ when 1.2 is installed are listed in
+  Attention and settled in Resolve Names instead of being changed (#334).
 - A bulb or motion sensor that comes back to the bridge with new Hue ids
   but the same radio (deleted and added again in the Hue app, or after a
   reset of the bridge) is re-linked to its old device by itself, keeping
   the device's programming; Last Action says so (#334).
 - The Hue Bridge looks after itself in the background: it reads the
-  bridge again behind the event stream and after a failed read, checks a
+  bridge again when its last read is 6 or 24 hours old, after a failed
+  read, and every 10 minutes while the event stream is down; checks a
   rejected key again after 5 minutes, 15 minutes, an hour and then every
-  hour, maps a new Hue room to the Control4 room of the same name, marks a
-  device that sits in another room than its Hue room on the list rows, and
-  says in Attention when the bridge or its event stream has been away for
-  an hour (#334).
+  hour; maps a Hue room or zone that appears later to the one Control4
+  room of the same name (the update to 1.2 maps nothing by itself); and
+  marks on the Lights, Scenes, Zone Lights and Motion Sensors lists a
+  device that sits in another Control4 room than its Hue room maps to
+  (#334).
 - Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
   and motion sensors from the bridge now, without needing the event stream
   (#324).
@@ -73,14 +79,16 @@ listed.
   Programming does not refer to actions, so no project needs changing
   (#334).
 - Pair Bridge waits up to 2 minutes for the link button, so the button can
-  be pressed before or after the click; entering the address of a bridge
-  never paired, or picking it in Bridges Found, opens the same wait (#334).
+  be pressed before or after the click; entering the address on a driver
+  that is not paired, or picking a bridge in Bridges Found, opens the same
+  wait (#334).
 - Import All New adds every new light and motion sensor in one click, and
   Add From Hue adds one light, zone or room, scene, all scenes of a room,
   motion sensor or MotionAware area from one list with folders (#334).
 - Link Device points a device of any kind at its replacement, with the
-  driver's suggestion shown and one line that links every suggested match
-  at once; Forget Device releases a device of any kind. Forget Device and
+  driver's suggestion shown, and its first line links every suggested
+  match and every connected device the bridge does not know yet at once;
+  Forget Device releases a device of any kind. Forget Device and
   Forget Pairing ask for confirmation (#334).
 - Diagnostics gathers the support steps in one action: check the
   connection now, read everything from the bridge now, reconnect or stop
@@ -90,8 +98,9 @@ listed.
   Programming, in place of Test: Motion and Test: No Motion (#334).
 - A long Attention continues on extra rows as Last Action does, so the
   action named at the end of an item is never cut off (#334).
-- Set Room Mapping's "(no mapping)" keeps a Hue room unmapped: the
-  automatic mapping by name leaves it alone (#334).
+- Room Mappings says how each mapping was made (by name, by hand, or
+  before 1.2), and Set Room Mapping's "(no mapping)" keeps a Hue room
+  unmapped: the automatic mapping by name leaves it alone (#334).
 - One wording on the Hue Bridge's Lights, Scenes, Zone Lights and Motion
   Sensors rows: "… on bridge, N imported, N new", then the missing, unbound
   and deleted counts when there are any; the bulk add of motion sensors is

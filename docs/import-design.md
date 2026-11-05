@@ -251,6 +251,17 @@ ends with the zone lights' items (`hue_bridge/driver.lua:attention_text`). A
 long `Last Action` continues on `Last Action (2)` to `(6)`, word-wrapped at
 72 characters, unused rows hidden (`last_action`).
 
+Current (2026-11-05, release 1.2, #334): `Attention` wraps the same way,
+on `Attention (2)` to `(6)`; a text longer than six rows ends in "… (Lua
+output)" (`show_attention`). `Room Mappings` lines end in how each was
+made, " (by name)", " (by hand)", " (before 1.2)", or read "(no mapping,
+by hand)", "(unmapped)" or "(unmapped; Control4 room <x> matches)"; the
+row reads "None yet (Set Room Mapping makes one)" while no group is cached
+and no mapping exists. The `Lights`, `Scenes`, `Zone Lights` and `Motion
+Sensors` lines of a linked device in another Control4 room than its Hue
+room or zone maps to end in " (in <room> instead of <mapped room>)", or "
+(in <room>; mapped room gone)" (`owner:room_marks`).
+
 Actions (all plain `LUA_ACTION`s; the two with pickers carry
 `CUSTOM_SELECT` params, §8):
 
@@ -279,18 +290,31 @@ stay hidden aliases until 2.0). The rows of this contract that change:
 
 | Action (1.2) | Params | Does |
 | --- | --- | --- |
-| `Import All New` (replaces `Import All New Lights` and `Import All New Motion Sensors`) | — | the lights' import as above (fresh GET, mapped rooms only, tombstones skipped, likely replacements skipped and listed for Link Device), then the motion sensors' import (never MotionAware areas); additionally skips every light or sensor that the automatic re-link below re-linked or would suggest (contract §3.2); one `Last Action`, the lights' part first; idempotent by rid; never renames, moves or rebinds |
+| `Import All New` (replaces `Import All New Lights` and `Import All New Motion Sensors`) | — | the lights' import as above (fresh GET, mapped rooms only, tombstones skipped, likely replacements skipped and listed for Link Device), then the motion sensors' import (never MotionAware areas); each runs the automatic re-link below first, so a light or sensor it re-linked is no longer new and is neither added nor listed (contract §3.2); one `Last Action`, "<lights' part> \| Motion: <motion part>"; idempotent by rid; never renames, moves or rebinds |
 | `Add From Hue` (replaces `Add Light`, `Add Zone Light`, `Add Scene`, `Add All Scenes Of Room`, `Add Motion Sensor`, `Add Motion Area`) | `What` (a CUSTOM_SELECT with folders: `f:lights`, `f:groups`, `f:scenes`, `f:scenes:<group_rid>`, `f:motion`; leaves `light:<rid>`, `group:<rid>`, `scene:<rid>`, `sensor:<rid>`, `area:<rid>`, `all:lights`, `all:motion`), `Room` (as `Add Light`'s) | routes the pick to the module that owned the old action, with its texts, refusals and guards; a single pick goes into `Room` (empty = "(mapped room)"); `all:lights`, `all:motion` and a picked `f:scenes:<group_rid>` (all scenes of that room or zone) use the mappings; single selection only (verified on OS 3.4.2, contract §2.3); clears a tombstone as `Add Light` did |
-| automatic re-link by MAC (part of `Re-link Device To Light`'s job; D7) | — (no click) | on every lights or motion registry refresh: a new rid whose MAC equals that of exactly one gone device of the same kind (gone = linked, rid absent from the last successful full read; never a tombstoned or forgotten one) is re-pointed to it as `Re-link Device To Light` did, `Last Action` "Re-linked Desk Lamp to its bulb (same radio, new Hue id)" (a bridge reset: one summary, "Re-linked 47 devices by radio"), and the Hue thing takes the Composer name (names research N16); several candidates, a multi-light device whose position does not decide, or a new rid that has a device already stay suggestions in `Link Device`; scenes, zone lights and MotionAware areas have no MAC and are only suggested (contract §3.2, M1 to M9) |
+| automatic re-link by MAC (part of `Re-link Device To Light`'s job; D7) | — (no click) | on every lights or motion registry refresh: a new rid whose MAC equals that of exactly one gone device of the same kind (gone = linked, rid absent from the last successful full read; never a tombstoned or forgotten one) is re-pointed to it as `Re-link Device To Light` did, `Last Action` "Re-linked Desk Lamp to its bulb (same radio, new Hue id)" ("… to its sensor …" for a motion sensor; a bridge reset: one summary, "Re-linked 47 devices by radio: Lamp 1, Lamp 2, Lamp 3 +44 more"; also when a new light or sensor appears on the event stream), and the Hue thing takes the Composer name (names research N16); several candidates, a multi-light device whose position does not decide, or a new rid that has a device already stay suggestions in `Link Device`; scenes, zone lights and MotionAware areas have no MAC and are only suggested (contract §3.2, M1 to M9) |
 
 `Link Device` (`Device`, `To`) replaces the four Re-link actions and Link
-Devices' name match (offered, with a "dev:suggested" row that applies every
-suggestion); `Forget Device` (`Device`, `Confirm`) replaces the Forget
-actions of the bridge and the devices; `Resolve Names` replaces Adopt Hue
-Names and Accept Names As They Are; Map Rooms By Name and Room Audit run by
-themselves (a mapping by exact unique name when a group appears, never over
-a hand choice or a removed mapping; a mark on the list rows). The manual's
-chapter 13 has the full table of where every action went.
+Devices: its `Device` list holds the gone and unbound devices by kind,
+each with an unambiguous suggestion appended, and a first row,
+"dev:suggested" ("Every device with a suggested match (<n>)", or "Every
+bound device the bridge does not know yet, by its own id or name" with
+none), that applies every suggestion and then runs Link Devices' adoption
+of bound devices the registry lacks (by announced rid, else by exact
+unique name); a bare device has no row of its own. Name suggestions need
+the same name in the same Hue room (lights, motion) or group (scenes);
+zone lights have none. `Forget Device` (`Device`, `Confirm`) replaces the
+Forget actions of the bridge and the devices; `Resolve Names` replaces
+Adopt Hue Names and Accept Names As They Are; Map Rooms By Name and Room
+Audit run by themselves: a group the driver has not seen before is mapped
+by exact unique name (never over a mapping, a hand choice, one made before
+1.2 or a removed one; a fresh installation maps at its first read, the
+update from a build that ran Map Rooms By Name maps nothing and records
+every group as seen), a by-name mapping whose Control4 room was deleted is
+re-pointed to the one room of that name after a full read, and `Last
+Action` names what was mapped; Room Audit is the mark on the list rows
+above. The manual's chapter 13 has the full table of where every action
+went.
 
 Current (2026-10-25, build 316): `Link Devices`, `Adopt Hue Names` and
 `Accept Names As They Are` run for the lights, the scenes and the zone
@@ -316,7 +340,9 @@ room id appended when two rooms share a name.
 - New read-only property `Hue Room`; `Status` texts for `gone` and
   forgotten; `Hue Light ID` shows "#12 (rid…)" when `id_v1` is known.
 - Actions `Adopt Hue Name` (rename this device's proxy to the Hue name) and
-  `Forget This Light` (asks the bridge to Forget it).
+  `Forget This Light` (asks the bridge to Forget it). Gone since 1.2
+  (#334): a Hue Light has no actions; the names sync by themselves and the
+  bridge's `Forget Device` releases it.
 - **ALS** [Q 13]: `reduced_als_support = True` in `driver.xml` plus
   `SET_BRIGHTNESS_STOP` / `SET_COLOR_STOP` handlers (stop = settle the pending
   target at the light's current reported value) [verified: PP 63/22]. Both
@@ -677,7 +703,8 @@ device_id }`. `HUE_FORGOTTEN` sets the forgotten `Status` text, `Online`
 reason. `HUE_CONFIGURE`/`HUE_STATE` received before `OnDriverLateInit` are
 buffered and applied after it. New property `Hue Room` (read-only); `Hue
 Light ID` shows "#12 (e0e51794…)" when `id_v1` is known. `Status` for state
-"gone": "Gone from the Hue bridge since <date>; re-link or Forget". Actions:
+"gone": "Gone from the Hue bridge since <date>; re-link or Forget" (since
+1.2: "…; Link or Forget Device"). Actions:
 `Adopt Hue Name` (`C4:RenameDevice(proxy_id, hue name)`; the proxy id is the
 first key of `C4:GetBoundConsumerDevices(C4:GetDeviceID(), 5001)` [verified:
 hardware]) and `Forget This Light` (sends `HUE_FORGET`). `driver.xml`:

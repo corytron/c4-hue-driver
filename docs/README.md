@@ -127,7 +127,9 @@ are dated research; what was built from them is in the contracts and
 
 - [`composer-checklist.md`](composer-checklist.md): the steps only Composer,
   a Navigator, a keypad or the Hue app can show, as the owner runs them, with
-  a "Done" line per step.
+  a "Done" line per step; section L is release 1.2's (#334: the nine bridge
+  actions and the background tasks), its quoted texts checked against the
+  code.
 - [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
   2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the
