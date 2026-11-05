@@ -332,3 +332,56 @@ Where this section and the text above disagree, this section wins.
 | --- | --- | --- |
 | D11 | **At the 1.2 install, names that already differ are offered, not synced:** Resolve Names lists them once, with "Composer names to Hue" as the first row; from then on every rename syncs by itself both ways. Zone lights stay out of the automatic sync, like rooms. | [names-sync research](simplify-research-names-sync.md) |
 | D12 | **Discovery keeps a second local stage:** if mDNS finds nothing while the paired bridge is missing, a TCP probe of port 443 on at most two /24 networks (around the last good address and around the controller), at most hourly, four connections at once; identity as at pairing (the Signify chain, the bridge id in its public config). Never the internet. | [discovery research](simplify-research-discovery.md) |
+
+## 2. Build contract, wave 1 (coordinator, 2026-11-05)
+
+Two pieces that touch no shared file, built in parallel on
+`feature/simplify-1.2-334`; wiring into `driver.lua`, `driver.xml` and
+`tools/build.sh` stays with the coordinator.
+
+### 2.1 The engine: `bridge/housekeeping.lua`
+
+The interface and rules are [scheduler research](simplify-research-scheduler.md)
+§3.1 to §3.7 and §6 (tests), with these amendments from section 1.8:
+
+- **No `enable()`**: background tasks are always on (D4). Debug Mode logs
+  every run (task, trigger, requests used, result).
+- **The engine only reads** (GETs). The writes that 1.2 adds, the name sync of
+  D6, come from a person's rename and go through the user's command path, not
+  through the engine; they count as user activity for the gate of §3.4.
+- **Not wired yet.** Wave 1 delivers the module, `commands:busy()` in
+  `bridge/commands.lua`, and their specs; no task is registered in
+  `driver.lua` yet. A spec-only task table proves the rules.
+- **Fake clock**: an `advance(ms)` helper in `tests/helpers/fake_c4.lua` that
+  moves `c4.now_ms` and fires due timers in time order (the existing
+  `fire_timers` stays as it is).
+
+Owner files: `src/hue_bridge/bridge/housekeeping.lua`,
+`src/hue_bridge/bridge/commands.lua`, `tests/spec/housekeeping_spec.lua`,
+`tests/spec/commands_spec.lua`, `tests/helpers/fake_c4.lua`.
+
+### 2.2 The dev-build probe: `bridge/probe12.lua`
+
+One module, dev builds only (stripped like `bridge/devtools.lua`), that
+answers the open questions of the D9 install in about two minutes through
+signed dev-loop commands (`tools/devctl.py run`), so the Windows session only
+installs in place:
+
+- **Probe Discovery**: [discovery research](simplify-research-discovery.md)
+  §6: the environment (controller address), the SSDP control, the mDNS
+  variants (does an answer reach `ReceivedFromNetwork`, with which address
+  record), and a timed TCP 443 sweep of one /24 with four connections at
+  once, reporting each step to the log and Last Action.
+- **Probe Names**: [names-sync research](simplify-research-names-sync.md) §8:
+  rename one light, one scene, one motion sensor device and one MotionAware
+  area to a marked test name and back, a 33-character name, and a duplicate
+  scene name in one room, restoring every original name even after an error;
+  reports Hue's answer to each.
+- **Picker folders**: the handler for one DEV-ONLY test action whose
+  CUSTOM_SELECT returns folders (the XML snippet goes into the hand-back; the
+  coordinator adds it to `driver.xml`), logging what Composer sends back.
+
+Owner files: `src/hue_bridge/bridge/probe12.lua`, `tests/spec/probe12_spec.lua`,
+`src/hue_bridge/bridge/devtools.lua` (registration of the probe commands
+only). The bulb re-add of D7 needs the owner's phone (delete one bulb in the
+Hue app, add it again) and is read from the existing log afterwards.
