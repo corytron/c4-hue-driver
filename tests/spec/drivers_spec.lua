@@ -1389,7 +1389,7 @@ describe("Hue Bridge driver", function()
 		end
 
 		-- The house's pairing predates the stored model: Bridges Found read
-		-- "Paired with  at 10.0.1.x" on dev 467 while Bridge Model was right.
+		-- "Paired with  at 10.0.2.x" on dev 467 while Bridge Model was right.
 		it("Bridges Found names the model the identity check read when the pairing stored none", function()
 			local env, c4 = house()
 			env.OnDriverLateInit("DIT_STARTUP")
@@ -1912,8 +1912,10 @@ describe("Hue Bridge driver", function()
 					-- Another bridge answers at the address before the next attempt.
 					w.at[IP] = OTHER
 					w.run(3000)
+					-- Nothing to forget on a driver never paired: the pick's own ending.
 					assert.equal("Pairing failed: Bridge at 10.0.2.143 reports ID 001788fffe456def, expected "
-						.. "001788fffe123abc; run Forget Pairing first to pair with another bridge", env.Properties["Status"])
+						.. "001788fffe123abc (the bridge picked in Bridges Found); pick it again or Search again",
+						env.Properties["Status"])
 					assert.equal(1, #w.posts, "no key asked of the other bridge")
 					assert.is_nil(c4.persist.hue_app_key)
 
@@ -2114,6 +2116,35 @@ describe("Hue Bridge driver", function()
 				assert.equal("192.0.2.75", env.Properties["Bridge IP Address"])
 			end)
 
+			it("says another bridge answers where the paired one is expected, not that nothing answers", function()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				w.at["192.0.2.75"] = OTHER
+				set_address(env, "192.0.2.75")
+				w.run(65 * MIN, 5000)
+				assert.is_true(attention_has(env, "Bridge 123ABC not found at 192.0.2.75 since 12:00: another bridge "
+					.. "answers there; check its power, or type its address in Bridge IP Address"), fake.attention(env))
+				assert.is_false(attention_has(env, "not answering"), fake.attention(env))
+
+				-- Nothing answers at first, another bridge later (the check asks
+				-- every 30 s while nothing answers): the item follows the last answer.
+				env, c4 = house()
+				w = world(c4)
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				set_address(env, "192.0.2.75")
+				w.run(65 * MIN, 5000)
+				assert.is_true(attention_has(env, "Bridge 123ABC not answering at 192.0.2.75 since 12:00: check its power, "
+					.. "or type its address in Bridge IP Address"), fake.attention(env))
+				w.at["192.0.2.75"] = OTHER
+				w.run(MIN, 5000)
+				assert.is_true(attention_has(env, "Bridge 123ABC not found at 192.0.2.75 since 12:00: another bridge "
+					.. "answers there"), fake.attention(env))
+				assert.is_false(attention_has(env, "not answering"), fake.attention(env))
+			end)
+
 			it("offers where the paired bridge answers when a typed address does not, never rewriting it", function()
 				local env, c4 = house()
 				local w = world(c4)
@@ -2194,6 +2225,169 @@ describe("Hue Bridge driver", function()
 					end
 				end
 			end)
+
+		-- The event stream on binding 6001 after a start or a reload (the
+		-- flapping of 2026-11-05): Director as the house log shows it. A
+		-- NetConnect is ONLINE 100 ms later while the bridge takes connections
+		-- (`w.net_up`), else OFFLINE; a NetDisconnect or a NetConnect of a
+		-- connection that is up brings its OFFLINE; the request is answered
+		-- with a 200 head 10 ms after it is sent, and the connection stays
+		-- open, with a keepalive comment every 30 s.
+		describe("the event stream on its network connection", function()
+			local HEAD_200 = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+			local KEEPALIVE = "6\r\n: hi\n\n\r\n"
+
+			local function director(c4, w)
+				w.net_up, w.connects, w.disconnects = true, {}, 0
+				local serial, current = 0, nil
+				local real_connect, real_disconnect, real_send = c4.NetConnect, c4.NetDisconnect, c4.SendToNetwork
+				c4.NetConnect = function(self, binding, port, ...)
+					real_connect(self, binding, port, ...)
+					if binding ~= 6001 then return end
+					serial = serial + 1
+					local id = serial
+					w.connects[#w.connects + 1] = c4.now_ms
+					current = id
+					c4:SetTimer(100, function()
+						if current ~= id then return end
+						if not w.net_up then current = nil end
+						c4.net_status(6001, port, w.net_up and "ONLINE" or "OFFLINE")
+					end)
+				end
+				c4.NetDisconnect = function(self, binding, port)
+					real_disconnect(self, binding, port)
+					if binding ~= 6001 then return end
+					w.disconnects = w.disconnects + 1
+					if current then
+						current = nil
+						c4:SetTimer(2, function() c4.net_status(6001, port, "OFFLINE") end)
+					end
+				end
+				c4.SendToNetwork = function(self, binding, port, data)
+					real_send(self, binding, port, data)
+					if binding ~= 6001 then return end
+					local id = current
+					c4:SetTimer(10, function()
+						if current == id then c4.net_receive(6001, port, HEAD_200) end
+					end)
+					c4:SetTimer(30000, function(timer)
+						if current ~= id then return timer:Cancel() end
+						c4.net_receive(6001, port, KEEPALIVE)
+					end, true)
+				end
+				-- The bridge ends the open connection.
+				function w.net_drop()
+					current = nil
+					c4.net_status(6001, 443, "OFFLINE")
+				end
+			end
+
+			-- Paired, on a network connection (or `transport`) whose TLS check
+			-- answered pinned on this Director before.
+			local function on_netstream(transport)
+				local env, c4 = house({ ["Event Stream Transport"] = transport or "Network connection" })
+				c4.persist.netcheck_pinned_on_v2 = c4.director_version
+				local w = world(c4)
+				director(c4, w)
+				return env, c4, w
+			end
+
+			-- A dev loop reload (src/common/devloop.lua): the old code's
+			-- OnDriverDestroyed, the driver's modules dropped, the new chunk run
+			-- in the same Lua state, then OnDriverInit and OnDriverLateInit with
+			-- DIT_UPDATING. Timers and transfers of the old code live on.
+			local function reload(env)
+				env.OnDriverDestroyed()
+				for name in pairs(package.loaded) do
+					if name:match("^bridge%.") or (name:match("^common%.") and name ~= "common.log") then
+						package.loaded[name] = nil
+					end
+				end
+				local chunk = assert(loadfile("src/hue_bridge/driver.lua"))
+				setfenv(chunk, env)
+				chunk()
+				env.OnDriverInit("DIT_UPDATING")
+				env.OnDriverLateInit("DIT_UPDATING")
+			end
+
+			local function connected(env)
+				return env.Properties["Event Stream"]:find("^Connected since") ~= nil
+			end
+
+			for _, dit in ipairs({ "DIT_STARTUP", "DIT_UPDATING" }) do
+				it("connects exactly once at a start (" .. dit .. ")", function()
+					local env, c4, w = on_netstream()
+					env.OnDriverInit(dit)
+					env.OnDriverLateInit(dit)
+					w.run(10 * MIN)
+					assert.is_true(connected(env), env.Properties["Event Stream"])
+					assert.equal(1, #w.connects, "one connect")
+					local created = 0
+					for _, call in ipairs(c4.calls_to("CreateNetworkConnection")) do
+						if call[1] == 6001 then created = created + 1 end
+					end
+					assert.equal(1, created, "the connection is created once")
+					assert.equal(1, w.disconnects, "only the disconnect before the first connect")
+				end)
+			end
+
+			-- The flapping of 2026-11-05: the dev loop applied one version twice,
+			-- 400 ms apart, and the identity check of the code the second reload
+			-- destroyed answered afterwards.
+			for _, transport in ipairs({ "Network connection", "Web transfer" }) do
+				it("leaves one stream after two reloads 400 ms apart, the first one's identity check in flight ("
+					.. transport .. ")", function()
+					local env, c4, w = on_netstream(transport)
+					local function streams()
+						if transport == "Network connection" then return #w.connects end
+						local n = 0
+						for _, t in ipairs(c4.transfers) do
+							if t.url:find("/eventstream/", 1, true) then n = n + 1 end
+						end
+						return n
+					end
+					env.OnDriverInit("DIT_STARTUP")
+					env.OnDriverLateInit("DIT_STARTUP")
+					w.run(5000)
+					assert.is_true(connected(env), env.Properties["Event Stream"])
+					reload(env)
+					c4.advance(400) -- its identity check is still in flight
+					reload(env)
+					local before, decoys = streams(), #c4.decoy_transfers
+					w.run(5 * MIN, 100)
+					assert.equal(decoys + 1, #c4.decoy_transfers, "one TLS check: the destroyed code sends nothing")
+					assert.equal(before + 1, streams(), "one stream after the reloads, by the code that runs")
+					assert.is_true(connected(env), env.Properties["Event Stream"])
+				end)
+			end
+
+			it("adds no retry chain when the outage check restarts a stream that is retrying", function()
+				local env, _, w = on_netstream()
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				assert.is_true(connected(env), env.Properties["Event Stream"])
+				local checks = w.identity_checks()
+				-- The bridge takes no connection for 90 s: the stream retries, and at
+				-- 60 s the outage check runs the identity check, then starts it.
+				w.net_up = false
+				w.net_drop()
+				w.run(90 * 1000, 100)
+				assert.equal(checks + 1, w.identity_checks(), "the outage's identity check")
+				for i = 2, #w.connects do
+					assert.truthy(w.connects[i] - w.connects[i - 1] >= 1000,
+						string.format("connects %d ms apart: two chains", w.connects[i] - w.connects[i - 1]))
+				end
+				w.net_up = true
+				w.run(2 * MIN, 100)
+				assert.is_true(connected(env), env.Properties["Event Stream"])
+				-- Connected for good: no other chain connects or disconnects again.
+				local connects, disconnects = #w.connects, w.disconnects
+				w.run(10 * MIN, 100)
+				assert.equal(connects, #w.connects)
+				assert.equal(disconnects, w.disconnects)
+				assert.is_true(connected(env), env.Properties["Event Stream"])
+			end)
+		end)
 	end)
 
 	describe("messages before late init", function()

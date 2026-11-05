@@ -133,6 +133,13 @@ and `LUA_ACTION` is unwrapped to its `ACTION`), else the driver's
 reload sequence on the current bridge version (it does not re-forward the
 light tree; touch a file under `src/hue_light` or `src/common` for that).
 
+**Pin, don't pin-and-reload.** A pin that changes the bridge's version already makes the bridge
+reload at its next poll. Queuing `reload` right after it reloads a second time while the
+first reload's checks are still in flight, and before #334's netstream fix that could leave
+a stream of the unloaded code holding the network binding, flapping the event stream until
+the driver was updated in Composer (house round of 2026-11-05). Use `reload` only to re-run
+the same version.
+
 `POST /log` body `{"version": "<running version>", "lines": [{"t": <ms since epoch>, "line": "..."}]}` → 204.
 The server appends `HH:MM:SS.mmm <line>` to `driver.log` and echoes to stdout.
 

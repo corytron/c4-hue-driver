@@ -79,6 +79,16 @@
 --    one is up [assumed].
 --  * Director never reconnects on its own: AUTO_CONNECT and KEEP_CONNECTION
 --    are off, and after an "OFFLINE" the stream connects again itself.
+--  * One object owns the binding: the last one to connect. An object it
+--    replaced without stop() is stopped then, silently (its connect timer
+--    and its retry go, its connection is disconnected), because Director's
+--    reports reach the current object only: a replaced object would never
+--    see its "ONLINE", give its connect up after CONNECT_TIMEOUT with a
+--    NetDisconnect that ends the current object's connection, and keep a
+--    retry chain of its own (the flapping of 2026-11-05, #334). After
+--    retire() (the driver's OnDriverDestroyed) no object of this module
+--    connects again: a callback of the destroyed driver code that is still
+--    in flight (a dev loop reload keeps the Lua state) cannot start one.
 --
 -- [assumed] until the hardware tests of docs/raw-stream-design.md §5: that
 -- CACERTFILE resolves inside the .c4z as ssl_cabundle does, and that
@@ -119,6 +129,11 @@ netstream.CONNECT_TIMEOUT = 10      -- seconds for "ONLINE", then again for the 
 netstream.DEFAULT_WATCHDOG = 600    -- seconds of silence before reconnecting, as stream.lua
 netstream.BACKOFF_MIN = 1           -- seconds, as stream.lua
 netstream.BACKOFF_MAX = 60
+
+-- The object that connected last, which Director's reports reach, and
+-- whether retire() has run (see the header).
+local owner = nil
+local retired = false
 
 -- What the answer may hold back while it is incomplete: one line of the
 -- head, the head as a whole, a chunk-size or trailer line. The SSE parser's
@@ -574,6 +589,27 @@ function netstream:start()
 	self:connect()
 end
 
+-- Let the binding go without a word to the owner: no retry, no timer left,
+-- a connection still open or pending disconnected. For an object another
+-- one replaced, and for retire(); stop() is the owner's.
+function netstream:release()
+	self:cancel_timer("retry_timer")
+	self:drop_connection()
+	self.state = "stopped"
+	self.created_ip = nil
+	self.stats.connected_since = nil
+end
+
+-- The driver is being destroyed (OnDriverDestroyed): the current object
+-- lets the binding go, and no object of this module connects again.
+function netstream.retire()
+	retired = true
+	if owner then
+		owner:release()
+		owner = nil
+	end
+end
+
 -- Stop until the next start(): no reconnect, and the next start() creates
 -- the connection afresh. `text` is the status to show (default "Stopped").
 function netstream:stop(text)
@@ -610,6 +646,19 @@ local function open(self, ip, options)
 end
 
 function netstream:connect()
+	if retired then
+		log.debug("event stream: the driver is being destroyed; not connecting")
+		return self:release()
+	end
+	-- This object owns the binding from here; one it replaced stops (see the header).
+	if owner and owner ~= self and (owner:running() or owner.link ~= "closed") then
+		if owner.link ~= "closed" then
+			self.stale_offline = math.max(self.stale_offline, 1) -- the OFFLINE its disconnect may bring
+		end
+		log.debug("event stream: a replaced stream object still held the binding; it stops")
+		owner:release()
+	end
+	owner = self
 	self:drop_connection()
 	local conn, reason = self.opts.connection()
 	if not conn then
@@ -660,10 +709,15 @@ function netstream:connect()
 	end
 	-- Before the calls, should Director report from inside one of them.
 	self:arm_connect_timer(false)
+	local gen = self.generation
 	local ok, err = pcall(open, self, ip, options)
 	if not ok then
 		log.warn("event stream: could not open the network connection: %s", tostring(err))
-		return self:fail("could not open the network connection: " .. tostring(err))
+		-- Unless a report from inside a call ended this connection already:
+		-- one connection ends once, with one retry.
+		if gen == self.generation then
+			return self:fail("could not open the network connection: " .. tostring(err))
+		end
 	end
 end
 

@@ -65,6 +65,7 @@ local state = {
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
 	late_init_done = false,
+	destroyed = false,   -- OnDriverDestroyed ran: what this code still has in flight starts nothing
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
 	key_rejected = nil,  -- HTTP code (401/403) once the bridge refused the key; cleared by Pair Bridge or a new address
 	tls_verdict = nil,   -- the TLS self-check's answer for this start and address (bridge/tlscheck.lua)
@@ -79,6 +80,7 @@ local state = {
 	stream_down_ms = nil, -- since when the event stream is not connected
 	unreachable_ms = nil, -- since when the identity check finds nothing answering at this address
 	away_ms = nil,        -- since when the identity check fails at this address (nothing, or another bridge)
+	away_other = nil,     -- the id another bridge answered with at this address, when that was the last answer
 	find_missed_ms = nil, -- when the follow-up search (D5, D12) last ended without the paired bridge
 	moved = nil,          -- { from, to, text, at }: the last address change the follow-up made (away.MOVED_KEY)
 }
@@ -688,6 +690,9 @@ function away.items()
 			items[#items + 1] = string.format("Bridge %s missing since %s: not found on the network (searched %s); check "
 				.. "its power, or type its address in Bridge IP Address", id, away.clock(state.away_ms),
 				away.clock(state.find_missed_ms))
+		elseif state.away_other then
+			items[#items + 1] = string.format("Bridge %s not found at %s since %s: another bridge answers there; check "
+				.. "its power, or type its address in Bridge IP Address", id, state.ip, away.clock(state.away_ms))
 		else
 			items[#items + 1] = string.format("Bridge %s not answering at %s since %s: check its power, or type its "
 				.. "address in Bridge IP Address", id, state.ip, away.clock(state.away_ms))
@@ -1170,7 +1175,7 @@ end
 -- Rebuild the stream with the current properties. It is started again if it
 -- was running, or if `force` is set and the driver is paired with an IP.
 local function restart_stream(force)
-	if not state.stream then
+	if not state.stream or state.destroyed then
 		return
 	end
 	local was_running = state.stream:running()
@@ -1278,8 +1283,8 @@ local function tls_gate(gen, ip, done)
 		return done(false)
 	end
 	tlscheck.run(ip, function(verdict, detail)
-		if gen ~= state.address_gen then
-			return -- the address changed meanwhile; its own check runs
+		if gen ~= state.address_gen or state.destroyed then
+			return -- the address changed meanwhile (its own check runs), or this code was unloaded
 		end
 		if verdict == "not_pinned" then
 			state.tls_verdict = verdict
@@ -1333,6 +1338,9 @@ local function verify_identity(purpose, callback)
 		if ip ~= state.ip or gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
 		end
+		if state.destroyed then
+			return -- OnDriverDestroyed ran (a dev loop reload keeps the Lua state): the new code checks
+		end
 		if not paired() then
 			return -- Forget Pairing overtook the check (#236: the step before pairing another bridge)
 		end
@@ -1362,7 +1370,7 @@ local function verify_identity(purpose, callback)
 				if trusted then
 					state.identity_text = nil
 					local was_away = state.away_ms ~= nil
-					state.unreachable_ms, state.away_ms, state.find_missed_ms = nil, nil, nil
+					state.unreachable_ms, state.away_ms, state.find_missed_ms, state.away_other = nil, nil, nil, nil
 					-- The address the paired bridge last answered at: where the
 					-- address follow-up starts looking (D5, discovery research §2.5).
 					if state.last_good_ip ~= ip then
@@ -1383,6 +1391,10 @@ local function verify_identity(purpose, callback)
 				.. "is corrected", ip, reported, state.creds.bridge_id))
 			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
 			state.away_ms = state.away_ms or now_ms()
+			if state.away_other ~= reported then
+				state.away_other = reported
+				refresh_lights_props() -- Attention's "away" item names the other bridge at once
+			end
 			-- Another bridge where ours answered (a DHCP swap, research T3);
 			-- at a typed address, where ours may answer instead (bridges.offer).
 			want_find_bridge()
@@ -1396,6 +1408,10 @@ local function verify_identity(purpose, callback)
 		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
 		state.unreachable_ms = state.unreachable_ms or now_ms()
 		state.away_ms = state.away_ms or state.unreachable_ms
+		if state.away_other then
+			state.away_other = nil -- nothing answers now
+			refresh_lights_props()
+		end
 		if now_ms() - state.unreachable_ms >= FIND_AFTER_S * 1000 then
 			want_find_bridge()
 		end
@@ -1512,6 +1528,9 @@ local function net_gate(continue)
 end
 
 local function choose_stream_address(callback)
+	if state.destroyed then
+		return -- a callback of unloaded code (see OnDriverDestroyed)
+	end
 	local gen = state.address_gen
 	local check_ip = altaddr.for_check(state.ip)
 	local family = altaddr.stream_family(state.ip)
@@ -1635,7 +1654,7 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		if state.hk then
 			state.hk:reset(state.address_gen)
 		end
-		state.unreachable_ms, state.away_ms, state.find_missed_ms = nil, nil, nil
+		state.unreachable_ms, state.away_ms, state.find_missed_ms, state.away_other = nil, nil, nil, nil
 		outage.cancel() -- the new address gets its own identity check below
 		state.outage_restart = nil
 		state.key_rejected = nil
@@ -1730,7 +1749,8 @@ local function pair_attempt(first)
 	-- kept when the key is not, so it counts while Status reads "Not paired".
 	-- Without one, the bridge picked in Bridges Found is expected the same
 	-- way (§4 finding 4).
-	local paired_id = (state.creds and state.creds.bridge_id) or state.pair_expected_id
+	local stored_id = state.creds and state.creds.bridge_id
+	local paired_id = stored_id or state.pair_expected_id
 	pairing.pair(state.ip, {
 		on_probed = function(info)
 			if stale() then return end
@@ -1793,7 +1813,7 @@ local function pair_attempt(first)
 			if stale() then return end
 			prop("Status", "Pairing failed: " .. message)
 		end,
-	}, paired_id)
+	}, paired_id, stored_id == nil and paired_id ~= nil)
 end
 
 dispatch.commands["Pair_Bridge"] = function()
@@ -2603,6 +2623,7 @@ dispatch.commands["Forget_Pairing"] = function()
 	outage.cancel()
 	state.outage_restart = nil
 	state.unreachable_ms, state.away_ms, state.find_missed_ms, state.offer_gen = nil, nil, nil, nil
+	state.away_other = nil
 	state.moved = nil
 	C4:PersistDeleteValue(away.MOVED_KEY)
 	refresh_status()
@@ -3333,6 +3354,9 @@ function OnDriverLateInit(dit)
 	dispatch.replay_properties(Properties)
 	show_driver_version(1)
 	settle_last_action_rows()
+	if state.stream then
+		state.stream:stop() -- never two objects on the binding (netstream.lua)
+	end
 	state.stream = new_stream()
 	state.late_init_done = true
 	state.discovery = discovery_mod.new({ identify = pairing.probe, log = log })
@@ -3356,7 +3380,15 @@ function OnDriverLateInit(dit)
 	end
 end
 
+-- Director ends the old code with its Lua state and kills its timers
+-- (API 22_miscellaneous/_24-OnDriverDestroyed.md); a dev loop reload keeps
+-- both (src/common/devloop.lua). So everything in flight here, an identity
+-- or TLS check above all, must start nothing once it answers: a stream
+-- started by unloaded code holds binding 6001 beside the new code's, never
+-- sees a report, and ends the new code's connection with its own connect
+-- timeout and retries (the flapping of 2026-11-05).
 function OnDriverDestroyed()
+	state.destroyed = true
 	close_pairing_window()
 	outage.cancel()
 	if attention_timer then
@@ -3394,6 +3426,7 @@ function OnDriverDestroyed()
 	if state.stream then
 		state.stream:stop()
 	end
+	netstream.retire() -- and no object of this code's netstream connects again
 	if state.queue then
 		state.queue:stop()
 	end
