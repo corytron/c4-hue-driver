@@ -14,6 +14,8 @@ listed.
 
 ## Unreleased
 
+## 1.2 "Taramyn", build 488 (2026-11-05)
+
 ### Added
 - The Hue Bridge finds Hue bridges on the local network: a new Bridges
   Found row lists them (a driver that is not paired searches by itself a
