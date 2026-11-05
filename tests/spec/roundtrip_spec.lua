@@ -105,7 +105,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 	it("runs the whole loop", function()
 		local bc4 = bridge.C4
 		assert.equal("0 imported", bridge.Properties["Lights"])
-		assert.equal("None; use Map Rooms By Name", bridge.Properties["Room Mappings"])
+		assert.equal("None yet (Set Room Mapping makes one)", bridge.Properties["Room Mappings"])
 
 		-- Self-check, then the stream connects and the deferred resync runs
 		-- against an empty registry: the lights' six GETs, the scenes' three
@@ -120,7 +120,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		local stream_t = bc4.last_transfer()
 		assert.equal(STREAM_URL, stream_t.url)
 		stream_t:respond_headers(200, {})
-		assert.equal(1, fire_fast_timers(bridge, 1), "on_connected deferral")
+		-- The on_connected deferral, then the background resync after its 2 s
+		-- debounce (bridge/housekeeping.lua, contract §3.1).
+		bc4.advance(2500)
 		-- 6 for the lights, scene + smart_scene + grouped_light for the scenes;
 		-- the zone lights take the scenes' grouped_light items instead of a GET.
 		assert.equal(9, answer_resource_gets(bridge, 1))
@@ -131,14 +133,14 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- one mapping per line, and a pick in Composer snaps back.
 		local summary = "4 Hue rooms and zones; 2 unmapped (open the list to read)"
 		assert.equal(summary, bridge.Properties["Room Mappings"])
-		assert.equal(summary .. ",Garage → Garage,Living Room → Living Room,Attic (zone) → (unmapped),"
+		assert.equal(summary .. ",Garage → Garage (by name),Living Room → Living Room (by name),Attic (zone) → (unmapped),"
 			.. "Downstairs (zone) → (unmapped)", bc4.property_lists["Room Mappings"])
 		bridge.Properties["Room Mappings"] = "Garage → Garage"
 		bridge.OnPropertyChanged("Room Mappings")
 		assert.equal(summary, bridge.Properties["Room Mappings"])
 		-- (read-only lists: a pick leaves no Last Action note)
 		assert.equal("done", bc4.persist.hue_rooms_automapped)
-		assert.truthy(bridge.Properties["Attention"]:find("^4 new lights on the bridge: "))
+		assert.truthy(fake.attention(bridge):find("^4 new lights on the bridge: "))
 
 		-- Import All New Lights: six GETs, three AddDevice calls in name order
 		-- into the mapped rooms, each bound and told its configuration and
@@ -157,14 +159,14 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- which are shown only while used; fake.last_action joins them.
 		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001), Hallway Ambiance #3 to Living Room "
 			.. "(device 2002), Living Room Lamp #1 to Living Room (device 2003)"
-		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)"
+		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add From Hue): Kitchen Strip #2 (no Hue room)"
 		assert.equal(added .. "; " .. skipped, fake.last_action(bridge))
 		assert.is_true(#bridge.Properties["Last Action"] <= 72, "the row itself fits the column")
 		fire_fast_timers(bridge, 400) -- the rows' visibility batch
 		assert.equal(0, bc4.property_attribs["Last Action (2)"], "a continuation row shown")
 		assert.equal(1, bc4.property_attribs["Last Action (6)"], "an unused row hidden")
-		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Add Light or Import All New Lights)",
-			bridge.Properties["Attention"])
+		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Import All New or Add From Hue)",
+			fake.attention(bridge))
 		assert.same({ "HUE_CONFIGURE", "HUE_STATE" }, messages_to(bc4, LIVING_ID))
 		assert.equal(LIVING_ROOM, fake.project.devices[LIVING_ID].room_id)
 
@@ -179,11 +181,24 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		end
 		for _, rec in ipairs(lamp_records) do rec.name = "Lamp" end
 		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
-		assert.truthy(bridge.Properties["Attention"]:find("Lamp is Living Room Lamp in Hue", 1, true),
-			bridge.Properties["Attention"])
-		for _, rec in ipairs(lamp_records) do rec.name = "Living Room Lamp" end
-		bridge.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem">2003</param></c4soap>')
-		assert.is_nil(bridge.Properties["Attention"]:find("differ", 1, true), bridge.Properties["Attention"])
+		-- Since 1.2 the rename goes to Hue (names N1, #334): the lamp's device
+		-- name and its light's own name, paced, never listed as a difference.
+		assert.is_nil(fake.attention(bridge):find("Lamp is Living Room Lamp in Hue", 1, true),
+			fake.attention(bridge))
+		bc4.advance(3000)
+		local puts = {}
+		for _, t in ipairs(bc4.transfers) do
+			if t.method == "PUT" and tostring(t.data):find('"name":"Lamp"', 1, true) then
+				puts[#puts + 1] = t.url:match("/clip/v2/resource/(%w+)/")
+				if not t.answered then
+					t.answered = true
+					t:respond(200, '{"errors":[],"data":[]}')
+					bc4.advance(1100)
+				end
+			end
+		end
+		assert.truthy(#puts >= 1, "the Composer name went to Hue")
+		assert.equal("device", puts[1], "the lamp's device name first")
 
 		-- Now the Living Room Lamp is a real driver bound to this bridge.
 		fake.pair(bridge, light, { light_id = LIVING_ID, bind = false })
@@ -265,7 +280,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- (The swapped event also left Hallway Ambiance's device in no room, so
 		-- two lights have a mapped Hue room to audit.)
 		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
-		assert.equal("1 of 2 are not in the room their Hue room maps to: Living Room Lamp is in Living Room; Hue says "
+		assert.equal("1 of 2 are not in the room their Hue room maps to: Lamp is in Living Room; Hue says "
 			.. "Garage → drag it to Garage in Composer if you want it there", fake.last_action(bridge))
 
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the
@@ -288,5 +303,33 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.is_nil(bc4.persist.hue_tombstones[F.rids.living])
 		assert.equal(2004, bc4.persist.hue_lights[F.rids.living].device_id)
 		assert.equal("4 lights on bridge‚ 3 imported‚ 1 new", bridge.Properties["Lights"])
+	end)
+
+	-- 1.2 (#334, docs/simplify-actions-design.md §1.3): what Room Audit listed
+	-- on a click is a mark on the device's line of the Lights drop-down; the
+	-- rows are refreshed every five minutes, so a move in Composer shows up
+	-- within that, and nothing is ever moved back.
+	it("marks a light moved to another Control4 room on its Lights line; Room Audit still lists it", function()
+		local bc4 = bridge.C4
+		bc4.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8"}')
+		bc4.last_transfer():respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
+		bc4.last_transfer():respond_headers(200, {})
+		bc4.advance(2500)
+		answer_resource_gets(bridge, 1)
+		assert.equal("Mapped 2 Hue rooms and zones by name: Garage → Garage, Living Room → Living Room",
+			fake.last_action(bridge), "the first read maps the rooms by name and says so")
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Import All New" })
+		answer_resource_gets(bridge, 1)
+		assert.equal(3, #bc4.added)
+		assert.truthy(bc4.property_lists["Lights"]:find(",Garage: Garage White → device 2001,", 1, true))
+
+		fake.move_device(2001, LIVING_ROOM)
+		bc4.advance(300000)
+		assert.truthy(bc4.property_lists["Lights"]:find(",Garage: Garage White → device 2001 (in Living Room instead of "
+			.. "Garage),", 1, true), bc4.property_lists["Lights"])
+		assert.equal(LIVING_ROOM, fake.project.devices[2001].room_id, "nothing moved back")
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
+		assert.equal("1 of 3 are not in the room their Hue room maps to: Garage White is in Living Room; Hue says Garage → "
+			.. "drag it to Garage in Composer if you want it there", fake.last_action(bridge))
 	end)
 end)

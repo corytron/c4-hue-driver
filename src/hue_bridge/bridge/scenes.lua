@@ -110,14 +110,14 @@ scenes.TAG = "scenes"
 scenes.WORDS = {
 	held = "scene",                       -- "its registered scene is <rid>"
 	stranger = "an unregistered device",  -- a HUE_SCENE_GOODBYE the module does not hold
-	goodbye_tail = "Add Scene lists it as deleted, Add All Scenes Of Room skips it",
-	add_action = "Add Scene",
+	goodbye_tail = "Add From Hue lists it as deleted; adding all scenes of its room skips it",
+	add_action = "Add From Hue",
 	busy_job = "adding scenes",
 	busy_resync = "resyncing scenes",
 	kind = "scene",
 	unbound_kind = "unbound scene device",
-	relink_or_forget = "Re-link Scene or Forget Scene",
-	forget_action = "Forget Scene",
+	relink_or_forget = "Link or Forget Device",
+	forget_action = "Forget Device",
 	name_kind = "Hue scene name",
 	hue_names = "Hue scene names",
 	device_noun = "scene device",
@@ -129,13 +129,14 @@ scenes.WORDS = {
 	registered = "scene",                 -- "device 2061 is not a registered scene"
 	relink_target = "a scene",            -- "pick a device and a scene"
 	requester = "scene device",           -- "the scene device named no device"
-	forget_tail = "; the Hue scene is listed under Add Scene again",
+	forget_tail = "; the Hue scene is listed under Add From Hue again",
 	link_noun = "scene devices",          -- "No scene devices are bound to this bridge"
 	link_many = "Hue scenes",
 	link_one = "Hue scene's",
 	link_none = "Hue scene",
 }
 scenes.DEVICE_DRIVER = scenes.SCENE_DRIVER
+scenes.NAMES_KIND = "scene"  -- bridge/names.lua syncs the scenes' names (D6)
 scenes.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Scene's flag first
 scenes.MESSAGES = { configure = "HUE_SCENE_CONFIGURE", hello = "HUE_SCENE_HELLO", goodbye = "HUE_SCENE_GOODBYE",
 	forgotten = "HUE_SCENE_FORGOTTEN" }
@@ -668,7 +669,8 @@ function scenes:absorb(res)
 	self:refresh_registry()
 end
 
--- The entry's cached name follows Hue's; the Composer device keeps its own.
+-- The entry's cached name follows Hue's; the Composer device keeps its own
+-- here, and the names sync (bridge/names.lua) hears of it and decides.
 function scenes:take_name(entry, scene)
 	if entry.name == scene.name then
 		return false
@@ -676,7 +678,72 @@ function scenes:take_name(entry, scene)
 	self.ctx.log.info("scenes: %s was renamed to %s in Hue (Composer name unchanged)", tostring(entry.name),
 		tostring(scene.name))
 	entry.name = scene.name
+	self:hue_named(scene.rid)
 	return true
+end
+
+-- Names (bridge/names.lua, D6; names-sync §5.2) ----------------------------------
+
+-- A scene's Composer form: a zone scene carries the zone in front, a
+-- time-based scene its base name ("Golden hours 4" → "Golden hours").
+function scenes:name_form(_rid, entry)
+	local name, gtype = self:group_info(entry.group_rid, entry)
+	local form = { smart = is_smart(entry) }
+	if gtype == "zone" and name ~= nil and name ~= "" then
+		form.prefix = tostring(name) .. " "
+	end
+	return form
+end
+
+-- The PUT that names a scene, or a time-based scene (V, E11), on the bridge.
+-- Hue takes a name another scene of the room has [verified: house 2026-11-05].
+function scenes:name_requests(rid, name)
+	local entry = self.registry[rid]
+	if not entry then
+		return nil
+	end
+	local path = (is_smart(entry) and scenes.SMART_SCENE_PATH or scenes.SCENE_PATH) .. "/" .. rid
+	return { { method = "PUT", path = path, body = { metadata = { name = name } } } }
+end
+
+-- Whether a gone entry's group and a record's are the same room or zone:
+-- the same rid or, failing that, the same group name and type
+-- (owner.same_group: a bridge reset gives every group a new rid, §4
+-- finding 9).
+function scenes:in_same_group(entry, record)
+	local entry_name, entry_type = self:group_info(entry.group_rid, entry)
+	local name, gtype = self:group_info(record.group_rid, record)
+	return owner.same_group(entry.group_rid, hue_model.group_label(entry_name, entry_type), record.group_rid,
+		hue_model.group_label(name, gtype))
+end
+
+-- M9 / S4: a gone scene and an unimported one of the same kind with its name
+-- in the same group (Hue deleted and re-made it): suggested only, never
+-- automatic (scenes have no radio).
+function scenes:name_suggestions(seen)
+	local out = {}
+	local gone = self.reg:rids("gone")
+	if #gone == 0 then
+		return out
+	end
+	local tombs = self.reg:tombstones()
+	for _, record in ipairs(self:unimported_scenes()) do
+		if not tombs[record.rid] then
+			local matches = {}
+			for _, rid in ipairs(gone) do
+				local entry = self.registry[rid]
+				if not seen[rid] and self:record_of(rid) == nil and is_smart(entry) == is_smart(record)
+					and name_of(entry) == name_of(record) and self:in_same_group(entry, record) then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = record.rid, why = "same name in the same group",
+					ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
 end
 
 -- The identity fields of one entry from its catalogue record (of either
@@ -833,6 +900,11 @@ function scenes:send_state(rid, reason, active)
 end
 
 -- Group on/off and other scenes (docs/keypad-design.md "Scene hold-to-dim") -----
+
+-- (owner hook) A scene's room mark follows the mapping of its room or zone.
+function scenes:mark_group(rid)
+	return self:group_rid_of(rid)
+end
 
 -- The group a scene of either kind belongs to: the catalogue's, else the entry's.
 function scenes:group_rid_of(rid)
@@ -1205,7 +1277,7 @@ function scenes:reconcile_scenes()
 				self:entry_label(rid, entry), entry.device_id)
 		elseif entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
-			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Re-link Scene or Forget Scene)",
+			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Link or Forget Device)",
 				self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
@@ -1293,7 +1365,7 @@ function scenes:scene_deleted(rid, entry)
 		if self.reg:set_state(rid, "gone") then
 			self:mark()
 		end
-		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Re-link Scene or Forget Scene)",
+		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Link or Forget Device)",
 			self:entry_label(rid, entry), entry.device_id)
 		return self:announce_gone(rid, "event") and 1 or 0
 	end
@@ -2021,7 +2093,8 @@ function scenes:add_scene(rid, room_id, done)
 	end
 	local scene = self:record_of(rid)
 	if not scene then
-		done(false, string.format("Not added: scene %s is not on the bridge (Refresh Scenes and try again)", tostring(rid)))
+		done(false, string.format("Not added: scene %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)", tostring(rid)))
 		return false
 	end
 	local room_name
@@ -2071,7 +2144,8 @@ function scenes:add_all_of_group(group_rid, done)
 	end
 	local group = self:groups():group(group_rid)
 	if not group then
-		done(false, string.format("Not added: Hue room %s is not on the bridge (connect the event stream and try again)",
+		done(false, string.format("Not added: Hue room %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)",
 			tostring(group_rid)))
 		return false
 	end
@@ -2133,7 +2207,7 @@ function scenes:add_all_of_group(group_rid, done)
 			parts[#parts + 1] = "stopped early: " .. err
 		end
 		if #deleted > 0 then
-			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add Scene re-creates one): %s", #deleted,
+			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add From Hue re-creates one): %s", #deleted,
 				table.concat(deleted, ", "))
 		end
 		return table.concat(parts, "; ")
@@ -2162,7 +2236,8 @@ function scenes:relink_fields(fields)
 end
 
 function scenes.relink_refusal(_self, _device_id, new_rid)
-	return string.format("Not re-linked: scene %s is not on the bridge (Refresh Scenes and try again)",
+	return string.format("Not re-linked: scene %s is not on the bridge (Diagnostics ▸ Read everything "
+		.. "from the bridge now, then try again)",
 		tostring(new_rid))
 end
 
@@ -2319,7 +2394,7 @@ end
 -- last.
 function scenes:picker_scenes()
 	if not self.synced then
-		return util.empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local owners = self:slot_owners()
 	local plain, deleted = {}, {}
@@ -2352,7 +2427,7 @@ end
 -- Decision 8; imported counts both kinds).
 function scenes:picker_groups()
 	if not self.synced then
-		return util.empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local rooms = self.project:rooms()
 	local counts, smart, imported, records = {}, {}, {}, {}
@@ -2450,11 +2525,17 @@ end
 -- about seven per room). The registered scenes the bridge lacks follow
 -- under the group they remember as "(missing; device N)". Commas become "‚"
 -- (U+201A): the list is comma-delimited (driver.lua's
--- refresh_room_mappings). Before the first GET, the registry alone: what is
+-- refresh_room_mappings). A linked scene whose device sits in another
+-- Control4 room than its room or zone maps to carries the room mark
+-- (owner:room_marks). Before the first GET, the registry alone: what is
 -- known. Empty when nothing is.
 function scenes:list_items()
 	local owners = self:slot_owners()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	local rows = {}
 	local function row(x, rid, suffix)
 		local label, name, smart = self:group_label(x.group_rid, x), name_of(x), is_smart(x)
@@ -2472,7 +2553,7 @@ function scenes:list_items()
 			local entry, tomb = self.registry[rid], tombs[rid]
 			local suffix = ""
 			if entry then
-				suffix = entry_suffix(entry)
+				suffix = state_of(entry)
 			elseif tomb then
 				suffix = string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
@@ -2481,7 +2562,7 @@ function scenes:list_items()
 	end
 	for rid, entry in pairs(self.registry) do
 		if not self:record_of(rid) then
-			row(entry, rid, entry_suffix(entry))
+			row(entry, rid, state_of(entry))
 		end
 	end
 	table.sort(rows, function(a, b)

@@ -1035,8 +1035,9 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
         % (house["stream_timeout_s"], house["stream_watchdog_s"], house["debug_mode"])
     )
     add(
-        "- The bridge's `Status` and `Attention` texts, and any dialog or `[ERROR]` line in a Lua tab during the "
-        "install."
+        "- The bridge's `Status` and `Attention` texts, with every `Attention (2)` to `Attention (6)` row that is "
+        "shown (1.2 and later wrap a long Attention onto them), and any dialog or `[ERROR]` line in a Lua tab "
+        "during the install."
     )
     add("- Exact texts as UIA reports them; screenshots under C:\\c4-hue\\shots\\.")
     add("")

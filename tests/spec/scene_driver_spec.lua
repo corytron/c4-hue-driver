@@ -358,7 +358,7 @@ describe("Hue Scene driver", function()
 			local env, c4 = known_scene("static")
 			configure(env, { state = "gone", gone_since = "1761000000" })
 			local expected = "Scene deleted in Hue since " .. os.date("%Y-%m-%d %H:%M", 1761000000)
-				.. "; ON does nothing; re-link or Forget"
+				.. "; ON does nothing; Link or Forget Device"
 			assert.equal(expected, env.Properties["Status"])
 			assert.equal("Offline", env.Properties["Online"])
 			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
@@ -375,7 +375,7 @@ describe("Hue Scene driver", function()
 		it("says deleted without a date when the bridge sends none", function()
 			local env = known_scene()
 			configure(env, { state = "gone" })
-			assert.equal("Scene deleted in Hue; ON does nothing; re-link or Forget", env.Properties["Status"])
+			assert.equal("Scene deleted in Hue; ON does nothing; Link or Forget Device", env.Properties["Status"])
 		end)
 
 		it("while gone, drops ON with a warning and reports OFF at once, nothing to the bridge", function()
@@ -712,7 +712,7 @@ describe("Hue Scene driver", function()
 
 	describe("HUE_SCENE_FORGOTTEN", function()
 		local FORGOTTEN = "Forgotten by the bridge (was Hue scene Relax). "
-			.. "Delete this device in Composer, or bind it again and use Link Devices"
+			.. "Delete this device, or bind it again and use Link Device on the Hue Bridge"
 
 		it("explains in Status, goes offline and drops proxy commands", function()
 			local env, c4 = known_scene("static")
@@ -1065,12 +1065,36 @@ describe("Hue Scene driver", function()
 		end)
 	end)
 
-	describe("actions", function()
+	describe("hidden aliases until 2.0 (no actions since 1.2, docs/simplify-actions-design.md §3.3)", function()
 		-- The light_v2 proxy the fake's project gave this device: the consumer
 		-- of the protocol driver's binding 5001, as on the controller.
 		local function proxy_of(id)
 			return assert(fake.project.devices[id].proxy_id, "the fake registers a proxy per loaded device")
 		end
+
+		it("Adopt Hue Name and Forget This Scene answer sent by name too, as the dev loop sends them", function()
+			local env, c4 = known_scene()
+			env.ExecuteCommand("Adopt Hue Name", {})
+			assert.same({ { proxy_of(SCENE_ID), "Relax" } }, c4.calls_to("RenameDevice"))
+			env.ExecuteCommand("Forget This Scene", {})
+			assert.equal(1, #messages(c4, "HUE_SCENE_FORGET"))
+		end)
+
+		it("say in the log, in Debug Mode, which action of the Hue Bridge does the job now", function()
+			local env = known_scene()
+			local lines = {}
+			log.set_debug(true)
+			log.sink = function(line) lines[#lines + 1] = line end
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Scene" })
+			log.set_debug(false)
+			log.sink = function() end
+			local text = table.concat(lines, "\n")
+			assert.truthy(text:find("Adopt Hue Name is a hidden alias until 2.0; Resolve Names on the Hue Bridge "
+				.. "does this now", 1, true))
+			assert.truthy(text:find("Forget This Scene is a hidden alias until 2.0; Forget Device on the Hue Bridge "
+				.. "does this now", 1, true))
+		end)
 
 		it("Adopt Hue Name renames the proxy device, not the protocol driver", function()
 			local env, c4 = known_scene()
@@ -1192,7 +1216,7 @@ describe("Hue Scene driver", function()
 			assert.truthy(xml:find("<minimum_os_version>3.3.0</minimum_os_version>", 1, true))
 		end)
 
-		it("declares the properties and both actions", function()
+		it("declares the properties and no actions (1.2, D3: the Hue Bridge has them)", function()
 			local props = fake.declared_properties("hue_scene")
 			for _, name in ipairs({ "Driver Version", "Status", "Hue Scene", "Hue Room", "Hue Scene ID", "Online",
 				"Last Action" }) do
@@ -1200,9 +1224,9 @@ describe("Hue Scene driver", function()
 			end
 			assert.equal("Off", props["Debug Mode"])
 			assert.equal("As set in Hue", props["Recall As"])
-			for _, name in ipairs({ "Adopt Hue Name", "Forget This Scene" }) do
-				assert.truthy(xml:find("<action>%s*<name>" .. name .. "</name>%s*<command>" .. name .. "</command>"), name)
-			end
+			assert.is_nil(xml:find("<action>", 1, true))
+			assert.is_nil(xml:find("<actions>", 1, true))
+			assert.is_nil(xml:find("<actions/>", 1, true))
 		end)
 
 		it("has the light's two connections: the LIGHT_V2 provider and the HUE_BRIDGE consumer", function()
@@ -2700,11 +2724,11 @@ describe("Hue Scene driver", function()
 			it("gives way to the deleted-in-Hue text", function()
 				local env = smart_scene("active")
 				configure(env, smart_with({ state = "gone" }))
-				assert.equal("Scene deleted in Hue; ON does nothing; re-link or Forget", env.Properties["Status"])
+				assert.equal("Scene deleted in Hue; ON does nothing; Link or Forget Device", env.Properties["Status"])
 			end)
 		end)
 
-		describe("Adopt Hue Name (Decision 7)", function()
+		describe("Adopt Hue Name, a hidden alias (Decision 7)", function()
 			it("names a zone's time-based scene after the zone and the scene without the app's number", function()
 				local env, c4 = smart_scene()
 				local proxy_id = fake.project.devices[SCENE_ID].proxy_id

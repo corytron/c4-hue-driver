@@ -292,12 +292,12 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		event(F.events.zone_deleted)
 		assert.equal("gone", sent_params(bc4, "HUE_CONFIGURE").state)
 		fake.pump()
-		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; re-link or Forget",
+		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; Link or Forget Device",
 			light.Properties["Status"])
 		assert.equal("Offline", light.Properties["Online"])
 		assert.equal("1 zone + 2 rooms on bridge, 1 imported, 2 new, 1 missing", Z:summary())
 		assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", now)
-			.. ") (Re-link Zone Light or Forget Light)", Z:attention())
+			.. ") (Link or Forget Device)", Z:attention())
 		bc4.sent = {}
 		before = #bc4.transfers
 		fake.as(light, light.ReceivedFromProxy, 5001, "ON", {})
@@ -316,7 +316,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal(F.group_rids.garage, light.C4.persist.hue_rid)
 		assert.equal("Downstairs", fake.project.devices[DEVICE_ID].name, "the Composer name is the owner's")
 		assert.equal("1 zone light name differs from the Composer names: Downstairs is Garage Lights in Hue "
-			.. "(Adopt Hue Names or Accept Names As They Are)", Z:attention())
+			.. "(Resolve Names)", Z:attention())
 		assert.truthy(Z:accept_names():find("^Accepted 1 zone light name difference"))
 		assert.equal("None", Z:attention())
 

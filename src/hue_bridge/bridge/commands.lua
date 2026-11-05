@@ -481,6 +481,20 @@ function commands:pending(rid)
 	return light and light.pending and copy(light.pending) or nil
 end
 
+-- True while the queue holds work for the bridge: a state waiting (for its
+-- debounce, a token or a retry) or a PUT in flight. The background tasks
+-- (bridge/housekeeping.lua) wait while either queue is busy, so a person's
+-- command never queues behind one of their GETs in Director's one transfer
+-- per host (docs/simplify-research-scheduler.md §3.4).
+function commands:busy()
+	for _, light in pairs(self.lights) do
+		if light.pending or light.inflight then
+			return true
+		end
+	end
+	return false
+end
+
 function commands:stats()
 	return copy(self.counters)
 end

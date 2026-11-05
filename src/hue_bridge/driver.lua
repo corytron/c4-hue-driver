@@ -23,6 +23,10 @@ local tlscheck = require("bridge.tlscheck")
 local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
 local util = require("bridge.util")
+local housekeeping = require("bridge.housekeeping")
+local discovery_mod = require("bridge.discovery")
+local actions_mod = require("bridge.actions")
+local names_mod = require("bridge.names")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -61,6 +65,7 @@ local state = {
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
 	late_init_done = false,
+	destroyed = false,   -- OnDriverDestroyed ran: what this code still has in flight starts nothing
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
 	key_rejected = nil,  -- HTTP code (401/403) once the bridge refused the key; cleared by Pair Bridge or a new address
 	tls_verdict = nil,   -- the TLS self-check's answer for this start and address (bridge/tlscheck.lua)
@@ -71,7 +76,24 @@ local state = {
 	limits_sent = {},    -- light rid -> the limits last given to the command queue
 	stream_started_at = nil, -- "MM-DD HH:MM" of the stream's first connect since the driver started
 	stream_abandoned = {}, -- abandoned stream transfers that may still be open, across stream rebuilds (stream.lua)
+	-- The outage and "away" measures (now_ms below; nil when the condition does not hold):
+	stream_down_ms = nil, -- since when the event stream is not connected
+	unreachable_ms = nil, -- since when the identity check finds nothing answering at this address
+	away_ms = nil,        -- since when the identity check fails at this address (nothing, or another bridge)
+	away_other = nil,     -- the id another bridge answered with at this address, when that was the last answer
+	find_missed_ms = nil, -- when the follow-up search (D5, D12) last ended without the paired bridge
+	moved = nil,          -- { from, to, text, at }: the last address change the follow-up made (away.MOVED_KEY)
 }
+
+-- Milliseconds since the epoch [verified: SDK 34_timer/_2-GetTime, OS 3.2.3 on]: the clock of
+-- the outage and "away" measures, so the specs' fake clock (c4.advance) moves them too.
+local function now_ms()
+	return C4:GetTime()
+end
+
+-- Bridges Found's list (owner's answer D5; the row itself is drawn further down): the bridges
+-- the last search heard, the labels shown, and whether a search runs.
+local bridges = { items = {}, by_label = {}, searching = false }
 
 -- The Attention text of a failed TLS self-check (issue #53, tls_gate below).
 local TLS_ATTENTION = "TLS check failed: the controller accepted the bridge without its Signify roots; "
@@ -158,7 +180,8 @@ local function refresh_status()
 	elseif not paired() then
 		prop("Status", "Not paired: press the link button, then run Pair Bridge")
 	elseif state.key_rejected then
-		prop("Status", string.format("Key rejected by the bridge (HTTP %d): re-pair with Pair Bridge", state.key_rejected))
+		prop("Status", string.format("Key rejected by the bridge (HTTP %d): checked again by itself; re-pair with "
+			.. "Pair Bridge if it stays", state.key_rejected))
 	elseif state.tls_verdict == "not_pinned" then
 		prop("Status", "TLS check failed: nothing is sent (see Attention)")
 	elseif state.identity_ok ~= true then
@@ -168,6 +191,10 @@ local function refresh_status()
 		prop("Status", "Paired")
 	end
 	prop("Bridge ID", paired() and state.creds.bridge_id or "")
+	-- Every change of what the background tasks' guards read passes here.
+	if state.hk then
+		state.hk:wake()
+	end
 end
 
 -- A Status text of the identity check or of the TLS check it waits for: shown
@@ -365,6 +392,11 @@ local function key_rejected(code)
 	end
 	C4:UpdateProperty("Event Stream", string.format("Stopped: key rejected (HTTP %d)", code))
 	refresh_status()
+	-- The background re-check (owner's answer D8): 5 min, 15 min, 1 h, then
+	-- hourly, until the bridge accepts the key again or the driver re-pairs.
+	if state.hk then
+		state.hk:poke("key_recheck", "error")
+	end
 end
 
 -- A 401/403 to a keyed module request is not proof that the key is gone:
@@ -403,9 +435,20 @@ local function bridge_request(req, callback)
 	if state.identity_ok ~= true then
 		return callback({ ok = false, err = "bridge identity not verified yet" })
 	end
+	-- The GETs sent while a background read runs (an optional task's resync
+	-- chain) count against the hourly budget of optional requests
+	-- (bridge/housekeeping.lua job.charge; §4 finding 7); nothing is refused.
+	if state.charge and (req.method == nil or req.method == "GET") then
+		state.charge()
+	end
 	req.ip = state.ip
 	req.key = state.creds.key
 	req.tls = nil
+	-- Every write here is a person's (commands, recalls, renames): the
+	-- background tasks keep 1.5 s clear of the last one (§1.3).
+	if req.method ~= nil and req.method ~= "GET" then
+		state.last_write_ms = C4:GetTime()
+	end
 	return http.request(req, function(r)
 		if type(r) == "table" and (r.code == 401 or r.code == 403) then
 			confirm_key_rejected(r.code)
@@ -584,8 +627,92 @@ local function is_zone_light_rid(rid)
 	return rid ~= nil and rid ~= "" and state.zone_lights:is_group(rid) == true
 end
 
+-- The bridge's own Attention items (contract §1.3 and D5, §4 finding 6; the texts of
+-- docs/simplify-research-discovery.md §2.5 where they fit): the paired bridge away an hour
+-- ("missing" once the local search found it nowhere), the event stream down an hour while the
+-- bridge answers, the paired bridge answering elsewhere than an address typed by hand, and a
+-- move the driver followed (for a day). Each ends with what resolves it and goes by itself
+-- when its condition ends; the rows timer (every 5 minutes) brings the hour-old ones. One
+-- table, since the main chunk is near Lua 5.1's limit of 200 locals.
+local away = {
+	ATTENTION_S = 3600,
+	MOVED_S = 86400,
+	MOVED_KEY = "hue_bridge_moved", -- { from, to, text, at }: the last move the follow-up made
+}
+
+-- "14:02" today, "10-26 14:02" on another day.
+function away.clock(ms)
+	local t = math.floor(ms / 1000)
+	if os.date("%Y-%m-%d", t) == os.date("%Y-%m-%d", math.floor(now_ms() / 1000)) then
+		return os.date("%H:%M", t)
+	end
+	return os.date("%m-%d %H:%M", t)
+end
+
+-- Where the last search of Bridges Found heard the paired bridge, when not at Bridge IP Address.
+function away.heard_elsewhere()
+	local id = state.creds and state.creds.bridge_id
+	for _, item in ipairs(bridges.items) do
+		if id and item.id == id and item.ip and item.ip ~= state.ip then
+			return item.ip
+		end
+	end
+	return nil
+end
+
+-- The remedy of an event stream that stays down while the bridge answers: the other transport
+-- (the manual's advice for a feed that does not connect), or the bridge's restart when the
+-- network connection's TLS check already moved the feed to Web transfer (NET_ATTENTION).
+function away.stream_remedy()
+	if use_netstream() then
+		return "set Event Stream Transport to Web transfer if it stays"
+	elseif state.net_check == "not_pinned" then
+		return "restart the bridge if it stays"
+	end
+	return "set Event Stream Transport to Network connection if it stays"
+end
+
+function away.items()
+	local items = {}
+	if not (paired() and state.ip) then
+		return items
+	end
+	local now = now_ms()
+	-- The last six hex digits of the id, as the mDNS instance name and Bridges Found show it.
+	local id = tostring(state.creds.bridge_id or ""):sub(-6):upper()
+	local elsewhere = state.identity_ok ~= true and state.ip ~= state.last_good_ip and away.heard_elsewhere()
+	if elsewhere then
+		-- A typed address that never verified is the installer's: offered, never rewritten (principle 1).
+		items[#items + 1] = string.format("Bridge %s answers at %s, not at the typed %s: pick it in Bridges Found", id,
+			elsewhere, state.ip)
+	elseif state.away_ms and now - state.away_ms >= away.ATTENTION_S * 1000 then
+		if state.find_missed_ms and state.ip == state.last_good_ip then
+			items[#items + 1] = string.format("Bridge %s missing since %s: not found on the network (searched %s); check "
+				.. "its power, or type its address in Bridge IP Address", id, away.clock(state.away_ms),
+				away.clock(state.find_missed_ms))
+		elseif state.away_other then
+			items[#items + 1] = string.format("Bridge %s not found at %s since %s: another bridge answers there; check "
+				.. "its power, or type its address in Bridge IP Address", id, state.ip, away.clock(state.away_ms))
+		else
+			items[#items + 1] = string.format("Bridge %s not answering at %s since %s: check its power, or type its "
+				.. "address in Bridge IP Address", id, state.ip, away.clock(state.away_ms))
+		end
+	end
+	if state.stream_down_ms and not state.stream_connected and state.identity_ok == true and keyed_refusal() == nil
+			and state.stream and state.stream:running() and now - state.stream_down_ms >= away.ATTENTION_S * 1000 then
+		items[#items + 1] = string.format("Event stream down since %s while the bridge answers (lists read every 10 "
+			.. "minutes): %s", away.clock(state.stream_down_ms), away.stream_remedy())
+	end
+	local moved = state.moved
+	if moved and moved.to == state.ip and now - moved.at < away.MOVED_S * 1000 then
+		items[#items + 1] = moved.text
+	end
+	return items
+end
+
 -- The owner-facing counts and lists (docs/import-design.md §6).
--- The lights' Attention text followed by the scenes' and the zone lights' items.
+-- The TLS checks' items, the bridge's own, then the lights' Attention text followed by the
+-- scenes', the zone lights', the motion devices' and the names' items.
 local function attention_text()
 	local items = {}
 	if state.tls_verdict == "not_pinned" then
@@ -593,6 +720,9 @@ local function attention_text()
 	end
 	if state.net_check == "not_pinned" then
 		items[#items + 1] = NET_ATTENTION
+	end
+	for _, item in ipairs(away.items()) do
+		items[#items + 1] = item
 	end
 	local text = state.lights:attention()
 	if text and text ~= "" and text ~= "None" then
@@ -606,6 +736,13 @@ local function attention_text()
 	end
 	if state.motion then
 		for _, item in ipairs(state.motion:attention_items() or {}) do
+			items[#items + 1] = item
+		end
+	end
+	-- Names that wait for the bridge, that Hue refused, or that changed in
+	-- bulk (bridge/names.lua; each ends in "(Resolve Names)").
+	if state.names then
+		for _, item in ipairs(state.names:attention() or {}) do
 			items[#items + 1] = item
 		end
 	end
@@ -646,7 +783,7 @@ end
 local function refresh_room_mappings()
 	local items, unmapped = state.lights:room_mapping_items()
 	if #items == 0 then
-		return show_list("Room Mappings", "None; use Map Rooms By Name")
+		return show_list("Room Mappings", "None yet (Set Room Mapping makes one)")
 	end
 	show_list("Room Mappings", string.format("%d Hue rooms and zones; %d unmapped (open the list to read)",
 		#items, unmapped), items)
@@ -657,6 +794,86 @@ local function show_module_list(name, module)
 	show_list(name, module:summary(), module:list_items())
 end
 
+local function wrap_text(text, width)
+	local lines, line = {}, ""
+	for word in text:gmatch("%S+") do
+		while #word > width do
+			if line ~= "" then
+				lines[#lines + 1] = line
+				line = ""
+			end
+			lines[#lines + 1] = word:sub(1, width)
+			word = word:sub(width + 1)
+		end
+		if line == "" then
+			line = word
+		elseif #line + 1 + #word <= width then
+			line = line .. " " .. word
+		else
+			lines[#lines + 1] = line
+			line = word
+		end
+	end
+	if line ~= "" then
+		lines[#lines + 1] = line
+	end
+	return lines
+end
+
+local function row_visible(name, visible)
+	if C4.SetPropertyAttribs then
+		pcall(C4.SetPropertyAttribs, C4, name, visible and 0 or 1)
+	end
+end
+
+-- Attention, word-wrapped onto its continuation rows like Last Action
+-- (#68, contract §1.3: the action hint at the end is never cut): Composer
+-- clips a value at about 75 characters. Unused rows are hidden; their
+-- visibility is asserted again 400 ms and 1.5 s later, as Last Action's is,
+-- because Composer dropped a show or hide that came in the same burst as the
+-- texts [hardware 2026-10-24].
+local ATTENTION_ROWS, ROW_WIDTH = 6, 72
+local attention_shown = {}
+local attention_timer = nil
+
+local function attention_row(i)
+	return string.format("Attention (%d)", i)
+end
+
+local function assert_attention_rows()
+	for i = 2, ATTENTION_ROWS do
+		row_visible(attention_row(i), attention_shown[i] == true)
+	end
+end
+
+local function assert_attention_rows_soon()
+	if attention_timer then
+		attention_timer:Cancel()
+	end
+	attention_timer = C4:SetTimer(400, function()
+		assert_attention_rows()
+		attention_timer = C4:SetTimer(1500, function()
+			attention_timer = nil
+			assert_attention_rows()
+		end)
+	end)
+end
+
+local function show_attention(text)
+	local lines = wrap_text(text, ROW_WIDTH)
+	if #lines > ATTENTION_ROWS then
+		-- In full in the Lua output whatever Debug Mode says, as Last Action's overflow (§4 finding 1).
+		log.always("Attention: %s", text)
+		lines[ATTENTION_ROWS] = lines[ATTENTION_ROWS]:sub(1, ROW_WIDTH - 16) .. " … (Lua output)"
+	end
+	prop("Attention", lines[1] or "None")
+	for i = 2, ATTENTION_ROWS do
+		prop(attention_row(i), lines[i] or "")
+		attention_shown[i] = lines[i] ~= nil
+	end
+	assert_attention_rows_soon()
+end
+
 local function refresh_lights_props()
 	if not state.zone_lights then
 		return -- before late init created the modules
@@ -665,7 +882,7 @@ local function refresh_lights_props()
 	local attention = attention_text()
 	if attention ~= state.attention_sent then
 		state.attention_sent = attention
-		prop("Attention", attention)
+		show_attention(attention)
 	end
 	refresh_room_mappings()
 	show_module_list("Scenes", state.scenes)
@@ -713,7 +930,7 @@ end
 -- device cache, docs/motion-design.md §4.2); the owner-facing rows are
 -- refreshed after the lights and once more after the chain. done(failures)
 -- gets the list of "<part>: <error>" texts, empty when every part worked.
-local function resync_all(done)
+local function resync_all(done, tier)
 	local failures = {}
 	local function note(part, ok, err, sent)
 		if ok then
@@ -723,11 +940,22 @@ local function resync_all(done)
 			failures[#failures + 1] = part .. ": " .. tostring(err)
 		end
 	end
+	-- A quick resync (after a silence reconnect, contract §3.1) leaves out the
+	-- scene catalogue; the zone lights then read /grouped_light themselves.
+	local function scenes_step(cb)
+		if tier == "quick" then
+			log.info("scene resync skipped (quick resync)")
+			return cb(true, nil, 0, nil)
+		end
+		state.scenes:resync(cb)
+	end
 	state.lights:resync(function(ok, err, sent)
 		note("light", ok, err, sent)
 		refresh_lights_props()
-		state.scenes:resync(function(sok, serr, ssent, grouped)
-			note("scene", sok, serr, ssent)
+		scenes_step(function(sok, serr, ssent, grouped)
+			if tier ~= "quick" then
+				note("scene", sok, serr, ssent)
+			end
 			state.zone_lights:resync(function(zok, zerr, zsent)
 				note("zone light", zok, zerr, zsent)
 				state.motion:resync(function(mok, merr, msent)
@@ -739,6 +967,110 @@ local function resync_all(done)
 				end)
 			end, grouped)
 		end)
+	end)
+end
+
+-- Background tasks (docs/simplify-actions-design.md §1.3, §3.1; the engine
+-- is bridge/housekeeping.lua, the tasks are defined in start_housekeeping
+-- below). The resync chain's GETs go through bridge_request as before, not
+-- through the engine's job.http: the engine schedules, retries and
+-- coalesces the chain, and the user-first rule is applied once, before the
+-- chain starts. An optional task's chain charges each GET to its job
+-- (job.charge, run_resync), so the hourly budget of optional requests
+-- counts it (§4 finding 7).
+
+-- True while a command queue holds work or a person's write went out in the
+-- last quiet_ms (the engine's gate, research §3.4).
+local function user_active(quiet_ms)
+	if (state.queue and state.queue:busy()) or (state.group_queue and state.group_queue:busy()) then
+		return true
+	end
+	return state.last_write_ms ~= nil
+		and C4:GetTime() - state.last_write_ms < (quiet_ms or housekeeping.USER_QUIET_MS)
+end
+
+-- fn once no user command is waiting, or after GATE_MAX_MS whatever, so a
+-- long slider session cannot starve the resync after a reconnect.
+local function after_user(fn)
+	local waited = 0
+	local function look()
+		if waited >= housekeeping.GATE_MAX_MS or not user_active() then
+			return fn()
+		end
+		waited = waited + housekeeping.GATE_POLL_MS
+		C4:SetTimer(housekeeping.GATE_POLL_MS, look)
+	end
+	look()
+end
+
+-- The resync a connect needs (contract §3.1, #65): full at the first connect
+-- of this run, after an error and after an outage of RESYNC_FULL_OUTAGE_S or
+-- more; quick (no scene catalogue) after a silence (watchdog) reconnect.
+local RESYNC_FULL_OUTAGE_S = 600
+
+local function connect_tier()
+	state.resync_connects = (state.resync_connects or 0) + 1
+	local down_s = state.stream_down_ms and (now_ms() - state.stream_down_ms) / 1000 or nil
+	local reason = state.stream_down_reason or ""
+	state.stream_down_ms, state.stream_down_reason = nil, nil
+	if state.resync_connects > 1 and down_s ~= nil and down_s < RESYNC_FULL_OUTAGE_S and reason:find("watchdog") then
+		return "quick"
+	end
+	return "full"
+end
+
+-- Ask for a resync; a full one wins over a quick one still waiting.
+-- done(ok, text) once, by the run that serves it.
+local function want_resync(tier, why, done)
+	if state.resync_tier ~= "full" then
+		state.resync_tier = tier
+	end
+	if not state.hk then
+		-- Not started yet (cannot happen after late init): as beta 8 did.
+		return resync_all(function(failures)
+			if done then done(#failures == 0, table.concat(failures, "; ")) end
+		end, tier)
+	end
+	state.hk:poke("resync", why, done)
+end
+
+-- Finding the paired bridge at a new address (owner's answers D5, D12;
+-- bridge/discovery.lua): asked for once the bridge has not answered at the
+-- address where it last did for FIND_AFTER_S, or another bridge answers
+-- there. Never for an address typed by hand that never answered: there the
+-- owner's Bridges Found list offers the fix.
+local LAST_GOOD_IP_KEY = "hue_bridge_last_good_ip"
+local FIND_AFTER_S = 300
+
+local function want_find_bridge()
+	if state.hk and paired() and state.ip ~= nil and state.ip == state.last_good_ip then
+		state.hk:poke("find_bridge", "error")
+	end
+end
+
+-- The identity check after an outage (contract §1.3; maintenance research
+-- §2.4 c; discovery research T2): once the event stream has been down
+-- outage.CHECK_S, the bridge at the address is asked for its id again,
+-- without the key, before the key goes out again: until it answers with the
+-- paired id, keyed requests are refused and the stream's next attempt waits
+-- (its row reads "Not connected: bridge identity not verified yet"). Once
+-- per outage, armed when a connected stream drops; the TLS self-check's
+-- verdict of this start and address stands (pinning is the controller's).
+-- outage.check itself is defined after verify_identity.
+local outage = { CHECK_S = 60 }
+
+function outage.cancel()
+	if state.outage_timer then
+		state.outage_timer:Cancel()
+		state.outage_timer = nil
+	end
+end
+
+function outage.arm()
+	outage.cancel()
+	state.outage_timer = C4:SetTimer(outage.CHECK_S * 1000, function()
+		state.outage_timer = nil
+		outage.check()
 	end)
 end
 
@@ -758,6 +1090,30 @@ local function new_stream()
 			-- is down (docs/edge-cases-motion.md §6).
 			if not per_event and state.motion and not tostring(text):find("^Connected since") then
 				state.motion:on_stream_state(false)
+			end
+			-- What the next connect's resync needs (contract §3.1): when the
+			-- outage began and the reason it began with.
+			if not per_event then
+				local up = tostring(text):find("^Connected since") ~= nil
+				local was_up = state.stream_connected
+				state.stream_connected = up
+				if up then
+					outage.cancel()
+				else
+					state.stream_down_ms = state.stream_down_ms or now_ms()
+					if state.stream_down_reason == nil and tostring(text):find("^Disconnected") then
+						state.stream_down_reason = tostring(text)
+					end
+					-- A drop, not a stop (Diagnostics, a rejected key, a rebuild).
+					if was_up and state.stream and state.stream:running() then
+						outage.arm()
+					end
+					-- Only while the bridge itself does not answer: a stream that
+					-- fails on its own is no reason to look elsewhere.
+					if state.identity_ok ~= true and now_ms() - state.stream_down_ms >= FIND_AFTER_S * 1000 then
+						want_find_bridge()
+					end
+				end
 			end
 			if not per_event and tostring(text):find("^Connected since") then
 				state.stream_connects = (state.stream_connects or 0) + 1
@@ -788,7 +1144,7 @@ local function new_stream()
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
 			state.motion:on_stream_state(true)
-			resync_all()
+			want_resync(connect_tier(), "connect")
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
@@ -819,7 +1175,7 @@ end
 -- Rebuild the stream with the current properties. It is started again if it
 -- was running, or if `force` is set and the driver is paired with an IP.
 local function restart_stream(force)
-	if not state.stream then
+	if not state.stream or state.destroyed then
 		return
 	end
 	local was_running = state.stream:running()
@@ -843,6 +1199,7 @@ end
 -- is sent; an unreachable bridge is asked again every 30 s, a different
 -- bridge never (it does not become ours by waiting).
 local IDENTITY_RETRY_MS = 30000
+
 local identity_timer = nil
 
 local function cancel_identity_retry()
@@ -881,10 +1238,23 @@ local function reset_identity_check()
 	identity_running = nil
 end
 
+-- Bridges Found's renderer, defined with the list further down; its
+-- summary names the model the bridge reported (show_bridge_info). The
+-- restart of the first-load searches (Forget Pairing) and the search that
+-- offers the paired bridge's address for a typed one are `bridges.restart`
+-- and `bridges.offer`, defined there too.
+local redraw_bridges
+
 -- The bridge's model, name and firmware rows (docs/bridge-compat-design.md
--- Decision 3), from a /api/0/config answer or a pairing probe.
+-- Decision 3), from a /api/0/config answer or a pairing probe. The model is
+-- kept for Bridges Found too: a pairing made before 1.1 stored none, so the
+-- stored credentials alone left its summary "Paired with  at ..." (dev 467).
 local function show_bridge_info(info)
+	state.bridge_model = info.model
 	prop("Bridge Model", config.model_label(info.model))
+	if redraw_bridges then
+		redraw_bridges()
+	end
 	prop("Bridge Name", util.display_name(info.name))
 	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
 	if config.firmware_check(info.sw_version) == "old" then
@@ -913,8 +1283,8 @@ local function tls_gate(gen, ip, done)
 		return done(false)
 	end
 	tlscheck.run(ip, function(verdict, detail)
-		if gen ~= state.address_gen then
-			return -- the address changed meanwhile; its own check runs
+		if gen ~= state.address_gen or state.destroyed then
+			return -- the address changed meanwhile (its own check runs), or this code was unloaded
 		end
 		if verdict == "not_pinned" then
 			state.tls_verdict = verdict
@@ -922,7 +1292,7 @@ local function tls_gate(gen, ip, done)
 				ip, tostring(detail))
 			refresh_status()
 			show_stream_waiting() -- "Not connected: TLS check failed", as Connect Event Stream would say
-			C4:UpdateProperty("Attention", TLS_ATTENTION)
+			show_attention(TLS_ATTENTION)
 			state.attention_sent = TLS_ATTENTION
 			return done(false)
 		end
@@ -968,6 +1338,9 @@ local function verify_identity(purpose, callback)
 		if ip ~= state.ip or gen ~= state.address_gen then
 			return -- the address changed meanwhile; its own check runs
 		end
+		if state.destroyed then
+			return -- OnDriverDestroyed ran (a dev loop reload keeps the Lua state): the new code checks
+		end
 		if not paired() then
 			return -- Forget Pairing overtook the check (#236: the step before pairing another bridge)
 		end
@@ -996,6 +1369,17 @@ local function verify_identity(purpose, callback)
 				end
 				if trusted then
 					state.identity_text = nil
+					local was_away = state.away_ms ~= nil
+					state.unreachable_ms, state.away_ms, state.find_missed_ms, state.away_other = nil, nil, nil, nil
+					-- The address the paired bridge last answered at: where the
+					-- address follow-up starts looking (D5, discovery research §2.5).
+					if state.last_good_ip ~= ip then
+						state.last_good_ip = ip
+						C4:PersistSetValue(LAST_GOOD_IP_KEY, ip)
+					end
+					if was_away then
+						refresh_lights_props() -- Attention's "away" or "typed" item goes at once
+					end
 				end
 				refresh_status()
 				answer_identity(trusted)
@@ -1006,12 +1390,60 @@ local function verify_identity(purpose, callback)
 			identity_status(string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
 				.. "is corrected", ip, reported, state.creds.bridge_id))
 			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
+			state.away_ms = state.away_ms or now_ms()
+			if state.away_other ~= reported then
+				state.away_other = reported
+				refresh_lights_props() -- Attention's "away" item names the other bridge at once
+			end
+			-- Another bridge where ours answered (a DHCP swap, research T3);
+			-- at a typed address, where ours may answer instead (bridges.offer).
+			want_find_bridge()
+			if bridges.offer then
+				bridges.offer()
+			end
 			return answer_identity(false)
 		end
 		identity_status(string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
 			tostring(r.ok and "no bridge id in the answer" or r.err), IDENTITY_RETRY_MS / 1000))
 		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
+		state.unreachable_ms = state.unreachable_ms or now_ms()
+		state.away_ms = state.away_ms or state.unreachable_ms
+		if state.away_other then
+			state.away_other = nil -- nothing answers now
+			refresh_lights_props()
+		end
+		if now_ms() - state.unreachable_ms >= FIND_AFTER_S * 1000 then
+			want_find_bridge()
+		end
+		if bridges.offer then
+			bridges.offer()
+		end
 		again()
+	end)
+end
+
+-- The outage's identity check (outage.CHECK_S above). The stream starts
+-- again once the check passes, unless the owner stopped it meanwhile
+-- (Diagnostics), the address changed (its own checks restart it) or the
+-- pairing was forgotten.
+function outage.check()
+	if state.stream_connected or not (state.stream and state.stream:running()) then
+		return -- back already, or stopped on purpose (Diagnostics, a rejected key)
+	end
+	if state.identity_ok ~= true or keyed_refusal() ~= nil then
+		return -- being checked already, or nothing keyed goes out anyway
+	end
+	log.info("event stream down for %d s: the bridge's identity is checked again before the key goes out",
+		math.floor((now_ms() - (state.stream_down_ms or now_ms())) / 1000))
+	state.identity_ok = nil
+	state.identity_text = nil
+	state.outage_restart = state.address_gen
+	refresh_status()
+	verify_identity("stream", function(ok)
+		if ok and state.outage_restart == state.address_gen and state.stream and not state.stream_connected then
+			state.outage_restart = nil
+			state.stream:start()
+		end
 	end)
 end
 
@@ -1096,6 +1528,9 @@ local function net_gate(continue)
 end
 
 local function choose_stream_address(callback)
+	if state.destroyed then
+		return -- a callback of unloaded code (see OnDriverDestroyed)
+	end
 	local gen = state.address_gen
 	local check_ip = altaddr.for_check(state.ip)
 	local family = altaddr.stream_family(state.ip)
@@ -1216,6 +1651,12 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		-- Everything learnt about the old address goes; the checks run afresh,
 		-- and until they pass Status does not read "Paired" (#236).
 		state.address_gen = state.address_gen + 1
+		if state.hk then
+			state.hk:reset(state.address_gen)
+		end
+		state.unreachable_ms, state.away_ms, state.find_missed_ms, state.away_other = nil, nil, nil, nil
+		outage.cancel() -- the new address gets its own identity check below
+		state.outage_restart = nil
 		state.key_rejected = nil
 		state.tls_verdict = nil
 		state.identity_ok = nil
@@ -1242,6 +1683,16 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 			state.stream_paused_by_address = (state.stream and state.stream:running()) or nil
 			restart_stream()
 		end
+		-- A driver that was never paired opens the pairing window as soon as
+		-- an address is entered (contract §1.2, action 1).
+		if ip and not paired() and not (state.creds and state.creds.bridge_id) and not state.pair_until then
+			dispatch.commands["Pair_Bridge"]()
+		end
+		-- Bridges Found names the address: the paired summary, and the
+		-- networks of the offered search (§4 finding 12).
+		if redraw_bridges then
+			redraw_bridges()
+		end
 	end
 end
 
@@ -1263,35 +1714,71 @@ end
 
 -- Actions ------------------------------------------------------------------
 
-dispatch.commands["Pair_Bridge"] = function()
-	if not state.ip then
-		prop("Status", "Enter the bridge IP address first")
-		return
+-- Pair Bridge waits up to PAIR_WINDOW_S for the link button (contract §1.2,
+-- action 1): while the bridge answers "link button not pressed", the key is
+-- asked for again every PAIR_RETRY_MS and Status counts down.
+local PAIR_WINDOW_S = 120
+local PAIR_RETRY_MS = 3000
+local pair_timer = nil
+
+local function close_pairing_window()
+	if pair_timer then
+		pair_timer:Cancel()
+		pair_timer = nil
 	end
-	prop("Status", "Pairing: contacting bridge")
+	state.pair_until = nil
+	state.pairing_active = false
+	state.pair_expected_id = nil
+end
+
+local function pair_attempt(first)
+	if first then
+		prop("Status", "Pairing: contacting bridge")
+	end
+	state.pairing_active = true
 	local gen = state.address_gen
 	local function stale()
 		if gen ~= state.address_gen then
 			log.info("pairing result for an earlier bridge address ignored")
+			close_pairing_window()
 			return true
 		end
 	end
 	-- The stored bridge id: another bridge is refused until Forget Pairing
 	-- (docs/bridge-compat-design.md, "Pairing another bridge (#236)"). It is
 	-- kept when the key is not, so it counts while Status reads "Not paired".
-	local paired_id = state.creds and state.creds.bridge_id
+	-- Without one, the bridge picked in Bridges Found is expected the same
+	-- way (§4 finding 4).
+	local stored_id = state.creds and state.creds.bridge_id
+	local paired_id = stored_id or state.pair_expected_id
 	pairing.pair(state.ip, {
 		on_probed = function(info)
 			if stale() then return end
 			show_bridge_info(info)
-			prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
-				info.bridge_id))
+			if first then
+				prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
+					info.bridge_id))
+			end
 		end,
 		on_link_button = function()
 			if stale() then return end
-			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
+			local left = math.ceil(((state.pair_until or 0) - C4:GetTime()) / 1000)
+			if left <= 0 then
+				close_pairing_window()
+				return prop("Status", "Pairing window closed: press the link button on the Hue bridge, then run "
+					.. "Pair Bridge again")
+			end
+			prop("Status", string.format("Press the link button on the Hue bridge (waiting %d:%02d)",
+				math.floor(left / 60), left % 60))
+			pair_timer = C4:SetTimer(PAIR_RETRY_MS, function()
+				pair_timer = nil
+				if state.pair_until then
+					pair_attempt(false)
+				end
+			end)
 		end,
 		on_paired = function(creds)
+			close_pairing_window()
 			if stale() then return end
 			local previous_id = state.creds and state.creds.bridge_id
 			-- Use the in-memory result: the store writes on its own thread
@@ -1309,14 +1796,36 @@ dispatch.commands["Pair_Bridge"] = function()
 			end
 			prop("Bridge Model", config.model_label(creds.model))
 			refresh_status()
+			-- Bridges Found reads "Paired with ..." at once, and the first-load
+			-- searches end (§4 finding 2).
+			if state.search_timer then
+				state.search_timer:Cancel()
+				state.search_timer = nil
+			end
+			if redraw_bridges then
+				redraw_bridges()
+			end
 			show_stream_waiting() -- not "Not paired" while the new pairing's checks run
 			choose_stream_address(function() restart_stream(true) end)
 		end,
 		on_error = function(message)
+			close_pairing_window()
 			if stale() then return end
 			prop("Status", "Pairing failed: " .. message)
 		end,
-	}, paired_id)
+	}, paired_id, stored_id == nil and paired_id ~= nil)
+end
+
+dispatch.commands["Pair_Bridge"] = function()
+	if not state.ip then
+		prop("Status", "Enter the bridge IP address first")
+		return
+	end
+	close_pairing_window()
+	-- A bridge picked in Bridges Found (pick_bridge sets it for this call only).
+	state.pair_expected_id = state.pick_id
+	state.pair_until = C4:GetTime() + PAIR_WINDOW_S * 1000
+	pair_attempt(true)
 end
 
 -- GET /clip/v2/resource/bridge with the key via `host` (the dotted address;
@@ -1328,6 +1837,51 @@ end
 -- /api/0/config without the key. A rejected key does not stop it: a 200 with
 -- the paired bridge id is how the key is shown to work again, which clears
 -- the lock and starts the stream (finding 4).
+-- The bridge accepts the key again (Test Connection, or the background
+-- re-check of D8): the lock goes and the stream starts again.
+local function key_accepted_again()
+	state.key_rejected = nil
+	refresh_status()
+	if state.stream_ip then
+		restart_stream(true)
+	else
+		choose_stream_address(function() restart_stream(true) end)
+	end
+end
+
+-- The background key re-check (owner's answer D8): one keyed GET of the
+-- bridge resource, which any valid key may read, sent although the key is
+-- locked (the lock is what it tests), only after the identity check passed
+-- (the task's guards). done(ok, text, cleared): cleared when this check
+-- lifted the lock.
+local function recheck_key(done)
+	if not state.key_rejected then
+		return done(true, "the key is not rejected")
+	end
+	local gen, creds = state.address_gen, state.creds
+	http.request({ ip = state.ip, key = creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+		if gen ~= state.address_gen or creds ~= state.creds then
+			return done(false, "cancelled: the address or the pairing changed")
+		end
+		if r.code == 401 or r.code == 403 then
+			return done(false, string.format("the bridge still refuses the key (HTTP %d)", r.code))
+		elseif not r.ok then
+			return done(false, "no answer: " .. tostring(r.err))
+		end
+		local item = r.json and r.json.data and r.json.data[1] or {}
+		local reported = config.normalise_bridge_id(item.bridge_id)
+		if reported and reported ~= creds.bridge_id then
+			return done(false, string.format("the bridge reports ID %s, expected %s", reported, creds.bridge_id))
+		end
+		if state.key_rejected then
+			log.warn("key re-check: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
+			key_accepted_again()
+			return done(true, "the bridge accepts the key again", true)
+		end
+		done(true, "the bridge accepts the key")
+	end)
+end
+
 local function test_connection(host)
 	local refusal = keyed_refusal(true)
 	if refusal == "not paired" then
@@ -1371,12 +1925,7 @@ local function test_connection(host)
 		end
 		if state.key_rejected then
 			log.warn("Test Connection: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
-			state.key_rejected = nil
-			if state.stream_ip then
-				restart_stream(true)
-			else
-				choose_stream_address(function() restart_stream(true) end)
-			end
+			key_accepted_again()
 		end
 		prop("Status", string.format("Test OK: HTTP 200 via %s in %d s, bridge %s", host, secs,
 			tostring(reported or state.creds.bridge_id)))
@@ -1399,37 +1948,7 @@ local LAST_ACTION_ROWS, LAST_ACTION_WIDTH = 6, 72
 local last_action_shown = {}   -- row index → true while the row holds text
 local last_action_timer = nil
 
-local function wrap_text(text, width)
-	local lines, line = {}, ""
-	for word in text:gmatch("%S+") do
-		while #word > width do
-			if line ~= "" then
-				lines[#lines + 1] = line
-				line = ""
-			end
-			lines[#lines + 1] = word:sub(1, width)
-			word = word:sub(width + 1)
-		end
-		if line == "" then
-			line = word
-		elseif #line + 1 + #word <= width then
-			line = line .. " " .. word
-		else
-			lines[#lines + 1] = line
-			line = word
-		end
-	end
-	if line ~= "" then
-		lines[#lines + 1] = line
-	end
-	return lines
-end
 
-local function row_visible(name, visible)
-	if C4.SetPropertyAttribs then
-		pcall(C4.SetPropertyAttribs, C4, name, visible and 0 or 1)
-	end
-end
 
 local function last_action_row(i)
 	return string.format("Last Action (%d)", i)
@@ -1535,7 +2054,7 @@ local function picker(module, method, ...)
 end
 
 function HueLightList() return picker(state.lights, "picker_lights") end
-function RoomList() return picker(state.lights, "picker_rooms", "add") end
+-- RoomList (Add From Hue's Room) is defined with the 1.2 actions below.
 function RelinkDeviceList() return picker(state.lights, "picker_relink_devices") end
 -- ForgetDeviceList is defined with the zone lights' pickers below: it joins
 -- the lights' and the zone lights' devices.
@@ -1588,10 +2107,7 @@ function RelinkZoneLightList()
 	end
 	return list
 end
-function ForgetDeviceList()
-	return join_pickers(picker(state.lights, "picker_forget_devices"),
-		picker(state.zone_lights, "picker_forget_devices"))
-end
+-- ForgetDeviceList (Forget Device's Device) is defined with the 1.2 actions below.
 
 dispatch.commands["Add_Light"] = function(params)
 	if not can() then return end
@@ -1916,13 +2432,13 @@ end
 -- Refresh All (#324): every list read from the bridge now, stream or not.
 dispatch.commands["Refresh_All"] = function()
 	if not can() then return end
-	resync_all(function(failures)
-		if #failures == 0 then
+	want_resync("full", "click", function(ok, text)
+		if ok then
 			last_action(string.format("Refreshed from the bridge: Lights: %s | Scenes: %s | Zone lights: %s | Motion: %s",
 				tostring(state.lights:summary()), tostring(state.scenes:summary()),
 				tostring(state.zone_lights:summary()), tostring(state.motion:summary())))
 		else
-			last_action("Refresh All: " .. table.concat(failures, "; "))
+			last_action("Read everything from the bridge: " .. tostring(text))
 		end
 	end)
 end
@@ -2076,10 +2592,15 @@ dispatch.commands["Connect_Event_Stream"] = function()
 end
 
 dispatch.commands["Disconnect_Event_Stream"] = function()
+	state.outage_restart = nil -- an outage check in flight does not start it again
 	state.stream:stop()
 end
 
 dispatch.commands["Forget_Pairing"] = function()
+	close_pairing_window()
+	if state.hk then
+		state.hk:reset(state.address_gen, true)
+	end
 	state.identity_ok = nil
 	state.identity_text = nil
 	reset_identity_check()
@@ -2089,6 +2610,7 @@ dispatch.commands["Forget_Pairing"] = function()
 	netstream.clear_address()
 	credentials.clear()
 	state.creds = nil
+	state.bridge_model = nil
 	state.stream_ip = nil
 	state.stream_family = nil
 	prop("Stream Address", "")
@@ -2097,7 +2619,22 @@ dispatch.commands["Forget_Pairing"] = function()
 	prop("Bridge Firmware", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
+	-- Nothing is paired: no outage, nothing away or moved (away.items).
+	outage.cancel()
+	state.outage_restart = nil
+	state.unreachable_ms, state.away_ms, state.find_missed_ms, state.offer_gen = nil, nil, nil, nil
+	state.away_other = nil
+	state.moved = nil
+	C4:PersistDeleteValue(away.MOVED_KEY)
 	refresh_status()
+	-- Bridges Found reads the unpaired summary at once, and the first-load
+	-- searches start again (§4 finding 2).
+	if redraw_bridges then
+		redraw_bridges()
+	end
+	if bridges.restart then
+		bridges.restart()
+	end
 end
 
 -- Bindings and system events --------------------------------------------------
@@ -2201,6 +2738,14 @@ function OnSystemEvent(data)
 	-- A rename in Composer changes what Attention compares; without this it
 	-- stayed stale until the next action or resync [hardware 2026-10-22].
 	if state.late_init_done and type(data) == "string" and data:find("OnItemNameChanged", 1, true) then
+		-- Two-way names (owner's answer D6): a light, scene or motion device
+		-- renamed in Composer is renamed on the bridge (bridge/names.lua reads
+		-- the new name itself; other items' ids are ignored there).
+		local id = tonumber(data:match('name="iditem"[^>]*>%s*(%d+)') or data:match('iditem="?(%d+)')
+			or data:match("<iditem>%s*(%d+)%s*</iditem>"))
+		if state.names and id then
+			state.names:on_composer_rename(id)
+		end
 		refresh_lights_props()
 	end
 end
@@ -2256,15 +2801,482 @@ if devtools then
 		bridge_request = bridge_request,
 		restart_stream = restart_stream,
 		test_connection = test_connection,
+		last_action = last_action,
 	})
+end
+
+-- The merged actions of 1.2 (bridge/actions.lua, docs/simplify-actions-design.md §3.3, §3.4) ----------
+
+-- The beta 8 handlers the new actions run (Diagnostics' entries, Import All
+-- New), taken before the aliases below take their keys over.
+local beta8 = {}
+for _, key in ipairs({ "Test_Connection", "Refresh_All", "Connect_Event_Stream", "Disconnect_Event_Stream",
+	"Log_Motion_Diagnostics" }) do
+	beta8[key] = dispatch.commands[key]
+end
+
+local D = actions_mod.DIAGNOSTICS
+-- Diagnostics' entries; the dev ones run bridge/devtools.lua's handlers,
+-- which exist in dev builds only (looked up when run).
+local function dev_command(key, params)
+	return function()
+		local fn = dispatch.commands[key]
+		if fn then fn(params or {}) end
+	end
+end
+local diagnostics = {
+	[D.TEST] = { order = 1, text = "Check the connection now", shows = "Status",
+		run = function() beta8.Test_Connection() end },
+	[D.REFRESH] = { order = 2, text = "Read everything from the bridge now", run = function() beta8.Refresh_All() end },
+	[D.CONNECT] = { order = 3, text = "Reconnect the event stream", shows = "Event Stream",
+		run = function() beta8.Connect_Event_Stream() end },
+	[D.DISCONNECT] = { order = 4, text = "Stop the event stream until the next start", shows = "Event Stream",
+		run = function() beta8.Disconnect_Event_Stream() end },
+	[D.MOTION_LOG] = { order = 5, text = "Log motion diagnostics (10 minutes)",
+		run = function() beta8.Log_Motion_Diagnostics() end },
+	[D.CONNECTION_TEST_BRIDGE] = { order = 6, dev = true, text = "(dev) Connection experiment: the bridge",
+		run = dev_command("Connection_Test", { Target = "Bridge" }) },
+	[D.CONNECTION_TEST_SERVER] = { order = 7, dev = true, text = "(dev) Connection experiment: the diagnostic server",
+		run = dev_command("Connection_Test", { Target = "Diagnostic Server" }) },
+	[D.RELOAD_CREDENTIALS] = { order = 8, dev = true, text = "(dev) Reload credentials",
+		run = dev_command("Reload_Credentials") },
+	[D.CHECK_PINNING] = { order = 9, dev = true, text = "(dev) Check CA pinning", run = dev_command("Check_CA_Pinning") },
+}
+
+local function new_actions()
+	return actions_mod.new({
+		lights = state.lights, scenes = state.scenes, zone_lights = state.zone_lights, motion = state.motion,
+		names = state.names, last_action = last_action, can = can, diagnostics = diagnostics, dev = devtools ~= nil,
+		log = log, before_names = fill_proxy_ids,
+	})
+end
+
+local function actions_list(method, folder)
+	if not state.actions then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	return state.actions[method](state.actions, folder)
+end
+
+function AddFromHueList(folder) return actions_list("add_list", folder) end
+function RoomList() return actions_list("room_list") end
+function LinkDeviceList(folder) return actions_list("link_list", folder) end
+function LinkTargetList(folder) return actions_list("link_target_list", folder) end
+function ForgetDeviceList(folder) return actions_list("forget_list", folder) end
+function ResolveNamesList() return actions_list("names_list") end
+function DiagnosticsList() return actions_list("diagnostics_list") end
+
+dispatch.commands["Add_From_Hue"] = function(params) state.actions:run_add(params) end
+dispatch.commands["Link_Device"] = function(params) state.actions:run_link(params) end
+dispatch.commands["Forget_Device"] = function(params) state.actions:run_forget(params) end
+dispatch.commands["Resolve_Names"] = function(params) state.actions:run_names(params) end
+dispatch.commands["Diagnostics"] = function(params) state.actions:run_diagnostics(params) end
+
+-- Import All New: the lights, then the motion sensors, each into the room
+-- its Hue room maps to (§1.2 action 2).
+dispatch.commands["Import_All_New"] = function()
+	if not can() then return end
+	state.lights:import_new(function(_, lights_text)
+		state.motion:import_new(function(_, motion_text)
+			last_action(tostring(lights_text) .. " | Motion: " .. tostring(motion_text))
+		end)
+	end)
+end
+
+-- Forget Pairing asks for confirmation (§3.3).
+local forget_pairing = dispatch.commands["Forget_Pairing"]
+dispatch.commands["Forget_Pairing"] = function(params)
+	if (params or {}).Confirm ~= actions_mod.CONFIRM_YES then
+		return last_action(actions_mod.NOT_CONFIRMED)
+	end
+	forget_pairing(params)
+	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept")
+end
+
+-- Set Room Mapping's second picker is "Control4 Room" in 1.2; "Room" still
+-- arrives from the dev loop and older briefs.
+local set_room_mapping = dispatch.commands["Set_Room_Mapping"]
+dispatch.commands["Set_Room_Mapping"] = function(params)
+	params = params or {}
+	if params["Control4 Room"] ~= nil and params.Room == nil then
+		params.Room = params["Control4 Room"]
+	end
+	return set_room_mapping(params)
+end
+
+-- Every beta 8 command merged into bridge/actions.lua answers until 2.0.
+for old in pairs(actions_mod.ALIASES) do
+	dispatch.commands[(old:gsub("%s+", "_"))] = function(params) state.actions:run_alias(old, params) end
+end
+
+-- Bridges Found (owner's answer D5; discovery research §2.4): the bridges
+-- that answered on the local network, never the internet. Searched for at
+-- the first load and again after Forget Pairing (3 s, 1 min, 5 min, then
+-- every 15 min until paired) and on "Search again"; a pick sets Bridge IP
+-- Address and runs Pair Bridge, which then pairs the picked bridge only.
+-- The list itself (`bridges`) is declared at the top, for Attention.
+local BRIDGES_ROW = "Bridges Found"
+local SEARCH_AGAIN = "Search again"
+local FIRST_SEARCH_MS = { 3000, 60000, 300000 }
+local SEARCH_EVERY_MS = 900000
+
+-- The offered search of every address, naming the networks find_subnet
+-- searches, in its order (§4 finding 12): the /24 of Bridge IP Address
+-- first, then the controller's when it differs (bridge/discovery.lua).
+local function subnet_item()
+	if not state.discovery then
+		return nil
+	end
+	return discovery_mod.subnet_label(state.discovery:subnet_nets(state.ip))
+end
+
+local function show_bridges()
+	local paired_id = state.creds and state.creds.bridge_id or nil
+	local labels, by_label = {}, {}
+	local function add(label, value)
+		label = commaless(label)
+		labels[#labels + 1] = label
+		by_label[label] = value
+	end
+	for _, item in ipairs(bridges.items) do
+		if paired_id and item.id == paired_id then
+			add(discovery_mod.item_label(item, paired_id), item)
+		end
+	end
+	for _, item in ipairs(bridges.items) do
+		if not (paired_id and item.id == paired_id) then
+			add(discovery_mod.item_label(item, paired_id), item)
+		end
+	end
+	local n = #bridges.items
+	local summary
+	if bridges.searching then
+		summary = "Looking for Hue bridges on the network..."
+	elseif paired() and state.ip then
+		local model = state.bridge_model
+		if model == nil or model == "" then
+			model = state.creds.model
+		end
+		local label = config.model_label(model)
+		summary = label ~= "" and string.format("Paired with %s at %s", label, state.ip)
+			or string.format("Paired with the bridge at %s", state.ip)
+	elseif n > 0 then
+		summary = string.format("%d Hue bridge%s found: pick one and click Set to pair", n, n == 1 and "" or "s")
+	else
+		summary = "No Hue bridge answered: type its address in Bridge IP Address"
+	end
+	add(SEARCH_AGAIN, "search")
+	local subnet = subnet_item()
+	if subnet and not bridges.searching and n == 0 then
+		add(subnet, "subnet")
+	end
+	bridges.by_label = by_label
+	show_list(BRIDGES_ROW, summary, labels)
+end
+redraw_bridges = show_bridges
+
+-- `asked`: a search the owner picked (Search again, the subnet search)
+-- reports in Last Action; the automatic ones write the row and the log
+-- only, so the owner's last result stays (§4 finding 3).
+local function search_bridges(subnet, asked)
+	if not state.discovery then
+		return
+	end
+	bridges.searching = true
+	show_bridges()
+	local function found(list, detail)
+		bridges.searching = false
+		bridges.items = type(list) == "table" and list or {}
+		show_bridges()
+		local text = detail and detail.text
+		if asked and text then
+			last_action("Bridges Found: " .. tostring(text))
+		else
+			if text then
+				log.info("Bridges Found (automatic search): %s", tostring(text))
+			end
+			refresh_lights_props() -- Attention's offer of the paired bridge's address (away.items)
+		end
+	end
+	if subnet then
+		state.discovery:find_subnet(found, state.ip)
+	else
+		state.discovery:find_all(found)
+	end
+end
+
+local function schedule_searches(i)
+	i = i or 1
+	if state.search_timer then
+		state.search_timer:Cancel()
+		state.search_timer = nil
+	end
+	if paired() then
+		return
+	end
+	state.search_timer = C4:SetTimer(FIRST_SEARCH_MS[i] or SEARCH_EVERY_MS, function()
+		state.search_timer = nil
+		if paired() then
+			return show_bridges()
+		end
+		search_bridges(false)
+		schedule_searches(i + 1)
+	end)
+end
+
+-- Forget Pairing starts the first-load searches again (§4 finding 2).
+function bridges.restart()
+	schedule_searches(1)
+end
+
+-- The paired bridge does not answer at an address typed by hand (one it
+-- never answered at): one automatic search per address, so that Bridges
+-- Found lists where it does answer and Attention offers it (discovery
+-- research §2.5: such an address is the installer's and never rewritten).
+function bridges.offer()
+	if not (paired() and state.ip) or state.ip == state.last_good_ip or state.offer_gen == state.address_gen then
+		return
+	end
+	state.offer_gen = state.address_gen
+	search_bridges(false)
+end
+
+-- The driver's own UpdateProperty fires no OnPropertyChanged, so the
+-- property's handler runs here (discovery research finding 7).
+local function set_bridge_address(ip)
+	C4:UpdateProperty("Bridge IP Address", ip)
+	dispatch.properties["Bridge_IP_Address"](ip)
+end
+
+local function pick_bridge(item)
+	local paired_id = state.creds and state.creds.bridge_id or nil
+	local where = string.format("%s at %s", config.model_label(item.model), tostring(item.ip))
+	if item.supported == false then
+		return last_action(where .. " is a first-generation bridge without the CLIP v2 API: this driver cannot use it")
+	end
+	if paired() and paired_id then
+		if item.id ~= paired_id then
+			if item.replaces == paired_id then
+				return last_action(where .. " replaces the paired bridge: run Forget Pairing, then pick it here again")
+			end
+			return last_action("Not changed: " .. where .. " is another bridge; to pair it instead, run Forget "
+				.. "Pairing first")
+		end
+		if item.ip == state.ip then
+			return last_action("Already paired with this bridge at " .. tostring(item.ip))
+		end
+		set_bridge_address(item.ip)
+		return last_action(string.format("Bridge IP Address set to %s, where the paired bridge answers", item.ip))
+	end
+	-- The picked bridge is the one expected (§4 finding 4): another bridge
+	-- answering at its address during the pairing window is refused, as Pair
+	-- Bridge refuses one while a bridge id is stored. On a never-paired
+	-- driver the address change opens the window itself, with this id.
+	state.pick_id = item.id
+	set_bridge_address(item.ip)
+	last_action("Bridge IP Address set to " .. tostring(item.ip) .. ": press the link button on the Hue bridge")
+	if state.pair_until then
+		state.pair_expected_id = item.id -- a window open at this address now waits for this bridge only
+	else
+		dispatch.commands["Pair_Bridge"]()
+	end
+	state.pick_id = nil
+end
+
+dispatch.properties["Bridges_Found"] = function(value)
+	local pick = bridges.by_label[tostring(value)]
+	if pick == nil then
+		return -- the summary itself, or a list that changed meanwhile
+	end
+	list_rows_sent[BRIDGES_ROW] = nil -- the row snaps back to its summary
+	if pick == "search" then
+		search_bridges(false, true)
+	elseif pick == "subnet" then
+		search_bridges(true, true)
+	else
+		pick_bridge(pick)
+	end
+	show_bridges()
+end
+
+-- The background tasks (contract §1.3, §3.1; scheduler research §5). Every
+-- run reports to the log (Debug Mode shows each one, owner's answer D4).
+local function modules_busy()
+	for _, m in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+		if m and (m.resyncing or (m.BUSY_FLAGS and m[m.BUSY_FLAGS[1]])) then
+			return true
+		end
+	end
+	return false
+end
+
+local SAFETY_GUARDS = { "paired", "identity_ok", "key_ok", "not_pairing", "stream_up", "modules_idle" }
+
+local function start_housekeeping(dit)
+	local hk = housekeeping.new({
+		http = bridge_request,
+		log = log,
+		user_active = user_active,
+		bridge_id = function() return state.creds and state.creds.bridge_id or nil end,
+		state = function()
+			return {
+				paired = connection() ~= nil,
+				identity_ok = state.identity_ok == true,
+				key_ok = state.key_rejected == nil and keyed_refusal() == nil,
+				stream_up = state.stream_connected == true,
+				not_pairing = not state.pairing_active,
+				modules_idle = not modules_busy(),
+			}
+		end,
+		on_status = function(report)
+			local line = string.format("background %s (%s): %s in %d ms%s", tostring(report.task),
+				tostring(report.trigger), report.ok and "OK" or "failed", tonumber(report.ms) or 0,
+				report.text and (": " .. tostring(report.text)) or "")
+			if report.ok then
+				log.debug("%s", line)
+			else
+				log.info("%s", line)
+			end
+		end,
+	})
+	-- The resync after every connect (as beta 8 did), now retried after a
+	-- failure (60 s doubling to 15 min); also Refresh All (a click). A full
+	-- one counts as both safety reads, a quick one as the quick one. The
+	-- optional tasks pass their `job`: every GET of the chain is charged to
+	-- it (bridge_request, job.charge), so the reads count against the hourly
+	-- budget of optional requests (§4 finding 7); the essential resync passes
+	-- none and stays outside it, as before.
+	local function run_resync(tier, done, job)
+		after_user(function()
+			local charge = job and job.charge or nil
+			state.charge = charge
+			resync_all(function(failures)
+				if charge and state.charge == charge then
+					state.charge = nil
+				end
+				if #failures > 0 then
+					state.resync_tier = state.resync_tier == "full" and "full" or tier
+					return done(false, table.concat(failures, "; "))
+				end
+				hk:mark_fresh("safety_quick")
+				if tier == "full" then
+					hk:mark_fresh("safety_full")
+				end
+				done(true, tier .. " resync")
+			end, tier)
+		end)
+	end
+	hk:define({
+		name = "resync", class = "essential", triggers = { "connect", "click", "error" },
+		debounce_s = 2, backoff_max_s = 900,
+		run = function(_job, done)
+			local tier = state.resync_tier or "full"
+			state.resync_tier = nil
+			run_resync(tier, done)
+		end,
+	})
+	-- The net under the stream: a quick read when none for 6 h, a full one
+	-- when none for 24 h. READ_BUDGET is the most GETs one of these reads
+	-- may make: the full chain is 17 on a Bridge Pro and 15 on a v2, the
+	-- quick one 2 fewer; the rest is room for a module that reads one type
+	-- more. A run starts only when its whole budget fits in the hour.
+	local READ_BUDGET = 25
+	hk:define({
+		name = "safety_quick", class = "optional", triggers = { "timer" }, interval_s = 6 * 3600,
+		persist = true, guards = SAFETY_GUARDS, budget = READ_BUDGET,
+		run = function(job, done) run_resync("quick", done, job) end,
+	})
+	hk:define({
+		name = "safety_full", class = "optional", triggers = { "timer" }, interval_s = 24 * 3600,
+		persist = true, guards = SAFETY_GUARDS, budget = READ_BUDGET,
+		run = function(job, done) run_resync("full", done, job) end,
+	})
+	-- The lists stay current while the stream is down but the bridge answers:
+	-- a quick read every 10 minutes once the stream has been down 5 minutes
+	-- (six an hour fit the hourly budget, housekeeping.HOUR_BUDGET).
+	hk:define({
+		name = "stream_down_read", class = "optional", triggers = { "timer" }, interval_s = 600,
+		guards = { "paired", "identity_ok", "key_ok", "not_pairing", "modules_idle" }, budget = READ_BUDGET,
+		run = function(job, done)
+			if state.stream_connected or state.stream_down_ms == nil then
+				return done(true, "the event stream is connected")
+			elseif now_ms() - state.stream_down_ms < 300000 then
+				return done(true, "the event stream is down for less than 5 minutes")
+			end
+			run_resync("quick", done, job)
+		end,
+	})
+	-- A rejected key is checked again by itself (D8): 5 min after the
+	-- refusal, then 15 min, then an hour, then hourly.
+	hk:define({
+		name = "key_recheck", class = "essential", triggers = { "error" },
+		debounce_s = 300, backoff_s = { 900, 3600 }, guards = { "paired", "identity_ok", "not_pairing" },
+		run = function(_job, done)
+			recheck_key(function(ok, text, cleared)
+				if cleared then
+					last_action("The bridge accepts the application key again: event stream restarting")
+				end
+				done(ok, text)
+			end)
+		end,
+	})
+	-- The paired bridge at a new address (D5, D12): mDNS first, a sweep of
+	-- at most two /24 networks at most hourly (bridge/discovery.lua); only
+	-- the paired id's address is ever taken, and Last Action says what moved.
+	hk:define({
+		name = "find_bridge", class = "essential", triggers = { "error" },
+		debounce_s = 5, min_gap_s = 300, timeout_s = 360, guards = { "paired", "not_pairing" },
+		run = function(_job, done)
+			local creds, gen, old = state.creds, state.address_gen, state.ip
+			if not (state.discovery and creds and creds.bridge_id) then
+				return done(true, "nothing to look for")
+			end
+			if state.identity_ok == true then
+				-- Never while the bridge answers at its address (discovery research §2.5).
+				return done(true, "the bridge answers at its address")
+			end
+			state.discovery:find_paired(creds.bridge_id, state.last_good_ip or old, function(ip, how, detail)
+				local text = detail and detail.text or tostring(how)
+				if gen ~= state.address_gen then
+					return done(true, "the address changed meanwhile")
+				end
+				if ip and ip ~= old then
+					local moved = string.format("The bridge moved from %s to %s (%s): Bridge IP Address updated; "
+						.. "reserve its address in the router", tostring(old), ip, text)
+					-- Attention keeps the same text for a day (discovery research
+					-- §2.5, away.items), across a restart too.
+					state.moved = { from = old, to = ip, text = moved, at = now_ms() }
+					C4:PersistSetValue(away.MOVED_KEY, state.moved)
+					set_bridge_address(ip)
+					last_action(moved)
+				elseif not ip and (how == "not_found" or how == "limited") then
+					-- mDNS, then the sweep (or the sweep of the last hour) found it
+					-- nowhere: Attention says "missing" once it is away an hour.
+					state.find_missed_ms = now_ms()
+				end
+				done(ip ~= nil, text)
+			end)
+		end,
+	})
+	state.hk = hk
+	hk:start(dit)
+	if state.key_rejected then
+		hk:poke("key_recheck", "error")
+	end
 end
 
 function OnDriverInit()
 end
 
-function OnDriverLateInit()
+function OnDriverLateInit(dit)
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
+	state.last_good_ip = C4:PersistGetValue(LAST_GOOD_IP_KEY)
+	local moved = C4:PersistGetValue(away.MOVED_KEY)
+	if type(moved) == "table" and type(moved.to) == "string" and type(moved.text) == "string"
+			and tonumber(moved.at) then
+		state.moved = moved
+	end
 	state.lights = new_lights()
 	state.lights:load()
 	-- Configure every known light from the persisted registry before any
@@ -2298,6 +3310,39 @@ function OnDriverLateInit()
 		end,
 		on_done = function(text) last_action(text) end,
 	}))
+	-- Two-way names (D6, D11; bridge/names.lua). Its writes go through
+	-- bridge_request like a person's, so the background tasks give way.
+	local registries = { light = state.lights, scene = state.scenes, motion = state.motion,
+		zone_light = state.zone_lights }
+	state.names = names_mod.new({
+		persist_get = function(key) return C4:PersistGetValue(key) end,
+		persist_set = function(key, value) C4:PersistSetValue(key, value) end,
+		registries = registries,
+		put_name = names_mod.put_via(registries, bridge_request, log),
+		rename_device = function(id, name) C4:RenameDevice(id, name) end,
+		display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+		proxy_of = function(device_id)
+			local consumers = C4:GetBoundConsumerDevices(device_id, 5001)
+			return type(consumers) == "table" and next(consumers) or nil
+		end,
+		user_active = user_active,
+		bridge_ready = function()
+			return connection() ~= nil and state.identity_ok == true and keyed_refusal() == nil
+		end,
+		last_action = function(text) last_action(text) end,
+		attention_changed = function() refresh_lights_props() end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end,
+		now_ms = function() return C4:GetTime() end,
+		wall = os.time,
+		log = log,
+	})
+	for _, m in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+		m:set_names(state.names)
+		-- The re-link by radio (D7) says what it did in Last Action.
+		m.ctx.last_action = last_action
+	end
+	state.names:migrate(driver_version())
+	state.actions = new_actions()
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).
 	local r = state.lights:reconcile()
@@ -2309,8 +3354,15 @@ function OnDriverLateInit()
 	dispatch.replay_properties(Properties)
 	show_driver_version(1)
 	settle_last_action_rows()
+	if state.stream then
+		state.stream:stop() -- never two objects on the binding (netstream.lua)
+	end
 	state.stream = new_stream()
 	state.late_init_done = true
+	state.discovery = discovery_mod.new({ identify = pairing.probe, log = log })
+	start_housekeeping(dit)
+	show_bridges()
+	schedule_searches()
 	replay_early_commands()
 	register_probe_events()
 	refresh_status()
@@ -2328,7 +3380,31 @@ function OnDriverLateInit()
 	end
 end
 
+-- Director ends the old code with its Lua state and kills its timers
+-- (API 22_miscellaneous/_24-OnDriverDestroyed.md); a dev loop reload keeps
+-- both (src/common/devloop.lua). So everything in flight here, an identity
+-- or TLS check above all, must start nothing once it answers: a stream
+-- started by unloaded code holds binding 6001 beside the new code's, never
+-- sees a report, and ends the new code's connection with its own connect
+-- timeout and retries (the flapping of 2026-11-05).
 function OnDriverDestroyed()
+	state.destroyed = true
+	close_pairing_window()
+	outage.cancel()
+	if attention_timer then
+		attention_timer:Cancel()
+		attention_timer = nil
+	end
+	if state.hk then
+		state.hk:stop()
+	end
+	if state.discovery then
+		state.discovery:stop()
+	end
+	if state.search_timer then
+		state.search_timer:Cancel()
+		state.search_timer = nil
+	end
 	if prop_soon_timer then
 		prop_soon_timer:Cancel()
 		prop_soon_timer = nil
@@ -2350,6 +3426,7 @@ function OnDriverDestroyed()
 	if state.stream then
 		state.stream:stop()
 	end
+	netstream.retire() -- and no object of this code's netstream connects again
 	if state.queue then
 		state.queue:stop()
 	end
@@ -2366,14 +3443,23 @@ function OnConnectionStatusChanged(idBinding, nPort, strStatus)
 	if netcheck.on_status_changed(idBinding, nPort, strStatus) then
 		return
 	end
+	-- Binding 6008: the mDNS search of bridge/discovery.lua.
+	if state.discovery and state.discovery:status_changed(idBinding, nPort, strStatus) then
+		return
+	end
 	local s = state.stream
 	if s and s.on_status_changed then
 		s:on_status_changed(idBinding, nPort, strStatus)
 	end
 end
 
-function ReceivedFromNetwork(idBinding, _nPort, strData)
+-- `from` (the sender) is passed from OS 4.0.0 on only [verified: SDK
+-- 32_serial_network_device/_15-ReceivedFromNetwork].
+function ReceivedFromNetwork(idBinding, nPort, strData, from)
 	if netcheck.on_data(idBinding, strData) then
+		return
+	end
+	if state.discovery and state.discovery:received(idBinding, nPort, strData, from) then
 		return
 	end
 	local s = state.stream

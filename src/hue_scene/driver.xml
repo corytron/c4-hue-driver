@@ -97,20 +97,10 @@
 				<readonly>true</readonly>
 			</property>
 		</properties>
-		<actions>
-			<action>
-				<name>Adopt Hue Name</name>
-				<command>Adopt Hue Name</command>
-				<params/>
-				<sort_order>1</sort_order>
-			</action>
-			<action>
-				<name>Forget This Scene</name>
-				<command>Forget This Scene</command>
-				<params/>
-				<sort_order>2</sort_order>
-			</action>
-		</actions>
+		<!-- No actions since 1.2 (#334, docs/simplify-actions-design.md §1.2, D3):
+		     the Hue Bridge's Link Device, Forget Device and Resolve Names serve
+		     every device. Adopt Hue Name and Forget This Scene still answer by
+		     command, as hidden aliases until 2.0 (§3.3). -->
 		<commands/>
 	</config>
 	<proxies>

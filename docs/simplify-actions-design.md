@@ -226,7 +226,7 @@ scenes, motion): 11 bridge actions instead of 9.
 One module, `bridge/housekeeping.lua`, runs every background job: one job
 at a time, reads only, user commands always first (no housekeeping request
 while a command queue is busy or within 1.5 s of a user write), nothing
-optional in the first 5 minutes after a Director restart, at most 60 optional
+optional in the first 5 minutes after a Director restart, at most 100 optional
 requests an hour, due times persisted because timers die at every restart and
 update. It never creates, renames, binds, moves or deletes a device, except
 where the owner opts in (Names From Hue = Follow; D7).
@@ -325,3 +325,271 @@ Where this section and the text above disagree, this section wins.
 | D8 | **Yes**: the rejected key is re-checked automatically (5 min, 15 min, 1 h, then hourly). | None. |
 | D9 | **Yes**: one dev build on the house through the Windows session, once the Modern Forms work frees it, to test picker folders, mDNS answers and the bulb re-add of D7. | None. |
 | D10 | **Yes**: the four small fixes of 1.5 go into 1.1 beta 8 now. | None. |
+
+### 1.9 Two more answers (2026-11-05), from the follow-up research
+
+| # | Answer | Source |
+| --- | --- | --- |
+| D11 | **At the 1.2 install, names that already differ are offered, not synced:** Resolve Names lists them once, with "Composer names to Hue" as the first row; from then on every rename syncs by itself both ways. Zone lights stay out of the automatic sync, like rooms. | [names-sync research](simplify-research-names-sync.md) |
+| D12 | **Discovery keeps a second local stage:** if mDNS finds nothing while the paired bridge is missing, a TCP probe of port 443 on at most two /24 networks (around the last good address and around the controller), at most hourly, four connections at once; identity as at pairing (the Signify chain, the bridge id in its public config). Never the internet. | [discovery research](simplify-research-discovery.md) |
+
+## 2. Build contract, wave 1 (coordinator, 2026-11-05)
+
+Two pieces that touch no shared file, built in parallel on
+`feature/simplify-1.2-334`; wiring into `driver.lua`, `driver.xml` and
+`tools/build.sh` stays with the coordinator.
+
+### 2.1 The engine: `bridge/housekeeping.lua`
+
+The interface and rules are [scheduler research](simplify-research-scheduler.md)
+§3.1 to §3.7 and §6 (tests), with these amendments from section 1.8:
+
+- **No `enable()`**: background tasks are always on (D4). Debug Mode logs
+  every run (task, trigger, requests used, result).
+- **The engine only reads** (GETs). The writes that 1.2 adds, the name sync of
+  D6, come from a person's rename and go through the user's command path, not
+  through the engine; they count as user activity for the gate of §3.4.
+- **Not wired yet.** Wave 1 delivers the module, `commands:busy()` in
+  `bridge/commands.lua`, and their specs; no task is registered in
+  `driver.lua` yet. A spec-only task table proves the rules.
+- **Fake clock**: an `advance(ms)` helper in `tests/helpers/fake_c4.lua` that
+  moves `c4.now_ms` and fires due timers in time order (the existing
+  `fire_timers` stays as it is).
+
+Owner files: `src/hue_bridge/bridge/housekeeping.lua`,
+`src/hue_bridge/bridge/commands.lua`, `tests/spec/housekeeping_spec.lua`,
+`tests/spec/commands_spec.lua`, `tests/helpers/fake_c4.lua`.
+
+### 2.2 The dev-build probe: `bridge/probe12.lua`
+
+One module, dev builds only (stripped like `bridge/devtools.lua`), that
+answers the open questions of the D9 install in about two minutes through
+signed dev-loop commands (`tools/devctl.py run`), so the Windows session only
+installs in place:
+
+- **Probe Discovery**: [discovery research](simplify-research-discovery.md)
+  §6: the environment (controller address), the SSDP control, the mDNS
+  variants (does an answer reach `ReceivedFromNetwork`, with which address
+  record), and a timed TCP 443 sweep of one /24 with four connections at
+  once, reporting each step to the log and Last Action.
+- **Probe Names**: [names-sync research](simplify-research-names-sync.md) §8:
+  rename one light, one scene, one motion sensor device and one MotionAware
+  area to a marked test name and back, a 33-character name, and a duplicate
+  scene name in one room, restoring every original name even after an error;
+  reports Hue's answer to each.
+- **Picker folders**: the handler for one DEV-ONLY test action whose
+  CUSTOM_SELECT returns folders (the XML snippet goes into the hand-back; the
+  coordinator adds it to `driver.xml`), logging what Composer sends back.
+
+Owner files: `src/hue_bridge/bridge/probe12.lua`, `tests/spec/probe12_spec.lua`,
+`src/hue_bridge/bridge/devtools.lua` (registration of the probe commands
+only). The bulb re-add of D7 needs the owner's phone (delete one bulb in the
+Hue app, add it again) and is read from the existing log afterwards.
+
+### 2.3 What the dev build showed (2026-11-05, build 447 on the house)
+
+The full report is on #334 and in Discussions (#358). What it settles:
+
+- **Picker folders work on OS 3.4.2.** A CUSTOM_SELECT list function gets
+  the current folder's value as its first argument (`""` at the top) and
+  answers `list, back`. Entries with `folder = true` open on double-click; a
+  "Back" row returns to `back`; a folder entry can itself be picked. **Add
+  From Hue is one picker: 9 bridge actions** (1.2), not the fallback of 11.
+- **Single selection only**: bulk adds stay as "All …" rows.
+- **The pickers of one action are independent**: the second list function
+  gets `""`, never the first picker's value. An action validates the pair
+  when it runs and refuses a mismatch in Last Action.
+- **mDNS works from the driver**: a legacy query from the driver's own port
+  (UDP connection to 224.0.0.251:5353) gets the paired bridge's answer in
+  milliseconds, with PTR, SRV, TXT (`bridgeid`, `modelid`) and A records.
+  `ReceivedFromNetwork` names no sender, so the address comes from the A
+  record. Port 5353 itself is Director's.
+- **The sweep works**: 253 hosts in 83 s with 4 connections in flight; the
+  identity check of the 9 open hosts took 2.4 s, and every non-Hue host
+  failed at TLS before any HTTP request.
+- **Names:** a light's device name and its light name are independent;
+  Hue refuses 33 characters (`maxLength`) and 32 two-byte characters
+  ("Invalid name"), so the limit is treated as **32 bytes of UTF-8**; a
+  duplicate scene name in one room is accepted; a MotionAware area takes a
+  name from the driver. Not tested: motion sensor renames (the house has
+  none), names-sync tests T4 and T5 (our RenameDevice's echo, an adopted
+  device's rename); they run on the first 1.2 dev build.
+- **D7's bulb test was skipped by the owner** (2026-11-05): the MAC in
+  `zigbee_connectivity` is the bulb's Zigbee IEEE address, fixed in hardware.
+
+## 3. Build contract, wave 2 (coordinator, 2026-11-05)
+
+Everything else of 1.2, on `feature/simplify-1.2-334`, in five parallel
+pieces with disjoint files plus the coordinator's integration. Sections 1.2,
+1.3, 1.8, 1.9 and 2.3 are the requirements; this section is the interface.
+Where they disagree, this section wins.
+
+### 3.1 Decisions taken from the research's recommendations
+
+The owner answered D1 to D12. The names-sync research asked nine more
+questions (its §7); Q1 and Q2 are D11. The others take the research's
+recommended answer, reported to the owner and reversible in review:
+a refused name is never cut by itself (Q3); a room prefix typed in Composer
+stays on the Composer side (Q4); more than 5 differences found in one pass
+are held and offered (Q5); a re-link, by click or by MAC, gives the Hue
+thing the Composer name (Q6); motion's "no writes" rule is lifted for names
+only (Q7); a Hue rename of a held device waits for Resolve Names (Q8).
+
+The scheduler research's tiering stands: a **full** resync at the first
+connect of a run, after an error reconnect and after an outage of 10
+minutes or more; a **quick** one (no `/scene` and `/smart_scene`) after a
+silence (watchdog) reconnect. This is the #65 split.
+
+### 3.2 D7: automatic re-link by MAC, the cases
+
+Runs on every lights or motion registry refresh (resync and stream `add`).
+"Gone" means a linked Control4 device whose rid the last *successful* full
+read did not contain; tombstoned (forgotten) devices are never candidates.
+
+| # | Case | Behaviour | Class |
+| --- | --- | --- | --- |
+| M1 | A new rid carries the MAC of exactly one gone device of the same kind, single-light device | re-link that device to the new rid; Last Action "Re-linked Desk Lamp to its bulb (same radio, new Hue id)"; names N16 | auto |
+| M2 | Several gone devices carry that MAC (two histories) | suggestion only (Link Device "(suggested)") | offered |
+| M3 | Multi-light device (one MAC, several lights) | auto only when the light's position on its device (`service_id` / its index among the device's light services) matches exactly one gone entry; else suggested | auto / offered |
+| M4 | The gone device was forgotten, or its Composer device deleted | nothing | — |
+| M5 | The new rid is already linked to another device (imported meanwhile) | nothing automatic; Link Device suggests | offered |
+| M6 | Bridge reset or replaced and re-paired (many at once) | every M1 match re-links, one Last Action summary ("Re-linked 47 devices by radio"); names follow at the paced rate of N16 | auto |
+| M7 | Motion sensor: the same rule on the sensor's device MAC | as M1 to M5 | auto / offered |
+| M8 | Same name, same Hue room, different MAC (a truly new bulb) | suggestion only, as beta 8 | offered |
+| M9 | Scenes, zone lights, MotionAware areas | no MAC: never automatic (scene S4: suggested by unique name in the same group) | offered |
+
+An automatic re-link never creates, deletes, moves or renames a device in
+Composer, and Import All New skips any light or sensor that M1 to M7 would
+re-link or suggest (the beta 8 rule).
+
+### 3.3 The actions (driver.xml, the coordinator's)
+
+Bridge, in this `sort_order`: 1 Pair Bridge, 2 Import All New, 3 Add From
+Hue (params What, Room), 4 Link Device (params Device, To), 5 Forget Device
+(params Device, Confirm), 6 Resolve Names (param Names), 7 Set Room Mapping
+(params Hue Room, Control4 Room; as today plus a "none" target), 8
+Diagnostics (param What), 9 Forget Pairing (param Confirm). Dev builds add
+their three dev actions inside Diagnostics' list, not as actions. Confirm is
+a LIST `No` / `Yes, forget`; anything but the second refuses with "Not
+forgotten: choose Yes, forget".
+
+Every removed action's command string stays a **hidden alias** in
+`dispatch.commands` until 2.0 (compat research R2; the ledger checks it).
+Hue Light and Hue Scene: no actions; their old commands stay aliases. Hue
+Motion: one action, **Test Motion Programming**; Test: Motion, Test: No
+Motion and Refresh From Bridge stay aliases.
+
+### 3.4 Interfaces
+
+**`bridge/actions.lua`** (piece C): the pickers and runners of actions 3 to
+6 and 8, built only from the modules' public methods; it edits no module.
+
+```lua
+local actions = require("bridge.actions")
+local a = actions.new(ctx)
+-- ctx = { lights, scenes, zone_lights, motion, names, last_action = fn(text),
+--         can = fn() -> bool, diagnostics = { [value] = { text, run = fn() } },
+--         dev = bool }
+a:add_list(folder)        -> list, back   -- What of Add From Hue
+a:room_list()             -> list         -- Room (the lights' picker_rooms("add"))
+a:link_list(folder)       -> list, back   -- Device of Link Device
+a:link_target_list(folder)-> list, back   -- To of Link Device
+a:forget_list(folder)     -> list, back
+a:names_list()            -> list         -- Names of Resolve Names (from names)
+a:diagnostics_list()      -> list
+a:run_add(params)  a:run_link(params)  a:run_forget(params)
+a:run_names(params)  a:run_diagnostics(params)   -- each ends in last_action
+```
+
+Value grammar (stable, logged, never shown): folders `f:lights`,
+`f:groups`, `f:scenes`, `f:scenes:<group_rid>` (selectable: all scenes of
+that room or zone), `f:motion`; leaves `light:<rid>`, `group:<rid>`,
+`scene:<rid>`, `sensor:<rid>`, `area:<rid>`, `all:lights`, `all:motion`;
+devices `dev:<device_id>`, `dev:suggested` (every device with a suggested
+match). A folder whose list would be empty is left out; an empty picker
+shows one explanatory row with value `""`.
+
+**`bridge/names.lua`** (piece B): the two-way sync of names-sync research §5.
+
+```lua
+local names = require("bridge.names")
+local n = names.new(ctx)
+-- ctx = { store (persist get/set), registries = { light = lights, scene = scenes,
+--         motion = motion }, put_name = fn(kind, rid, name, done(ok, err)),
+--         rename_device = fn(proxy_id, name), display_name = fn(device_id) -> name,
+--         user_active = fn() -> bool, last_action = fn(text), attention_changed = fn() }
+n:on_composer_rename(proxy_id)          -- from OnSystemEvent OnItemNameChanged
+n:on_hue_name(kind, rid, name)          -- from the modules' take_name paths
+n:pass(kind)                            -- after each module's resync
+n:relinked(kind, old_rid, new_rid)      -- N16
+n:forgotten(kind, rid)
+n:resolve_rows() -> list                -- for Resolve Names
+n:resolve(value, done)
+n:attention() -> list of texts
+n:migrate(build)                         -- N19 at the first run of 1.2
+```
+
+**`bridge/discovery.lua`** (piece A, with any helper modules it needs):
+
+```lua
+local discovery = require("bridge.discovery")
+local d = discovery.new(ctx)
+-- ctx = { controller_ip = fn(), identify = fn(ip, done(info|nil, err)),
+--         log, now_ms, timer = fn(ms, fn) }
+d:find_all(done(list))          -- first load and "Search again": mDNS, then nothing more
+d:find_subnet(done(list))       -- the offered subnet search (sweep), on a click
+d:find_paired(bridge_id, last_ip, done(ip|nil, how))   -- the follow-up (D5, D12)
+-- list items: { id, name, model, ip, how = "mdns"|"sweep" }
+-- ReceivedFromNetwork(binding, port, data) is forwarded by driver.lua to d:received(...)
+```
+
+**Modules (piece B)** keep their public methods and resync signatures
+(amended 2026-11-05: `driver.lua`'s `resync_all(done, tier)` makes the
+quick tier itself by leaving out `scenes:resync`; the zone lights then read
+`/grouped_light` themselves, as they already can). Motion's resync also sends every motion device the
+bridge's answering state (the #247 side finding); lights and motion apply
+3.2 inside their registry refresh and expose `suggested()` for
+`dev:suggested`.
+
+### 3.5 Pieces and owner files
+
+| Piece | Owns (creates or edits only these) |
+| --- | --- |
+| A discovery | `src/hue_bridge/bridge/discovery.lua` (and `bridge/mdns.lua`, `bridge/sweep.lua` if split), `tests/spec/discovery_spec.lua` (and their specs) |
+| B names and re-link | `src/hue_bridge/bridge/names.lua`, `tests/spec/names_spec.lua`, `src/hue_bridge/bridge/{owner,lights,scenes,zone_lights,motion}.lua`, `tests/spec/{owner,lights,scenes,zone_lights,motion}_spec.lua`, `tests/fixtures/hue_resources.lua`, `tests/fixtures/hue_motion.lua` |
+| C actions | `src/hue_bridge/bridge/actions.lua`, `tests/spec/actions_spec.lua`, `tests/spec/ledger_spec.lua`, `tests/fixtures/ledger.lua` |
+| D child drivers | `src/hue_light/**`, `src/hue_scene/**`, `src/hue_motion/**` except their `www/documentation.html`; `tests/spec/{light_driver,scene_driver,motion_driver,light_caps,light_state,light_relative_level}_spec.lua` |
+| E documentation | every `www/documentation.html`, `docs/composer-checklist.md`, `docs/release-checklist.md`, `docs/import-design.md`, `docs/README.md`, `README.md`, `CHANGELOG.md` (the `## Unreleased` lines only) |
+| Coordinator | `src/hue_bridge/driver.lua`, `src/hue_bridge/driver.xml`, `src/hue_bridge/bridge/{housekeeping,commands,devtools,probe12}.lua`, `tools/**`, `tests/spec/{roundtrip,drivers,devloop,housekeeping,commands}_spec.lua`, the other roundtrip specs, `tests/helpers/fake_c4.lua`, this document, `docs/status.md`, `CLAUDE.md` |
+
+A piece that needs a change in a file it does not own writes the exact
+change into its hand-back instead. The coordinator wires: the housekeeping
+tasks (scheduler research §5, with the tiers of 3.1 and the key re-check of
+D8), the merged actions and aliases, Bridges Found and the address
+follow-up, `OnItemNameChanged`, the Attention wrap and the rows.
+
+## 4. Wave 3: what the documentation pass found (coordinator, 2026-11-05)
+
+Piece G read every manual against the code and listed twelve places where
+the code is wrong, or does less than this contract decided. Each is decided
+here. Findings 6 and the identity re-check are not new decisions: §1.3 and
+D5 promised them, and the code never had them.
+
+| # | Finding | Decision | Piece |
+| --- | --- | --- | --- |
+| 1 | An Attention text longer than six rows is logged in full only with Debug Mode On (`log.info`), while Last Action's overflow is always logged | Log it as Last Action does (`log.always`) | H |
+| 2 | Forget Pairing leaves Bridges Found reading "Paired with ..." and the automatic searches stopped until the driver restarts; a new pairing leaves "N found: pick one" up to 15 minutes | Both redraw the row at once; Forget Pairing starts the first-load searches again (3 s, 1 min, 5 min, then every 15 min) | H |
+| 3 | Every automatic search of an unpaired driver writes Last Action ("Bridges Found: ...") every 15 minutes, over the owner's last result | Automatic searches write the log and the row only; Last Action is for searches the owner asked for (Search again, the subnet pick) | H |
+| 4 | Picking a bridge in Bridges Found does not pass its id to the pairing, so another bridge answering at that address in the window would be paired | The pick's id is the expected one: a different id at the address is refused as Pair Bridge refuses one today | H |
+| 5 | The Link Device row names the device twice | The suggestion suffix names only the Hue thing and the reason | I |
+| 6 | Not built: Attention when the paired bridge is missing (D5: "If nothing local works, Attention says the bridge is missing"), the bridge or stream away an hour (§1.3), and the identity re-check before the key goes out again after an outage of 60 s or more (§1.3) | Build them as §1.3 and D5 say; the discovery research (simplify-research-discovery.md) has the texts of the missing, moved and typed-address-wrong cases, and its texts are used where they fit | H |
+| 7 | safety_quick, safety_full and stream_down_read are not counted against the hourly budget of optional requests | They are counted; stream_down_read stays every 10 minutes while the stream is down and the bridge answers. A quick read costs 15 requests on a Bridge Pro, so six an hour cannot fit under 60: the hourly budget is 100 (piece H; at most one request every 36 s on average) | H |
+| 8 | A new light with a re-link hint is told "(Import All New or Add From Hue)", which Import All New skips; a new motion sensor is told "(Add From Hue)", which Import All New imports | Hinted lights end "(Link Device)"; sensors end "(Import All New or Add From Hue)" | I |
+| 9 | Name suggestions need the same Hue room or group id, so after a bridge reset nothing is suggested; zone lights have none | The same room is the same id or, failing that, the same room name; zone lights get suggestions by the same rule if their module allows it without a new picker, otherwise an issue for 1.3 | I |
+| 10 | Inside Import All New the automatic re-link's Last Action is overwritten by the import's, and the import result never names the re-linked devices | Import All New's result names them ("re-linked 2: Lamp 3, Lamp 4"), and the re-link run inside an import writes no Last Action of its own | I |
+| 11 | A room-mapping pass that finds only ambiguous names writes Last Action and changes nothing; a result can begin "re-mapped" in lowercase | Nothing changed, nothing written (the log keeps it); every Last Action begins with a capital | I |
+| 12 | "Search every address of a.b.c.x" names the controller's /24, but the search starts with the Bridge IP Address's /24 | The label names what is searched | H |
+| 13 | (dev 467 on the house) A Composer rename reaches Hue, but the device's Hue Name row keeps the old name: a name change arriving on the event stream updates the registry and sends no HUE_CONFIGURE, so the row waited for the next full read (as in 1.1, but with two-way names it reads as a failed sync) | A name change from the stream sends the device its configure at once, for lights, scenes, zone lights and motion alike | I |
+| 14 | (dev 467) Composer's Select list reacts only to a click on a label's text, so the short "Back" row of Add From Hue and Link Device is hard to hit | The Back row names where it goes ("Back to Scenes", "Back to all folders"), wide enough to hit | I |
+
+Owner files: **H** `src/hue_bridge/driver.lua`, `src/hue_bridge/bridge/{housekeeping,discovery,mdns,sweep}.lua`, `tests/spec/{drivers,housekeeping,discovery,devloop}_spec.lua`, the roundtrip specs, `tests/helpers/fake_c4.lua`. **I** `src/hue_bridge/bridge/{owner,lights,scenes,zone_lights,motion,actions,names}.lua`, their specs, `tests/fixtures/*`. **J** (after H and I) every `www/documentation.html`, `docs/composer-checklist.md`, `docs/release-checklist.md`, `docs/import-design.md`, `README.md`, `CHANGELOG.md` (`## Unreleased`). A piece that needs a change in a file it does not own writes the exact change into its hand-back.

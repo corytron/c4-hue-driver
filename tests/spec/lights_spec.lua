@@ -162,6 +162,15 @@ describe("bridge.lights", function()
 		return { light = replace(F.light, F.rids.garage, REPLACED), device = replace(F.device, F.rids.garage, REPLACED) }
 	end
 
+	-- The same, with another bulb's radio: no automatic re-link (D7), only the
+	-- name suggests it.
+	local GARAGE_MAC, OTHER_GARAGE_MAC = "00:17:88:01:0b:12:34:04-0b", "00:17:88:01:0b:12:34:ff-0b"
+	local function new_bulb()
+		local o = replaced_bulb()
+		o.zigbee = replace(F.zigbee_connectivity, GARAGE_MAC, OTHER_GARAGE_MAC)
+		return o
+	end
+
 	local function container(text)
 		return C4:JsonDecode(text)[1]
 	end
@@ -253,10 +262,11 @@ describe("bridge.lights", function()
 			assert.equal("hue_light.c4z", c4.added[1].driver)
 			assert.same({ ok = true, text = "Added 3 new lights: Garage White #4 to Garage (device 2001), "
 				.. "Hallway Ambiance #3 to Living Room (device 2002), Living Room Lamp #1 to Living Room (device 2003); "
-				.. "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)" },
+				.. "skipped 1 with no mapped room (Set Room Mapping or Add From Hue): Kitchen Strip #2 (no Hue room)" },
 				last_result())
 			assert.equal("4 lights on bridge, 3 imported, 1 new", L:summary())
-			assert.is_true(saw_log("one-time Map Rooms By Name"))
+			assert.is_true(saw_log("rooms: Mapped 2 Hue rooms and zones by name: Garage → Garage, Living Room → Living "
+				.. "Room"))
 		end)
 
 		it("binds each new light to the bridge with the HUE_BRIDGE class", function()
@@ -382,7 +392,7 @@ describe("bridge.lights", function()
 			assert.equal("Hallway Ambiance", c4.added[1].name)
 			assert.equal(2003, c4.added[1].id)
 			assert.equal("Added 1 new light: Hallway Ambiance #3 to Living Room (device 2003); skipped 1 with no mapped room "
-				.. "(Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)", last_result().text)
+				.. "(Set Room Mapping or Add From Hue): Kitchen Strip #2 (no Hue room)", last_result().text)
 		end)
 
 		it("skips lights whose Hue room is unmapped or mapped to a room that no longer exists", function()
@@ -393,7 +403,7 @@ describe("bridge.lights", function()
 			L:import_new(done)
 			answer_gets()
 			assert.equal(0, #c4.added)
-			assert.same({ ok = true, text = "Added no lights; skipped 4 with no mapped room (Set Room Mapping or Add Light): "
+			assert.same({ ok = true, text = "Added no lights; skipped 4 with no mapped room (Set Room Mapping or Add From Hue): "
 				.. "Garage White #4 (Hue room Garage mapped to a Control4 room that no longer exists), "
 				.. "Hallway Ambiance #3 (Hue room Living Room not mapped), Kitchen Strip #2 (no Hue room), "
 				.. "Living Room Lamp #1 (Hue room Living Room not mapped)" }, last_result())
@@ -522,7 +532,7 @@ describe("bridge.lights", function()
 		end)
 	end)
 
-	describe("import_new and likely replacements (#344)", function()
+	describe("import_new and likely replacements (#344, D7)", function()
 		local HALL_NEW = "c48d1e6f-2a9b-4f3e-9c7d-8e5f1a2b3c99"
 		local MAC = { garage = "00:17:88:01:0b:12:34:04-0b", hallway = "00:17:88:01:0b:12:34:03-0b",
 			living = "00:17:88:01:0b:12:34:01-0b" }
@@ -552,29 +562,35 @@ describe("bridge.lights", function()
 			assert.is_true(L:on_binding_changed(1, "HUE_BRIDGE", false, device_id))
 		end
 
-		it("skips a gone light's return on the same radio, lists it with the hint, and re-link takes it", function()
+		it("re-links a gone light's return on the same radio instead of importing it (D7 M1), and says so in its "
+			.. "own result, not in a Last Action of the re-link (§4 finding 10)", function()
+			local said = {}
+			L = new_lights({ last_action = function(text) said[#said + 1] = text end })
 			import_all()
 			c4.added = {}
+			said = {}
 			-- Garage White deleted and re-added in the Hue app: a new rid, the same radio.
 			L:import_new(done)
 			answer_gets(swapped({ garage = { rid = REPLACED } }))
 			assert.equal(0, #c4.added)
-			assert.equal("gone", L.registry[F.rids.garage].state)
-			assert.is_nil(L.registry[REPLACED])
-			assert.same({ ok = true, text = "Added no lights; skipped 1 that may be a replacement "
-				.. "(Re-link Device To Light or Add Light): " .. HINT_GARAGE }, last_result())
-			assert.equal("4 lights on bridge, 4 imported, 1 new, 1 missing", L:summary())
+			assert.is_nil(L.registry[F.rids.garage])
+			assert.equal(ID.garage, L:device_for(REPLACED), "the device, its proxy and programming are kept")
+			assert.equal("linked", L.registry[REPLACED].state)
+			assert.same({ ok = true, text = "No new lights on the bridge (4 on bridge, 4 imported); re-linked 1 by radio: "
+				.. "Garage White" }, last_result())
+			assert.same({}, said, "the import's result is the one Last Action")
+			assert.equal("4 lights on bridge, 4 imported, 0 new", L:summary())
+			assert.is_true(saw_log("lights: re-linked 1 by radio during the import: Garage White"))
+			assert.equal(0, #c4.calls_to("RenameDevice"))
 
-			-- The action it names keeps device 2001; nothing is left to import.
-			assert.same({ true, "Re-linked device 2001 (was Garage White #4) to Garage White [Garage] #4" },
-				{ L:relink(ID.garage, REPLACED) })
-			L:import_new(done)
-			answer_gets(swapped({ garage = { rid = REPLACED } }))
-			assert.equal(0, #c4.added)
-			assert.same({ ok = true, text = "No new lights on the bridge (4 on bridge, 4 imported)" }, last_result())
+			-- Outside an import (a resync) the re-link writes its own Last Action, as before.
+			L:resync(done)
+			answer_gets(swapped({ garage = { rid = NEW_BULB } }))
+			assert.equal(ID.garage, L:device_for(NEW_BULB))
+			assert.same({ "Re-linked Garage White to its bulb (same radio, new Hue id)" }, said)
 		end)
 
-		it("skips the match of an unbound device whose light left the bridge, and lists it", function()
+		it("skips the match of an unbound device whose light left the bridge, and lists it (never automatic)", function()
 			import_all()
 			unbind(ID.garage)
 			c4.added = {}
@@ -583,11 +599,14 @@ describe("bridge.lights", function()
 			assert.equal(0, #c4.added)
 			assert.equal("unbound", L.registry[F.rids.garage].state, "an unbound entry is never marked gone")
 			assert.same({ ok = true, text = "Added no lights; skipped 1 that may be a replacement "
-				.. "(Re-link Device To Light or Add Light): " .. HINT_GARAGE }, last_result())
+				.. "(Link Device or Add From Hue): " .. HINT_GARAGE }, last_result())
 			assert.same({ "Garage White [Garage] #4 (looks like Garage White #4, device 2001; re-link?)" },
 				texts(L:picker_lights()))
 			assert.same({ "Garage White (device 2001, unbound since " .. os.date("%m-%d", T0) .. ")" },
 				texts(L:picker_relink_devices()))
+			local s = L:suggestions()
+			assert.equal(1, #s)
+			assert.same({ ID.garage, REPLACED, "same radio", true }, { s[1].device_id, s[1].rid, s[1].why, s[1].apply })
 		end)
 
 		it("takes no hint from an unbound device whose light is still on the bridge", function()
@@ -598,7 +617,7 @@ describe("bridge.lights", function()
 			local renamed = replace(F.light, "Kitchen Strip", "Garage White")
 			L:import_new(done)
 			answer_gets({ light = renamed })
-			assert.same({ ok = true, text = "Added no lights; skipped 1 with no mapped room (Set Room Mapping or Add Light): "
+			assert.same({ ok = true, text = "Added no lights; skipped 1 with no mapped room (Set Room Mapping or Add From Hue): "
 				.. "Garage White #2 (no Hue room)" }, last_result())
 			assert.same({ "Garage White #2" }, texts(L:picker_lights()))
 
@@ -607,7 +626,7 @@ describe("bridge.lights", function()
 			answer_gets({ light = replace(lights_json({ "living", "kitchen", "hallway" }), "Kitchen Strip", "Garage White") })
 			assert.equal("unbound", L.registry[F.rids.garage].state)
 			assert.same({ ok = true, text = "Added no lights; skipped 1 that may be a replacement "
-				.. "(Re-link Device To Light or Add Light): Garage White #2 (looks like Garage White #4, device 2001; "
+				.. "(Link Device or Add From Hue): Garage White #2 (looks like Garage White #4, device 2001; "
 				.. "re-link?)" }, last_result())
 			assert.equal(3, #c4.added, "the first import's three only")
 		end)
@@ -625,7 +644,7 @@ describe("bridge.lights", function()
 			assert.equal(2005, L:device_for(REPLACED))
 		end)
 
-		it("counts and lists a mix: replacements by radio and by name skipped, the rest as before", function()
+		it("counts and lists a mix: a radio match re-linked, a name match skipped, the rest as before", function()
 			L:import_new(done)
 			answer_gets()  -- devices 2001 to 2003; Kitchen Strip has no Hue room
 			unbind(ID.hallway)
@@ -637,19 +656,21 @@ describe("bridge.lights", function()
 				living = { rid = NEW_BULB, name = "Reading Lamp", radio = true } }))
 			assert.equal(1, #c4.added)
 			assert.same({ "Reading Lamp", LIVING_ROOM, 2004 }, { c4.added[1].name, c4.added[1].room, c4.added[1].id })
-			assert.same({ "gone", "unbound", "gone" }, { L.registry[F.rids.garage].state,
+			assert.same({ "linked", "unbound", "gone" }, { L.registry[REPLACED].state,
 				L.registry[F.rids.hallway].state, L.registry[F.rids.living].state })
+			assert.equal(ID.garage, L:device_for(REPLACED))
 			assert.same({ ok = true, text = "Added 1 new light: Reading Lamp #1 to Living Room (device 2004); "
-				.. "skipped 2 that may be replacements (Re-link Device To Light or Add Light): " .. HINT_GARAGE .. ", "
+				.. "re-linked 1 by radio: Garage White; "
+				.. "skipped 1 that may be a replacement (Link Device or Add From Hue): "
 				.. "Hallway Ambiance #3 (looks like Hallway Ambiance #3, device 2002; re-link?); "
-				.. "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)" },
+				.. "skipped 1 with no mapped room (Set Room Mapping or Add From Hue): Kitchen Strip #2 (no Hue room)" },
 				last_result())
 		end)
 
 		it("still lists a light deleted in Composer as deleted, even one that looks like a replacement", function()
 			import_all()
 			L:import_new(done)
-			answer_gets(swapped({ garage = { rid = REPLACED } }))
+			answer_gets(swapped({ garage = { rid = REPLACED, radio = true } }))
 			-- Added by hand all the same (device 2005), then deleted in Composer.
 			L:add_light(REPLACED, nil, done)
 			assert.same({ ok = true, text = "Added Garage White #4 to Garage (device 2005)" }, last_result())
@@ -657,10 +678,286 @@ describe("bridge.lights", function()
 			assert.truthy(L:goodbye({ rid = REPLACED, device_id = "2005" }))
 			c4.added = {}
 			L:import_new(done)
-			answer_gets(swapped({ garage = { rid = REPLACED } }))
+			answer_gets(swapped({ garage = { rid = REPLACED, radio = true } }))
 			assert.equal(0, #c4.added)
-			assert.same({ ok = true, text = "Added no lights; skipped 1 deleted in Composer (Add Light re-creates one): "
+			assert.same({ ok = true, text = "Added no lights; skipped 1 deleted in Composer (Add From Hue re-creates one): "
 				.. "Garage White #4 (deleted " .. os.date("%Y-%m-%d", T0 + 100) .. ")" }, last_result())
+		end)
+	end)
+
+	describe("re-link by radio (D7, docs/simplify-actions-design.md §3.2)", function()
+		local actions
+
+		before_each(function()
+			actions = {}
+			-- The first read's mapping of the rooms by name (auto_map_rooms) is the
+			-- rooms' Last Action, specified under "room mappings".
+			L = new_lights({ last_action = function(text)
+				if not text:find("^Mapped ") then table.insert(actions, text) end
+			end })
+		end)
+
+		-- The light fixture without `gone` (keys) and with `new` (key → new rid) re-added on its device.
+		local function bodies(gone, new)
+			local keep = {}
+			for _, key in ipairs({ "living", "kitchen", "hallway", "garage" }) do
+				if not gone[key] then keep[#keep + 1] = key end
+			end
+			local o = { light = lights_json(keep), device = F.device }
+			for key, rid in pairs(new or {}) do
+				o.light, o.device = replace(o.light, F.rids[key], rid), replace(o.device, F.rids[key], rid)
+			end
+			return o
+		end
+
+		it("M1: one gone light on the new rid's radio is re-linked at the resync, told, and said in Last Action", function()
+			import_all()
+			c4.sent = {}
+			resync(replaced_bulb())
+			assert.is_nil(L.registry[F.rids.garage])
+			local entry = L.registry[REPLACED]
+			assert.equal(ID.garage, entry.device_id)
+			assert.equal("linked", entry.state)
+			assert.equal(T0, entry.created_at, "the same record")
+			local configures = sent_to(ID.garage, "HUE_CONFIGURE")
+			assert.equal(REPLACED, configures[#configures].params.rid, "told its new rid after the gone one")
+			assert.same({ "Re-linked Garage White to its bulb (same radio, new Hue id)" }, actions)
+			assert.equal("None", L:attention())
+			assert.same({}, L:suggested())
+			assert.equal(4, #c4.calls_to("Bind"), "nothing created, bound or renamed")
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+		end)
+
+		it("re-links at a stream add once the gone light's radio comes back under a new rid", function()
+			import_all()
+			L:on_container(container('[{"type":"delete","data":[{"id":"' .. F.rids.garage .. '","type":"light"}]}]'))
+			assert.equal("gone", L.registry[F.rids.garage].state)
+			c4.sent = {}
+			L:on_container(container(F.events.light_readded(REPLACED)))
+			assert.equal(ID.garage, L:device_for(REPLACED))
+			assert.equal("linked", L.registry[REPLACED].state)
+			assert.same({ "HUE_CONFIGURE@2001", "HUE_STATE@2001" }, commands_sent())
+			assert.same({ "Re-linked Garage White to its bulb (same radio, new Hue id)" }, actions)
+		end)
+
+		it("M6: a bridge reset re-links every device by its radio, in one Last Action line", function()
+			import_all()
+			local new = { living = "a0000000-0000-4000-8000-0000000000a1", kitchen = "a0000000-0000-4000-8000-0000000000a2",
+				hallway = "a0000000-0000-4000-8000-0000000000a3", garage = "a0000000-0000-4000-8000-0000000000a4" }
+			resync(bodies({}, new))
+			for key, rid in pairs(new) do
+				assert.equal(ID[key], L:device_for(rid), key)
+			end
+			assert.equal(4, L:count())
+			assert.same({ "Re-linked 4 devices by radio: Living Room Lamp, Kitchen Strip, Hallway Ambiance +1 more" }, actions)
+		end)
+
+		it("M2: two gone devices on one radio are only suggested, neither applied by the bulk row", function()
+			import_all()
+			L.registry[F.rids.living].mac_address = L.registry[F.rids.garage].mac_address  -- two histories, one radio
+			resync(bodies({ living = true }, { garage = REPLACED }))
+			assert.equal("gone", L.registry[F.rids.garage].state)
+			assert.equal("gone", L.registry[F.rids.living].state)
+			assert.is_nil(L.registry[REPLACED])
+			assert.same({}, actions)
+			local s = L:suggestions()
+			assert.equal(2, #s)
+			assert.same({ false, false }, { s[1].apply, s[2].apply })
+			assert.same({ REPLACED, REPLACED }, { s[1].rid, s[2].rid })
+			assert.same({}, L:suggested(), "the bulk row (dev:suggested) gets neither")
+		end)
+
+		it("M3: on a multi-light device each light goes back to the entry at its position, else it is suggested",
+			function()
+			import_all()
+			resync()
+			-- Garage White's device carried two lights (front 0, back 1); both left, two came back.
+			local mac = L.registry[F.rids.garage].mac_address
+			L.registry[F.rids.garage].service_id = 0
+			L.registry[F.rids.hallway].mac_address, L.registry[F.rids.hallway].service_id = mac, 1
+			L.reg:set_state(F.rids.garage, "gone")
+			L.reg:set_state(F.rids.hallway, "gone")
+			local front, back = "b0000000-0000-4000-8000-0000000000b0", "b0000000-0000-4000-8000-0000000000b1"
+			local garage_model = L.models[F.rids.garage]
+			L.models[F.rids.garage], L.models[F.rids.hallway] = nil, nil
+			local device = L.devices[garage_model.device_rid]
+			device.light_rids = { front, back }
+			for i, rid in ipairs({ front, back }) do
+				local m = {}
+				for k, v in pairs(garage_model) do m[k] = v end
+				m.rid, m.service_id = rid, i - 1
+				L.models[rid] = m
+			end
+			assert.equal(2, L:auto_relink("resync"))
+			assert.equal(ID.garage, L:device_for(front))
+			assert.equal(ID.hallway, L:device_for(back))
+
+			-- Positions unknown: suggested only.
+			L.reg:relink(front, F.rids.garage)
+			L.reg:relink(back, F.rids.hallway)
+			L.reg:set_state(F.rids.garage, "gone")
+			L.reg:set_state(F.rids.hallway, "gone")
+			L.registry[F.rids.garage].service_id, L.registry[F.rids.hallway].service_id = nil, nil
+			assert.equal(0, L:auto_relink("resync"))
+			local s = L:suggestions()
+			assert.equal(4, #s)
+			for _, item in ipairs(s) do
+				assert.is_false(item.apply)
+			end
+		end)
+
+		it("M5: a new rid already linked to another device is only suggested, with its holder", function()
+			import_all()
+			-- The bulb re-added while its old light was still listed; imported by hand meanwhile.
+			L:on_container(container(F.events.light_readded(REPLACED)))
+			L:add_light(REPLACED, GARAGE_ROOM, done)
+			assert.equal(2005, L:device_for(REPLACED))
+			resync(replaced_bulb())
+			assert.equal("gone", L.registry[F.rids.garage].state, "not re-linked: the new rid is taken")
+			local s = L:suggestions()
+			assert.equal(1, #s)
+			assert.same({ ID.garage, REPLACED, 2005, false }, { s[1].device_id, s[1].rid, s[1].holder, s[1].apply })
+			assert.truthy(s[1].text:find("(already linked to device 2005)", 1, true))
+			assert.same({}, L:suggested(), "the bulk row (dev:suggested) never takes a held rid")
+		end)
+
+		it("M4: a forgotten device is never a candidate", function()
+			import_all()
+			assert.is_true((L:forget(ID.garage)))
+			resync(replaced_bulb())
+			assert.is_nil(L:device_for(REPLACED))
+			assert.same({}, actions)
+			assert.equal("4 lights on bridge, 3 imported, 1 new", L:summary())
+		end)
+
+		it("M8: a truly new bulb with the same name in the same Hue room is only suggested", function()
+			import_all()
+			resync(new_bulb())
+			assert.equal("gone", L.registry[F.rids.garage].state)
+			assert.same({}, actions)
+			local s = L:suggestions()
+			assert.equal(1, #s)
+			assert.same({ ID.garage, REPLACED, "same name in the same Hue room", true },
+				{ s[1].device_id, s[1].rid, s[1].why, s[1].apply })
+			-- The Hue thing only: Link Device's row names the device and adds the reason (§4 finding 5).
+			assert.equal("Garage White [Garage] #4", s[1].text)
+			assert.same({ { device_id = ID.garage, rid = REPLACED, text = s[1].text, why = s[1].why } }, L:suggested(),
+				"what bridge/actions.lua applies through relink(device_id, rid)")
+		end)
+
+		it("M8 after a bridge reset: the same room is the same rid or, failing that, the same room name (§4 finding 9)",
+			function()
+			import_all()
+			-- Every rid new: the bulb (another radio, the same name) and the Garage room.
+			local NEW_GARAGE = "7d6c5b4a-0000-4000-8000-00000000r009"
+			local o = new_bulb()
+			o.room = replace(F.room, F.group_rids.garage, NEW_GARAGE)
+			resync(o)
+			assert.equal("gone", L.registry[F.rids.garage].state)
+			local s = L:suggestions()
+			assert.equal(1, #s)
+			assert.same({ ID.garage, REPLACED, "same name in the same Hue room", true },
+				{ s[1].device_id, s[1].rid, s[1].why, s[1].apply })
+			assert.same({ "Garage White [Garage] #4 (looks like Garage White #4, device 2001; re-link?)" },
+				texts(L:picker_lights()), "the hint, which Import All New skips, follows the same rule")
+
+			-- A room of another name under a new rid is another room.
+			o.room = replace(replace(F.room, F.group_rids.garage, NEW_GARAGE), '"Garage"', '"Workshop"')
+			resync(o)
+			assert.same({}, L:suggestions())
+			assert.same({ "Garage White [Workshop] #4" }, texts(L:picker_lights()))
+		end)
+	end)
+
+	describe("the names sync's hooks (bridge/names.lua)", function()
+		local calls
+
+		local function recorder()
+			calls = {}
+			return setmetatable({}, { __index = function(_, method)
+				return function(_, ...)
+					calls[#calls + 1] = { method, ... }
+					if method == "relinked" then
+						return "; Hue gets the Composer name Garage White"
+					end
+				end
+			end })
+		end
+
+		local function called(method)
+			local out = {}
+			for _, c in ipairs(calls) do
+				if c[1] == method then out[#out + 1] = c end
+			end
+			return out
+		end
+
+		it("hears of each created light, the pass after every resync, a Hue rename from the stream, re-link and forget",
+			function()
+			L:set_names(recorder())
+			import_all()
+			assert.equal(4, #called("added"))
+			assert.same({ "added", "light", F.rids.garage, "Garage White" }, called("added")[1])
+			calls = {}
+			resync()
+			assert.same({ { "pass", "light" } }, called("pass"))
+
+			calls = {}
+			L:on_container(container(F.events.device_rename))
+			assert.same({ { "on_hue_name", "light", F.rids.garage } }, called("on_hue_name"))
+			assert.equal("Garage Spot", L:hue_name(F.rids.garage, L.registry[F.rids.garage]),
+				"a single-light lamp's Hue name is its device's")
+
+			resync(new_bulb())
+			calls = {}
+			local ok, text = L:relink(ID.garage, REPLACED)
+			assert.is_true(ok)
+			assert.equal("Re-linked device 2001 (was Garage White #4) to Garage White [Garage] #4; Hue gets the Composer "
+				.. "name Garage White", text)
+			assert.same({ { "relinked", "light", F.rids.garage, REPLACED } }, called("relinked"))
+			L:forget(ID.garage)
+			assert.same({ { "forgotten", "light", REPLACED } }, called("forgotten"))
+		end)
+
+		it("a names sync that fails never breaks a resync, an event or a re-link", function()
+			L:set_names(setmetatable({}, { __index = function()
+				return function() error("names broke") end
+			end }))
+			import_all()
+			L:resync(done)
+			answer_gets(new_bulb())
+			assert.same({ ok = true }, { ok = last_result().ok })
+			L:on_container(container(F.events.device_rename))
+			assert.is_true((L:relink(ID.garage, REPLACED)))
+			assert.is_true(saw_log("lights: names.pass failed"))
+		end)
+
+		it("routes Adopt Hue Names and Accept Names As They Are through the names sync", function()
+			L:set_names(recorder())
+			import_all()
+			L:adopt_hue_names()
+			assert.equal(1, #called("adopt_all"))
+			assert.equal("Names now sync both ways by themselves; Resolve Names lists the ones that cannot",
+				(function()
+					L:set_names(require("bridge.names"))
+					return L:accept_names()
+				end)())
+		end)
+
+		it("writes a single-light lamp's name on its device and its light, a multi-light one on its light", function()
+			import_all()
+			resync()
+			local entry = L.registry[F.rids.garage]
+			assert.same({
+				{ method = "PUT", path = "/clip/v2/resource/device/" .. F.device_rids.garage,
+					body = { metadata = { name = "Desk" } } },
+				{ method = "PUT", path = "/clip/v2/resource/light/" .. F.rids.garage, body = { metadata = { name = "Desk" } } },
+			}, L:name_requests(F.rids.garage, "Desk"))
+			assert.equal("device:" .. F.device_rids.garage, L:name_source(F.rids.garage, entry))
+			L.devices[F.device_rids.garage].light_rids = { F.rids.garage, NEW_BULB }
+			assert.same({ { method = "PUT", path = "/clip/v2/resource/light/" .. F.rids.garage,
+				body = { metadata = { name = "Desk" } } } }, L:name_requests(F.rids.garage, "Desk"))
+			assert.equal("Garage White", L:hue_name(F.rids.garage, entry), "the light's own name")
 		end)
 	end)
 
@@ -709,7 +1006,8 @@ describe("bridge.lights", function()
 			L:add_light(nil, LIVING_ROOM, done)
 			assert.equal("Not added: pick a light first", last_result().text)
 			L:add_light("nope", LIVING_ROOM, done)
-			assert.equal("Not added: light nope is not on the bridge (connect the event stream and try again)",
+			assert.equal("Not added: light nope is not on the bridge (Diagnostics ▸ Read everything from the bridge now, then "
+				.. "try again)",
 				last_result().text)
 			L:add_light(F.rids.garage, LIVING_ROOM, done)
 			assert.equal("Not added: Garage White #4 is already imported (device 2001)", last_result().text)
@@ -840,7 +1138,7 @@ describe("bridge.lights", function()
 			assert.equal(1, #sent_to(ID.garage, "HUE_STATE"), "no full state for a light that is not there")
 			assert.equal("3 lights on bridge, 4 imported, 0 new, 1 missing", L:summary())
 			assert.equal("1 light missing from the bridge: Garage White #4 (device 2001, since " .. os.date("%Y-%m-%d", T0 + 60)
-				.. ") (Re-link Device To Light or Forget Light)", L:attention())
+				.. ") (Link or Forget Device)", L:attention())
 			assert.same({ "Garage White (device 2001, gone since " .. os.date("%m-%d", T0 + 60) .. ")" },
 				texts(L:picker_relink_devices()))
 			assert.same({ "2001" }, values(L:picker_relink_devices()))
@@ -861,49 +1159,79 @@ describe("bridge.lights", function()
 			assert.equal("None", L:attention())
 		end)
 
-		it("lists a new light with a re-link hint when a gone entry shares its MAC or its name", function()
+		it("lists a new light with a re-link hint when a gone entry shares its name (another radio)", function()
 			import_all()
 			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
-			-- Garage White was deleted and re-added in the Hue app: new rid, same radio.
+			-- Garage White's bulb swapped for another one under its name: new rid, new radio.
 			logged = {}
-			resync(replaced_bulb())
+			resync(new_bulb())
 			assert.equal("4 lights on bridge, 4 imported, 1 new, 1 missing", L:summary())
-			assert.is_true(saw_log("new light Garage White [Garage] #4 on the bridge; use Add Light or Import All New Lights; "
+			assert.is_true(saw_log("new light Garage White [Garage] #4 on the bridge; use Import All New or Add From Hue; "
 				.. "it looks like Garage White #4 (device 2001): re-link?"))
 			assert.same({ "Garage White [Garage] #4 (looks like Garage White #4, device 2001; re-link?)" },
 				texts(L:picker_lights()))
 			assert.same({ REPLACED }, values(L:picker_lights()))
-			assert.truthy(L:attention():find("^1 new light on the bridge: Garage White %[Garage%] #4 %(looks like Garage White "
-				.. "#4, device 2001; re%-link%?%) %(Add Light or Import All New Lights%); 1 light missing"))
+			-- Import All New skips a hinted light: its item ends in Link Device (§4 finding 8).
+			assert.truthy(L:attention():find("^1 new light on the bridge may be a replacement: Garage White %[Garage%] #4 "
+				.. "%(looks like Garage White #4, device 2001; re%-link%?%) %(Link Device%); 1 light missing"), L:attention())
 
 			-- Logged once, however many resyncs see it.
 			logged = {}
-			resync(replaced_bulb())
+			resync(new_bulb())
 			assert.is_false(saw_log("new light"))
 
-			-- A different radio but the same name still hints.
-			L.registry[F.rids.garage].mac_address = "00:17:88:01:0b:12:34:ff-0b"
+			-- In another Hue room the name is no match (§3.2 M8: same name, same room).
+			L.registry[F.rids.garage].hue_room_rid = F.group_rids.living_room
+			L.registry[F.rids.garage].hue_room = "Living Room"
+			assert.same({ "Garage White [Garage] #4" }, texts(L:picker_lights()))
+			-- Another rid with the room's name is the same room (a bridge reset, §4 finding 9).
+			L.registry[F.rids.garage].hue_room = " garage "
 			assert.same({ "Garage White [Garage] #4 (looks like Garage White #4, device 2001; re-link?)" },
 				texts(L:picker_lights()))
+			L.registry[F.rids.garage].hue_room_rid, L.registry[F.rids.garage].hue_room = F.group_rids.garage, "Garage"
 			L.registry[F.rids.garage].name = "Other"
 			assert.same({ "Garage White [Garage] #4" }, texts(L:picker_lights()))
 		end)
 
-		it("runs Map Rooms By Name once, at the first resync that knows the rooms, guarded by a persisted flag", function()
-			assert.is_nil(c4.persist.hue_rooms)
-			resync()
-			assert.equal("done", c4.persist.hue_rooms_automapped)
-			assert.equal("Garage → Garage; Living Room → Living Room; Attic (zone) → (unmapped); "
-				.. "Downstairs (zone) → (unmapped)", L:room_mappings_text())
-			assert.is_true(saw_log("one-time Map Rooms By Name at the first resync of this build: Mapped 2: "
-				.. "Garage → Garage, Living Room → Living Room; no Control4 room named: Attic (zone), Downstairs (zone)"))
+		it("lists the new lights apart from the hinted ones, each item ending in what resolves it (§4 finding 8)",
+			function()
+			import_all()
+			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
+			-- Garage White's bulb swapped under its name (a hint), and a bulb nobody had.
+			local o = new_bulb()
+			o.light = o.light:gsub("%]%}$", "," .. json.encode(json.decode(F.events.add)[1].data[1]) .. "]}")
+			resync(o)
+			assert.equal("1 new light on the bridge: New Bulb #5 (Import All New or Add From Hue); 1 new light on the "
+				.. "bridge may be a replacement: Garage White [Garage] #4 (looks like Garage White #4, device 2001; "
+				.. "re-link?) (Link Device); 1 light missing from the bridge: Garage White #4 (device 2001, since "
+				.. os.date("%Y-%m-%d", T0) .. ") (Link or Forget Device)", L:attention())
+		end)
 
-			-- Removed by the owner: the next resync leaves it alone.
-			L:set_room_mapping(F.group_rids.garage, nil)
-			logged = {}
+		it("maps the Hue rooms by name when they first appear, never again over a removal, and waits for the rooms",
+			function()
+			assert.is_nil(c4.persist.hue_rooms)
+			local said = {}
+			L = new_lights({ last_action = function(text) said[#said + 1] = text end })
 			resync()
-			assert.is_false(saw_log("one-time Map Rooms By Name"))
-			assert.equal("Garage → (unmapped); Living Room → Living Room; Attic (zone) → (unmapped); "
+			assert.equal("Garage → Garage (by name); Living Room → Living Room (by name); Attic (zone) → (unmapped); "
+				.. "Downstairs (zone) → (unmapped)", L:room_mappings_text())
+			assert.same({ "Mapped 2 Hue rooms and zones by name: Garage → Garage, Living Room → Living Room" }, said)
+			assert.same({ [F.group_rids.garage] = "name", [F.group_rids.living_room] = "name" },
+				c4.persist.hue_rooms_auto.how)
+			assert.same({ [F.group_rids.garage] = true, [F.group_rids.living_room] = true, [F.group_rids.attic] = true,
+				[F.group_rids.downstairs] = true }, c4.persist.hue_rooms_auto.seen)
+			-- Kept set, so an earlier build after a rollback does not map again.
+			assert.equal("done", c4.persist.hue_rooms_automapped)
+
+			-- Removed by the owner: the next resync and a restart leave it alone.
+			L:set_room_mapping(F.group_rids.garage, nil)
+			said = {}
+			resync()
+			L = new_lights({ last_action = function(text) said[#said + 1] = text end })
+			L:load()
+			resync()
+			assert.same({}, said)
+			assert.equal("Garage → (no mapping, by hand); Living Room → Living Room (by name); Attic (zone) → (unmapped); "
 				.. "Downstairs (zone) → (unmapped)", L:room_mappings_text())
 
 			-- A project whose room list is unknown postpones the run instead of using it up.
@@ -911,6 +1239,7 @@ describe("bridge.lights", function()
 			L = new_lights({ project = { rooms = function() return {} end } })
 			resync()
 			assert.is_nil(c4.persist.hue_rooms_automapped)
+			assert.is_nil(c4.persist.hue_rooms_auto)
 		end)
 
 		it("reconciles in the contract's order: project, lights, rooms, then the state fan-out", function()
@@ -1008,8 +1337,8 @@ describe("bridge.lights", function()
 			assert.equal(4, #c4.added)
 			assert.equal("5 lights on bridge, 4 imported, 1 new", L:summary())
 			assert.same({ { text = "New Bulb #5", value = NEW_BULB } }, L:picker_lights())
-			assert.equal("1 new light on the bridge: New Bulb #5 (Add Light or Import All New Lights)", L:attention())
-			assert.is_true(saw_log("new light New Bulb #5 on the bridge; use Add Light or Import All New Lights"))
+			assert.equal("1 new light on the bridge: New Bulb #5 (Import All New or Add From Hue)", L:attention())
+			assert.is_true(saw_log("new light New Bulb #5 on the bridge; use Import All New or Add From Hue"))
 			-- Again: idempotent, logged once.
 			logged = {}
 			assert.equal(0, L:on_container(container(F.events.add)))
@@ -1062,7 +1391,8 @@ describe("bridge.lights", function()
 			assert.same({ "HUE_CONFIGURE@2002", "HUE_CONFIGURE@2003" }, commands_sent())
 			assert.equal("Lounge", c4.sent[1].params.hue_room)
 			assert.equal("Lounge", c4.persist.hue_rooms[F.group_rids.living_room].hue_name)
-			assert.equal("Garage → Garage; Lounge → Living Room; Attic (zone) → (unmapped); "
+			-- A rename is no appearance: the mapping by name stays as it was.
+			assert.equal("Garage → Garage (by name); Lounge → Living Room (by name); Attic (zone) → (unmapped); "
 				.. "Downstairs (zone) → (unmapped)", L:room_mappings_text())
 		end)
 
@@ -1092,9 +1422,12 @@ describe("bridge.lights", function()
 			end
 			local before = saves()
 
-			-- A rename alone: nothing to send, registry and store updated at once.
-			assert.equal(0, L:on_container(rename(F.rids.garage, "Garage Lamp")))
-			assert.equal(0, #c4.sent)
+			-- A rename alone: registry and store updated at once, and the device's
+			-- Hue Name row hears it at once too (§4 finding 13), not at the next read.
+			assert.equal(1, L:on_container(rename(F.rids.garage, "Garage Lamp")))
+			assert.same({ "HUE_CONFIGURE@2001" }, commands_sent())
+			assert.equal("Garage Lamp", c4.sent[1].params.name)
+			assert.equal(F.rids.garage, c4.sent[1].params.rid)
 			assert.equal("Garage Lamp", L.registry[F.rids.garage].name)
 			assert.equal("Garage Lamp", c4.persist.hue_lights[F.rids.garage].name)
 			assert.equal(ID.garage, L:device_for(F.rids.garage), "the device id is untouched")
@@ -1102,22 +1435,43 @@ describe("bridge.lights", function()
 			assert.is_true(saw_log("Garage White was renamed to Garage Lamp in Hue"))
 			assert.equal(0, #c4.calls_to("RenameDevice"))
 
-			-- A rename alongside state: the state is sent, the name is taken.
-			assert.equal(1, L:on_container(rename(F.rids.living, "Lounge Lamp", { on = { on = false } })))
-			assert.same({ rid = F.rids.living, on = "false", reason = "event" }, c4.sent[1].params)
+			-- A rename alongside state: the configure, then the state; the name is taken.
+			c4.sent = {}
+			assert.equal(2, L:on_container(rename(F.rids.living, "Lounge Lamp", { on = { on = false } })))
+			assert.same({ "HUE_CONFIGURE@2003", "HUE_STATE@2003" }, commands_sent())
+			assert.equal("Lounge Lamp", c4.sent[1].params.name)
+			assert.same({ rid = F.rids.living, on = "false", reason = "event" }, c4.sent[2].params)
 			assert.equal("Lounge Lamp", c4.persist.hue_lights[F.rids.living].name)
 			assert.equal(before + 2, saves())
 
-			-- The same name again, and a rename of an unregistered light: no save.
+			-- The same name again (the echo of a rename the driver sent), and a rename
+			-- of an unregistered light: nothing sent, no save.
+			c4.sent = {}
 			assert.equal(0, L:on_container(rename(F.rids.living, "Lounge Lamp")))
 			assert.equal(0, L:on_container(rename("unknown", "Whatever")))
+			assert.equal(0, #c4.sent)
 			assert.equal(before + 2, saves())
 
-			-- The next resync sees the same names: no rename logged, no save.
+			-- The next resync sees the same names: no rename logged, no save, no new configure.
 			logged = {}
 			resync({ light = F.light:gsub("Garage White", "Garage Lamp"):gsub("Living Room Lamp", "Lounge Lamp") })
 			assert.is_false(saw_log("was renamed"))
 			assert.equal(before + 2, saves())
+			assert.equal(0, #sent_to(ID.garage, "HUE_CONFIGURE"), "the device was told already")
+		end)
+
+		it("sends no configure for a rename of an unbound light's device, nor for a device rename that changes "
+			.. "nothing the device is told", function()
+			-- The Hue device renamed: its name is the names sync's (device_name), not the Hue Name row.
+			assert.equal(0, L:on_container(container(F.events.device_rename)))
+			assert.equal(0, #c4.sent)
+			assert.equal("Garage Spot", L.registry[F.rids.garage].device_name)
+			L:on_binding_changed(1, "HUE_BRIDGE", false, ID.garage)
+			c4.sent = {}
+			assert.equal(0, L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
+				metadata = { name = "Garage Lamp" } } } }))
+			assert.equal(0, #c4.sent)
+			assert.equal("Garage Lamp", L.registry[F.rids.garage].name)
 		end)
 
 		it("skips the devices of unbound entries", function()
@@ -1133,7 +1487,7 @@ describe("bridge.lights", function()
 		before_each(function()
 			import_all()
 			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
-			resync(replaced_bulb())
+			resync(new_bulb())
 			c4.sent = {}
 		end)
 
@@ -1166,7 +1520,8 @@ describe("bridge.lights", function()
 				{ L:relink(ID.garage, F.rids.living) })
 			assert.same({ false, "Not re-linked: device 2003 is already linked to Living Room Lamp #1" },
 				{ L:relink(ID.living, F.rids.living) })
-			assert.same({ false, "Not re-linked: light nope is not on the bridge (connect the event stream and try again)" },
+			assert.same({ false, "Not re-linked: light nope is not on the bridge (Diagnostics ▸ Read everything from the "
+				.. "bridge now, then try again)" },
 				{ L:relink(ID.garage, "nope") })
 			assert.equal(0, #c4.sent)
 			assert.equal("gone", L.registry[F.rids.garage].state)
@@ -1197,11 +1552,11 @@ describe("bridge.lights", function()
 				.. "Hallway Ambiance (device 2002) to Hallway Ambiance [Living Room] #3 by name, "
 				.. "Kitchen Strip (device 2004) to Kitchen Strip #2 by name; "
 				.. "not linked 3: Living Room Lamp (device 2003): 2 bound devices share that name; rename one in Composer and "
-				.. "run Link Devices again; "
+				.. "run Link Device again; "
 				.. "Mystery (device 2005): no unimported Hue light has that name; rename the device in Composer to the Hue "
-				.. "light's exact name and run Link Devices again; "
+				.. "light's exact name and run Link Device again; "
 				.. "Living Room Lamp (device 2006): 2 bound devices share that name; rename one in Composer and run Link "
-				.. "Devices again", text)
+				.. "Device again", text)
 			assert.equal(3, L:count())
 			assert.equal(ID.garage, L:device_for(F.rids.garage))
 			assert.equal(ID.hallway, L:device_for(F.rids.hallway))
@@ -1219,15 +1574,15 @@ describe("bridge.lights", function()
 			text = L:link_devices()
 			assert.equal("Linked 1 device: Living Room Lamp (device 2003) to Living Room Lamp [Living Room] #1 by name; "
 				.. "not linked 1: Mystery (device 2005): no unimported Hue light has that name; rename the device in Composer "
-				.. "to the Hue light's exact name and run Link Devices again", text)
+				.. "to the Hue light's exact name and run Link Device again", text)
 
 			-- A device announcing a rid another device holds is a conflict.
 			L.announced[2005] = { rid = F.rids.living }
 			text = L:link_devices()
-			assert.equal("not linked 1: Mystery (device 2005) announces Living Room Lamp #1, which device 2003 holds "
-				.. "(Forget Light on one of them)", text)
+			assert.equal("Not linked 1: Mystery (device 2005) announces Living Room Lamp #1, which device 2003 holds "
+				.. "(Forget Device on one of them)", text)
 			assert.truthy(L:attention():find("2 devices claim Hue light Living Room Lamp #1: 2003 and 2005 "
-				.. "(Forget Light on one of them)", 1, true))
+				.. "(Forget Device on one of them)", 1, true))
 		end)
 
 		it("adopts a device by a rid that is not on the bridge as gone", function()
@@ -1295,8 +1650,8 @@ describe("bridge.lights", function()
 				"the skipped device is not counted")
 			-- Without the skip set the zone light would be a candidate and nagged about.
 			L.announced[ZONE_DEVICE] = nil
-			assert.equal("not linked 1: Kitchen Strip (device 2005): no unimported Hue light has that name; "
-				.. "rename the device in Composer to the Hue light's exact name and run Link Devices again", L:link_devices())
+			assert.equal("Not linked 1: Kitchen Strip (device 2005): no unimported Hue light has that name; "
+				.. "rename the device in Composer to the Hue light's exact name and run Link Device again", L:link_devices())
 		end)
 
 		it("ctx.skip_devices does the same for every call, as a set, a list or a function", function()
@@ -1367,7 +1722,7 @@ describe("bridge.lights", function()
 			assert.same({}, sent_to(ZONE_DEVICE))
 
 			-- Re-link to a real light is refused; Forget drops the entry and leaves the binding alone.
-			assert.same({ false, "Not re-linked: device 2005 is a zone light; Forget Light drops its stale light entry" },
+			assert.same({ false, "Not re-linked: device 2005 is a zone light; Forget Device drops its stale light entry" },
 				{ L:relink(ZONE_DEVICE, F.rids.kitchen) })
 			assert.same({ true, "Forgot Bedside Lights #zone-rid (device 2005): dropped the stale light entry; "
 				.. "the device stays bound as a zone light" }, { L:forget(ZONE_DEVICE) })
@@ -1387,7 +1742,7 @@ describe("bridge.lights", function()
 
 		it("drops the entry, unbinds the device, tells it HUE_FORGOTTEN, and lists the light under Add Light", function()
 			assert.same({ true, "Forgot Garage White #4 (device 2001): unbound and left in the project for you to delete; "
-				.. "the Hue light is listed under Add Light again" }, { L:forget(ID.garage) })
+				.. "the Hue light is listed under Add From Hue again" }, { L:forget(ID.garage) })
 			assert.is_nil(L.registry[F.rids.garage])
 			assert.is_nil(c4.persist.hue_lights[F.rids.garage])
 			assert.is_nil(c4.persist.hue_tombstones[F.rids.garage], "forget leaves no tombstone")
@@ -1439,7 +1794,7 @@ describe("bridge.lights", function()
 
 		it("counts the differences in Attention until adopted or accepted [Q 10]", function()
 			assert.equal("2 Hue names differ from the Composer names: Garage is Garage White in Hue, Hall is Hallway Ambiance "
-				.. "in Hue (Adopt Hue Names or Accept Names As They Are)", L:attention())
+				.. "in Hue (Resolve Names)", L:attention())
 			assert.equal("Accepted 2 name differences: Garage (Hue: Garage White), Hall (Hue: Hallway Ambiance)",
 				L:accept_names())
 			assert.equal("None", L:attention())
@@ -1452,7 +1807,7 @@ describe("bridge.lights", function()
 				metadata = { name = "Garage Lamp" } }, { id = F.rids.garage, type = "light",
 				metadata = { name = "Garage Lamp" } } } })
 			assert.equal("1 Hue name differs from the Composer names: Garage is Garage Lamp in Hue "
-				.. "(Adopt Hue Names or Accept Names As They Are)", L:attention())
+				.. "(Resolve Names)", L:attention())
 		end)
 
 		it("adopt_hue_names renames the proxy of every linked device whose Composer name differs", function()
@@ -1460,7 +1815,7 @@ describe("bridge.lights", function()
 				.. "no proxy id known", L:adopt_hue_names())
 			assert.same({ { id = 3001, name = "Garage White" } }, c4.renamed)
 			assert.equal("Garage White", c4:GetDeviceDisplayName(3001))
-			assert.equal("not renamed 1: Hall (device 2002): no proxy id known", L:adopt_hue_names())
+			assert.equal("Not renamed 1: Hall (device 2002): no proxy id known", L:adopt_hue_names())
 			L.registry[F.rids.hallway].proxy_id = fake.project.devices[ID.hallway].proxy_id
 			assert.equal("Renamed 1 device: Hall → Hallway Ambiance (device 2002)", L:adopt_hue_names())
 			assert.equal("No Composer names differ from the Hue names", L:adopt_hue_names())
@@ -1506,7 +1861,7 @@ describe("bridge.lights", function()
 			c4:RenameDevice(proxy, "Garage")
 			c4.renamed = {}
 			assert.equal("1 Hue name differs from the Composer names: Garage is Garage Device in Hue "
-				.. "(Adopt Hue Names or Accept Names As They Are)", L:attention())
+				.. "(Resolve Names)", L:attention())
 			assert.equal("Renamed 1 device: Garage → Garage Device (device 2001)", L:adopt_hue_names())
 			assert.same({ { id = proxy, name = "Garage Device" } }, c4.renamed)
 			assert.equal("None", L:attention())
@@ -1517,7 +1872,7 @@ describe("bridge.lights", function()
 			L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
 				metadata = { name = "Workbench" } } } })
 			assert.equal("1 Hue name differs from the Composer names: Garage Device is Workbench in Hue "
-				.. "(Adopt Hue Names or Accept Names As They Are)", L:attention())
+				.. "(Resolve Names)", L:attention())
 			assert.same({}, c4.renamed, "an event renames nothing")
 		end)
 	end)
@@ -1596,12 +1951,21 @@ describe("bridge.lights", function()
 				{ L:set_room_mapping(F.group_rids.downstairs, GARAGE_ROOM) })
 			assert.same({ c4_room_id = GARAGE_ROOM, c4_room_name = "Garage", hue_name = "Downstairs", type = "zone" },
 				c4.persist.hue_rooms[F.group_rids.downstairs])
-			assert.equal("Garage → Living Room; Living Room → Living Room; Attic (zone) → (unmapped); "
-				.. "Downstairs (zone) → Garage", L:room_mappings_text())
-			assert.same({ true, "Removed the mapping for Garage" }, { L:set_room_mapping(F.group_rids.garage, nil) })
+			assert.equal("Garage → Living Room (by hand); Living Room → Living Room (by name); Attic (zone) → (unmapped); "
+				.. "Downstairs (zone) → Garage (by hand)", L:room_mappings_text())
+			assert.same({ true, "Removed the mapping for Garage; it is not mapped by name again" },
+				{ L:set_room_mapping(F.group_rids.garage, nil) })
 			assert.same({ true, "No mapping for Garage to remove" }, { L:set_room_mapping(F.group_rids.garage, nil) })
+			-- "(no mapping)" on a group that never had one records the choice too.
+			assert.same({ true, "No mapping for Attic (zone) to remove; it is not mapped by name from now on" },
+				{ L:set_room_mapping(F.group_rids.attic, nil) })
+			assert.same({ [F.group_rids.garage] = "none", [F.group_rids.living_room] = "name",
+				[F.group_rids.downstairs] = "hand", [F.group_rids.attic] = "none" }, c4.persist.hue_rooms_auto.how)
+			assert.equal("Garage → (no mapping, by hand); Living Room → Living Room (by name); "
+				.. "Attic (zone) → (no mapping, by hand); Downstairs (zone) → Garage (by hand)", L:room_mappings_text())
 			assert.same({ false, "Not mapped: pick a Hue room first" }, { L:set_room_mapping("", LIVING_ROOM) })
-			assert.same({ false, "Not mapped: Hue room nope is not on the bridge (connect the event stream and try again)" },
+			assert.same({ false, "Not mapped: Hue room nope is not on the bridge (Diagnostics ▸ Read everything from the "
+				.. "bridge now, then try again)" },
 				{ L:set_room_mapping("nope", LIVING_ROOM) })
 			assert.same({ false, "Not mapped: the whole bridge cannot be mapped to one room" },
 				{ L:set_room_mapping(F.group_rids.home, LIVING_ROOM) })
@@ -1617,7 +1981,10 @@ describe("bridge.lights", function()
 			fake.add_room(9, " Downstairs ", 4, "Lower")
 			fake.add_room(10, "Living Room", 4, "Lower")  -- a second room with that name: ambiguous
 			resync()
-			assert.equal("None; use Map Rooms By Name", L:room_mappings_text())
+			-- The update to 1.2 maps nothing by itself; the matches are offered.
+			assert.equal("Garage → (unmapped; Control4 room GARAGE matches); Living Room → (unmapped); "
+				.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped; Control4 room  Downstairs  matches)",
+				L:room_mappings_text())
 			assert.equal("Mapped 2: Garage → GARAGE, Downstairs (zone) →  Downstairs ; no Control4 room named: Attic (zone); "
 				.. "ambiguous: Living Room (2 Control4 rooms are named Living Room)", L:map_rooms_by_name())
 			L:set_room_mapping(F.group_rids.living_room, 10)
@@ -1625,10 +1992,15 @@ describe("bridge.lights", function()
 			assert.equal("Nothing new to map; 3 already mapped (kept); no Control4 room named: Attic (zone)",
 				L:map_rooms_by_name())
 			assert.equal(LIVING_ROOM, c4.persist.hue_rooms[F.group_rids.garage].c4_room_id, "never overridden")
+			-- Never over a mapping the owner removed either.
+			L:set_room_mapping(F.group_rids.downstairs, nil)
+			assert.equal("Nothing new to map; 2 already mapped (kept); unmapped by hand (kept): Downstairs (zone); "
+				.. "no Control4 room named: Attic (zone)", L:map_rooms_by_name())
 		end)
 
 		it("map_rooms_by_name needs the groups and the rooms", function()
-			assert.equal("Nothing mapped: no Hue rooms fetched yet (connect the event stream and try again)",
+			assert.equal("Nothing mapped: no Hue rooms fetched yet (Diagnostics ▸ Read everything from the bridge now, then "
+				.. "try again)",
 				L:map_rooms_by_name())
 			L = new_lights({ project = { rooms = function() return {} end } })
 			resync()
@@ -1643,18 +2015,19 @@ describe("bridge.lights", function()
 			}
 			L:load()
 			resync()
-			assert.equal("Garage → (Control4 room gone); Living Room → Living Room; Attic (zone) → (unmapped); "
-				.. "Downstairs (zone) → (unmapped); Office (deleted in Hue) → Living Room; "
-				.. "Upstairs (zone) (deleted in Hue) → (Control4 room gone)", L:room_mappings_text())
+			assert.equal("Garage → (Control4 room gone) (before 1.2); Living Room → Living Room (by name); "
+				.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped); Office (deleted in Hue) → Living Room "
+				.. "(before 1.2); Upstairs (zone) (deleted in Hue) → (Control4 room gone) (before 1.2)", L:room_mappings_text())
 			assert.truthy(L:attention():find("; 2 room mappings point at a Control4 room that no longer exists: Garage, "
 				.. "Upstairs (zone) (deleted in Hue) (Set Room Mapping)", 1, true), L:attention())
 			-- The stale mappings can still be removed through the picker.
 			local hue_rooms = L:picker_hue_rooms()
-			assert.same({ "Garage → (Control4 room gone)", "Living Room → Living Room", "Attic (zone) → (unmapped)",
-				"Downstairs (zone) → (unmapped)", "Office (deleted in Hue) → Living Room",
-				"Upstairs (zone) (deleted in Hue) → (Control4 room gone)" }, texts(hue_rooms))
+			assert.same({ "Garage → (Control4 room gone) (before 1.2)", "Living Room → Living Room (by name)",
+				"Attic (zone) → (unmapped)", "Downstairs (zone) → (unmapped)", "Office (deleted in Hue) → Living Room "
+					.. "(before 1.2)",
+				"Upstairs (zone) (deleted in Hue) → (Control4 room gone) (before 1.2)" }, texts(hue_rooms))
 			assert.equal("old-zone", hue_rooms[6].value)
-			assert.same({ true, "Removed the mapping for Upstairs (zone) (deleted in Hue)" },
+			assert.same({ true, "Removed the mapping for Upstairs (zone) (deleted in Hue); it is not mapped by name again" },
 				{ L:set_room_mapping("old-zone", nil) })
 			-- A deleted-in-Hue mapping can be re-pointed too.
 			assert.same({ true, "Mapped Office (deleted in Hue) → Garage" }, { L:set_room_mapping("old-office", GARAGE_ROOM) })
@@ -1670,12 +2043,13 @@ describe("bridge.lights", function()
 			L:load()
 			-- Right after a reload, before any resync: the cached names, no suffix.
 			assert.is_false(L.groups_loaded)
-			assert.equal("Downstairs (zone) → (Control4 room gone); Garage → Garage; Living Room → Living Room",
-				L:room_mappings_text())
+			-- Mappings an earlier build made say so.
+			assert.equal("Downstairs (zone) → (Control4 room gone) (before 1.2); Garage → Garage (before 1.2); "
+				.. "Living Room → Living Room (before 1.2)", L:room_mappings_text())
 			assert.equal("1 room mapping points at a Control4 room that no longer exists: Downstairs (zone) (Set Room Mapping)",
 				L:attention())
-			assert.same({ "Downstairs (zone) → (Control4 room gone)", "Garage → Garage", "Living Room → Living Room" },
-				texts(L:picker_hue_rooms()))
+			assert.same({ "Downstairs (zone) → (Control4 room gone) (before 1.2)", "Garage → Garage (before 1.2)",
+				"Living Room → Living Room (before 1.2)" }, texts(L:picker_hue_rooms()))
 			-- An event before the first resync cannot blank a light's room either.
 			assert.same({}, L:reconcile_rooms())
 
@@ -1686,17 +2060,195 @@ describe("bridge.lights", function()
 			end
 			resync({ room = json.encode(doc) })
 			assert.is_true(L.groups_loaded)
-			assert.equal("Living Room → Living Room; Attic (zone) → (unmapped); Downstairs (zone) → (Control4 room gone); "
-				.. "Garage (deleted in Hue) → Garage", L:room_mappings_text())
-			assert.equal("Garage (deleted in Hue) → Garage", texts(L:picker_hue_rooms())[4])
+			assert.equal("Living Room → Living Room (before 1.2); Attic (zone) → (unmapped); Downstairs (zone) → "
+				.. "(Control4 room gone) (before 1.2); Garage (deleted in Hue) → Garage (before 1.2)", L:room_mappings_text())
+			assert.equal("Garage (deleted in Hue) → Garage (before 1.2)", texts(L:picker_hue_rooms())[4])
 			-- And a full fetch that has the Garage again drops the suffix.
 			resync()
-			assert.equal("Garage → Garage; Living Room → Living Room; Attic (zone) → (unmapped); "
-				.. "Downstairs (zone) → (Control4 room gone)", L:room_mappings_text())
+			assert.equal("Garage → Garage (before 1.2); Living Room → Living Room (before 1.2); Attic (zone) → "
+				.. "(unmapped); "
+				.. "Downstairs (zone) → (Control4 room gone) (before 1.2)", L:room_mappings_text())
+		end)
+
+		-- 1.2 (#334): rooms map by name when they appear, docs/simplify-actions-design.md §1.3.
+		describe("by name when they appear (1.2)", function()
+			local said
+
+			local function said_by(...)
+				said = {}
+				L = new_lights({ last_action = function(text) said[#said + 1] = text end })
+				for _, f in ipairs({ ... }) do f() end
+			end
+
+			-- The zone fixture plus one zone the driver has not seen.
+			local CELLAR = "7d6c5b4a-0000-4000-8000-00000000z009"
+			local function zones_with_cellar()
+				local doc = json.decode(F.zone)
+				doc.data[#doc.data + 1] = { id = CELLAR, id_v1 = "/groups/9", type = "zone", children = {}, services = {},
+					metadata = { name = "Cellar", archetype = "other" } }
+				return json.encode(doc)
+			end
+
+			local function renamed(rid, gtype, name)
+				return '[{"creationtime":"2026-10-21T18:20:00Z","id":"9de116fc-0020-4a2b-8c3d-000000000020","type":"update",'
+					.. '"data":[{"id":"' .. rid .. '","metadata":{"name":"' .. name .. '"},"type":"' .. gtype .. '"}]}]'
+			end
+
+			it("maps one added in Hue at its stream add and one a later read brings; a rename of a known one maps nothing",
+				function()
+				said_by(resync)
+				said = {}
+				fake.add_room(9, "Upstairs")
+				assert.equal(0, L:on_container(container(F.events.zone_add)))
+				assert.same({ "Mapped 1 Hue room or zone by name: Upstairs (zone) → Upstairs" }, said)
+				assert.equal(9, c4.persist.hue_rooms[F.new_zone_rid].c4_room_id)
+				assert.equal("name", c4.persist.hue_rooms_auto.how[F.new_zone_rid])
+
+				-- A known zone renamed to the name of a Control4 room: no appearance,
+				-- only offered (the owner's answer: renames do not count).
+				fake.add_room(10, "Loft")
+				said = {}
+				L:on_container(container(renamed(F.group_rids.attic, "zone", "Loft")))
+				assert.same({}, said)
+				assert.is_nil(c4.persist.hue_rooms[F.group_rids.attic])
+				assert.truthy(L:room_mappings_text():find("Loft (zone) → (unmapped; Control4 room Loft matches)", 1, true))
+
+				-- A zone made while the driver was not watching appears at the next read.
+				fake.add_room(11, "Cellar")
+				resync({ zone = zones_with_cellar() })
+				assert.same({ "Mapped 1 Hue room or zone by name: Cellar (zone) → Cellar" }, said)
+				assert.equal(11, c4.persist.hue_rooms[CELLAR].c4_room_id)
+				-- The read had no Upstairs: it leaves the seen list, its mapping stays.
+				assert.is_nil(c4.persist.hue_rooms_auto.seen[F.new_zone_rid])
+				assert.equal(9, c4.persist.hue_rooms[F.new_zone_rid].c4_room_id)
+				assert.equal(0, #c4.calls_to("AddDevice"), "a mapping moves or creates nothing")
+			end)
+
+			it("never maps a name two Control4 rooms carry: says so once, offers nothing, and does not try again",
+				function()
+				fake.add_room(9, " garage ", 4, "Lower")
+				said_by(resync)
+				assert.same({ "Mapped 1 Hue room or zone by name: Living Room → Living Room; not mapped, the name is "
+					.. "ambiguous (Set Room Mapping): Garage (2 Control4 rooms are named Garage)" }, said)
+				said = {}
+				fake.delete_room(9)
+				resync()
+				assert.same({}, said, "seen: a later read does not map it by itself")
+				assert.equal("Garage → (unmapped; Control4 room Garage matches); Living Room → Living Room (by name); "
+					.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped)", L:room_mappings_text())
+			end)
+
+			it("writes no Last Action when a pass maps nothing (only ambiguous names); the log keeps it (§4 finding 11)",
+				function()
+				fake.add_room(9, "Garage", 4, "Lower")
+				fake.add_room(10, "Living Room", 4, "Lower")
+				said_by(resync)
+				assert.same({}, said)
+				assert.is_true(saw_log("lights: rooms: not mapped, the name is ambiguous (Set Room Mapping): Garage (2 Control4 "
+					.. "rooms are named Garage), Living Room (2 Control4 rooms are named Living Room)"))
+				assert.same({}, c4.persist.hue_rooms or {}, "nothing mapped")
+			end)
+
+			it("maps nothing by itself at the update to 1.2: its first read's groups are known, a match only offered",
+				function()
+				c4.persist.hue_rooms_automapped = "done"  -- an earlier build ran its one-time Map Rooms By Name
+				c4.persist.hue_rooms = { [F.group_rids.garage] = { c4_room_id = GARAGE_ROOM, c4_room_name = "Garage",
+					hue_name = "Garage", type = "room" } }
+				said_by(function() L:load() end, resync)
+				assert.same({}, said)
+				assert.is_nil(c4.persist.hue_rooms[F.group_rids.living_room])
+				assert.equal("Garage → Garage (before 1.2); Living Room → (unmapped; Control4 room Living Room matches); "
+					.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped)", L:room_mappings_text())
+				assert.same({}, c4.persist.hue_rooms_auto.how)
+				assert.is_true(c4.persist.hue_rooms_auto.seen[F.group_rids.living_room])
+				-- What appears after the update is mapped as usual.
+				fake.add_room(9, "Upstairs")
+				L:on_container(container(F.events.zone_add))
+				assert.same({ "Mapped 1 Hue room or zone by name: Upstairs (zone) → Upstairs" }, said)
+				-- Map Rooms By Name (a hidden alias) offers the rest on demand.
+				assert.equal("Mapped 1: Living Room → Living Room; 2 already mapped (kept); no Control4 room named: "
+					.. "Attic (zone), Downstairs (zone)", L:map_rooms_by_name())
+				assert.equal("name", c4.persist.hue_rooms_auto.how[F.group_rids.living_room])
+			end)
+
+			it("re-points a mapping by name whose Control4 room was deleted to the one room of the name (CR3), never a "
+				.. "hand choice", function()
+				said_by(resync)
+				L:set_room_mapping(F.group_rids.downstairs, GARAGE_ROOM)
+				fake.delete_room(GARAGE_ROOM)
+				fake.add_room(12, "Garage")
+				said = {}
+				resync()
+				assert.same({ "Re-mapped by name (the Control4 room was deleted): Garage → Garage" }, said)
+				assert.equal(12, c4.persist.hue_rooms[F.group_rids.garage].c4_room_id)
+				assert.equal(GARAGE_ROOM, c4.persist.hue_rooms[F.group_rids.downstairs].c4_room_id, "a hand choice stays")
+				assert.truthy(L:attention():find("; 1 room mapping points at a Control4 room that no longer exists: "
+					.. "Downstairs (zone) (Set Room Mapping)", 1, true), L:attention())
+				said = {}
+				resync()
+				assert.same({}, said)
+			end)
+
+			it("reads an earlier build's changes safely: a recorded mapping it removed counts as removed, one it made "
+				.. "as a hand choice", function()
+				said_by(resync)
+				-- After a rollback the earlier build removed Garage's mapping and mapped Attic by hand.
+				local raw = c4.persist.hue_rooms
+				raw[F.group_rids.garage] = nil
+				raw[F.group_rids.attic] = { c4_room_id = LIVING_ROOM, c4_room_name = "Living Room", hue_name = "Attic",
+					type = "zone" }
+				L = new_lights()
+				L:load()
+				resync()
+				assert.equal("Garage → (no mapping, by hand); Living Room → Living Room (by name); "
+					.. "Attic (zone) → Living Room (before 1.2); Downstairs (zone) → (unmapped)", L:room_mappings_text())
+				assert.equal("none", L:mapping_how(F.group_rids.garage))
+				assert.equal("earlier", L:mapping_how(F.group_rids.attic))
+				assert.is_nil(L:mapping_how(F.group_rids.downstairs))
+			end)
+		end)
+
+		it("marks a linked light whose device sits in another Control4 room than its Hue room maps to; moves nothing",
+			function()
+			import_all()
+			local lookups = #c4.calls_to("GetDevices")
+			assert.same({}, L:room_marks())
+			assert.same({ { DeviceIds = "2001,2002,2003" } }, c4.calls_to("GetDevices")[lookups + 1],
+				"one lookup, of the lights in mapped Hue rooms")
+			fake.move_device(ID.garage, LIVING_ROOM)
+			fake.move_device(ID.hallway, GARAGE_ROOM)
+			assert.same({
+				"(no room): Kitchen Strip → device 2004",
+				"Garage: Garage White → device 2001 (in Living Room instead of Garage)",
+				"Living Room: Hallway Ambiance → device 2002 (in Garage instead of Living Room)",
+				"Living Room: Living Room Lamp → device 2003",
+			}, L:list_items())
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+			assert.equal(LIVING_ROOM, fake.project.devices[ID.garage].room_id, "nothing moved")
+			-- A mapped room deleted in Composer.
+			fake.add_room(13, "Den")
+			L:set_room_mapping(F.group_rids.living_room, 13)
+			fake.delete_room(13)
+			assert.equal(" (in Garage; mapped room gone)", L:room_marks()[ID.hallway])
+			-- A gone light carries no mark; a failed lookup marks nothing.
+			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
+			assert.is_nil(L:room_marks()[ID.garage])
+			L = new_lights({ project = { devices = function() error("lookup failed") end } })
+			L:load()
+			resync()
+			assert.same({}, L:room_marks())
+			-- Without a mapping, no lookup at all.
+			L = new_lights()
+			L:load()
+			resync()
+			for _, rid in ipairs({ F.group_rids.garage, F.group_rids.living_room }) do L:set_room_mapping(rid, nil) end
+			lookups = #c4.calls_to("GetDevices")
+			assert.same({}, L:room_marks())
+			assert.equal(lookups, #c4.calls_to("GetDevices"))
 		end)
 
 		it("room_audit lists devices whose Control4 room differs from their Hue room's mapping [Q 12]", function()
-			assert.equal("No room mappings; use Map Rooms By Name or Set Room Mapping first", L:room_audit())
+			assert.equal("No room mappings yet (Set Room Mapping makes one)", L:room_audit())
 			import_all()
 			assert.equal("All 3 linked lights in mapped Hue rooms are in the rooms their Hue rooms map to", L:room_audit())
 			fake.move_device(ID.garage, LIVING_ROOM)
@@ -1819,12 +2371,13 @@ describe("bridge.lights", function()
 			assert.is_false(L:hello(F.rids.garage, { device_id = tostring(ID.hallway) }))
 			assert.equal(0, #c4.sent)
 			assert.equal(ID.garage, L:device_for(F.rids.garage), "the holder keeps the rid")
-			assert.equal("2 devices claim Hue light Garage White #4: 2001 and 2002 (Forget Light on one of them)", L:attention())
+			assert.equal("2 devices claim Hue light Garage White #4: 2001 and 2002 (Forget Device on one of "
+				.. "them)", L:attention())
 			assert.is_true(saw_log("device 2002 claims Garage White #4, which device 2001 holds"))
 			-- Forgetting (or deleting) either device ends the conflict.
 			L:forget(ID.hallway)
 			assert.equal("4 lights on bridge, 3 imported, 1 new", L:summary())
-			assert.equal("1 new light on the bridge: Hallway Ambiance [Living Room] #3 (Add Light or Import All New Lights)",
+			assert.equal("1 new light on the bridge: Hallway Ambiance [Living Room] #3 (Import All New or Add From Hue)",
 				L:attention())
 
 			-- Two unregistered devices announcing one rid: neither is adopted.
@@ -1898,7 +2451,7 @@ describe("bridge.lights", function()
 			L:import_new(done)
 			answer_gets()
 			assert.equal(0, #c4.added)
-			assert.same({ ok = true, text = "Added no lights; skipped 1 deleted in Composer (Add Light re-creates one): "
+			assert.same({ ok = true, text = "Added no lights; skipped 1 deleted in Composer (Add From Hue re-creates one): "
 				.. "Garage White #4 (deleted " .. date .. ")" }, last_result())
 
 			L:add_light(F.rids.garage, nil, done)
@@ -1939,7 +2492,8 @@ describe("bridge.lights", function()
 			assert.equal(T0 + 7, entry.unbound_since)
 			assert.equal("unbound", c4.persist.hue_lights[F.rids.garage].state)
 			assert.equal("4 lights on bridge, 4 imported, 0 new, 1 unbound", L:summary())
-			assert.equal("1 unbound device: Garage White #4 (device 2001) (bind it to this bridge in Composer, or Forget Light)",
+			assert.equal("1 unbound device: Garage White #4 (device 2001) (bind it to this bridge in Composer, or Forget "
+				.. "Device)",
 				L:attention())
 			assert.same({ "Garage White (device 2001, unbound since " .. os.date("%m-%d", T0 + 7) .. ")" },
 				texts(L:picker_relink_devices()))
@@ -2006,7 +2560,8 @@ describe("bridge.lights", function()
 
 	describe("pickers", function()
 		it("picker_lights lists unimported lights with room and number, hints first, deleted last", function()
-			assert.same({ { text = "(no lights fetched yet; connect the event stream)", value = "" } }, L:picker_lights())
+			assert.same({ { text = "(no lights fetched yet; Diagnostics ▸ Read everything from the bridge "
+				.. "now)", value = "" } }, L:picker_lights())
 			resync()
 			assert.same({ "Garage White [Garage] #4", "Hallway Ambiance [Living Room] #3", "Kitchen Strip #2",
 				"Living Room Lamp [Living Room] #1" }, texts(L:picker_lights()))
@@ -2064,11 +2619,12 @@ describe("bridge.lights", function()
 		end)
 
 		it("picker_hue_rooms lists rooms then zones with their mappings", function()
-			assert.same({ { text = "(no Hue rooms fetched yet; connect the event stream)", value = "" } }, L:picker_hue_rooms())
+			assert.same({ { text = "(no Hue rooms fetched yet; Diagnostics ▸ Read everything from the bridge "
+				.. "now)", value = "" } }, L:picker_hue_rooms())
 			resync()
 			assert.same({
-				{ text = "Garage → Garage", value = F.group_rids.garage },
-				{ text = "Living Room → Living Room", value = F.group_rids.living_room },
+				{ text = "Garage → Garage (by name)", value = F.group_rids.garage },
+				{ text = "Living Room → Living Room (by name)", value = F.group_rids.living_room },
 				{ text = "Attic (zone) → (unmapped)", value = F.group_rids.attic },
 				{ text = "Downstairs (zone) → (unmapped)", value = F.group_rids.downstairs },
 			}, L:picker_hue_rooms())
@@ -2166,7 +2722,8 @@ describe("bridge.lights", function()
 			assert.equal(8, #c4.calls_to("SendToDevice"))
 			local persisted = {}
 			for _, args in ipairs(c4.calls_to("PersistSetValue")) do persisted[args[1]] = true end
-			assert.same({ hue_lights = true, hue_rooms = true, hue_tombstones = true, hue_rooms_automapped = true }, persisted)
+			assert.same({ hue_lights = true, hue_rooms = true, hue_tombstones = true, hue_rooms_automapped = true,
+				hue_rooms_auto = true }, persisted)
 			-- The project calls default to C4 too (the fake records these two).
 			assert.same({ { C4iNames = "hue_light.c4z" } }, c4.calls_to("GetDevices")[1])
 			assert.same({ "roomdevice.c4i" }, c4.calls_to("GetDevicesByC4iName")[1])
@@ -2365,7 +2922,7 @@ describe("bridge.lights", function()
 		it("forgets what a device announced when it is re-linked or tombstoned (R5)", function()
 			import_all()
 			resync({ light = lights_json({ "living", "kitchen", "hallway" }) })
-			resync(replaced_bulb())
+			resync(new_bulb())
 			L:hello(F.rids.garage, { device_id = tostring(ID.garage) })
 			assert.equal(F.rids.garage, L.announced[ID.garage].rid)
 			assert.is_true((L:relink(ID.garage, REPLACED)))
@@ -2414,7 +2971,7 @@ describe("bridge.lights", function()
 			assert.equal("Kitchen Strip", c4.sent[1].params.name)
 			assert.same({ rid = F.rids.kitchen, online = "false", reason = "resync" }, c4.sent[2].params)
 			assert.is_true(saw_log("Kitchen Strip #2 (device 2001) was deleted on the bridge while its device was being "
-				.. "added; marked gone (Re-link Device To Light or Forget Light)"))
+				.. "added; marked gone (Link or Forget Device)"))
 			assert.equal("3 lights on bridge, 1 imported, 3 new, 1 missing", L:summary())
 			-- Its hello is answered with the gone configuration.
 			c4.sent = {}

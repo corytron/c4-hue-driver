@@ -46,10 +46,10 @@ has the release notes and the provenance attestations. How to install them:
   switches and dimmers or by Hue automations show up in Control4 within a
   second or two and Control4 programming reacts to them. Changes arrive as
   events, not by polling: the driver reads the whole bridge when the stream
-  connects, which it does again after ten quiet minutes and at least once an
-  hour (**Stream Watchdog (s)**, **Stream Timeout (s)**), and when an action
-  you click needs fresh data. No cloud account is involved and nothing
-  leaves the house.
+  connects (it reopens a stream that has been quiet for ten minutes,
+  **Stream Watchdog (s)**) and, from 1.2, by itself every few hours as a
+  check behind the stream. No cloud account is involved and nothing leaves
+  the house.
 - **Rooms and zones as lights.** A Hue zone or room can be added as one Hue
   Light device whose tile, slider and colour controls move every lamp in it
   with a single request to the bridge.
@@ -63,7 +63,8 @@ has the release notes and the provenance attestations. How to install them:
   Control4 motion sensor: its icon, "senses motion" programming and history,
   plus light level, temperature (also as an output for a thermostat or a
   temperature display), battery and an occupancy hold time. In the 1.1
-  prereleases only, for testers; it never changes anything on the Hue side.
+  prereleases only, for testers; it changes nothing on the Hue side except,
+  from 1.2, a sensor's name when you rename its device in Composer.
 - **Keypads.** Hue Light and Hue Scene devices offer Top, Bottom and Toggle
   Button Links: tap for on and off, hold for Hue's own smooth dimming, and the
   keypad LEDs follow the device, including changes made on the Hue side. The
@@ -71,24 +72,36 @@ has the release notes and the provenance attestations. How to install them:
   preset and the click rates on a Hue Light, the hold rates and the LED
   colours on both. A Control4 switch can run as a decoupled two-button
   keypad for a Hue bulb.
-- **Pairing from Composer.** Enter the bridge's address, press the link
-  button, click Pair Bridge. The application key is stored encrypted on the
+- **Pairing from Composer.** Pick the bridge from **Bridges Found** (from
+  1.2 the driver looks for Hue bridges on the local network by itself) or
+  type its address, then click Pair Bridge and press the link button within
+  two minutes. The application key is stored encrypted on the
   controller and never shown. HTTPS only: the bridge's certificate is
   verified against Signify's root certificates, which ship with the driver,
   and at every start and after an address change the driver checks, before
   anything carries the key, that the bridge at the address is the paired one
   (by its bridge id) and that the controller really applies those roots (a
-  TLS self-check).
-- **Lifecycle handling.** Renames on either side, lights replaced or deleted in
-  Hue, devices deleted in Composer, a bridge reset or replaced, a project
-  restored from a backup: each is reported in a readable `Attention` line and
-  resolved with a click (Adopt Hue Names, Re-link Device To Light, Forget
-  Light, Link Devices, ...). The driver never creates, renames, moves or
-  deletes a Control4 device on its own.
+  TLS self-check); the bridge id is checked again once the event stream has
+  been down for a minute.
+- **Nine actions, and the rest by itself (from 1.2).** The bridge has nine
+  actions (Pair Bridge, Import All New, Add From Hue, Link Device, Forget
+  Device, Resolve Names, Set Room Mapping, Diagnostics, Forget Pairing); the
+  lights and scenes have none. Reading the bridge again, re-checking a
+  rejected key, following the bridge to a new address on the local network
+  and mapping new Hue rooms by name happen without a click, and Attention
+  says when the bridge has been away for an hour.
+- **Lifecycle handling.** A name changed on either side follows on the other
+  (from 1.2; Composer's name wins when both changed). A bulb or sensor that
+  comes back with the same radio is re-linked by itself. Lights replaced or
+  deleted in Hue, devices deleted in Composer, a bridge reset or replaced, a
+  project restored from a backup: each is reported in a readable `Attention`
+  line and resolved with a click (Link Device, Forget Device, Resolve
+  Names). The driver never creates, moves or deletes a Control4 device on
+  its own.
 - **Readable Composer properties.** Status, Event Stream, Lights, Scenes, Zone
   Lights, Room Mappings and Last Action say in plain words what the driver is
   doing and what it did; long lists open as drop-downs, and a long Last Action
-  continues on up to five more rows.
+  or Attention continues on up to five more rows.
 - **Polite to the bridge.** Commands are coalesced per light (a fast slider
   drag sends only the latest value) and paced at Hue's limits: about ten light
   commands a second, one grouped command a second.
@@ -96,7 +109,9 @@ has the release notes and the provenance attestations. How to install them:
 ### What it looks like in Composer Pro
 
 The bridge's actions, adding a Hue zone as one light, and a scene device
-(example names; the pictures are the manual's, `src/hue_bridge/www/img/`):
+(example names; the pictures are the manual's, `src/hue_bridge/www/img/`, and
+the first two still show release 1.1, before the actions were merged into
+nine):
 
 <img src="src/hue_bridge/www/img/bridge-actions.png" width="380" alt="The Hue Bridge driver's Actions tab"> <img src="src/hue_bridge/www/img/add-zone-light.png" width="380" alt="Add Zone Light with the Group list open">
 
@@ -114,10 +129,12 @@ The bridge's actions, adding a Hue zone as one light, and a scene device
   roots, but it has not been tried.
 - A **Philips Hue Bridge** (the square version 2 bridge, BSB002) or a **Hue
   Bridge Pro** (BSB003) on the same network as the controller, with a fixed
-  IPv4 address (a DHCP reservation in your router). The driver finds the
-  bridge by its address only. An address with a number below 8 in it
-  (`10.0.2.143`, not `198.51.100.50`) gives the event stream a connection
-  queue of its own; the manual's chapter 3 explains why.
+  IPv4 address, preferably (a DHCP reservation in your router). From 1.2 the
+  driver finds the bridge on the local network by itself (mDNS, then a
+  search of at most two private networks, around its last address and the
+  controller's own; never through the internet) and follows it to a new
+  address; a bridge on another VLAN is entered by its address. Any IPv4
+  address works.
 - Not supported: the round first-generation bridge (BSB001), which has no CLIP v2
   API, and devices that are not Hue bridges; both are refused at pairing. The
   bridge's software must be 1948086000 or newer, or pairing is refused too
@@ -238,30 +255,40 @@ chapters 3 to 7 and 9 are the long version of this list.
    manufacturer *Philips Hue* with the model text *Hue Bridge (CLIP v2)* (the
    search also finds Control4's own Hue drivers) and double-click it. Do not
    add a Hue Light or Hue Scene from the Items pane: the bridge creates them.
-4. On the bridge's **Properties** tab, type the bridge's address into **Bridge
-   IP Address** (the Hue app shows it under Settings > My Hue system) and
-   click the row's **Set** button. Status reads *Not paired: press the link
-   button, then run Pair Bridge*.
-5. Press the round **link button** on the bridge, then right away click
-   **Pair Bridge** on the **Actions** tab (Hue accepts a pairing for about 30
-   seconds after the press). Status goes *Pairing: contacting
-   bridge*, *Pairing: found Hue Bridge Pro (BSB003) ..., requesting key*,
-   *Checking the bridge at ... before anything is sent*, **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware fill
-   in, Event Stream reads *Connected since ...*, Lights reads for example *47
-   on bridge, 0 imported, 47 new, ...*, Attention lists the new lights, and
-   Room Mappings is filled by a one-time automatic **Map Rooms By Name**.
+4. On the bridge's **Properties** tab, open **Bridges Found**, pick your
+   bridge and click the row's **Set** button; or type the bridge's address
+   into **Bridge IP Address** (the Hue app shows it under Settings > My Hue
+   system) and click that row's **Set**. On a driver that is not paired
+   either one opens the pairing window: Status reads *Pairing: found Hue
+   Bridge Pro (BSB003) ..., requesting key*, then *Press the link button on
+   the Hue bridge (waiting 1:57)* and counts down (**Pair Bridge** on the
+   **Actions** tab opens it again).
+5. Press the round **link button** on the bridge within those two minutes.
+   Status goes on to *Checking the bridge at ... before anything is sent*,
+   then **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware
+   fill in, Event Stream reads *Connected since ...*, Lights reads for
+   example *47 lights on bridge, 0 imported, 47 new*, Attention lists the
+   new lights, and Room Mappings maps every Hue room whose name exactly one
+   Control4 room has (on a new installation; an update from an earlier
+   release keeps its mappings and maps nothing by itself).
 6. **Rooms.** Open the Room Mappings drop-down; map what is still
-   *(unmapped)* with **Set Room Mapping** (zones too), or click **Map Rooms By
-   Name** again after creating rooms. A mapping decides only where new devices
-   land; it never moves anything.
-7. **Lights.** **Add Light** creates one Hue Light in a room you pick;
-   **Import All New Lights** creates every new light whose Hue room is mapped;
-   **Add Zone Light** makes a Hue zone or room into one light.
-8. **Scenes.** **Add Scene** creates one Hue Scene (time-of-day scenes are
-   listed as *(time-based)*); **Add All Scenes Of Room** creates every scene of
-   one Hue room or zone.
+   *(unmapped)* with **Set Room Mapping** (zones too). A Hue room that
+   appears later is mapped by name by itself, and Last Action says so. A
+   mapping decides only where
+   new devices land; it never moves anything.
+7. **Lights.** **Import All New** creates every new light whose Hue room is
+   mapped. **Add From Hue** creates one light, or a Hue zone or room as one
+   light, in a room you pick: its list opens in folders (double-click a
+   folder to open it).
+8. **Scenes.** **Add From Hue** has a folder of scenes for each Hue room or
+   zone: open it and pick one scene, or pick the folder itself for all the
+   scenes of that room or zone.
 9. **File > Refresh Navigators**, so the touch screens and the app show the
    new tiles.
+
+These steps are for release 1.2 and later. Release 1.1 and earlier had other
+actions (Add Light, Add Scene, Test Connection, ...); the manual on the
+bridge's Documentation tab always matches the build installed.
 
 <!-- Screenshots. Only add-driver-menu.png is used here: the licensing research
      (docs/licensing-research.md, section 4 and section 6 step 4) rates it
@@ -272,8 +299,8 @@ chapters 3 to 7 and 9 are the long version of this list.
      bridge-properties.png here (the house bridge's id, P3; the device
      inventory picture of P4 has left the repository);
      light-properties.png and scene-properties.png carry the owner's light and
-     scene identifiers (P6); bridge-actions.png is clean but predates Add Zone
-     Light and Re-link Zone Light and shows three development-only actions. -->
+     scene identifiers (P6); bridge-actions.png is clean but shows the 1.1
+     actions and three development-only ones (1.2 has nine; retake it). -->
 
 ![Composer's Driver menu with Add or Update Driver or Agent highlighted](src/hue_bridge/www/img/add-driver-menu.png)
 
@@ -321,15 +348,17 @@ again.
   shows Status, Hue Scene, Hue Room, Hue Scene ID, Online and Last Action;
   both show Driver Version. Yours to set: **Recall As** on a scene (how ON
   plays the scene), the keypad settings, and **Debug Mode** (diagnostics
-  only); click the row's Set button after changing one. Each device has two
-  actions, **Adopt Hue Name** and **Forget This Light** / **Forget This
-  Scene**.
+  only); click the row's Set button after changing one. From 1.2 a Hue
+  Light or Hue Scene has no actions of its own: its name and its Hue name
+  follow each other by themselves, and the bridge's **Forget Device**
+  releases it.
 
 ## Troubleshooting
 
-Click **Test Connection** on the bridge first: *Test OK* means the controller
-reaches the bridge, the bridge is the paired one and it accepts the key. Then
-the manual:
+Run the bridge's **Diagnostics** action with *Check the connection now* first
+(release 1.1: **Test Connection**): *Test OK* means the controller reaches
+the bridge, the bridge is the paired one and it accepts the key. Then the
+manual:
 
 - chapter 4: pairing failures, the bridge offline, the bridge's address
   changed;
@@ -338,7 +367,8 @@ the manual:
 - chapter 9: scenes deleted, renamed or edited in Hue, time-of-day scenes;
 - chapter 12: every text the properties can show and what to do about it, and
   "things that look wrong but are not";
-- chapter 13: limits and a quick reference of all actions.
+- chapter 13: limits, a quick reference of the nine actions and where each
+  action of 1.1 went.
 
 The design notes behind the driver are in [`docs/`](docs/README.md): the
 architecture (`docs/design.md`), the feature contracts, and the edge-case
@@ -348,8 +378,9 @@ never done without a click.
 ### Reporting a problem
 
 Open a GitHub issue with the **Driver Version**, the Control4 OS version, the
-bridge model, the texts of **Status**, **Event Stream**, **Attention** and
-**Last Action** (with **Last Action (2)** to **(6)** when shown), and the
+bridge model, the texts of **Status**, **Event Stream**, **Attention** (with
+**Attention (2)** to **(6)** when shown) and **Last Action** (with **Last
+Action (2)** to **(6)** when shown), and the
 relevant lines of the Lua output (the device's Lua tab in Composer; **Debug
 Mode** On if asked, and Off again afterwards). Replace your LAN addresses and
 the bridge id with placeholders. The driver never shows the application key;

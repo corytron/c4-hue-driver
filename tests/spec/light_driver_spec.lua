@@ -314,7 +314,7 @@ describe("Hue Light driver", function()
 			local env, c4 = lit_light()
 			configure(env, { state = "gone", gone_since = "1761000000" })
 			local expected = "Gone from the Hue bridge since " .. os.date("%Y-%m-%d %H:%M", 1761000000)
-				.. "; re-link or Forget"
+				.. "; Link or Forget Device"
 			assert.equal(expected, env.Properties["Status"])
 			assert.equal("Offline", env.Properties["Online"])
 			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
@@ -337,7 +337,7 @@ describe("Hue Light driver", function()
 		it("says gone without a date when the bridge sends none", function()
 			local env = lit_light()
 			configure(env, { state = "gone" })
-			assert.equal("Gone from the Hue bridge; re-link or Forget", env.Properties["Status"])
+			assert.equal("Gone from the Hue bridge; Link or Forget Device", env.Properties["Status"])
 		end)
 	end)
 
@@ -352,7 +352,7 @@ describe("Hue Light driver", function()
 		end
 
 		local FORGOTTEN = "Forgotten by the bridge (was Hue light Desk #12). "
-			.. "Delete this device in Composer, or bind it again and use Link Devices"
+			.. "Delete this device, or bind it again and use Link Device on the Hue Bridge"
 
 		it("explains in Status, goes offline and drops proxy commands", function()
 			local env, c4 = known_light()
@@ -670,12 +670,36 @@ describe("Hue Light driver", function()
 		end)
 	end)
 
-	describe("actions", function()
+	describe("hidden aliases until 2.0 (no actions since 1.2, docs/simplify-actions-design.md §3.3)", function()
 		-- The light_v2 proxy the fake's project gave this light: the consumer of
 		-- the protocol driver's binding 5001, as on the controller.
 		local function proxy_of(light_id)
 			return assert(fake.project.devices[light_id].proxy_id, "the fake registers a proxy per loaded light")
 		end
+
+		it("Adopt Hue Name and Forget This Light answer sent by name too, as the dev loop sends them", function()
+			local env, c4 = lit_light()
+			env.ExecuteCommand("Adopt Hue Name", {})
+			assert.same({ { proxy_of(LIGHT_ID), "Desk" } }, c4.calls_to("RenameDevice"))
+			env.ExecuteCommand("Forget This Light", {})
+			assert.equal(1, #messages(c4, "HUE_FORGET"))
+		end)
+
+		it("say in the log, in Debug Mode, which action of the Hue Bridge does the job now", function()
+			local env = lit_light()
+			local lines = {}
+			log.set_debug(true)
+			log.sink = function(line) lines[#lines + 1] = line end
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
+			log.set_debug(false)
+			log.sink = function() end
+			local text = table.concat(lines, "\n")
+			assert.truthy(text:find("Adopt Hue Name is a hidden alias until 2.0; Resolve Names on the Hue Bridge "
+				.. "does this now", 1, true))
+			assert.truthy(text:find("Forget This Light is a hidden alias until 2.0; Forget Device on the Hue Bridge "
+				.. "does this now", 1, true))
+		end)
 
 		it("Adopt Hue Name renames the proxy device, not the protocol driver", function()
 			local env, c4 = lit_light()
@@ -791,13 +815,13 @@ describe("Hue Light driver", function()
 			assert.equal("True", capability("supports_target"))
 		end)
 
-		it("declares the lifecycle properties and both actions", function()
+		it("declares the lifecycle properties and no actions (1.2, D3: the Hue Bridge has them)", function()
 			local props = fake.declared_properties("hue_light")
 			assert.equal("", props["Hue Room"])
 			assert.equal("", props["Last Action"])
-			for _, name in ipairs({ "Adopt Hue Name", "Forget This Light" }) do
-				assert.truthy(xml:find("<action>%s*<name>" .. name .. "</name>%s*<command>" .. name .. "</command>"), name)
-			end
+			assert.is_nil(xml:find("<action>", 1, true))
+			assert.is_nil(xml:find("<actions>", 1, true))
+			assert.is_nil(xml:find("<actions/>", 1, true))
 		end)
 	end)
 
@@ -1680,8 +1704,9 @@ describe("Hue Light driver", function()
 		end)
 
 		-- Issue #234: the group type was not persisted, so after a restart a
-		-- room device spoke of a "group light", and Adopt Hue Name gave it the
-		-- room's bare name, until the bridge configured it again.
+		-- room device spoke of a "group light", and Adopt Hue Name (a hidden
+		-- alias since 1.2) gave it the room's bare name, until the bridge
+		-- configured it again.
 		it("persists the group type, so after a restart its texts and Adopt Hue Name need no configure (#234)", function()
 			local first, c4 = load_light({ rid = ROOM_RID })
 			configure_group(first, ROOM)
@@ -1739,7 +1764,7 @@ describe("Hue Light driver", function()
 			configure_group(env, ZONE, { state = "gone", gone_since = "1761000000" }, { "kind", "group_type", "light_count" })
 			assert.equal("group", c4.persist.hue_kind)
 			assert.is_nil(c4.persist.hue_group_type, "the stored type follows the one the device shows")
-			assert.equal("Group deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; re-link or Forget",
+			assert.equal("Group deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; Link or Forget Device",
 				env.Properties["Status"])
 			assert.equal("Hue zone", env.Properties["Model"])
 
@@ -1826,7 +1851,7 @@ describe("Hue Light driver", function()
 		it("says deleted in Hue while the bridge reports the zone gone, and comes back when re-linked", function()
 			local env, c4 = lit_zone()
 			configure_group(env, ZONE, { state = "gone", gone_since = "1761000000" })
-			local expected = "Zone deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; re-link or Forget"
+			local expected = "Zone deleted in Hue since " .. os.date("%Y-%m-%d", 1761000000) .. "; Link or Forget Device"
 			assert.equal(expected, fits(env.Properties["Status"]))
 			assert.equal("Offline", env.Properties["Online"])
 			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
@@ -1837,7 +1862,7 @@ describe("Hue Light driver", function()
 			assert.equal(0, #c4.sent, "dropped")
 			assert.equal(expected, env.Properties["Status"])
 
-			-- Re-link Device To Light to another zone: a configure with the new identity.
+			-- Link Device on the bridge, to another zone: a configure with the new identity.
 			local other = "c0ffee00-aaaa-4bbb-8ccc-ddddeeeeffff"
 			configure_group(env, ZONE, { rid = other, name = "Reading Nook", id_v1 = "/groups/7", light_count = "3" })
 			assert.equal("Hue zone Reading Nook (3 lights)", env.Properties["Status"])
@@ -1852,14 +1877,14 @@ describe("Hue Light driver", function()
 		it("says Room deleted for a room, without a date when the bridge sends none", function()
 			local env = load_light({ rid = ROOM_RID })
 			configure_group(env, ROOM, { state = "gone" })
-			assert.equal("Room deleted in Hue; re-link or Forget", env.Properties["Status"])
+			assert.equal("Room deleted in Hue; Link or Forget Device", fits(env.Properties["Status"]))
 		end)
 
 		it("names the zone when forgotten and puts the instruction in Last Action", function()
 			local env, c4 = lit_zone()
 			env.ExecuteCommand("HUE_FORGOTTEN", { rid = ZONE_RID, name = "Bedside Lights" })
 			assert.equal("Forgotten by the bridge (was Hue zone Bedside Lights)", fits(env.Properties["Status"]))
-			assert.equal("Delete this device in Composer, or bind it again and use Link Devices",
+			assert.equal("Delete this device, or bind it again and use Link Device on the Hue Bridge",
 				fake.last_action(env))
 			assert.equal("Offline", env.Properties["Online"])
 			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
@@ -1868,7 +1893,7 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
 			assert.equal(0, #c4.sent)
 			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group",
-				hue_group_type = "zone" }, c4.persist, "the identity stays, so binding the device again lets Link Devices adopt it")
+				hue_group_type = "zone" }, c4.persist, "the identity stays, so binding the device again lets Link Device adopt it")
 
 			c4.calls = {}
 			configure_group(env, ZONE)
@@ -1936,7 +1961,7 @@ describe("Hue Light driver", function()
 			assert.equal(1, #c4.active_timers(), "only the hold's click guard is left: both targets were confirmed")
 		end)
 
-		it("Adopt Hue Name and Forget This Light speak of the zone or room", function()
+		it("Adopt Hue Name and Forget This Light (hidden aliases) speak of the zone or room", function()
 			local env, c4 = lit_zone()
 			local proxy_id = proxy_of(LIGHT_ID)
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })

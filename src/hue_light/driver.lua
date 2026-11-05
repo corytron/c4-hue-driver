@@ -45,15 +45,25 @@ local COLOR_KEYS = {
 -- kind is part of it (docs/zone-light-design.md §2): a zone or room device
 -- persists "group" and the bridge routes its hello on it; a light persists
 -- none, as every light did before zone lights existed. So is a group's type
--- ("zone" / "room"): its texts, and the name Adopt Hue Name gives a room
--- device, are right after a restart, before the bridge configures it again
--- (#234).
+-- ("zone" / "room"): its texts, and the name Adopt Hue Name (a hidden
+-- alias since 1.2) gives a room device, are right after a restart, before
+-- the bridge configures it again (#234).
 local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model", kind = "hue_kind",
 	group_type = "hue_group_type" }
 
 -- What a forgotten device's owner can do; a light's Status says it, a group
--- device's Last Action (its Status names the group instead).
-local FORGOTTEN_INSTRUCTION = "Delete this device in Composer, or bind it again and use Link Devices"
+-- device's Last Action (its Status names the group instead). The device has
+-- no actions since 1.2 (#334, D3): every remedy is an action of the Hue
+-- Bridge device, and the texts name it (Link Device, Forget Device).
+local FORGOTTEN_INSTRUCTION = "Delete this device, or bind it again and use Link Device on the Hue Bridge"
+
+-- The remedy for a device whose light, zone or room is gone from Hue: the
+-- bridge's Link Device or Forget Device, in words that keep a group's
+-- Status under 60 characters.
+local GONE_REMEDY = "Link or Forget Device"
+
+-- The remedy for a bound device the bridge has not linked to a Hue light.
+local UNLINKED_REMEDY = "use Link Device on the Hue Bridge"
 
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
@@ -186,16 +196,16 @@ local function forgotten_status()
 	return string.format("Forgotten by the bridge (was %s). %s", was_label(), FORGOTTEN_INSTRUCTION)
 end
 
--- "Gone from the Hue bridge since 2026-10-24 12:00; re-link or Forget" for a
--- light; "Zone deleted in Hue since 2026-10-24; re-link or Forget" for a group
--- (the day alone keeps it under 60 characters).
+-- "Gone from the Hue bridge since 2026-10-24 12:00; Link or Forget Device"
+-- for a light; "Zone deleted in Hue since 2026-10-24; Link or Forget Device"
+-- for a group (the day alone keeps it under 60 characters).
 local function gone_status()
 	if state.is_group(st) then
 		local since = st.gone_since and (" since " .. os.date("%Y-%m-%d", st.gone_since)) or ""
-		return group_word() .. " deleted in Hue" .. since .. "; re-link or Forget"
+		return group_word() .. " deleted in Hue" .. since .. "; " .. GONE_REMEDY
 	end
 	local since = st.gone_since and (" since " .. os.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
-	return "Gone from the Hue bridge" .. since .. "; re-link or Forget"
+	return "Gone from the Hue bridge" .. since .. "; " .. GONE_REMEDY
 end
 
 -- Decision 11: "Hue zone Bedside Lights has no lights; nothing to control".
@@ -209,16 +219,16 @@ end
 -- has no grouped_light to command (docs/zone-light-design.md Decision 11).
 local function blocker()
 	if st.forgotten then
-		return "forgotten by the bridge; delete this device or bind it again and use Link Devices"
+		return "forgotten by the bridge; " .. FORGOTTEN_INSTRUCTION:gsub("^D", "d")
 	elseif not bridge then
 		return "not bound to a Hue Bridge"
 	elseif not st.rid then
-		return "waiting for the bridge to assign a Hue light (use Add Light or Link Devices on it)"
+		return "waiting for the bridge to assign a Hue light (" .. UNLINKED_REMEDY .. ")"
 	elseif st.gone then
 		if state.is_group(st) then
-			return group_word():lower() .. " deleted in Hue; re-link or Forget"
+			return group_word():lower() .. " deleted in Hue; " .. GONE_REMEDY
 		end
-		return "gone from the Hue bridge; re-link or Forget"
+		return "gone from the Hue bridge; " .. GONE_REMEDY
 	elseif st.no_lights then
 		return no_lights_text()
 	end
@@ -571,13 +581,27 @@ dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(p
 	report_online()
 end)
 
--- Composer actions (LUA_ACTION) ----------------------------------------------
--- Every click ends in Last Action and a log line, whatever happened.
+-- Hidden aliases (LUA_ACTION or by name) ------------------------------------
+-- Since 1.2 the device has no actions (#334, docs/simplify-actions-design.md
+-- §1.2, D3): names follow Hue by themselves and the Hue Bridge's Resolve
+-- Names settles what cannot, its Forget Device releases any device. The two
+-- old commands still answer as they did, for the dev loop, older briefs and
+-- any C4:SendToDevice caller, until 2.0 (§3.3; tests/fixtures/ledger.lua
+-- lists them). Every call ends in Last Action and a log line, whatever
+-- happened.
+
+-- `fn` under the old command, saying in the log (Debug Mode) what replaced it.
+local function alias(old, now, fn)
+	return function(...)
+		log.info("%s is a hidden alias until 2.0; %s on the Hue Bridge does this now", old, now)
+		return fn(...)
+	end
+end
 
 -- The Composer name the Hue name calls for: the Hue name itself, except that
 -- a room device is "<Room> Lights", so the Lighting page of a Control4 room
 -- does not list a light named like the room (docs/zone-light-design.md §5
--- Naming; the bridge's Attention and Adopt Hue Names apply the same rule).
+-- Naming; the bridge's Attention and Resolve Names apply the same rule).
 local function expected_name()
 	if state.is_group(st) and st.group_type == "room" then
 		return st.name .. " Lights"
@@ -586,8 +610,8 @@ local function expected_name()
 end
 
 -- Rename our proxy (the device Composer shows) to the Hue name. Only ever
--- from this click: names belong to the owner (docs/import-design.md §7).
-dispatch.commands["Adopt_Hue_Name"] = function()
+-- from this command: names belong to the owner (docs/import-design.md §7).
+dispatch.commands["Adopt_Hue_Name"] = alias("Adopt Hue Name", "Resolve Names", function()
 	if not st.name then
 		return result(string.format("Not renamed: no Hue name known yet (the bridge has not configured this %s)",
 			what()))
@@ -599,18 +623,18 @@ dispatch.commands["Adopt_Hue_Name"] = function()
 	local name = expected_name()
 	C4:RenameDevice(id, name) -- [verified: API 22/_32]
 	result(string.format("Renamed device %d to %s", id, name))
-end
+end)
 
 -- Ask the bridge to Forget this light (or zone/room device); it answers
 -- HUE_FORGOTTEN, which sets Status. The bridge finds the entry by rid or,
 -- for a rid-less light, by device id.
-dispatch.commands["Forget_This_Light"] = function()
+dispatch.commands["Forget_This_Light"] = alias("Forget This Light", "Forget Device", function()
 	if not bridge then
 		return result("Not sent: not bound to a Hue Bridge")
 	end
 	C4:SendToDevice(bridge, "HUE_FORGET", { rid = st.rid, device_id = device_id() })
 	result(string.format("Asked the bridge to forget this %s; its answer sets Status", what()))
-end
+end)
 
 -- Programming commands -------------------------------------------------------
 -- Raise Level By and Restore Saved Level (docs/relative-level-design.md,

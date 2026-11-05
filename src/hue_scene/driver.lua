@@ -174,15 +174,20 @@ local function group_label()
 	return st.group_name
 end
 
+-- The device has no actions since 1.2 (#334, D3): every remedy is an action
+-- of the Hue Bridge device, and the texts name it.
+local FORGOTTEN_INSTRUCTION = "Delete this device, or bind it again and use Link Device on the Hue Bridge"
+local GONE_REMEDY = "Link or Forget Device"
+local UNLINKED_REMEDY = "use Link Device on the Hue Bridge"
+
 local function forgotten_status()
-	return string.format("Forgotten by the bridge (was Hue scene %s). "
-		.. "Delete this device in Composer, or bind it again and use Link Devices",
-		st.forgotten.name or st.rid or "unknown")
+	return string.format("Forgotten by the bridge (was Hue scene %s). %s", st.forgotten.name or st.rid or "unknown",
+		FORGOTTEN_INSTRUCTION)
 end
 
 local function gone_status()
 	local since = st.gone_since and (" since " .. os.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
-	return "Scene deleted in Hue" .. since .. "; ON does nothing; re-link or Forget"
+	return "Scene deleted in Hue" .. since .. "; ON does nothing; " .. GONE_REMEDY
 end
 
 -- Why a command cannot reach the scene right now, or nil when it can. The
@@ -190,13 +195,13 @@ end
 -- what to do even while its binding is already gone.
 local function blocker()
 	if st.forgotten then
-		return "forgotten by the bridge; delete this device or bind it again and use Link Devices"
+		return "forgotten by the bridge; " .. FORGOTTEN_INSTRUCTION:gsub("^D", "d")
 	elseif not bridge then
 		return "not bound to a Hue Bridge"
 	elseif not st.rid then
-		return "waiting for the bridge to assign a Hue scene (use Add Scene or Link Devices on it)"
+		return "waiting for the bridge to assign a Hue scene (" .. UNLINKED_REMEDY .. ")"
 	elseif st.gone then
-		return "scene deleted in Hue; re-link or Forget"
+		return "scene deleted in Hue; " .. GONE_REMEDY
 	end
 	return nil
 end
@@ -878,7 +883,7 @@ end
 -- (common/device.lua) holds them until then, in order.
 
 -- The kind a configure names; none (a bridge from before time-based scenes)
--- is an ordinary scene. A change (Re-link Scene across kinds) drops what
+-- is an ordinary scene. A change (Link Device across kinds) drops what
 -- belonged to the old kind: a time-based scene never holds on, and nothing
 -- follows a start of the other kind.
 local function take_kind(params)
@@ -1083,12 +1088,26 @@ dispatch.commands["HUE_SCENE_FORGOTTEN"] = after_late_init("HUE_SCENE_FORGOTTEN"
 	report_online()
 end)
 
--- Composer actions (LUA_ACTION) ----------------------------------------------
--- Every click ends in Last Action and a log line, whatever happened.
+-- Hidden aliases (LUA_ACTION or by name) ------------------------------------
+-- Since 1.2 the device has no actions (#334, docs/simplify-actions-design.md
+-- §1.2, D3): names follow Hue by themselves and the Hue Bridge's Resolve
+-- Names settles what cannot, its Forget Device releases any device. The two
+-- old commands still answer as they did, for the dev loop, older briefs and
+-- any C4:SendToDevice caller, until 2.0 (§3.3; tests/fixtures/ledger.lua
+-- lists them). Every call ends in Last Action and a log line, whatever
+-- happened.
+
+-- `fn` under the old command, saying in the log (Debug Mode) what replaced it.
+local function alias(old, now, fn)
+	return function(...)
+		log.info("%s is a hidden alias until 2.0; %s on the Hue Bridge does this now", old, now)
+		return fn(...)
+	end
+end
 
 -- Rename our proxy (the device Composer shows) to the Hue scene name. Only
--- ever from this click: names belong to the owner (docs/import-design.md §7).
-dispatch.commands["Adopt_Hue_Name"] = function()
+-- ever from this command: names belong to the owner (docs/import-design.md §7).
+dispatch.commands["Adopt_Hue_Name"] = alias("Adopt Hue Name", "Resolve Names", function()
 	if not st.name then
 		return result("Not renamed: no Hue name known yet (the bridge has not configured this scene)")
 	end
@@ -1106,18 +1125,18 @@ dispatch.commands["Adopt_Hue_Name"] = function()
 	end
 	C4:RenameDevice(id, name) -- [verified: API 22/_32]
 	result(string.format("Renamed device %d to %s", id, name))
-end
+end)
 
 -- Ask the bridge to Forget this scene; it answers HUE_SCENE_FORGOTTEN, which
 -- sets Status. The bridge finds the entry by rid or, for a rid-less device,
 -- by device id.
-dispatch.commands["Forget_This_Scene"] = function()
+dispatch.commands["Forget_This_Scene"] = alias("Forget This Scene", "Forget Device", function()
 	if not bridge then
 		return result("Not sent: not bound to a Hue Bridge")
 	end
 	C4:SendToDevice(bridge, "HUE_SCENE_FORGET", { rid = st.rid, device_id = device_id() })
 	result("Asked the bridge to forget this scene; its answer sets Status")
-end
+end)
 
 -- From the proxy (ReceivedFromProxy) ------------------------------------------
 -- Commands without a handler are logged at debug by common.dispatch.

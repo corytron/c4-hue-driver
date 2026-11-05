@@ -19,6 +19,8 @@ files["src/hue_bridge/driver.lua"] = {
 		"HueLightList", "RoomList", "RelinkDeviceList", "ForgetDeviceList", "HueRoomList", "MappingTargetList",
 		"SceneList", "SceneGroupList", "RelinkSceneList", "ForgetSceneList", "ZoneGroupList", "RelinkZoneLightList",
 		"MotionSensorList", "MotionAreaList", "MotionTargetList", "RelinkMotionDeviceList", "ForgetMotionDeviceList",
+		-- The 1.2 actions' lists (bridge/actions.lua, #334).
+		"AddFromHueList", "LinkDeviceList", "LinkTargetList", "ResolveNamesList", "DiagnosticsList",
 	},
 }
 

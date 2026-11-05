@@ -76,14 +76,14 @@ zone_lights.TAG = "zone_lights"
 zone_lights.WORDS = {
 	held = "group",                                  -- "its registered group is <rid>"
 	stranger = "a device that is not a zone light",  -- a HUE_GOODBYE the module does not hold
-	goodbye_tail = "Add Zone Light lists it as deleted",
-	add_action = "Add Zone Light",
+	goodbye_tail = "Add From Hue lists it as deleted",
+	add_action = "Add From Hue",
 	busy_job = "adding a zone light",
 	busy_resync = "resyncing zone lights",
 	kind = "zone light",
 	unbound_kind = "unbound zone light device",
-	relink_or_forget = "Re-link Zone Light or Forget Light",
-	forget_action = "Forget Light",
+	relink_or_forget = "Link or Forget Device",
+	forget_action = "Forget Device",
 	name_kind = "zone light name",
 	hue_names = "Hue zone and room names",
 	device_noun = "zone light device",
@@ -694,7 +694,7 @@ function zone_lights:reconcile_groups()
 		elseif self:groups_loaded() and entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
 			self.ctx.log.warn("zone_lights: %s (device %d) is no longer on the bridge; marked gone "
-				.. "(Re-link Zone Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+				.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
 	end
@@ -860,7 +860,7 @@ function zone_lights:refresh_all(carried, touched)
 				if entry.state == "linked" and self:groups_loaded() and self.reg:set_state(rid, "gone") then
 					self:mark()
 					self.ctx.log.warn("zone_lights: %s (device %d) was deleted on the bridge; marked gone "
-						.. "(Re-link Zone Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+						.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 					if self:announce_gone(rid, "event") then
 						sent = sent + 1
 					end
@@ -1066,8 +1066,8 @@ function zone_lights:entry_for_command(params, what)
 		return nil
 	end
 	if entry.state == "gone" then
-		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Re-link Zone Light "
-			.. "or Forget Light)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
+		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Link or Forget "
+			.. "Device)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
 			util.date_of(entry.gone_since))
 		return nil
 	end
@@ -1207,6 +1207,12 @@ function zone_lights:room_group_of(group)
 	return group.rid, self:group_label(group)
 end
 
+-- (owner hook) A zone light's room mark follows the mapping of the zone or
+-- room it stands for.
+function zone_lights.mark_group(_self, rid)
+	return rid
+end
+
 function zone_lights:add_label(group)
 	return self:group_label(group)
 end
@@ -1252,8 +1258,8 @@ function zone_lights:add(a, b, c)
 		if any and any.type == "bridge_home" then
 			done(false, "Not added: the whole bridge cannot be a zone light")
 		else
-			done(false, string.format("Not added: zone or room %s is not on the bridge (connect the event stream and try again)",
-				tostring(rid)))
+			done(false, string.format("Not added: zone or room %s is not on the bridge (Diagnostics ▸ Read everything "
+				.. "from the bridge now, then try again)", tostring(rid)))
 		end
 		return false
 	end
@@ -1299,8 +1305,41 @@ function zone_lights:relink_refusal(device_id, new_rid)
 	if self:models()[new_rid] then
 		return string.format("Not re-linked: device %d is a zone light; pick a zone or room", device_id)
 	end
-	return string.format("Not re-linked: zone or room %s is not on the bridge (connect the event stream and try "
-		.. "again)", tostring(new_rid))
+	return string.format("Not re-linked: zone or room %s is not on the bridge (Diagnostics ▸ Read everything from "
+		.. "the bridge now, then try again)", tostring(new_rid))
+end
+
+-- (owner hook) R4, B1: a gone zone light and a zone or room with no device,
+-- of its type and with its name (owner.same_group: the group is the room
+-- itself, so after a bridge reset or a room deleted and made again only its
+-- name can tell; §4 finding 9). Suggested only, never automatic (groups have
+-- no radio); Link Device lists it with the others.
+function zone_lights:name_suggestions(seen)
+	local out, sources = {}, {}
+	for _, rid in ipairs(self.reg:rids("gone")) do
+		if not seen[rid] and self:record_of(rid) == nil then
+			sources[#sources + 1] = rid
+		end
+	end
+	if #sources == 0 then
+		return out
+	end
+	local tombs = self.reg:tombstones()
+	for _, group in ipairs(self:groups():groups()) do
+		if self.GROUP_TYPES[group.type] and not self.registry[group.rid] and tombs[group.rid] == nil then
+			local label, matches = hue_model.group_label(group.name, group.type), {}
+			for _, rid in ipairs(sources) do
+				local entry = self.registry[rid]
+				if owner.same_group(rid, hue_model.group_label(entry.name, entry.group_type), group.rid, label) then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = group.rid, why = "same name", ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
 end
 
 -- "Re-linked device 1180 (was Bedside Lights) to zone Reading Nook".
@@ -1533,10 +1572,16 @@ end
 -- and " (deleted in Hue; device N)" when gone. Commas become "‚" (U+201A):
 -- the list is comma-delimited (driver.lua's refresh_room_mappings). Before
 -- the groups are fetched, the registry alone: what is known. Empty when
--- nothing is.
+-- nothing is. A linked zone light whose device sits in another Control4
+-- room than its zone or room maps to carries the room mark
+-- (owner:room_marks).
 function zone_lights:list_items()
 	local cache = self:groups()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	local out, listed = {}, {}
 	for _, gtype in ipairs({ "zone", "room" }) do
 		for _, group in ipairs(cache:groups(gtype)) do
@@ -1550,7 +1595,7 @@ function zone_lights:list_items()
 			local text = list_label(group.name, gtype, count)
 			local entry, tomb = self.registry[group.rid], tombs[group.rid]
 			if entry then
-				text = text .. entry_suffix(entry)
+				text = text .. state_of(entry)
 			elseif tomb then
 				text = text .. string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
@@ -1566,7 +1611,7 @@ function zone_lights:list_items()
 			elseif entry.light_count then
 				count = util.plural(entry.light_count, "light")
 			end
-			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. entry_suffix(entry)
+			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. state_of(entry)
 		end
 	end
 	for i, text in ipairs(out) do

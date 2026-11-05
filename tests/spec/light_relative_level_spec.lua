@@ -511,9 +511,9 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			configure(env, { state = "gone" })
 			c4.sent = {}
 			raise(env, "30", "1000")
-			assert.equal("Not raised: gone from the Hue bridge; re-link or Forget", fake.last_action(env))
+			assert.equal("Not raised: gone from the Hue bridge; Link or Forget Device", fake.last_action(env))
 			restore(env, "1000")
-			assert.equal("Not restored: gone from the Hue bridge; re-link or Forget (saved 40 % kept)",
+			assert.equal("Not restored: gone from the Hue bridge; Link or Forget Device (saved 40 % kept)",
 				fake.last_action(env))
 			assert.equal(0, #sets(c4))
 			assert.same({ 40, 70 }, stored(c4))
@@ -542,13 +542,13 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			local env, c4 = light_at(40)
 			env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
 			raise(env, "30", "1000")
-			assert.equal("Not raised: forgotten by the bridge; delete this device or bind it again and use Link Devices",
-				fake.last_action(env))
+			assert.equal("Not raised: forgotten by the bridge; delete this device, or bind it again and use "
+				.. "Link Device on the Hue Bridge", fake.last_action(env))
 			assert.equal(0, #sets(c4))
 
 			env, c4 = load_light(nil, { rid = false })
 			raise(env, "30", "1000")
-			assert.equal("Not raised: waiting for the bridge to assign a Hue light (use Add Light or Link Devices on it)",
+			assert.equal("Not raised: waiting for the bridge to assign a Hue light (use Link Device on the Hue Bridge)",
 				fake.last_action(env))
 			assert.equal(0, #sets(c4))
 		end)

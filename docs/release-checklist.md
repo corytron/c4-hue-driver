@@ -25,16 +25,20 @@ findings as comments), and `docs/status.md` sums them up.
   `deploy/house.yaml` valid. `tools/setup-checks.sh` first if a tool is
   missing.
 - `tools/build.sh` (release) and `tools/build.sh --dev`: the release
-  `hue_bridge.c4z` has 29 actions (`unzip -p build/hue_bridge.c4z
-  driver.xml | grep -c '<action>'`) and no `Dev Server`, `Diagnostic
-  Server`, `Connection Test`, `Reload Credentials`, `Check CA Pinning`
-  (the `DEV-ONLY` blocks of
-  `src/hue_bridge/driver.xml`, which `tools/build.sh` strips); no
+  `hue_bridge.c4z` has 9 actions since 1.2 (#334; 29 before) (`unzip -p
+  build/hue_bridge.c4z driver.xml | grep -c '<action>'`), `hue_light.c4z`
+  and `hue_scene.c4z` 0, and `hue_motion.c4z` 1 (Test Motion Programming);
+  the bridge has no `Dev Server` or `Diagnostic Server` property (the
+  `DEV-ONLY` blocks of `src/hue_bridge/driver.xml`, which `tools/build.sh`
+  strips) and its Diagnostics list no "(dev) …" entry (two connection
+  experiments, reload credentials, check CA pinning: they come from
+  `bridge/devtools.lua`, which a release does not carry); no
   package holds `common/devloop.lua` or `common/devkey.lua`, and the bridge
   no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua`
   (`tools/build.sh` refuses to package a release stage that still has one).
-  The dev build has all of them (32 actions, the three diagnostics before
-  `Forget Pairing`; each package carries the dev
+  The dev build has all of them (the same 9 actions, with the four
+  development entries inside the Diagnostics list; 32 actions before 1.2,
+  the three diagnostics before `Forget Pairing`); each package carries the dev
   key as `common/devkey.lua` and is written 0600). `build/manifest.json`
   names the build, the commit, `"dev": false` or `true`, and the four
   packages' checksums and sizes.
@@ -57,7 +61,11 @@ state"). `tools/devserver.py` running, the bridge's `Dev Server` set to the
 `host:port` it prints, `tools/devctl.py status` shows the bridge polling.
 Then, through `tools/devctl.py run`, with the shipped log
 (`build/dev/driver.log`) as the evidence (`docs/dev-loop.md`); steps 2 to
-4 and the log scan of step 9 are scripted as `tools/regress.sh`:
+4 and the log scan of step 9 are scripted as `tools/regress.sh`. Since 1.2
+(#334) the steps name the 1.2 actions; every removed action's command
+string (`Test Connection`, `Refresh Scenes`, `Room Audit`, `Link Devices`,
+`Add Light`, …) still answers as a hidden alias until 2.0, so a script that
+calls the old names keeps working, and step 11 checks that it does:
 
 1. Startup: the log shows the resync (`event stream connected; resyncing
    <n> lights`, then `resync done`, `scene resync done` and `zone light
@@ -70,15 +78,25 @@ Then, through `tools/devctl.py run`, with the shipped log
    OK`), and `Lights`, `Scenes`, `Zone Lights`, `Room
    Mappings` summaries matching the house (47 lights; 126 + 15 scenes; 7
    zones, 16 rooms; 23 mappings).
-2. `Test Connection` → `Status` "Test OK: HTTP 200 via … bridge …".
-3. `Refresh Scenes` → `Last Action` "Scenes refreshed: 126 + 15 time-based on
-   bridge, 2 imported, 2 deleted" (counts as on the house).
-4. `Room Audit`, `Link Devices` → their texts, nothing changed (no new
-   devices). `Adopt Hue Names` and `Accept Names As They Are` change the
-   owner's project (the first renames every device whose Composer name
-   differs, the second accepts the differences), so `tools/regress.sh`
-   runs them only with `--with-renames`; run them when a name difference
-   is what is being tested: their texts, no renames unless a name differs.
+2. `Diagnostics` with "Check the connection now" → `Status` "Test OK: HTTP
+   200 via … bridge …".
+3. `Diagnostics` with "Read everything from the bridge now" → `Last Action`
+   "Read everything from the bridge now: started", then "Refreshed from the bridge: Lights: … | Scenes: …
+   | Zone lights: … | Motion: …" with the four list summaries, the scenes'
+   "126 scenes + 15 time-based on bridge, 2 imported, 2 deleted" (counts as
+   on the house).
+4. The background tasks of 1.2 in the log (with `Debug Mode` On): one line
+   per run, "housekeeping: <task> (<trigger>): OK: <what it did>; <n>
+   requests, <s> s" (for example "housekeeping: stream_down_read (timer):
+   OK: quick resync; 15 requests, 2.1 s"; "failed: …" for a failed run,
+   logged whatever Debug Mode says), the reads behind the stream, the
+   mapping of rooms by name, the room marks on the list rows;
+   nothing created, renamed, bound or moved by them. The pickers of `Add
+   From Hue`, `Link Device`, `Forget Device` and `Resolve Names` answer
+   their folders (`tools/devctl.py` can call each list function); nothing
+   changed. `Resolve Names` changes the owner's project (it renames), so
+   `tools/regress.sh` runs it only with `--with-renames`; run it when a name
+   difference is what is being tested.
 5. Zone light round trip on the Bedside Lights zone light (device 1166):
    `tools/devctl.py run "Proxy Command" Light=1166 Command=ON` (and the
    other light_v2 commands the same way) or the owner's tile: ON → one PUT
@@ -91,21 +109,34 @@ Then, through `tools/devctl.py run`, with the shipped log
    `stop`.
 7. Time-of-day scene: Golden hours (1164) ON → `smart_scene` activate; OFF →
    deactivate and the room off.
-8. Light lifecycle: `Add Light` of one light (Left Bedside Light) into the
-   Master Bedroom → `Last Action` "Added Left Bedside Light #<n> to Master
-   Bedroom (device <id>)", a device with `Status` "Left Bedside Light
-   (<model>)" and `Driver Version` at once; a Composer delete of that
-   device → `Lights` "…, <d> deleted" with `<d>` one higher, and `Add
-   Light` lists it "Left Bedside Light [<Hue room>] #<n> (deleted from
-   Composer <date>)".
-   (`Forget Light` before a delete leaves no tombstone: the device is
-   unbound, so its delete reaches no bridge, and the light is listed under
-   Add Light again without the mark.)
+8. Light lifecycle: `Add From Hue` of one light (Left Bedside Light) into
+   the Master Bedroom → `Last Action` "Added Left Bedside Light #<n> to
+   Master Bedroom (device <id>)", a device with `Status` "Left Bedside Light
+   (<model>)" and `Driver Version` at once; within seconds the device's
+   name and the Hue light's agree (no rename either way); a Composer delete
+   of that device → `Lights` "…, <d> deleted" with `<d>` one higher, and
+   `Add From Hue` lists it "Left Bedside Light [<Hue room>] #<n> (deleted
+   from Composer <date>)".
+   (`Forget Device` with Confirm "Yes, forget" before a delete leaves no
+   tombstone: the device is unbound, so its delete reaches no bridge, and
+   the light is listed under Add From Hue again without the mark; with
+   Confirm "No" it refuses with "Not forgotten: choose Yes, forget".)
 9. Events: a Hue-app change of a lamp → one `HUE_STATE` only to the devices
    that show it; `Events Received` rises; no error line in the log.
 10. Thirty minutes idle: no reconnect storms (the `Event Stream` row counts
-    the reconnects since start), no timer errors. Memory is not measured:
-    nothing in the drivers or the dev loop reports the Lua memory.
+    the reconnects since start), no timer errors, and the background tasks
+    quiet: no safety read in the first five minutes after a start (plus up
+    to a minute of jitter; a minute after a driver update), and none while
+    the stream is up and the last read is younger than 6 hours. (The
+    engine's hourly budget of 100 optional requests counts the safety
+    reads and the reads every 10 minutes while the stream is down, a quick
+    read being 15 requests on the Bridge Pro; the resync at every connect
+    is essential and not counted.) Memory is not measured: nothing in
+    the drivers or the dev loop reports the Lua memory.
+11. The old command strings (1.2, #334): `tools/devctl.py run "Test
+    Connection"`, `"Refresh Scenes"` and `"Room Audit"` answer as before
+    (the ledger spec, `tests/spec/ledger_spec.lua`, checks every alias on
+    the VM); none of them shows on the Actions tab.
 
 ## 2. Release build on the house (Windows session, Composer)
 
@@ -123,12 +154,18 @@ reboots the controller). Read:
    row shows the summary and the list one line per item (47 lights; 141
    scenes; 23 zones and rooms; 23 mappings), and a pick snaps back to the
    summary and changes nothing. `Last Action` is a read-only text that
-   continues on `Last Action (2)` to `(6)`, rows shown only while they hold
-   text.
-3. The Actions tab: 29 actions, none of the three diagnostics
-   (`Connection Test`, `Reload Credentials`, `Check CA Pinning`).
-4. `Add Zone Light` for a throwaway zone, Driver Version at once, `Forget
-   Light`, delete: as in round 25 (`docs/composer-remote.md`).
+   continues on `Last Action (2)` to `(6)`, and `Attention` the same on
+   `Attention (2)` to `(6)`, rows shown only while they hold text.
+3. The Actions tab: 9 actions (Pair Bridge, Import All New, Add From Hue,
+   Link Device, Forget Device, Resolve Names, Set Room Mapping, Diagnostics,
+   Forget Pairing; 29 before 1.2), and the Diagnostics list without the
+   four "(dev) …" entries; a Hue Light's and a Hue Scene's Actions tab
+   empty, a Hue Motion Sensor's with Test Motion Programming alone.
+   `Bridges Found` below `Bridge IP Address`, reading "Paired with Hue
+   Bridge Pro (BSB003) at …".
+4. `Add From Hue` of a throwaway zone (its zones and rooms folder), Driver
+   Version at once, `Forget Device` with Confirm "Yes, forget", delete: as
+   in round 25 (`docs/composer-remote.md`), with the 1.2 actions.
 5. The Documentation tab opens and shows the manual's title and the
    chapter list (and the three device pages).
 6. The Lua tab of a device during the install: no `[ERROR]` line.
@@ -161,7 +198,9 @@ reboots the controller). Read:
 Once per new controller OS version, before a build is called good on it:
 
 1. Install the three `--dev` files as in section 1 and run the bridge's
-   `Check CA Pinning` action once (`Status` reads `Checking CA pinning
+   CA pinning check once: since 1.2 (#334) an entry of the dev build's
+   Diagnostics list, before that the `Check CA Pinning` action; `tools/devctl.py
+   run "Check CA Pinning"` reaches it either way (`Status` reads `Checking CA pinning
    against example.com` meanwhile). `Status` must read `Pinning check
    passed: only Signify-signed certificates are trusted`: a public-CA site
    (example.com) was refused with the driver's bundle, so the bundle

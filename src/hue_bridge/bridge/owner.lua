@@ -48,7 +48,8 @@
 -- goodbye_unregistered, forget_sent, reconciled, reconcile_done,
 -- resync_extra, room_mapping, expected_name, agreeing_names, entry_name,
 -- answer_hello, forgot, told_name, relink_fields, forget_label,
--- relinked_label, link_hello, link_rid, link_adopt_hello (defaults below).
+-- relinked_label, link_hello, link_rid, link_adopt_hello, mark_group(rid, entry)
+-- (defaults below).
 --
 -- Divergences between the three copies, settled before they were merged
 -- (rule 2 of the contract): today's behaviour of each module is kept behind
@@ -198,6 +199,20 @@
 -- Divergences deliberately left (not this PR's to align): scenes keep no
 -- early-hello cap, no R5, no R11 for hellos and no schema; zone lights mark
 -- a deleted zone gone at the AddDevice answer but not at a later hello.
+--
+-- 1.2 (#334, docs/simplify-actions-design.md §3): two more shared pieces.
+--   Names (bridge/names.lua, D6): a module with NAMES_KIND ("light",
+--   "scene", "motion"; zone lights have none, D11) tells the names sync what
+--   it learns, once set_names() gave it one (without it every path is as in
+--   1.1): a Hue name taken from an event (hue_named), the pass after each
+--   successful resync, a device created (N17), re-linked (N16; its text
+--   ends the re-link's), forgotten or deleted. Its hooks: hue_name,
+--   name_form, name_requests, name_source; Adopt Hue Names and Accept Names
+--   As They Are route through it; Attention's name item becomes names'.
+--   Re-link by radio (D7, §3.2 M1-M7): auto_relink re-links a gone device
+--   whose radio (MAC) a new record carries when exactly one matches, and
+--   suggested() lists what Link Device may offer. Hooks: radio_records,
+--   radio_ready, same_kind, name_suggestions, radio_words.
 
 local log = require("common.log")
 local util = require("bridge.util")
@@ -299,6 +314,80 @@ function owner:count()
 		n = n + 1
 	end
 	return n
+end
+
+-- Names (bridge/names.lua) -------------------------------------------------------
+
+-- The names sync this module tells, or nil: set_names() or ctx.names. A
+-- module without NAMES_KIND (the zone lights) never tells it anything.
+function owner:set_names(n)
+	self.names = n
+end
+
+function owner:names_sync()
+	local n = rawget(self, "names") or self.ctx.names
+	if n and self.NAMES_KIND then
+		return n
+	end
+	return nil
+end
+
+-- Call `method` of the names sync with the module's kind first; pcall-wrapped
+-- (a names failure never breaks a resync, an event or an action). Returns
+-- its first result.
+function owner:tell_names(method, ...)
+	local n = self:names_sync()
+	if not n or type(n[method]) ~= "function" then
+		return nil
+	end
+	local ok, result = pcall(n[method], n, self.NAMES_KIND, ...)
+	if not ok then
+		self.ctx.log.error("%s: names.%s failed: %s", self.TAG, method, tostring(result))
+		return nil
+	end
+	return result
+end
+
+-- A Hue name the module took from an event (its take_name paths).
+function owner:hue_named(rid)
+	return self:tell_names("on_hue_name", rid)
+end
+
+-- The names pass after a successful resync (names-sync §3.3 step 2).
+function owner:names_pass()
+	return self:tell_names("pass")
+end
+
+-- Hooks for bridge/names.lua: the raw Hue name a linked entry's Composer
+-- name follows (the creation name's source), its form (a zone scene's
+-- prefix, a time-based scene's base name), the PUTs that write a name, and
+-- what Hue keeps the name on (two entries on one source never sync, N15).
+function owner.hue_name(_self, _rid, entry)
+	return entry.name
+end
+
+function owner.name_form()
+	return {}
+end
+
+function owner.name_requests()
+	return nil
+end
+
+function owner:name_source(rid)
+	return tostring(self.NAMES_KIND or self.TAG) .. ":" .. tostring(rid)
+end
+
+-- The proxy id names found for an adopted entry (E5): kept in the
+-- registry's own field.
+function owner:remember_proxy(rid, proxy_id)
+	local entry = self.registry[rid]
+	local id = util.positive(proxy_id)
+	if entry and id and entry.proxy_id ~= id then
+		self.reg:update(rid, { proxy_id = id })
+		self:mark()
+		self:flush()
+	end
 end
 
 -- A list row's summary (Lights, Scenes, Zone Lights, Motion Sensors; one
@@ -631,6 +720,7 @@ function owner:goodbye(params)
 	self:clear_conflicts_for(entry.device_id)
 	self:mark()
 	self:flush()
+	self:tell_names("forgotten", rid)
 	self.ctx.log.always("%s: %s (device %d) was deleted in Composer; %s", self.TAG, label, entry.device_id,
 		self.WORDS.goodbye_tail)
 	return tomb
@@ -742,6 +832,7 @@ function owner:reconcile(no_save, created)
 		if device_of[rid] then
 			self.announced[device_of[rid]] = nil
 		end
+		self:tell_names("forgotten", rid)
 		self.ctx.log.warn("%s: %s was deleted in Composer while the bridge was not watching; %s lists it as deleted",
 			self.TAG, tostring(tomb.name or rid), self.WORDS.add_action)
 	end
@@ -824,6 +915,9 @@ function owner:resync(done, ...)
 			end
 		end
 		self.resyncing = false
+		if ok and res ~= nil then
+			self:names_pass()  -- the module's names are fresh: the sync compares them (names-sync §3.3)
+		end
 		if not ok then
 			self:protect("resync done", done, false, tostring(e))
 		elseif not settle then
@@ -904,6 +998,67 @@ function owner:room_for_add(record, room_id, rooms)
 		return nil, string.format("Not added: %s: %s; pick a room, or Set Room Mapping first", self:add_label(record), why)
 	end
 	return id, why
+end
+
+-- Hook: the Hue room or zone whose mapping decides a registered entry's room
+-- mark (lights and motion: the Hue room the entry remembers; zone lights:
+-- the group itself; scenes: the scene's room or zone).
+function owner.mark_group(_self, _rid, entry)
+	return entry.hue_room_rid
+end
+
+-- The room marks (1.2, #334; docs/simplify-actions-design.md §1.3, import
+-- research §5.4, H5 and C3): { [device_id] = " (in Hall instead of Office)" } for
+-- every linked device whose Control4 room differs from the room its Hue
+-- room or zone maps to; " (in Hall; mapped room gone)" when the mapping
+-- points at a Control4 room the project no longer has. What Room Audit
+-- listed on a click is shown on the device's own list row, at every
+-- refresh of the rows; nothing is moved (no API moves a device), and the
+-- Control4 room stays the owner's. One local lookup (GetDevices by the
+-- devices' ids), only while one of the module's devices is in a mapped
+-- room; a lookup that fails or knows nothing of a device marks nothing
+-- (unknown is never "elsewhere").
+function owner:room_marks()
+	local marks = {}
+	local mapping_of, ids = {}, {}
+	for _, rid in ipairs(self.reg:rids("linked")) do
+		local entry = self.registry[rid]
+		local mapping = self:room_mapping(self:mark_group(rid, entry))
+		local id = entry.device_id
+		if mapping and mapping.c4_room_id and not mapping_of[id] and not self:foreign(id) then
+			mapping_of[id] = mapping
+			ids[#ids + 1] = tostring(id)
+		end
+	end
+	if #ids == 0 then
+		return marks
+	end
+	local ok, raw = self.project:call("devices", { DeviceIds = table.concat(ids, ",") })
+	if not ok or type(raw) ~= "table" then
+		return marks
+	end
+	local rooms = self.project:rooms()
+	for id, info in pairs(raw) do
+		local device_id = tonumber(id)
+		local mapping = device_id and mapping_of[device_id]
+		local room_id = type(info) == "table" and tonumber(info.roomId) or nil
+		if mapping and room_id and room_id ~= mapping.c4_room_id then
+			local here = util.display_name(info.roomName)
+			if here == "" then
+				here = rooms[room_id] or ("room " .. tostring(room_id))
+			end
+			local there = rooms[mapping.c4_room_id]
+			if not there and next(rooms) == nil then
+				there = mapping.c4_room_name
+			end
+			if there then
+				marks[device_id] = string.format(" (in %s instead of %s)", here, there)
+			else
+				marks[device_id] = string.format(" (in %s; mapped room gone)", here)
+			end
+		end
+	end
+	return marks
 end
 
 -- Device creation ---------------------------------------------------------------
@@ -1047,6 +1202,7 @@ function owner:register_added(job, device_id, info, created, failed)
 	end
 	self:registered(device_id)
 	self:save()
+	self:tell_names("added", record.rid, self:hue_name(record.rid, entry))  -- N17: paired at its first look
 	created[#created + 1] = { record = record, device_id = device_id, room_name = job.room_name }
 	return device_id
 end
@@ -1241,6 +1397,11 @@ function owner:adopt_hue_names()
 	if busy then
 		return busy
 	end
+	if self:names_sync() then
+		-- 1.2: the names sync both ways; the hidden alias takes the Hue names of
+		-- the pairs that wait for Resolve Names (names-sync §6).
+		return self:tell_names("adopt_all") or "Names: nothing to adopt"
+	end
 	local renamed, skipped = {}, {}
 	for _, d in ipairs(self:name_differences(true)) do
 		local entry, current, expected = d.entry, d.current, d.expected
@@ -1271,7 +1432,9 @@ function owner:adopt_hue_names()
 				table.concat(renamed, ", "))
 		end
 		if #skipped > 0 then
-			parts[#parts + 1] = string.format("not renamed %d: %s", #skipped, table.concat(skipped, ", "))
+			-- Every Last Action begins with a capital (§4 finding 11).
+			parts[#parts + 1] = string.format("%s %d: %s", #renamed > 0 and "not renamed" or "Not renamed", #skipped,
+				table.concat(skipped, ", "))
 		end
 		text = table.concat(parts, "; ")
 	end
@@ -1285,6 +1448,10 @@ function owner:accept_names()
 	local busy = self:busy_text()
 	if busy then
 		return busy
+	end
+	local n = self:names_sync()
+	if n then
+		return n.accept_text()  -- the hidden alias writes nothing (names-sync §6)
 	end
 	local accepted = {}
 	for _, d in ipairs(self:name_differences()) do
@@ -1353,15 +1520,16 @@ function owner:attention_items(items)
 			c.holder, c.claimant, words.forget_action)
 	end
 
-	local diffs = self:name_differences()
+	-- With the names sync (1.2) its own items replace this one for the kinds it
+	-- syncs; the zone lights' differences point to Resolve Names.
+	local diffs = self:names_sync() == nil and self:name_differences() or {}
 	if #diffs > 0 then
 		local names = {}
 		for _, d in ipairs(diffs) do
 			names[#names + 1] = string.format("%s is %s in Hue", d.current, d.expected)
 		end
-		items[#items + 1] = string.format("%d %s%s differ%s from the Composer names: %s "
-			.. "(Adopt Hue Names or Accept Names As They Are)", #diffs, words.name_kind, #diffs == 1 and "" or "s",
-			#diffs == 1 and "s" or "", util.some(names, self.MAX_NAMED))
+		items[#items + 1] = string.format("%d %s%s differ%s from the Composer names: %s (Resolve Names)", #diffs,
+			words.name_kind, #diffs == 1 and "" or "s", #diffs == 1 and "s" or "", util.some(names, self.MAX_NAMED))
 	end
 
 	return items
@@ -1442,11 +1610,15 @@ end
 
 -- Re-link: the entry keeps its device, proxy, programming and name and
 -- swaps the rid (§1 rule 3); the device hears its new configuration and
--- state. Returns ok, text.
-function owner:relink(device_id, new_rid)
-	local busy = self:busy_text()
-	if busy then
-		return false, busy
+-- state, and the Hue thing its Composer name (names N16, when the names sync
+-- is set: its text ends this one's). `internal` (the re-link by radio of D7,
+-- inside a resync or an event) skips the busy check. Returns ok, text.
+function owner:relink(device_id, new_rid, internal)
+	if not internal then
+		local busy = self:busy_text()
+		if busy then
+			return false, busy
+		end
 	end
 	device_id = util.positive(device_id)
 	if not device_id or type(new_rid) ~= "string" or new_rid == "" then
@@ -1457,7 +1629,7 @@ function owner:relink(device_id, new_rid)
 		return false, string.format("Not re-linked: device %d is not a registered %s", device_id, self.WORDS.registered)
 	end
 	if self:foreign(device_id) then
-		return false, string.format("Not re-linked: device %d is a zone light; Forget Light drops its stale light entry",
+		return false, string.format("Not re-linked: device %d is a zone light; Forget Device drops its stale light entry",
 			device_id)
 	end
 	local holder = self.registry[new_rid]
@@ -1495,6 +1667,7 @@ function owner:relink(device_id, new_rid)
 	self:push(new_rid, "resync", true)
 	self:flush()
 	local text = string.format("Re-linked device %d (was %s) to %s", device_id, was, self:relinked_label(record))
+	text = text .. (self:tell_names("relinked", old_rid, new_rid) or "")
 	self.ctx.log.always("%s: %s", self.TAG, text)
 	return true, text
 end
@@ -1519,6 +1692,7 @@ function owner:forget(device_id)
 	local label = self:forget_label(rid, entry, device_id)
 	local told = shown(self:told_name(entry))
 	self.reg:forget(rid)
+	self:tell_names("forgotten", rid)
 	self:mark()
 	self:forgot(rid, entry, device_id, told)
 	self.last_configure[rid] = nil
@@ -1664,7 +1838,7 @@ function owner:link_devices(skip_ids)
 			end
 		elseif names[id] and shared[util.name_key(names[id])] > 1 then
 			problems[#problems + 1] = string.format("%s: %d bound devices share that name; rename one in Composer and run "
-				.. "Link Devices again", who, shared[util.name_key(names[id])])
+				.. "Link Device again", who, shared[util.name_key(names[id])])
 		else
 			local matches = self:match_unimported_by_name({ composer, hello.name })
 			if #matches == 1 then
@@ -1678,10 +1852,10 @@ function owner:link_devices(skip_ids)
 				end
 			elseif #matches > 1 then
 				problems[#problems + 1] = string.format("%s: %d unimported %s have that name; rename the device in Composer "
-					.. "to one %s exact name and run Link Devices again", who, #matches, words.link_many, words.link_one)
+					.. "to one %s exact name and run Link Device again", who, #matches, words.link_many, words.link_one)
 			else
 				problems[#problems + 1] = string.format("%s: no unimported %s has that name; rename the device in Composer "
-					.. "to the %s exact name%s and run Link Devices again", who, words.link_none, words.link_one,
+					.. "to the %s exact name%s and run Link Device again", who, words.link_none, words.link_one,
 					words.link_hint or "")
 			end
 		end
@@ -1693,11 +1867,256 @@ function owner:link_devices(skip_ids)
 			table.concat(linked, ", "))
 	end
 	if #problems > 0 then
-		parts[#parts + 1] = string.format("not linked %d: %s", #problems, table.concat(problems, "; "))
+		-- Every Last Action begins with a capital (§4 finding 11).
+		parts[#parts + 1] = string.format("%s %d: %s", #linked > 0 and "not linked" or "Not linked", #problems,
+			table.concat(problems, "; "))
 	end
 	local text = table.concat(parts, "; ")
 	self.ctx.log.always("%s: %s", self.TAG, text)
 	return text
+end
+
+-- Re-link by radio (D7; docs/simplify-actions-design.md §3.2) ------------------
+
+-- Hooks: the records on the bridge a radio identifies, each { rid, mac,
+-- multi (the record's device has several of them), position (its place on
+-- that device: service_id), record } (lights: every light with a MAC;
+-- motion: every sensor); whether this run has read the bridge enough to
+-- judge (a full read of the records and their radios); whether an entry
+-- and a record are the same kind of thing (motion: sensor or area); the
+-- matches by name the module offers besides (M8); the words of the Last
+-- Action ("its bulb").
+function owner.radio_records()
+	return {}
+end
+
+function owner.radio_ready()
+	return false
+end
+
+function owner.same_kind()
+	return true
+end
+
+function owner.name_suggestions()
+	return {}
+end
+
+-- The key a Hue room's or zone's label is compared by in the name matches:
+-- util.name_key of the label without the " (deleted in Hue)" mark a module
+-- adds once the group left the bridge; nil for no room.
+local DELETED_MARK = " (deleted in Hue)"
+local function group_key(label)
+	if type(label) ~= "string" then
+		return nil
+	end
+	if #label > #DELETED_MARK and label:sub(-#DELETED_MARK) == DELETED_MARK then
+		label = label:sub(1, -#DELETED_MARK - 1)
+	end
+	local key = util.name_key(label)
+	if key == "" or key == "(no room)" then
+		return nil
+	end
+	return key
+end
+
+-- Whether two Hue rooms or zones are the same one for a name match (M8, S4,
+-- A13; docs/simplify-actions-design.md §4 finding 9): the same rid (two
+-- nils included: neither in a room), or failing that the same label, since a
+-- bridge reset or a room deleted and made again gives it a new rid. Labels
+-- are hue_model.group_label's ("Kitchen", "Downstairs (zone)"), so a room
+-- and a zone of one name stay apart.
+function owner.same_group(rid_a, label_a, rid_b, label_b)
+	if rid_a == rid_b then
+		return true
+	end
+	local a = group_key(label_a)
+	return a ~= nil and a == group_key(label_b)
+end
+
+owner.RADIO_WORDS = { thing = "its Hue resource" }
+
+-- The entries a new record may stand for, by MAC: gone ones, and unbound
+-- ones whose resource the bridge is known to lack (beta 8's hint, #344),
+-- never another module's device; tombstoned and forgotten devices have no
+-- entry (M4). Returns { [mac] = { { rid, entry, gone } ... } }.
+function owner:radio_sources()
+	local by_mac = {}
+	for _, state in ipairs({ "gone", "unbound" }) do
+		for _, rid in ipairs(self.reg:rids(state)) do
+			local entry = self.registry[rid]
+			if entry.mac_address and self:record_of(rid) == nil and not self:foreign(entry.device_id)
+				and (state == "gone" or self:known_missing(rid)) then
+				local list = by_mac[entry.mac_address] or {}
+				by_mac[entry.mac_address] = list
+				list[#list + 1] = { rid = rid, entry = entry, gone = state == "gone" }
+			end
+		end
+	end
+	return by_mac
+end
+
+-- §3.2 M1-M7 over the records: auto = { { entry_rid, rid, record } } (M1: one
+-- gone entry of that kind carries the record's radio; M3: on a multi-light
+-- device, the one at the record's position), offered = { { entry_rid, rid,
+-- why = "same radio", holder?, ambiguous? } } (M2 several histories, M3 no
+-- unique position, M5 the record already linked to another device, and an
+-- unbound source). An entry two records would take is no automatic match.
+function owner:radio_scan()
+	local auto, offered, claims = {}, {}, {}
+	if not self:radio_ready() then
+		return auto, offered
+	end
+	local by_mac = self:radio_sources()
+	if next(by_mac) == nil then
+		return auto, offered
+	end
+	local tombs = self.reg:tombstones()
+	for _, r in ipairs(self:radio_records()) do
+		local list = r.mac and by_mac[r.mac] or nil
+		local cands = {}
+		for _, g in ipairs(list or {}) do
+			local placed = not r.multi or g.entry.service_id == nil or r.position == nil
+				or tostring(g.entry.service_id) == tostring(r.position)
+			if placed and self:same_kind(g.entry, r.record) then
+				cands[#cands + 1] = g
+			end
+		end
+		local holder = self.registry[r.rid]
+		if holder then
+			for _, g in ipairs(cands) do  -- M5
+				offered[#offered + 1] = { entry_rid = g.rid, rid = r.rid, why = "same radio", holder = holder.device_id }
+			end
+		elseif not tombs[r.rid] and #cands > 0 then
+			local g = cands[1]
+			local positioned = not r.multi or (r.position ~= nil and g.entry.service_id ~= nil
+				and tostring(g.entry.service_id) == tostring(r.position))
+			if #cands == 1 and g.gone and positioned then
+				auto[#auto + 1] = { entry_rid = g.rid, rid = r.rid, record = r.record }
+				claims[g.rid] = (claims[g.rid] or 0) + 1
+			else
+				for _, c in ipairs(cands) do
+					offered[#offered + 1] = { entry_rid = c.rid, rid = r.rid, why = "same radio", ambiguous = #cands > 1 }
+				end
+			end
+		end
+	end
+	local out = {}
+	for _, m in ipairs(auto) do
+		if claims[m.entry_rid] == 1 then
+			out[#out + 1] = m
+		else
+			offered[#offered + 1] = { entry_rid = m.entry_rid, rid = m.rid, why = "same radio", ambiguous = true }
+		end
+	end
+	return out, offered
+end
+
+-- D7's automatic re-link, after the registry refresh of a resync or of a
+-- stream `add`: every M1 / M3 / M7 match re-linked (§3.2), never a device
+-- the project no longer has; one Last Action line, a summary when several
+-- went at once (M6). Inside Import All New (`into`, a list) it writes no Last
+-- Action: the labels of the devices it re-linked are appended to `into`, and
+-- the import's own result names them (§4 finding 10). Never creates,
+-- deletes, moves or renames a device in Composer; the names follow at their
+-- paced rate (N16). Returns the number re-linked.
+function owner:auto_relink(reason, into)
+	local auto = self:radio_scan()
+	if #auto == 0 then
+		return 0
+	end
+	local present = self.project:devices_of(self.DEVICE_DRIVER)
+	local labels = {}
+	for _, m in ipairs(auto) do
+		local entry = self.registry[m.entry_rid]
+		if entry and not self.registry[m.rid] and (not present or present[entry.device_id]) then
+			local label = self.project:display_name(entry.proxy_id or entry.device_id)
+				or self:entry_name(m.entry_rid, entry)
+			local device_id = entry.device_id
+			local ok, text = self:relink(device_id, m.rid, true)
+			if ok then
+				labels[#labels + 1] = util.sanitise(label)
+				self.ctx.log.always("%s: re-linked by radio (%s): %s", self.TAG, tostring(reason), text)
+			else
+				self.ctx.log.warn("%s: no re-link by radio for device %d: %s", self.TAG, device_id, tostring(text))
+			end
+		end
+	end
+	if #labels == 0 then
+		return 0
+	end
+	if type(into) == "table" then
+		for _, label in ipairs(labels) do
+			into[#into + 1] = label
+		end
+		self.ctx.log.always("%s: re-linked %d by radio during the import: %s", self.TAG, #labels,
+			table.concat(labels, ", "))
+		return #labels
+	end
+	local text
+	if #labels == 1 then
+		text = string.format("Re-linked %s to %s (same radio, new Hue id)", labels[1], self.RADIO_WORDS.thing)
+	else
+		text = string.format("Re-linked %d devices by radio: %s", #labels, util.some(labels, self.MAX_NAMED))
+	end
+	self.ctx.log.always("%s: %s", self.TAG, text)
+	if type(self.ctx.last_action) == "function" then
+		self:protect("last_action", self.ctx.last_action, text)
+	end
+	return #labels
+end
+
+-- Every re-link the module offers: { { device_id, entry_rid, rid, why, text,
+-- apply, holder?, ambiguous? } }, a device's radio offers first, then the
+-- module's name matches (M8, S4, A13). `apply` is true when a click may
+-- re-link it without a choice: neither the device nor the target appears in
+-- another offer, nothing holds the target (M5), the match is not ambiguous
+-- (M2, M3). The others are for the per-device texts only. `text` names the
+-- Hue thing only ("Lamp 5 [Bedroom] #9", and the holder of a taken one):
+-- Link Device's row already names the device and adds `why` (§4 finding 5).
+function owner:suggestions()
+	local _, offered = self:radio_scan()
+	local out, seen = {}, {}
+	for _, o in ipairs(offered) do
+		local entry = self.registry[o.entry_rid]
+		if entry then
+			seen[o.entry_rid] = true
+			out[#out + 1] = { device_id = entry.device_id, entry_rid = o.entry_rid, rid = o.rid, why = o.why,
+				holder = o.holder, ambiguous = o.ambiguous }
+		end
+	end
+	for _, o in ipairs(self:name_suggestions(seen) or {}) do
+		local entry = self.registry[o.entry_rid]
+		if entry then
+			out[#out + 1] = { device_id = entry.device_id, entry_rid = o.entry_rid, rid = o.rid, why = o.why or "same name",
+				ambiguous = o.ambiguous }
+		end
+	end
+	local by_device, by_rid = {}, {}
+	for _, s in ipairs(out) do
+		by_device[s.device_id] = (by_device[s.device_id] or 0) + 1
+		by_rid[s.rid] = (by_rid[s.rid] or 0) + 1
+	end
+	for _, s in ipairs(out) do
+		local record = self:record_of(s.rid)
+		s.apply = not s.holder and not s.ambiguous and by_device[s.device_id] == 1 and by_rid[s.rid] == 1
+		s.text = (record and self:record_label(record) or tostring(s.rid))
+			.. (s.holder and string.format(" (already linked to device %d)", s.holder) or "")
+	end
+	return out
+end
+
+-- Link Device's "every device with a suggested match" (§3.3, dev:suggested;
+-- bridge/actions.lua re-links each through relink(device_id, rid)): only the
+-- offers a click may apply as they are, { { device_id, rid, text, why } }.
+function owner:suggested()
+	local out = {}
+	for _, s in ipairs(self:suggestions()) do
+		if s.apply then
+			out[#out + 1] = { device_id = s.device_id, rid = s.rid, text = s.text, why = s.why }
+		end
+	end
+	return out
 end
 
 return owner
