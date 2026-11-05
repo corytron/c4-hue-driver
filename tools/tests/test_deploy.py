@@ -853,6 +853,7 @@ class StartTest(DeployCase):
         self.assertIn(APPROVAL, brief)
         self.assertIn("Add or Update Driver or Agent", brief)
         self.assertIn("Never delete and re-add", brief)
+        self.assertIn('"Overwrite Driver or Agent?" with the reason "Current version is newer"', brief)
         self.assertIn('Note from the coordinator: "changes <capabilities>: reboot the controller afterwards"', brief)
         self.assertIn("--signer-workflow octo/hue/.github/workflows/release.yml", brief)
         self.assertIn("no LAN address and no bridge id", brief)

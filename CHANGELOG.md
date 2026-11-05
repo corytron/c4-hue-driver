@@ -56,30 +56,6 @@ listed.
   marks on the Lights, Scenes, Zone Lights and Motion Sensors lists a
   device that sits in another Control4 room than its Hue room maps to.
   Its reads ask the bridge for at most 100 requests an hour (#334).
-- Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
-  and motion sensors from the bridge now, without needing the event stream
-  (#324).
-- Hue motion sensors and MotionAware areas (Hue Bridge Pro) as Control4
-  motion sensors: a fourth driver, Hue Motion, with the stock motion
-  programming, light level, temperature, battery and an occupancy hold time,
-  added from the bridge's Add Motion Sensor and Add Motion Area actions, and
-  a Log Motion Diagnostics action for testers (#268).
-- Import All New Motion Sensors: one click adds every Hue motion sensor not
-  added yet to the Control4 room its Hue room maps to, and lists the ones it
-  skips (#319).
-- Two programming commands on every Hue Light device: Raise Level By
-  (points over the current level, remembering it) and Restore Saved Level
-  (back to it, unless someone changed the light since), for motion
-  programming that raises lamps and puts them back (#297).
-- Prereleases for testers: versions such as 1.1-beta.1 appear on the
-  Releases page marked Pre-release, with their own notes and a Beta feedback
-  form; the stable release stays the one marked Latest (#269).
-- A setting on every Hue Scene device, On State Follows: by default its
-  tile and keypad LEDs now show on while any light of the scene's room or
-  zone is on, whatever turned it on (another scene, the Hue app, a Hue
-  switch, a Hue Light in Control4), and off once they are all off. Choose
-  This scene for the earlier behaviour, on only while that scene is the one
-  played. This changes existing scene keypads after the update (#310).
 
 ### Changed
 - The Hue Bridge has 9 actions instead of 29: Pair Bridge, Import All New,
@@ -121,6 +97,36 @@ listed.
 - Room Mappings says how each mapping was made (by name, by hand, or
   before 1.2), and Set Room Mapping's "(no mapping)" keeps a Hue room
   unmapped: the automatic mapping by name leaves it alone (#334).
+
+## 1.1 "Brasso", build 447 (2026-11-05)
+
+### Added
+- Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
+  and motion sensors from the bridge now, without needing the event stream
+  (#324).
+- Hue motion sensors and MotionAware areas (Hue Bridge Pro) as Control4
+  motion sensors: a fourth driver, Hue Motion, with the stock motion
+  programming, light level, temperature, battery and an occupancy hold time,
+  added from the bridge's Add Motion Sensor and Add Motion Area actions, and
+  a Log Motion Diagnostics action for testers (#268).
+- Import All New Motion Sensors: one click adds every Hue motion sensor not
+  added yet to the Control4 room its Hue room maps to, and lists the ones it
+  skips (#319).
+- Two programming commands on every Hue Light device: Raise Level By
+  (points over the current level, remembering it) and Restore Saved Level
+  (back to it, unless someone changed the light since), for motion
+  programming that raises lamps and puts them back (#297).
+- Prereleases for testers: versions such as 1.1-beta.1 appear on the
+  Releases page marked Pre-release, with their own notes and a Beta feedback
+  form; the stable release stays the one marked Latest (#269).
+- A setting on every Hue Scene device, On State Follows: by default its
+  tile and keypad LEDs now show on while any light of the scene's room or
+  zone is on, whatever turned it on (another scene, the Hue app, a Hue
+  switch, a Hue Light in Control4), and off once they are all off. Choose
+  This scene for the earlier behaviour, on only while that scene is the one
+  played. This changes existing scene keypads after the update (#310).
+
+### Changed
 - One wording on the Hue Bridge's Lights, Scenes, Zone Lights and Motion
   Sensors rows: "… on bridge, N imported, N new", then the missing, unbound
   and deleted counts when there are any; the bulk add of motion sensors is
