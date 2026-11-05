@@ -1,8 +1,9 @@
 # Status of the Hue driver (2026-11-05)
 
-**Now (2026-11-05).** The house runs prerelease **v1.1-beta.8, build 443**
-(`deploy/house.yaml`; `python3 tools/deploy.py status` says whether it is
-installed). **1.2 "Taramyn"** (#334, PR #353, branch
+**Now (2026-11-05).** **1.1 "Brasso", build 447, is released** (Latest;
+[Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382))
+and runs on the house (`deploy/house.yaml`; `python3 tools/deploy.py status`
+says whether it is installed). **1.2 "Taramyn"** (#334, PR #353, branch
 `feature/simplify-1.2-334`, contract `docs/simplify-actions-design.md`) is
 built and checked on the house through two dev rounds:
 - dev 467 ([Discussion #369](https://github.com/corytron/c4-hue-driver/discussions/369));
@@ -22,7 +23,6 @@ What 1.2 does:
   is away, missing, moved or answering elsewhere.
 
 Open before 1.2 ships:
-- the 1.1 release itself, since 1.2 follows it;
 - review and merge of PR #353;
 - the 1.2 betas.
 
