@@ -2256,6 +2256,7 @@ if devtools then
 		bridge_request = bridge_request,
 		restart_stream = restart_stream,
 		test_connection = test_connection,
+		last_action = last_action,
 	})
 end
 

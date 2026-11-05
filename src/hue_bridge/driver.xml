@@ -549,6 +549,22 @@
 				<sort_order>31</sort_order>
 				<params/>
 			</action>
+			<!-- The 1.2 probe of picker folders (#334, docs/simplify-actions-design.md §2.2). -->
+			<action>
+				<name>Test Picker Folders</name>
+				<command>Probe Picker Folders</command>
+				<sort_order>33</sort_order>
+				<params>
+					<param>
+						<name>What</name>
+						<type>CUSTOM_SELECT:Probe12PickerList</type>
+					</param>
+					<param>
+						<name>Room</name>
+						<type>CUSTOM_SELECT:Probe12RoomList</type>
+					</param>
+				</params>
+			</action>
 			<!-- DEV-ONLY END -->
 			<action>
 				<name>Forget Pairing</name>

@@ -2283,7 +2283,8 @@ describe("bridge/devtools.lua development requests", function()
 			if not release[name] then added[#added + 1] = name end
 		end
 		table.sort(added)
-		assert.same({ "Check CA Pinning", "Connection Test", "Reload Credentials" }, dev_only_commands())
+		assert.same({ "Check CA Pinning", "Connection Test", "Probe Picker Folders", "Reload Credentials" },
+			dev_only_commands())
 		local expected = { "HUE_LOG" }
 		for _, command in ipairs(dev_only_commands()) do expected[#expected + 1] = (command:gsub("%s+", "_")) end
 		table.sort(expected)

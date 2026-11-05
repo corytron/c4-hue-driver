@@ -191,6 +191,7 @@ ledger.rows = {
 			{ action = "Reload Credentials", dev = true },
 			{ action = "Connection Test", params = { "Target" }, dev = true },
 			{ action = "Check CA Pinning", dev = true },
+			{ action = "Probe Picker Folders", params = { "What", "Room" }, dev = true },
 		},
 	},
 	{
