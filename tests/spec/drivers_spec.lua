@@ -1388,6 +1388,17 @@ describe("Hue Bridge driver", function()
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
 		end
 
+		-- The house's pairing predates the stored model: Bridges Found read
+		-- "Paired with  at 10.0.1.x" on dev 467 while Bridge Model was right.
+		it("Bridges Found names the model the identity check read when the pairing stored none", function()
+			local env, c4 = house()
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.equal("Paired with the bridge at 10.0.2.143", env.Properties["Bridges Found"])
+			identity(c4)
+			assert.equal("Paired with Hue Bridge Pro (BSB003) at 10.0.2.143", env.Properties["Bridges Found"])
+			assert.equal("Hue Bridge Pro (BSB003)", env.Properties["Bridge Model"])
+		end)
+
 		describe("Pair Bridge with another bridge (item 1)", function()
 			it("is refused until Forget Pairing, before anything is shown or asked for", function()
 				local env, c4 = house()

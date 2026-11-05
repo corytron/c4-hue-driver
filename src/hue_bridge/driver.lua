@@ -1089,10 +1089,20 @@ local function reset_identity_check()
 	identity_running = nil
 end
 
+-- Bridges Found's renderer, defined with the list further down; its
+-- summary names the model the bridge reported (show_bridge_info).
+local redraw_bridges
+
 -- The bridge's model, name and firmware rows (docs/bridge-compat-design.md
--- Decision 3), from a /api/0/config answer or a pairing probe.
+-- Decision 3), from a /api/0/config answer or a pairing probe. The model is
+-- kept for Bridges Found too: a pairing made before 1.1 stored none, so the
+-- stored credentials alone left its summary "Paired with  at ..." (dev 467).
 local function show_bridge_info(info)
+	state.bridge_model = info.model
 	prop("Bridge Model", config.model_label(info.model))
+	if redraw_bridges then
+		redraw_bridges()
+	end
 	prop("Bridge Name", util.display_name(info.name))
 	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
 	if config.firmware_check(info.sw_version) == "old" then
@@ -2373,6 +2383,7 @@ dispatch.commands["Forget_Pairing"] = function()
 	netstream.clear_address()
 	credentials.clear()
 	state.creds = nil
+	state.bridge_model = nil
 	state.stream_ip = nil
 	state.stream_family = nil
 	prop("Stream Address", "")
@@ -2698,7 +2709,13 @@ local function show_bridges()
 	if bridges.searching then
 		summary = "Looking for Hue bridges on the network..."
 	elseif paired() and state.ip then
-		summary = string.format("Paired with %s at %s", config.model_label(state.creds.model), state.ip)
+		local model = state.bridge_model
+		if model == nil or model == "" then
+			model = state.creds.model
+		end
+		local label = config.model_label(model)
+		summary = label ~= "" and string.format("Paired with %s at %s", label, state.ip)
+			or string.format("Paired with the bridge at %s", state.ip)
 	elseif n > 0 then
 		summary = string.format("%d Hue bridge%s found: pick one and click Set to pair", n, n == 1 and "" or "s")
 	else
@@ -2712,6 +2729,7 @@ local function show_bridges()
 	bridges.by_label = by_label
 	show_list(BRIDGES_ROW, summary, labels)
 end
+redraw_bridges = show_bridges
 
 local function search_bridges(subnet)
 	if not state.discovery then
