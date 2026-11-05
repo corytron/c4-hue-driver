@@ -14,6 +14,8 @@ listed.
 
 ## Unreleased
 
+## 1.1 "Brasso", build 447 (2026-11-05)
+
 ### Added
 - Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
   and motion sensors from the bridge now, without needing the event stream
