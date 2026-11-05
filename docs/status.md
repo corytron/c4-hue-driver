@@ -1,4 +1,38 @@
-# Status of the Hue driver (2026-10-27)
+# Status of the Hue driver (2026-11-05)
+
+**Now (2026-11-05).** **1.1 "Brasso", build 447, is released** (Latest;
+[Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382))
+and runs on the house (`deploy/house.yaml`; `python3 tools/deploy.py status`
+says whether it is installed). **1.2 "Taramyn"** (#334, PR #353, branch
+`feature/simplify-1.2-334`, contract `docs/simplify-actions-design.md`) is
+built and checked on the house through two dev rounds:
+- dev 467 ([Discussion #369](https://github.com/corytron/c4-hue-driver/discussions/369));
+- dev 477, wave 3 ([Discussion #378](https://github.com/corytron/c4-hue-driver/discussions/378)).
+
+What 1.2 does:
+- **Bridge actions:** 39 become 9 (Pair Bridge, Import All New, Add From Hue,
+  Link Device, Forget Device, Resolve Names, Set Room Mapping, Diagnostics,
+  Forget Pairing). The light and scene devices have no actions; the old
+  commands answer as hidden aliases until 2.0.
+- **By itself:** it reads the bridge in tiers, re-checks a rejected key,
+  finds the bridge on the LAN (mDNS, then a bounded sweep, never the
+  internet), maps rooms by exact name, and re-links a returned bulb by its
+  radio.
+- **Names:** they sync both ways.
+- **Attention:** it wraps onto continuation rows and says when the bridge
+  is away, missing, moved or answering elsewhere.
+
+Open before 1.2 ships:
+- review and merge of PR #353;
+- the 1.2 betas.
+
+Follow-ups filed:
+- #371, the occupancy hold after a restart;
+- #373, driver.lua near Lua 5.1's limit of 200 locals;
+- #376, dev-loop reload leftovers, also on 1.1.
+
+The sections below are the 1.1-era record, last brought up to date on
+2026-10-27.
 
 **1.1 betas since 2026-10-26** (prereleases, never Latest; `docs/prerelease-design.md`, #269):
 `v1.1-beta.1` (build 376) and `v1.1-beta.2` (build 381) add a fourth driver,
