@@ -325,3 +325,10 @@ Where this section and the text above disagree, this section wins.
 | D8 | **Yes**: the rejected key is re-checked automatically (5 min, 15 min, 1 h, then hourly). | None. |
 | D9 | **Yes**: one dev build on the house through the Windows session, once the Modern Forms work frees it, to test picker folders, mDNS answers and the bulb re-add of D7. | None. |
 | D10 | **Yes**: the four small fixes of 1.5 go into 1.1 beta 8 now. | None. |
+
+### 1.9 Two more answers (2026-11-05), from the follow-up research
+
+| # | Answer | Source |
+| --- | --- | --- |
+| D11 | **At the 1.2 install, names that already differ are offered, not synced:** Resolve Names lists them once, with "Composer names to Hue" as the first row; from then on every rename syncs by itself both ways. Zone lights stay out of the automatic sync, like rooms. | [names-sync research](simplify-research-names-sync.md) |
+| D12 | **Discovery keeps a second local stage:** if mDNS finds nothing while the paired bridge is missing, a TCP probe of port 443 on at most two /24 networks (around the last good address and around the controller), at most hourly, four connections at once; identity as at pairing (the Signify chain, the bridge id in its public config). Never the internet. | [discovery research](simplify-research-discovery.md) |
