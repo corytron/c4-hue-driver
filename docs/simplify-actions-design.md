@@ -567,3 +567,27 @@ change into its hand-back instead. The coordinator wires: the housekeeping
 tasks (scheduler research §5, with the tiers of 3.1 and the key re-check of
 D8), the merged actions and aliases, Bridges Found and the address
 follow-up, `OnItemNameChanged`, the Attention wrap and the rows.
+
+## 4. Wave 3: what the documentation pass found (coordinator, 2026-11-05)
+
+Piece G read every manual against the code and listed twelve places where
+the code is wrong, or does less than this contract decided. Each is decided
+here. Findings 6 and the identity re-check are not new decisions: §1.3 and
+D5 promised them, and the code never had them.
+
+| # | Finding | Decision | Piece |
+| --- | --- | --- | --- |
+| 1 | An Attention text longer than six rows is logged in full only with Debug Mode On (`log.info`), while Last Action's overflow is always logged | Log it as Last Action does (`log.always`) | H |
+| 2 | Forget Pairing leaves Bridges Found reading "Paired with ..." and the automatic searches stopped until the driver restarts; a new pairing leaves "N found: pick one" up to 15 minutes | Both redraw the row at once; Forget Pairing starts the first-load searches again (3 s, 1 min, 5 min, then every 15 min) | H |
+| 3 | Every automatic search of an unpaired driver writes Last Action ("Bridges Found: ...") every 15 minutes, over the owner's last result | Automatic searches write the log and the row only; Last Action is for searches the owner asked for (Search again, the subnet pick) | H |
+| 4 | Picking a bridge in Bridges Found does not pass its id to the pairing, so another bridge answering at that address in the window would be paired | The pick's id is the expected one: a different id at the address is refused as Pair Bridge refuses one today | H |
+| 5 | The Link Device row names the device twice | The suggestion suffix names only the Hue thing and the reason | I |
+| 6 | Not built: Attention when the paired bridge is missing (D5: "If nothing local works, Attention says the bridge is missing"), the bridge or stream away an hour (§1.3), and the identity re-check before the key goes out again after an outage of 60 s or more (§1.3) | Build them as §1.3 and D5 say; the discovery research (simplify-research-discovery.md) has the texts of the missing, moved and typed-address-wrong cases, and its texts are used where they fit | H |
+| 7 | safety_quick, safety_full and stream_down_read are not counted against the hourly budget of optional requests | They are counted; stream_down_read stays every 10 minutes while the stream is down and the bridge answers | H |
+| 8 | A new light with a re-link hint is told "(Import All New or Add From Hue)", which Import All New skips; a new motion sensor is told "(Add From Hue)", which Import All New imports | Hinted lights end "(Link Device)"; sensors end "(Import All New or Add From Hue)" | I |
+| 9 | Name suggestions need the same Hue room or group id, so after a bridge reset nothing is suggested; zone lights have none | The same room is the same id or, failing that, the same room name; zone lights get suggestions by the same rule if their module allows it without a new picker, otherwise an issue for 1.3 | I |
+| 10 | Inside Import All New the automatic re-link's Last Action is overwritten by the import's, and the import result never names the re-linked devices | Import All New's result names them ("re-linked 2: Lamp 3, Lamp 4"), and the re-link run inside an import writes no Last Action of its own | I |
+| 11 | A room-mapping pass that finds only ambiguous names writes Last Action and changes nothing; a result can begin "re-mapped" in lowercase | Nothing changed, nothing written (the log keeps it); every Last Action begins with a capital | I |
+| 12 | "Search every address of a.b.c.x" names the controller's /24, but the search starts with the Bridge IP Address's /24 | The label names what is searched | H |
+
+Owner files: **H** `src/hue_bridge/driver.lua`, `src/hue_bridge/bridge/{housekeeping,discovery,mdns,sweep}.lua`, `tests/spec/{drivers,housekeeping,discovery,devloop}_spec.lua`, the roundtrip specs, `tests/helpers/fake_c4.lua`. **I** `src/hue_bridge/bridge/{owner,lights,scenes,zone_lights,motion,actions,names}.lua`, their specs, `tests/fixtures/*`. **J** (after H and I) every `www/documentation.html`, `docs/composer-checklist.md`, `docs/release-checklist.md`, `docs/import-design.md`, `README.md`, `CHANGELOG.md` (`## Unreleased`). A piece that needs a change in a file it does not own writes the exact change into its hand-back.
