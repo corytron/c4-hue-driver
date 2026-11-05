@@ -15,6 +15,31 @@ listed.
 ## Unreleased
 
 ### Added
+- The Hue Bridge finds Hue bridges on the local network: a new Bridges
+  Found row lists them when the driver is first loaded, and picking one
+  sets the address and opens the pairing window. When the paired bridge
+  later moves to another address, the driver finds it again by its bridge
+  id and updates Bridge IP Address by itself, saying so in Last Action and
+  Attention. Local network only (mDNS, then a bounded search of nearby
+  addresses), never the internet (#334).
+- Names follow each other both ways for lights, scenes and motion sensors:
+  a rename in Composer renames the light, scene or sensor in the Hue app,
+  and a rename in the Hue app renames the Control4 device; when both
+  changed, the Composer name wins. Hue rooms, zones and zone lights are
+  not synced, a name Hue refuses (longer than 32 bytes) waits for Resolve
+  Names, and names that already differ when 1.2 is installed are offered
+  once in Resolve Names instead of being changed (#334).
+- A bulb or motion sensor that comes back to the bridge with new Hue ids
+  but the same radio (deleted and added again in the Hue app, or after a
+  reset of the bridge) is re-linked to its old device by itself, keeping
+  the device's programming; Last Action says so (#334).
+- The Hue Bridge looks after itself in the background: it reads the
+  bridge again behind the event stream and after a failed read, checks a
+  rejected key again after 5 minutes, 15 minutes, an hour and then every
+  hour, maps a new Hue room to the Control4 room of the same name, marks a
+  device that sits in another room than its Hue room on the list rows, and
+  says in Attention when the bridge or its event stream has been away for
+  an hour (#334).
 - Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
   and motion sensors from the bridge now, without needing the event stream
   (#324).
@@ -41,6 +66,32 @@ listed.
   played. This changes existing scene keypads after the update (#310).
 
 ### Changed
+- The Hue Bridge has 9 actions instead of 29: Pair Bridge, Import All New,
+  Add From Hue, Link Device, Forget Device, Resolve Names, Set Room
+  Mapping, Diagnostics and Forget Pairing. Every job of the old actions is
+  still there, and the manual's chapter 13 says where each one went.
+  Programming does not refer to actions, so no project needs changing
+  (#334).
+- Pair Bridge waits up to 2 minutes for the link button, so the button can
+  be pressed before or after the click; entering the address of a bridge
+  never paired, or picking it in Bridges Found, opens the same wait (#334).
+- Import All New adds every new light and motion sensor in one click, and
+  Add From Hue adds one light, zone or room, scene, all scenes of a room,
+  motion sensor or MotionAware area from one list with folders (#334).
+- Link Device points a device of any kind at its replacement, with the
+  driver's suggestion shown and one line that links every suggested match
+  at once; Forget Device releases a device of any kind. Forget Device and
+  Forget Pairing ask for confirmation (#334).
+- Diagnostics gathers the support steps in one action: check the
+  connection now, read everything from the bridge now, reconnect or stop
+  the event stream, and log the motion diagnostics (#334).
+- The Hue Light and Hue Scene devices have no actions any more (everything
+  is on the bridge), and the Hue Motion Sensor has one, Test Motion
+  Programming, in place of Test: Motion and Test: No Motion (#334).
+- A long Attention continues on extra rows as Last Action does, so the
+  action named at the end of an item is never cut off (#334).
+- Set Room Mapping's "(no mapping)" keeps a Hue room unmapped: the
+  automatic mapping by name leaves it alone (#334).
 - One wording on the Hue Bridge's Lights, Scenes, Zone Lights and Motion
   Sensors rows: "… on bridge, N imported, N new", then the missing, unbound
   and deleted counts when there are any; the bulk add of motion sensors is
@@ -56,6 +107,16 @@ listed.
   the three drivers of the latest release (#266).
 
 ### Fixed
+- Import All New Lights no longer adds a light that looks like the
+  replacement of a gone or unbound Hue Light device (the same radio
+  hardware or the same name) as a second device: it leaves it out and lists
+  it for Re-link Device To Light, as Import All New Motion Sensors already
+  did (#344).
+- The Hue Bridge manual no longer asks for a bridge address with a number
+  below 8: since 1.1 beta 6 the event stream has its own network
+  connection and any address works; the advice now applies only to the
+  Web transfer fallback. Its action counts now match a release build: 29
+  on the Hue Bridge (#344).
 - On a controller where other drivers keep web transfers open, every Hue
   command and read timed out while the event feed was connected. The feed
   now uses a network connection of its own (a new Event Stream Transport

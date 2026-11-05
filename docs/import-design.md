@@ -31,6 +31,14 @@ below. The present is in `docs/status.md`.
    [verified: API 9/_0.1]; nothing in an event, a resync or a startup ever
    creates or removes a device, and nothing ever moves one (no API exists
    [verified: sweep of the API docs]).
+   Superseded in part (2026-11-05, release 1.2, #334, owner's answers D6
+   and D7 in `docs/simplify-actions-design.md` §1.8): creating, deleting
+   and moving stay a click, but two things now happen without one. A
+   rename on either side renames the other (lights, scenes, motion
+   sensors; never rooms, zones or zone lights; Control4 wins when both
+   changed), and a linked device whose rid is gone is re-pointed by itself
+   to a new rid that carries the same radio (MAC), §6 below. Link Devices'
+   adoption by remembered rid at start and at bind was already automatic.
 2. **Nothing is lost by waiting.** Every detected change (new light, gone
    light, rename, room move, deleted device) is cached, counted in a bridge
    property and logged, so the owner can act on it from Composer whenever he
@@ -249,7 +257,7 @@ Actions (all plain `LUA_ACTION`s; the two with pickers carry
 | Action | Params | Does |
 | --- | --- | --- |
 | `Add Light` | `Light` (unimported + tombstoned rids), `Room` (Control4 rooms, default "(mapped room)") | one `AddDevice` into the chosen room; mapping only pre-selects [Q 9]; clears a tombstone |
-| `Import All New Lights` (renames `Import Lights`) | — | every unimported, non-tombstoned rid into its mapped room; **skips** lights whose Hue room is unmapped and lists them in `Last Action` [Q 1]; idempotent by rid; never renames, moves or rebinds |
+| `Import All New Lights` (renames `Import Lights`) | — | every unimported, non-tombstoned rid into its mapped room; **skips** lights whose Hue room is unmapped and lists them in `Last Action` [Q 1]; since #344 (2026-11-05) also **skips** a light that looks like the replacement of a gone or unbound device (`relink_hint`: same MAC, else same name) and lists it for Re-link; idempotent by rid; never renames, moves or rebinds |
 | `Re-link Device To Light` | `Device` (gone + unbound entries), `Light` (unimported rids) | swaps the rid in the entry; `HUE_CONFIGURE` with the new caps; device, name, room, bindings, programming untouched |
 | `Link Devices` | — | adopts bound `hue_light` devices the registry lacks: by the rid they announce, else by exact unique name; reports each |
 | `Forget Light` | `Device` (any entry) | removes the entry, `C4:Unbind(device, 1)` [verified: API 9/_19], sends `HUE_FORGOTTEN`; the device stays for the owner to delete; the rid returns to `Add Light` |
@@ -264,6 +272,25 @@ Everything a click does is also a log line; a click during an import or a
 resync is refused with "Busy: importing; try again in a moment"; empty
 pickers hold one explanatory entry that the action rejects into `Last
 Action`.
+
+Current (2026-11-05, release 1.2, #334): the bridge's 29 actions became 9
+(`docs/simplify-actions-design.md` §1.2 and §3.3; the old command strings
+stay hidden aliases until 2.0). The rows of this contract that change:
+
+| Action (1.2) | Params | Does |
+| --- | --- | --- |
+| `Import All New` (replaces `Import All New Lights` and `Import All New Motion Sensors`) | — | the lights' import as above (fresh GET, mapped rooms only, tombstones skipped, likely replacements skipped and listed for Link Device), then the motion sensors' import (never MotionAware areas); additionally skips every light or sensor that the automatic re-link below re-linked or would suggest (contract §3.2); one `Last Action`, the lights' part first; idempotent by rid; never renames, moves or rebinds |
+| `Add From Hue` (replaces `Add Light`, `Add Zone Light`, `Add Scene`, `Add All Scenes Of Room`, `Add Motion Sensor`, `Add Motion Area`) | `What` (a CUSTOM_SELECT with folders: `f:lights`, `f:groups`, `f:scenes`, `f:scenes:<group_rid>`, `f:motion`; leaves `light:<rid>`, `group:<rid>`, `scene:<rid>`, `sensor:<rid>`, `area:<rid>`, `all:lights`, `all:motion`), `Room` (as `Add Light`'s) | routes the pick to the module that owned the old action, with its texts, refusals and guards; a single pick goes into `Room` (empty = "(mapped room)"); `all:lights`, `all:motion` and a picked `f:scenes:<group_rid>` (all scenes of that room or zone) use the mappings; single selection only (verified on OS 3.4.2, contract §2.3); clears a tombstone as `Add Light` did |
+| automatic re-link by MAC (part of `Re-link Device To Light`'s job; D7) | — (no click) | on every lights or motion registry refresh: a new rid whose MAC equals that of exactly one gone device of the same kind (gone = linked, rid absent from the last successful full read; never a tombstoned or forgotten one) is re-pointed to it as `Re-link Device To Light` did, `Last Action` "Re-linked Desk Lamp to its bulb (same radio, new Hue id)" (a bridge reset: one summary, "Re-linked 47 devices by radio"), and the Hue thing takes the Composer name (names research N16); several candidates, a multi-light device whose position does not decide, or a new rid that has a device already stay suggestions in `Link Device`; scenes, zone lights and MotionAware areas have no MAC and are only suggested (contract §3.2, M1 to M9) |
+
+`Link Device` (`Device`, `To`) replaces the four Re-link actions and Link
+Devices' name match (offered, with a "dev:suggested" row that applies every
+suggestion); `Forget Device` (`Device`, `Confirm`) replaces the Forget
+actions of the bridge and the devices; `Resolve Names` replaces Adopt Hue
+Names and Accept Names As They Are; Map Rooms By Name and Room Audit run by
+themselves (a mapping by exact unique name when a group appears, never over
+a hand choice or a removed mapping; a mark on the list rows). The manual's
+chapter 13 has the full table of where every action went.
 
 Current (2026-10-25, build 316): `Link Devices`, `Adopt Hue Names` and
 `Accept Names As They Are` run for the lights, the scenes and the zone

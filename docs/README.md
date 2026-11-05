@@ -167,15 +167,24 @@ are dated research; what was built from them is in the contracts and
   (2026-10-28, #325).
 - [`simplify-actions-design.md`](simplify-actions-design.md): fewer actions
   and more background tasks (2026-11-04, #334): the contract of the research
-  phase, the inventory of the 39 actions, the verdict vocabulary, and the
-  merged proposal with the owner's decisions (39 actions become 10). Its
-  research: [import](simplify-research-import.md),
+  phase, the inventory of the 39 actions, the verdict vocabulary, the
+  merged proposal with the owner's decisions (39 actions become 10), what
+  the dev build of 2026-11-05 showed, and the build contracts of release
+  1.2. Its research: [import](simplify-research-import.md),
   [maintenance](simplify-research-maintenance.md),
   [composer](simplify-research-composer.md),
   [journeys](simplify-research-journeys.md),
   [compat](simplify-research-compat.md),
   [scheduler](simplify-research-scheduler.md) and
-  [comparables](simplify-research-comparables.md).
+  [comparables](simplify-research-comparables.md); then, for the owner's
+  answers D5 and D6, the follow-up research
+  [`simplify-research-names-sync.md`](simplify-research-names-sync.md)
+  (two-way names for lights, scenes and motion sensors: what the name is
+  on each side, the edge cases, the agreed pair per device, pacing and the
+  texts) and
+  [`simplify-research-discovery.md`](simplify-research-discovery.md)
+  (finding the bridge on the local network only: mDNS, a bounded subnet
+  probe, the Bridges Found row at first load and the address follow-up).
 - [`prerelease-design.md`](prerelease-design.md): prereleases for testers
   (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
   from `main` like every release, their notes, the one list of packages, the

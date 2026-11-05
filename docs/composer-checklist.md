@@ -9,6 +9,15 @@ showed, in the words of that day; **Open** means it has not been checked
 yet. What runs on the house and what is open overall is `docs/status.md`;
 the engineering record behind each result is `docs/design.md`.
 
+**Release 1.2 (#334) replaced the actions**: the Hue Bridge has 9 (Pair
+Bridge, Import All New, Add From Hue, Link Device, Forget Device, Resolve
+Names, Set Room Mapping, Diagnostics, Forget Pairing), the Hue Light and Hue
+Scene none, the Hue Motion Sensor one (Test Motion Programming), and much of
+what was a click is a background task. Section L holds the checks of 1.2 and
+the table of where each old action went. The steps of sections A to K keep
+the action names of the build they were written for, as the record of what
+was checked; repeat one on 1.2 through the action that replaced it.
+
 ## Before you start
 
 - **Release builds.** Release builds (no dev loop, no Lua command window)
@@ -59,7 +68,8 @@ device for a single lamp, and the switches bound as above.
    hue_bridge.c4z, hue_light.c4z, hue_scene.c4z", and within a minute every
    Hue device showing the new `Driver Version`. All three files belong in the
    project even with no device of a type: the bridge creates lights and
-   scenes from them (Add Light, Add Scene). Never add a Hue Light or Hue Scene
+   scenes from them (Add Light, Add Scene; from 1.2 Import All New and Add
+   From Hue). Never add a Hue Light or Hue Scene
    device by hand. A right-click "Update Driver" is only for reloading the
    same version ("Versions are equal. Do you want to overwrite…?").
    - **Done** for every build since 84 (2026-10-21), the last being 160
@@ -195,13 +205,16 @@ actions Composer shows on a dev build (`Connection Test`, `Reload
 Credentials`, `Check CA Pinning`); a light's or scene's reload line appears
 only in its own Lua tab.
 
-- Stream address rotation: after each reconnect `Event Stream` shows
-  "Connected since" within seconds, and `Stream Address` shows a different
-  spelling of the bridge address than before, "<spelling> (own queue,
-  spelling <i> of <k>)" ("(own queue, the only spelling)" when the address
-  has no octet below 8 to pad, "<address> (shared queue with commands:
-  <reason>)" when the stream cannot have its own). The release build
-  rotates the same way at every reconnect. **Done 2026-10-21** (dev loop,
+- Stream address rotation, with `Event Stream Transport` = Web transfer
+  only (since #317 the default network connection reads "<address>
+  (network connection, binding 6001)" and does not rotate): after each
+  reconnect `Event Stream` shows "Connected since" within seconds, and
+  `Stream Address` shows a different spelling of the bridge address than
+  before, "<spelling> (own queue, spelling <i> of <k>)" ("(own queue, the
+  only spelling)" when the address has one octet below 8,
+  "<address> (shared queue with commands: <reason>)" when the stream
+  cannot have its own, such as an address with no octet below 8). The
+  release build rotates the same way at every reconnect. **Done 2026-10-21** (dev loop,
   PR #6): two reloads took the second and third spelling and connected 200
   and 160 ms after the attempt; the row then read "<spelling> (own queue,
   rotating over <k> spellings; commands use <bridge address>)", reworded
@@ -256,16 +269,20 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
 17. A light's Properties: `Hue Room` (its Hue room's name), `Hue Light ID`
     "#<n> (<8 hex digits>…)", `Last Action`; its Actions tab: Adopt Hue Name
     above Forget This Light. **Done 2026-10-21** (Left Bedside Light: "Master
-    Bedroom", "#46 (e0e51794…)").
-18. The bridge's Actions tab, top to bottom, on a release build (22
+    Bedroom", "#46 (e0e51794…)"). From 1.2 (#334) the Actions tab is empty
+    (step 75).
+18. The bridge's Actions tab, top to bottom, on a release build (29
     actions): Pair Bridge, Add Light, Import All New Lights, Add Zone Light,
     Re-link Device To Light, Re-link Zone Light, Link Devices, Forget Light,
     Adopt Hue Names, Accept Names As They Are, Set Room Mapping, Map Rooms By
     Name, Room Audit, Add Scene, Add All Scenes Of Room, Re-link Scene,
-    Forget Scene, Refresh Scenes, Test Connection, Connect Event Stream,
+    Forget Scene, Refresh Scenes, Refresh All, Add Motion Sensor, Import All
+    New Motion Sensors, Add Motion Area, Re-link Motion Device, Forget Motion
+    Device, Log Motion Diagnostics, Test Connection, Connect Event Stream,
     Disconnect Event Stream, Forget Pairing; a development build has
     Connection Test, Reload Credentials and Check CA Pinning before Forget
-    Pairing (25). Click **Add Light**: a dialog with two pickers.
+    Pairing (32). **Superseded in 1.2 (#334)**: 9 actions on a release
+    build and on a development build alike (step 75). Click **Add Light**: a dialog with two pickers.
     `Light` lists the lights without a device, those deleted in Composer
     last as "<name> [<Hue room>] #<n> (deleted from Composer <date>)" (today
     all 47), or "(every light on the bridge is imported)" when there is
@@ -349,7 +366,8 @@ at every resync, recall and status events, the bridge's scene actions.
     before, missing and unbound only when not zero). The Actions tab has Add
     Scene, Add All Scenes Of Room, Re-link Scene, Forget Scene and Refresh
     Scenes between Room Audit and Test Connection. **Done 2026-10-21** (the
-    scene actions run from Composer).
+    scene actions run from Composer). From 1.2 (#334) Add From Hue, Link
+    Device, Forget Device and Diagnostics take their place (step 75).
 26. **Add Scene**: the `Scene` list holds every scene without a device as
     "<Room>: <Scene>", zones as "<Zone> (zone): <Scene>", dynamic ones ending
     " (dynamic)", grouped by room, those deleted in Composer last; since
@@ -384,7 +402,7 @@ at every resync, recall and status events, the bridge's scene actions.
     Change `Recall As` to "Static", click the row's **Set** button, tap ON:
     the scene is set once instead of played (with the bridge's `Debug Mode`
     On, its Lua tab shows the recall "as static"). Actions: Adopt Hue Name
-    above Forget This Scene. **Done 2026-10-21 22:03–22:04** (after Set the
+    above Forget This Scene (from 1.2 none, step 75). **Done 2026-10-21 22:03–22:04** (after Set the
     recall went out as static) and **2026-10-22** ("Static" → "As set in
     Hue" through the Set button).
 29. **Add All Scenes Of Room** with a mapped room that has scenes: "Added <k>
@@ -601,10 +619,13 @@ the drag in step 59 and the reboot in step 58):
     bridge, 0 imported, 0 new" ("0 imported" alone until the first full read
     after the install; it read "0 sensors and 0 areas on the bridge; 0
     added" before #325) and no line under it. The Actions tab has Add Motion
-    Sensor, Add Motion Area, Re-link Motion Device, Forget Motion Device and
-    Log Motion Diagnostics. Paste the full order of the tab, 27 buttons on a
-    release build (22 before), so that the quick reference in the manual's
+    Sensor, Import All New Motion Sensors, Add Motion Area, Re-link Motion
+    Device, Forget Motion Device and Log Motion Diagnostics. Paste the full
+    order of the tab, 29 buttons on a release build (27 at 1.1 beta 1,
+    before Refresh All and Import All New Motion Sensors; 22 before 1.1), so that the quick reference in the manual's
     chapter 13 and the caption of its picture in chapter 5 can follow it.
+    Superseded in 1.2 (#334): the bridge has no motion actions of its own
+    (step 75).
     - **Done:** open.
 53. **Add Motion Sensor and Add Motion Area with nothing to add** (EC §10
     item 4; EC B5). Open Add Motion Sensor and open its `Sensor` list:
@@ -670,7 +691,8 @@ the drag in step 59 and the reboot in step 58):
       Model, Hue Motion, Light Level, Temperature, Battery, Occupancy Hold
       Time (s) ("0"), Last Action, Debug Mode. Paste which of them a device
       without a kind shows. `Status` reads "Not bound to a Hue Bridge";
-    - Actions: Refresh From Bridge, Test: Motion, Test: No Motion;
+    - Actions: Refresh From Bridge, Test: Motion, Test: No Motion (from 1.2
+      only Test Motion Programming, step 87);
     - Connections: a "Hue Bridge" control input and a "Temperature"
       output, and no visible proxy connection;
     - Programming, the device's events: senses motion, stops sensing
@@ -683,7 +705,8 @@ the drag in step 59 and the reboot in step 58):
       LastActionTime, Online, Enabled, Light Level, Temperature C,
       Temperature F, Battery Level, Battery Low.
     - **Done:** open.
-57. **Test: Motion and Test: No Motion** (C4R H3; contract §7). Make two
+57. **Test: Motion and Test: No Motion** (C4R H3; contract §7; from 1.2 the
+    one action Test Motion Programming, step 87). Make two
     NUMBER variables first (Agents » Variables, "Motion Test On" and
     "Motion Test Off"). In Programming, add "when <test device> senses
     motion: increment Motion Test On" and the same for "stops sensing
@@ -915,6 +938,170 @@ Windows session's drags build programming and bind Connections too
     - Set `Occupancy Hold Time (s)` to 300 and click Set: the house setup.
       From the next end of motion the lamps go back about 5 min 10 s after
       the last movement.
+    - **Done:** open.
+
+## L. Release 1.2: nine actions and the background tasks (#334)
+
+Written on 2026-11-05, before the build, from the contract
+(`docs/simplify-actions-design.md`, sections 1.2, 1.3, 1.8, 1.9, 2.3 and 3)
+and the research it cites; check every quoted text against the first 1.2
+build and paste what differs. The owner's manual says the same in prose:
+chapter 1 ("What the driver does by itself"), 4 (Bridges Found, the pairing
+window, a moved bridge), 5 ("The nine actions"), 8.2 (names), 8.3 (re-link
+by radio), chapter 12 (Diagnostics) and chapter 13 (where the old actions
+went). Reading and cancelling dialogs is always fine; steps that add,
+forget or rename say so and undo what they did.
+
+| Action up to 1.1 | From 1.2 |
+| --- | --- |
+| Pair Bridge | Pair Bridge (a 2-minute window for the link button) |
+| Add Light, Add Zone Light, Add Scene, Add All Scenes Of Room, Add Motion Sensor, Add Motion Area | Add From Hue (folders; a room's scene folder picked as a whole adds all its scenes) |
+| Import All New Lights, Import All New Motion Sensors | Import All New |
+| Re-link Device To Light, Re-link Zone Light, Re-link Scene, Re-link Motion Device | Link Device (by itself for a bulb or sensor back with the same radio) |
+| Link Devices | by itself at start and bind; name matches offered in Link Device |
+| Forget Light, Forget Scene, Forget Motion Device, Forget This Light, Forget This Scene | Forget Device (with Confirm) |
+| Adopt Hue Names, Accept Names As They Are, Adopt Hue Name (light, scene) | names sync both ways by themselves; Resolve Names for what waits |
+| Set Room Mapping | Set Room Mapping (rows Hue Room, Control4 Room) |
+| Map Rooms By Name, Room Audit | by themselves (mapping by name; a mark on the list rows) |
+| Refresh Scenes, Refresh All, Refresh From Bridge (motion) | by themselves; Diagnostics ▸ Read everything from the bridge now |
+| Test Connection, Connect Event Stream, Disconnect Event Stream, Log Motion Diagnostics | Diagnostics (and the key re-check by itself) |
+| Connection Test, Reload Credentials, Check CA Pinning (dev) | entries of Diagnostics in a development build |
+| Forget Pairing | Forget Pairing (with Confirm) |
+| Test: Motion, Test: No Motion | Test Motion Programming |
+
+74. **Install in place** (all four files, step 1 or the deploy brief). The
+    1.2 drivers change no `<capabilities>`, so expect no "Restart
+    Director?"; if Composer asks, note which driver it names and reboot as
+    under "Before you start". Within a minute every Hue device shows the new
+    `Driver Version`; the bridge `Status` "Paired", `Event Stream`
+    "Connected since <HH:MM:SS>", and `Lights`, `Scenes`, `Zone Lights`,
+    `Motion Sensors` and `Room Mappings` as before the install (step 2).
+    Paste `Attention`: names that already differed at the update are
+    listed once, "<n> names differ between Composer and Hue (Resolve
+    Names)" (nothing is renamed by itself).
+    - **Done:** open.
+75. **The actions, counted.** The bridge's Actions tab, top to bottom:
+    Pair Bridge, Import All New, Add From Hue, Link Device, Forget Device,
+    Resolve Names, Set Room Mapping, Diagnostics, Forget Pairing: **9**, on a
+    release build and on a development build (whose three extra entries are
+    in the Diagnostics list, step 84). A Hue Light's Actions tab (a zone
+    light's too): **0**, empty. A Hue Scene's: **0**. A Hue Motion Sensor's:
+    **1**, Test Motion Programming. Paste each list.
+    - **Done:** open.
+76. **Bridges Found** (manual chapter 4). Properties has a `Bridges Found`
+    row right below `Bridge IP Address`. Expect the summary "Paired with Hue
+    Bridge Pro at <address>"; open its list: "(paired) Hue Bridge Pro -
+    <name> - <address> - <last 6 of the bridge id>", any other bridge on
+    the network, then "Search again". Pick "Search again" and click the
+    row's **Set**: the row snaps back to the summary and `Last Action` says
+    what the search found (paste it). Pick the paired bridge and Set:
+    nothing changes (expected `Last Action` "Already paired with this
+    bridge"). Do not pick another bridge: it is refused while paired.
+    - **Done:** open.
+77. **Add From Hue: the folders** (contract §2.3 and §3.4). Open the
+    dialog and the `What` list: paste the top level (expected folders for
+    the lights, the zones and rooms, the scenes and, with the MotionAware
+    area, the motion sensors and areas; a folder with nothing to add is
+    left out). Double-click the scenes' folder: one folder per Hue room or
+    zone; double-click one: a "Back" line, then its scenes ("<scene>",
+    "(time-based)" first, "(dynamic)", "(in <schedule>)", deleted ones last
+    with their date). Pick "Back": the level above returns. Open the
+    lights' folder: its first line adds every new light; the lights follow
+    as "<name> [<Hue room>] #<n>". Open `Room`: "(mapped room)" first. Paste
+    each level. Then **Cancel**: a click on OK would add devices. Optional,
+    only for scenes you want on the house: pick one room's folder itself
+    (one click, not a double-click), leave `Room` and OK: "Added <k> scenes
+    of <Hue room> to <room>: …".
+    - **Done:** open.
+78. **Import All New** (one click, no dialog). With nothing new, paste
+    `Last Action`: the lights' part (today "Added no lights; skipped <d>
+    deleted in Composer (Add From Hue re-creates one): …" or "No new lights
+    on the bridge (…)") and the motion part. A new device is a bug.
+    - **Done:** open.
+79. **Link Device** (manual 8.3, 8.6). Open `Device`: its first line is the
+    line for every device with a suggested match (or one line saying there
+    is nothing to link), then the gone, unbound or unlinked devices, if
+    any, with their suggestion; open `To`: folders by kind. Paste both, then
+    Cancel. Open it again, leave both rows empty and click OK: paste the
+    refusal in `Last Action`. Nothing changes.
+    - **Done:** open.
+80. **Confirm** on Forget Device and Forget Pairing (contract §3.3). Add a
+    throwaway zone light first (Add From Hue, the zones and rooms folder,
+    a zone, "(mapped room)", OK). **Forget Device**: pick it, leave
+    `Confirm` at "No", OK: `Last Action` "Not forgotten: choose Yes,
+    forget" and the device unchanged. Again with "Yes, forget": "Forgot
+    <zone> (zone, device <id>): unbound and left in the project for you to
+    delete"; delete the device in Composer. **Forget Pairing** with
+    `Confirm` "No" only: "Not forgotten: choose Yes, forget", `Status` still
+    "Paired". Never answer "Yes, forget" on Forget Pairing on the house.
+    - **Done:** open.
+81. **Names both ways** (manual 8.2; names research §8 tests T4 and T5).
+    Rename a light device in Composer (F2), for example "Foyer Lamp 1" to
+    "Foyer Lamp One": within seconds the Hue app shows the new name and
+    `Last Action` reads "Name sent to Hue: Foyer Lamp One (was Foyer Lamp 1
+    in Hue)". Rename it back in the Hue app: the device follows in Composer
+    within seconds, `Last Action` "Name taken from Hue: Foyer Lamp 1
+    (device <id>, was Foyer Lamp One)", and the name does not bounce back.
+    Do the same with the scene Shine, and with the MotionAware area's
+    device. Then type a name of 33 characters on the light: nothing is sent,
+    `Attention` lists "1 name Hue refused: … (Resolve Names)"; restore the
+    name in Composer and the item goes. Zone and room lights are not
+    synced: rename one in Composer and the Hue room keeps its name.
+    - **Done:** open.
+82. **Resolve Names** (manual 8.2). Open its `Names` list and paste it:
+    "Composer names to Hue (all <n>)" first, "Hue names to Composer (all
+    <n>)", then two lines per waiting device, or one line saying nothing
+    waits. Cancel, unless the owner decides how the differences found at
+    the update are settled (step 74).
+    - **Done:** open.
+83. **A moved bridge address** (manual chapter 4; contract D5, D12). The
+    safe half: type an address in `Bridge IP Address` where no bridge
+    answers, for example an unused one of the house's network, and click
+    Set. Within a minute `Status` reads "Bridge at <typed> not reachable
+    (…); checking again in 30 s", and `Attention` says where the paired
+    bridge answers, "Bridge <id6> answers at <address>, not at the typed
+    <typed>: pick it in Bridges Found"; pick the "(paired)" line in
+    `Bridges Found` and Set: `Status` "Paired" again and the feed back
+    within seconds. The driver must not overwrite the typed address by
+    itself. The automatic half needs the owner's router (optional, not
+    blocking the release; about six minutes): change the bridge's DHCP
+    reservation and restart the bridge; about five minutes after it stops
+    answering, `Bridge IP Address` changes by itself, `Last Action` and
+    `Attention` read "Bridge <id6> moved from <old> to <new> (found by
+    mDNS): Bridge IP Address updated; reserve its address in the router",
+    and the lights follow again. Put the reservation back afterwards.
+    - **Done:** open.
+84. **Diagnostics** (manual chapter 12). Open its `What` list and paste it:
+    Check the connection now; Read everything from the bridge now;
+    Reconnect the event stream; Stop the event stream until the next
+    start; Log motion diagnostics (10 minutes); on a development build also
+    the connection experiment, reload credentials and check CA pinning.
+    Run "Check the connection now": `Status` "Test OK: HTTP 200 via
+    <address> in <n> s, bridge <id>". Run "Read everything from the bridge
+    now": `Last Action` with the four list summaries. Run "Reconnect the
+    event stream": `Event Stream` "Connected since <a new time>". Do not run
+    "Stop the event stream" without "Reconnect" right after it.
+    - **Done:** open.
+85. **What the driver did by itself** (manual chapter 1). `Room Mappings`:
+    paste three lines; each says how it was made (by name, by hand, or
+    removed). `Lights` and `Zone Lights`: a device that sits in another
+    Control4 room than its Hue room maps to names its room on its line
+    (paste one, if any). Set the bridge's `Debug Mode` to On for a few
+    minutes, open its Lua tab and paste the background-task lines that
+    appear (one per run: which job, why, how many requests); set it back to
+    Off.
+    - **Done:** open.
+86. **Attention wraps** (contract §1.3). When `Attention` is longer than the
+    column (step 74's item, for example), it continues on the rows right
+    below it, as `Last Action` does, and the action named at the end of an
+    item is readable. Paste the rows.
+    - **Done:** open.
+87. **Test Motion Programming** (manual 14.6) on the MotionAware area's
+    device, with step 57's two variables and programs: with the device
+    Closed, click it: State "Open", Motion Test On +1, `Last Action` saying
+    which state was sent (paste it); click it again within 30 s: State
+    "Closed", Motion Test Off +1; click once more and wait 40 s: State back
+    to Hue's (Closed in an empty room) 30 s after the click.
     - **Done:** open.
 
 ## What to paste back
