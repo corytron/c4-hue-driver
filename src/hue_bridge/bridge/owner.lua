@@ -48,7 +48,8 @@
 -- goodbye_unregistered, forget_sent, reconciled, reconcile_done,
 -- resync_extra, room_mapping, expected_name, agreeing_names, entry_name,
 -- answer_hello, forgot, told_name, relink_fields, forget_label,
--- relinked_label, link_hello, link_rid, link_adopt_hello (defaults below).
+-- relinked_label, link_hello, link_rid, link_adopt_hello, mark_group(rid, entry)
+-- (defaults below).
 --
 -- Divergences between the three copies, settled before they were merged
 -- (rule 2 of the contract): today's behaviour of each module is kept behind
@@ -999,6 +1000,67 @@ function owner:room_for_add(record, room_id, rooms)
 	return id, why
 end
 
+-- Hook: the Hue room or zone whose mapping decides a registered entry's room
+-- mark (lights and motion: the Hue room the entry remembers; zone lights:
+-- the group itself; scenes: the scene's room or zone).
+function owner.mark_group(_self, _rid, entry)
+	return entry.hue_room_rid
+end
+
+-- The room marks (1.2, #334; docs/simplify-actions-design.md §1.3, import
+-- research §5.4, H5 and C3): { [device_id] = " (in Hall instead of Office)" } for
+-- every linked device whose Control4 room differs from the room its Hue
+-- room or zone maps to; " (in Hall; mapped room gone)" when the mapping
+-- points at a Control4 room the project no longer has. What Room Audit
+-- listed on a click is shown on the device's own list row, at every
+-- refresh of the rows; nothing is moved (no API moves a device), and the
+-- Control4 room stays the owner's. One local lookup (GetDevices by the
+-- devices' ids), only while one of the module's devices is in a mapped
+-- room; a lookup that fails or knows nothing of a device marks nothing
+-- (unknown is never "elsewhere").
+function owner:room_marks()
+	local marks = {}
+	local mapping_of, ids = {}, {}
+	for _, rid in ipairs(self.reg:rids("linked")) do
+		local entry = self.registry[rid]
+		local mapping = self:room_mapping(self:mark_group(rid, entry))
+		local id = entry.device_id
+		if mapping and mapping.c4_room_id and not mapping_of[id] and not self:foreign(id) then
+			mapping_of[id] = mapping
+			ids[#ids + 1] = tostring(id)
+		end
+	end
+	if #ids == 0 then
+		return marks
+	end
+	local ok, raw = self.project:call("devices", { DeviceIds = table.concat(ids, ",") })
+	if not ok or type(raw) ~= "table" then
+		return marks
+	end
+	local rooms = self.project:rooms()
+	for id, info in pairs(raw) do
+		local device_id = tonumber(id)
+		local mapping = device_id and mapping_of[device_id]
+		local room_id = type(info) == "table" and tonumber(info.roomId) or nil
+		if mapping and room_id and room_id ~= mapping.c4_room_id then
+			local here = util.display_name(info.roomName)
+			if here == "" then
+				here = rooms[room_id] or ("room " .. tostring(room_id))
+			end
+			local there = rooms[mapping.c4_room_id]
+			if not there and next(rooms) == nil then
+				there = mapping.c4_room_name
+			end
+			if there then
+				marks[device_id] = string.format(" (in %s instead of %s)", here, there)
+			else
+				marks[device_id] = string.format(" (in %s; mapped room gone)", here)
+			end
+		end
+	end
+	return marks
+end
+
 -- Device creation ---------------------------------------------------------------
 
 -- One-line recursive dump of a Lua value, keys sorted, for log.always.
@@ -1464,10 +1526,8 @@ function owner:attention_items(items)
 		for _, d in ipairs(diffs) do
 			names[#names + 1] = string.format("%s is %s in Hue", d.current, d.expected)
 		end
-		local synced = rawget(self, "names") or self.ctx.names
-		items[#items + 1] = string.format("%d %s%s differ%s from the Composer names: %s (%s)", #diffs, words.name_kind,
-			#diffs == 1 and "" or "s", #diffs == 1 and "s" or "", util.some(names, self.MAX_NAMED),
-			synced and "Resolve Names" or "Adopt Hue Names or Accept Names As They Are")
+		items[#items + 1] = string.format("%d %s%s differ%s from the Composer names: %s (Resolve Names)", #diffs,
+			words.name_kind, #diffs == 1 and "" or "s", #diffs == 1 and "s" or "", util.some(names, self.MAX_NAMED))
 	end
 
 	return items
@@ -1567,7 +1627,7 @@ function owner:relink(device_id, new_rid, internal)
 		return false, string.format("Not re-linked: device %d is not a registered %s", device_id, self.WORDS.registered)
 	end
 	if self:foreign(device_id) then
-		return false, string.format("Not re-linked: device %d is a zone light; Forget Light drops its stale light entry",
+		return false, string.format("Not re-linked: device %d is a zone light; Forget Device drops its stale light entry",
 			device_id)
 	end
 	local holder = self.registry[new_rid]
@@ -1776,7 +1836,7 @@ function owner:link_devices(skip_ids)
 			end
 		elseif names[id] and shared[util.name_key(names[id])] > 1 then
 			problems[#problems + 1] = string.format("%s: %d bound devices share that name; rename one in Composer and run "
-				.. "Link Devices again", who, shared[util.name_key(names[id])])
+				.. "Link Device again", who, shared[util.name_key(names[id])])
 		else
 			local matches = self:match_unimported_by_name({ composer, hello.name })
 			if #matches == 1 then
@@ -1790,10 +1850,10 @@ function owner:link_devices(skip_ids)
 				end
 			elseif #matches > 1 then
 				problems[#problems + 1] = string.format("%s: %d unimported %s have that name; rename the device in Composer "
-					.. "to one %s exact name and run Link Devices again", who, #matches, words.link_many, words.link_one)
+					.. "to one %s exact name and run Link Device again", who, #matches, words.link_many, words.link_one)
 			else
 				problems[#problems + 1] = string.format("%s: no unimported %s has that name; rename the device in Composer "
-					.. "to the %s exact name%s and run Link Devices again", who, words.link_none, words.link_one,
+					.. "to the %s exact name%s and run Link Device again", who, words.link_none, words.link_one,
 					words.link_hint or "")
 			end
 		end

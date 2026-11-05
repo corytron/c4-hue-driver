@@ -973,7 +973,7 @@ end
 -- is applied, as before 1.2.
 function actions:run_link_bound(_params, say)
 	say = self:say(say)
-	self:guard("Link Devices", say, function()
+	self:guard("Link Device", say, function()
 		if self:can() then
 			say(self:link_bound_text())
 		end
@@ -1062,7 +1062,7 @@ end
 -- Accept: its alias writes nothing); without bridge/names.lua, beta 8's accept.
 function actions:run_accept_names(_params, say)
 	say = self:say(say)
-	self:guard("Accept Names As They Are", say, function()
+	self:guard("Resolve Names", say, function()
 		if self:has("names", "resolve") then
 			local rows = self:entries("names", "resolve_rows")
 			return say(string.format("Nothing to accept: names follow each other between Composer and Hue by "

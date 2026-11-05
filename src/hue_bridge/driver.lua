@@ -672,7 +672,7 @@ end
 local function refresh_room_mappings()
 	local items, unmapped = state.lights:room_mapping_items()
 	if #items == 0 then
-		return show_list("Room Mappings", "None; use Map Rooms By Name")
+		return show_list("Room Mappings", "None yet (Set Room Mapping makes one)")
 	end
 	show_list("Room Mappings", string.format("%d Hue rooms and zones; %d unmapped (open the list to read)",
 		#items, unmapped), items)
@@ -2153,7 +2153,7 @@ dispatch.commands["Refresh_All"] = function()
 				tostring(state.lights:summary()), tostring(state.scenes:summary()),
 				tostring(state.zone_lights:summary()), tostring(state.motion:summary())))
 		else
-			last_action("Refresh All: " .. tostring(text))
+			last_action("Read everything from the bridge: " .. tostring(text))
 		end
 	end)
 end

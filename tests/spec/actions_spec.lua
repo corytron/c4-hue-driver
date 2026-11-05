@@ -287,8 +287,10 @@ describe("bridge/actions.lua", function()
 			assert.same({ { text = "(everything on the bridge is in Control4 already)", value = "" } },
 				(world(none).a:add_list("")))
 			none.lights.bridge_count = function() return 0 end
-			none.lights.picker_lights = function() return empty("(no lights fetched yet; connect the event stream)") end
-			assert.same({ { text = "(no lights fetched yet; connect the event stream)", value = "" } },
+			none.lights.picker_lights = function() return empty("(no lights fetched yet; Diagnostics ▸ Read everything from "
+				.. "the bridge now)") end
+			assert.same({ { text = "(no lights fetched yet; Diagnostics ▸ Read everything from the bridge "
+				.. "now)", value = "" } },
 				(world(none).a:add_list("")))
 			local bare = world({ lights = false, zone_lights = false, scenes = false, motion = false })
 			local list = bare.a:add_list("")

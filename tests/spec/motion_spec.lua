@@ -368,9 +368,11 @@ describe("bridge.motion", function()
 			assert.equal("0 imported", D:summary())
 			assert.same({}, D:list_items())
 			assert.same({}, attention())
-			assert.same({ { text = "(no motion sensors fetched yet; connect the event stream)", value = "" } },
+			assert.same({ { text = "(no motion sensors fetched yet; Diagnostics ▸ Read everything from the bridge "
+				.. "now)", value = "" } },
 				D:picker_sensors())
-			assert.same({ { text = "(no MotionAware areas fetched yet; connect the event stream)", value = "" } },
+			assert.same({ { text = "(no MotionAware areas fetched yet; Diagnostics ▸ Read everything from the bridge "
+				.. "now)", value = "" } },
 				D:picker_areas())
 			assert.same({}, D:picker_relink_devices(), "driver.lua adds its own placeholder")
 			assert.same({ { text = "(no motion devices registered)", value = "" } }, D:picker_forget_devices())
@@ -455,9 +457,9 @@ describe("bridge.motion", function()
 				.. "by this bridge", D:summary())
 			assert.same({ { text = "(this bridge offers no MotionAware areas)", value = "" } }, D:picker_areas())
 			assert.same({ rid = M.area, reason = "resync", online = "false",
-				status = "This bridge offers no MotionAware areas; Forget Motion Device removes it" }, states(2002)[1])
+				status = "This bridge offers no MotionAware areas; Forget Device removes it" }, states(2002)[1])
 			assert.is_true(has_item(attention(), "1 motion area device on a bridge without MotionAware: Kitchen motion area "
-				.. "(Forget Motion Device)"))
+				.. "(Forget Device)"))
 			assert.is_true(saw_log("this bridge offers no MotionAware areas (GET /clip/v2/resource/"
 				.. "motion_area_configuration answered 404)"))
 			-- Served again (a firmware update, B4): the area reports as before.
@@ -552,8 +554,9 @@ describe("bridge.motion", function()
 		it("refuses without a pick, a rid not on the bridge, a missing room and A15: a whole-home area without one",
 			function()
 			D:add(M.devices.hallway, nil, done)
-			assert.equal("Not added: motion sensor or area " .. M.devices.hallway .. " is not on the bridge (connect the event "
-				.. "stream and try again)", last_result().text)
+			assert.equal("Not added: motion sensor or area " .. M.devices.hallway .. " is not on the bridge (Diagnostics ▸ "
+				.. "Read everything "
+				.. "from the bridge now, then try again)", last_result().text)
 			resync({ motion_area_configuration = replace(M.motion_area_configuration,
 				'"group":{"rid":"' .. M.rooms.kitchen .. '","rtype":"room"}', '"group":{"rid":"' .. M.rooms.home
 				.. '","rtype":"bridge_home"}') })
@@ -626,11 +629,11 @@ describe("bridge.motion", function()
 			now = T0 + 86400
 			assert.is_not_nil(D:goodbye({ device_id = "2001", rid = M.devices.hallway }))
 			assert.is_nil(D:entry(M.devices.hallway))
-			assert.is_true(saw_log("motion: Hallway sensor (device 2001) was deleted in Composer; Add Motion Sensor and Add "
-				.. "Motion Area list it as deleted"))
+			assert.is_true(saw_log("motion: Hallway sensor (device 2001) was deleted in Composer; Add From Hue lists it "
+				.. "as deleted"))
 			assert.same({ "Porch sensor #20", string.format("Hallway sensor [Hallway] #12 (deleted from Composer %s)",
 				date(now)) }, texts(D:picker_sensors()))
-			assert.is_true(has_item(attention(), "1 new motion sensor on the bridge: Porch sensor #20 (Add Motion Sensor)"))
+			assert.is_true(has_item(attention(), "1 new motion sensor on the bridge: Porch sensor #20 (Add From Hue)"))
 			assert.equal("2 sensors + 1 area on bridge, 1 imported, 1 new, 1 deleted", D:summary())
 			D:add(M.devices.hallway, nil, done)
 			assert.equal("Added Hallway sensor to Hall (device 2003)", last_result().text)
@@ -641,8 +644,8 @@ describe("bridge.motion", function()
 	describe("import_new: Import All New Motion Sensors (#319, #325, EC §7)", function()
 		-- The text's tail while the Kitchen motion area has no device, and its
 		-- part for the Porch sensor, which is in no Hue room.
-		local AREA_NOTE = "not included: 1 new motion area (Add Motion Area adds areas one at a time)"
-		local NO_ROOM = "skipped 1 with no mapped room (Set Room Mapping or Add Motion Sensor): Porch sensor #20 "
+		local AREA_NOTE = "not included: 1 new motion area (Add From Hue adds areas one at a time)"
+		local NO_ROOM = "skipped 1 with no mapped room (Set Room Mapping or Add From Hue): Porch sensor #20 "
 			.. "(no Hue room)"
 
 		it("C1: adds every new sensor whose Hue room is mapped into that room, and lists the ones in no Hue room or an "
@@ -655,7 +658,7 @@ describe("bridge.motion", function()
 			assert.is_true(D:import_new(done))
 			assert.same({ { id = 2001, driver = "hue_motion.c4z", room = HALL, name = "Hallway sensor" } }, c4.added)
 			assert.same({ ok = true, text = "Added 1 new motion sensor: Hallway sensor #12 to Hall (device 2001); skipped 2 "
-				.. "with no mapped room (Set Room Mapping or Add Motion Sensor): Garden sensor #31 (Hue room Garden not "
+				.. "with no mapped room (Set Room Mapping or Add From Hue): Garden sensor #31 (Hue room Garden not "
 				.. "mapped), Porch sensor #20 (no Hue room); " .. AREA_NOTE }, last_result())
 			assert.same({ { provider = 15, provider_binding = 1, consumer = 2001, consumer_binding = 1, class = "HUE_BRIDGE" } },
 				c4.bindings)
@@ -670,7 +673,7 @@ describe("bridge.motion", function()
 			L.reg:set_room_mapping(GARDEN, { c4_room_id = 99, c4_room_name = "Shed", hue_name = "Garden", type = "room" })
 			assert.is_true(D:import_new(done))
 			assert.same({ ok = true, text = "Added no motion sensors; skipped 2 with no mapped room (Set Room Mapping or Add "
-				.. "Motion Sensor): Garden sensor #31 (Hue room Garden mapped to a Control4 room that no longer exists), Porch "
+				.. "From Hue): Garden sensor #31 (Hue room Garden mapped to a Control4 room that no longer exists), Porch "
 				.. "sensor #20 (no Hue room); " .. AREA_NOTE }, last_result())
 			assert.equal(1, #c4.added)
 
@@ -712,8 +715,8 @@ describe("bridge.motion", function()
 			now = T0 + 86400
 			assert.is_not_nil(D:goodbye({ device_id = "2001", rid = M.devices.hallway }))
 			D:import_new(done)
-			assert.same({ ok = true, text = string.format("Added no motion sensors; skipped 1 deleted in Composer (Add Motion "
-				.. "Sensor re-creates one): Hallway sensor #12 (deleted %s)", date(now)) }, last_result())
+			assert.same({ ok = true, text = string.format("Added no motion sensors; skipped 1 deleted in Composer (Add From "
+				.. "Hue re-creates one): Hallway sensor #12 (deleted %s)", date(now)) }, last_result())
 			assert.equal(3, #c4.added)
 			assert.is_nil(D:entry(M.devices.hallway))
 			-- Add Motion Sensor re-creates it on purpose; then nothing is left.
@@ -753,8 +756,8 @@ describe("bridge.motion", function()
 			end })
 			D:load()
 			assert.is_false(D:import_new(done))
-			assert.same({ ok = false, text = "Not added: no motion sensors fetched yet (connect the event stream and try "
-				.. "again)" }, last_result())
+			assert.same({ ok = false, text = "Not added: no motion sensors fetched yet (Diagnostics ▸ Read everything "
+				.. "from the bridge now, then try again)" }, last_result())
 			D:resync(done)
 			assert.is_false(D:import_new(done))
 			assert.same({ ok = false, text = "Busy: resyncing motion devices; try again in a moment" }, last_result())
@@ -1064,7 +1067,7 @@ describe("bridge.motion", function()
 			local ok, text = D:forget(2001)
 			assert.is_true(ok)
 			assert.equal("Forgot Hallway sensor (device 2001): unbound and left in the project for you to delete; the Hue "
-				.. "motion sensor is listed under Add Motion Sensor again", text)
+				.. "motion sensor is listed under Add From Hue again", text)
 			assert.same({ "HUE_MOTION_STATE@2001", "HUE_MOTION_FORGOTTEN@2001" }, commands())
 			assert.same({ rid = M.devices.hallway, reason = "event", online = "false", ended = "forgotten",
 				status = "Forgotten by the bridge (was Hue motion sensor Hallway sensor)" }, c4.sent[1].params)
@@ -1074,7 +1077,7 @@ describe("bridge.motion", function()
 			assert.is_not_nil(c4.persist.hue_motion_forgotten["2001"])
 			local _, area_text = D:forget(2002)
 			assert.equal("Forgot Kitchen motion area (device 2002): unbound and left in the project for you to delete; the "
-				.. "MotionAware area is listed under Add Motion Area again", area_text)
+				.. "MotionAware area is listed under Add From Hue again", area_text)
 
 			-- Bound again by the owner: its hello is refused, told again, never adopted.
 			C4:Bind(15, 1, 2001, 1, "HUE_BRIDGE")
@@ -1096,7 +1099,7 @@ describe("bridge.motion", function()
 			assert.equal("unbound", D:entry(M.devices.hallway).state)
 			assert.same({}, c4.sent, "the device ends its motion itself (§2.7)")
 			assert.is_true(has_item(attention(), "1 unbound motion device: Hallway sensor (device 2001) (bind it to this "
-				.. "bridge in Composer, or Forget Motion Device)"))
+				.. "bridge in Composer, or Forget Device)"))
 			feed("e1")
 			assert.same({}, c4.sent, "an unbound device is not told")
 			assert.is_true(D:on_binding_changed(1, "HUE_BRIDGE", true, 2001))
@@ -1159,7 +1162,7 @@ describe("bridge.motion", function()
 			assert.same({ "HUE_MOTION_CONFIGURE@2002" }, commands())
 			assert.equal("Kitchen island", c4.sent[1].params.name)
 			assert.is_true(has_item(attention(), "1 motion device name differs from the Composer names: Kitchen motion area "
-				.. "is Kitchen island in Hue (Adopt Hue Names or Accept Names As They Are)"))
+				.. "is Kitchen island in Hue (Resolve Names)"))
 		end)
 
 		it("S13: a sensor without some services: their rows are not offered, Online is unknown rather than false", function()
@@ -1243,16 +1246,16 @@ describe("bridge.motion", function()
 			resync()
 			feed("e10")
 			feed("e10")
-			assert.equal(1, count_log("motion: new motion sensor Hue motion sensor 1 #30 on the bridge; use Add Motion Sensor"))
+			assert.equal(1, count_log("motion: new motion sensor Hue motion sensor 1 #30 on the bridge; use Add From Hue"))
 			assert.same({}, c4.added)
 			assert.is_true(has_item(attention(), "3 new motion sensors on the bridge: Hallway sensor [Hallway] #12, Hue motion "
-				.. "sensor 1 #30, Porch sensor #20 (Add Motion Sensor)"))
+				.. "sensor 1 #30, Porch sensor #20 (Add From Hue)"))
 			assert.same({ "Hallway sensor [Hallway] #12", "Hue motion sensor 1 #30", "Porch sensor #20" },
 				texts(D:picker_sensors()))
 			feed("e11")
 			assert.same({ "Hallway sensor [Hallway] #12", "Porch sensor #20" }, texts(D:picker_sensors()))
 			assert.is_true(has_item(attention(), "1 new motion area on the bridge: Kitchen motion area (MotionAware) [Kitchen] "
-				.. "#ac00 (Add Motion Area)"))
+				.. "#ac00 (Add From Hue)"))
 		end)
 
 		it("S2: renamed in Hue: CONFIGURE carries the new name, Composer's is kept and listed until adopted or accepted",
@@ -1264,11 +1267,11 @@ describe("bridge.motion", function()
 			assert.equal("Front hall sensor", D:entry(M.devices.hallway).name)
 			assert.same({}, c4.renamed)
 			assert.is_true(has_item(attention(), "1 motion device name differs from the Composer names: Hallway sensor is "
-				.. "Front hall sensor in Hue (Adopt Hue Names or Accept Names As They Are)"))
+				.. "Front hall sensor in Hue (Resolve Names)"))
 			assert.equal("Accepted 1 motion device name difference: Hallway sensor (Hue: Front hall sensor)",
 				D:accept_names())
 			assert.is_false(has_item(attention(), "1 motion device name differs from the Composer names: Hallway sensor is "
-				.. "Front hall sensor in Hue (Adopt Hue Names or Accept Names As They Are)"))
+				.. "Front hall sensor in Hue (Resolve Names)"))
 			assert.equal("not renamed 1: Hallway sensor (device 2001): no proxy id known", D:adopt_hue_names())
 		end)
 
@@ -1411,7 +1414,7 @@ describe("bridge.motion", function()
 			assert.is_false(D:hello({ rid = M.devices.hallway, device_id = tostring(id), kind = "sensor" }))
 			assert.equal(2001, D:entry(M.devices.hallway).device_id)
 			assert.is_true(has_item(attention(), "2 devices claim Hue motion sensor Hallway sensor: 2001 and " .. id
-				.. " (Forget Motion Device on one of them)"))
+				.. " (Forget Device on one of them)"))
 		end)
 
 		it("C19: a registered device's hello (the driver updated in place) is answered in full", function()
@@ -1467,8 +1470,9 @@ describe("bridge.motion", function()
 				{ D:relink(2001, M.area) })
 			assert.same({ false, "Not re-linked: device 2002 is a motion area; pick an area" },
 				{ D:relink(2002, M.devices.porch) })
-			assert.same({ false, "Not re-linked: motion sensor or area nope is not on the bridge (connect the event stream "
-				.. "and try again)" }, { D:relink(2001, "nope") })
+			assert.same({ false, "Not re-linked: motion sensor or area nope is not on the bridge (Diagnostics ▸ Read "
+				.. "everything "
+				.. "from the bridge now, then try again)" }, { D:relink(2001, "nope") })
 		end)
 
 		it("S6, M7: a sensor deleted and paired again (same radio) is re-linked by itself; the device keeps everything",
@@ -1543,7 +1547,7 @@ describe("bridge.motion", function()
 			resync()
 			local id = hand_added("Hue motion sensor 1")
 			assert.equal("not linked 1: Hue motion sensor 1 (device " .. id .. "): 2 unimported Hue motion sensors or areas "
-				.. "have that name; rename the device in Composer to one sensor's or area's exact name and run Link Devices "
+				.. "have that name; rename the device in Composer to one sensor's or area's exact name and run Link Device "
 				.. "again", D:link_devices())
 			assert.same({}, D:registered_rids())
 		end)
@@ -1575,7 +1579,7 @@ describe("bridge.motion", function()
 			feed("e9_paused")
 			D:on_binding_changed(1, "HUE_BRIDGE", false, 2001)
 			assert.same({
-				"1 unbound motion device: Hallway sensor (device 2001) (bind it to this bridge in Composer, or Forget Motion "
+				"1 unbound motion device: Hallway sensor (device 2001) (bind it to this bridge in Composer, or Forget "
 					.. "Device)",
 				"1 motion sensor not reachable for more than 1 h: Porch sensor (still showing motion)",
 				"1 motion area paused in the Hue app: Kitchen motion area",
@@ -1632,6 +1636,20 @@ describe("bridge.motion", function()
 				"Porch sensor #20 (unbound; device 2003)",
 				"Hallway sensor (motion sensor) (missing; device 2001)",
 			}, D:list_items())
+		end)
+
+		it("marks a sensor or an area whose device sits in another Control4 room than its Hue room maps to (1.2)",
+			function()
+			add_both()
+			assert.same({}, D:room_marks())
+			fake.move_device(2001, PORCH)
+			fake.move_device(2002, HALL)
+			assert.same({
+				"Hallway sensor [Hallway] #12 → device 2001 (in Porch instead of Hall)",
+				"Porch sensor #20",
+				"Kitchen motion area (MotionAware) [Kitchen] #ac00 → device 2002 (in Hall instead of Kitchen)",
+			}, D:list_items())
+			assert.equal(PORCH, fake.project.devices[2001].room_id, "nothing moved")
 		end)
 
 		it("names (bridge/names.lua): a sensor's name is its device's, an area's its configuration's; a Hue rename is told",

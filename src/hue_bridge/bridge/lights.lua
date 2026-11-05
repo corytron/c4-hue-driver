@@ -54,7 +54,12 @@ lights.__index = lights
 setmetatable(lights, { __index = owner })  -- the shared lifecycle (bridge/owner.lua)
 
 lights.REGISTRY_KEY = registry.LIGHTS_KEY
-lights.AUTOMAP_KEY = "hue_rooms_automapped"  -- set once the one-time Map Rooms By Name has run [Q 5]
+lights.AUTOMAP_KEY = "hue_rooms_automapped"  -- set once the one-time Map Rooms By Name has run [Q 5]; 1.2 keeps it set
+-- 1.2 (#334): how each mapping was made and which Hue rooms and zones the
+-- driver has seen, { how = { [group rid] = "name" | "hand" | "none" },
+-- seen = { [group rid] = true } }. A key of its own, so hue_rooms keeps its
+-- shape and a rollback ignores it (docs/simplify-research-compat.md §5.3 R3).
+lights.ROOMS_AUTO_KEY = "hue_rooms_auto"
 lights.LIGHT_DRIVER = "hue_light.c4z"
 lights.BINDING = 1
 lights.BINDING_CLASS = "HUE_BRIDGE"
@@ -68,14 +73,14 @@ lights.TAG = "lights"
 lights.WORDS = {
 	held = "light",                       -- "its registered light is <rid>"
 	stranger = "an unregistered device",  -- a HUE_GOODBYE the module does not hold
-	goodbye_tail = "Add Light lists it as deleted, Import All New Lights skips it",
-	add_action = "Add Light",
+	goodbye_tail = "Add From Hue lists it as deleted, Import All New skips it",
+	add_action = "Add From Hue",
 	busy_job = "importing",
 	busy_resync = "resyncing",
 	kind = "light",
 	unbound_kind = "unbound device",
 	relink_or_forget = "Link or Forget Device",
-	forget_action = "Forget Light",
+	forget_action = "Forget Device",
 	name_kind = "Hue name",
 	hue_names = "Hue names",
 	device_noun = "device",
@@ -87,7 +92,7 @@ lights.WORDS = {
 	registered = "light",                 -- "device 1036 is not a registered light"
 	relink_target = "a light",            -- "pick a device and a light"
 	requester = "light",                  -- "the light named no device"
-	forget_tail = "; the Hue light is listed under Add Light again",
+	forget_tail = "; the Hue light is listed under Add From Hue again",
 	link_noun = "devices",                -- "No devices are bound to this bridge"
 	link_many = "Hue lights",
 	link_one = "Hue light's",
@@ -191,7 +196,8 @@ function lights.new(ctx)
 		resyncing = false,
 		resync_pending = nil,      -- the done callbacks of the resync to run once the current job ends (a list)
 		device_info_logged = false,
-		automapped = false,        -- the one-time Map Rooms By Name has run, or its persisted flag was seen
+		book = nil,                -- ROOMS_AUTO_KEY as read (room_book), nil until first used or after load()
+		book_dirty = false,        -- the book changed since it was written
 		skip_cache = nil,          -- inside on_container(): false, then the skip set at its first use; nil outside
 	}, lights)
 end
@@ -307,6 +313,32 @@ local function v1_tag(id_v1, rid)
 	return "#" .. tostring(rid):sub(1, 8)
 end
 
+-- "1 Hue room or zone", "3 Hue rooms and zones".
+local function groups_word(n)
+	return n == 1 and "1 Hue room or zone" or string.format("%d Hue rooms and zones", n)
+end
+
+-- The project's rooms by trimmed, case-insensitive name (util.norm): key →
+-- { id, name, count }; count > 1 when several rooms carry the name.
+local function rooms_by_name(rooms)
+	local by_key = {}
+	for id, name in pairs(rooms) do
+		local key = norm(name)
+		local hit = by_key[key]
+		if hit then
+			hit.count = hit.count + 1
+		else
+			by_key[key] = { id = id, name = name, count = 1 }
+		end
+	end
+	return by_key
+end
+
+-- The rooms book's values (ROOMS_AUTO_KEY), and how a Room Mappings row says
+-- how its mapping was made (mapping_how).
+local HOW_VALUES = { name = true, hand = true, none = true }
+local HOW_SUFFIX = { name = " (by name)", hand = " (by hand)", earlier = " (before 1.2)" }
+
 -- Registry access ---------------------------------------------------------------
 
 -- Read the persisted registry (v1 entries upgrade in place, fields outside
@@ -319,6 +351,7 @@ function lights:load()
 		self.ctx.log.debug("lights: loaded %s (device %s, %s)", tostring(entry.name), tostring(entry.device_id),
 			tostring(rid))
 	end
+	self.book, self.book_dirty = nil, false  -- read again at its next use
 	self.loaded = true
 	self.dirty = false
 	return self.registry
@@ -952,27 +985,146 @@ function lights:fanout(reason, with_configure)
 	return sent
 end
 
--- The one-time Map Rooms By Name at the first resync of this build [Q 5]:
--- exact matches only, affects only future adds, guarded by a persisted flag.
--- Waits for a resync in which both the groups and the project are known.
-function lights:automap_once()
-	if not self.automapped and self.ctx.persist_get(lights.AUTOMAP_KEY) then
-		self.automapped = true  -- read once per run, not once per resync
+-- Step 4, the rooms by name (1.2, #334; docs/simplify-actions-design.md §1.3,
+-- docs/simplify-research-import.md §5.4): a Hue room or zone is mapped to the
+-- Control4 room of exactly its name (trimmed, case-insensitive) when it
+-- *appears*: at the first full read after pairing, at a stream add, at a
+-- later read that brings a group this driver has not seen (R1, R4). Seen
+-- groups are remembered (ROOMS_AUTO_KEY), so a rename of a known group, a
+-- restart or the next read maps nothing (the owner's answer: renames do not
+-- count). Never over a mapping (a hand choice or one made before 1.2), never
+-- over one the owner removed ("none", CR4), never when two Control4 rooms
+-- carry the name (R6), never while the project's rooms are unknown (the
+-- group stays unseen and is tried again). After a full read
+-- (`authoritative`), a mapping this rule made whose Control4 room was
+-- deleted is re-pointed to the one room of that name, if there is one (CR3);
+-- deleted groups leave the seen list. The update to 1.2 maps nothing by
+-- itself (P1): an earlier build that ran its one-time Map Rooms By Name
+-- (AUTOMAP_KEY) has seen every group of the first read, so they are recorded
+-- as seen; an unmapped one is offered in Room Mappings when a Control4 room
+-- matches. Affects only future adds and the room marks; a device is never
+-- moved. Says what it mapped in Last Action (ctx.last_action) and returns
+-- that text, else nil. Local calls only, no bridge request.
+function lights:auto_map_rooms(authoritative)
+	if not self.groups_loaded then
+		return nil  -- the cache is not a full read of this run yet (an event before the first resync)
 	end
-	if self.automapped then
-		return false
+	local book = self:room_book()
+	local all = self.groups:groups()
+	if not book.known and self.ctx.persist_get(lights.AUTOMAP_KEY) then
+		for _, group in ipairs(all) do
+			book.seen[group.rid] = true
+		end
+		book.known, self.book_dirty = true, true
+		self.ctx.log.always("lights: rooms: %s known from before 1.2; none is mapped by itself now",
+			groups_word(#all))
+		return nil
 	end
-	if #self.groups:groups() == 0 or next(self.project:rooms()) == nil then
-		return false
+	local cached = {}
+	for _, group in ipairs(all) do
+		cached[group.rid] = true
 	end
-	local text = self:map_rooms_by_name(true)
-	self.ctx.persist_set(lights.AUTOMAP_KEY, "done")
-	self.automapped = true
-	self.ctx.log.always("lights: one-time Map Rooms By Name at the first resync of this build: %s", text)
-	return true
+	if authoritative then
+		for rid in pairs(book.seen) do
+			if not cached[rid] then
+				book.seen[rid], self.book_dirty = nil, true
+			end
+		end
+	end
+	local fresh = {}
+	for _, group in ipairs(all) do
+		if not book.seen[group.rid] then
+			fresh[#fresh + 1] = group
+		end
+	end
+	-- The mappings by name of cached groups, for CR3 after a full read.
+	local named = {}
+	if authoritative then
+		for group_rid, mapping in pairs(self.reg:room_mappings()) do
+			if cached[group_rid] and mapping.c4_room_id and self:mapping_how(group_rid) == "name" then
+				named[#named + 1] = group_rid
+			end
+		end
+		table.sort(named)
+	end
+	if #fresh == 0 and #named == 0 then
+		return nil  -- nothing appeared (a group's update, a rename), no project lookup
+	end
+	local rooms = self.project:rooms()
+	if next(rooms) == nil then
+		return nil  -- the project's rooms are unknown: wait, nothing is used up
+	end
+	local dead = {}
+	for _, group_rid in ipairs(named) do
+		if not rooms[self.reg:room_mapping(group_rid).c4_room_id] then
+			dead[#dead + 1] = group_rid
+		end
+	end
+	if #fresh == 0 and #dead == 0 then
+		return nil
+	end
+
+	local by_key = rooms_by_name(rooms)
+	local mapped, ambiguous, unmatched = {}, {}, 0
+	for _, group in ipairs(fresh) do
+		book.seen[group.rid], self.book_dirty = true, true
+		local label = self.groups:label(group.rid)
+		if not self.reg:room_mapping(group.rid) and book.how[group.rid] ~= "none" then
+			local hit = by_key[norm(group.name)]
+			if hit and hit.count == 1 then
+				self:map_by_name(group, hit)
+				mapped[#mapped + 1] = string.format("%s → %s", label, hit.name)
+			elseif hit then
+				ambiguous[#ambiguous + 1] = string.format("%s (%d Control4 rooms are named %s)", label, hit.count, hit.name)
+			else
+				unmatched = unmatched + 1
+				self.ctx.log.info("lights: rooms: %s appeared; no Control4 room is named %s", label, tostring(group.name))
+			end
+		end
+	end
+	local remapped = {}
+	for _, group_rid in ipairs(dead) do
+		local group = self.groups:group(group_rid)
+		local hit = by_key[norm(group.name)]
+		if hit and hit.count == 1 then
+			self:map_by_name(group, hit)
+			remapped[#remapped + 1] = string.format("%s → %s", self.groups:label(group_rid), hit.name)
+		end
+	end
+	if not book.known then
+		book.known, self.book_dirty = true, true
+		self.ctx.persist_set(lights.AUTOMAP_KEY, "done")  -- an earlier build after a rollback does not map again
+	end
+	local parts = {}
+	if #mapped > 0 then
+		parts[#parts + 1] = string.format("Mapped %s by name: %s", groups_word(#mapped),
+			table.concat(mapped, ", "))
+	end
+	if #remapped > 0 then
+		parts[#parts + 1] = string.format("re-mapped by name (the Control4 room was deleted): %s",
+			table.concat(remapped, ", "))
+	end
+	if #ambiguous > 0 then
+		parts[#parts + 1] = string.format("not mapped, the name is ambiguous (Set Room Mapping): %s",
+			table.concat(ambiguous, ", "))
+	end
+	if #parts == 0 then
+		if #fresh > 0 then
+			self.ctx.log.info("lights: rooms: %s appeared, none mapped by name (%d with no Control4 room of the name)",
+				groups_word(#fresh), unmatched)
+		end
+		return nil
+	end
+	local text = table.concat(parts, "; ")
+	text = text:sub(1, 1):upper() .. text:sub(2)
+	self.ctx.log.always("lights: rooms: %s", text)
+	if type(self.ctx.last_action) == "function" then
+		self:protect("last_action", self.ctx.last_action, text)
+	end
+	return text
 end
 
--- After a full fetch has been absorbed: steps 1, 2, 3 and 5 in order, one
+-- After a full fetch has been absorbed: steps 1, 2, 3, 4 and 5 in order, one
 -- save. Returns the number of HUE_STATE messages the fan-out sent.
 function lights:settle(reason, with_configure)
 	self.synced = true
@@ -980,7 +1132,7 @@ function lights:settle(reason, with_configure)
 	self:reconcile_lights()
 	self:auto_relink("resync")  -- D7 (§3.2): a gone light's bulb back under a new rid
 	self:reconcile_rooms()
-	self:automap_once()
+	self:auto_map_rooms(true)
 	local sent = self:fanout(reason, with_configure)
 	self:flush()
 	return sent
@@ -1126,6 +1278,7 @@ function lights:on_groups_changed()
 			sent = sent + 1
 		end
 	end
+	self:auto_map_rooms(false)  -- a room or zone added in Hue (R1)
 	return sent
 end
 
@@ -1232,7 +1385,8 @@ function lights:add_light(rid, room_id, done)
 	end
 	local model = self.models[rid]
 	if not model then
-		done(false, string.format("Not added: light %s is not on the bridge (connect the event stream and try again)",
+		done(false, string.format("Not added: light %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)",
 			tostring(rid)))
 		return false
 	end
@@ -1359,11 +1513,11 @@ function lights:import_fetched(res, finish)
 				#replacing, #replacing == 1 and "a replacement" or "replacements", table.concat(replacing, ", "))
 		end
 		if #unmapped > 0 then
-			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add Light): %s",
+			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add From Hue): %s",
 				#unmapped, table.concat(unmapped, ", "))
 		end
 		if #deleted > 0 then
-			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add Light re-creates one): %s",
+			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add From Hue re-creates one): %s",
 				#deleted, table.concat(deleted, ", "))
 		end
 		return table.concat(parts, "; ")
@@ -1381,7 +1535,8 @@ end
 -- are the hooks they take. A device another module owns (a zone light) is
 -- never re-linked, and Forget Light on one only drops the stale entry.
 function lights.relink_refusal(_self, _device_id, new_rid)
-	return string.format("Not re-linked: light %s is not on the bridge (connect the event stream and try again)",
+	return string.format("Not re-linked: light %s is not on the bridge (Diagnostics ▸ Read everything "
+		.. "from the bridge now, then try again)",
 		tostring(new_rid))
 end
 
@@ -1558,6 +1713,88 @@ function lights:name_suggestions(seen)
 	return out
 end
 
+-- The rooms book (ROOMS_AUTO_KEY, 1.2), read at its first use: { how, seen,
+-- known }, `known` once the key exists (the first pass of auto_map_rooms has
+-- run). Anything outside the shapes of ROOMS_AUTO_KEY is dropped.
+function lights:room_book()
+	if self.book then
+		return self.book
+	end
+	local raw = self.ctx.persist_get(lights.ROOMS_AUTO_KEY)
+	local book = { how = {}, seen = {}, known = type(raw) == "table" }
+	if book.known then
+		for rid, how in pairs(type(raw.how) == "table" and raw.how or {}) do
+			if type(rid) == "string" and rid ~= "" and HOW_VALUES[how] then
+				book.how[rid] = how
+			end
+		end
+		for rid, seen in pairs(type(raw.seen) == "table" and raw.seen or {}) do
+			if type(rid) == "string" and rid ~= "" and seen then
+				book.seen[rid] = true
+			end
+		end
+	end
+	self.book = book
+	return book
+end
+
+-- (owner hook) The rooms book is written before the registry (owner's flush
+-- and save call this first), when it changed. A crash between the two
+-- writes leaves at worst a mapping by name unrecorded in hue_rooms, which
+-- mapping_how then reads as removed: nothing is mapped by itself again.
+function lights:persist_extra()
+	if not self.book_dirty then
+		return
+	end
+	self.book_dirty = false
+	local book = self:room_book()
+	local how, seen = {}, {}
+	for rid, value in pairs(book.how) do
+		how[rid] = value
+	end
+	for rid in pairs(book.seen) do
+		seen[rid] = true
+	end
+	self.ctx.persist_set(lights.ROOMS_AUTO_KEY, { how = how, seen = seen })
+end
+
+-- How a group's mapping was made: "name" (auto_map_rooms or Map Rooms By
+-- Name), "hand" (Set Room Mapping), "earlier" (a mapping the book has no
+-- record of: made before 1.2, or by an earlier build after a rollback; it
+-- counts as a hand choice), "none" (no mapping, and the owner removed it or
+-- chose "(no mapping)"; also a record whose mapping an earlier build
+-- removed), or nil (never mapped). Only "name" and nil leave room for a
+-- mapping by name.
+function lights:mapping_how(group_rid)
+	if group_rid == nil then
+		return nil
+	end
+	local mapping = self.reg:room_mapping(group_rid)
+	local how = self:room_book().how[group_rid]
+	if mapping and mapping.c4_room_id then
+		return (how == "name" or how == "hand") and how or "earlier"
+	end
+	return how and "none" or nil
+end
+
+-- Record how a group's mapping was made (a cached group is seen from then on).
+function lights:set_how(group_rid, how)
+	local book = self:room_book()
+	book.how[group_rid] = how
+	if self.groups:group(group_rid) then
+		book.seen[group_rid] = true
+	end
+	self.book_dirty = true
+end
+
+-- Map `group` to the Control4 room `hit` ({ id, name }) by its name.
+function lights:map_by_name(group, hit)
+	self.reg:set_room_mapping(group.rid, { c4_room_id = hit.id, c4_room_name = hit.name, hue_name = group.name,
+		type = group.type })
+	self:set_how(group.rid, "name")
+	self:mark()
+end
+
 -- The label of a Hue group for mapping texts: the cached group's, or the
 -- mapping's remembered name, marked deleted in Hue only once this run has
 -- fetched the groups (right after a reload the cache is simply empty
@@ -1576,8 +1813,10 @@ function lights:group_label(group_rid, mapping)
 	return tostring(group_rid)
 end
 
--- Set Room Mapping: Hue room or zone → Control4 room; room_id nil removes
--- the mapping. Affects only future adds. Returns ok, text.
+-- Set Room Mapping: Hue room or zone → Control4 room, recorded as a hand
+-- choice; room_id nil ("(no mapping)") removes the mapping and records that
+-- the owner wants none, so no mapping by name ever comes back for it (CR4).
+-- Affects only future adds and the room marks. Returns ok, text.
 function lights:set_room_mapping(group_rid, room_id)
 	local busy = self:busy_text()
 	if busy then
@@ -1592,18 +1831,24 @@ function lights:set_room_mapping(group_rid, room_id)
 		return false, "Not mapped: the whole bridge cannot be mapped to one room"
 	end
 	if not group and not existing then
-		return false, string.format("Not mapped: Hue room %s is not on the bridge (connect the event stream and try again)",
+		return false, string.format("Not mapped: Hue room %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)",
 			tostring(group_rid))
 	end
 	local label = self:group_label(group_rid, existing)
 	if room_id == nil then
-		if not existing then
+		local text
+		if existing then
+			self.reg:remove_room_mapping(group_rid)
+			self:mark()
+			text = string.format("Removed the mapping for %s; it is not mapped by name again", label)
+		elseif self:mapping_how(group_rid) == "none" then
 			return true, string.format("No mapping for %s to remove", label)
+		else
+			text = string.format("No mapping for %s to remove; it is not mapped by name from now on", label)
 		end
-		self.reg:remove_room_mapping(group_rid)
-		self:mark()
+		self:set_how(group_rid, "none")
 		self:flush()
-		local text = string.format("Removed the mapping for %s", label)
 		self.ctx.log.always("lights: %s", text)
 		return true, text
 	end
@@ -1625,6 +1870,7 @@ function lights:set_room_mapping(group_rid, room_id)
 		hue_name = group and group.name or existing.hue_name,
 		type = group and group.type or existing.type,
 	})
+	self:set_how(group_rid, "hand")
 	self:mark()
 	self:flush()
 	local text = string.format("Mapped %s → %s", label, name)
@@ -1632,10 +1878,12 @@ function lights:set_room_mapping(group_rid, room_id)
 	return true, text
 end
 
--- Map Rooms By Name: exact, case-insensitive, trimmed matches between Hue
--- rooms/zones and Control4 rooms; never overrides a mapping; a name two
+-- Map Rooms By Name (a hidden alias since 1.2): auto_map_rooms' rule once,
+-- on demand, for every cached room and zone, seen or not: exact,
+-- case-insensitive, trimmed matches between Hue rooms/zones and Control4
+-- rooms; never over a mapping, never over one the owner removed; a name two
 -- Control4 rooms share is left alone. Returns the report text. `internal`
--- skips the busy check (the one-time run inside a resync).
+-- skips the busy check.
 function lights:map_rooms_by_name(internal)
 	if not internal then
 		local busy = self:busy_text()
@@ -1645,28 +1893,26 @@ function lights:map_rooms_by_name(internal)
 	end
 	local all = self.groups:groups()
 	if #all == 0 then
-		return "Nothing mapped: no Hue rooms fetched yet (connect the event stream and try again)"
+		return "Nothing mapped: no Hue rooms fetched yet (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)"
 	end
 	local rooms = self.project:rooms()
 	if next(rooms) == nil then
 		return "Nothing mapped: no Control4 rooms found in the project"
 	end
-	local by_key = {}
-	for id, name in pairs(rooms) do
-		local key = norm(name)
-		local hit = by_key[key]
-		if hit then
-			hit.count = hit.count + 1
-		else
-			by_key[key] = { id = id, name = name, count = 1 }
-		end
-	end
+	local by_key = rooms_by_name(rooms)
+	local book = self:room_book()
 
-	local mapped, kept, unmatched, ambiguous = {}, 0, {}, {}
+	local mapped, kept, unmatched, ambiguous, removed = {}, 0, {}, {}, {}
 	for _, group in ipairs(all) do
 		local label = self.groups:label(group.rid)
+		if not book.seen[group.rid] then
+			book.seen[group.rid], self.book_dirty = true, true
+		end
 		if self.reg:room_mapping(group.rid) then
 			kept = kept + 1
+		elseif book.how[group.rid] == "none" then
+			removed[#removed + 1] = label
 		else
 			local hit = by_key[norm(group.name)]
 			if not hit then
@@ -1674,9 +1920,7 @@ function lights:map_rooms_by_name(internal)
 			elseif hit.count > 1 then
 				ambiguous[#ambiguous + 1] = string.format("%s (%d Control4 rooms are named %s)", label, hit.count, hit.name)
 			else
-				self.reg:set_room_mapping(group.rid, { c4_room_id = hit.id, c4_room_name = hit.name, hue_name = group.name,
-					type = group.type })
-				self:mark()
+				self:map_by_name(group, hit)
 				mapped[#mapped + 1] = string.format("%s → %s", label, hit.name)
 			end
 		end
@@ -1693,6 +1937,9 @@ function lights:map_rooms_by_name(internal)
 	if kept > 0 then
 		parts[#parts + 1] = string.format("%d already mapped (kept)", kept)
 	end
+	if #removed > 0 then
+		parts[#parts + 1] = string.format("unmapped by hand (kept): %s", table.concat(removed, ", "))
+	end
 	if #unmatched > 0 then
 		parts[#parts + 1] = string.format("no Control4 room named: %s", table.concat(unmatched, ", "))
 	end
@@ -1706,8 +1953,10 @@ function lights:map_rooms_by_name(internal)
 	return text
 end
 
--- Room Audit: every linked device whose Control4 room (GetDevices → roomId)
--- differs from the room its Hue room maps to, as a drag list [Q 12]. Reads
+-- Room Audit (a hidden alias since 1.2: the room marks of owner:room_marks
+-- show the same on every device's list row): every linked device whose
+-- Control4 room (GetDevices → roomId) differs from the room its Hue room
+-- maps to, as a drag list [Q 12]. Reads
 -- only; nothing is moved (no API exists). `extra` audits another module's
 -- devices in the same list (the zone lights, docs/zone-light-design.md §4):
 -- a list of { device_id, name, group_rid }, each checked after the lights
@@ -1718,7 +1967,7 @@ end
 -- in an unmapped room is. Returns the text.
 function lights:room_audit(extra)
 	if next(self.reg:room_mappings()) == nil then
-		return "No room mappings; use Map Rooms By Name or Set Room Mapping first"
+		return "No room mappings yet (Set Room Mapping makes one)"
 	end
 	local checks, ids, seen = {}, {}, {}
 	local function check(device_id, name, group_rid)
@@ -1744,7 +1993,7 @@ function lights:room_audit(extra)
 	end
 	local ok, raw = self.project:call("devices", { DeviceIds = table.concat(ids, ",") })
 	if not ok or type(raw) ~= "table" or next(raw) == nil then
-		return "Room Audit unavailable: the project lookup returned nothing (see the Lua output)"
+		return "Room check unavailable: the project lookup returned nothing (see the Lua output)"
 	end
 	local infos = {}
 	for id, info in pairs(raw) do
@@ -1825,7 +2074,7 @@ function lights:attention()
 		for _, model in ipairs(new) do
 			names[#names + 1] = self:light_label(model) .. (self:hint_text(model) or "")
 		end
-		items[#items + 1] = string.format("%s on the bridge: %s (Add Light or Import All New Lights)",
+		items[#items + 1] = string.format("%s on the bridge: %s (Import All New or Add From Hue)",
 			plural(#new, "new light"), util.some(names, lights.MAX_NAMED))
 	end
 
@@ -1896,19 +2145,44 @@ function lights:each_mapping_row(fn)
 	return unmapped
 end
 
--- The Room Mappings property: one "Hue room → Control4 room" line per Hue
--- room and zone ("(unmapped)" or "(Control4 room gone)" when so), then the
--- mappings whose group is gone from Hue, plus how many groups have no
--- mapping; an empty list while no mapping exists at all. The bridge shows
--- them as the `Room Mappings` drop-down.
+-- What a mapping row says after its arrow (1.2): the Control4 room and how
+-- the mapping was made ("Office (by name)", "Study (by hand)", "Office
+-- (before 1.2)", the target "(Control4 room gone)" when so), "(no mapping,
+-- by hand)" for a group the owner left unmapped on purpose, else
+-- "(unmapped)", offering the Control4 room of exactly the group's name when
+-- there is one ("(unmapped; Control4 room Porch matches)"): what the update
+-- to 1.2 or a later Control4 room leaves unmapped is offered, never mapped
+-- by itself (import research §5.4, CR1). `by_key` is rooms_by_name(rooms).
+function lights:mapping_text(group_rid, mapping, rooms, by_key)
+	local how = self:mapping_how(group_rid)
+	if mapping and mapping.c4_room_id then
+		return self:mapping_target(mapping, rooms) .. (HOW_SUFFIX[how] or "")
+	end
+	if how == "none" then
+		return "(no mapping, by hand)"
+	end
+	local group = self.groups:group(group_rid)
+	local hit = group and by_key[norm(group.name)]
+	if hit and hit.count == 1 then
+		return string.format("(unmapped; Control4 room %s matches)", hit.name)
+	end
+	return "(unmapped)"
+end
+
+-- The Room Mappings property: one "Hue room → Control4 room (how)" line per
+-- Hue room and zone (mapping_text), then the mappings whose group is gone
+-- from Hue, plus how many groups have no mapping; an empty list while no
+-- group is cached and no mapping exists. The bridge shows them as the
+-- `Room Mappings` drop-down.
 function lights:room_mapping_items()
-	if next(self.reg:room_mappings()) == nil then
+	if next(self.reg:room_mappings()) == nil and #self.groups:groups() == 0 then
 		return {}, 0
 	end
 	local rooms = self.project:rooms()
+	local by_key = rooms_by_name(rooms)
 	local parts = {}
-	local unmapped = self:each_mapping_row(function(_, label, mapping)
-		parts[#parts + 1] = string.format("%s → %s", label, self:mapping_target(mapping, rooms))
+	local unmapped = self:each_mapping_row(function(rid, label, mapping)
+		parts[#parts + 1] = string.format("%s → %s", label, self:mapping_text(rid, mapping, rooms, by_key))
 	end)
 	return parts, unmapped
 end
@@ -1917,7 +2191,7 @@ end
 function lights:room_mappings_text()
 	local parts = self:room_mapping_items()
 	if #parts == 0 then
-		return "None; use Map Rooms By Name"
+		return "None yet (Set Room Mapping makes one)"
 	end
 	return table.concat(parts, "; ")
 end
@@ -1929,7 +2203,7 @@ end
 -- first, tombstoned ones marked with their Composer deletion date.
 function lights:picker_lights()
 	if not self.synced then
-		return empty_list("(no lights fetched yet; connect the event stream)")
+		return empty_list("(no lights fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local hinted, plain, deleted = {}, {}, {}
 	for _, model in ipairs(self:unimported_models()) do
@@ -2007,19 +2281,39 @@ function lights:device_text(rid, entry, rest, relink)
 	return string.format("%s (device %d%s)", name, entry.device_id, rest or "")
 end
 
--- Set Room Mapping's Hue Room: rooms then zones, each with its mapping, then
--- mappings whose Hue group was deleted (so they can be removed).
+-- Set Room Mapping's Hue Room: rooms then zones, each with its mapping and
+-- how it was made (mapping_text), then mappings whose Hue group was deleted
+-- (so they can be removed).
 function lights:picker_hue_rooms()
 	local rooms = self.project:rooms()
+	local by_key = rooms_by_name(rooms)
 	local list = {}
 	self:each_mapping_row(function(rid, label, mapping)
-		local target = self:mapping_target(mapping, rooms)
+		local target = self:mapping_text(rid, mapping, rooms, by_key)
 		list[#list + 1] = { text = string.format("%s → %s", sanitise(label), sanitise(target)), value = rid }
 	end)
 	if #list == 0 then
-		return empty_list("(no Hue rooms fetched yet; connect the event stream)")
+		return empty_list("(no Hue rooms fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	return list
+end
+
+-- (owner) room_marks with the zone-light skip set built once for the whole
+-- pass (foreign() reads it), not once per light; a failure marks nothing.
+function lights:room_marks()
+	local outer = self.skip_cache
+	if outer == nil then
+		self.skip_cache = false
+	end
+	local ok, marks = pcall(owner.room_marks, self)
+	if outer == nil then
+		self.skip_cache = nil
+	end
+	if not ok then
+		self.ctx.log.warn("lights: room marks failed: %s", tostring(marks))
+		return {}
+	end
+	return marks
 end
 
 -- Lists (the drop-down properties) ----------------------------------------------
@@ -2040,11 +2334,14 @@ end
 -- " (deleted from Composer <date>)" for a tombstone; the registered lights
 -- the bridge lacks ("(missing; device N)") under the room they were last
 -- seen in. Sorted by room label then name; a light in no room reads "(no
--- room)". Commas become "‚" (U+201A): the list is comma-delimited
+-- room)". A linked light whose device sits in another Control4 room than
+-- its Hue room maps to carries the room mark (room_marks: " (in Hall
+-- instead of Office)"). Commas become "‚" (U+201A): the list is comma-delimited
 -- (driver.lua's refresh_room_mappings). Before the first GET, the registry
 -- alone: what is known. Empty when nothing is.
 function lights:list_items()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
 	local rows = {}
 	-- The sort keys are lower-cased once per row, not twice per comparison
 	-- (docs/reviews/efficiency-2026-10-24.md R6).
@@ -2058,7 +2355,7 @@ function lights:list_items()
 		local entry, tomb = self.registry[rid], tombs[rid]
 		local suffix = " (new)"
 		if entry then
-			suffix = entry_suffix(entry)
+			suffix = entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
 		elseif tomb then
 			suffix = string.format(" (deleted from Composer %s)", date_of(tomb.deleted_at))
 		end

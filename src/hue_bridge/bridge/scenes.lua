@@ -110,14 +110,14 @@ scenes.TAG = "scenes"
 scenes.WORDS = {
 	held = "scene",                       -- "its registered scene is <rid>"
 	stranger = "an unregistered device",  -- a HUE_SCENE_GOODBYE the module does not hold
-	goodbye_tail = "Add Scene lists it as deleted, Add All Scenes Of Room skips it",
-	add_action = "Add Scene",
+	goodbye_tail = "Add From Hue lists it as deleted; adding all scenes of its room skips it",
+	add_action = "Add From Hue",
 	busy_job = "adding scenes",
 	busy_resync = "resyncing scenes",
 	kind = "scene",
 	unbound_kind = "unbound scene device",
 	relink_or_forget = "Link or Forget Device",
-	forget_action = "Forget Scene",
+	forget_action = "Forget Device",
 	name_kind = "Hue scene name",
 	hue_names = "Hue scene names",
 	device_noun = "scene device",
@@ -129,7 +129,7 @@ scenes.WORDS = {
 	registered = "scene",                 -- "device 2061 is not a registered scene"
 	relink_target = "a scene",            -- "pick a device and a scene"
 	requester = "scene device",           -- "the scene device named no device"
-	forget_tail = "; the Hue scene is listed under Add Scene again",
+	forget_tail = "; the Hue scene is listed under Add From Hue again",
 	link_noun = "scene devices",          -- "No scene devices are bound to this bridge"
 	link_many = "Hue scenes",
 	link_one = "Hue scene's",
@@ -889,6 +889,11 @@ function scenes:send_state(rid, reason, active)
 end
 
 -- Group on/off and other scenes (docs/keypad-design.md "Scene hold-to-dim") -----
+
+-- (owner hook) A scene's room mark follows the mapping of its room or zone.
+function scenes:mark_group(rid)
+	return self:group_rid_of(rid)
+end
 
 -- The group a scene of either kind belongs to: the catalogue's, else the entry's.
 function scenes:group_rid_of(rid)
@@ -2077,7 +2082,8 @@ function scenes:add_scene(rid, room_id, done)
 	end
 	local scene = self:record_of(rid)
 	if not scene then
-		done(false, string.format("Not added: scene %s is not on the bridge (Refresh Scenes and try again)", tostring(rid)))
+		done(false, string.format("Not added: scene %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)", tostring(rid)))
 		return false
 	end
 	local room_name
@@ -2127,7 +2133,8 @@ function scenes:add_all_of_group(group_rid, done)
 	end
 	local group = self:groups():group(group_rid)
 	if not group then
-		done(false, string.format("Not added: Hue room %s is not on the bridge (connect the event stream and try again)",
+		done(false, string.format("Not added: Hue room %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)",
 			tostring(group_rid)))
 		return false
 	end
@@ -2189,7 +2196,7 @@ function scenes:add_all_of_group(group_rid, done)
 			parts[#parts + 1] = "stopped early: " .. err
 		end
 		if #deleted > 0 then
-			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add Scene re-creates one): %s", #deleted,
+			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add From Hue re-creates one): %s", #deleted,
 				table.concat(deleted, ", "))
 		end
 		return table.concat(parts, "; ")
@@ -2218,7 +2225,8 @@ function scenes:relink_fields(fields)
 end
 
 function scenes.relink_refusal(_self, _device_id, new_rid)
-	return string.format("Not re-linked: scene %s is not on the bridge (Refresh Scenes and try again)",
+	return string.format("Not re-linked: scene %s is not on the bridge (Diagnostics ▸ Read everything "
+		.. "from the bridge now, then try again)",
 		tostring(new_rid))
 end
 
@@ -2375,7 +2383,7 @@ end
 -- last.
 function scenes:picker_scenes()
 	if not self.synced then
-		return util.empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local owners = self:slot_owners()
 	local plain, deleted = {}, {}
@@ -2408,7 +2416,7 @@ end
 -- Decision 8; imported counts both kinds).
 function scenes:picker_groups()
 	if not self.synced then
-		return util.empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local rooms = self.project:rooms()
 	local counts, smart, imported, records = {}, {}, {}, {}
@@ -2506,11 +2514,17 @@ end
 -- about seven per room). The registered scenes the bridge lacks follow
 -- under the group they remember as "(missing; device N)". Commas become "‚"
 -- (U+201A): the list is comma-delimited (driver.lua's
--- refresh_room_mappings). Before the first GET, the registry alone: what is
+-- refresh_room_mappings). A linked scene whose device sits in another
+-- Control4 room than its room or zone maps to carries the room mark
+-- (owner:room_marks). Before the first GET, the registry alone: what is
 -- known. Empty when nothing is.
 function scenes:list_items()
 	local owners = self:slot_owners()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	local rows = {}
 	local function row(x, rid, suffix)
 		local label, name, smart = self:group_label(x.group_rid, x), name_of(x), is_smart(x)
@@ -2528,7 +2542,7 @@ function scenes:list_items()
 			local entry, tomb = self.registry[rid], tombs[rid]
 			local suffix = ""
 			if entry then
-				suffix = entry_suffix(entry)
+				suffix = state_of(entry)
 			elseif tomb then
 				suffix = string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
@@ -2537,7 +2551,7 @@ function scenes:list_items()
 	end
 	for rid, entry in pairs(self.registry) do
 		if not self:record_of(rid) then
-			row(entry, rid, entry_suffix(entry))
+			row(entry, rid, state_of(entry))
 		end
 	end
 	table.sort(rows, function(a, b)

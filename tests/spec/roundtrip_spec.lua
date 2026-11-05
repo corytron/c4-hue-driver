@@ -105,7 +105,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 	it("runs the whole loop", function()
 		local bc4 = bridge.C4
 		assert.equal("0 imported", bridge.Properties["Lights"])
-		assert.equal("None; use Map Rooms By Name", bridge.Properties["Room Mappings"])
+		assert.equal("None yet (Set Room Mapping makes one)", bridge.Properties["Room Mappings"])
 
 		-- Self-check, then the stream connects and the deferred resync runs
 		-- against an empty registry: the lights' six GETs, the scenes' three
@@ -133,7 +133,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- one mapping per line, and a pick in Composer snaps back.
 		local summary = "4 Hue rooms and zones; 2 unmapped (open the list to read)"
 		assert.equal(summary, bridge.Properties["Room Mappings"])
-		assert.equal(summary .. ",Garage → Garage,Living Room → Living Room,Attic (zone) → (unmapped),"
+		assert.equal(summary .. ",Garage → Garage (by name),Living Room → Living Room (by name),Attic (zone) → (unmapped),"
 			.. "Downstairs (zone) → (unmapped)", bc4.property_lists["Room Mappings"])
 		bridge.Properties["Room Mappings"] = "Garage → Garage"
 		bridge.OnPropertyChanged("Room Mappings")
@@ -159,13 +159,13 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		-- which are shown only while used; fake.last_action joins them.
 		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001), Hallway Ambiance #3 to Living Room "
 			.. "(device 2002), Living Room Lamp #1 to Living Room (device 2003)"
-		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add Light): Kitchen Strip #2 (no Hue room)"
+		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add From Hue): Kitchen Strip #2 (no Hue room)"
 		assert.equal(added .. "; " .. skipped, fake.last_action(bridge))
 		assert.is_true(#bridge.Properties["Last Action"] <= 72, "the row itself fits the column")
 		fire_fast_timers(bridge, 400) -- the rows' visibility batch
 		assert.equal(0, bc4.property_attribs["Last Action (2)"], "a continuation row shown")
 		assert.equal(1, bc4.property_attribs["Last Action (6)"], "an unused row hidden")
-		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Add Light or Import All New Lights)",
+		assert.equal("1 new light on the bridge: Kitchen Strip #2 (Import All New or Add From Hue)",
 			bridge.Properties["Attention"])
 		assert.same({ "HUE_CONFIGURE", "HUE_STATE" }, messages_to(bc4, LIVING_ID))
 		assert.equal(LIVING_ROOM, fake.project.devices[LIVING_ID].room_id)
@@ -303,5 +303,33 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.is_nil(bc4.persist.hue_tombstones[F.rids.living])
 		assert.equal(2004, bc4.persist.hue_lights[F.rids.living].device_id)
 		assert.equal("4 lights on bridge‚ 3 imported‚ 1 new", bridge.Properties["Lights"])
+	end)
+
+	-- 1.2 (#334, docs/simplify-actions-design.md §1.3): what Room Audit listed
+	-- on a click is a mark on the device's line of the Lights drop-down; the
+	-- rows are refreshed every five minutes, so a move in Composer shows up
+	-- within that, and nothing is ever moved back.
+	it("marks a light moved to another Control4 room on its Lights line; Room Audit still lists it", function()
+		local bc4 = bridge.C4
+		bc4.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8"}')
+		bc4.last_transfer():respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
+		bc4.last_transfer():respond_headers(200, {})
+		bc4.advance(2500)
+		answer_resource_gets(bridge, 1)
+		assert.equal("Mapped 2 Hue rooms and zones by name: Garage → Garage, Living Room → Living Room",
+			fake.last_action(bridge), "the first read maps the rooms by name and says so")
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Import All New" })
+		answer_resource_gets(bridge, 1)
+		assert.equal(3, #bc4.added)
+		assert.truthy(bc4.property_lists["Lights"]:find(",Garage: Garage White → device 2001,", 1, true))
+
+		fake.move_device(2001, LIVING_ROOM)
+		bc4.advance(300000)
+		assert.truthy(bc4.property_lists["Lights"]:find(",Garage: Garage White → device 2001 (in Living Room instead of "
+			.. "Garage),", 1, true), bc4.property_lists["Lights"])
+		assert.equal(LIVING_ROOM, fake.project.devices[2001].room_id, "nothing moved back")
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
+		assert.equal("1 of 3 are not in the room their Hue room maps to: Garage White is in Living Room; Hue says Garage → "
+			.. "drag it to Garage in Composer if you want it there", fake.last_action(bridge))
 	end)
 end)

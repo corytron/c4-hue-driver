@@ -438,7 +438,7 @@ describe("motion round trip", function()
 			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new‚ 1 unbound",
 				bridge.Properties["Motion Sensors"])
 			assert.truthy(bridge.Properties["Attention"]:find("1 unbound motion device: Hallway sensor (device 2001) "
-				.. "(bind it to this bridge in Composer, or Forget Motion Device)", 1, true), bridge.Properties["Attention"])
+				.. "(bind it to this bridge in Composer, or Forget Device)", 1, true), bridge.Properties["Attention"])
 			bc4.sent = {}
 			stream(M.events.e2)
 			assert.same({}, messages_to(SENSOR_ID), "nothing goes to an unbound device")
@@ -462,8 +462,8 @@ describe("motion round trip", function()
 			assert.truthy(xml:find("<action>%s*<name>Import All New</name>%s*<command>Import All New</command>"))
 			assert.is_nil(xml:find("Add All New Motion Sensors", 1, true), "the old name is gone")
 			assert.equal("Added 1 new motion sensor: Hallway sensor #12 to Hallway (device 2001); skipped 1 with no mapped "
-				.. "room (Set Room Mapping or Add Motion Sensor): Porch sensor #20 (no Hue room); not included: 1 new "
-				.. "motion area (Add Motion Area adds areas one at a time)", action("Import All New Motion Sensors"))
+				.. "room (Set Room Mapping or Add From Hue): Porch sensor #20 (no Hue room); not included: 1 new "
+				.. "motion area (Add From Hue adds areas one at a time)", action("Import All New Motion Sensors"))
 			assert.same({ { id = SENSOR_ID, driver = "hue_motion.c4z", room = HALLWAY, name = "Hallway sensor" } },
 				bc4.added)
 		end)
@@ -476,9 +476,9 @@ describe("motion round trip", function()
 				bc4.property_lists["Motion Sensors"])
 			local attention = bridge.Properties["Attention"]
 			assert.truthy(attention:find("2 new motion sensors on the bridge: Hallway sensor [Hallway] #12, Porch sensor "
-				.. "#20 (Add Motion Sensor)", 1, true), attention)
+				.. "#20 (Add From Hue)", 1, true), attention)
 			assert.truthy(attention:find("1 new motion area on the bridge: Kitchen motion area (MotionAware) [Kitchen] "
-				.. "#ac00 (Add Motion Area)", 1, true), attention)
+				.. "#ac00 (Add From Hue)", 1, true), attention)
 
 			add_sensor()
 			assert.equal("2 sensors + 1 area on bridge‚ 1 imported‚ 2 new",
@@ -555,11 +555,11 @@ describe("motion round trip", function()
 			assert.equal(1, #bc4.bindings)
 
 			-- Forget Motion Device: the device is unbound and told; it stays in
-			-- the project, and the sensor is listed under Add Motion Sensor again.
+			-- the project, and the sensor is listed under Add From Hue again.
 			local forget = pick("ForgetMotionDeviceList", "Porch sensor (motion sensor, device 2001)")
 			text = action("Forget Motion Device", { Device = forget.value })
 			assert.equal("Forgot Porch sensor (device 2001): unbound and left in the project for you to delete; the Hue "
-				.. "motion sensor is listed under Add Motion Sensor again", text)
+				.. "motion sensor is listed under Add From Hue again", text)
 			fake.pump()
 			assert.same({}, bc4.bindings)
 			assert.is_nil(bc4.persist.hue_motion[M.devices.porch])

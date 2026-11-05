@@ -240,7 +240,7 @@ ledger.rows = {
 	-- Rooms ----------------------------------------------------------------------
 	{
 		id = "R1",
-		capability = "Room Mappings row, every mapping in its drop-down",
+		capability = "Room Mappings row, every mapping and how it was made (by name, by hand, none) in its drop-down",
 		gate = { "auto" },
 		paths = {
 			{ property = "Room Mappings", type = "DYNAMIC_LIST" },
@@ -258,22 +258,31 @@ ledger.rows = {
 	},
 	{
 		id = "R3",
-		capability = "Map by exact name, never overriding; done once by itself at the first resync",
+		capability = "Map a Hue room or zone by exact unique name when it appears, never over a hand choice or a "
+			.. "removed mapping; on demand for the rest",
 		gate = { "auto" },
 		paths = {
 			{ alias = "Map Rooms By Name" },
-			{ auto = "once, at the first resync (hue_rooms_automapped)", proof = { spec = "tests/spec/lights_spec.lua",
-				test = "runs Map Rooms By Name once, at the first resync that knows the rooms, guarded by a persisted flag" } },
+			{ auto = "the first read after pairing (hue_rooms_auto)", proof = { spec = "tests/spec/lights_spec.lua",
+				test = "maps the Hue rooms by name when they first appear, never again over a removal, and waits for the rooms" } },
+			{ auto = "a stream add, or a later read that brings a new group", proof = { spec = "tests/spec/lights_spec.lua",
+				test = "maps one added in Hue at its stream add and one a later read brings; a rename of a known one maps "
+					.. "nothing" } },
+			{ auto = "the update to 1.2 maps nothing, it offers", proof = { spec = "tests/spec/lights_spec.lua",
+				test = "maps nothing by itself at the update to 1.2: its first read's groups are known, a match only offered" } },
 		},
 	},
 	{
 		id = "R4",
-		capability = "Audit lights and zone lights against their mappings; nothing moved",
+		capability = "Mark the devices whose Control4 room differs from their Hue room's mapping; nothing moved",
 		gate = { "auto" },
 		paths = {
 			{ alias = "Room Audit" },
-			{ auto = "a marker on the Lights and Zone Lights rows at every read",
-				waits = "coordinator: the room-audit marker of docs/simplify-actions-design.md §1.3 and its spec" },
+			{ auto = "a mark on the Lights, Scenes, Zone Lights and Motion Sensors rows at every refresh",
+				proof = { spec = "tests/spec/roundtrip_spec.lua",
+					test = "marks a light moved to another Control4 room on its Lights line; Room Audit still lists it" } },
+			{ auto = "the same mark for every kind", proof = { module = "src/hue_bridge/bridge/owner.lua",
+				find = "function owner:room_marks()" } },
 		},
 	},
 	{

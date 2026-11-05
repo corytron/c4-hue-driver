@@ -76,14 +76,14 @@ zone_lights.TAG = "zone_lights"
 zone_lights.WORDS = {
 	held = "group",                                  -- "its registered group is <rid>"
 	stranger = "a device that is not a zone light",  -- a HUE_GOODBYE the module does not hold
-	goodbye_tail = "Add Zone Light lists it as deleted",
-	add_action = "Add Zone Light",
+	goodbye_tail = "Add From Hue lists it as deleted",
+	add_action = "Add From Hue",
 	busy_job = "adding a zone light",
 	busy_resync = "resyncing zone lights",
 	kind = "zone light",
 	unbound_kind = "unbound zone light device",
 	relink_or_forget = "Link or Forget Device",
-	forget_action = "Forget Light",
+	forget_action = "Forget Device",
 	name_kind = "zone light name",
 	hue_names = "Hue zone and room names",
 	device_noun = "zone light device",
@@ -1207,6 +1207,12 @@ function zone_lights:room_group_of(group)
 	return group.rid, self:group_label(group)
 end
 
+-- (owner hook) A zone light's room mark follows the mapping of the zone or
+-- room it stands for.
+function zone_lights.mark_group(_self, rid)
+	return rid
+end
+
 function zone_lights:add_label(group)
 	return self:group_label(group)
 end
@@ -1252,8 +1258,8 @@ function zone_lights:add(a, b, c)
 		if any and any.type == "bridge_home" then
 			done(false, "Not added: the whole bridge cannot be a zone light")
 		else
-			done(false, string.format("Not added: zone or room %s is not on the bridge (connect the event stream and try again)",
-				tostring(rid)))
+			done(false, string.format("Not added: zone or room %s is not on the bridge (Diagnostics ▸ Read everything "
+				.. "from the bridge now, then try again)", tostring(rid)))
 		end
 		return false
 	end
@@ -1299,8 +1305,8 @@ function zone_lights:relink_refusal(device_id, new_rid)
 	if self:models()[new_rid] then
 		return string.format("Not re-linked: device %d is a zone light; pick a zone or room", device_id)
 	end
-	return string.format("Not re-linked: zone or room %s is not on the bridge (connect the event stream and try "
-		.. "again)", tostring(new_rid))
+	return string.format("Not re-linked: zone or room %s is not on the bridge (Diagnostics ▸ Read everything from "
+		.. "the bridge now, then try again)", tostring(new_rid))
 end
 
 -- "Re-linked device 1180 (was Bedside Lights) to zone Reading Nook".
@@ -1533,10 +1539,16 @@ end
 -- and " (deleted in Hue; device N)" when gone. Commas become "‚" (U+201A):
 -- the list is comma-delimited (driver.lua's refresh_room_mappings). Before
 -- the groups are fetched, the registry alone: what is known. Empty when
--- nothing is.
+-- nothing is. A linked zone light whose device sits in another Control4
+-- room than its zone or room maps to carries the room mark
+-- (owner:room_marks).
 function zone_lights:list_items()
 	local cache = self:groups()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	local out, listed = {}, {}
 	for _, gtype in ipairs({ "zone", "room" }) do
 		for _, group in ipairs(cache:groups(gtype)) do
@@ -1550,7 +1562,7 @@ function zone_lights:list_items()
 			local text = list_label(group.name, gtype, count)
 			local entry, tomb = self.registry[group.rid], tombs[group.rid]
 			if entry then
-				text = text .. entry_suffix(entry)
+				text = text .. state_of(entry)
 			elseif tomb then
 				text = text .. string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
@@ -1566,7 +1578,7 @@ function zone_lights:list_items()
 			elseif entry.light_count then
 				count = util.plural(entry.light_count, "light")
 			end
-			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. entry_suffix(entry)
+			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. state_of(entry)
 		end
 	end
 	for i, text in ipairs(out) do

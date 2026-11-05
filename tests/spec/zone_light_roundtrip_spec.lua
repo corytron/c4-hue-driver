@@ -316,7 +316,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal(F.group_rids.garage, light.C4.persist.hue_rid)
 		assert.equal("Downstairs", fake.project.devices[DEVICE_ID].name, "the Composer name is the owner's")
 		assert.equal("1 zone light name differs from the Composer names: Downstairs is Garage Lights in Hue "
-			.. "(Adopt Hue Names or Accept Names As They Are)", Z:attention())
+			.. "(Resolve Names)", Z:attention())
 		assert.truthy(Z:accept_names():find("^Accepted 1 zone light name difference"))
 		assert.equal("None", Z:attention())
 

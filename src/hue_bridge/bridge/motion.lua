@@ -169,14 +169,14 @@ motion.TAG = "motion"
 motion.WORDS = {
 	held = "motion device",                                -- "its registered motion device is <rid>"
 	stranger = "a device that is not a motion device",     -- a HUE_MOTION_GOODBYE not held here
-	goodbye_tail = "Add Motion Sensor and Add Motion Area list it as deleted",
-	add_action = "Add Motion Sensor or Add Motion Area",
+	goodbye_tail = "Add From Hue lists it as deleted",
+	add_action = "Add From Hue",
 	busy_job = "adding a motion device",
 	busy_resync = "resyncing motion devices",
 	kind = "motion device",
 	unbound_kind = "unbound motion device",
 	relink_or_forget = "Link or Forget Device",
-	forget_action = "Forget Motion Device",
+	forget_action = "Forget Device",
 	name_kind = "motion device name",
 	hue_names = "Hue sensor and area names",
 	device_noun = "motion device",
@@ -187,7 +187,7 @@ motion.WORDS = {
 	registered = "motion device",                          -- "device 1201 is not a registered motion device"
 	relink_target = "a sensor or area",                    -- "pick a device and a sensor or area"
 	requester = "motion device",                           -- "the motion device named no device"
-	forget_tail = "; it is listed under Add Motion Sensor or Add Motion Area again",
+	forget_tail = "; it is listed under Add From Hue again",
 	link_noun = "motion devices",                          -- "No motion devices are bound to this bridge"
 	link_many = "Hue motion sensors or areas",
 	link_one = "sensor's or area's",
@@ -196,10 +196,10 @@ motion.WORDS = {
 }
 -- The words that differ between the two kinds (D2: one driver, two kinds).
 motion.KIND_WORDS = {
-	sensor = { kind = "motion sensor", fallback = "Hue motion sensor", add_action = "Add Motion Sensor",
-		forget_tail = "; the Hue motion sensor is listed under Add Motion Sensor again", pick = "a sensor" },
-	area = { kind = "motion area", fallback = "MotionAware area", add_action = "Add Motion Area",
-		forget_tail = "; the MotionAware area is listed under Add Motion Area again", pick = "an area" },
+	sensor = { kind = "motion sensor", fallback = "Hue motion sensor", add_action = "Add From Hue",
+		forget_tail = "; the Hue motion sensor is listed under Add From Hue again", pick = "a sensor" },
+	area = { kind = "motion area", fallback = "MotionAware area", add_action = "Add From Hue",
+		forget_tail = "; the MotionAware area is listed under Add From Hue again", pick = "an area" },
 }
 motion.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Motion Sensor / Area's flag first
 motion.NAMES_KIND = "motion"                   -- bridge/names.lua syncs the sensors' and areas' names (D6, Q7)
@@ -1058,7 +1058,7 @@ function motion:area_state(rid, entry)
 	if self.areas_supported == false then
 		-- B5: an area entry on a bridge that serves no areas. Not gone (only a
 		-- successful GET that lacks it says that), and no deliberate end.
-		return { online = "false", status = "This bridge offers no MotionAware areas; Forget Motion Device removes it" }
+		return { online = "false", status = "This bridge offers no MotionAware areas; Forget Device removes it" }
 	end
 	local record = self.area_records[rid]
 	local out = {}
@@ -2049,8 +2049,8 @@ function motion:relink(device_id, new_rid, internal)
 end
 
 function motion.relink_refusal(_self, _device_id, new_rid)
-	return string.format("Not re-linked: motion sensor or area %s is not on the bridge (connect the event stream and "
-		.. "try again)", tostring(new_rid))
+	return string.format("Not re-linked: motion sensor or area %s is not on the bridge (Diagnostics ▸ Read "
+		.. "everything from the bridge now, then try again)", tostring(new_rid))
 end
 
 -- Link Devices -------------------------------------------------------------------------------
@@ -2158,8 +2158,8 @@ function motion:add(rid, room_id, done)
 	end
 	local record = self:record_of(rid)
 	if not self:addable(record) then
-		done(false, string.format("Not added: motion sensor or area %s is not on the bridge (connect the event stream and "
-			.. "try again)", tostring(rid)))
+		done(false, string.format("Not added: motion sensor or area %s is not on the bridge (Diagnostics ▸ Read "
+			.. "everything from the bridge now, then try again)", tostring(rid)))
 		return false
 	end
 	local room_name
@@ -2229,7 +2229,8 @@ function motion:import_new(done)
 		return false
 	end
 	if not (self.got.motion and self:devices_loaded()) and next(self.sensor_records) == nil then
-		done(false, "Not added: no motion sensors fetched yet (connect the event stream and try again)")
+		done(false, "Not added: no motion sensors fetched yet (Diagnostics ▸ Read everything from the bridge now, "
+			.. "then try again)")
 		return false
 	end
 	-- D7 first (§3.2): a sensor M7 re-links is no new one; what it only
@@ -2298,15 +2299,15 @@ function motion:import_new(done)
 				#replacing, #replacing == 1 and "a replacement" or "replacements", table.concat(replacing, ", "))
 		end
 		if #unmapped > 0 then
-			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add Motion Sensor): %s",
+			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add From Hue): %s",
 				#unmapped, table.concat(unmapped, ", "))
 		end
 		if #deleted > 0 then
-			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add Motion Sensor re-creates one): %s",
+			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add From Hue re-creates one): %s",
 				#deleted, table.concat(deleted, ", "))
 		end
 		if new_areas > 0 then
-			parts[#parts + 1] = string.format("not included: %s (Add Motion Area adds areas one at a time)",
+			parts[#parts + 1] = string.format("not included: %s (Add From Hue adds areas one at a time)",
 				util.plural(new_areas, "new motion area"))
 		end
 		return table.concat(parts, "; ")
@@ -2469,14 +2470,15 @@ function motion:attention_items(items)
 			c.holder, c.claimant, words.forget_action)
 	end
 
-	local diffs = self:name_differences()
+	-- With the names sync (1.2) its own items (names:attention()) replace this one.
+	local diffs = self:names_sync() == nil and self:name_differences() or {}
 	if #diffs > 0 then
 		local names = {}
 		for _, d in ipairs(diffs) do
 			names[#names + 1] = string.format("%s is %s in Hue", d.current, d.expected)
 		end
-		items[#items + 1] = string.format("%d %s%s differ%s from the Composer names: %s (Adopt Hue Names or Accept Names "
-			.. "As They Are)", #diffs, words.name_kind, #diffs == 1 and "" or "s", #diffs == 1 and "s" or "", named(names))
+		items[#items + 1] = string.format("%d %s%s differ%s from the Composer names: %s (Resolve Names)", #diffs,
+			words.name_kind, #diffs == 1 and "" or "s", #diffs == 1 and "s" or "", named(names))
 	end
 
 	local now = self.ctx.now()
@@ -2566,8 +2568,8 @@ function motion:picker(kind)
 	local fetched = kind == "area" and self.got[motion.CONFIG_TYPE] or (self.got.motion and self:devices_loaded())
 	local records = kind == "area" and self.area_records or self.sensor_records
 	if not fetched and next(records) == nil then
-		return util.empty_list(kind == "area" and "(no MotionAware areas fetched yet; connect the event stream)"
-			or "(no motion sensors fetched yet; connect the event stream)")
+		return util.empty_list(kind == "area" and "(no MotionAware areas fetched yet; Diagnostics ▸ Read everything "
+			.. "from the bridge now)" or "(no motion sensors fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local hinted, plain, deleted, any = {}, {}, {}, false
 	local tombs = self.reg:tombstones()
@@ -2665,11 +2667,17 @@ end
 -- The Motion Sensors drop-down: every sensor then every area on the bridge
 -- as the pickers label them, with " → device N" when imported, " (unbound;
 -- device N)", " (deleted from Composer <date>)"; then the registered ones
--- the bridge lacks, "(missing; device N)". Commas become "‚" (U+201A): the
--- list is comma-delimited.
+-- the bridge lacks, "(missing; device N)". A linked device whose Control4
+-- room differs from the room its Hue room maps to carries the room mark
+-- (owner:room_marks). Commas become "‚" (U+201A): the list is
+-- comma-delimited.
 function motion:list_items()
 	local out, listed = {}, {}
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	for _, records in ipairs({ self.sensor_records, self.area_records }) do
 		for _, record in ipairs(sorted(records)) do
 			local entry = self.registry[record.rid]
@@ -2677,7 +2685,7 @@ function motion:list_items()
 				listed[record.rid] = true
 				local text = self:label_of(record)
 				if entry then
-					text = text .. entry_suffix(entry)
+					text = text .. state_of(entry)
 				elseif tombs[record.rid] then
 					text = text .. string.format(" (deleted from Composer %s)", util.date_of(tombs[record.rid].deleted_at))
 				end
@@ -2689,7 +2697,7 @@ function motion:list_items()
 		if not listed[rid] then
 			local entry = self.registry[rid]
 			out[#out + 1] = string.format("%s (%s)%s", self:entry_label(rid, entry), words_of(entry).kind,
-				entry_suffix(entry))
+				state_of(entry))
 		end
 	end
 	for i, text in ipairs(out) do
