@@ -461,18 +461,30 @@ function lights:new_count()
 	return n
 end
 
--- The gone entry a new light may be the replacement of: the same
--- mac_address (a re-added bulb keeps its radio) or the same name. Returns
--- rid, entry or nil.
+-- The entry a new light may be the return or replacement of: one Re-link
+-- Device To Light offers (gone or unbound, bridge/owner.lua's
+-- RELINK_STATES) whose light the bridge is known to lack. A gone entry
+-- always is; an unbound one is never marked gone, so it counts once its light
+-- has left too (owner:known_missing), never while the light is still there.
+-- The same mac_address first (a re-added bulb keeps its radio), else the
+-- same name; gone entries before unbound ones, each in name order. Returns
+-- rid, entry or nil. The new-light log line, Attention, the Add Light picker
+-- and Import All New Lights (which skips such a light, #344) go by it.
+local HINT_STATES = { "gone", "unbound" }
+
 function lights:relink_hint(model)
 	local mac = self.macs[model.device_rid]
 	local by_mac, by_name_rid
-	for _, rid in ipairs(self.reg:rids("gone")) do
-		local entry = self.registry[rid]
-		if mac and entry.mac_address == mac then
-			by_mac = by_mac or rid
-		elseif entry.name == model.name then
-			by_name_rid = by_name_rid or rid
+	for _, state in ipairs(HINT_STATES) do
+		for _, rid in ipairs(self.reg:rids(state)) do
+			local entry = self.registry[rid]
+			if state == "gone" or self:known_missing(rid) then
+				if mac and entry.mac_address == mac then
+					by_mac = by_mac or rid
+				elseif entry.name == model.name then
+					by_name_rid = by_name_rid or rid
+				end
+			end
 		end
 	end
 	local rid = by_mac or by_name_rid
@@ -1221,8 +1233,12 @@ end
 -- Import All New Lights: the six GETs, the reconciliation, then one
 -- AddDevice per unimported, non-tombstoned light with a mapped Hue room,
 -- into that room; lights in an unmapped room, in no room, or deleted in
--- Composer are skipped and listed [Q 1, Q 4]. Idempotent by rid; never
--- renames, moves or rebinds. done(ok, text) once, at the end.
+-- Composer are skipped and listed [Q 1, Q 4], and so is one that looks like
+-- the return or replacement of a gone or unbound device (relink_hint, #344):
+-- Re-link Device To Light keeps that device and its programming (§1 rule 3)
+-- where a second device would leave them behind, as Import All New Motion
+-- Sensors does. Idempotent by rid; never renames, moves or rebinds.
+-- done(ok, text) once, at the end.
 function lights:import_new(done)
 	done = done or function() end
 	local busy = self:busy_text()
@@ -1258,19 +1274,21 @@ function lights:import_fetched(res, finish)
 	self:absorb(res)
 	self:settle("resync", not self.configured_once)
 
-	local rooms = self.project:rooms()
-	local jobs, unmapped, deleted = {}, {}, {}
+	local rooms, tombs = self.project:rooms(), self.reg:tombstones()
+	local jobs, replacing, unmapped, deleted = {}, {}, {}, {}
 	for _, model in ipairs(self:unimported_models()) do
-		if self:is_tombstoned(model.rid) then
-			local tomb = self.reg:tombstones()[model.rid]
-			deleted[#deleted + 1] = string.format("%s (deleted %s)", self:light_label(model, false),
-				date_of(tomb.deleted_at))
+		local label, tomb = self:light_label(model, false), tombs[model.rid]
+		local hint = not tomb and self:hint_text(model) or nil
+		if tomb then
+			deleted[#deleted + 1] = string.format("%s (deleted %s)", label, date_of(tomb.deleted_at))
+		elseif hint then
+			replacing[#replacing + 1] = label .. hint
 		else
 			local room_id, why = self:default_room(model, rooms)
 			if room_id then
 				jobs[#jobs + 1] = { record = model, room_id = room_id, room_name = why }
 			else
-				unmapped[#unmapped + 1] = string.format("%s (%s)", self:light_label(model, false), why)
+				unmapped[#unmapped + 1] = string.format("%s (%s)", label, why)
 			end
 		end
 	end
@@ -1284,7 +1302,7 @@ function lights:import_fetched(res, finish)
 					tostring(c.room_name), c.device_id)
 			end
 			parts[#parts + 1] = string.format("Added %s: %s", plural(#created, "new light"), table.concat(names, ", "))
-		elseif #jobs == 0 and #unmapped == 0 and #deleted == 0 then
+		elseif #jobs == 0 and #replacing == 0 and #unmapped == 0 and #deleted == 0 then
 			parts[#parts + 1] = string.format("No new lights on the bridge (%d on bridge, %d imported)",
 				self:bridge_count(), self:count())
 		else
@@ -1299,6 +1317,10 @@ function lights:import_fetched(res, finish)
 		end
 		if err then
 			parts[#parts + 1] = "stopped early: " .. err
+		end
+		if #replacing > 0 then
+			parts[#parts + 1] = string.format("skipped %d that may be %s (Re-link Device To Light or Add Light): %s",
+				#replacing, #replacing == 1 and "a replacement" or "replacements", table.concat(replacing, ", "))
 		end
 		if #unmapped > 0 then
 			parts[#parts + 1] = string.format("skipped %d with no mapped room (Set Room Mapping or Add Light): %s",
