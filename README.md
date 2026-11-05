@@ -81,13 +81,15 @@ has the release notes and the provenance attestations. How to install them:
   and at every start and after an address change the driver checks, before
   anything carries the key, that the bridge at the address is the paired one
   (by its bridge id) and that the controller really applies those roots (a
-  TLS self-check).
+  TLS self-check); the bridge id is checked again once the event stream has
+  been down for a minute.
 - **Nine actions, and the rest by itself (from 1.2).** The bridge has nine
   actions (Pair Bridge, Import All New, Add From Hue, Link Device, Forget
   Device, Resolve Names, Set Room Mapping, Diagnostics, Forget Pairing); the
   lights and scenes have none. Reading the bridge again, re-checking a
   rejected key, following the bridge to a new address on the local network
-  and mapping new Hue rooms by name happen without a click.
+  and mapping new Hue rooms by name happen without a click, and Attention
+  says when the bridge has been away for an hour.
 - **Lifecycle handling.** A name changed on either side follows on the other
   (from 1.2; Composer's name wins when both changed). A bulb or sensor that
   comes back with the same radio is re-linked by itself. Lights replaced or
@@ -129,9 +131,10 @@ nine):
   Bridge Pro** (BSB003) on the same network as the controller, with a fixed
   IPv4 address, preferably (a DHCP reservation in your router). From 1.2 the
   driver finds the bridge on the local network by itself (mDNS, then a
-  search of the controller's own network; never through the internet) and
-  follows it to a new address; a bridge on another VLAN is entered by its
-  address. Any IPv4 address works.
+  search of at most two private networks, around its last address and the
+  controller's own; never through the internet) and follows it to a new
+  address; a bridge on another VLAN is entered by its address. Any IPv4
+  address works.
 - Not supported: the round first-generation bridge (BSB001), which has no CLIP v2
   API, and devices that are not Hue bridges; both are refused at pairing. The
   bridge's software must be 1948086000 or newer, or pairing is refused too

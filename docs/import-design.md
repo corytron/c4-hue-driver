@@ -253,7 +253,18 @@ long `Last Action` continues on `Last Action (2)` to `(6)`, word-wrapped at
 
 Current (2026-11-05, release 1.2, #334): `Attention` wraps the same way,
 on `Attention (2)` to `(6)`; a text longer than six rows ends in "… (Lua
-output)" (`show_attention`). `Room Mappings` lines end in how each was
+output)" and is logged in full whatever Debug Mode says, as Last Action's
+overflow is (`show_attention`, `log.always`; #334 §4 finding 1). Since the
+third wave of 1.2 the bridge's own items come after the TLS items and
+before the modules' (`away.items`): the paired bridge away an hour
+("missing" once mDNS and the sweep found it nowhere, else "not answering
+at <ip>"), the stream down an hour while the bridge answers, the paired
+bridge heard elsewhere than at a typed address, and for 24 h a move the
+follow-up made. A new light or motion sensor with a re-link hint is an
+item of its own, "N new light(s) on the bridge may be a replacement /
+replacements: … (Link Device)", since Import All New skips it; the plain
+item lists only the others and ends "(Import All New or Add From Hue)",
+for sensors too (areas "(Add From Hue)"; §4 finding 8). `Room Mappings` lines end in how each was
 made, " (by name)", " (by hand)", " (before 1.2)", or read "(no mapping,
 by hand)", "(unmapped)" or "(unmapped; Control4 room <x> matches)"; the
 row reads "None yet (Set Room Mapping makes one)" while no group is cached
@@ -290,20 +301,33 @@ stay hidden aliases until 2.0). The rows of this contract that change:
 
 | Action (1.2) | Params | Does |
 | --- | --- | --- |
-| `Import All New` (replaces `Import All New Lights` and `Import All New Motion Sensors`) | — | the lights' import as above (fresh GET, mapped rooms only, tombstones skipped, likely replacements skipped and listed for Link Device), then the motion sensors' import (never MotionAware areas); each runs the automatic re-link below first, so a light or sensor it re-linked is no longer new and is neither added nor listed (contract §3.2); one `Last Action`, "<lights' part> \| Motion: <motion part>"; idempotent by rid; never renames, moves or rebinds |
+| `Import All New` (replaces `Import All New Lights` and `Import All New Motion Sensors`) | — | the lights' import as above (fresh GET, mapped rooms only, tombstones skipped, likely replacements skipped and listed for Link Device), then the motion sensors' import (never MotionAware areas); each runs the automatic re-link below first, so a light or sensor it re-linked is no longer new: not added, and named in its part, "…; re-linked 1 by radio: Garage White", the re-link writing no `Last Action` of its own (contract §3.2, §4 finding 10); one `Last Action`, "<lights' part> \| Motion: <motion part>"; idempotent by rid; never renames, moves or rebinds |
 | `Add From Hue` (replaces `Add Light`, `Add Zone Light`, `Add Scene`, `Add All Scenes Of Room`, `Add Motion Sensor`, `Add Motion Area`) | `What` (a CUSTOM_SELECT with folders: `f:lights`, `f:groups`, `f:scenes`, `f:scenes:<group_rid>`, `f:motion`; leaves `light:<rid>`, `group:<rid>`, `scene:<rid>`, `sensor:<rid>`, `area:<rid>`, `all:lights`, `all:motion`), `Room` (as `Add Light`'s) | routes the pick to the module that owned the old action, with its texts, refusals and guards; a single pick goes into `Room` (empty = "(mapped room)"); `all:lights`, `all:motion` and a picked `f:scenes:<group_rid>` (all scenes of that room or zone) use the mappings; single selection only (verified on OS 3.4.2, contract §2.3); clears a tombstone as `Add Light` did |
-| automatic re-link by MAC (part of `Re-link Device To Light`'s job; D7) | — (no click) | on every lights or motion registry refresh: a new rid whose MAC equals that of exactly one gone device of the same kind (gone = linked, rid absent from the last successful full read; never a tombstoned or forgotten one) is re-pointed to it as `Re-link Device To Light` did, `Last Action` "Re-linked Desk Lamp to its bulb (same radio, new Hue id)" ("… to its sensor …" for a motion sensor; a bridge reset: one summary, "Re-linked 47 devices by radio: Lamp 1, Lamp 2, Lamp 3 +44 more"; also when a new light or sensor appears on the event stream), and the Hue thing takes the Composer name (names research N16); several candidates, a multi-light device whose position does not decide, or a new rid that has a device already stay suggestions in `Link Device`; scenes, zone lights and MotionAware areas have no MAC and are only suggested (contract §3.2, M1 to M9) |
+| automatic re-link by MAC (part of `Re-link Device To Light`'s job; D7) | — (no click) | on every lights or motion registry refresh: a new rid whose MAC equals that of exactly one gone device of the same kind (gone = linked, rid absent from the last successful full read; never a tombstoned or forgotten one) is re-pointed to it as `Re-link Device To Light` did, `Last Action` (at a refresh or a stream event; inside Import All New the import's result names it) "Re-linked Desk Lamp to its bulb (same radio, new Hue id)" ("… to its sensor …" for a motion sensor; a bridge reset: one summary, "Re-linked 47 devices by radio: Lamp 1, Lamp 2, Lamp 3 +44 more"; also when a new light or sensor appears on the event stream), and the Hue thing takes the Composer name (names research N16); several candidates, a multi-light device whose position does not decide, or a new rid that has a device already stay suggestions in `Link Device`; scenes, zone lights and MotionAware areas have no MAC and are only suggested (contract §3.2, M1 to M9) |
 
 `Link Device` (`Device`, `To`) replaces the four Re-link actions and Link
 Devices: its `Device` list holds the gone and unbound devices by kind,
-each with an unambiguous suggestion appended, and a first row,
+each with an unambiguous suggestion appended, naming the Hue thing and the
+reason once (§4 finding 5): "Lamp 5 (device 1213, gone since 10-22) →
+Lamp 5 [Bedroom] #9 (suggested: same name in the same Hue room)", the
+reasons "same radio", "same name in the same Hue room", "same name in the
+same group" (scenes) and "same name" (zone lights), " (suggested)" alone
+without one; and a first row,
 "dev:suggested" ("Every device with a suggested match (<n>)", or "Every
 bound device the bridge does not know yet, by its own id or name" with
 none), that applies every suggestion and then runs Link Devices' adoption
 of bound devices the registry lacks (by announced rid, else by exact
 unique name); a bare device has no row of its own. Name suggestions need
-the same name in the same Hue room (lights, motion) or group (scenes);
-zone lights have none. `Forget Device` (`Device`, `Confirm`) replaces the
+the same name in the same Hue room (lights, motion) or group (scenes),
+the same one being the same rid or, failing that, the same label
+(`owner.same_group`, §4 finding 9: after a bridge reset every room has a
+new rid; a room and a zone of one name stay apart); zone lights are
+suggested a gone device's zone or room of the same name and type. Every
+folder of Add From Hue's What, Link Device's Device and To and Forget
+Device's Device starts with a labelled row of ours, "Back to all folders"
+(value `f:top`, read as the top) or "Back to Scenes" from a room's scene
+folder, beside Composer's own Back link, which answers only a double-click
+on its word (§4 finding 14). `Forget Device` (`Device`, `Confirm`) replaces the
 Forget actions of the bridge and the devices; `Resolve Names` replaces
 Adopt Hue Names and Accept Names As They Are; Map Rooms By Name and Room
 Audit run by themselves: a group the driver has not seen before is mapped
@@ -312,7 +336,11 @@ by exact unique name (never over a mapping, a hand choice, one made before
 update from a build that ran Map Rooms By Name maps nothing and records
 every group as seen), a by-name mapping whose Control4 room was deleted is
 re-pointed to the one room of that name after a full read, and `Last
-Action` names what was mapped; Room Audit is the mark on the list rows
+Action` names what was mapped ("Mapped …", "Re-mapped by name (the Control4
+room was deleted): …", each followed by the ambiguous names when there are
+any); a pass that maps nothing writes no `Last Action`, only the log line
+"lights: rooms: not mapped, the name is ambiguous (Set Room Mapping): …"
+(§4 finding 11); Room Audit is the mark on the list rows
 above. The manual's chapter 13 has the full table of where every action
 went.
 

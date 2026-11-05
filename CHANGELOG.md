@@ -17,15 +17,24 @@ listed.
 ### Added
 - The Hue Bridge finds Hue bridges on the local network: a new Bridges
   Found row lists them (a driver that is not paired searches by itself a
-  few seconds after it starts and then every 15 minutes, each search
-  reported in Last Action; Search again searches at once), and picking
-  one sets the address and opens the pairing window. When the paired
-  bridge stops answering for 5 minutes at the address where it last
-  answered, the driver looks for it by its bridge id, updates Bridge IP
-  Address by itself and says so in Last Action; an address typed by hand
-  that never answered is never overwritten. Local network only (mDNS,
-  then a search of at most two blocks of nearby addresses, at most once
-  an hour), never the internet (#334).
+  few seconds after it starts or after Forget Pairing, and then every 15
+  minutes; Search again searches at once, and only the searches you pick
+  report in Last Action), and picking one sets the address and opens the
+  pairing window for that bridge only. When the paired bridge stops
+  answering for 5 minutes at the address where it last answered, the
+  driver looks for it by its bridge id, updates Bridge IP Address by
+  itself and says so in Last Action, and in Attention for a day; an
+  address typed by hand that never answered is never overwritten, but
+  Attention says where the paired bridge answers instead. Local network
+  only (mDNS, then a search of at most two blocks of nearby addresses,
+  which the offered search names, at most once an hour), never the
+  internet (#334).
+- The Hue Bridge's Attention says when the paired bridge has been missing
+  or not answering for an hour, and when the event stream has been down
+  for an hour while the bridge answers, with what to do; each item goes by
+  itself when the bridge is back. Before the key goes out again after the
+  event stream has been down for a minute, the driver checks the bridge's
+  id again (#334).
 - Names follow each other both ways for lights, scenes and motion sensors:
   a rename in Composer renames the light, scene or sensor in the Hue app,
   and a rename in the Hue app renames the Control4 device; when both
@@ -36,7 +45,8 @@ listed.
 - A bulb or motion sensor that comes back to the bridge with new Hue ids
   but the same radio (deleted and added again in the Hue app, or after a
   reset of the bridge) is re-linked to its old device by itself, keeping
-  the device's programming; Last Action says so (#334).
+  the device's programming; Last Action says so, or Import All New's
+  result when the import found it (#334).
 - The Hue Bridge looks after itself in the background: it reads the
   bridge again when its last read is 6 or 24 hours old, after a failed
   read, and every 10 minutes while the event stream is down; checks a
@@ -44,8 +54,8 @@ listed.
   hour; maps a Hue room or zone that appears later to the one Control4
   room of the same name (the update to 1.2 maps nothing by itself); and
   marks on the Lights, Scenes, Zone Lights and Motion Sensors lists a
-  device that sits in another Control4 room than its Hue room maps to
-  (#334).
+  device that sits in another Control4 room than its Hue room maps to.
+  Its reads ask the bridge for at most 100 requests an hour (#334).
 - Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
   and motion sensors from the bridge now, without needing the event stream
   (#324).
@@ -82,14 +92,23 @@ listed.
   be pressed before or after the click; entering the address on a driver
   that is not paired, or picking a bridge in Bridges Found, opens the same
   wait (#334).
-- Import All New adds every new light and motion sensor in one click, and
-  Add From Hue adds one light, zone or room, scene, all scenes of a room,
-  motion sensor or MotionAware area from one list with folders (#334).
+- Import All New adds every new light and motion sensor in one click and
+  names the devices it re-linked by their radio, and Add From Hue adds one
+  light, zone or room, scene, all scenes of a room, motion sensor or
+  MotionAware area from one list with folders. Every folder starts with a
+  line back, Back to all folders or Back to Scenes, easier to hit than
+  Composer's own Back (#334).
 - Link Device points a device of any kind at its replacement, with the
-  driver's suggestion shown, and its first line links every suggested
-  match and every connected device the bridge does not know yet at once;
-  Forget Device releases a device of any kind. Forget Device and
-  Forget Pairing ask for confirmation (#334).
+  driver's suggestion and its reason shown after the device, also for zone
+  and room lights and after a reset of the bridge (a room or zone made
+  again under its old name counts as the same), and its first line links
+  every suggested match and every connected device the bridge does not
+  know yet at once; Forget Device releases a device of any kind. Forget
+  Device and Forget Pairing ask for confirmation (#334).
+- A new light or motion sensor that looks like the replacement of a
+  missing device is listed in Attention on its own, ending in Link Device,
+  since Import All New leaves it out; new motion sensors end in Import All
+  New or Add From Hue, as new lights do (#334).
 - Diagnostics gathers the support steps in one action: check the
   connection now, read everything from the bridge now, reconnect or stop
   the event stream, and log the motion diagnostics (#334).
@@ -97,7 +116,8 @@ listed.
   is on the bridge), and the Hue Motion Sensor has one, Test Motion
   Programming, in place of Test: Motion and Test: No Motion (#334).
 - A long Attention continues on extra rows as Last Action does, so the
-  action named at the end of an item is never cut off (#334).
+  action named at the end of an item is never cut off, and one too long
+  for those rows is written in full to the Lua output (#334).
 - Room Mappings says how each mapping was made (by name, by hand, or
   before 1.2), and Set Room Mapping's "(no mapping)" keeps a Hue room
   unmapped: the automatic mapping by name leaves it alone (#334).

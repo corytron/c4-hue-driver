@@ -86,8 +86,10 @@ calls the old names keeps working, and step 11 checks that it does:
    "126 scenes + 15 time-based on bridge, 2 imported, 2 deleted" (counts as
    on the house).
 4. The background tasks of 1.2 in the log (with `Debug Mode` On): one line
-   per run, "background <task> (<trigger>): OK in <ms> ms: <what it did>"
-   ("failed in" for a failed run), the reads behind the stream, the
+   per run, "housekeeping: <task> (<trigger>): OK: <what it did>; <n>
+   requests, <s> s" (for example "housekeeping: stream_down_read (timer):
+   OK: quick resync; 15 requests, 2.1 s"; "failed: …" for a failed run,
+   logged whatever Debug Mode says), the reads behind the stream, the
    mapping of rooms by name, the room marks on the list rows;
    nothing created, renamed, bound or moved by them. The pickers of `Add
    From Hue`, `Link Device`, `Forget Device` and `Resolve Names` answer
@@ -126,9 +128,10 @@ calls the old names keeps working, and step 11 checks that it does:
     quiet: no safety read in the first five minutes after a start (plus up
     to a minute of jitter; a minute after a driver update), and none while
     the stream is up and the last read is younger than 6 hours. (The
-    engine's hourly budget of 60 optional requests counts only requests
-    sent through its own `job.http`; the safety reads run the resync chain,
-    which is not counted.) Memory is not measured: nothing in
+    engine's hourly budget of 100 optional requests counts the safety
+    reads and the reads every 10 minutes while the stream is down, a quick
+    read being 15 requests on the Bridge Pro; the resync at every connect
+    is essential and not counted.) Memory is not measured: nothing in
     the drivers or the dev loop reports the Lua memory.
 11. The old command strings (1.2, #334): `tools/devctl.py run "Test
     Connection"`, `"Refresh Scenes"` and `"Room Audit"` answer as before
