@@ -1,11 +1,12 @@
 # Status of the Hue driver (2026-11-05)
 
-**Now (2026-11-05).** **1.1 "Brasso", build 447, is released** (Latest;
-[Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382))
+**Now (2026-11-05).** **1.2 "Taramyn", build 488, is released** (Latest;
+[Discussion #387](https://github.com/corytron/c4-hue-driver/discussions/387))
 and runs on the house (`deploy/house.yaml`; `python3 tools/deploy.py status`
-says whether it is installed). **1.2 "Taramyn"** (#334, PR #353, branch
-`feature/simplify-1.2-334`, contract `docs/simplify-actions-design.md`) is
-built and checked on the house through two dev rounds:
+says whether it is installed). 1.1 "Brasso", build 447, was released the
+same day ([Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382)).
+1.2 (#334, PR #353, contract `docs/simplify-actions-design.md`) was checked on
+the house in two dev rounds:
 - dev 467 ([Discussion #369](https://github.com/corytron/c4-hue-driver/discussions/369));
 - dev 477, wave 3 ([Discussion #378](https://github.com/corytron/c4-hue-driver/discussions/378)).
 
@@ -22,9 +23,10 @@ What 1.2 does:
 - **Attention:** it wraps onto continuation rows and says when the bridge
   is away, missing, moved or answering elsewhere.
 
-Open before 1.2 ships:
-- review and merge of PR #353;
-- the 1.2 betas.
+Not yet exercised on the house:
+- the write paths of the new actions, which dispatch to 1.1's operations;
+- the automatic re-link by radio;
+- the bridge-away Attention items, which are covered by specs.
 
 Follow-ups filed:
 - #371, the occupancy hold after a restart;
