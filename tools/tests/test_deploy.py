@@ -849,6 +849,7 @@ class StartTest(DeployCase):
         self.assertIn("C:\\c4-hue\\drivers\\v1.0\\", brief)
         self.assertIn("`Driver Version` = 252", brief)
         self.assertIn("`Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 600 and `Debug Mode` = Off", brief)
+        self.assertIn("every `Attention (2)` to `Attention (6)` row that is shown", brief)
         self.assertIn(APPROVAL, brief)
         self.assertIn("Add or Update Driver or Agent", brief)
         self.assertIn("Never delete and re-add", brief)
