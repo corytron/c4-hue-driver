@@ -25,18 +25,21 @@ findings as comments), and `docs/status.md` sums them up.
   `deploy/house.yaml` valid. `tools/setup-checks.sh` first if a tool is
   missing.
 - `tools/build.sh` (release) and `tools/build.sh --dev`: the release
-  `hue_bridge.c4z` has 22 actions (`unzip -p build/hue_bridge.c4z
+  `hue_bridge.c4z` has 29 actions (`unzip -p build/hue_bridge.c4z
   driver.xml | grep -c '<action>'`) and no `Dev Server`, `Diagnostic
-  Server`, `Connection Test`, `Reload Credentials`, `Check CA Pinning`; no
+  Server`, `Connection Test`, `Reload Credentials`, `Check CA Pinning`
+  (the `DEV-ONLY` blocks of
+  `src/hue_bridge/driver.xml`, which `tools/build.sh` strips); no
   package holds `common/devloop.lua` or `common/devkey.lua`, and the bridge
   no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua`
   (`tools/build.sh` refuses to package a release stage that still has one).
-  The dev build has all of them (25 actions; each package carries the dev
+  The dev build has all of them (32 actions, the three diagnostics before
+  `Forget Pairing`; each package carries the dev
   key as `common/devkey.lua` and is written 0600). `build/manifest.json`
-  names the build, the commit, `"dev": false` or `true`, and the three
+  names the build, the commit, `"dev": false` or `true`, and the four
   packages' checksums and sizes.
 - `unzip -l build/<driver>.c4z` lists `LICENSE` and `NOTICE` in each of the
-  three packages (Apache 2.0 §4).
+  four packages (Apache 2.0 §4).
 - No LAN address, Hue application key or private certificate in `src/`,
   `docs/`, `tools/`, `tests/`: the `secrets` check (gitleaks with
   `.gitleaks.toml`) covers the tree and the history; the placeholders
@@ -60,17 +63,22 @@ Then, through `tools/devctl.py run`, with the shipped log
    <n> lights`, then `resync done`, `scene resync done` and `zone light
    resync done`; with the bridge's `Debug Mode` On also each GET: light,
    device, zigbee_connectivity, room, zone and bridge_home, then scene,
-   smart_scene and one grouped_light), the stream on its padded spelling
-   (`stream will use <spelling>, rotating over <k> spelling(s); self-check
-   via <spelling> OK`), and `Lights`, `Scenes`, `Zone Lights`, `Room
+   smart_scene and one grouped_light), the stream on its network connection
+   (`event stream: connecting to <address> (network connection, binding
+   6001)`; only on Web transfer the padded spelling, `stream will use
+   <spelling>, rotating over <k> spelling(s); self-check via <spelling>
+   OK`), and `Lights`, `Scenes`, `Zone Lights`, `Room
    Mappings` summaries matching the house (47 lights; 126 + 15 scenes; 7
    zones, 16 rooms; 23 mappings).
 2. `Test Connection` → `Status` "Test OK: HTTP 200 via … bridge …".
 3. `Refresh Scenes` → `Last Action` "Scenes refreshed: 126 + 15 time-based on
    bridge, 2 imported, 2 deleted" (counts as on the house).
-4. `Room Audit`, `Link Devices`, `Adopt Hue Names`, `Accept Names As They
-   Are` → their texts, nothing changed (no new devices, no renames unless a
-   name differs).
+4. `Room Audit`, `Link Devices` → their texts, nothing changed (no new
+   devices). `Adopt Hue Names` and `Accept Names As They Are` change the
+   owner's project (the first renames every device whose Composer name
+   differs, the second accepts the differences), so `tools/regress.sh`
+   runs them only with `--with-renames`; run them when a name difference
+   is what is being tested: their texts, no renames unless a name differs.
 5. Zone light round trip on the Bedside Lights zone light (device 1166):
    `tools/devctl.py run "Proxy Command" Light=1166 Command=ON` (and the
    other light_v2 commands the same way) or the owner's tile: ON → one PUT
@@ -117,7 +125,8 @@ reboots the controller). Read:
    summary and changes nothing. `Last Action` is a read-only text that
    continues on `Last Action (2)` to `(6)`, rows shown only while they hold
    text.
-3. The Actions tab: 22 actions, none of the three diagnostics.
+3. The Actions tab: 29 actions, none of the three diagnostics
+   (`Connection Test`, `Reload Credentials`, `Check CA Pinning`).
 4. `Add Zone Light` for a throwaway zone, Driver Version at once, `Forget
    Light`, delete: as in round 25 (`docs/composer-remote.md`).
 5. The Documentation tab opens and shows the manual's title and the
@@ -226,7 +235,8 @@ development here is finished.
    (`docs/changelog-design.md`): before dispatching, make sure its
    `## Unreleased` entry lists what this build changes (a run with an empty
    entry fails), and for the first release of a new major version that the
-   codename is agreed (Andor rule). Check the release page: seven assets,
+   codename is agreed (Andor rule). Check the release page: eight assets
+   (four since 1.1 added `hue_motion.c4z`),
    the title `<version> "<codename>"`, the notes' first heading with this
    build. After the release, the desired-state PR also runs
    `python3 tools/changelog.py stamp --version X.Y --build N --date
@@ -262,7 +272,7 @@ automatic, since the controller has no install API. After the release exists:
    controller from System Manager after the install"` when the build changes
    a `driver.xml` `<capabilities>` block, and `--supersede` when an earlier
    deployment is still in progress. It downloads `manifest.json`,
-   `SHA256SUMS.txt` and the three packages from the release into
+   `SHA256SUMS.txt` and the four packages from the release into
    `build/release/<tag>/`, verifies every sha256 against both files, that
    the manifest's build is the file's and its commit the tag's, and that
    each package's provenance attestation verifies with `gh attestation

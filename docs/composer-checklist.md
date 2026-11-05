@@ -195,13 +195,16 @@ actions Composer shows on a dev build (`Connection Test`, `Reload
 Credentials`, `Check CA Pinning`); a light's or scene's reload line appears
 only in its own Lua tab.
 
-- Stream address rotation: after each reconnect `Event Stream` shows
-  "Connected since" within seconds, and `Stream Address` shows a different
-  spelling of the bridge address than before, "<spelling> (own queue,
-  spelling <i> of <k>)" ("(own queue, the only spelling)" when the address
-  has no octet below 8 to pad, "<address> (shared queue with commands:
-  <reason>)" when the stream cannot have its own). The release build
-  rotates the same way at every reconnect. **Done 2026-10-21** (dev loop,
+- Stream address rotation, with `Event Stream Transport` = Web transfer
+  only (since #317 the default network connection reads "<address>
+  (network connection, binding 6001)" and does not rotate): after each
+  reconnect `Event Stream` shows "Connected since" within seconds, and
+  `Stream Address` shows a different spelling of the bridge address than
+  before, "<spelling> (own queue, spelling <i> of <k>)" ("(own queue, the
+  only spelling)" when the address has one octet below 8,
+  "<address> (shared queue with commands: <reason>)" when the stream
+  cannot have its own, such as an address with no octet below 8). The
+  release build rotates the same way at every reconnect. **Done 2026-10-21** (dev loop,
   PR #6): two reloads took the second and third spelling and connected 200
   and 160 ms after the attempt; the row then read "<spelling> (own queue,
   rotating over <k> spellings; commands use <bridge address>)", reworded
@@ -257,15 +260,17 @@ Steps 17, 20, 22 and 24 need a Hue Light device; step 21 adds one.
     "#<n> (<8 hex digits>…)", `Last Action`; its Actions tab: Adopt Hue Name
     above Forget This Light. **Done 2026-10-21** (Left Bedside Light: "Master
     Bedroom", "#46 (e0e51794…)").
-18. The bridge's Actions tab, top to bottom, on a release build (22
+18. The bridge's Actions tab, top to bottom, on a release build (29
     actions): Pair Bridge, Add Light, Import All New Lights, Add Zone Light,
     Re-link Device To Light, Re-link Zone Light, Link Devices, Forget Light,
     Adopt Hue Names, Accept Names As They Are, Set Room Mapping, Map Rooms By
     Name, Room Audit, Add Scene, Add All Scenes Of Room, Re-link Scene,
-    Forget Scene, Refresh Scenes, Test Connection, Connect Event Stream,
+    Forget Scene, Refresh Scenes, Refresh All, Add Motion Sensor, Import All
+    New Motion Sensors, Add Motion Area, Re-link Motion Device, Forget Motion
+    Device, Log Motion Diagnostics, Test Connection, Connect Event Stream,
     Disconnect Event Stream, Forget Pairing; a development build has
     Connection Test, Reload Credentials and Check CA Pinning before Forget
-    Pairing (25). Click **Add Light**: a dialog with two pickers.
+    Pairing (32). Click **Add Light**: a dialog with two pickers.
     `Light` lists the lights without a device, those deleted in Composer
     last as "<name> [<Hue room>] #<n> (deleted from Composer <date>)" (today
     all 47), or "(every light on the bridge is imported)" when there is
@@ -601,9 +606,10 @@ the drag in step 59 and the reboot in step 58):
     bridge, 0 imported, 0 new" ("0 imported" alone until the first full read
     after the install; it read "0 sensors and 0 areas on the bridge; 0
     added" before #325) and no line under it. The Actions tab has Add Motion
-    Sensor, Add Motion Area, Re-link Motion Device, Forget Motion Device and
-    Log Motion Diagnostics. Paste the full order of the tab, 27 buttons on a
-    release build (22 before), so that the quick reference in the manual's
+    Sensor, Import All New Motion Sensors, Add Motion Area, Re-link Motion
+    Device, Forget Motion Device and Log Motion Diagnostics. Paste the full
+    order of the tab, 29 buttons on a release build (27 at 1.1 beta 1,
+    before Refresh All and Import All New Motion Sensors; 22 before 1.1), so that the quick reference in the manual's
     chapter 13 and the caption of its picture in chapter 5 can follow it.
     - **Done:** open.
 53. **Add Motion Sensor and Add Motion Area with nothing to add** (EC §10
