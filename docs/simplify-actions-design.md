@@ -1,7 +1,7 @@
 # Simplifying the drivers: fewer actions, background tasks instead of clicks (#334)
 
-Status: research phase, opened 2026-11-04 on the owner's request. Nothing in
-`src/` changes until the proposal that comes out of this research is accepted.
+Status: proposal ready for the owner's decisions (section 1.7), 2026-11-04.
+Nothing in `src/` changes until they are answered.
 
 ## 0. Contract of the research phase
 
@@ -157,6 +157,154 @@ rest of the checkout at the same time. Nobody runs `git`.
 `src/*/www/documentation.html`, `CHANGELOG.md`, and issues #280, #305, #309,
 #324 and #325.
 
-## 1. Findings and proposal
+## 1. Findings and proposal (coordinator, 2026-11-04)
 
-To be written by the coordinator once the seven files exist.
+Merged from the seven research files:
+[import](simplify-research-import.md), [maintenance](simplify-research-maintenance.md),
+[composer](simplify-research-composer.md), [journeys](simplify-research-journeys.md),
+[compat](simplify-research-compat.md), [scheduler](simplify-research-scheduler.md) and
+[comparables](simplify-research-comparables.md). Where they disagreed, the
+choice and its reason are in 1.6. Nothing here is built yet: the owner's
+answers in 1.7 come first.
+
+### 1.1 What the research found
+
+- **The count.** A release build shows 29 bridge actions (32 in a dev build)
+  and 7 on the three child drivers: 36 buttons, most of them the same few
+  jobs repeated per kind of thing (light, zone, scene, sensor, area).
+- **The platform's limits.** Composer's Actions tab is fixed by `driver.xml`:
+  no hiding, grouping or renaming at runtime, no result, no wizard. Creating a
+  device must follow a person's click (the SDK's AddDevice contract), and no
+  API deletes a device or moves it to another room. A background task can
+  therefore notice and prepare, never create or delete.
+- **What the platform allows.** Merged actions with a "what" picker (proven on
+  OS 3.4.2), settings instead of action pairs, timers with persisted due
+  times, and the events the driver already receives. Renaming or removing an
+  action is safe in an in-place update: programming never refers to actions.
+- **No engine today.** Background work is ad hoc: no safety-net read behind
+  the event stream, a failed resync after a connect is never retried, a
+  rejected key stays locked until someone clicks, and an IP change is never
+  noticed (Status keeps saying Paired).
+- **Clicks per job barely drop; the number of things to learn does.** The
+  gain is 36 buttons down to 10, plus jobs the driver does for itself.
+- **Comparable products** merge by intent (one import, one inbox of finds),
+  follow the bridge by its id when its address changes, keep the installer's
+  names and rooms, and never auto-delete.
+- **Compatibility.** Keep every removed command string as a hidden alias until
+  2.0 (the dev loop, `tools/regress.sh` and the Windows briefs call actions by
+  command), never reshape the persisted store, and add a ledger spec that
+  proves every feature still has a path before any action changes.
+
+### 1.2 The proposed actions (39 become 10)
+
+Hue Bridge, 9 actions in release builds:
+
+| # | Action | What it does | Replaces |
+| --- | --- | --- | --- |
+| 1 | **Pair Bridge** | One click; waits up to 2 minutes for the link button. Opens by itself when an address is entered on a never-paired driver. | Pair Bridge |
+| 2 | **Import All New** | One click, no dialog: every new light and motion sensor into the Control4 room its Hue room maps to; skips a likely replacement of a gone device and offers the re-link instead. | Import All New Lights, Import All New Motion Sensors |
+| 3 | **Add From Hue** | One picker of everything on the bridge not yet in Control4: lights, zones and rooms, scenes (with "all scenes of this room" rows), motion sensors and MotionAware areas; then a room. | Add Light, Add Zone Light, Add Scene, Add All Scenes Of Room, Add Motion Sensor, Add Motion Area |
+| 4 | **Link Device** | Points a gone, unbound or unlinked device of any kind at a Hue thing, the driver's suggestion pre-chosen; a row "every device with a suggested match" does them all. | Re-link Device To Light, Re-link Zone Light, Re-link Scene, Re-link Motion Device, Link Devices |
+| 5 | **Forget Device** | Releases a device of any kind from the bridge, leaving it in the project; asks for confirmation. | Forget Light, Forget Scene, Forget Motion Device, Forget This Light, Forget This Scene |
+| 6 | **Resolve Names** | Rename to the Hue names, or keep the Composer names, for all or one device. | Adopt Hue Names, Accept Names As They Are, both Adopt Hue Name |
+| 7 | **Set Room Mapping** | The one hand choice of a Control4 room per Hue room or zone, now also "none". | Set Room Mapping |
+| 8 | **Diagnostics** | One picker: check the connection now; read everything from the bridge now; reconnect the event stream; stop the event stream until the next start; log motion diagnostics (10 minutes). Dev builds add the connection experiment, reload credentials and check CA pinning. | Test Connection, Refresh All, Refresh Scenes, Connect and Disconnect Event Stream, Log Motion Diagnostics, Connection Test, Reload Credentials, Check CA Pinning |
+| 9 | **Forget Pairing** | Unchanged, plus a confirmation. | Forget Pairing |
+
+Hue Light and Hue Scene: no actions (their Status already points to the
+bridge). Hue Motion: one action, **Test Motion Programming**, a toggle that
+sends the opposite of what the device shows and Hue's state again after 30 s
+(replaces Test: Motion and Test: No Motion; Refresh From Bridge retires, the
+hello at start and the bridge's reads cover it).
+
+If Composer with OS 3.4.2 cannot show folders in the Add From Hue picker (a
+dev-build test, 1.7 D9), it splits into three actions (lights and zones,
+scenes, motion): 11 bridge actions instead of 9.
+
+### 1.3 What the driver does by itself
+
+One module, `bridge/housekeeping.lua`, runs every background job: one job
+at a time, reads only, user commands always first (no housekeeping request
+while a command queue is busy or within 1.5 s of a user write), nothing
+optional in the first 5 minutes after a Director restart, at most 60 optional
+requests an hour, due times persisted because timers die at every restart and
+update. It never creates, renames, binds, moves or deletes a device, except
+where the owner opts in (Names From Hue = Follow; D7).
+
+| Job | When | Replaces the click |
+| --- | --- | --- |
+| Read lights, scenes, zone lights and sensors | every stream connect (as today, now retried on failure); when the data is 6 h old (quick) or 24 h old (full); every 10 min while the stream is down but the bridge answers | Refresh All, Refresh Scenes, Refresh From Bridge |
+| Re-check a rejected key | 5 min, 15 min, 1 h, then hourly | Test Connection |
+| Re-check the bridge's identity | after any stream outage of 60 s or more, before the key goes out again | (new safety) |
+| Find the bridge at a new address | when it has been unreachable 5 min (D5) | (new; today only a typed address) |
+| Map Hue rooms to Control4 rooms by exact unique name | when a room appears; never over a hand choice or a removed mapping | Map Rooms By Name |
+| Mark devices whose Hue room and Control4 room differ | on every read, as a marker on the list rows | Room Audit |
+| Adopt devices by remembered id | at start and at every bind (as today); name matches are offered on Link Device, not applied | Link Devices |
+| Accept a name the installer typed in Composer | when Composer renames a device (D6) | Accept Names As They Are |
+| Say the bridge or the stream has been away an hour | Attention | (new) |
+
+Visible: each job writes one Last Action line or an Attention item; Attention
+wraps like Last Action so the action hint is never cut. Stoppable: one
+setting, **Background Tasks** On (default) / Off, where Off is exactly beta
+7's behaviour.
+
+### 1.4 Settings and rows
+
+- New: **Background Tasks** (On / Off), **Names From Hue** (Ask, the
+  default and today's behaviour / Follow: rename a device while its Composer
+  name still equals the old Hue name, one rename at a time).
+- Shown only with Debug Mode On or under Web transfer: Stream Address, Events
+  Received, Last Event. **Stream Timeout (s), Stream Watchdog (s) and Event
+  Stream Transport stay visible** until the install brief stops reading them
+  back (`tools/deploy.py` checks them after every install); hiding them is a
+  second step.
+- Room Mappings shows how each mapping was made ("by name", by hand, none).
+
+### 1.5 Order of work (release 1.2, after 1.1 is released)
+
+1. The ledger spec (`tests/spec/ledger_spec.lua`, every feature of the
+   compat ledger reachable, aliases with an expiry, background tasks that
+   never create, rename or bind on their own over a simulated week) and a
+   `sort_order` uniqueness spec. Before any action changes.
+2. One dev build on the house: folders and multi-pick in the Add From Hue
+   picker on OS 3.4.2, and, if D5 is yes, whether mDNS answers reach the
+   driver.
+3. The housekeeping engine with a fake clock in the specs.
+4. The merged actions, with every old command as a hidden alias until 2.0.
+5. Rows, Attention wrapping, manuals, checklists, screenshots, CHANGELOG.
+
+Before that, in 1.1 beta 8 (small fixes found by the research): Import All
+New Lights no longer imports a likely replacement as a duplicate; the manual
+drops the "address below 8" advice that #317 made moot; the checklists and
+the manual's actions picture stop saying 22 actions; `tools/regress.sh` stops
+renaming devices on the house.
+
+### 1.6 Where the research disagreed, and the choice
+
+| Question | Positions | Choice |
+| --- | --- | --- |
+| Import All New as its own button | journeys yes (1 click today, 6 inside a picker); import and maintenance fold it into Add From Hue | its own button: the most frequent job stays one click |
+| Child devices' actions | import and journeys none; composer keep Adopt Hue Name and Forget per device | none: one place to look, the bridge |
+| Refresh All | scheduler and comparables keep a button; maintenance, journeys and composer automatic plus a Diagnostics entry | automatic plus Diagnostics: the reads run themselves |
+| Event stream off | composer and scheduler a setting; maintenance a Diagnostics entry | Diagnostics: a support step, not a setting to forget |
+| Offers | composer a Suggestions drop-down; import and journeys markers and Attention | markers and Attention: no list that acts on a pick |
+| Link Devices | composer and journeys automatic; import offered | adoption by id automatic (as today), name matches offered |
+| Background switch | scheduler On/Off; maintenance On / On, no internet / Off | On/Off; a separate switch only if D5 brings an internet lookup |
+| Discovery | maintenance and comparables want it; scheduler says no phoning home | the owner's call: D5 |
+
+### 1.7 Decisions for the owner
+
+Each has a recommended answer; one word decides it.
+
+| # | Question | Recommended |
+| --- | --- | --- |
+| D1 | Ship this as 1.2 after 1.1 is released, not in the 1.1 betas the tester follows? | yes |
+| D2 | Keep Import All New as its own one-click button (9 bridge actions, not 8)? | yes |
+| D3 | Take all actions off the Hue Light and Hue Scene devices? | yes |
+| D4 | One Background Tasks switch (On/Off, Off = beta 7) instead of one per task? | yes |
+| D5 | Find the bridge again at a new address by its id: ask Signify's discovery service (internet, at most hourly, only while the bridge is missing, switchable off), after testing local mDNS first? The driver then rewrites Bridge IP Address itself and says so. | yes |
+| D6 | A rename typed in Composer counts as "keep this name", and Names From Hue = Ask by default? | yes |
+| D7 | Re-link a gone device by itself when a new light carries its radio (MAC), after one test with a spare bulb on the house? | yes, after the test |
+| D8 | The hourly key re-check may present a rejected key again (today only Test Connection does)? | yes |
+| D9 | One dev build on the house (through the Windows session, when it is free) to test folders and multi-pick in the pickers? | yes |
+| D10 | The small fixes of 1.5 in 1.1 beta 8 now? | yes |
