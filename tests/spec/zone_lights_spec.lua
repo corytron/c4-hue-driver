@@ -1164,6 +1164,37 @@ describe("bridge.zone_lights", function()
 			assert.is_nil(Z.announced[2001])
 		end)
 
+		it("suggests the zone made again under its name and type (a bridge reset, §4 finding 9), never re-linking by "
+			.. "itself", function()
+			add_downstairs()
+			feed(F.events.zone_deleted)
+			assert.equal("gone", Z:entry(DOWNSTAIRS).state)
+			assert.same({}, Z:suggestions(), "no zone of its name on the bridge yet")
+			-- The Downstairs zone made again: a new rid, the same name.
+			local NEW_DOWNSTAIRS = "7d6c5b4a-0000-4000-8000-00000000z0a1"
+			local function groups(zone)
+				L:absorb({ room = decode_data(F.room), zone = decode_data(zone), bridge_home = decode_data(F.bridge_home) })
+			end
+			groups(replace(F.zone, DOWNSTAIRS, NEW_DOWNSTAIRS))
+			local s = Z:suggestions()
+			assert.equal(1, #s)
+			assert.same({ 2001, NEW_DOWNSTAIRS, "same name", true, "Downstairs (zone)" },
+				{ s[1].device_id, s[1].rid, s[1].why, s[1].apply, s[1].text })
+			assert.same({ { device_id = 2001, rid = NEW_DOWNSTAIRS, text = "Downstairs (zone)", why = "same name" } },
+				Z:suggested(), "what Link Device's dev:suggested applies")
+			assert.equal("gone", Z:entry(DOWNSTAIRS).state, "only suggested")
+			assert.equal(0, #c4.renamed)
+			-- A zone of another name, or a room of that name, is no match.
+			groups(replace(replace(F.zone, DOWNSTAIRS, NEW_DOWNSTAIRS), '"name":"Downstairs"', '"name":"Ground Floor"'))
+			assert.same({}, Z:suggestions())
+			groups(replace(replace(F.zone, DOWNSTAIRS, NEW_DOWNSTAIRS), '"type":"zone"', '"type":"room"'))
+			assert.same({}, Z:suggestions())
+			-- Link Device re-links it to the suggestion.
+			groups(replace(F.zone, DOWNSTAIRS, NEW_DOWNSTAIRS))
+			assert.is_true((Z:relink(2001, NEW_DOWNSTAIRS)))
+			assert.equal("Downstairs", Z:entry(NEW_DOWNSTAIRS).name)
+		end)
+
 		it("refuses bad arguments, unknown devices, held groups, a light rid and groups not on the bridge", function()
 			add_downstairs()
 			Z:add(LIVING, nil, done)
@@ -1346,7 +1377,7 @@ describe("bridge.zone_lights", function()
 			assert.equal("1 zone light name differs from the Composer names: Bedside is Ground Floor in Hue "
 				.. "(Resolve Names)", Z:attention())
 			Z.registry[DOWNSTAIRS].proxy_id = nil
-			assert.equal("not renamed 1: Downstairs (device 2001): no proxy id known", Z:adopt_hue_names(),
+			assert.equal("Not renamed 1: Downstairs (device 2001): no proxy id known", Z:adopt_hue_names(),
 				"without a proxy id the protocol device's own name is compared")
 		end)
 	end)

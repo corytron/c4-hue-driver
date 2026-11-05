@@ -186,9 +186,20 @@ local function walk(fn, problems)
 			problems[#problems + 1] = string.format("folder %q: no list", folder_value)
 			return
 		end
-		if folder_value == "" and back ~= nil then problems[#problems + 1] = "the top has a back" end
-		if folder_value ~= "" and type(back) ~= "string" then
+		-- The labelled Back row to the top (f:top) opens the top itself.
+		local top = folder_value == "" or folder_value == "f:top"
+		if top and back ~= nil then problems[#problems + 1] = "the top has a back" end
+		if not top and type(back) ~= "string" then
 			problems[#problems + 1] = string.format("folder %q: back is %s", folder_value, type(back))
+		end
+		-- Every folder's list starts with a Back row that says where it goes (§4 finding 14).
+		if not top and type(back) == "string" then
+			local first = list[1]
+			if not (first.folder and first.value == (back == "" and "f:top" or back)
+				and first.text:find("^Back to %S")) then
+				problems[#problems + 1] = string.format("folder %q: no labelled Back row first (%s)", folder_value,
+					tostring(first.text))
+			end
 		end
 		for _, e in ipairs(list) do
 			if type(e.text) ~= "string" or e.text == "" then problems[#problems + 1] = "an entry without text" end
@@ -302,43 +313,52 @@ describe("bridge/actions.lua", function()
 			local w = world()
 			local list, back = w.a:add_list("f:lights")
 			assert.equal("", back)
-			assert.same({ "All 1 new light, each into its mapped room", "Desk Lamp [Office] #3",
+			assert.same({ "Back to all folders", "All 1 new light, each into its mapped room", "Desk Lamp [Office] #3",
 				"Porch Light [Porch] #4 (deleted from Composer 10-22)" }, texts(list))
-			assert.same({ "all:lights", "light:L1", "light:L2" }, values(list))
+			assert.same({ "f:top", "all:lights", "light:L1", "light:L2" }, values(list))
+			assert.is_true(list[1].folder)
+			assert.is_nil(list[1].selectable)
 			w = world({ lights = { new_count = function() return 0 end } })
-			assert.same({ "light:L1", "light:L2" }, values((w.a:add_list("f:lights"))))
+			assert.same({ "f:top", "light:L1", "light:L2" }, values((w.a:add_list("f:lights"))))
 		end)
 
 		it("lists the zones and rooms, and the motion sensors and areas after their All row", function()
 			local w = world()
 			local groups, back = w.a:add_list("f:groups")
 			assert.equal("", back)
-			assert.same({ "group:G1" }, values(groups))
+			assert.same({ "f:top", "group:G1" }, values(groups))
 			local motion = w.a:add_list("f:motion")
-			assert.same({ "all:motion", "sensor:M1", "area:A1" }, values(motion))
-			assert.equal("All 1 new motion sensor, each into its mapped room", motion[1].text)
+			assert.same({ "f:top", "all:motion", "sensor:M1", "area:A1" }, values(motion))
+			assert.equal("All 1 new motion sensor, each into its mapped room", motion[2].text)
 		end)
 
 		it("puts the scenes in a selectable folder per room or zone, each opening on its All row", function()
 			local w = world()
 			local folders, back = w.a:add_list("f:scenes")
 			assert.equal("", back)
-			assert.same({ "Attic (zone): 1 scene", "Kitchen: 2 scenes" }, texts(folders))
-			assert.same({ "f:scenes:Z1", "f:scenes:R1" }, values(folders))
-			for _, e in ipairs(folders) do
+			assert.same({ "Back to all folders", "Attic (zone): 1 scene", "Kitchen: 2 scenes" }, texts(folders))
+			assert.same({ "f:top", "f:scenes:Z1", "f:scenes:R1" }, values(folders))
+			for i, e in ipairs(folders) do
 				assert.is_true(e.folder)
-				assert.is_true(e.selectable)
+				assert.equal(i > 1 or nil, e.selectable, "the Back row is never picked")
 			end
 			local kitchen
 			kitchen, back = w.a:add_list("f:scenes:R1")
 			assert.equal("f:scenes", back)
-			assert.same({ "All scenes of Kitchen not in Control4 yet", "Relax", "Bright (dynamic)" }, texts(kitchen))
-			assert.same({ "f:scenes:R1", "scene:S1", "scene:S2" }, values(kitchen))
-			assert.is_nil(kitchen[1].folder)
+			assert.same({ "Back to Scenes", "All scenes of Kitchen not in Control4 yet", "Relax", "Bright (dynamic)" },
+				texts(kitchen))
+			assert.same({ "f:scenes", "f:scenes:R1", "scene:S1", "scene:S2" }, values(kitchen))
+			assert.is_true(kitchen[1].folder)
+			assert.is_nil(kitchen[2].folder)
 			local gone
 			gone, back = w.a:add_list("f:scenes:R9")
 			assert.equal("f:scenes", back)
-			assert.equal("", gone[1].value)
+			assert.same({ "f:scenes", "" }, values(gone))
+			-- The Back row to the top opens the top (Composer passes its value as the folder).
+			local top
+			top, back = w.a:add_list("f:top")
+			assert.is_nil(back)
+			assert.same(texts((w.a:add_list(""))), texts(top))
 		end)
 
 		it("answers the top for a value it does not know (a leaf Composer passes back)", function()
@@ -468,19 +488,28 @@ describe("bridge/actions.lua", function()
 			local lights
 			lights, back = w.a:link_list("f:lights")
 			assert.equal("", back)
-			assert.same({ { text = "Old Lamp (device 1001, gone since 10-24)", value = "dev:1001" } }, lights)
-			assert.same({ { text = "(no zone light device is gone or unbound)", value = "" } }, (w.a:link_list("f:groups")))
+			assert.same({ { text = "Back to all folders", value = "f:top", folder = true },
+				{ text = "Old Lamp (device 1001, gone since 10-24)", value = "dev:1001" } }, lights)
+			assert.same({ { text = "Back to all folders", value = "f:top", folder = true },
+				{ text = "(no zone light device is gone or unbound)", value = "" } }, (w.a:link_list("f:groups")))
 			assert.same({}, w.acted())
 		end)
 
 		it("counts the suggestions and shows each next to its device; one the lists lack joins its kind", function()
 			local w = world({ lights = { suggested = function()
-				return { { device_id = 1001, rid = "L1", text = "Desk Lamp [Office] #3, same radio" },
-					{ device_id = 1002, rid = "L2" } }
+				return { { device_id = 1001, rid = "L1", text = "Desk Lamp [Office] #3", why = "same radio" },
+					{ device_id = 1002, rid = "L2" }, { device_id = 1003, rid = "L3", text = "Desk, Lamp #9" } }
+			end, picker_relink_devices = function()
+				return { { text = "Old Lamp (device 1001, gone since 10-24)", value = "1001" },
+					{ text = "Lamp (device 1003, gone since 10-24)", value = "1003" } }
 			end } })
 			local list = w.a:link_list("")
-			assert.same({ text = "Every device with a suggested match (2)", value = "dev:suggested" }, list[1])
-			assert.same({ "Old Lamp (device 1001, gone since 10-24) → Desk Lamp [Office] #3  same radio (suggested)",
+			assert.same({ text = "Every device with a suggested match (3)", value = "dev:suggested" }, list[1])
+			-- The device once, then the Hue thing and the reason (§4 finding 5); no comma
+			-- of a Hue name inside the row.
+			assert.same({ "Back to all folders",
+				"Old Lamp (device 1001, gone since 10-24) → Desk Lamp [Office] #3 (suggested: same radio)",
+				"Lamp (device 1003, gone since 10-24) → Desk  Lamp #9 (suggested)",
 				"Desk #2 (device 1002) (has a suggested match)" }, texts((w.a:link_list("f:lights"))))
 		end)
 
@@ -505,18 +534,19 @@ describe("bridge/actions.lua", function()
 			assert.same({ "(its suggested match)", "Lights (2)", "Zones and rooms (1)", "Scenes (3 in 2 rooms)",
 				"Motion sensors and areas (2)" }, texts(list))
 			assert.same({ "to:suggested", "f:lights", "f:groups", "f:scenes", "f:motion" }, values(list))
-			assert.same({ "light:L1", "light:L2" }, values((w.a:link_target_list("f:lights"))))
-			assert.same({ "sensor:M1", "area:A1" }, values((w.a:link_target_list("f:motion"))))
+			assert.same({ "f:top", "light:L1", "light:L2" }, values((w.a:link_target_list("f:lights"))))
+			assert.same({ "f:top", "sensor:M1", "area:A1" }, values((w.a:link_target_list("f:motion"))))
 		end)
 
 		it("puts scenes in room folders that cannot be picked themselves, with no All row", function()
 			local w = world()
 			local folders = w.a:link_target_list("f:scenes")
-			assert.same({ "f:scenes:Z1", "f:scenes:R1" }, values(folders))
+			assert.same({ "f:top", "f:scenes:Z1", "f:scenes:R1" }, values(folders))
 			for _, e in ipairs(folders) do assert.is_nil(e.selectable) end
 			local kitchen, back = w.a:link_target_list("f:scenes:R1")
 			assert.equal("f:scenes", back)
-			assert.same({ "scene:S1", "scene:S2" }, values(kitchen))
+			assert.same({ "Back to Scenes", "Relax", "Bright (dynamic)" }, texts(kitchen))
+			assert.same({ "f:scenes", "scene:S1", "scene:S2" }, values(kitchen))
 		end)
 
 		it("shows a lone kind in place of its folder, and its room folders go back to the top", function()
@@ -525,8 +555,9 @@ describe("bridge/actions.lua", function()
 				zone_lights = { picker_groups = function() return {} end }, motion = false,
 			})
 			assert.same({ "to:suggested", "f:scenes:Z1", "f:scenes:R1" }, values((w.a:link_target_list(""))))
-			local _, back = w.a:link_target_list("f:scenes:R1")
+			local kitchen, back = w.a:link_target_list("f:scenes:R1")
 			assert.equal("", back)
+			assert.same({ text = "Back to all folders", value = "f:top", folder = true }, kitchen[1])
 		end)
 
 		it("answers strings only and a back in every folder", function()
@@ -633,7 +664,7 @@ describe("bridge/actions.lua", function()
 			local lights
 			lights, back = w.a:forget_list("f:lights")
 			assert.equal("", back)
-			assert.same({ "dev:1001", "dev:1002" }, values(lights))
+			assert.same({ "f:top", "dev:1001", "dev:1002" }, values(lights))
 			local only = world({ zone_lights = false, scenes = false, motion = false })
 			assert.same({ "dev:1001", "dev:1002" }, values((only.a:forget_list(""))))
 			local none = world({ lights = false, zone_lights = false, scenes = false,

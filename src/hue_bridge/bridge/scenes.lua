@@ -706,6 +706,17 @@ function scenes:name_requests(rid, name)
 	return { { method = "PUT", path = path, body = { metadata = { name = name } } } }
 end
 
+-- Whether a gone entry's group and a record's are the same room or zone:
+-- the same rid or, failing that, the same group name and type
+-- (owner.same_group: a bridge reset gives every group a new rid, §4
+-- finding 9).
+function scenes:in_same_group(entry, record)
+	local entry_name, entry_type = self:group_info(entry.group_rid, entry)
+	local name, gtype = self:group_info(record.group_rid, record)
+	return owner.same_group(entry.group_rid, hue_model.group_label(entry_name, entry_type), record.group_rid,
+		hue_model.group_label(name, gtype))
+end
+
 -- M9 / S4: a gone scene and an unimported one of the same kind with its name
 -- in the same group (Hue deleted and re-made it): suggested only, never
 -- automatic (scenes have no radio).
@@ -721,8 +732,8 @@ function scenes:name_suggestions(seen)
 			local matches = {}
 			for _, rid in ipairs(gone) do
 				local entry = self.registry[rid]
-				if not seen[rid] and self:record_of(rid) == nil and entry.group_rid == record.group_rid
-					and is_smart(entry) == is_smart(record) and name_of(entry) == name_of(record) then
+				if not seen[rid] and self:record_of(rid) == nil and is_smart(entry) == is_smart(record)
+					and name_of(entry) == name_of(record) and self:in_same_group(entry, record) then
 					matches[#matches + 1] = rid
 				end
 			end

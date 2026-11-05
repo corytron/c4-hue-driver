@@ -1797,7 +1797,7 @@ describe("bridge.scenes", function()
 				driver_name = "Hue Scene" }
 			c4:Bind(15, 1, 2099, 1, "HUE_BRIDGE")
 			S:hello(F.scene_rids.relax, { device_id = "2099" })
-			assert.equal("not linked 1: Relax (device 2099) announces Relax, which device 2001 holds "
+			assert.equal("Not linked 1: Relax (device 2099) announces Relax, which device 2001 holds "
 				.. "(Forget Device on one of them)", S:link_devices())
 		end)
 
@@ -1853,7 +1853,7 @@ describe("bridge.scenes", function()
 				.. "(Resolve Names)", S:attention())
 			S.registry[F.scene_rids.relax].proxy_id = nil
 			-- Without a proxy id the protocol device's own name ("Relax", as AddDevice named it) is compared.
-			assert.equal("not renamed 1: Relax (device 2001): no proxy id known", S:adopt_hue_names())
+			assert.equal("Not renamed 1: Relax (device 2001): no proxy id known", S:adopt_hue_names())
 		end)
 	end)
 
@@ -1922,7 +1922,31 @@ describe("bridge.scenes", function()
 			assert.equal(1, #s)
 			assert.same({ 2001, NEW_RELAX, "same name in the same group", true }, { s[1].device_id, s[1].rid, s[1].why,
 				s[1].apply })
-			assert.equal("Relax (device 2001) → Living Room: Relax, same name in the same group", s[1].text)
+			-- The Hue thing only: Link Device's row names the device and adds the reason (§4 finding 5).
+			assert.equal("Living Room: Relax", s[1].text)
+		end)
+
+		it("S4 after a bridge reset: the same group is the same rid or, failing that, the same group name and type "
+			.. "(§4 finding 9)", function()
+			add_relax()
+			S:on_container(container(F.events.scene_deleted))
+			-- The Living Room made again (a new rid), with Relax in it under a new rid.
+			local NEW_ROOM = "7d6c5b4a-0000-4000-8000-00000000r0a1"
+			local function reset(room_name)
+				local rooms = replace(F.room, F.group_rids.living_room, NEW_ROOM)
+				if room_name then rooms = replace(rooms, '"name":"Living Room"', '"name":"' .. room_name .. '"') end
+				L:absorb({ room = decode_data(rooms), zone = decode_data(F.zone), bridge_home = decode_data(F.bridge_home) })
+				resync({ body = replace(replace(F.scene, F.scene_rids.relax, NEW_RELAX), F.group_rids.living_room, NEW_ROOM) })
+			end
+			reset()
+			assert.equal("gone", S.registry[F.scene_rids.relax].state)
+			local s = S:suggestions()
+			assert.equal(1, #s)
+			assert.same({ 2001, NEW_RELAX, "same name in the same group", true }, { s[1].device_id, s[1].rid, s[1].why,
+				s[1].apply })
+			-- A group of another name is another group.
+			reset("Lounge")
+			assert.same({}, S:suggestions())
 		end)
 	end)
 

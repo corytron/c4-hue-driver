@@ -1309,6 +1309,39 @@ function zone_lights:relink_refusal(device_id, new_rid)
 		.. "the bridge now, then try again)", tostring(new_rid))
 end
 
+-- (owner hook) R4, B1: a gone zone light and a zone or room with no device,
+-- of its type and with its name (owner.same_group: the group is the room
+-- itself, so after a bridge reset or a room deleted and made again only its
+-- name can tell; §4 finding 9). Suggested only, never automatic (groups have
+-- no radio); Link Device lists it with the others.
+function zone_lights:name_suggestions(seen)
+	local out, sources = {}, {}
+	for _, rid in ipairs(self.reg:rids("gone")) do
+		if not seen[rid] and self:record_of(rid) == nil then
+			sources[#sources + 1] = rid
+		end
+	end
+	if #sources == 0 then
+		return out
+	end
+	local tombs = self.reg:tombstones()
+	for _, group in ipairs(self:groups():groups()) do
+		if self.GROUP_TYPES[group.type] and not self.registry[group.rid] and tombs[group.rid] == nil then
+			local label, matches = hue_model.group_label(group.name, group.type), {}
+			for _, rid in ipairs(sources) do
+				local entry = self.registry[rid]
+				if owner.same_group(rid, hue_model.group_label(entry.name, entry.group_type), group.rid, label) then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = group.rid, why = "same name", ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
+end
+
 -- "Re-linked device 1180 (was Bedside Lights) to zone Reading Nook".
 function zone_lights.relinked_label(_self, group)
 	return group.type .. " " .. util.sanitise(group.name)

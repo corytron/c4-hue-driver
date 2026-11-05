@@ -41,7 +41,8 @@
 --
 -- Values (stable, logged, never shown):
 --   folders  f:lights, f:groups, f:scenes, f:scenes:<group_rid> (in Add From
---            Hue a selectable folder: every scene of that room or zone), f:motion
+--            Hue a selectable folder: every scene of that room or zone), f:motion;
+--            f:top, the labelled "Back to all folders" row: the top itself
 --   leaves   light:<rid>, group:<rid>, scene:<rid>, sensor:<rid>, area:<rid>,
 --            all:lights, all:motion (Import All New's two halves)
 --   devices  dev:<device_id>, dev:suggested (every device with a suggested
@@ -327,8 +328,27 @@ local function scenes_text(count, groups)
 	return string.format("Scenes (%d in %s)", count, util.plural(#groups, "room"))
 end
 
+-- The folder value of the labelled row back to the top (actions.TOP): the
+-- list functions read it as the top itself (key_of).
+actions.TOP = "f:top"
+
+-- The labelled Back row a folder's list starts with (§4 finding 14):
+-- Composer's own "Back" link is a short word that only a double-click on its
+-- text opens, so the row says where it goes and is a folder of that value
+-- (folders open on a double-click, §2.3). "Back to Scenes" from a room's
+-- scenes, "Back to all folders" from a top folder.
+local function back_row(back)
+	local kind = FOLDER_KIND[back]
+	if kind then
+		return folder("Back to " .. KINDS[kind].add, back)
+	end
+	return folder("Back to all folders", actions.TOP)
+end
+
 -- Runs a list builder with module failures noted; a failure of the whole
--- builder answers one row instead of raising into Composer.
+-- builder answers one row instead of raising into Composer. A list inside a
+-- folder (a `back`) starts with its labelled Back row, and `back` still goes
+-- to Composer for its own Back link.
 function actions:build(what, fn, ...)
 	self.problems = {}
 	local ok, list, back = pcall(fn, self, ...)
@@ -344,11 +364,17 @@ function actions:build(what, fn, ...)
 				KINDS[key].add:lower()))
 		end
 	end
+	if type(back) == "string" then
+		table.insert(list, 1, back_row(back))
+	end
 	return list, back
 end
 
 local function key_of(folder_value)
-	return type(folder_value) == "string" and folder_value or ""
+	if type(folder_value) ~= "string" or folder_value == actions.TOP then
+		return ""
+	end
+	return folder_value
 end
 
 -- Add From Hue's What.
@@ -463,27 +489,28 @@ function actions:room_list()
 	end)
 end
 
--- Suggestions (bridge/lights.lua and bridge/motion.lua suggested(), §3.2 and
--- §3.4; any module may have one): a list of { device_id, rid, text? } or a
--- map device_id -> rid or -> { rid, text }. Returns them sorted by device,
--- and by device id.
+-- Suggestions (bridge/owner.lua's suggested(), §3.2 and §3.4; any module
+-- may have one): a list of { device_id, rid, text?, why? } (`text` the Hue
+-- thing, `why` the reason) or a map device_id -> rid or -> { rid, text, why }.
+-- Returns the list sorted by device id, and the same items by device id.
 function actions:suggestions()
 	local out, by_device = {}, {}
 	for _, key in ipairs(OWNERS) do
 		local list = self:call(key, "suggested")
 		if type(list) == "table" then
 			local function take(device_id, item)
-				local id, rid, text = tonumber(device_id), nil, nil
+				local id, rid, text, why = tonumber(device_id), nil, nil, nil
 				if type(item) == "string" then
 					rid = item
 				elseif type(item) == "table" then
 					id = id or tonumber(item.device_id or item.device)
 					rid = item.rid or item.to or item.new_rid
 					text = str(item.text or item.label)
+					why = str(item.why)
 				end
 				rid = str(rid)
 				if id and rid and not by_device[id] then
-					local s = { device_id = id, rid = rid, text = text, kind = key }
+					local s = { device_id = id, rid = rid, text = text, why = why, kind = key }
 					out[#out + 1] = s
 					by_device[id] = s
 				end
@@ -499,11 +526,18 @@ function actions:suggestions()
 	return out, by_device
 end
 
+-- What a device's row in Link Device adds for its suggestion: the Hue thing
+-- and the reason, never the device again (the row names it; §4 finding 5):
+-- " → Lamp 5 [Bedroom] #9 (suggested: same name in the same Hue room)".
 local function suggestion_suffix(s)
 	if not s then
 		return ""
 	end
-	return s.text and (" → " .. util.sanitise(s.text) .. " (suggested)") or " (has a suggested match)"
+	if not s.text then
+		return " (has a suggested match)"
+	end
+	local why = s.why and (": " .. util.sanitise(s.why)) or ""
+	return " → " .. util.sanitise(s.text) .. " (suggested" .. why .. ")"
 end
 
 -- A module's device rows: picker values (device ids) as dev:<id>.

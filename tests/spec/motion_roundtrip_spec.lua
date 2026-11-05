@@ -475,8 +475,9 @@ describe("motion round trip", function()
 				.. "Hallway sensor [Hallway] #12,Porch sensor #20,Kitchen motion area (MotionAware) [Kitchen] #ac00",
 				bc4.property_lists["Motion Sensors"])
 			local attention = fake.attention(bridge)
+			-- Import All New imports new sensors (§4 finding 8, bridge/motion.lua).
 			assert.truthy(attention:find("2 new motion sensors on the bridge: Hallway sensor [Hallway] #12, Porch sensor "
-				.. "#20 (Add From Hue)", 1, true), attention)
+				.. "#20 (Import All New or Add From Hue)", 1, true), attention)
 			assert.truthy(attention:find("1 new motion area on the bridge: Kitchen motion area (MotionAware) [Kitchen] "
 				.. "#ac00 (Add From Hue)", 1, true), attention)
 

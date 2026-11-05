@@ -511,10 +511,12 @@ end
 local HINT_STATES = { "gone", "unbound" }
 
 -- Whether an entry and a light are in the same Hue room, or one of the two
--- rooms is not known.
+-- rooms is not known. The same room is the same rid or, failing that, the
+-- same room name (owner.same_group): after a bridge reset every room has a
+-- new rid (§4 finding 9).
 function lights:same_room(entry, model)
-	local room = self:hue_room_of(model)
-	return entry.hue_room_rid == nil or room == nil or entry.hue_room_rid == room
+	local room, label = self:hue_room_of(model)
+	return entry.hue_room_rid == nil or room == nil or owner.same_group(entry.hue_room_rid, entry.hue_room, room, label)
 end
 
 -- True when the light's device carries more than one light (§3.2 M3).
@@ -1004,7 +1006,8 @@ end
 -- as seen; an unmapped one is offered in Room Mappings when a Control4 room
 -- matches. Affects only future adds and the room marks; a device is never
 -- moved. Says what it mapped in Last Action (ctx.last_action) and returns
--- that text, else nil. Local calls only, no bridge request.
+-- that text, else nil; a pass that mapped nothing (only ambiguous names, say)
+-- writes the log alone. Local calls only, no bridge request.
 function lights:auto_map_rooms(authoritative)
 	if not self.groups_loaded then
 		return nil  -- the cache is not a full read of this run yet (an event before the first resync)
@@ -1095,6 +1098,18 @@ function lights:auto_map_rooms(authoritative)
 		book.known, self.book_dirty = true, true
 		self.ctx.persist_set(lights.AUTOMAP_KEY, "done")  -- an earlier build after a rollback does not map again
 	end
+	if #mapped == 0 and #remapped == 0 then
+		-- Nothing changed: nothing for Last Action (§4 finding 11); the log keeps
+		-- the ambiguous names.
+		if #ambiguous > 0 then
+			self.ctx.log.always("lights: rooms: not mapped, the name is ambiguous (Set Room Mapping): %s",
+				table.concat(ambiguous, ", "))
+		elseif #fresh > 0 then
+			self.ctx.log.info("lights: rooms: %s appeared, none mapped by name (%d with no Control4 room of the name)",
+				groups_word(#fresh), unmatched)
+		end
+		return nil
+	end
 	local parts = {}
 	if #mapped > 0 then
 		parts[#parts + 1] = string.format("Mapped %s by name: %s", groups_word(#mapped),
@@ -1108,15 +1123,8 @@ function lights:auto_map_rooms(authoritative)
 		parts[#parts + 1] = string.format("not mapped, the name is ambiguous (Set Room Mapping): %s",
 			table.concat(ambiguous, ", "))
 	end
-	if #parts == 0 then
-		if #fresh > 0 then
-			self.ctx.log.info("lights: rooms: %s appeared, none mapped by name (%d with no Control4 room of the name)",
-				groups_word(#fresh), unmatched)
-		end
-		return nil
-	end
 	local text = table.concat(parts, "; ")
-	text = text:sub(1, 1):upper() .. text:sub(2)
+	text = text:sub(1, 1):upper() .. text:sub(2)  -- "Re-mapped …" when nothing was mapped anew
 	self.ctx.log.always("lights: rooms: %s", text)
 	if type(self.ctx.last_action) == "function" then
 		self:protect("last_action", self.ctx.last_action, text)
@@ -1125,12 +1133,15 @@ function lights:auto_map_rooms(authoritative)
 end
 
 -- After a full fetch has been absorbed: steps 1, 2, 3, 4 and 5 in order, one
--- save. Returns the number of HUE_STATE messages the fan-out sent.
-function lights:settle(reason, with_configure)
+-- save. Returns the number of HUE_STATE messages the fan-out sent. Import All
+-- New passes `relinked`, a list: D7's re-links go there instead of into a
+-- Last Action of their own (owner:auto_relink).
+function lights:settle(reason, with_configure, relinked)
 	self.synced = true
 	self:reconcile(true)
 	self:reconcile_lights()
-	self:auto_relink("resync")  -- D7 (§3.2): a gone light's bulb back under a new rid
+	-- D7 (§3.2): a gone light's bulb back under a new rid.
+	self:auto_relink(relinked and "import" or "resync", relinked)
 	self:reconcile_rooms()
 	self:auto_map_rooms(true)
 	local sent = self:fanout(reason, with_configure)
@@ -1203,18 +1214,25 @@ function lights:on_light_item(item, kind)
 		return 0
 	end
 	local changed = hue_model.update(model, item)
-	if entry and has_field(changed, "name") and self:take_name(entry, model) then
+	local renamed = entry ~= nil and has_field(changed, "name") and self:take_name(entry, model)
+	if renamed then
 		self:mark()
 	end
 	if not entry or entry.state == "unbound" then
 		return 0
 	end
+	local sent = 0
+	-- A rename (in Hue, or the echo of one sent from Composer) reaches the
+	-- device's Hue Name row at once, not at the next full read (§4 finding 13).
+	if renamed and self:configure_changed(rid) and self:send_configure(rid) then
+		sent = 1
+	end
 	local params = hue_model.state_params(model, changed, "event")
 	if hue_model.has_state(params) then
 		self:tell(entry.device_id, "HUE_STATE", params)
-		return 1
+		sent = sent + 1
 	end
-	return 0
+	return sent
 end
 
 -- A zigbee_connectivity item: online for the device's lights (and its MAC,
@@ -1244,7 +1262,10 @@ function lights:on_connectivity_item(item)
 end
 
 -- A device item: a new device record, a renamed device, or a deleted one.
+-- Returns the number of messages sent (a rename's HUE_CONFIGURE, when what
+-- the device is told changed).
 function lights:on_device_item(item, kind)
+	local sent = 0
 	if kind == "add" then
 		local parsed = hue_model.devices({ item })
 		if parsed[item.id] then  -- nil for an id that is not a resource id
@@ -1263,10 +1284,14 @@ function lights:on_device_item(item, kind)
 					self.reg:update(rid, { device_name = device.name })
 					self:mark()
 					self:hue_named(rid)  -- a single-light lamp's Hue name is its device's (names)
+					if entry.state ~= "unbound" and self:configure_changed(rid) and self:send_configure(rid) then
+						sent = sent + 1
+					end
 				end
 			end
 		end
 	end
+	return sent
 end
 
 -- The group cache changed: refresh the rooms (step 3) and tell the lights
@@ -1307,7 +1332,7 @@ local function on_container_body(self, container)
 			elseif item.type == "zigbee_connectivity" then
 				sent = sent + self:on_connectivity_item(item)
 			elseif item.type == "device" then
-				self:on_device_item(item, kind)
+				sent = sent + self:on_device_item(item, kind)
 			elseif item.type == "room" or item.type == "zone" or item.type == "bridge_home" then
 				if self.groups:apply(item, kind) then
 					groups_changed = true
@@ -1426,7 +1451,8 @@ end
 -- Link Device keeps that device and its programming (§1 rule 3)
 -- where a second device would leave them behind, as Import All New Motion
 -- Sensors does. A light D7 re-links by its radio (settle, §3.2) is no new
--- one by then. Idempotent by rid; never renames, moves or rebinds.
+-- one by then; the result names it ("re-linked 1 by radio: Garage White").
+-- Idempotent by rid; never renames, moves or rebinds.
 -- done(ok, text) once, at the end.
 function lights:import_new(done)
 	done = done or function() end
@@ -1461,7 +1487,8 @@ end
 -- The part of the import that runs once the GETs are in.
 function lights:import_fetched(res, finish)
 	self:absorb(res)
-	self:settle("resync", not self.configured_once)
+	local relinked = {}  -- D7's re-links of this read: the result names them (§4 finding 10)
+	self:settle("resync", not self.configured_once, relinked)
 	self:names_pass()  -- a full read, as a resync's
 
 	local rooms, tombs = self.project:rooms(), self.reg:tombstones()
@@ -1497,6 +1524,9 @@ function lights:import_fetched(res, finish)
 				self:bridge_count(), self:count())
 		else
 			parts[#parts + 1] = "Added no lights"
+		end
+		if #relinked > 0 then
+			parts[#parts + 1] = string.format("re-linked %d by radio: %s", #relinked, table.concat(relinked, ", "))
 		end
 		if #failed > 0 then
 			local names = {}
@@ -2067,15 +2097,29 @@ end
 function lights:attention()
 	local items = {}
 
-	-- Sorted (for the names) only when there is something new to name.
+	-- Sorted (for the names) only when there is something new to name. A
+	-- light with a re-link hint is one item of its own, ending in the action
+	-- that resolves it: Import All New skips it (#344; §4 finding 8).
 	local new = self:new_count() > 0 and self:new_models() or {}
 	if #new > 0 then
-		local names = {}
+		local names, hinted = {}, {}
 		for _, model in ipairs(new) do
-			names[#names + 1] = self:light_label(model) .. (self:hint_text(model) or "")
+			local hint = self:hint_text(model)
+			if hint then
+				hinted[#hinted + 1] = self:light_label(model) .. hint
+			else
+				names[#names + 1] = self:light_label(model)
+			end
 		end
-		items[#items + 1] = string.format("%s on the bridge: %s (Import All New or Add From Hue)",
-			plural(#new, "new light"), util.some(names, lights.MAX_NAMED))
+		if #names > 0 then
+			items[#items + 1] = string.format("%s on the bridge: %s (Import All New or Add From Hue)",
+				plural(#names, "new light"), util.some(names, lights.MAX_NAMED))
+		end
+		if #hinted > 0 then
+			items[#items + 1] = string.format("%s on the bridge may be %s: %s (Link Device)",
+				plural(#hinted, "new light"), #hinted == 1 and "a replacement" or "replacements",
+				util.some(hinted, lights.MAX_NAMED))
+		end
 	end
 
 	-- Missing lights, unbound devices, two devices claiming one light, name

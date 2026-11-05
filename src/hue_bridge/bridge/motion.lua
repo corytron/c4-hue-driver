@@ -785,6 +785,23 @@ function motion.same_kind(_self, entry, record)
 	return kind_of(entry) == kind_of(record)
 end
 
+-- The Hue room of a record as an entry keeps it: a sensor's room, an area's
+-- room or zone; rid, label.
+function motion:hue_room_of(record)
+	if record.kind == "area" then
+		return record.group and record.group.rid or nil, self:room_label_of(record)
+	end
+	return record.room, record.room_name
+end
+
+-- Whether an entry and a record are in the same Hue room or zone: the same
+-- rid or, failing that, the same room name (owner.same_group: a bridge reset
+-- gives every room a new rid, §4 finding 9).
+function motion:same_room(entry, record)
+	local room, label = self:hue_room_of(record)
+	return owner.same_group(entry.hue_room_rid, entry.hue_room, room, label)
+end
+
 -- S4, A13: a new sensor or area with the name of exactly one gone device of
 -- its kind in the same Hue room or zone (the radio offers come first).
 function motion:name_suggestions(seen)
@@ -799,12 +816,11 @@ function motion:name_suggestions(seen)
 	end
 	for _, kind in ipairs({ "sensor", "area" }) do
 		for _, record in ipairs(self:new_records(kind)) do
-			local room = record.kind == "area" and (record.group and record.group.rid) or record.room
 			local matches = {}
 			for _, rid in ipairs(sources) do
 				local entry = self.registry[rid]
 				if kind_of(entry) == kind and record.name ~= nil and entry.name == record.name
-					and entry.hue_room_rid == room then
+					and self:same_room(entry, record) then
 					matches[#matches + 1] = rid
 				end
 			end
@@ -2234,8 +2250,11 @@ function motion:import_new(done)
 		return false
 	end
 	-- D7 first (§3.2): a sensor M7 re-links is no new one; what it only
-	-- suggests is skipped below as a likely replacement (hint_text).
-	self:auto_relink("import")
+	-- suggests is skipped below as a likely replacement (hint_text). The
+	-- re-links are named in the result, not in a Last Action of their own
+	-- (§4 finding 10).
+	local relinked = {}
+	self:auto_relink("import", relinked)
 	local rooms, tombs = self.project:rooms(), self.reg:tombstones()
 	local jobs, replacing, unmapped, deleted, on_bridge = {}, {}, {}, {}, 0
 	for _, record in ipairs(sorted(self.sensor_records)) do
@@ -2283,6 +2302,9 @@ function motion:import_new(done)
 				imported)
 		else
 			parts[#parts + 1] = "Added no motion sensors"
+		end
+		if #relinked > 0 then
+			parts[#parts + 1] = string.format("re-linked %d by radio: %s", #relinked, table.concat(relinked, ", "))
 		end
 		if #failed > 0 then
 			local names = {}
@@ -2366,7 +2388,6 @@ end
 function motion:relink_hint(record)
 	local by_mac, by_name
 	local mac = record.kind ~= "area" and self:mac_of(record.rid) or nil
-	local room = record.kind == "area" and (record.group and record.group.rid) or record.room
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
 		local source = entry.state == "gone" or (entry.state == "linked" and record.kind ~= "area"
@@ -2374,7 +2395,7 @@ function motion:relink_hint(record)
 		if source and kind_of(entry) == kind_of(record) then
 			if mac and entry.mac_address == mac then
 				by_mac = by_mac or rid
-			elseif record.name ~= nil and entry.name == record.name and entry.hue_room_rid == room then
+			elseif record.name ~= nil and entry.name == record.name and self:same_room(entry, record) then
 				by_name = by_name or rid
 			end
 		end
@@ -2422,15 +2443,27 @@ function motion:attention_items(items)
 	items = items or {}
 	local words = motion.WORDS
 
+	-- New sensors end in what adds them, Import All New included; one with a
+	-- re-link hint is an item of its own ending in Link Device, since Import
+	-- All New skips it. Areas are never imported in bulk (§4 finding 8).
 	for _, kind in ipairs({ "sensor", "area" }) do
-		local names = {}
+		local names, hinted = {}, {}
 		for _, record in ipairs(self:new_records(kind)) do
-			names[#names + 1] = self:label_of(record) .. (self:hint_text(record) or "")
+			local hint = self:hint_text(record)
+			if hint and kind == "sensor" then
+				hinted[#hinted + 1] = self:label_of(record) .. hint
+			else
+				names[#names + 1] = self:label_of(record) .. (hint or "")
+			end
 		end
+		local w = motion.KIND_WORDS[kind]
 		if #names > 0 then
-			local w = motion.KIND_WORDS[kind]
 			items[#items + 1] = string.format("%s on the bridge: %s (%s)", util.plural(#names, "new " .. w.kind),
-				named(names), w.add_action)
+				named(names), kind == "sensor" and "Import All New or Add From Hue" or w.add_action)
+		end
+		if #hinted > 0 then
+			items[#items + 1] = string.format("%s on the bridge may be %s: %s (Link Device)",
+				util.plural(#hinted, "new " .. w.kind), #hinted == 1 and "a replacement" or "replacements", named(hinted))
 		end
 	end
 

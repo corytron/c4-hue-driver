@@ -1432,7 +1432,9 @@ function owner:adopt_hue_names()
 				table.concat(renamed, ", "))
 		end
 		if #skipped > 0 then
-			parts[#parts + 1] = string.format("not renamed %d: %s", #skipped, table.concat(skipped, ", "))
+			-- Every Last Action begins with a capital (§4 finding 11).
+			parts[#parts + 1] = string.format("%s %d: %s", #renamed > 0 and "not renamed" or "Not renamed", #skipped,
+				table.concat(skipped, ", "))
 		end
 		text = table.concat(parts, "; ")
 	end
@@ -1865,7 +1867,9 @@ function owner:link_devices(skip_ids)
 			table.concat(linked, ", "))
 	end
 	if #problems > 0 then
-		parts[#parts + 1] = string.format("not linked %d: %s", #problems, table.concat(problems, "; "))
+		-- Every Last Action begins with a capital (§4 finding 11).
+		parts[#parts + 1] = string.format("%s %d: %s", #linked > 0 and "not linked" or "Not linked", #problems,
+			table.concat(problems, "; "))
 	end
 	local text = table.concat(parts, "; ")
 	self.ctx.log.always("%s: %s", self.TAG, text)
@@ -1896,6 +1900,38 @@ end
 
 function owner.name_suggestions()
 	return {}
+end
+
+-- The key a Hue room's or zone's label is compared by in the name matches:
+-- util.name_key of the label without the " (deleted in Hue)" mark a module
+-- adds once the group left the bridge; nil for no room.
+local DELETED_MARK = " (deleted in Hue)"
+local function group_key(label)
+	if type(label) ~= "string" then
+		return nil
+	end
+	if #label > #DELETED_MARK and label:sub(-#DELETED_MARK) == DELETED_MARK then
+		label = label:sub(1, -#DELETED_MARK - 1)
+	end
+	local key = util.name_key(label)
+	if key == "" or key == "(no room)" then
+		return nil
+	end
+	return key
+end
+
+-- Whether two Hue rooms or zones are the same one for a name match (M8, S4,
+-- A13; docs/simplify-actions-design.md §4 finding 9): the same rid (two
+-- nils included: neither in a room), or failing that the same label, since a
+-- bridge reset or a room deleted and made again gives it a new rid. Labels
+-- are hue_model.group_label's ("Kitchen", "Downstairs (zone)"), so a room
+-- and a zone of one name stay apart.
+function owner.same_group(rid_a, label_a, rid_b, label_b)
+	if rid_a == rid_b then
+		return true
+	end
+	local a = group_key(label_a)
+	return a ~= nil and a == group_key(label_b)
 end
 
 owner.RADIO_WORDS = { thing = "its Hue resource" }
@@ -1979,10 +2015,12 @@ end
 -- D7's automatic re-link, after the registry refresh of a resync or of a
 -- stream `add`: every M1 / M3 / M7 match re-linked (§3.2), never a device
 -- the project no longer has; one Last Action line, a summary when several
--- went at once (M6). Never creates, deletes, moves or renames a device in
--- Composer; the names follow at their paced rate (N16). Returns the number
--- re-linked.
-function owner:auto_relink(reason)
+-- went at once (M6). Inside Import All New (`into`, a list) it writes no Last
+-- Action: the labels of the devices it re-linked are appended to `into`, and
+-- the import's own result names them (§4 finding 10). Never creates,
+-- deletes, moves or renames a device in Composer; the names follow at their
+-- paced rate (N16). Returns the number re-linked.
+function owner:auto_relink(reason, into)
 	local auto = self:radio_scan()
 	if #auto == 0 then
 		return 0
@@ -2007,6 +2045,14 @@ function owner:auto_relink(reason)
 	if #labels == 0 then
 		return 0
 	end
+	if type(into) == "table" then
+		for _, label in ipairs(labels) do
+			into[#into + 1] = label
+		end
+		self.ctx.log.always("%s: re-linked %d by radio during the import: %s", self.TAG, #labels,
+			table.concat(labels, ", "))
+		return #labels
+	end
 	local text
 	if #labels == 1 then
 		text = string.format("Re-linked %s to %s (same radio, new Hue id)", labels[1], self.RADIO_WORDS.thing)
@@ -2025,7 +2071,9 @@ end
 -- module's name matches (M8, S4, A13). `apply` is true when a click may
 -- re-link it without a choice: neither the device nor the target appears in
 -- another offer, nothing holds the target (M5), the match is not ambiguous
--- (M2, M3). The others are for the per-device texts only.
+-- (M2, M3). The others are for the per-device texts only. `text` names the
+-- Hue thing only ("Lamp 5 [Bedroom] #9", and the holder of a taken one):
+-- Link Device's row already names the device and adds `why` (§4 finding 5).
 function owner:suggestions()
 	local _, offered = self:radio_scan()
 	local out, seen = {}, {}
@@ -2050,12 +2098,10 @@ function owner:suggestions()
 		by_rid[s.rid] = (by_rid[s.rid] or 0) + 1
 	end
 	for _, s in ipairs(out) do
-		local entry = self.registry[s.entry_rid]
 		local record = self:record_of(s.rid)
 		s.apply = not s.holder and not s.ambiguous and by_device[s.device_id] == 1 and by_rid[s.rid] == 1
-		s.text = string.format("%s (device %d) → %s, %s%s", self:entry_name(s.entry_rid, entry), s.device_id,
-			record and self:record_label(record) or tostring(s.rid), s.why,
-			s.holder and string.format(" (already linked to device %d)", s.holder) or "")
+		s.text = (record and self:record_label(record) or tostring(s.rid))
+			.. (s.holder and string.format(" (already linked to device %d)", s.holder) or "")
 	end
 	return out
 end
