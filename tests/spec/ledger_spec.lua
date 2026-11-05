@@ -12,23 +12,32 @@
 --    tools/regress.sh or C4:SendToDevice send it (the bare command), on a
 --    fresh driver that is neither paired nor bound: it raises nothing and
 --    writes a row, and every CUSTOM_SELECT picker it names answers a list.
+--    A driver may have no action (1.2: the Hue Light and the Hue Scene).
 -- 2. sort_order is on every action or on none, and no two share one (a
 --    duplicate hides an action in Composer, docs/simplify-research-composer.md);
 --    the same for the programming commands, zero-based. No two actions share
---    a name or a dispatch key.
--- 3. Every ledger row resolves: each path (action, property and its type,
---    programming command, event, conditional, proxy, proxy command,
+--    a name or a dispatch key. The actions are 1.2's (ledger.actions,
+--    docs/simplify-actions-design.md §3.3) in that order, a dev build has no
+--    action a release build lacks, and the merged actions' parameters are
+--    the pickers and LIST items bridge/actions.lua serves.
+-- 3. Every ledger row resolves: each path (action, with the picker values
+--    that reach the feature and the module method they end in, property and
+--    its type, programming command, event, conditional, proxy, proxy command,
 --    connection, inter-driver message, documentation page, automatic with
 --    the spec or module that proves it, alias) exists and reaches its
 --    handler; each gate has a path of its kind; every action belongs to a row.
 -- 4. Every alias reaches a handler, stays out of driver.xml and expires: the
---    spec fails once the code's version line reaches the alias's expiry.
--- 5. Pending until bridge/housekeeping.lua exists: background tasks never
---    create, rename, bind or delete a device on their own.
+--    spec fails once the code's version line reaches the alias's expiry. A
+--    dev alias answers in dev builds only. Every command an earlier
+--    driver.xml had is an action or an alias, and bridge/actions.lua's
+--    aliases are the ledger's.
+-- 5. Pending: background tasks never create, rename, bind or delete a device
+--    on their own over a simulated week.
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
 local LEDGER = require("fixtures.ledger")
+local ACTIONS = require("bridge.actions")
 
 local DRIVERS = { "hue_bridge", "hue_light", "hue_scene", "hue_motion" }
 local IS_DRIVER = { hue_bridge = true, hue_light = true, hue_scene = true, hue_motion = true }
@@ -78,7 +87,9 @@ local function entries(xml, section, tag)
 		local entry = { name = field(own, "name"), command = field(own, "command"), type = field(own, "type"),
 			sort_order = field(own, "sort_order"), id = tonumber(field(own, "id")), params = {}, items = {} }
 		for _, param in ipairs(each(body:match("<params>(.-)</params>"), "param")) do
-			entry.params[#entry.params + 1] = { name = field(param, "name"), type = field(param, "type") }
+			local items = {}
+			for _, item in ipairs(each(param:match("<items>(.-)</items>"), "item")) do items[#items + 1] = trim(item) end
+			entry.params[#entry.params + 1] = { name = field(param, "name"), type = field(param, "type"), items = items }
 		end
 		for _, item in ipairs(each(own:match("<items>(.-)</items>"), "item")) do
 			entry.items[#entry.items + 1] = trim(item)
@@ -182,7 +193,13 @@ end
 -- One call into a driver: the handler it reached (nil: the unknown-command
 -- path), whether it raised, the [ERROR] lines it logged (a handler that
 -- failed is logged so by common/dispatch.lua), the rows it wrote.
-local function send(driver_run, how, name, binding)
+local function copy(t)
+	local out = {}
+	for k, v in pairs(t or {}) do out[k] = v end
+	return out
+end
+
+local function send(driver_run, how, name, binding, params)
 	local env, hits = driver_run.env, driver_run.hits
 	local list = how == "proxy" and hits.proxy or hits.commands
 	local from = #list + 1
@@ -194,9 +211,11 @@ local function send(driver_run, how, name, binding)
 	env.C4.calls = {}
 	local ok, value = pcall(fake.as, env, function()
 		if how == "click" then
-			return env.ExecuteCommand("LUA_ACTION", { ACTION = name })
+			local p = copy(params)
+			p.ACTION = name
+			return env.ExecuteCommand("LUA_ACTION", p)
 		elseif how == "by_name" then
-			return env.ExecuteCommand(name, {})
+			return env.ExecuteCommand(name, copy(params))
 		elseif how == "proxy" then
 			return env.ReceivedFromProxy(binding or 5001, name, {})
 		elseif how == "condition" then
@@ -213,16 +232,25 @@ local function send(driver_run, how, name, binding)
 		value = ok and value or nil }
 end
 
--- An action, clicked on a driver of its own and then sent by name to it;
+local function params_text(params)
+	local keys = {}
+	for k in pairs(params or {}) do keys[#keys + 1] = k end
+	table.sort(keys)
+	for i, k in ipairs(keys) do keys[i] = string.format("%s=%s", k, tostring(params[k])) end
+	return "{" .. table.concat(keys, ", ") .. "}"
+end
+
+-- An action, clicked on a driver of its own and then sent by name to it,
+-- with `params` (none: as the click on the Actions tab before any pick);
 -- memoised, since the XML checks and the ledger rows ask for the same ones.
 local probes = {}
-local function probe_action(form, driver, command)
-	local id = table.concat({ "action", form, driver, command }, "|")
+local function probe_action(form, driver, command, params)
+	local id = table.concat({ "action", form, driver, command, params_text(params) }, "|")
 	if not probes[id] then
 		probes[id] = in_form(form, function()
 			local run = fresh(driver)
-			local result = send(run, "click", command)
-			result.by_name = send(run, "by_name", command)
+			local result = send(run, "click", command, nil, params)
+			result.by_name = send(run, "by_name", command, nil, params)
 			return result
 		end)
 	end
@@ -296,6 +324,182 @@ local function version_line()
 	return best
 end
 
+-- Picker values (pick, via) -----------------------------------------------------
+
+-- bridge/actions.lua over spy modules that answer the public methods the
+-- real ones have, each with one thing to pick: the place to prove that a
+-- picked value reaches the module method a feature lives in, whatever the
+-- house's bridge holds. One device per kind; "<rid>" is the thing of the
+-- prefix's kind, "<device_id>" the via module's device, "<row>" a names row.
+local SPY_RID = { light = "L1", group = "G1", scene = "S1", sensor = "M1", area = "A1", ["f:scenes"] = "R1" }
+local SPY_DEVICE = { lights = 1001, zone_lights = 1101, scenes = 1201, motion = 1301 }
+local SPY_ROW = "row:1002:hue"
+
+local function substitute(value, via)
+	value = tostring(value)
+	local prefix = value:match("^(.-):<rid>$")
+	if prefix then return prefix .. ":" .. tostring(SPY_RID[prefix]) end
+	if value == "dev:<device_id>" then
+		return "dev:" .. tostring(SPY_DEVICE[tostring(via):match("^([%w_]+):")])
+	end
+	if value == "<row>" then return SPY_ROW end
+	return value
+end
+
+local function spy_world()
+	local w = { said = {}, called = {}, calls = {}, errors = {} }
+	local function spy_list(...)
+		local out = {}
+		for i = 1, select("#", ...), 2 do out[#out + 1] = { text = select(i, ...), value = select(i + 1, ...) } end
+		return out
+	end
+	local function finish(...)  -- the last argument is done(ok, text)
+		local cb = select(select("#", ...), ...)
+		if type(cb) == "function" then cb(true, "done") end
+		return true
+	end
+	local function ok() return true, "done" end
+	local function text() return "done" end
+	local function devices(id) return function() return spy_list("device " .. id, tostring(id)) end end
+	local function owner(id, more)
+		local m = { picker_relink_devices = devices(id), picker_forget_devices = devices(id), relink = ok, forget = ok,
+			link_devices = text, adopt_hue_names = text, accept_names = text }
+		for k, v in pairs(more) do m[k] = v end
+		return m
+	end
+	local defs = {
+		lights = owner(1001, { picker_lights = function() return spy_list("Light", "L1") end,
+			picker_rooms = function() return spy_list("(mapped room)", "mapped", "Office", "7") end,
+			add_light = finish, import_new = finish, new_count = function() return 1 end,
+			bridge_count = function() return 1 end }),
+		zone_lights = owner(1101, { picker_groups = function() return spy_list("Zone", "G1") end, add = finish,
+			device_ids = function() return { [1101] = true } end }),
+		scenes = owner(1201, { picker_scenes = function() return spy_list("Kitchen: Relax", "S1") end,
+			record_of = function() return { group_rid = "R1" } end, group_label = function() return "Kitchen" end,
+			add_scene = finish, add_all_of_group = finish }),
+		motion = owner(1301, { picker_sensors = function() return spy_list("Sensor", "M1") end,
+			picker_areas = function() return spy_list("Area", "A1") end, new_records = function() return { {} } end,
+			add = finish, import_new = finish }),
+		names = { resolve = finish, resolve_rows = function()
+			return spy_list("Composer names to Hue", "names:composer_to_hue", "Hue names to Composer",
+				"names:hue_to_composer", "Desk: rename to Desk Lamp", SPY_ROW)
+		end },
+	}
+	local function quiet() end
+	local ctx = { last_action = function(t) w.said[#w.said + 1] = t end, can = function() return true end,
+		log = { always = quiet, info = quiet, debug = quiet, warn = quiet,
+			error = function(fmt, ...) w.errors[#w.errors + 1] = string.format(fmt, ...) end } }
+	for key, methods in pairs(defs) do
+		local m = {}
+		for name, fn in pairs(methods) do
+			m[name] = function(_, ...)
+				w.called[key .. ":" .. name] = true
+				w.calls[#w.calls + 1] = key .. ":" .. name
+				return fn(...)
+			end
+		end
+		ctx[key] = m
+	end
+	w.a = ACTIONS.new(ctx)
+	return w
+end
+
+-- Whether a CUSTOM_SELECT list function offers `value`: a leaf or a
+-- selectable folder, folders opened (each once, four deep at most).
+local function offers(list_fn, value)
+	local seen = {}
+	local function visit(folder_value, depth)
+		if seen[folder_value] or depth > 4 then return false end
+		seen[folder_value] = true
+		local list = list_fn(folder_value)
+		for _, e in ipairs(type(list) == "table" and list or {}) do
+			if e.value == value and (not e.folder or e.selectable) then return true end
+			if e.folder and visit(e.value, depth + 1) then return true end
+		end
+		return false
+	end
+	return visit("", 0)
+end
+
+-- The real driver's list function, on a fresh driver of the build.
+local function real_offers(form, driver, fn, value)
+	return in_form(form, function()
+		local run = fresh(driver)
+		if type(run.env[fn]) ~= "function" then return false end
+		return offers(function(f) return fake.custom_select(run.env, fn, f) end, value)
+	end)
+end
+
+local function runner_of(command)
+	for _, spec in ipairs(ACTIONS.ACTIONS) do
+		if spec.command == command then return spec end
+	end
+	return nil
+end
+
+local function has_item(items, value)
+	for _, item in ipairs(items or {}) do
+		if item == value then return true end
+	end
+	return false
+end
+
+-- An action path with `pick`: each value is offered by its parameter's
+-- LIST or picker; with `via`, bridge/actions.lua's runner takes it to that
+-- module method; and the real driver, clicked with those values, reaches
+-- its handler, raises nothing and writes a row.
+local function check_picks(path, driver, action, problem)
+	local params = {}
+	for name, value in pairs(path.pick) do params[name] = substitute(value, path.via) end
+	local by_name = {}
+	for _, param in ipairs(action.params) do by_name[param.name] = param end
+	for name, value in pairs(params) do
+		local param = by_name[name]
+		local fn = param and (param.type or ""):match("^CUSTOM_SELECT:(.+)$")
+		if not param then
+			problem("has no parameter %q", name)
+		elseif param.type == "LIST" then
+			if not has_item(param.items, value) then problem("%s: %q is not one of its LIST items", name, value) end
+		elseif not fn then
+			problem("%s is a %s, not a LIST or a CUSTOM_SELECT", name, tostring(param.type))
+		elseif path.via then
+			local method = ACTIONS.LISTS[fn]
+			if not method then
+				problem("%s: driver.xml names %s, a list bridge/actions.lua does not serve", name, fn)
+			else
+				local w = spy_world()
+				if not offers(function(f) return w.a[method](w.a, f) end, value) then
+					problem("%s: bridge/actions.lua's %s does not offer %q", name, method, value)
+				end
+			end
+		elseif path.dev then
+			if not real_offers("dev", driver, fn, value) then problem("%s: the dev build's %s lacks %q", name, fn, value) end
+			if real_offers("release", driver, fn, value) then
+				problem("%s: the release build's %s offers the dev value %q", name, fn, value)
+			end
+		elseif not real_offers("release", driver, fn, value) then
+			problem("%s: the release build's %s does not offer %q", name, fn, value)
+		end
+	end
+	if path.via then
+		local spec = runner_of(path.action)
+		if not spec then
+			problem("bridge/actions.lua runs no action %q (ACTIONS)", path.action)
+		else
+			local w = spy_world()
+			w.a[spec.runner](w.a, params)
+			if not w.called[path.via] then
+				problem("%s with %s does not reach %s (it called %s; Last Action %q)", spec.runner, params_text(params),
+					path.via, table.concat(w.calls, ", "), tostring(w.said[#w.said]))
+			end
+			if #w.said == 0 then problem("%s with %s ends in no Last Action", spec.runner, params_text(params)) end
+			if w.errors[1] then problem("%s raised: %s", spec.runner, w.errors[1]) end
+		end
+	end
+	local why = action_problem(probe_action(path.dev and "dev" or "release", driver, path.action, params))
+	if why then problem("clicked with %s: %s", params_text(params), why) end
+end
+
 -- The ledger ------------------------------------------------------------------
 
 local KINDS = { "action", "property", "command", "event", "conditional", "proxy", "proxy_command", "connection",
@@ -337,17 +541,22 @@ end
 local resolvers = {}
 
 function resolvers.action(path, driver, problem)
-	local form = path.dev and "dev" or "release"
+	-- dev with pick: a value only dev builds offer, of an action both have.
+	local form = (path.dev and not path.pick) and "dev" or "release"
 	local action = model(driver, form).action_by_command[path.action]
 	if not action then
 		return problem("not the <command> of an action of the %s build", form)
 	end
-	if path.dev and model(driver, "release").action_by_command[path.action] then
+	if path.dev and not path.pick and model(driver, "release").action_by_command[path.action] then
 		problem("marked dev, but the release build has it too")
 	end
 	local want, got = path.params or {}, param_names(action)
 	if table.concat(want, "|") ~= table.concat(got, "|") then
 		problem("parameters are {%s}, the ledger says {%s}", table.concat(got, ", "), table.concat(want, ", "))
+	end
+	if path.via and not path.pick then problem("names via but no pick") end
+	if path.pick then
+		return check_picks(path, driver, action, problem)
 	end
 	local why = action_problem(probe_action(form, driver, path.action))
 	if why then problem("%s", why) end
@@ -428,6 +637,9 @@ function resolvers.documentation(path, driver, problem)
 end
 
 function resolvers.auto(path, _, problem)
+	if path.waits then
+		return problem("waits for %s", tostring(path.waits))
+	end
 	local proof = path.proof
 	if type(proof) ~= "table" or not (proof.spec or proof.module) then
 		return problem("names no proof (a spec and a test, or a module and its text)")
@@ -515,7 +727,8 @@ describe("feature ledger (#334)", function()
 				it(driver .. ", " .. form .. " build: reaches its handler clicked and sent by name, raises nothing, "
 					.. "writes a row", function()
 					local problems = {}
-					assert.is_true(#model(driver, form).actions > 0, "no actions parsed from src/" .. driver .. "/driver.xml")
+					assert.equal(#(LEDGER.actions[driver] or {}), #model(driver, form).actions,
+						"the actions parsed from src/" .. driver .. "/driver.xml")
 					for _, action in ipairs(model(driver, form).actions) do
 						if not action.command or action.command == "" then
 							problems[#problems + 1] = tostring(action.name) .. ": no <command>"
@@ -541,11 +754,13 @@ describe("feature ledger (#334)", function()
 									if type(run.env[fn]) ~= "function" then
 										problems[#problems + 1] = where .. ": not a function of the driver"
 									else
-										local ok, list = pcall(fake.custom_select, run.env, fn)
-										if not ok then
-											problems[#problems + 1] = where .. ": raised " .. tostring(list)
-										elseif type(list) ~= "table" then
-											problems[#problems + 1] = where .. ": answered a " .. type(list)
+										for _, top in ipairs({ false, "" }) do
+											local ok, list = pcall(fake.custom_select, run.env, fn, top or nil)
+											if not ok then
+												problems[#problems + 1] = where .. ": raised " .. tostring(list)
+											elseif type(list) ~= "table" then
+												problems[#problems + 1] = where .. ": answered a " .. type(list)
+											end
 										end
 									end
 								end
@@ -608,6 +823,55 @@ describe("feature ledger (#334)", function()
 				end)
 			end
 		end
+
+		-- The actions as Composer lists them: by sort_order, each with its
+		-- parameter names (none: nil, as the ledger writes it).
+		local function in_order(driver, form)
+			local list = {}
+			for _, action in ipairs(model(driver, form).actions) do list[#list + 1] = action end
+			table.sort(list, function(a, b) return (tonumber(a.sort_order) or 0) < (tonumber(b.sort_order) or 0) end)
+			local out = {}
+			for _, action in ipairs(list) do
+				out[#out + 1] = { command = action.command, params = #action.params > 0 and param_names(action) or nil }
+			end
+			return out
+		end
+
+		for _, driver in ipairs(DRIVERS) do
+			it(driver .. ": the actions are 1.2's (ledger.actions) in sort_order, and a dev build adds none", function()
+				assert.same(LEDGER.actions[driver], in_order(driver, "release"))
+				assert.same(in_order(driver, "release"), in_order(driver, "dev"))
+			end)
+		end
+
+		it("hue_bridge: the merged actions take the pickers and LIST items bridge/actions.lua serves", function()
+			local problems = {}
+			local specs = {}
+			for _, spec in ipairs(ACTIONS.ACTIONS) do specs[#specs + 1] = spec end
+			-- Forget Pairing's confirmation is the same LIST (§3.3).
+			specs[#specs + 1] = { command = "Forget Pairing", params = { { name = "Confirm", items = ACTIONS.CONFIRM_ITEMS } } }
+			for _, spec in ipairs(specs) do
+				local action = model("hue_bridge", "release").action_by_command[spec.command]
+				if not action then
+					problems[#problems + 1] = spec.command .. ": not an action of the release driver.xml"
+				else
+					for i, want in ipairs(spec.params) do
+						local got = action.params[i] or {}
+						local label = spec.command .. " / " .. want.name
+						if got.name ~= want.name then
+							problems[#problems + 1] = label .. ": parameter " .. i .. " is " .. tostring(got.name)
+						elseif want.list and got.type ~= "CUSTOM_SELECT:" .. want.list then
+							problems[#problems + 1] = label .. ": " .. tostring(got.type) .. ", not CUSTOM_SELECT:" .. want.list
+						elseif want.items and (got.type ~= "LIST"
+								or table.concat(got.items, "|") ~= table.concat(want.items, "|")) then
+							problems[#problems + 1] = label .. ": " .. tostring(got.type) .. " {" .. table.concat(got.items, ", ")
+								.. "}, not LIST {" .. table.concat(want.items, ", ") .. "}"
+						end
+					end
+				end
+			end
+			assert.same({}, problems)
+		end)
 	end)
 
 	describe("3. the ledger rows (tests/fixtures/ledger.lua)", function()
@@ -714,6 +978,32 @@ describe("feature ledger (#334)", function()
 			assert.same({}, problems)
 		end)
 
+		it("keeps every command an earlier driver.xml had: still an action, or an alias", function()
+			local problems = {}
+			for _, driver in ipairs(DRIVERS) do
+				for _, command in ipairs(LEDGER.earlier_commands[driver] or {}) do
+					if not model(driver, "dev").action_by_command[command] and not find_alias(command, driver) then
+						problems[#problems + 1] = driver .. ": " .. command
+					end
+				end
+			end
+			assert.same({}, problems)
+		end)
+
+		it("lists bridge/actions.lua's aliases, each with the same target", function()
+			local problems = {}
+			for command, alias in pairs(ACTIONS.ALIASES) do
+				local listed = find_alias(command, "hue_bridge")
+				if not listed then
+					problems[#problems + 1] = command .. ": not in ledger.aliases"
+				elseif listed.target ~= alias.target then
+					problems[#problems + 1] = string.format("%s: the ledger says %s, bridge/actions.lua %s", command,
+						tostring(listed.target), tostring(alias.target))
+				end
+			end
+			assert.same({}, problems)
+		end)
+
 		for _, alias in ipairs(LEDGER.aliases) do
 			local driver = alias_driver(alias)
 			local target_driver = alias.target_driver or driver
@@ -728,7 +1018,11 @@ describe("feature ledger (#334)", function()
 				end
 				for _, form in ipairs(FORMS) do
 					local result = probe_action(form, driver, alias.command)
-					if not result.reached or not result.by_name.reached then
+					if alias.dev and form == "release" then
+						if result.reached or result.by_name.reached then
+							problems[#problems + 1] = "a dev command, but the release build answers it"
+						end
+					elseif not result.reached or not result.by_name.reached then
 						problems[#problems + 1] = form .. " build: reaches no handler"
 					elseif result.raised or result.by_name.raised or result.errors[1] or result.by_name.errors[1] then
 						problems[#problems + 1] = form .. " build: " .. tostring(action_problem(result))

@@ -16,10 +16,21 @@
 --   paths       every way it is reached today; each must resolve (see the spec)
 --
 -- A path (driver defaults to "hue_bridge"):
---   { action = "<command>", params = { "<param name>", ... }, dev = true? }
+--   { action = "<command>", params = { "<param name>", ... }, pick = { [param] = "<value>" }?,
+--     via = "<module>:<method>"?, dev = true? }
 --       an <action> of driver.xml by its <command> (the <name> is free to
---       change, R1); params are its parameter names in order (none if absent);
---       dev = true for a DEV-ONLY action, absent from release builds
+--       change, R1); params are its parameter names in order (none if absent).
+--       pick: the parameter values that reach this feature (1.2's merged
+--       actions, docs/simplify-actions-design.md §3.4). Each must be offered:
+--       a LIST param's item, else a value its CUSTOM_SELECT list offers (a
+--       leaf or a selectable folder, folders opened). With via, the list and
+--       the runner are bridge/actions.lua's, run against the spec's spy
+--       modules, and the runner must call that module method; "<rid>" and
+--       "<device_id>" stand for the spy's thing of that kind and the via
+--       module's device, "<row>" for a names row. Without via, the list is
+--       the real driver's (the Diagnostics entries driver.lua defines).
+--       dev = true: without pick, a DEV-ONLY action (none in 1.2); with pick,
+--       a value only the dev build offers (its release list must lack it)
 --   { property = "<name>", type = "<STRING|LIST|DYNAMIC_LIST|RANGED_INTEGER>", items = { ... }? }
 --       a <property> of the release driver.xml with that type; items, for a
 --       LIST, are items that must stay (a LIST item never changes meaning, R7)
@@ -34,6 +45,9 @@
 --   { auto = "<trigger>", proof = { spec = "<file>", test = "<text of an it()>" } }
 --   { auto = "<trigger>", proof = { module = "<file>", find = "<text>" } }
 --       automatic today: not re-tested here, the named spec or module proves it
+--   { auto = "<trigger>", waits = "<who>: <what>" }
+--       automatic from 1.2, its proof not written yet: fails, naming who it
+--       waits for, until the proof replaces `waits`
 --   { alias = "<old command>" }                a hidden alias listed below
 --
 -- No room, house or person names; addresses only 192.0.2.x, 198.51.100.x or
@@ -62,7 +76,7 @@ ledger.rows = {
 		gate = { "click" },
 		paths = {
 			{ action = "Pair Bridge" },
-			{ action = "Forget Pairing" },
+			{ action = "Forget Pairing", params = { "Confirm" }, pick = { Confirm = "Yes, forget" } },
 		},
 	},
 	{
@@ -80,7 +94,7 @@ ledger.rows = {
 		capability = "Forget the pairing (key gone, stream stopped, address and devices kept)",
 		gate = { "click" },
 		paths = {
-			{ action = "Forget Pairing" },
+			{ action = "Forget Pairing", params = { "Confirm" }, pick = { Confirm = "Yes, forget" } },
 		},
 	},
 	{
@@ -109,7 +123,8 @@ ledger.rows = {
 				test = "keeps a failed TLS verdict through Connect Event Stream and a new pairing" } },
 			{ auto = "before the network-connection stream", proof = { spec = "tests/spec/netcheck_spec.lua",
 				test = "pinned: the probe ids closed and cleared, the version remembered, the stream on 6001 with the key" } },
-			{ action = "Check CA Pinning", dev = true },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:check_pinning" }, dev = true },
+			{ alias = "Check CA Pinning" },
 		},
 	},
 	{
@@ -117,7 +132,8 @@ ledger.rows = {
 		capability = "Key-rejected lock, ended by a re-pair, a new address or a 200 answer",
 		gate = { "click", "prop" },
 		paths = {
-			{ action = "Test Connection" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:test" } },
+			{ alias = "Test Connection" },
 			{ action = "Pair Bridge" },
 			{ property = "Bridge IP Address", type = "STRING" },
 			{ auto = "a REST 401/403 locks", proof = { spec = "tests/spec/drivers_spec.lua",
@@ -129,7 +145,8 @@ ledger.rows = {
 		capability = "A one-question health check, reported in Status",
 		gate = { "click" },
 		paths = {
-			{ action = "Test Connection" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:test" } },
+			{ alias = "Test Connection" },
 			{ property = "Status", type = "STRING" },
 		},
 	},
@@ -152,8 +169,10 @@ ledger.rows = {
 		capability = "Stop and restart the feed by hand",
 		gate = { "click" },
 		paths = {
-			{ action = "Disconnect Event Stream" },
-			{ action = "Connect Event Stream" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:disconnect" } },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:connect" } },
+			{ alias = "Disconnect Event Stream" },
+			{ alias = "Connect Event Stream" },
 		},
 	},
 	{
@@ -172,7 +191,8 @@ ledger.rows = {
 		capability = "Every list read without the stream (#324)",
 		gate = { "click" },
 		paths = {
-			{ action = "Refresh All" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:refresh" } },
+			{ alias = "Refresh All" },
 		},
 	},
 	{
@@ -180,7 +200,8 @@ ledger.rows = {
 		capability = "Scene list read now",
 		gate = { "click" },
 		paths = {
-			{ action = "Refresh Scenes" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:refresh" } },
+			{ alias = "Refresh Scenes" },
 		},
 	},
 	{
@@ -188,10 +209,16 @@ ledger.rows = {
 		capability = "Developer diagnostics: stored credentials, connection experiment, public CA pinning (dev builds)",
 		gate = { "click" },
 		paths = {
-			{ action = "Reload Credentials", dev = true },
-			{ action = "Connection Test", params = { "Target" }, dev = true },
-			{ action = "Check CA Pinning", dev = true },
-			{ action = "Probe Picker Folders", params = { "What", "Room" }, dev = true },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:reload_credentials" }, dev = true },
+			{ action = "Diagnostics", params = { "What" },
+				pick = { What = "diag:connection_test:bridge" }, dev = true },
+			{ action = "Diagnostics", params = { "What" },
+				pick = { What = "diag:connection_test:server" }, dev = true },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:check_pinning" }, dev = true },
+			{ alias = "Reload Credentials" },
+			{ alias = "Connection Test" },
+			{ alias = "Check CA Pinning" },
+			{ alias = "Probe Picker Folders" },
 		},
 	},
 	{
@@ -226,15 +253,15 @@ ledger.rows = {
 		capability = "Map one Hue room or zone to a Control4 room, or unmap it",
 		gate = { "click" },
 		paths = {
-			{ action = "Set Room Mapping", params = { "Hue Room", "Room" } },
+			{ action = "Set Room Mapping", params = { "Hue Room", "Control4 Room" } },
 		},
 	},
 	{
 		id = "R3",
 		capability = "Map by exact name, never overriding; done once by itself at the first resync",
-		gate = { "click", "auto" },
+		gate = { "auto" },
 		paths = {
-			{ action = "Map Rooms By Name" },
+			{ alias = "Map Rooms By Name" },
 			{ auto = "once, at the first resync (hue_rooms_automapped)", proof = { spec = "tests/spec/lights_spec.lua",
 				test = "runs Map Rooms By Name once, at the first resync that knows the rooms, guarded by a persisted flag" } },
 		},
@@ -242,9 +269,11 @@ ledger.rows = {
 	{
 		id = "R4",
 		capability = "Audit lights and zone lights against their mappings; nothing moved",
-		gate = { "click" },
+		gate = { "auto" },
 		paths = {
-			{ action = "Room Audit" },
+			{ alias = "Room Audit" },
+			{ auto = "a marker on the Lights and Zone Lights rows at every read",
+				waits = "coordinator: the room-audit marker of docs/simplify-actions-design.md §1.3 and its spec" },
 		},
 	},
 	{
@@ -252,13 +281,17 @@ ledger.rows = {
 		capability = "New devices default to \"(mapped room)\"",
 		gate = { "click" },
 		paths = {
-			{ action = "Add Light", params = { "Light", "Room" } },
-			{ action = "Add Zone Light", params = { "Group", "Room" } },
-			{ action = "Add Scene", params = { "Scene", "Room" } },
-			{ action = "Add Motion Sensor", params = { "Sensor", "Room" } },
-			{ action = "Add Motion Area", params = { "Area", "Room" } },
-			{ action = "Import All New Lights" },
-			{ action = "Import All New Motion Sensors" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "light:<rid>", Room = "mapped" }, via = "lights:add_light" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "group:<rid>", Room = "mapped" }, via = "zone_lights:add" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "scene:<rid>", Room = "mapped" }, via = "scenes:add_scene" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "sensor:<rid>", Room = "mapped" }, via = "motion:add" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "area:<rid>", Room = "mapped" }, via = "motion:add" },
+			{ action = "Import All New" },
 		},
 	},
 
@@ -268,7 +301,9 @@ ledger.rows = {
 		capability = "Add one light, in a chosen or the mapped room",
 		gate = { "click" },
 		paths = {
-			{ action = "Add Light", params = { "Light", "Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "light:<rid>", Room = "mapped" }, via = "lights:add_light" },
+			{ alias = "Add Light" },
 		},
 	},
 	{
@@ -276,7 +311,10 @@ ledger.rows = {
 		capability = "Import every new light whose Hue room is mapped, and list the skipped ones",
 		gate = { "click" },
 		paths = {
-			{ action = "Import All New Lights" },
+			{ action = "Import All New" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "all:lights", Room = "mapped" }, via = "lights:import_new" },
+			{ alias = "Import All New Lights" },
 		},
 	},
 	{
@@ -286,7 +324,8 @@ ledger.rows = {
 		gate = { "auto", "click" },
 		paths = {
 			{ message = "HUE_GOODBYE" },
-			{ action = "Add Light", params = { "Light", "Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "light:<rid>", Room = "mapped" }, via = "lights:add_light" },
 			{ auto = "a delete in Composer (HUE_GOODBYE)", proof = { spec = "tests/spec/lights_spec.lua",
 				test = "tombstones the entry, which Import skips and Add Light re-creates" } },
 		},
@@ -296,7 +335,9 @@ ledger.rows = {
 		capability = "Point a gone or unbound light device at another light, keeping its name, room and programming",
 		gate = { "click" },
 		paths = {
-			{ action = "Re-link Device To Light", params = { "Device", "Light" } },
+			{ action = "Link Device", params = { "Device", "To" },
+				pick = { Device = "dev:<device_id>", To = "light:<rid>" }, via = "lights:relink" },
+			{ alias = "Re-link Device To Light" },
 		},
 	},
 	{
@@ -304,8 +345,10 @@ ledger.rows = {
 		capability = "Release a light device (it stays to be deleted; the light can be added again)",
 		gate = { "click" },
 		paths = {
-			{ action = "Forget Light", params = { "Device" } },
-			{ action = "Forget This Light", driver = "hue_light" },
+			{ action = "Forget Device", params = { "Device", "Confirm" },
+				pick = { Device = "dev:<device_id>", Confirm = "Yes, forget" }, via = "lights:forget" },
+			{ alias = "Forget Light" },
+			{ alias = "Forget This Light", driver = "hue_light" },
 			{ message = "HUE_FORGET" },
 			{ message = "HUE_FORGOTTEN", driver = "hue_light" },
 		},
@@ -316,7 +359,9 @@ ledger.rows = {
 			.. "name and identity (click)",
 		gate = { "auto", "click" },
 		paths = {
-			{ action = "Link Devices" },
+			{ action = "Link Device", params = { "Device", "To" },
+				pick = { Device = "dev:suggested", To = "to:suggested" }, via = "lights:link_devices" },
+			{ alias = "Link Devices" },
 			{ message = "HUE_HELLO" },
 			{ auto = "a hello with a rid the registry lacks", proof = { spec = "tests/spec/lights_spec.lua",
 				test = "auto-adopts exactly one bound device carrying a rid the registry lacks [Q 3]" } },
@@ -397,7 +442,9 @@ ledger.rows = {
 		capability = "A Hue zone or room as one Hue Light",
 		gate = { "click" },
 		paths = {
-			{ action = "Add Zone Light", params = { "Group", "Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "group:<rid>", Room = "mapped" }, via = "zone_lights:add" },
+			{ alias = "Add Zone Light" },
 		},
 	},
 	{
@@ -405,7 +452,9 @@ ledger.rows = {
 		capability = "Point a zone light at another zone or room",
 		gate = { "click" },
 		paths = {
-			{ action = "Re-link Zone Light", params = { "Device", "Group" } },
+			{ action = "Link Device", params = { "Device", "To" },
+				pick = { Device = "dev:<device_id>", To = "group:<rid>" }, via = "zone_lights:relink" },
+			{ alias = "Re-link Zone Light" },
 		},
 	},
 	{
@@ -413,8 +462,10 @@ ledger.rows = {
 		capability = "Release a zone light",
 		gate = { "click" },
 		paths = {
-			{ action = "Forget Light", params = { "Device" } },
-			{ action = "Forget This Light", driver = "hue_light" },
+			{ action = "Forget Device", params = { "Device", "Confirm" },
+				pick = { Device = "dev:<device_id>", Confirm = "Yes, forget" }, via = "zone_lights:forget" },
+			{ alias = "Forget Light" },
+			{ alias = "Forget This Light", driver = "hue_light" },
 		},
 	},
 	{
@@ -434,7 +485,9 @@ ledger.rows = {
 		capability = "Rename every differing light, scene, zone light and motion device to its Hue name",
 		gate = { "click" },
 		paths = {
-			{ action = "Adopt Hue Names" },
+			{ action = "Resolve Names", params = { "Names" },
+				pick = { Names = "names:hue_to_composer" }, via = "names:resolve" },
+			{ alias = "Adopt Hue Names" },
 		},
 	},
 	{
@@ -442,8 +495,9 @@ ledger.rows = {
 		capability = "Rename one light, zone light or scene device",
 		gate = { "click" },
 		paths = {
-			{ action = "Adopt Hue Name", driver = "hue_light" },
-			{ action = "Adopt Hue Name", driver = "hue_scene" },
+			{ action = "Resolve Names", params = { "Names" }, pick = { Names = "<row>" }, via = "names:resolve" },
+			{ alias = "Adopt Hue Name", driver = "hue_light" },
+			{ alias = "Adopt Hue Name", driver = "hue_scene" },
 			{ property = "Hue Name", type = "STRING", driver = "hue_light" },
 			{ property = "Hue Scene", type = "STRING", driver = "hue_scene" },
 		},
@@ -453,7 +507,9 @@ ledger.rows = {
 		capability = "Keep the Composer names; Attention stays quiet until the Hue name changes again",
 		gate = { "click" },
 		paths = {
-			{ action = "Accept Names As They Are" },
+			{ action = "Resolve Names", params = { "Names" },
+				pick = { Names = "names:composer_to_hue" }, via = "names:resolve" },
+			{ alias = "Accept Names As They Are" },
 		},
 	},
 	{
@@ -476,7 +532,9 @@ ledger.rows = {
 		capability = "Add one scene, ordinary or time-of-day",
 		gate = { "click" },
 		paths = {
-			{ action = "Add Scene", params = { "Scene", "Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "scene:<rid>", Room = "mapped" }, via = "scenes:add_scene" },
+			{ alias = "Add Scene" },
 		},
 	},
 	{
@@ -484,7 +542,9 @@ ledger.rows = {
 		capability = "Add every scene of a room or zone",
 		gate = { "click" },
 		paths = {
-			{ action = "Add All Scenes Of Room", params = { "Hue Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "f:scenes:<rid>", Room = "mapped" }, via = "scenes:add_all_of_group" },
+			{ alias = "Add All Scenes Of Room" },
 		},
 	},
 	{
@@ -492,7 +552,9 @@ ledger.rows = {
 		capability = "Point a scene device at another scene",
 		gate = { "click" },
 		paths = {
-			{ action = "Re-link Scene", params = { "Device", "Scene" } },
+			{ action = "Link Device", params = { "Device", "To" },
+				pick = { Device = "dev:<device_id>", To = "scene:<rid>" }, via = "scenes:relink" },
+			{ alias = "Re-link Scene" },
 		},
 	},
 	{
@@ -500,8 +562,10 @@ ledger.rows = {
 		capability = "Release a scene device; its hello is refused afterwards (hue_scene_forgotten)",
 		gate = { "click" },
 		paths = {
-			{ action = "Forget Scene", params = { "Device" } },
-			{ action = "Forget This Scene", driver = "hue_scene" },
+			{ action = "Forget Device", params = { "Device", "Confirm" },
+				pick = { Device = "dev:<device_id>", Confirm = "Yes, forget" }, via = "scenes:forget" },
+			{ alias = "Forget Scene" },
+			{ alias = "Forget This Scene", driver = "hue_scene" },
 			{ message = "HUE_SCENE_FORGET" },
 			{ message = "HUE_SCENE_FORGOTTEN", driver = "hue_scene" },
 		},
@@ -552,7 +616,9 @@ ledger.rows = {
 		capability = "Add one motion sensor",
 		gate = { "click" },
 		paths = {
-			{ action = "Add Motion Sensor", params = { "Sensor", "Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "sensor:<rid>", Room = "mapped" }, via = "motion:add" },
+			{ alias = "Add Motion Sensor" },
 		},
 	},
 	{
@@ -561,7 +627,10 @@ ledger.rows = {
 			.. "ones, and list them",
 		gate = { "click" },
 		paths = {
-			{ action = "Import All New Motion Sensors" },
+			{ action = "Import All New" },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "all:motion", Room = "mapped" }, via = "motion:import_new" },
+			{ alias = "Import All New Motion Sensors" },
 		},
 	},
 	{
@@ -569,7 +638,9 @@ ledger.rows = {
 		capability = "Add a MotionAware area (Bridge Pro)",
 		gate = { "click" },
 		paths = {
-			{ action = "Add Motion Area", params = { "Area", "Room" } },
+			{ action = "Add From Hue", params = { "What", "Room" },
+				pick = { What = "area:<rid>", Room = "mapped" }, via = "motion:add" },
+			{ alias = "Add Motion Area" },
 		},
 	},
 	{
@@ -578,7 +649,11 @@ ledger.rows = {
 			.. "than an hour)",
 		gate = { "click" },
 		paths = {
-			{ action = "Re-link Motion Device", params = { "Device", "Target" } },
+			{ action = "Link Device", params = { "Device", "To" },
+				pick = { Device = "dev:<device_id>", To = "sensor:<rid>" }, via = "motion:relink" },
+			{ action = "Link Device", params = { "Device", "To" },
+				pick = { Device = "dev:<device_id>", To = "area:<rid>" }, via = "motion:relink" },
+			{ alias = "Re-link Motion Device" },
 		},
 	},
 	{
@@ -586,7 +661,9 @@ ledger.rows = {
 		capability = "Release a motion device; its hello is refused afterwards (hue_motion_forgotten)",
 		gate = { "click" },
 		paths = {
-			{ action = "Forget Motion Device", params = { "Device" } },
+			{ action = "Forget Device", params = { "Device", "Confirm" },
+				pick = { Device = "dev:<device_id>", Confirm = "Yes, forget" }, via = "motion:forget" },
+			{ alias = "Forget Motion Device" },
 			{ message = "HUE_MOTION_FORGET" },
 			{ message = "HUE_MOTION_FORGOTTEN", driver = "hue_motion" },
 		},
@@ -596,7 +673,8 @@ ledger.rows = {
 		capability = "Tester diagnostics: the motion resources and ten minutes of reports, redacted",
 		gate = { "click" },
 		paths = {
-			{ action = "Log Motion Diagnostics" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:motion_log" } },
+			{ alias = "Log Motion Diagnostics" },
 		},
 	},
 	{
@@ -604,7 +682,8 @@ ledger.rows = {
 		capability = "Ask the bridge again for one device's details and state",
 		gate = { "click" },
 		paths = {
-			{ action = "Refresh From Bridge", driver = "hue_motion" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "diag:refresh" } },
+			{ alias = "Refresh From Bridge", driver = "hue_motion" },
 			{ message = "HUE_MOTION_HELLO" },
 		},
 	},
@@ -613,8 +692,9 @@ ledger.rows = {
 		capability = "Fake motion or no motion, to test programming",
 		gate = { "click" },
 		paths = {
-			{ action = "Test Motion", driver = "hue_motion" },
-			{ action = "Test No Motion", driver = "hue_motion" },
+			{ action = "Test Motion Programming", driver = "hue_motion" },
+			{ alias = "Test Motion", driver = "hue_motion" },
+			{ alias = "Test No Motion", driver = "hue_motion" },
 		},
 	},
 	{
@@ -711,18 +791,110 @@ ledger.rows = {
 	},
 }
 
+-- The actions of 1.2 (docs/simplify-actions-design.md §3.3), per driver,
+-- in sort_order, with their parameters; the release driver.xml must have
+-- exactly these, and the dev build the same ones (dev builds add their
+-- diagnostics inside Diagnostics' list, not as actions).
+ledger.actions = {
+	hue_bridge = {
+		{ command = "Pair Bridge" },
+		{ command = "Import All New" },
+		{ command = "Add From Hue", params = { "What", "Room" } },
+		{ command = "Link Device", params = { "Device", "To" } },
+		{ command = "Forget Device", params = { "Device", "Confirm" } },
+		{ command = "Resolve Names", params = { "Names" } },
+		{ command = "Set Room Mapping", params = { "Hue Room", "Control4 Room" } },
+		{ command = "Diagnostics", params = { "What" } },
+		{ command = "Forget Pairing", params = { "Confirm" } },
+	},
+	hue_light = {},
+	hue_scene = {},
+	hue_motion = {
+		{ command = "Test Motion Programming" },
+	},
+}
+
+-- Every <command> of an <action> in the driver.xml files up to 1.2 wave 1
+-- (beta 8, plus wave 1's DEV-ONLY Probe Picker Folders): each is still an
+-- action of 1.2 or one of the aliases below.
+ledger.earlier_commands = {
+	hue_bridge = {
+		"Pair Bridge", "Add Light", "Import All New Lights", "Add Zone Light", "Re-link Device To Light",
+		"Re-link Zone Light", "Link Devices", "Forget Light", "Adopt Hue Names", "Accept Names As They Are",
+		"Set Room Mapping", "Map Rooms By Name", "Room Audit", "Add Scene", "Add All Scenes Of Room", "Re-link Scene",
+		"Forget Scene", "Refresh Scenes", "Refresh All", "Add Motion Sensor", "Import All New Motion Sensors",
+		"Add Motion Area", "Re-link Motion Device", "Forget Motion Device", "Log Motion Diagnostics", "Test Connection",
+		"Connect Event Stream", "Disconnect Event Stream", "Connection Test", "Reload Credentials", "Check CA Pinning",
+		"Probe Picker Folders", "Forget Pairing",
+	},
+	hue_light = { "Adopt Hue Name", "Forget This Light" },
+	hue_scene = { "Adopt Hue Name", "Forget This Scene" },
+	hue_motion = { "Refresh From Bridge", "Test Motion", "Test No Motion" },
+}
+
 -- Commands that left driver.xml but still answer, as hidden aliases in the
 -- dispatch table until 2.0 (docs/simplify-research-compat.md §5.3 R2): the
 -- dev loop, tools/regress.sh, older briefs and any C4:SendToDevice caller
--- send them by name. Empty today; the simplification adds one entry per
--- command it removes, for example
---   { command = "Refresh All", target = "Diagnostics", expires = "2.0" },
---   { command = "Adopt Hue Name", driver = "hue_light", target = "Resolve Names", target_driver = "hue_bridge",
---     expires = "2.0" },
--- driver (the one that still answers the old command) defaults to "hue_bridge"; target is the
--- action that does the job now, on target_driver (default: driver).
--- The spec fails once the code's version line reaches `expires`, so removing
--- an alias is a decision, not an accident.
-ledger.aliases = {}
+-- send them by name. driver (the one that still answers the old command)
+-- defaults to "hue_bridge"; target is the action that does the job now, on
+-- target_driver (default: driver). dev = true: a developer command that only
+-- dev builds answer (bridge/devtools.lua), and release builds must not. The
+-- bridge's aliases into the merged actions are bridge/actions.lua's
+-- ALIASES (the spec checks the two lists agree); the others keep their
+-- beta 8 handlers. The spec fails once the code's version line reaches
+-- `expires`, so removing an alias is a decision, not an accident.
+ledger.aliases = {
+	-- Into Add From Hue and Import All New.
+	{ command = "Add Light", target = "Add From Hue", expires = "2.0" },
+	{ command = "Add Zone Light", target = "Add From Hue", expires = "2.0" },
+	{ command = "Add Scene", target = "Add From Hue", expires = "2.0" },
+	{ command = "Add All Scenes Of Room", target = "Add From Hue", expires = "2.0" },
+	{ command = "Add Motion Sensor", target = "Add From Hue", expires = "2.0" },
+	{ command = "Add Motion Area", target = "Add From Hue", expires = "2.0" },
+	{ command = "Import All New Lights", target = "Import All New", expires = "2.0" },
+	{ command = "Import All New Motion Sensors", target = "Import All New", expires = "2.0" },
+	-- Into Link Device.
+	{ command = "Re-link Device To Light", target = "Link Device", expires = "2.0" },
+	{ command = "Re-link Zone Light", target = "Link Device", expires = "2.0" },
+	{ command = "Re-link Scene", target = "Link Device", expires = "2.0" },
+	{ command = "Re-link Motion Device", target = "Link Device", expires = "2.0" },
+	{ command = "Link Devices", target = "Link Device", expires = "2.0" },
+	-- Into Forget Device.
+	{ command = "Forget Light", target = "Forget Device", expires = "2.0" },
+	{ command = "Forget Scene", target = "Forget Device", expires = "2.0" },
+	{ command = "Forget Motion Device", target = "Forget Device", expires = "2.0" },
+	-- Into Resolve Names.
+	{ command = "Adopt Hue Names", target = "Resolve Names", expires = "2.0" },
+	{ command = "Accept Names As They Are", target = "Resolve Names", expires = "2.0" },
+	-- Into Diagnostics.
+	{ command = "Test Connection", target = "Diagnostics", expires = "2.0" },
+	{ command = "Refresh All", target = "Diagnostics", expires = "2.0" },
+	{ command = "Connect Event Stream", target = "Diagnostics", expires = "2.0" },
+	{ command = "Disconnect Event Stream", target = "Diagnostics", expires = "2.0" },
+	{ command = "Log Motion Diagnostics", target = "Diagnostics", expires = "2.0" },
+	-- Their beta 8 handlers, unchanged: automatic since 1.2 (§1.3), or (Refresh
+	-- Scenes) the scene list alone, read at once.
+	{ command = "Map Rooms By Name", target = "Set Room Mapping", expires = "2.0" },
+	{ command = "Room Audit", target = "Set Room Mapping", expires = "2.0" },
+	{ command = "Refresh Scenes", target = "Diagnostics", expires = "2.0" },
+	-- Dev builds only: entries of Diagnostics' list there.
+	{ command = "Connection Test", target = "Diagnostics", dev = true, expires = "2.0" },
+	{ command = "Reload Credentials", target = "Diagnostics", dev = true, expires = "2.0" },
+	{ command = "Check CA Pinning", target = "Diagnostics", dev = true, expires = "2.0" },
+	{ command = "Probe Picker Folders", target = "Diagnostics", dev = true, expires = "2.0" },
+	-- The child drivers' (their handlers unchanged in behaviour).
+	{ command = "Adopt Hue Name", driver = "hue_light", target = "Resolve Names", target_driver = "hue_bridge",
+		expires = "2.0" },
+	{ command = "Forget This Light", driver = "hue_light", target = "Forget Device", target_driver = "hue_bridge",
+		expires = "2.0" },
+	{ command = "Adopt Hue Name", driver = "hue_scene", target = "Resolve Names", target_driver = "hue_bridge",
+		expires = "2.0" },
+	{ command = "Forget This Scene", driver = "hue_scene", target = "Forget Device", target_driver = "hue_bridge",
+		expires = "2.0" },
+	{ command = "Refresh From Bridge", driver = "hue_motion", target = "Diagnostics", target_driver = "hue_bridge",
+		expires = "2.0" },
+	{ command = "Test Motion", driver = "hue_motion", target = "Test Motion Programming", expires = "2.0" },
+	{ command = "Test No Motion", driver = "hue_motion", target = "Test Motion Programming", expires = "2.0" },
+}
 
 return ledger

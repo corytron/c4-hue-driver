@@ -2283,10 +2283,13 @@ describe("bridge/devtools.lua development requests", function()
 			if not release[name] then added[#added + 1] = name end
 		end
 		table.sort(added)
-		assert.same({ "Check CA Pinning", "Connection Test", "Probe Picker Folders", "Reload Credentials" },
-			dev_only_commands())
+		-- Since 1.2 the dev entries live inside Diagnostics' list, so driver.xml
+		-- has no DEV-ONLY action left; their commands still answer in dev builds.
+		assert.same({}, dev_only_commands())
 		local expected = { "HUE_LOG" }
-		for _, command in ipairs(dev_only_commands()) do expected[#expected + 1] = (command:gsub("%s+", "_")) end
+		for _, command in ipairs({ "Check CA Pinning", "Connection Test", "Probe Picker Folders", "Reload Credentials" }) do
+			expected[#expected + 1] = (command:gsub("%s+", "_"))
+		end
 		table.sort(expected)
 		assert.same(expected, added)
 	end)

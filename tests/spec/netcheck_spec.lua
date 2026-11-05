@@ -1017,7 +1017,7 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 
 	it("Forget Pairing and OnDriverDestroyed close and clear a probe in flight; the check answers no one", function()
 		for _, stop in ipairs({
-			function(env) env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing" }) end,
+			function(env) env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing", Confirm = "Yes, forget" }) end,
 			function(env) env.OnDriverDestroyed() end,
 		}) do
 			local env, c4 = at_decoy(paired_bridge())

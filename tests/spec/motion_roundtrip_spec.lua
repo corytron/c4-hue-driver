@@ -457,9 +457,9 @@ describe("motion round trip", function()
 
 		it("#325: Import All New Motion Sensors, the bulk add's one name, imports every new sensor in a mapped room",
 			function()
+			-- Since 1.2 a hidden alias of Import All New (docs/simplify-actions-design.md §3.3).
 			local xml = assert(io.open("src/hue_bridge/driver.xml")):read("*a")
-			assert.truthy(xml:find("<action>%s*<name>Import All New Motion Sensors</name>%s*"
-				.. "<command>Import All New Motion Sensors</command>"))
+			assert.truthy(xml:find("<action>%s*<name>Import All New</name>%s*<command>Import All New</command>"))
 			assert.is_nil(xml:find("Add All New Motion Sensors", 1, true), "the old name is gone")
 			assert.equal("Added 1 new motion sensor: Hallway sensor #12 to Hallway (device 2001); skipped 1 with no mapped "
 				.. "room (Set Room Mapping or Add Motion Sensor): Porch sensor #20 (no Hue room); not included: 1 new "

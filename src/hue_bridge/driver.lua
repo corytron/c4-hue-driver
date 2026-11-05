@@ -25,6 +25,7 @@ local project_mod = require("bridge.project")
 local util = require("bridge.util")
 local housekeeping = require("bridge.housekeeping")
 local discovery_mod = require("bridge.discovery")
+local actions_mod = require("bridge.actions")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -1716,7 +1717,7 @@ local function picker(module, method, ...)
 end
 
 function HueLightList() return picker(state.lights, "picker_lights") end
-function RoomList() return picker(state.lights, "picker_rooms", "add") end
+-- RoomList (Add From Hue's Room) is defined with the 1.2 actions below.
 function RelinkDeviceList() return picker(state.lights, "picker_relink_devices") end
 -- ForgetDeviceList is defined with the zone lights' pickers below: it joins
 -- the lights' and the zone lights' devices.
@@ -1769,10 +1770,7 @@ function RelinkZoneLightList()
 	end
 	return list
 end
-function ForgetDeviceList()
-	return join_pickers(picker(state.lights, "picker_forget_devices"),
-		picker(state.zone_lights, "picker_forget_devices"))
-end
+-- ForgetDeviceList (Forget Device's Device) is defined with the 1.2 actions below.
 
 dispatch.commands["Add_Light"] = function(params)
 	if not can() then return end
@@ -2444,6 +2442,110 @@ if devtools then
 	})
 end
 
+-- The merged actions of 1.2 (bridge/actions.lua, docs/simplify-actions-design.md §3.3, §3.4) ----------
+
+-- The beta 8 handlers the new actions run (Diagnostics' entries, Import All
+-- New), taken before the aliases below take their keys over.
+local beta8 = {}
+for _, key in ipairs({ "Test_Connection", "Refresh_All", "Connect_Event_Stream", "Disconnect_Event_Stream",
+	"Log_Motion_Diagnostics" }) do
+	beta8[key] = dispatch.commands[key]
+end
+
+local D = actions_mod.DIAGNOSTICS
+-- Diagnostics' entries; the dev ones run bridge/devtools.lua's handlers,
+-- which exist in dev builds only (looked up when run).
+local function dev_command(key, params)
+	return function()
+		local fn = dispatch.commands[key]
+		if fn then fn(params or {}) end
+	end
+end
+local diagnostics = {
+	[D.TEST] = { order = 1, text = "Check the connection now", shows = "Status",
+		run = function() beta8.Test_Connection() end },
+	[D.REFRESH] = { order = 2, text = "Read everything from the bridge now", run = function() beta8.Refresh_All() end },
+	[D.CONNECT] = { order = 3, text = "Reconnect the event stream", shows = "Event Stream",
+		run = function() beta8.Connect_Event_Stream() end },
+	[D.DISCONNECT] = { order = 4, text = "Stop the event stream until the next start", shows = "Event Stream",
+		run = function() beta8.Disconnect_Event_Stream() end },
+	[D.MOTION_LOG] = { order = 5, text = "Log motion diagnostics (10 minutes)",
+		run = function() beta8.Log_Motion_Diagnostics() end },
+	[D.CONNECTION_TEST_BRIDGE] = { order = 6, dev = true, text = "(dev) Connection experiment: the bridge",
+		run = dev_command("Connection_Test", { Target = "Bridge" }) },
+	[D.CONNECTION_TEST_SERVER] = { order = 7, dev = true, text = "(dev) Connection experiment: the diagnostic server",
+		run = dev_command("Connection_Test", { Target = "Diagnostic Server" }) },
+	[D.RELOAD_CREDENTIALS] = { order = 8, dev = true, text = "(dev) Reload credentials",
+		run = dev_command("Reload_Credentials") },
+	[D.CHECK_PINNING] = { order = 9, dev = true, text = "(dev) Check CA pinning", run = dev_command("Check_CA_Pinning") },
+}
+
+local function new_actions()
+	return actions_mod.new({
+		lights = state.lights, scenes = state.scenes, zone_lights = state.zone_lights, motion = state.motion,
+		names = state.names, last_action = last_action, can = can, diagnostics = diagnostics, dev = devtools ~= nil,
+		log = log, before_names = fill_proxy_ids,
+	})
+end
+
+local function actions_list(method, folder)
+	if not state.actions then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	return state.actions[method](state.actions, folder)
+end
+
+function AddFromHueList(folder) return actions_list("add_list", folder) end
+function RoomList() return actions_list("room_list") end
+function LinkDeviceList(folder) return actions_list("link_list", folder) end
+function LinkTargetList(folder) return actions_list("link_target_list", folder) end
+function ForgetDeviceList(folder) return actions_list("forget_list", folder) end
+function ResolveNamesList() return actions_list("names_list") end
+function DiagnosticsList() return actions_list("diagnostics_list") end
+
+dispatch.commands["Add_From_Hue"] = function(params) state.actions:run_add(params) end
+dispatch.commands["Link_Device"] = function(params) state.actions:run_link(params) end
+dispatch.commands["Forget_Device"] = function(params) state.actions:run_forget(params) end
+dispatch.commands["Resolve_Names"] = function(params) state.actions:run_names(params) end
+dispatch.commands["Diagnostics"] = function(params) state.actions:run_diagnostics(params) end
+
+-- Import All New: the lights, then the motion sensors, each into the room
+-- its Hue room maps to (§1.2 action 2).
+dispatch.commands["Import_All_New"] = function()
+	if not can() then return end
+	state.lights:import_new(function(_, lights_text)
+		state.motion:import_new(function(_, motion_text)
+			last_action(tostring(lights_text) .. " | Motion: " .. tostring(motion_text))
+		end)
+	end)
+end
+
+-- Forget Pairing asks for confirmation (§3.3).
+local forget_pairing = dispatch.commands["Forget_Pairing"]
+dispatch.commands["Forget_Pairing"] = function(params)
+	if (params or {}).Confirm ~= actions_mod.CONFIRM_YES then
+		return last_action(actions_mod.NOT_CONFIRMED)
+	end
+	forget_pairing(params)
+	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept")
+end
+
+-- Set Room Mapping's second picker is "Control4 Room" in 1.2; "Room" still
+-- arrives from the dev loop and older briefs.
+local set_room_mapping = dispatch.commands["Set_Room_Mapping"]
+dispatch.commands["Set_Room_Mapping"] = function(params)
+	params = params or {}
+	if params["Control4 Room"] ~= nil and params.Room == nil then
+		params.Room = params["Control4 Room"]
+	end
+	return set_room_mapping(params)
+end
+
+-- Every beta 8 command merged into bridge/actions.lua answers until 2.0.
+for old in pairs(actions_mod.ALIASES) do
+	dispatch.commands[(old:gsub("%s+", "_"))] = function(params) state.actions:run_alias(old, params) end
+end
+
 -- Bridges Found (owner's answer D5; discovery research §2.4): the bridges
 -- that answered on the local network, never the internet. Searched for at
 -- the first load (3 s, 1 min, 5 min, then every 15 min until paired) and on
@@ -2763,6 +2865,7 @@ function OnDriverLateInit(dit)
 		end,
 		on_done = function(text) last_action(text) end,
 	}))
+	state.actions = new_actions()
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).
 	local r = state.lights:reconcile()
