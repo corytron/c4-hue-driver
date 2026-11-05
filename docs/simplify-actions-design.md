@@ -36,10 +36,19 @@ feature is reached, never whether it exists.
    that makes a later manual fix harder is wrong.
 3. **Visible and stoppable.** Every background task says what it did in
    Status, Attention or Last Action, and can be switched off by one setting.
-4. **Cheap.** Director allows four `C4:url` transfers at once, controller-wide
-   across all drivers; Hue limits requests per second; the house controller
-   runs OS 3.4.2 and must stay responsive. A task that costs requests names
-   its budget.
+4. **Cheap.** Hue limits requests per second, and the house controller runs
+   OS 3.4.2 and must stay responsive. A task that costs requests names its
+   budget. **Correction of 2026-11-04 (owner):** Director's four-transfer limit
+   is not a design constraint any more. It bit us only because the event
+   stream held a `C4:url` transfer for good; since #317 the stream is a
+   network connection (`bridge/netstream.lua`) and no `C4:url` transfer waits
+   for it. Do not size or limit a proposal by that number. What is still true
+   today: the REST requests (`bridge/http.lua`) still use `C4:url`, and
+   Director runs one `C4:url` transfer per host at a time
+   (`bridge/commands.lua`, `docs/design.md` "C4:url transfer scheduling"), so
+   a burst of requests queues behind each other. The owner's view is that the
+   TCP module could carry the REST calls too; a proposal may use that, saying
+   what it would cost to build and what it would remove.
 5. **Nothing regresses.** The driver still works on OS 3.x and 4.x, with the
    Hue Bridge v2 and the Bridge Pro, offline-first, and every existing device,
    pairing and Composer project survives the update in place.
@@ -130,8 +139,8 @@ rest of the checkout at the same time. Nobody runs `git`.
   `git`, no writes to GitHub, no edits outside your one file, no `tools/`
   runs that write to `build/`.
 - Hardware facts that matter: the house controller runs OS 3.4.2; the house
-  bridge is a Hue Bridge Pro; Director allows four `C4:url` transfers at once
-  (the event stream uses a network connection instead since #317); the
+  bridge is a Hue Bridge Pro; the event stream uses a network connection since #317, so the old
+  four-transfer limit no longer shapes the design (see principle 4); the
   outside tester (Marc) owns motion sensors and a Hue Bridge v2.
 - Finish with a hand-back of at most 15 lines: your five strongest
   recommendations and the one decision you most need from the owner.
