@@ -260,7 +260,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("gone", bc4.sent[1].params.state)
 		assert.equal(2, fake.pump())
 		assert.equal("Scene deleted in Hue since " .. os.date("%Y-%m-%d %H:%M", now)
-			.. "; ON does nothing; re-link or Forget", scene.Properties["Status"])
+			.. "; ON does nothing; Link or Forget Device", scene.Properties["Status"])
 		assert.equal("Offline", scene.Properties["Online"])
 		assert.equal("4 scenes + 1 time-based on bridge, 1 imported, 5 new, 1 missing", S:summary())
 		assert.equal("1 scene missing from the bridge: Relax (device 2001, since " .. os.date("%Y-%m-%d", now)
@@ -359,8 +359,8 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 			.. "the Hue scene is listed under Add Scene again", last_action)
 		assert.equal(0, S:count())
 		assert.equal(0, #bc4.bindings)
-		assert.equal("Forgotten by the bridge (was Hue scene Savanna sunset). Delete this device in Composer, "
-			.. "or bind it again and use Link Devices", scene.Properties["Status"])
+		assert.equal("Forgotten by the bridge (was Hue scene Savanna sunset). Delete this device, "
+			.. "or bind it again and use Link Device on the Hue Bridge", scene.Properties["Status"])
 		assert.equal(F.scene_rids.savanna, S:picker_scenes()[#S:picker_scenes()].value, "listed under Add Scene again")
 	end)
 end)

@@ -77,20 +77,10 @@
 				<readonly>true</readonly>
 			</property>
 		</properties>
-		<actions>
-			<action>
-				<name>Adopt Hue Name</name>
-				<command>Adopt Hue Name</command>
-				<sort_order>1</sort_order>
-				<params/>
-			</action>
-			<action>
-				<name>Forget This Light</name>
-				<command>Forget This Light</command>
-				<sort_order>2</sort_order>
-				<params/>
-			</action>
-		</actions>
+		<!-- No actions since 1.2 (#334, docs/simplify-actions-design.md §1.2, D3):
+		     the Hue Bridge's Link Device, Forget Device and Resolve Names serve
+		     every device. Adopt Hue Name and Forget This Light still answer by
+		     command, as hidden aliases until 2.0 (§3.3). -->
 		<!-- Programming commands (docs/relative-level-design.md, #297): Composer lists
 		     them under the device in Programming as device specific commands
 		     [verified: FUND 15/_7], and Director hands each to ExecuteCommand under

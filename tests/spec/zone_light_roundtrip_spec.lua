@@ -292,7 +292,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		event(F.events.zone_deleted)
 		assert.equal("gone", sent_params(bc4, "HUE_CONFIGURE").state)
 		fake.pump()
-		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; re-link or Forget",
+		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; Link or Forget Device",
 			light.Properties["Status"])
 		assert.equal("Offline", light.Properties["Online"])
 		assert.equal("1 zone + 2 rooms on bridge, 1 imported, 2 new, 1 missing", Z:summary())

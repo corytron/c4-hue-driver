@@ -127,24 +127,15 @@
 				<readonly>false</readonly>
 			</property>
 		</properties>
+		<!-- One action since 1.2 (#334, docs/simplify-actions-design.md §1.2): a
+		     toggle that checks programming without a sensor, kept in release
+		     builds. Refresh From Bridge, Test Motion and Test No Motion still
+		     answer by command, as hidden aliases until 2.0 (§3.3). -->
 		<actions>
 			<action>
-				<name>Refresh From Bridge</name>
-				<command>Refresh From Bridge</command>
+				<name>Test Motion Programming</name>
+				<command>Test Motion Programming</command>
 				<sort_order>1</sort_order>
-				<params/>
-			</action>
-			<!-- Kept in release builds: they check programming without a sensor. -->
-			<action>
-				<name>Test: Motion</name>
-				<command>Test Motion</command>
-				<sort_order>2</sort_order>
-				<params/>
-			</action>
-			<action>
-				<name>Test: No Motion</name>
-				<command>Test No Motion</command>
-				<sort_order>3</sort_order>
 				<params/>
 			</action>
 		</actions>

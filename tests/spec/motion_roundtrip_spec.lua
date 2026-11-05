@@ -562,7 +562,7 @@ describe("motion round trip", function()
 			assert.same({}, bc4.bindings)
 			assert.is_nil(bc4.persist.hue_motion[M.devices.porch])
 			assert.equal("Forgotten by the bridge (was Hue motion sensor Porch sensor)", sensor.Properties["Status"])
-			assert.equal("Delete this device in Composer, or bind it again and use Link Devices",
+			assert.equal("Delete this device, or bind it again and use Link Device on the Hue Bridge",
 				sensor.Properties["Last Action"])
 			assert.equal("No", sensor.Properties["Online"])
 			assert.same({}, contact(sensor))
