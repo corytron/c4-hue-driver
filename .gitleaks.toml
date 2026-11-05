@@ -60,6 +60,9 @@ keywords = ["001788"]
 description = "The documented placeholder ids: CONTRIBUTING.md's, Signify's documentation examples and the ids of the invented test fixtures"
 regexes = [
     '''(?i)^001788(?:fffe123abc|fffe25b8f8|fffe100491|0000abcdef|fffe000000|fffe456def)$''',
+    # An invented "other bridge" of tests/spec/drivers_spec.lua's key re-check
+    # spec (#334, commit b8bd87d): no real bridge.
+    '''(?i)^001788fffe999999$''',
 ]
 
 # Any IPv4 literal that is not a documented placeholder or a textbook example.
