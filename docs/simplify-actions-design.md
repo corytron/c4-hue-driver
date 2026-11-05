@@ -1,7 +1,7 @@
 # Simplifying the drivers: fewer actions, background tasks instead of clicks (#334)
 
-Status: proposal ready for the owner's decisions (section 1.7), 2026-11-04.
-Nothing in `src/` changes until they are answered.
+Status: decided by the owner on 2026-11-05 (section 1.8); the build is 1.2.
+The two-way names (D6) and local discovery (D5) get their edge-case research before code.
 
 ## 0. Contract of the research phase
 
@@ -308,3 +308,20 @@ Each has a recommended answer; one word decides it.
 | D8 | The hourly key re-check may present a rejected key again (today only Test Connection does)? | yes |
 | D9 | One dev build on the house (through the Windows session, when it is free) to test folders and multi-pick in the pickers? | yes |
 | D10 | The small fixes of 1.5 in 1.1 beta 8 now? | yes |
+
+### 1.8 The owner's answers (2026-11-05)
+
+Where this section and the text above disagree, this section wins.
+
+| # | Answer | What changes above |
+| --- | --- | --- |
+| D1 | **Build now, ship as 1.2** after 1.1 is released. | None. |
+| D2 | **Import All New stays its own button**: 9 bridge actions. | None. |
+| D3 | **The Hue Light and Hue Scene devices have no actions.** | None. |
+| D4 | **Always on, no switch.** | The Background Tasks setting of 1.3 and 1.4 is dropped. Each job still writes Last Action or Attention, and Debug Mode logs every run, so support can tell what ran. |
+| D5 | **Local only; internet reliance is always a bad choice.** When the driver is first loaded it finds the bridges on the network and lets the installer pick one; afterwards it finds the paired bridge again by itself when its address changes. | No Signify discovery service, not even as a fallback. Local means only: mDNS first (the dev build of D9 tests whether answers reach the driver), and if mDNS cannot work on Director, a bounded probe of the controller's subnet for the known bridge id (unauthenticated `GET /api/config`, under the TLS check). A new picker row lists the bridges found (name, model, id); choosing one sets the address and opens the pairing window. If nothing local works, Attention says the bridge is missing. |
+| D6 | **Two-way names for lights, scenes and motion sensors** (not rooms): a rename in Composer renames the thing on the Hue bridge too, and a rename in Hue renames the Control4 device, automatically, so the two never drift. | Replaces Names From Hue (Ask/Follow) and most of Resolve Names: names sync both ways by themselves. Resolve Names stays only for what cannot sync (a name Hue refuses, such as too long or a duplicate scene name in a room) and for the first sync of devices whose names differ at the update. Rooms keep the hand mapping of Set Room Mapping. Edge cases first (CLAUDE.md): both sides renamed at once (Control4 wins: it is the source of truth), Hue's name length limit, duplicate names, echo loops, renames while the bridge is offline, zone lights. |
+| D7 | **Automatic re-link when the MAC matches**: the same physical bulb back with new Hue ids (a bridge reset or swap, a delete and re-add) re-links its old device by itself and says so. A truly new bulb is only suggested, when it carries the same name in the same Hue room. | One delete-and-re-add test on the house first confirms the MAC survives (part of D9's dev build). |
+| D8 | **Yes**: the rejected key is re-checked automatically (5 min, 15 min, 1 h, then hourly). | None. |
+| D9 | **Yes**: one dev build on the house through the Windows session, once the Modern Forms work frees it, to test picker folders, mDNS answers and the bulb re-add of D7. | None. |
+| D10 | **Yes**: the four small fixes of 1.5 go into 1.1 beta 8 now. | None. |
