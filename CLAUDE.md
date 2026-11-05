@@ -25,7 +25,7 @@ Custom Control4 DriverWorks driver that controls Philips Hue lighting through th
 - **Research agents are read-only** and write one new file under `docs/` (for example a design for a new transport), citing the SDK doc file for every API claim.
 - Typical split for a feature: VM-side tooling (Python) / driver-side Lua module plus its spec / changes to existing modules plus their specs / a design or research document. Integration into `driver.lua`, `driver.xml`, `tools/build.sh` and `CLAUDE.md` stays with the coordinator.
 - Don't spawn for quick things (one file, a handful of edits); do it inline. Everything larger is split.
-- Spawn every agent at the highest effort (`effort: "max"`; the owner calls it "ultracode"), whatever the task.
+- Spawn every agent as Opus 5.5 at `effort: "xhigh"` (owner, 2026-11-04: "Opus extra", not `max`; the older "ultracode" meant `max`), whatever the task.
 - While agents run, the coordinator does the integration pieces nobody else owns (`driver.lua`, `driver.xml`, `tools/build.sh`, `CLAUDE.md`) and verifies through the dev loop, rather than waiting idle.
 
 ## Environment

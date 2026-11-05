@@ -165,6 +165,10 @@ are dated research; what was built from them is in the contracts and
 - [`list-rows-design.md`](list-rows-design.md): one wording for the bridge's
   bulk actions (Import All New …) and one format for its four list rows
   (2026-10-28, #325).
+- [`simplify-actions-design.md`](simplify-actions-design.md): fewer actions
+  and more background tasks (2026-11-04, #334): the contract of the research
+  phase, the inventory of the 39 actions, the verdict vocabulary, and, once
+  the seven `simplify-research-*.md` files exist, the merged proposal.
 - [`prerelease-design.md`](prerelease-design.md): prereleases for testers
   (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
   from `main` like every release, their notes, the one list of packages, the
