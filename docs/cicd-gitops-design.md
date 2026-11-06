@@ -114,7 +114,7 @@ Four jobs; **their `name:` strings are the required status checks on
    then `tools/check.sh --strict --only lua-lint lua-test`.
    Cache `~/.luarocks` and `/usr/local/lib/luarocks` keyed on the workflow
    file if it saves time; otherwise leave it.
-2. `Build the three .c4z packages`: as today (`needs: test`, full-depth
+2. `Build the .c4z packages` (named `Build the three .c4z packages` until #391): as today (`needs: test`, full-depth
    checkout, packager fetched at build time at its pinned commit, §5.5,
    LICENSE and NOTICE in each package, artifact upload), plus
    `tools/build.sh` output `build/manifest.json`

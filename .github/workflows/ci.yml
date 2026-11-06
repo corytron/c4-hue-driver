@@ -69,7 +69,7 @@ jobs:
   # The name is a required status check on main, so it keeps its words; the
   # job builds and checks one package per src/<driver>/driver.xml, however many.
   build:
-    name: Build the three .c4z packages
+    name: Build the .c4z packages
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20

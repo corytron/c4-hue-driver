@@ -132,7 +132,7 @@ PSScriptAnalyzer for the `powershell` check.
 names. A check whose tool is not installed is reported as `skip` and does
 not fail the run; CI runs the same script with `--strict`, where a skip is a
 failure, in four jobs whose names are the required checks on `main`: *Lint
-and test (Lua 5.1)* (`lua-lint`, `lua-test`), *Build the three .c4z
+and test (Lua 5.1)* (`lua-lint`, `lua-test`), *Build the .c4z
 packages* (after the Lua job: `tools/build.sh`, then a check that every
 package carries `LICENSE` and `NOTICE` and that `build/manifest.json`
 describes them), *Tooling
