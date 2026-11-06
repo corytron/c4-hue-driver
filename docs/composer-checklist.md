@@ -25,7 +25,7 @@ was checked; repeat one on 1.2 through the action that replaced it.
   Since build 259 (2026-10-24, 23:11) a release reaches the house from
   GitHub (`docs/release-checklist.md`, "Deploy to the house"): `tools/deploy.py
   start` writes the brief, and the Windows Claude session downloads the
-  three files of the release from their GitHub URLs (checksums checked)
+  four files of the release from their GitHub URLs (checksums checked)
   and installs them (step 1). A development build goes on the house only
   when the developer asks for a test (dev build 309 since 2026-10-25 03:24,
   for issue #40), and a release replaces it afterwards (issue #228).
@@ -63,10 +63,10 @@ device for a single lamp, and the switches bound as above.
 ## A. Install and update
 
 1. Driver » "Add or Update Driver or Agent…", select `hue_bridge.c4z`,
-   `hue_light.c4z` and `hue_scene.c4z` of the same build, Open. Expect
+   `hue_light.c4z`, `hue_motion.c4z` and `hue_scene.c4z` of the same build, Open. Expect
    "Update Succeeded: Drivers or agents were successfully updated:
-   hue_bridge.c4z, hue_light.c4z, hue_scene.c4z", and within a minute every
-   Hue device showing the new `Driver Version`. All three files belong in the
+   hue_bridge.c4z, hue_light.c4z, hue_motion.c4z, hue_scene.c4z", and within a minute every
+   Hue device showing the new `Driver Version`. All four files belong in the
    project even with no device of a type: the bridge creates lights and
    scenes from them (Add Light, Add Scene; from 1.2 Import All New and Add
    From Hue). Never add a Hue Light or Hue Scene

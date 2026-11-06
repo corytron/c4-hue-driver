@@ -14,6 +14,12 @@ listed.
 
 ## Unreleased
 
+### Changed
+- The project's GitHub page names all four drivers: the Download list links
+  Hue Motion too, motion sensors are no longer called a beta feature, and the
+  security policy, contributing guide and checklists count four packages and
+  eight release files (#389).
+
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
 ### Added

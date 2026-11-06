@@ -197,7 +197,7 @@ programs spells it out. A binding can still be made from the bridge with
 
 Installing a release (since 2026-10-24, round 34): `tools/deploy.py start`
 writes `build/release/<tag>/BRIEF.md` (`docs/release-checklist.md`,
-"Deploy to the house") and the coordinator sends it as it is: the three
+"Deploy to the house") and the coordinator sends it as it is: the four
 GitHub download URLs and their sha256, the PowerShell that fetches them
 into `C:\c4-hue\drivers\<tag>\` and checks them with `Get-FileHash`, the
 Composer steps, what to read back, and the standing-approval sentence. The
@@ -207,7 +207,7 @@ Agent…", in place (approval per rule 8), and reads back every device's
 (s)`, `Debug Mode`, `Status` and `Attention`; the coordinator records the
 result with `tools/deploy.py done` or `failed`. A dev build or a
 feature-branch test build is the exception (`CLAUDE.md`, Deploy): the
-coordinator serves the three `.c4z` from `build/release/` on port 8090
+coordinator serves the four `.c4z` from `build/release/` on port 8090
 (`python3 -I -m http.server 8090 --bind 0.0.0.0 --directory
 build/release`, stopped afterwards), puts their sha256 in the brief, and
 records the install with `tools/deploy.py record --no-manifest`.

@@ -52,7 +52,7 @@ findings as comments), and `docs/status.md` sums them up.
 
 ## 1. Dev loop on the house (dev build of the bridge)
 
-Build the three `--dev` files with `tools/build.sh --dev` from the commit
+Build the four `--dev` files with `tools/build.sh --dev` from the commit
 under test and install them through the Windows session the way `CLAUDE.md`
 (Deploy) describes for a dev build: served from `build/release/` on port
 8090, briefed with their sha256, recorded afterwards with `python3
@@ -140,7 +140,7 @@ calls the old names keeps working, and step 11 checks that it does:
 
 ## 2. Release build on the house (Windows session, Composer)
 
-Install the three release files from the GitHub release through
+Install the four release files from the GitHub release through
 `tools/deploy.py start` and the brief it writes ("Deploy to the house"
 below); no "Restart Director?" unless a capability changed (then the owner
 reboots the controller). Read:
@@ -167,7 +167,7 @@ reboots the controller). Read:
    Version at once, `Forget Device` with Confirm "Yes, forget", delete: as
    in round 25 (`docs/composer-remote.md`), with the 1.2 actions.
 5. The Documentation tab opens and shows the manual's title and the
-   chapter list (and the three device pages).
+   chapter list (and the three device pages: light, scene and motion).
 6. The Lua tab of a device during the install: no `[ERROR]` line.
 7. The bridge's `Attention` does not read `TLS check failed: …` and
    `Status` reads `Paired`. What the TLS self-check proves (#53; the
@@ -197,7 +197,7 @@ reboots the controller). Read:
 
 Once per new controller OS version, before a build is called good on it:
 
-1. Install the three `--dev` files as in section 1 and run the bridge's
+1. Install the four `--dev` files as in section 1 and run the bridge's
    CA pinning check once: since 1.2 (#334) an entry of the dev build's
    Diagnostics list, before that the `Check CA Pinning` action; `tools/devctl.py
    run "Check CA Pinning"` reaches it either way (`Status` reads `Checking CA pinning
@@ -331,7 +331,7 @@ automatic, since the controller has no install API. After the release exists:
    attestation that fails. `--tag` names another release than
    `deploy/house.yaml`'s.
 4. **Send the brief.** `BRIEF.md` goes to the Windows Composer session as it
-   is (`docs/composer-remote.md`): the three GitHub download URLs, each
+   is (`docs/composer-remote.md`): the four GitHub download URLs, each
    file's sha256, the PowerShell that fetches them into
    `C:\c4-hue\drivers\<tag>\` and checks them with `Get-FileHash`, the
    Composer steps (Driver ▸ Add or Update Driver or Agent…, all three at

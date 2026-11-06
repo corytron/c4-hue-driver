@@ -14,7 +14,7 @@ the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
 
 ## Start here
 
-- [`status.md`](status.md): what runs on the author's house, what the three
+- [`status.md`](status.md): what runs on the author's house, what the four
   drivers do today, what was verified on hardware, and what is open.
 - [`design.md`](design.md): the engineering notebook. Targets (OS versions,
   Lua 5.1), the three-driver structure, networking and the certificate

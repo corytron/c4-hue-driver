@@ -23,11 +23,12 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 
 ## Download
 
-The three drivers of the latest release; install all three, from the same
+The four drivers of the latest release; install all four, from the same
 release:
 
 - [**hue_bridge.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_bridge.c4z): Hue Bridge
 - [**hue_light.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_light.c4z): Hue Light
+- [**hue_motion.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_motion.c4z): Hue Motion (motion sensors and MotionAware areas)
 - [**hue_scene.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_scene.c4z): Hue Scene
 
 Their checksums are in [`SHA256SUMS.txt`](https://github.com/corytron/c4-hue-driver/releases/latest/download/SHA256SUMS.txt); the
@@ -58,13 +59,13 @@ has the release notes and the provenance attestations. How to install them:
   turns its room or zone off, and the slider brightens or dims the room or
   zone while keeping the scene's look. On a time-of-day scene, on starts the
   schedule.
-- **Motion sensors (1.1 beta).** A fourth driver, **Hue Motion**, makes each
+- **Motion sensors (since 1.1).** A fourth driver, **Hue Motion**, makes each
   Hue motion sensor, and each MotionAware area of a Hue Bridge Pro, a stock
   Control4 motion sensor: its icon, "senses motion" programming and history,
   plus light level, temperature (also as an output for a thermostat or a
-  temperature display), battery and an occupancy hold time. In the 1.1
-  prereleases only, for testers; it changes nothing on the Hue side except,
-  from 1.2, a sensor's name when you rename its device in Composer.
+  temperature display), battery and an occupancy hold time. It changes
+  nothing on the Hue side except, from 1.2, a sensor's name when you rename
+  its device in Composer.
 - **Keypads.** Hue Light and Hue Scene devices offer Top, Bottom and Toggle
   Button Links: tap for on and off, hold for Hue's own smooth dimming, and the
   keypad LEDs follow the device, including changes made on the Hue side. The
@@ -120,7 +121,7 @@ nine):
 ## What you need
 
 - A Control4 controller on **OS 3.3.0 or newer** (the `minimum_os_version` of
-  the three drivers) and Composer Pro. Written and tested on **OS 3.4.2 with
+  the four drivers) and Composer Pro. Written and tested on **OS 3.4.2 with
   Composer Pro 3.4.2**; OS 4 has not been tried. Where the drivers rely on
   behaviour measured on OS 3.4.2 (the event stream's own connection queue,
   the controller applying the driver's CA bundle), they check it at every
@@ -144,9 +145,10 @@ nine):
 
 ## What it is not
 
-- No Hue motion sensors, buttons, dimmer switches or entertainment areas as
-  Control4 devices (a Hue dimmer's effect on the lights still shows up).
-- No Hue automations or MotionAware; what they do to the lights shows up.
+- No Hue buttons, dimmer switches or entertainment areas as Control4 devices
+  (a Hue dimmer's effect on the lights still shows up); motion sensors and
+  MotionAware areas are, through Hue Motion.
+- No Hue automations; what they do to the lights shows up.
 - One bridge per project; a second Hue Bridge device is not supported.
 - Hue's whole-home group ("all lights") is not offered as a light; zones and
   rooms are, one at a time.
@@ -163,27 +165,27 @@ Take the release marked **Latest** on the
 (<https://github.com/corytron/c4-hue-driver/releases/latest> always points at
 it). Releases are numbered `X.Y` and tagged `vX.Y`; each X.Y carries its own
 codename from Star Wars: Andor, a major character for an X.0 and a lesser one
-for a point release: 1.0 is **"Cassian"**, 1.1 **"Brasso"**.
+for a point release: 1.0 is **"Cassian"**, 1.1 **"Brasso"**, 1.2 **"Taramyn"**.
 Prereleases for testers (`X.Y-beta.N`) are on the same page, marked
 **Pre-release**; they are never **Latest**, and the Download links above
-never serve them. The 1.1 prereleases carry a fourth driver,
-`hue_motion.c4z`; install all four of a prerelease together. What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
+never serve them. Install all four drivers of a release, or of a
+prerelease, together. What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
 release's notes on GitHub and the end of each driver's Documentation tab
 repeat. Every release is built and attached by the repository's Release workflow,
-never by hand, and carries seven files:
+never by hand, and carries eight files:
 
-- `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`: the three drivers.
-  Download all three; they must come from the same release.
+- `hue_bridge.c4z`, `hue_light.c4z`, `hue_motion.c4z`, `hue_scene.c4z`: the
+  four drivers. Download all four; they must come from the same release.
 - `SHA256SUMS.txt`: the checksum of each package.
 - `manifest.json`: what was built: `tag` and `version`, `build` (the **build
-  number**, the integer the three drivers show as **Driver Version** in
+  number**, the integer the four drivers show as **Driver Version** in
   Composer once installed; Control4 needs an integer there, so the files
-  carry the build number while the release is called 1.0), `commit`,
+  carry the build number while the release is called X.Y), `commit`,
   `built_at`, `dev` (`false` in a release), and each package's `sha256` and
   size. The release notes name the build number too.
 - `attestations.sigstore.json`: the Sigstore bundle of the build provenance
   the Release workflow signed for the packages (one attestation naming all
-  three).
+  four).
 - `hue-drivers.intoto.jsonl`: the same provenance as in-toto JSON lines.
 
 A later release of the same version moves the tag and replaces the attached
@@ -191,7 +193,7 @@ files with a newer build; Driver Version tells the builds apart. To check
 what you downloaded:
 
 ```sh
-sha256sum -c SHA256SUMS.txt                                          # the three packages
+sha256sum -c SHA256SUMS.txt                                          # the four packages
 gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver \
   --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml   # GitHub CLI 2.102.0 or newer; repeat per package
 ```
@@ -205,7 +207,7 @@ instead of the copy on GitHub. Older GitHub CLI versions match
 
 ### Build from source
 
-`tools/build.sh` packages the three drivers with Snap One's public driver
+`tools/build.sh` packages the four drivers with Snap One's public driver
 packager, which you clone yourself (nothing of Snap One's is vendored here):
 
 ```sh
@@ -243,12 +245,12 @@ checks.
 ## Install in Composer Pro
 
 The **Documentation** tab of the **Hue Bridge** device holds the full owner's
-manual (`src/hue_bridge/www/documentation.html`); a Hue Light or Hue Scene
-device's Documentation tab is a one-page summary of that device. The manual's
+manual (`src/hue_bridge/www/documentation.html`); a Hue Light, Hue Scene or
+Hue Motion device's Documentation tab is a one-page summary of that device. The manual's
 chapters 3 to 7 and 9 are the long version of this list.
 
-1. Copy the three `.c4z` files to the computer that runs Composer Pro.
-2. **Driver > Add or Update Driver or Agent...**, select all three files at
+1. Copy the four `.c4z` files to the computer that runs Composer Pro.
+2. **Driver > Add or Update Driver or Agent...**, select all four files at
    once (hold Ctrl) and open them. Composer answers *Update Succeeded*.
 3. In System Design, select the room for the bridge, open the Items pane's
    **Search** tab and type `Hue Bridge`. Pick the **Hue Bridge** by
@@ -390,7 +392,7 @@ never paste one. Pull requests are welcome; see
 ## Repository layout
 
 ```
-src/common/        shared modules: dispatch and log (all three drivers), device (what the
+src/common/        shared modules: dispatch and log (all four drivers), device (what the
                    light and scene drivers share: proxy, keypad machine and settings, LEDs,
                    binding re-check), devloop (development builds only); build.sh adds
                    build_version.lua, and the dev key to a development build
@@ -456,7 +458,7 @@ The author's house is the one installation, and it is run from the repository
    one issue labelled `deploy` open while they differ.
 5. `python3 tools/deploy.py start` downloads the release, verifies the
    checksums, the manifest and the attestations, records the deployment and
-   writes a brief; the author's Windows Composer session installs the three
+   writes a brief; the author's Windows Composer session installs the four
    files from the GitHub release URLs through *Add or Update Driver or
    Agent...* (the controller has no install API, so this click is never
    automatic); `python3 tools/deploy.py done` records the result, which
@@ -468,7 +470,7 @@ this file.
 ## Status
 
 [`docs/status.md`](docs/status.md) is the one-page current state: what the
-three drivers do today, what was verified on hardware (pairing, the event
+four drivers do today, what was verified on hardware (pairing, the event
 stream and resync, import and the whole light lifecycle, scenes, keypad taps
 and holds with LEDs, the keypad settings, time-of-day scenes, zone lights
 from the phone and the keypad, a light staying bound through a controller
