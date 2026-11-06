@@ -441,7 +441,7 @@ The author's house is the one installation, and it is run from the repository
 ([`docs/cicd-gitops-design.md`](docs/cicd-gitops-design.md)):
 
 1. A change is a pull request. Four checks must pass before it can merge:
-   *Lint and test (Lua 5.1)*, *Build the three .c4z packages*, *Tooling
+   *Lint and test (Lua 5.1)*, *Build the .c4z packages*, *Tooling
    checks (shell, Python, XML, workflows)* and *Secrets and private data*;
    the branch must be up to date with `main` and every review conversation
    resolved. `main` takes nothing else, and the rule binds the maintainer
