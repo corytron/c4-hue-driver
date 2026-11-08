@@ -1,10 +1,33 @@
-# Status of the Hue driver (2026-11-07)
+# Status of the Hue driver (2026-11-08)
 
-**Now (2026-11-05).** **1.2 "Taramyn", build 488, is released** (Latest;
-[Discussion #387](https://github.com/corytron/c4-hue-driver/discussions/387))
-and runs on the house (`deploy/house.yaml`; `python3 tools/deploy.py status`
-says whether it is installed). 1.1 "Brasso", build 447, was released the
-same day ([Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382)).
+**Now (2026-11-08).** **1.3 "Kerri", build 539, is released** (Latest;
+[release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.3);
+agent reports and the hardware round in
+[Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401))
+and goes onto the house (`deploy/house.yaml`; `python3 tools/deploy.py status`
+says whether it is installed). What 1.3 changes is in `CHANGELOG.md`:
+- **Holds:** a hold on a scene, zone light or room light ramps instead of
+  jumping (#249).
+- **Motion:** a motion hold resumes after a restart (#371).
+- **ON and TOGGLE:** they follow Default On Brightness (#233).
+- **Fixes:** #243, #246, #308 and #329.
+- **Under the hood:** the bridge driver's main chunk is down from 199
+  locals to 137 (#373), and dev-loop reloads clean up after themselves
+  (#247, #376).
+
+The dev build 538 checks passed on the house. The owner chose to ship
+without the lamp tests (2026-11-08), so these still need checking in
+normal use:
+- the group holds, including a time-based scene that keeps running through
+  a stepped hold;
+- the turn-on guard;
+- ON at Default On Brightness;
+- the resumed motion hold.
+
+Before 1.3: **1.2 "Taramyn", build 488,** was released on 2026-11-05
+([Discussion #387](https://github.com/corytron/c4-hue-driver/discussions/387)),
+and 1.1 "Brasso", build 447, the same day
+([Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382)).
 1.2 (#334, PR #353, contract `docs/simplify-actions-design.md`) was checked on
 the house in two dev rounds:
 - dev 467 ([Discussion #369](https://github.com/corytron/c4-hue-driver/discussions/369));
@@ -473,26 +496,8 @@ What was left is under "Open" (#38, #61, #62).
 Every open item is an issue (`gh issue list --state open`); this list says
 where each stands on 2026-11-07.
 
-- **1.3 "Kerri"** (#398): its three pieces are merged on `main` but not yet
-  released. The agents' reports and the review are in
-  [Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401).
-  - **#373** (PR #400, build 514 on `main`): the bridge driver's main chunk
-    is down from 199 locals to 137, with seven groups moved into `bridge/`
-    modules. A read-only review found no change in behaviour. The new
-    `lua-limits` check fails above 180 locals or 50 upvalues in any function.
-  - **#249** (PR #402, build 514): a hold on a scene, zone light or room light
-    ramps lamp by lamp with up to 10 lamps on. Above that, or while a
-    time-based or moving scene runs on the group, it moves in steps of a
-    second (`docs/group-hold-design.md`).
-  - **#371** (PR #403, build 506): after a restart, a motion hold whose end
-    the device saw resumes only the time that is left
-    (`docs/motion-hold-restart-design.md`).
-  - **Next:** a hardware round on the house before the release. It covers:
-    - a lamp-by-lamp hold and a stepped hold, each stopping where released;
-    - a hold from off;
-    - a time-based scene that keeps running through a stepped hold;
-    - a motion hold that resumes across a driver update;
-    - the refactored bridge (pairing, outage, Bridges Found).
+- **1.3 "Kerri"** (#398) is released (build 539). Its lamp behaviour has not
+  been tested on the house; see "Now".
 - **Not yet exercised on the house from 1.2:** the write paths of the new
   actions, the re-link by radio and the bridge-away Attention items (see
   "Now").
@@ -500,8 +505,6 @@ where each stands on 2026-11-07.
   research is done (`docs/hue-automations-research.md`,
   `docs/edge-cases-automations.md`, draft PR #285); the contract and the
   owner's decisions come next.
-- **#233** Decided 2026-11-08: ON and TOGGLE follow Default On Brightness
-  (PR for 1.3).
 - **#65** Read the Event Stream reconnect count and the event rate after a
   day on a build.
 - **#38** The owner's pass on the phone and keypads, and saving and backing

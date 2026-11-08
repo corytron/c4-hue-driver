@@ -14,6 +14,8 @@ listed.
 
 ## Unreleased
 
+## 1.3 "Kerri", build 539 (2026-11-08)
+
 ### Changed
 - ON and Toggle (a tile tap, Turn On in programming) now turn a Hue Light,
   zone light or room light on at its Default On Brightness, like a keypad
