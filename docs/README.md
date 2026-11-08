@@ -127,6 +127,12 @@ are dated research; what was built from them is in the contracts and
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
+- [`tls-probe-bindings-research.md`](tls-probe-bindings-research.md): the
+  bindings the network connection's TLS check leaves in Director: the one
+  documented call that can delete them (`C4:RemoveDynamicBinding`, assumed
+  for network bindings until the house shows it), why nothing documented
+  makes Director retry them, why two probes per Director version is the
+  floor, the fix and the checks for the house (2026-11-08, #329).
 
 ## Checklists and process
 

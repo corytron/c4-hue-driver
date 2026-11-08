@@ -283,6 +283,34 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal("1 of 2 are not in the room their Hue room maps to: Lamp is in Living Room; Hue says "
 			.. "Garage → drag it to Garage in Composer if you want it there", fake.last_action(bridge))
 
+		-- #308, as seen on the house: the lamp goes off (Hue keeps its 50 %),
+		-- a turn-on at 30 % follows, and the bridge's first event after it
+		-- carries the on alone, so the light's cache still says 50 %; the 30
+		-- comes in the next event. The proxy goes from 0 to 30, never via 50.
+		local function light_event(id, fields)
+			fields.id, fields.type = F.rids.living, "light"
+			local ev = json.encode({ { creationtime = "2026-10-21T18:12:00Z", id = "evt-" .. id, type = "update",
+				data = { fields } } })
+			fake.as(bridge, function() stream_t:chunk("id: " .. id .. ":0\ndata: " .. ev .. "\n\n") end)
+			return fake.pump()
+		end
+		assert.equal(1, light_event(12, { on = { on = false } }))
+		light.C4.calls = {}
+		fake.as(light, light.ReceivedFromProxy, 5001, "SET_BRIGHTNESS_TARGET",
+			{ LIGHT_BRIGHTNESS_TARGET = "30", RATE = "1000" })
+		assert.equal(1, fake.pump(), "the HUE_SET")
+		assert.is_true(fire_fast_timers(bridge, 80) >= 1, "debounce timer")
+		put = bc4.last_transfer()
+		body = json.decode(put.data)
+		assert.same({ true, 30 }, { body.on.on, body.dimming.brightness })
+		fake.as(bridge, function()
+			put:respond(200, '{"data":[{"rid":"' .. F.rids.living .. '","rtype":"light"}],"errors":[]}')
+		end)
+		assert.equal(1, light_event(13, { on = { on = true } }), "a HUE_STATE with the on alone")
+		assert.same({}, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
+		assert.equal(1, light_event(14, { dimming = { brightness = 30.04 } }))
+		assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 30 } }, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
+
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the
 		-- binding goes, and Import All New Lights would skip it; Add Light
 		-- re-creates it in its mapped room and clears the tombstone.

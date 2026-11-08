@@ -30,6 +30,21 @@ listed.
   security policy, contributing guide and checklists count four packages and
   eight release files (#389).
 
+### Fixed
+- The network connection's TLS check now removes the test connections it
+  opened once it has answered, and once clears away those that earlier
+  versions left behind (#329).
+- A light's Hue Name row shows the lamp's name as the Hue app shows it (its
+  Hue device's name for a single-light lamp), and Event Stream reads
+  `Stopped: key rejected (HTTP 403)`, not `Stopped`, when the bridge refuses
+  the key at the stream address check (#246).
+- Hue Scene: a keypad hold started part-way up or down now moves the
+  scene's slider on Navigators at the same speed as the lights, instead of
+  more slowly (#243).
+- Hue Light: turning a light on from off no longer shows its old level for an
+  instant before the level asked for; a change made elsewhere at that moment
+  shows up at most a second after the ramp (#308).
+
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
 ### Added

@@ -807,15 +807,16 @@ end
 -- The name, the room label and the model are display names
 -- (util.display_name): the light shows them in its Hue Name, Hue Room and
 -- Model rows, and its own Adopt Hue Name renames to the name (security
--- review 2026-10-25 finding 8). The registry keeps the bridge's own.
-function lights.configure_params(_self, rid, entry)
+-- review 2026-10-25 finding 8). The registry keeps the bridge's own. The
+-- name is shown_name's (#246, below), absent when it is not known yet.
+function lights:configure_params(rid, entry)
 	local extra = { hue_room = util.display_name(entry.hue_room), id_v1 = entry.id_v1 }
 	if entry.state == "gone" then
 		extra.state = "gone"
 		extra.gone_since = entry.gone_since
 	end
 	local params = hue_model.registry_configure_params(rid, entry, extra)
-	params.name, params.model = owner.shown(params.name), owner.shown(params.model)
+	params.name, params.model = owner.shown(self:shown_name(rid, entry)), owner.shown(params.model)
 	return params
 end
 
@@ -1223,7 +1224,8 @@ function lights:on_light_item(item, kind)
 	end
 	local sent = 0
 	-- A rename (in Hue, or the echo of one sent from Composer) reaches the
-	-- device's Hue Name row at once, not at the next full read (§4 finding 13).
+	-- device's Hue Name row at once, not at the next full read (§4 finding 13),
+	-- when the row shows this name (shown_name: a single lamp's follows its device, #246).
 	if renamed and self:configure_changed(rid) and self:send_configure(rid) then
 		sent = 1
 	end
@@ -1630,8 +1632,8 @@ end
 -- rename that did not happen in Hue:
 --   - the light's own name: what earlier builds compared with, what their
 --     Adopt Hue Names renamed to and Accept Names As They Are recorded, and
---     what the light device's own Adopt Hue Name renames to (its Hue Name
---     row);
+--     what the light device's own Adopt Hue Name renamed to (its Hue Name
+--     row, which shows hue_name's since #246);
 --   - the device name the registry cached, while this run has not read the
 --     bridge's devices: right after a start the creation name falls back to
 --     the light's own name, not knowing whether the device has other lights.
@@ -1655,6 +1657,24 @@ function lights:hue_name(_rid, entry)
 	return entry.name
 end
 
+-- The name the light's Hue Name row shows, and a forgotten light is told
+-- (#246): hue_name's, because that is the lamp's name in the Hue app and the
+-- name the names sync compares the Composer name with, so the row, Resolve
+-- Names and the Hue app agree. Until this run has read the bridge's devices
+-- it is not known whether the lamp's device has other lights: when the
+-- device name the registry cached differs from the light's own, nil, and the
+-- light keeps the name it shows (st.name; a restart does not flicker it).
+function lights:shown_name(rid, entry)
+	if self.devices[entry.device_rid] == nil and entry.device_name ~= nil and entry.device_name ~= entry.name then
+		return nil
+	end
+	return self:hue_name(rid, entry)
+end
+
+function lights:told_name(entry)
+	return self:shown_name(nil, entry)
+end
+
 -- Where Hue keeps that name: the device for a single-light lamp (a motion
 -- sensor on the same device would share it, N15), else the light.
 function lights:name_source(rid, entry)
@@ -1668,9 +1688,9 @@ end
 -- The PUTs that give a light `name` on the bridge. A single-light lamp's
 -- device name and its light's own name are independent on the bridge
 -- [verified: house, 2026-11-05, docs/simplify-actions-design.md §2.3], and
--- both are read: the Hue app and this driver's creation name show the
--- device's, the light's own is the Hue Name row, the labels and every v1
--- client. So both are written, the device first (it decides; a refused
+-- both are read: the Hue app, this driver's creation name and the Hue Name
+-- row (#246) show the device's, the light's own is the labels' and every v1
+-- client's. So both are written, the device first (it decides; a refused
 -- light name is only logged, names.put_via); a light on a multi-light
 -- device has its own name only (N31, the house's test settled it).
 function lights:name_requests(rid, name)

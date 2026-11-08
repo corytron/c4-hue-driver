@@ -32,6 +32,7 @@
 - **Test 3, verification is real,** through `bridge/netcheck.lua`. A refused handshake is **silent**: Director reports neither ONLINE nor OFFLINE. So the check needs a positive control, and each probe on a binding id that was **never used before**. A reused id is only renamed by Director, and then either inherits the old connection (build 415: the "decoy" answered 43 ms after ONLINE) or does nothing (build 416).
   - Build 418: the decoy on a fresh 6100 was registered, then silent; the real CA on a fresh 6101 went online in 182 ms and answered. The verdict was pinned, and the stream connected on 6001.
   - A later reconnect used the remembered verdict: no probe, connected in 0.5 s.
+  - The probe bindings' end state (#329, `docs/tls-probe-bindings-research.md`): up to build 418 each probe id was disconnected and its address cleared, and the binding stayed in Director. Since the #329 fix each one is also removed with `C4:RemoveDynamicBinding` at the end of its probe, and the ids earlier runs left from 6100 up are removed once per controller at the end of the next check (the persisted mark `netcheck_removed_below`). That the call removes a binding made by `CreateNetworkConnection` is **[assumed]** until the house shows it; the result of the research's §5 checks goes here.
 
 ## 0.1 Who writes what
 

@@ -314,23 +314,101 @@ end
 -- A target sent to the bridge stays pending until a HUE_STATE carrying that
 -- field arrives, its fallback fires, or the proxy says stop; either way the
 -- proxy gets a CHANGED.
+--
+-- A turn-on from off also waits for its level (#308): Hue's first report
+-- after it can carry the level the lamp had before it went off (seen on the
+-- house: 70 % for 16 ms, then the 30 % asked for). While it waits, a
+-- report's on and brightness are held back, out of the cache and away from
+-- the proxy, when they would show the light on at neither the target
+-- (within a point: Hue reports its Zigbee level) nor a level on the way up
+-- to it (with a ramp only), or a level while the light still shows off. The
+-- rest of the report (colour, online) goes through, and so does an off.
+-- Held fields go under the next report that goes through (the target often
+-- comes alone, without the on). When the wait ends any other way they go
+-- into the cache as the bridge's word, and when the fallback ends it, at
+-- the ramp plus FALLBACK_MS (as long as the driver waits for any
+-- confirmation), they are reported: a change made elsewhere meanwhile is
+-- late by at most that, never lost.
+
+-- The level the proxy shows for a light on at `brightness` (Hue percent).
+local function on_level(brightness)
+	return state.to_proxy_brightness({ on = true, brightness = brightness })
+end
+
+-- Held fields into the cache; apply_hue's answer, nil when none were held.
+local function release(pending)
+	local held = pending.held
+	pending.held = nil
+	return held and state.apply_hue(st, held)
+end
+
 local function settle(kind)
-	if fallback[kind] then
-		fallback[kind].timer:Cancel()
+	local pending = fallback[kind]
+	if pending then
+		pending.timer:Cancel()
 		fallback[kind] = nil
+		release(pending)
 	end
 end
 
 -- `assume` applies the sent target to the cache and reports it; it runs when
--- the bridge has not confirmed within the ramp plus FALLBACK_MS.
-local function arm(kind, rate, assume)
+-- the bridge has not confirmed within the ramp plus FALLBACK_MS. `goal` is
+-- the level a turn-on from off waits for (nil otherwise); a report held back
+-- for it is reported then instead, as the bridge's word beats a guess.
+local function arm(kind, rate, assume, goal)
 	settle(kind)
-	local pending = { assume = assume }
+	local pending = { assume = assume, goal = goal, ramp = rate > 0 }
 	pending.timer = C4:SetTimer(rate + FALLBACK_MS, function()
 		fallback[kind] = nil
-		assume()
+		local changed = release(pending)
+		if not changed then
+			return assume()
+		end
+		log.debug("turn-on to %d %% unconfirmed after %d ms; showing what the bridge reported", goal,
+			rate + FALLBACK_MS)
+		report_brightness()
+		if changed.color then
+			report_color()
+		end
 	end)
 	fallback[kind] = pending
+end
+
+-- A HUE_STATE while a turn-on from off waits for its level: the params to
+-- apply, with the held fields under them when the report goes through, or
+-- without their on and brightness when these are held back too.
+local function hold_stale(params)
+	local pending = fallback.brightness
+	if not (pending and pending.goal) or (params.on == nil and params.brightness == nil) then
+		return params
+	end
+	local held = pending.held or {}
+	local merged = { on = params.on or held.on, brightness = params.brightness or held.brightness }
+	local on = device.to_bool(merged.on)
+	if on == nil then
+		on = st.on
+	end
+	local through = on == false and merged.on ~= nil -- an off always goes through
+	if on then
+		-- No level known at all (a plug never reports one): nothing to be stale.
+		local brightness = tonumber(merged.brightness) or st.brightness
+		local level = brightness and on_level(brightness)
+		through = not level or math.abs(level - pending.goal) <= 1 or (pending.ramp and level <= pending.goal)
+	end
+	local out = {}
+	for k, v in pairs(params) do
+		out[k] = v
+	end
+	if through then
+		pending.held = nil
+		out.on, out.brightness = merged.on, merged.brightness
+	else
+		pending.held = merged
+		out.on, out.brightness = nil, nil
+		log.debug("held back on=%s brightness=%s: the turn-on waits for %d %%", tostring(merged.on),
+			tostring(merged.brightness), pending.goal)
+	end
+	return out
 end
 
 -- SET_BRIGHTNESS_STOP / SET_COLOR_STOP: the proxy wants the transition closed
@@ -371,6 +449,9 @@ local function set_brightness(target, rate)
 		return
 	end
 	local current = state.to_proxy_brightness(st) or 0
+	-- From off, the level the turn-on waits for (#308); Hue raises a level
+	-- below the bulb's lowest to that.
+	local goal = st.on == false and target > 0 and on_level(math.max(target, st.min_dim or 0)) or nil
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = target,
@@ -390,7 +471,7 @@ local function set_brightness(target, rate)
 		if changed.color then
 			report_color() -- the turn-on carried a colour stored while off
 		end
-	end)
+	end, goal)
 	return true
 end
 
@@ -545,6 +626,7 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
 	end
+	params = hold_stale(params)
 	local changed = state.apply_hue(st, params)
 	-- Any report of a pending field settles the target, whatever the value:
 	-- the proxy heard CHANGING and must hear CHANGED.
