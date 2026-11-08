@@ -30,6 +30,11 @@ listed.
   security policy, contributing guide and checklists count four packages and
   eight release files (#389).
 
+### Fixed
+- Hue Scene: a keypad hold started part-way up or down now moves the
+  scene's slider on Navigators at the same speed as the lights, instead of
+  more slowly (#243).
+
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
 ### Added
