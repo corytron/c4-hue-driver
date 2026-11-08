@@ -310,9 +310,10 @@ local function remove(id)
 end
 
 -- NetDisconnect a probe id, clear its address and remove it, each call under
--- pcall; the id is never touched again. The clear stays before the removal:
--- where RemoveDynamicBinding does nothing to a network binding [assumed
--- possible, #329], the id is left as it was before #329.
+-- pcall; the id is never touched again. RemoveDynamicBinding removes a
+-- CreateNetworkConnection binding from Director's list [verified on the
+-- house 2026-11-08, OS 3.4.3, #329]; the clear stays before the removal, so
+-- a controller where it did nothing would keep the id as before #329.
 local function close(check, id)
 	check.open[id] = nil
 	last_close = now_ms()

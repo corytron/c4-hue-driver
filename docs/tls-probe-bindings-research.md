@@ -204,3 +204,15 @@ Steps 2–4 of §4 were built on `fix/tls-probe-bindings-329` as written, with o
 - **The addition: removing earlier runs' ids counts as a close for the 1.5 s gap** (`last_close`). `run()` cancels a check still in flight, and that cancel's tidy removes the leftovers. Without this rule the new decoy could follow that burst of removals by only what was left of an earlier gap. With it, no decoy is created less than 1.5 s after any removal. One side effect: a second run that finds the ids used up gives its answer 1.5 s later.
 - Logging: when every leftover is removed, one debug line reads `removed the probe bindings A to B left by earlier runs`. When some fail, one warning reads `N of the probe bindings A to B left by earlier runs could not be removed: …`.
 - `tests/helpers/fake_c4.lua` has `RemoveDynamicBinding` as in §4.3. `tests/spec/netcheck_spec.lua` covers the cases of §4.4, plus three more: the run's own copy of the mark while the store lags, an unusable mark (one that is not a whole number from 6100 up counts as 6100, and one past the counter removes nothing), and the gap after the leftovers when a run replaces a check.
+
+## 7. Verified on the house (2026-11-08)
+
+- With dev build 538, the check used probe bindings 6102 and 6103 and reached
+  `pinned`. `netcheck_removed_below` moved to 6104, and no removal raised.
+  After the 1.3 release (build 539), Director's binding list for the bridge
+  no longer held any 6100-range id.
+- The two 1.0-era leftovers, 6002 and 6003, were removed once by hand from
+  the bridge's Lua tab (step 5 of the recommendation). `RemoveDynamicBinding`
+  returned without error, and Director's list then held only binding 1 and
+  the stream's 6001. So the call removes a `CreateNetworkConnection` binding,
+  which section 1 could only assume.
