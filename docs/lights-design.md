@@ -221,6 +221,10 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   `LIGHT_BRIGHTNESS_TARGET`, `RATE` } [verified], then
   `LIGHT_BRIGHTNESS_CHANGED` when the matching `HUE_STATE` arrives, or
   after `rate + 1000 ms` if it never does (so the UI never sticks).
+  Since 1.3 (#308), while a turn-on from off waits for its target, a
+  report that shows the light on at another level (the lamp's previous
+  brightness, seen for about 16 ms on the house) is held back until the
+  target arrives or that deadline passes; an off always goes through.
 - `SET_COLOR_TARGET` with xy and mode [assumed param keys:
   `LIGHT_COLOR_TARGET_X`, `LIGHT_COLOR_TARGET_Y`,
   `LIGHT_COLOR_TARGET_COLOR_MODE`, `LIGHT_COLOR_TARGET_RATE`; the docs print

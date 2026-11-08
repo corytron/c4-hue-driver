@@ -30,6 +30,11 @@ listed.
   security policy, contributing guide and checklists count four packages and
   eight release files (#389).
 
+### Fixed
+- Hue Light: turning a light on from off no longer shows its old level for an
+  instant before the level asked for; a change made elsewhere at that moment
+  shows up at most a second after the ramp (#308).
+
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
 ### Added
