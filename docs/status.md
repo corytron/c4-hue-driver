@@ -473,16 +473,26 @@ What was left is under "Open" (#38, #61, #62).
 Every open item is an issue (`gh issue list --state open`); this list says
 where each stands on 2026-11-07.
 
-- **1.3 "Kerri"** (#398), started 2026-11-07, each piece on its own branch
-  and PR:
-  - **#373** The bridge's `driver.lua` is at 199 of Lua 5.1's 200 locals in
-    its main chunk. Whole groups move into modules, and a check fails when
-    the count climbs again. This goes first.
-  - **#249** Holds on scenes, zone lights and room lights jump to the end of
-    the range, because Hue ignores `dynamics.duration` on grouped_light dims.
-    The owner picks one of the issue's three options.
-  - **#371** After a restart, the motion occupancy hold starts again from
-    the first read. The edge cases are settled first.
+- **1.3 "Kerri"** (#398): its three pieces are merged on `main` but not yet
+  released. The agents' reports and the review are in
+  [Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401).
+  - **#373** (PR #400, build 514 on `main`): the bridge driver's main chunk
+    is down from 199 locals to 137, with seven groups moved into `bridge/`
+    modules. A read-only review found no change in behaviour. The new
+    `lua-limits` check fails above 180 locals or 50 upvalues in any function.
+  - **#249** (PR #402, build 514): a hold on a scene, zone light or room light
+    ramps lamp by lamp with up to 10 lamps on. Above that, or while a
+    time-based or moving scene runs on the group, it moves in steps of a
+    second (`docs/group-hold-design.md`).
+  - **#371** (PR #403, build 506): after a restart, a motion hold whose end
+    the device saw resumes only the time that is left
+    (`docs/motion-hold-restart-design.md`).
+  - **Next:** a hardware round on the house before the release. It covers:
+    - a lamp-by-lamp hold and a stepped hold, each stopping where released;
+    - a hold from off;
+    - a time-based scene that keeps running through a stepped hold;
+    - a motion hold that resumes across a driver update;
+    - the refactored bridge (pairing, outage, Bridges Found).
 - **Not yet exercised on the house from 1.2:** the write paths of the new
   actions, the re-link by radio and the bridge-away Attention items (see
   "Now").
