@@ -12,6 +12,9 @@
 # Checks, in order:
 #   lua-lint     luacheck src tests tools
 #   lua-test     busted tests
+#   lua-limits   python3 tools/lua_limits.py: no function of a Lua file under src/ has more
+#                than 180 locals or 50 upvalues (luac5.1 -p -l -l; Lua 5.1 stops at 200 and 60;
+#                docs/driver-locals-design.md)
 #   shell        shellcheck -S style tools/*.sh (and setup-vm.sh if present)
 #   python-lint  ruff check tools; ruff format --check tools
 #   python-test  python3 -B -m unittest discover -s tools/tests (-B: no __pycache__,
@@ -36,7 +39,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 
-ALL_CHECKS=(lua-lint lua-test shell python-lint python-test xml powershell workflows secrets house changelog links)
+ALL_CHECKS=(lua-lint lua-test lua-limits shell python-lint python-test xml powershell workflows secrets house changelog links)
 
 usage() {
 	echo "usage: tools/check.sh [--strict] [--only <name>...]" >&2
@@ -49,6 +52,7 @@ tools_for() {
 	case "$1" in
 		lua-lint) echo luacheck ;;
 		lua-test) echo busted ;;
+		lua-limits) echo luac5.1 python3 ;;
 		shell) echo shellcheck ;;
 		python-lint) echo ruff ;;
 		python-test | xml | house | changelog) echo python3 ;;
@@ -72,6 +76,10 @@ check_lua_lint() {
 
 check_lua_test() {
 	run busted tests
+}
+
+check_lua_limits() {
+	run python3 -I tools/lua_limits.py
 }
 
 check_shell() {
