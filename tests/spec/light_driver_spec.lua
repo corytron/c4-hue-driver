@@ -277,6 +277,22 @@ describe("Hue Light driver", function()
 			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
 		end)
 
+		-- #246: the bridge leaves the name out while it cannot tell yet whether
+		-- the lamp's Hue name is its device's or its own (right after a start).
+		it("keeps the Hue Name row and the stored name when a configure carries no name", function()
+			local env, c4 = load_light()
+			configure(env)
+			local nameless = {}
+			for k, v in pairs(CONFIGURE) do nameless[k] = v end
+			nameless.name = nil
+			env.ExecuteCommand("HUE_CONFIGURE", nameless)
+			assert.equal("Desk", env.Properties["Hue Name"])
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("Desk", c4.persist.hue_name)
+			configure(env, { name = "Desk Lamp" })
+			assert.equal("Desk Lamp", env.Properties["Hue Name"])
+		end)
+
 		it("re-reports known state after a re-configure", function()
 			local env, c4 = lit_light()
 			configure(env)
@@ -967,6 +983,193 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "RAMP_TO_LEVEL", { LEVEL = "30", TIME = "4000" })
 			assert.same({ rid = "l1", on = "true", brightness = "30", rate = "4000" }, last_sent(c4).params)
 			assert.equal(6, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+		end)
+	end)
+
+	-- #308: the bridge's first event after a turn-on can carry the level the
+	-- lamp had before it went off. The bridge sends only what changed, so an
+	-- event with the on alone leaves that old level in the light's cache.
+	describe("a turn-on from off waits for its level (#308)", function()
+		-- A configured light the bridge reports off; Hue keeps its level, 70 %.
+		local function dark_at_70(extra)
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env, extra)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "70", mirek = "370",
+				color_mode = "ct", online = "true", reason = "hello" })
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function turn_on(env, target, rate)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = target, RATE = rate })
+		end
+
+		local function hue_state(env, params)
+			params.rid = "l1"
+			env.ExecuteCommand("HUE_STATE", params)
+		end
+
+		-- Every LIGHT_BRIGHTNESS_CURRENT the proxy heard as CHANGED, in order.
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do
+				out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT
+			end
+			return out
+		end
+
+		-- Every MATCH_LED_STATE the Top Button Link (200) heard, in order.
+		local function led_states(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do
+				if args[1] == 200 and args[2] == "MATCH_LED_STATE" then
+					out[#out + 1] = args[3].STATE
+				end
+			end
+			return out
+		end
+
+		it("as seen on the house: off at 70, Raise Level By 30, an event with the on, then 30; never 70", function()
+			local env, c4 = dark_at_70()
+			env.ExecuteCommand("Raise Level By", { Points = "30", ["Ramp (ms)"] = "1000" })
+			assert.same({ rid = "l1", on = "true", brightness = "30", rate = "1000" }, messages(c4, "HUE_SET")[1].params)
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 30, RATE = 1000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			hue_state(env, { on = "true", reason = "event" })
+			assert.same({}, levels(c4), "the 70 % the cache still holds is not shown")
+			assert.same({}, led_states(c4), "nor do the LEDs move before the level is known")
+			c4.advance(16)
+			hue_state(env, { brightness = "30.2", reason = "event" })
+			assert.same({ 30 }, levels(c4))
+			assert.same({ true }, led_states(c4))
+			assert.equal(0, #c4.active_timers(), "the fallback is settled")
+			c4.advance(5000)
+			assert.same({ 30 }, levels(c4))
+		end)
+
+		it("holds the old level whether an event spells it out or comes before the on", function()
+			for _, first in ipairs({ { { on = "true", brightness = "70" } }, { { brightness = "70" }, { on = "true" } } }) do
+				local env, c4 = dark_at_70()
+				turn_on(env, "30", "0")
+				for _, params in ipairs(first) do
+					hue_state(env, params)
+				end
+				assert.same({}, levels(c4))
+				hue_state(env, { brightness = "30" })
+				assert.same({ 30 }, levels(c4))
+			end
+		end)
+
+		it("lets the rest of a held event through: its colour and online", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "30", "0")
+			hue_state(env, { on = "true", brightness = "70", x = "0.4", y = "0.35", color_mode = "xy", online = "false" })
+			assert.same({}, levels(c4))
+			assert.same({ { LIGHT_COLOR_CURRENT_X = 0.4, LIGHT_COLOR_CURRENT_Y = 0.35, LIGHT_COLOR_CURRENT_COLOR_MODE = 0 } },
+				notifies(c4, "LIGHT_COLOR_CHANGED"))
+			assert.same({ { STATE = false } }, notifies(c4, "ONLINE_CHANGED"))
+		end)
+
+		it("lets an off through at once, also after a held event", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "30", "0")
+			hue_state(env, { on = "false" })
+			assert.same({ 0 }, levels(c4))
+			assert.equal(0, #c4.active_timers())
+
+			env, c4 = dark_at_70()
+			turn_on(env, "30", "0")
+			hue_state(env, { on = "true", brightness = "70" })
+			hue_state(env, { on = "false" })
+			assert.same({ 0 }, levels(c4))
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("shows a held level once the ramp plus 1 s passed without the target, and later ones at once", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "30", "1000")
+			hue_state(env, { on = "true", brightness = "70" }) -- the Hue app, say, at the same moment
+			c4.advance(1999)
+			assert.same({}, levels(c4))
+			c4.advance(1)
+			assert.same({ 70 }, levels(c4), "what the bridge said, not the 30 the fallback would assume")
+			hue_state(env, { brightness = "55" })
+			assert.same({ 70, 55 }, levels(c4))
+		end)
+
+		it("still assumes the target at that time when the bridge said nothing", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "30", "1000")
+			c4.advance(2000)
+			assert.same({ 30 }, levels(c4))
+			hue_state(env, { on = "true", brightness = "70" })
+			assert.same({ 30, 70 }, levels(c4), "a report after the wait goes through")
+		end)
+
+		it("lets a level reported after the target through at once", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "30", "0")
+			hue_state(env, { on = "true", brightness = "30" })
+			hue_state(env, { brightness = "70" })
+			assert.same({ 30, 70 }, levels(c4))
+		end)
+
+		it("lets a level on the way up to the target through during a ramp, not without one", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "80", "2000")
+			hue_state(env, { on = "true", brightness = "20" })
+			assert.same({ 20 }, levels(c4))
+
+			env, c4 = dark_at_70()
+			turn_on(env, "80", "0")
+			hue_state(env, { on = "true", brightness = "20" })
+			assert.same({}, levels(c4))
+			hue_state(env, { brightness = "80.3" })
+			assert.same({ 80 }, levels(c4))
+		end)
+
+		it("takes the bulb's lowest level for a target below it (Hue raises the level to it)", function()
+			local env, c4 = dark_at_70({ min_dim = "4" })
+			turn_on(env, "1", "0")
+			hue_state(env, { on = "true", brightness = "4" })
+			assert.same({ 4 }, levels(c4))
+		end)
+
+		it("ends the wait with what the bridge said when the proxy stops the ramp", function()
+			local env, c4 = dark_at_70()
+			turn_on(env, "30", "1000")
+			hue_state(env, { on = "true", brightness = "70" })
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+			assert.same({ 70 }, levels(c4))
+			assert.equal(0, #c4.active_timers())
+		end)
+
+		it("does not move a keypad hold from off: the dim up starts from 1 %", function()
+			local env, c4 = dark_at_70()
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time: the turn-on at 1 %
+			hue_state(env, { on = "true", brightness = "70" })
+			c4.fire_timers_of(600) -- the dim up
+			local changing = notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 1, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 4950 }, changing[#changing])
+			assert.same({}, levels(c4))
+		end)
+
+		it("guards only a turn-on from off: a light already on shows every report", function()
+			local env, c4 = lit_light()
+			turn_on(env, "75", "0")
+			hue_state(env, { brightness = "60" })
+			assert.same({ 60 }, levels(c4))
+		end)
+
+		it("shows a light that never reports a level (a plug) on at once", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env, { has_color = "false", has_cct = "false" })
+			hue_state(env, { on = "false", online = "true" })
+			c4.calls = {}
+			turn_on(env, "30", "0")
+			hue_state(env, { on = "true" })
+			assert.same({ 100 }, levels(c4))
 		end)
 	end)
 

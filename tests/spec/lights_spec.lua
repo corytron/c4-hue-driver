@@ -1406,8 +1406,11 @@ describe("bridge.lights", function()
 		end)
 
 		it("takes a device rename into device_name and drops deleted devices from the cache", function()
-			assert.equal(0, L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+			-- The only light of its device shows the device's name in its Hue Name row (#246).
+			assert.equal(1, L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
 				metadata = { name = "Garage Device" } } } }))
+			assert.same({ "HUE_CONFIGURE@2001" }, commands_sent())
+			assert.equal("Garage Device", c4.sent[1].params.name)
 			assert.equal("Garage Device", L.registry[F.rids.garage].device_name)
 			assert.equal("Garage White", L.registry[F.rids.garage].name)
 			assert.equal(0, L:on_container({ type = "delete", data = { { id = F.device_rids.garage, type = "device" } } }))
@@ -1422,27 +1425,36 @@ describe("bridge.lights", function()
 			end
 			local before = saves()
 
-			-- A rename alone: registry and store updated at once, and the device's
-			-- Hue Name row hears it at once too (§4 finding 13), not at the next read.
-			assert.equal(1, L:on_container(rename(F.rids.garage, "Garage Lamp")))
-			assert.same({ "HUE_CONFIGURE@2001" }, commands_sent())
-			assert.equal("Garage Lamp", c4.sent[1].params.name)
-			assert.equal(F.rids.garage, c4.sent[1].params.rid)
+			-- A rename alone: registry and store updated at once. The Hue Name row
+			-- of the only light of its device shows the device's name (#246), so
+			-- the light's own rename tells the device nothing ...
+			assert.equal(0, L:on_container(rename(F.rids.garage, "Garage Lamp")))
+			assert.same({}, commands_sent())
 			assert.equal("Garage Lamp", L.registry[F.rids.garage].name)
 			assert.equal("Garage Lamp", c4.persist.hue_lights[F.rids.garage].name)
 			assert.equal(ID.garage, L:device_for(F.rids.garage), "the device id is untouched")
 			assert.equal(before + 1, saves())
 			assert.is_true(saw_log("Garage White was renamed to Garage Lamp in Hue"))
 			assert.equal(0, #c4.calls_to("RenameDevice"))
+			-- ... and the device's rename reaches the row at once (§4 finding 13), not at the next read.
+			assert.equal(1, L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+				metadata = { name = "Garage Lamp" } } } }))
+			assert.same({ "HUE_CONFIGURE@2001" }, commands_sent())
+			assert.equal("Garage Lamp", c4.sent[1].params.name)
+			assert.equal(F.rids.garage, c4.sent[1].params.rid)
+			assert.equal(before + 2, saves())
 
-			-- A rename alongside state: the configure, then the state; the name is taken.
+			-- A rename alongside state, the device's and the light's in one container
+			-- (the Hue app renames the device): the configure, then the state.
 			c4.sent = {}
-			assert.equal(2, L:on_container(rename(F.rids.living, "Lounge Lamp", { on = { on = false } })))
+			local both = rename(F.rids.living, "Lounge Lamp", { on = { on = false } })
+			table.insert(both.data, 1, { id = F.device_rids.living, type = "device", metadata = { name = "Lounge Lamp" } })
+			assert.equal(2, L:on_container(both))
 			assert.same({ "HUE_CONFIGURE@2003", "HUE_STATE@2003" }, commands_sent())
 			assert.equal("Lounge Lamp", c4.sent[1].params.name)
 			assert.same({ rid = F.rids.living, on = "false", reason = "event" }, c4.sent[2].params)
 			assert.equal("Lounge Lamp", c4.persist.hue_lights[F.rids.living].name)
-			assert.equal(before + 2, saves())
+			assert.equal(before + 3, saves())
 
 			-- The same name again (the echo of a rename the driver sent), and a rename
 			-- of an unregistered light: nothing sent, no save.
@@ -1450,28 +1462,40 @@ describe("bridge.lights", function()
 			assert.equal(0, L:on_container(rename(F.rids.living, "Lounge Lamp")))
 			assert.equal(0, L:on_container(rename("unknown", "Whatever")))
 			assert.equal(0, #c4.sent)
-			assert.equal(before + 2, saves())
+			assert.equal(before + 3, saves())
 
 			-- The next resync sees the same names: no rename logged, no save, no new configure.
 			logged = {}
-			resync({ light = F.light:gsub("Garage White", "Garage Lamp"):gsub("Living Room Lamp", "Lounge Lamp") })
+			resync({ light = F.light:gsub("Garage White", "Garage Lamp"):gsub("Living Room Lamp", "Lounge Lamp"),
+				device = F.device:gsub("Garage White", "Garage Lamp"):gsub("Living Room Lamp", "Lounge Lamp") })
 			assert.is_false(saw_log("was renamed"))
-			assert.equal(before + 2, saves())
+			assert.equal(before + 3, saves())
 			assert.equal(0, #sent_to(ID.garage, "HUE_CONFIGURE"), "the device was told already")
+			assert.equal(0, #sent_to(ID.living, "HUE_CONFIGURE"), "the device was told already")
 		end)
 
 		it("sends no configure for a rename of an unbound light's device, nor for a device rename that changes "
 			.. "nothing the device is told", function()
-			-- The Hue device renamed: its name is the names sync's (device_name), not the Hue Name row.
+			L:on_binding_changed(1, "HUE_BRIDGE", false, ID.garage)
+			c4.sent = {}
 			assert.equal(0, L:on_container(container(F.events.device_rename)))
 			assert.equal(0, #c4.sent)
 			assert.equal("Garage Spot", L.registry[F.rids.garage].device_name)
-			L:on_binding_changed(1, "HUE_BRIDGE", false, ID.garage)
-			c4.sent = {}
 			assert.equal(0, L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
 				metadata = { name = "Garage Lamp" } } } }))
 			assert.equal(0, #c4.sent)
 			assert.equal("Garage Lamp", L.registry[F.rids.garage].name)
+
+			-- Hallway Ambiance moved onto the Living Room Lamp's device: a light of a
+			-- multi-light device shows its own name, so its device's rename tells it nothing.
+			resync({ light = replace(F.light, F.device_rids.hallway, F.device_rids.living),
+				device = replace(F.device, '{"rid":"' .. F.rids.living .. '","rtype":"light"}', '{"rid":"' .. F.rids.living
+					.. '","rtype":"light"},{"rid":"' .. F.rids.hallway .. '","rtype":"light"}') })
+			c4.sent = {}
+			assert.equal(0, L:on_container({ type = "update", data = { { id = F.device_rids.living, type = "device",
+				metadata = { name = "Lounge Pair" } } } }))
+			assert.equal(0, #c4.sent)
+			assert.equal("Lounge Pair", L.registry[F.rids.hallway].device_name)
 		end)
 
 		it("skips the devices of unbound entries", function()
@@ -1874,6 +1898,84 @@ describe("bridge.lights", function()
 			assert.equal("1 Hue name differs from the Composer names: Garage Device is Workbench in Hue "
 				.. "(Resolve Names)", L:attention())
 			assert.same({}, c4.renamed, "an event renames nothing")
+		end)
+	end)
+
+	-- Issue #246: a light's Hue Name row shows the name the names sync compares
+	-- its Composer name with (lights:hue_name): the Hue device's name for the
+	-- only light of its device, as the Hue app shows the lamp, else the light's
+	-- own name. Before this run has read the devices, a name that cannot be
+	-- settled yet is not sent, so a restart does not flicker the row.
+	describe("the Hue Name row (#246)", function()
+		-- Garage White's device is called "Garage Device"; Hallway Ambiance sits
+		-- on the Living Room Lamp's device, now called "Lounge Pair".
+		local function devices_named()
+			local device = replace(F.device, '"metadata":{"name":"Garage White"', '"metadata":{"name":"Garage Device"')
+			device = replace(device, '"metadata":{"name":"Living Room Lamp"', '"metadata":{"name":"Lounge Pair"')
+			device = replace(device, '{"rid":"' .. F.rids.living .. '","rtype":"light"}',
+				'{"rid":"' .. F.rids.living .. '","rtype":"light"},{"rid":"' .. F.rids.hallway .. '","rtype":"light"}')
+			return { device = device, light = replace(F.light, F.device_rids.hallway, F.device_rids.living) }
+		end
+
+		local function import_named()
+			L:import_new(done)
+			answer_gets(devices_named())
+			L:add_light(F.rids.kitchen, LIVING_ROOM, done)
+		end
+
+		local function configured_name(id)
+			local list = sent_to(id, "HUE_CONFIGURE")
+			return list[#list].params.name
+		end
+
+		it("shows the Hue device's name for the only light of its device, the light's own on a shared device", function()
+			import_named()
+			assert.equal("Garage Device", configured_name(ID.garage))
+			assert.equal("Hallway Ambiance", configured_name(ID.hallway))
+			assert.equal("Living Room Lamp", configured_name(ID.living))
+			assert.equal("Kitchen Strip", configured_name(ID.kitchen))
+			-- The same names the names sync compares the Composer names with.
+			for _, key in ipairs({ "garage", "hallway", "living", "kitchen" }) do
+				local rid = F.rids[key]
+				assert.equal(L:hue_name(rid, L.registry[rid]), configured_name(ID[key]), key)
+			end
+			assert.equal("Garage White", L.registry[F.rids.garage].name, "the registry keeps the light's own name")
+		end)
+
+		it("follows a rename of the device of a single light, not a rename of its light alone", function()
+			import_named()
+			c4.sent = {}
+			L:on_container({ type = "update", data = { { id = F.rids.garage, type = "light",
+				metadata = { name = "Garage Bulb" } } } })
+			assert.same({}, commands_sent(), "the row shows the device's name")
+			L:on_container({ type = "update", data = { { id = F.device_rids.garage, type = "device",
+				metadata = { name = "Workbench" } } } })
+			assert.same({ "HUE_CONFIGURE@2001" }, commands_sent())
+			assert.equal("Workbench", configured_name(ID.garage))
+		end)
+
+		it("keeps the row a light shows across a restart until the devices are read", function()
+			import_named()
+			L = new_lights()
+			L:load()
+			c4.sent = {}
+			L:configure_all()
+			assert.equal(4, #commands_sent())
+			assert.is_nil(configured_name(ID.garage), "device name or light name: not known yet")
+			assert.is_nil(configured_name(ID.living), "a shared device: not known yet either")
+			assert.equal("Kitchen Strip", configured_name(ID.kitchen), "the two names agree: no doubt")
+			c4.sent = {}
+			resync(devices_named())
+			assert.equal("Garage Device", configured_name(ID.garage))
+			assert.equal("Living Room Lamp", configured_name(ID.living))
+			assert.equal(0, #sent_to(ID.kitchen, "HUE_CONFIGURE"), "told already")
+		end)
+
+		it("tells a forgotten light the name its row showed", function()
+			import_named()
+			c4.sent = {}
+			L:forget(ID.garage)
+			assert.same({ rid = F.rids.garage, name = "Garage Device" }, sent_to(ID.garage, "HUE_FORGOTTEN")[1].params)
 		end)
 	end)
 

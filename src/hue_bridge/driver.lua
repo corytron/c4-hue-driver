@@ -869,7 +869,9 @@ local function restart_stream(force)
 		return
 	end
 	local was_running = state.stream:running()
-	state.stream:stop()
+	-- A rejected key keeps key_rejected's text, not a bare "Stopped": the address
+	-- self-check's 401/403 rebuilds the stream right after writing it (#246).
+	state.stream:stop(state.key_rejected and string.format("Stopped: key rejected (HTTP %d)", state.key_rejected))
 	state.stream = new_stream()
 	if (was_running or force) and keyed_refusal() == nil and state.identity_ok == true then
 		state.stream:start()
@@ -2370,6 +2372,7 @@ function OnDriverDestroyed()
 	pair_window:close()
 	state.away:cancel_outage_check()
 	attention_rows:cancel()
+	last_action_rows:cancel()
 	if state.hk then
 		state.hk:stop()
 	end
