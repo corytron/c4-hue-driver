@@ -160,8 +160,8 @@ jobs:
           rock mediator_lua 1.1.2-0
           rock busted 2.3.0-1
 
-      - name: Lint and test (luacheck, busted)
-        run: tools/check.sh --strict --only lua-lint lua-test
+      - name: Lint, test and Lua limits (luacheck, busted, luac5.1)
+        run: tools/check.sh --strict --only lua-lint lua-test lua-limits
 
       # The packager runs in Build, so it is pinned to a reviewed commit: the
       # same commit as in ci.yml, where how to move it is written.

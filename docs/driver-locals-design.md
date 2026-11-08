@@ -32,7 +32,7 @@ than the module reaching back into the driver.
   existing spec keeps passing. A spec that reached into a moved function
   through the driver may be rewritten to reach it through its new module, but
   its assertions stay the same.
-- **Each new module gets its own spec** (`tests/hue_bridge/<module>_spec.lua`,
+- **Each new module gets its own spec** (`tests/spec/<module>_spec.lua`,
   in the style of the others), covering what the moved code does on its own.
 - **No new globals.** No Snap One code, no `require` outside the package.
 
@@ -48,7 +48,7 @@ the job that runs the other tooling tests.
 
 | Owner | Files |
 | --- | --- |
-| Agent **R** (refactor) | `src/hue_bridge/driver.lua`; new `src/hue_bridge/bridge/*.lua` modules; their new specs under `tests/hue_bridge/`; edits to existing specs that reached into moved code |
+| Agent **R** (refactor) | `src/hue_bridge/driver.lua`; new `src/hue_bridge/bridge/*.lua` modules; their new specs under `tests/spec/`; edits to existing specs that reached into moved code |
 | Agent **T** (tooling) | the new check script under `tools/` and its tests under `tools/tests/`; `tools/check.sh`; `.github/workflows/ci.yml` (only the "Lint and test (Lua 5.1)" job's `--only` list) |
 | Coordinator | this document, `CLAUDE.md`, `docs/design.md`, `CHANGELOG.md`, `docs/status.md`, git |
 

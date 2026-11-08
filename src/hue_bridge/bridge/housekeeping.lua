@@ -4,7 +4,7 @@
 -- interface and rules of docs/simplify-research-scheduler.md §3.1 to §3.7
 -- with three amendments: background tasks are always on (no enable(), owner's
 -- answer D4), the engine only reads (every request it makes is a GET), and
--- the tasks themselves are hue_bridge/driver.lua's (start_housekeeping); §4
+-- the tasks themselves are bridge/tasks.lua's (since #373); §4
 -- of the contract adds job.charge and the hourly budget of 100 (finding 7).
 --
 --   local hk = housekeeping.new(ctx)
