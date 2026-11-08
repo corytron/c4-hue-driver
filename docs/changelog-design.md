@@ -198,9 +198,10 @@ heading "New in build {build}" and `{history}` under "Earlier builds of
 - `tools/check.sh` gains the check `changelog` (`changelog.py check`),
   run by CI's tooling job.
 - Before the first build of a new X.Y, its first prerelease included, the
-  coordinator proposes its codename by the rule of §1 and waits for the
-  owner's approval; a pull request then adds it to `.github/codenames.json`
-  (#304).
+  coordinator picks its codename by the rule of §1 and reports it,
+  without waiting for approval (#396; the names in line for 1.0's point
+  releases are in `docs/release-checklist.md`); a pull request then adds
+  it to `.github/codenames.json` (#304).
 
 ## 6. Who owns which file
 
