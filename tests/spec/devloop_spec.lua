@@ -633,6 +633,23 @@ describe("common.devloop", function()
 			assert.same({ { 250, false } }, c4.calls_to("SetTimer"))
 		end)
 
+		it("passes the caller's SetTimer arguments exactly: no explicit nil repeat flag (#411)", function()
+			local proxy = rawget(_G, "C4")
+			local runtime = c4.SetTimer
+			-- As the controller does: a third argument that is given must be a boolean.
+			c4.SetTimer = function(self, delay, fn, ...)
+				if select("#", ...) > 0 and type((...)) ~= "boolean" then
+					error("repeat should be a boolean")
+				end
+				return runtime(self, delay, fn, ...)
+			end
+			assert.has_no.errors(function() proxy:SetTimer(250, function() end) end)
+			assert.has_no.errors(function() proxy:SetTimer(250, function() end, true) end)
+			assert.has_no.errors(function() proxy:SetTimer(250, function() end, false) end)
+			assert.has_error(function() proxy:SetTimer(250, function() end, nil) end, "repeat should be a boolean")
+			c4.SetTimer = runtime
+		end)
+
 		it("cancels every timer the running code armed, after its OnDriverDestroyed and before the new code", function()
 			local proxy = rawget(_G, "C4")
 			devloop.start(HOST)

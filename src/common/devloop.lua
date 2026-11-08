@@ -651,7 +651,12 @@ end
 -- fires. The callback is wrapped only for that; Director's arguments (the
 -- timer, and the skips of a repeating one) reach it unchanged, and so does
 -- whatever it raises.
-local function guarded_set_timer(self, delay, callback, repeating, ...)
+-- The caller's arguments reach the runtime exactly as given: an explicit nil
+-- in place of a missing repeat flag is refused on the controller ("repeat
+-- should be a boolean", dev build 537, #411).
+local function guarded_set_timer(self, delay, callback, ...)
+	local extra = select("#", ...)
+	local repeating = (...)
 	local real = S.c4_real
 	if self == S.c4_proxy then self = real end
 	local set = S.timer_set
@@ -666,7 +671,11 @@ local function guarded_set_timer(self, delay, callback, repeating, ...)
 			return callback(fired, ...)
 		end
 	end
-	timer = real.SetTimer(self, delay, fn, repeating, ...)
+	if extra == 0 then
+		timer = real.SetTimer(self, delay, fn)
+	else
+		timer = real.SetTimer(self, delay, fn, ...)
+	end
 	if timer ~= nil and set then set[timer] = true end
 	return timer
 end
