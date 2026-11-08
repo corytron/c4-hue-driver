@@ -27,7 +27,7 @@ the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
 - [`release-checklist.md`](release-checklist.md): what a build must pass on
   the development machine, on the dev loop, in Composer and on the owner's
   phone and keypads before it is called good, and what to check after a
-  controller OS upgrade; the naming of the releases (one Andor codename per X.Y: 1.0 "Cassian", 1.1 "Brasso", 1.2 "Taramyn"), how a
+  controller OS upgrade; the naming of the releases, how a
   release is cut (the Release workflow) and how it reaches the house
   (`tools/deploy.py`).
 
@@ -62,6 +62,10 @@ of it is live.
   Scene devices: taps, hold-to-dim through Hue's relative dimming, keypad
   LEDs, decoupled Control4 switches, and the keypad settings shown in
   Composer since 2026-10-25 (#59).
+- [`driver-locals-design.md`](driver-locals-design.md): the bridge driver's
+  local-variable budget (#373): Lua 5.1 compiles at most 200 locals in a
+  function, so whole groups moved into `bridge/` modules, and the
+  `lua-limits` check fails above 180 locals or 50 upvalues.
 - [`group-hold-design.md`](group-hold-design.md): holds on Hue Scene
   devices, zone lights and room lights (#249): Hue ignores the ramp time on
   a whole-group dim, so from 1.3 a hold dims each lit lamp (up to 10) or

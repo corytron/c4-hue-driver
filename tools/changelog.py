@@ -37,7 +37,7 @@ stamp   turns "## Unreleased" into the release's heading below a new, empty "## 
         writes the file only when the result passes check. Refuses an empty Unreleased entry, a
         build that has an entry already and a prerelease.
 
-Codenames (issue #304): each version X.Y has its own codename from Star Wars: Andor, named in one
+Codenames (issue #304): each version X.Y has its own codename, named in one
 place, .github/codenames.json: a JSON object such as {"1.0": "Cassian", "1.1": "Brasso"}, its keys
 X.Y without leading zeros, its names ASCII letters and digits joined by single spaces or hyphens, no
 name twice whatever the letter case. Every release heading carries the name the file gives its X.Y,
