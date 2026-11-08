@@ -92,7 +92,9 @@ sha256 of every file PyPI has for it; they are installed one at a time with
 `python3 -m pip install --require-hashes --no-deps --only-binary=:all:
 --user --break-system-packages`, so pip refuses an unlisted hash, any
 dependency and any source build. `actionlint` and `gitleaks` are pinned
-release binaries whose sha256 the script carries and verifies. Today:
+release binaries whose sha256 the script carries and verifies; when a
+release URL fails, the script fetches the same asset by its pinned id from
+the REST API (#419). Today:
 ruff 0.17.2, zizmor 1.31.1, shellcheck-py 0.10.0.1, actionlint 1.7.12,
 gitleaks 8.30.1. CI runs the same script (ubuntu-latest has `shellcheck`
 and `pwsh` already; the script skips what is present). It prints each
