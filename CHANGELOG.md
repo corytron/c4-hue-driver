@@ -30,6 +30,12 @@ listed.
   security policy, contributing guide and checklists count four packages and
   eight release files (#389).
 
+### Fixed
+- A light's Hue Name row shows the lamp's name as the Hue app shows it (its
+  Hue device's name for a single-light lamp), and Event Stream reads
+  `Stopped: key rejected (HTTP 403)`, not `Stopped`, when the bridge refuses
+  the key at the stream address check (#246).
+
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
 ### Added
