@@ -85,6 +85,17 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    on the grouped_light: parity with the Hue Light device (ON is 100 %; the
    proxy's On preset is hidden and 100). Hue's "restore each lamp's last
    state" stays with the Hue app (open question 1).
+   Superseded (2026-11-08, #233, owner's Option 1): the parity stays, its
+   level moved. The Hue Light driver, which a zone or room light runs, sends
+   ON, TOGGLE from off and the top tap as `HUE_SET on=true
+   brightness=<the device's Default On Brightness>` (the On preset, shown
+   in Composer since #59, 100 unless the dealer changed it), ON and TOGGLE
+   at once, the tap over the click rate up; ON on a lit group sets every
+   lamp to it too, from above or below [verified: proxy reference, light_v2
+   `_7-TOGGLE.md` and the variable Default On Preset Brightness in
+   `30_Light_v2_variables/_0-HEADER.md`]. The bridge passes the level
+   through unchanged (`zone_lights:set`), so nothing changed there; with
+   the preset at 100 the PUT is the one above.
 5. **Slider and targets are absolute** (`dimming.brightness` on the group),
    not relative as the scene devices move: a light device's level is a
    promise (40 % means every lamp at 40 %) and the tile's average then
@@ -157,7 +168,8 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
     `HUE_SCENE_GROUP on=false` and goes off, the group tile goes off; group
     ON afterwards → group tile on at 100 %, scene tile stays off; a scene
     recalled anywhere → group tile on at the scene's average brightness and
-    the first lit lamp's colour.
+    the first lit lamp's colour. Superseded (2026-11-08, #233): group ON is
+    at the device's Default On Brightness (Decision 4).
 11. **No lights in the group** (empty zone, sensor-only room): the device is
     told `no_lights=true`: `ONLINE_CHANGED false`, tile off, commands dropped
     with the reason in Status; refilled → online again, nothing to click.
@@ -406,7 +418,9 @@ and both scene devices.
 ## 7. Open questions (recommended answer first)
 
 1. **ON = 100 % or Hue's "last state"?** 100 % (Decision 4), parity with the
-   Hue Light; the Hue app keeps its own semantics.
+   Hue Light; the Hue app keeps its own semantics. Superseded (2026-11-08,
+   #233): ON is the device's Default On Brightness, still in parity with
+   the Hue Light and still never Hue's "last state".
 2. **Absolute slider vs relative moves?** Absolute (Decision 5).
 3. **"Add All Zones"?** No: 23 devices in one click is the flood the scenes
    contract avoided; one click per zone is deliberate.
@@ -444,7 +458,8 @@ section, this section wins.
    flags, intersection of CT ranges** (Q5), **colour of the first lit member**
    (Q6), **group queue 1/s with burst 3** (Q8), **no bridge_home device** (Q9),
    **cross-kind re-link refused** (Q10), **mixed install order accepted**
-   (Q11): as recommended.
+   (Q11): as recommended. Superseded for Q1 (2026-11-08, #233): ON is the
+   device's Default On Brightness (Decision 4).
 2. **A separate bridge action `Add Zone Light`** (Q7, changed). Parameters:
    `Group`, a picker from `zone_lights:picker_groups()` (zones first, then
    rooms, "<Name> (zone, 2 lights)" / "<Name> (room, 9 lights)", tombstoned
@@ -467,7 +482,9 @@ section, this section wins.
    hardware plan: a colour and a CT pick from the tile reaching both lamps. If
    the bridge refuses, the fallback (one PUT per capable member through the
    light queue) is a follow-up. H2 does not affect the driver (ON always
-   sends brightness 100).
+   sends brightness 100). Current (2026-11-08, #233): ON sends the device's
+   Default On Brightness; it still always sends a brightness, so H2 still
+   does not affect it.
 4. **Split** as §6, with `hue_model.lua`, `hue_model_spec.lua` and the
    fixtures folded into the bridge-module agent so that no agent waits on
    another; `tests/spec/zone_light_roundtrip_spec.lua` and the `drivers_spec`

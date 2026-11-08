@@ -15,6 +15,9 @@ listed.
 ## Unreleased
 
 ### Changed
+- ON and Toggle (a tile tap, Turn On in programming) now turn a Hue Light,
+  zone light or room light on at its Default On Brightness, like a keypad
+  tap; at the default 100 nothing changes (#233).
 - Keypad holds on a Hue Scene, a zone light or a room light now ramp instead
   of jumping to full or off in about a second: smoothly, lamp by lamp, with
   up to 10 lamps on, and in steps of a second with more lamps on or while a

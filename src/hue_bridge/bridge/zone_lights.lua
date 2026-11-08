@@ -1105,8 +1105,10 @@ end
 -- ctx.group_set (coalesced per group by the driver's group queue, which
 -- builds the PUT: on, dimming.brightness, color.xy or
 -- color_temperature.mirek, dynamics). ON from the device arrives as on=true
--- brightness=100 (Decision 4); a colour while off is kept by the device for
--- the next turn-on (Decision 7), so nothing is held here. Returns true when queued.
+-- with the device's Default On Brightness as brightness, 100 unless the
+-- dealer changed it (Decision 4, #233); a colour while off is kept by the
+-- device for the next turn-on (Decision 7), so nothing is held here.
+-- Returns true when queued.
 function zone_lights:set(params)
 	params = params or {}
 	local rid, entry, grouped = self:entry_for_command(params, "HUE_SET")

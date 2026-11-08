@@ -986,6 +986,148 @@ describe("Hue Light driver", function()
 		end)
 	end)
 
+	-- #233 (owner, 2026-11-08): ON and TOGGLE turn the light on at the On
+	-- preset, the Default On Brightness a top keypad tap goes to [proxy
+	-- reference: light_v2 TOGGLE, and the variable Default On Preset
+	-- Brightness], at once as before; the click rates stay with keypad taps.
+	describe("ON and TOGGLE at the Default On Brightness (#233)", function()
+		-- The configured light off; Hue keeps its level, 70 %.
+		local function dark_light(opts)
+			local env, c4 = load_light(opts or { rid = "l1" })
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "70", mirek = "370",
+				color_mode = "ct", online = "true", reason = "hello" })
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function set_preset(env, c4, level)
+			env.ReceivedFromProxy(5001, "SET_PRESET_LEVEL", { LEVEL = level })
+			c4.calls, c4.sent = {}, {}
+		end
+
+		local function brightness_sent(c4)
+			local sets = messages(c4, "HUE_SET")
+			return sets[#sets] and sets[#sets].params.brightness
+		end
+
+		it("goes to 100 at once while the Default On Brightness was never set, exactly as before", function()
+			local env, c4 = dark_light()
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, last_sent(c4).params)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, last_sent(c4).params)
+		end)
+
+		it("ON from off goes to a changed Default On Brightness, at once, and the proxy hears that target", function()
+			local env, c4 = dark_light()
+			set_preset(env, c4, "40")
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ id = BRIDGE_ID, command = "HUE_SET",
+				params = { rid = "l1", on = "true", brightness = "40", rate = "0" } }, last_sent(c4))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 0 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			c4.advance(1000) -- nothing from the bridge: the fallback assumes the target
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("TOGGLE from off goes to it too; TOGGLE from on turns the light off at once", function()
+			local env, c4 = dark_light()
+			set_preset(env, c4, "40")
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ rid = "l1", on = "true", brightness = "40", rate = "0" }, last_sent(c4).params)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40" })
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ rid = "l1", on = "false", rate = "0" }, last_sent(c4).params)
+		end)
+
+		it("TOGGLE before the bridge reported the light goes to it, as to 100 before", function()
+			local env, c4 = load_light({ rid = "l1" })
+			configure(env)
+			set_preset(env, c4, "40")
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.equal("40", brightness_sent(c4))
+		end)
+
+		it("ON on a light already on goes to it from a lower and from a higher level, as a top tap does", function()
+			local env, c4 = lit_light() -- on at 40 %
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.equal("100", brightness_sent(c4), "the default: 100, as before")
+			set_preset(env, c4, "60")
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ rid = "l1", on = "true", brightness = "60", rate = "0" }, last_sent(c4).params)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "85" })
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.equal("60", brightness_sent(c4), "down from 85")
+		end)
+
+		it("keeps the click rates for keypad taps: ON is at once, a top tap over the click rate up", function()
+			local env, c4 = dark_light()
+			set_preset(env, c4, "40")
+			env.ReceivedFromProxy(5001, "SET_CLICK_RATE_UP", { RATE = "1500" })
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ rid = "l1", on = "true", brightness = "40", rate = "0" }, last_sent(c4).params)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+			assert.same({ rid = "l1", on = "true", brightness = "40", rate = "1500" }, last_sent(c4).params)
+		end)
+
+		it("uses the Default On Brightness persisted before a restart", function()
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid = "l1"
+			c4.persist.preset_level = 25
+			env.OnDriverLateInit("DIT_STARTUP")
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", online = "true" })
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.equal("25", brightness_sent(c4))
+		end)
+
+		it("never turns the light off for ON: a refused 0 or text keeps the level in use; a stored 0 reads as 100", function()
+			local env, c4 = dark_light()
+			set_preset(env, c4, "0")
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, last_sent(c4).params)
+			set_preset(env, c4, "40")
+			env.ReceivedFromProxy(5001, "SET_PRESET_LEVEL", { LEVEL = "bright" })
+			assert.same({ { 5001, "40" } }, (function()
+				local out = {}
+				for _, args in ipairs(c4.calls_to("SendToProxy")) do
+					if args[2] == "PRESET_LEVEL" then out[#out + 1] = { args[1], args[3] } end
+				end
+				return out
+			end)(), "the level kept is reported back")
+			env.ReceivedFromProxy(5001, "TOGGLE", {}) -- the cache still says off: no report since the ON
+			assert.equal("40", brightness_sent(c4))
+
+			env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			c4.persist.hue_rid = "l1"
+			c4.persist.preset_level = 0 -- as the house had it for minutes on 2026-10-25 (#59)
+			env.OnDriverLateInit("DIT_STARTUP")
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", online = "true" })
+			c4.sent = {}
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.equal("100", brightness_sent(c4))
+		end)
+
+		it("takes a colour picked while off along, as any turn-on does", function()
+			local env, c4 = dark_light()
+			set_preset(env, c4, "40")
+			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35",
+				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ rid = "l1", on = "true", brightness = "40", rate = "0", x = "0.4", y = "0.35" },
+				last_sent(c4).params)
+		end)
+	end)
+
 	-- #308: the bridge's first event after a turn-on can carry the level the
 	-- lamp had before it went off. The bridge sends only what changed, so an
 	-- event with the on alone leaves that old level in the light's cache.
@@ -1126,6 +1268,20 @@ describe("Hue Light driver", function()
 			assert.same({}, levels(c4))
 			hue_state(env, { brightness = "80.3" })
 			assert.same({ 80 }, levels(c4))
+		end)
+
+		it("waits for the Default On Brightness after ON or TOGGLE from off (#233)", function()
+			for _, command in ipairs({ "ON", "TOGGLE" }) do
+				local env, c4 = dark_at_70()
+				env.ReceivedFromProxy(5001, "SET_PRESET_LEVEL", { LEVEL = "30" })
+				env.ReceivedFromProxy(5001, command, {})
+				assert.same({ rid = "l1", on = "true", brightness = "30", rate = "0" }, messages(c4, "HUE_SET")[1].params)
+				hue_state(env, { on = "true", reason = "event" })
+				assert.same({}, levels(c4), command .. ": the 70 % the cache still holds is not shown")
+				hue_state(env, { brightness = "30.2", reason = "event" })
+				assert.same({ 30 }, levels(c4))
+				assert.equal(0, #c4.active_timers(), "the fallback is settled")
+			end
 		end)
 
 		it("takes the bulb's lowest level for a target below it (Hue raises the level to it)", function()
@@ -2162,6 +2318,24 @@ describe("Hue Light driver", function()
 			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "false" })
 			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
 			assert.equal(1, #c4.active_timers(), "only the hold's click guard is left: both targets were confirmed")
+		end)
+
+		it("ON and TOGGLE set every lamp to the zone light's own Default On Brightness, as on a light (#233)", function()
+			local env, c4 = lit_zone() -- on at 40 %
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ rid = ZONE_RID, on = "true", brightness = "100", rate = "0" }, last_sent(c4).params,
+				"100 while it was never changed")
+			env.ReceivedFromProxy(5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+			assert.equal(60, c4.persist.preset_level)
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ id = BRIDGE_ID, command = "HUE_SET",
+				params = { rid = ZONE_RID, on = "true", brightness = "60", rate = "0" } }, last_sent(c4))
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "60", reason = "event" })
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ rid = ZONE_RID, on = "false", rate = "0" }, last_sent(c4).params)
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "false", reason = "event" })
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ rid = ZONE_RID, on = "true", brightness = "60", rate = "0" }, last_sent(c4).params)
 		end)
 
 		it("Adopt Hue Name and Forget This Light (hidden aliases) speak of the zone or room", function()

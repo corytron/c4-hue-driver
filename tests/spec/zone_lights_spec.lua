@@ -1017,10 +1017,11 @@ describe("bridge.zone_lights", function()
 	end)
 
 	describe("set (HUE_SET)", function()
-		it("queues the absolute fields on the group's grouped_light: ON is on=true brightness=100", function()
+		it("queues the absolute fields on the group's grouped_light: ON is on=true with the device's level", function()
 			add_downstairs()
 			c4.sent = {}
 			local n = #c4.transfers
+			-- ON from a device at the default Default On Brightness, 100 (#233)
 			assert.is_true(Z:set({ rid = DOWNSTAIRS, on = "true", brightness = "100", rate = "0" }))
 			assert.same({ { rid = G_DOWNSTAIRS, fields = { on = true, brightness = 100, rate = 0 } } }, sets)
 			assert.is_true(Z:set({ rid = DOWNSTAIRS, on = "false", rate = "250" }))

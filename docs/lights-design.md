@@ -242,6 +242,24 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   `OFF` → 0, `SET_LEVEL`/`RAMP_TO_LEVEL` { `LEVEL`, `TIME` } → the same path
   [assumed these may still arrive from old programming]. As built, `ON`
   always means 100 % (never the last level) and `TOGGLE` goes to 100 or 0.
+  Superseded (2026-11-08, #233, owner's Option 1): `ON`, and `TOGGLE` from
+  off (or before the bridge reported the light), go to the On preset, the
+  Default On Brightness a top keypad tap goes to (`dev.setting("preset")`,
+  100 while never set; a 0 or another value out of range is never taken:
+  from the proxy the value in use is kept, persisted it reads as 100), at
+  rate 0 as before; `TOGGLE` from on is still 0 at rate 0. `ON` on
+  a light already on goes to the preset as well, from below or above, as
+  the top tap does [verified: proxy reference, light_v2 `_7-TOGGLE.md`
+  (TOGGLE from off activates the On preset) and the variable Default On
+  Preset Brightness in `30_Light_v2_variables/_0-HEADER.md` (a top click
+  goes to it whatever the current level, a higher one too)]; with the
+  preset at 100 everything is as before. The click rates stay with keypad
+  taps. A turn-on from off waits for the preset's level as for any target
+  (#308). Zone and room lights run this driver, so they follow too
+  (`docs/zone-light-design.md` Decision 4). Which command a Navigator's tap
+  or programming's "Turn On" arrives as is still unverified: the reference
+  says a Navigator uses the On preset when a driver lacks `DYNAMIC_ON`
+  (`_1.3-DYNAMICON.md`), and the driver reports its preset to the proxy.
 - `SYNCHRONIZE` → report cached state (brightness, colour, online).
 
 Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):

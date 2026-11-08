@@ -87,6 +87,7 @@ local dev = device.new({
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
 local update_leds, LINK_BUTTON, send = dev.update_leds, device.LINK_BUTTON, dev.send
+local setting = dev.setting -- the keypad settings: "preset" (Default On Brightness), the rates
 
 -- Identity and status texts ------------------------------------------------
 
@@ -971,12 +972,25 @@ end
 -- is accepted as a brightness stop.
 dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
 
+-- ON and TOGGLE turn the light on at the On preset, the Default On
+-- Brightness a top keypad tap goes to (#233, owner 2026-11-08), at once as
+-- before: TOGGLE from off activates the On preset [verified: proxy
+-- reference, light_v2 TOGGLE], and the On preset is the level a top tap
+-- gives whatever level the light is at, a higher one too [verified: proxy
+-- reference, light_v2 variables, Default On Preset Brightness], so ON on a
+-- light already on goes to it as well, as the top tap here does. A preset
+-- never set reads as 100, the level both commands always had, and one out
+-- of range (0 included) is never taken (common/device.lua), so neither
+-- turns a light off. The click rates stay with keypad taps, so a light at
+-- the default preset behaves exactly as before; a zone or room light sends
+-- the same HUE_SET and the bridge sets every lamp.
 dispatch.proxy["TOGGLE"] = function()
-	set_brightness(st.on and 0 or 100, 0)
+	set_brightness(st.on and 0 or setting("preset"), 0)
 end
 
--- Legacy commands that old programming may still send.
-dispatch.proxy["ON"] = function() set_brightness(100, 0) end
+-- Legacy commands that old programming may still send. Which command
+-- "Turn On" in programming sends is unverified; ON goes where TOGGLE does.
+dispatch.proxy["ON"] = function() set_brightness(setting("preset"), 0) end
 dispatch.proxy["OFF"] = function() set_brightness(0, 0) end
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
 dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
@@ -993,7 +1007,6 @@ local HOLD_TICK_MS = 100 -- the level estimate advances this often during a ramp
 -- zone_lights.DIM_MAX_DURATION, scenes.DIM_MAX_DURATION), which a light's
 -- lacked (#234).
 local HOLD_MAX_MS = 6000000
-local setting = dev.setting
 
 -- A tap: top goes to the On preset over the click rate up, bottom off over
 -- the click rate down, toggle either way from the state the light shows.

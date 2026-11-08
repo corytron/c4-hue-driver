@@ -320,7 +320,7 @@ this page disagree about the present, this page and the code win.
   ("7 zones, 16 rooms on bridge; 2 imported"). The device: Status "Hue zone
   Bedside Lights (2 lights)", Model "Hue zone (2 lights)", Hue Light ID
   "zone #9 (b90ea7b4…)"; on while any lamp is lit, level = the group's
-  average; ON = every lamp to 100 %, slider absolute on the group, keypad
+  average; ON = every lamp to 100 % (Default On Brightness since 1.3, #233), slider absolute on the group, keypad
   holds relative (`dimming_delta`), colour and colour temperature to the
   group, capabilities the union of the members' (the colour temperature
   range their common one, to which the bridge also clamps, #58); the tile's
@@ -500,7 +500,8 @@ where each stands on 2026-11-07.
   research is done (`docs/hue-automations-research.md`,
   `docs/edge-cases-automations.md`, draft PR #285); the contract and the
   owner's decisions come next.
-- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness.
+- **#233** Decided 2026-11-08: ON and TOGGLE follow Default On Brightness
+  (PR for 1.3).
 - **#65** Read the Event Stream reconnect count and the event rate after a
   day on a build.
 - **#38** The owner's pass on the phone and keypads, and saving and backing
