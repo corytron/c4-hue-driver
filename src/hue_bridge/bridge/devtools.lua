@@ -650,6 +650,19 @@ end
 -- loop. See the top of this file.
 function devtools.install(given)
 	ctx = given
+	-- The event stream's abandoned transfers outlive a dev loop reload (#247):
+	-- Cancel() does not end them (bridge/stream.lua, rule 2), and Director
+	-- runs at most four C4:url transfers at once. The list the driver hands
+	-- every stream it builds (state.stream_abandoned, until now one per load
+	-- of driver.lua) becomes the one the loop keeps, so the reloaded code
+	-- counts the old code's open transfers against the stream's cap and waits
+	-- as after any restart. Here, before late init builds the first stream. A
+	-- running common/devloop.lua without keep (a dev install from before it)
+	-- leaves the list per load, as before.
+	if type(devloop.keep) == "function" and type(given.state) == "table"
+		and type(given.state.stream_abandoned) == "table" then
+		given.state.stream_abandoned = devloop.keep("stream_abandoned", given.state.stream_abandoned)
+	end
 	-- The 1.2 probe gets the same context; it defines the global list
 	-- functions of its picker test (Probe12PickerList, Probe12RoomList).
 	probe12.install(given)

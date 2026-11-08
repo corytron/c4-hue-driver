@@ -2421,6 +2421,113 @@ describe("Hue Bridge driver", function()
 				assert.is_true(connected(env), env.Properties["Event Stream"])
 			end)
 		end)
+
+		-- Dev loop reloads (src/common/devloop.lua; #247, #376), as the loop
+		-- runs them: the old code's OnDriverDestroyed, the driver's modules
+		-- dropped except common.devloop, which a reload never replaces, the new
+		-- chunk run in the same Lua state, then OnDriverInit and
+		-- OnDriverLateInit with DIT_UPDATING. The old code's transfers live on.
+		describe("dev loop reloads", function()
+			local function dev_build()
+				rawset(_G, "__DEVLOOP", nil)
+				package.loaded["common.devkey"] = nil
+				package.preload["common.devkey"] = function() return string.rep("0123456789abcdef", 4) end
+			end
+
+			after_each(function()
+				package.preload["common.devkey"] = nil
+				package.loaded["common.devkey"] = nil
+				package.loaded["common.devloop"] = nil
+				rawset(_G, "__DEVLOOP", nil)
+			end)
+
+			local function reload(env)
+				env.OnDriverDestroyed()
+				for name in pairs(package.loaded) do
+					if name:match("^bridge%.") or (name:match("^common%.") and name ~= "common.log"
+						and name ~= "common.devloop") then
+						package.loaded[name] = nil
+					end
+				end
+				local chunk = assert(loadfile("src/hue_bridge/driver.lua"))
+				setfenv(chunk, env)
+				chunk()
+				env.OnDriverInit("DIT_UPDATING")
+				env.OnDriverLateInit("DIT_UPDATING")
+			end
+
+			local function stream_transfers(c4)
+				local out = {}
+				for _, t in ipairs(c4.transfers) do
+					if t.url:find("/eventstream/", 1, true) then out[#out + 1] = t end
+				end
+				return out
+			end
+
+			local function connected(env)
+				return env.Properties["Event Stream"]:find("^Connected since") ~= nil
+			end
+
+			-- A quiet house: no bridge event ends the transfers the old code
+			-- abandoned (Cancel() does not, bridge/stream.lua rule 2).
+			it("open no more than two stream transfers for two reloads in a row (#247)", function()
+				dev_build()
+				local env, c4 = house()
+				local w = world(c4)
+				env.OnDriverInit("DIT_STARTUP")
+				env.OnDriverLateInit("DIT_STARTUP")
+				w.run(5000)
+				assert.is_true(connected(env), env.Properties["Event Stream"])
+				assert.equal(1, #stream_transfers(c4))
+				reload(env)
+				w.run(5000)
+				assert.is_true(connected(env), env.Properties["Event Stream"])
+				assert.equal(2, #stream_transfers(c4), "the old code's transfer is still open beside the new one")
+				reload(env)
+				w.run(5 * MIN)
+				assert.equal(2, #stream_transfers(c4), "the second reload opens none while two may still be open")
+				assert.equal("Waiting for an earlier stream transfer to close", env.Properties["Event Stream"])
+				-- A bridge event reaches the first transfer: its callback aborts
+				-- it, and the waiting stream opens at its next try.
+				stream_transfers(c4)[1]:done(-1, nil)
+				w.run(2 * MIN)
+				assert.equal(3, #stream_transfers(c4))
+				assert.is_true(connected(env), env.Properties["Event Stream"])
+			end)
+
+			it("leave each load its own list in a build without a dev key, as before (release builds never reload)",
+				function()
+					local env, c4 = house()
+					local w = world(c4)
+					env.OnDriverInit("DIT_STARTUP")
+					env.OnDriverLateInit("DIT_STARTUP")
+					w.run(5000)
+					reload(env)
+					w.run(5000)
+					reload(env)
+					w.run(5000)
+					assert.equal(3, #stream_transfers(c4), "the new code does not see the old code's transfers")
+					assert.is_true(connected(env), env.Properties["Event Stream"])
+				end)
+
+			-- #376's last comment: the old code's Last Action rows must not be
+			-- shown or hidden once it is destroyed.
+			it("cancel Last Action's row timer in OnDriverDestroyed, as Attention's (#376)", function()
+				local env, c4 = house()
+				env.OnDriverLateInit("DIT_STARTUP") -- settles Last Action's rows: its timer is armed
+				env.OnDriverDestroyed()
+				local function last_action_attribs()
+					local n = 0
+					for _, call in ipairs(c4.calls_to("SetPropertyAttribs")) do
+						if tostring(call[1]):find("^Last Action %(") then n = n + 1 end
+					end
+					return n
+				end
+				local before = last_action_attribs()
+				c4.advance(5000)
+				assert.equal(before, last_action_attribs())
+			end)
+		end)
 	end)
 
 	describe("messages before late init", function()

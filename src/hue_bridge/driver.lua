@@ -2372,6 +2372,7 @@ function OnDriverDestroyed()
 	pair_window:close()
 	state.away:cancel_outage_check()
 	attention_rows:cancel()
+	last_action_rows:cancel()
 	if state.hk then
 		state.hk:stop()
 	end
