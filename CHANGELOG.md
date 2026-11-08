@@ -31,6 +31,9 @@ listed.
   eight release files (#389).
 
 ### Fixed
+- The network connection's TLS check now removes the test connections it
+  opened once it has answered, and once clears away those that earlier
+  versions left behind (#329).
 - A light's Hue Name row shows the lamp's name as the Hue app shows it (its
   Hue device's name for a single-light lamp), and Event Stream reads
   `Stopped: key rejected (HTTP 403)`, not `Stopped`, when the bridge refuses
