@@ -1117,7 +1117,8 @@ class NotesTest(CliCase):
         self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
         self.assertIn(
             "Codename **Brasso**: each X.Y release of this project has its own codename from Star Wars: Andor "
-            "(a widely recognised name for an X.0, a lesser character, place or object for a point release), and "
+            "(a widely recognised name for an X.0; for a point release, a lesser-known character, place or object "
+            "tied to its X.0's name), and "
             "every build of 1.1, prereleases included, keeps it.",
             out,
         )
@@ -1174,7 +1175,8 @@ class NotesTest(CliCase):
         self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
         self.assertIn(
             "Codename: **Cassian**. Each X.Y release of this project has its own codename from Star Wars: Andor "
-            "(a widely recognised name for an X.0, a lesser character, place or object for a point release); "
+            "(a widely recognised name for an X.0; for a point release, a lesser-known character, place or object "
+            "tied to its X.0's name); "
             "every build of 1.0 keeps it.",
             out,
         )
