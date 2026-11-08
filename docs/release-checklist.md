@@ -239,9 +239,13 @@ Wars: Andor, kept by all its builds and betas: an X.0 a widely recognised
 character, place or object, a point release a lesser-known one tied
 specifically to its X.0's name (#394; for 1.0, Cassian's sister, mother,
 homeworld or ship). Before the first build of a new X.Y the coordinator
-proposes one and the owner approves it; it goes into
-`.github/codenames.json`, which `tools/changelog.py` reads (used so far:
-1.0 Cassian, 1.1 Brasso, 1.2 Taramyn). The driver files carry the
+picks one by that rule and reports it, without waiting for approval
+(#396); it goes into `.github/codenames.json`, which `tools/changelog.py`
+reads (used so far: 1.0 Cassian, 1.1 Brasso, 1.2 Taramyn). The owner
+approved the names for 1.0's next point releases, taken in this order:
+Kerri (Cassian's sister), Maarva (his adoptive mother), Kenari (his
+homeworld), Kassa (his birth name), Clem (his adoptive father) and B2EMO
+(the family droid). The driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
 integer there); it is named in the release's `manifest.json`, in the
 release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the
