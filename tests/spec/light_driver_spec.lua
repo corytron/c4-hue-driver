@@ -277,6 +277,22 @@ describe("Hue Light driver", function()
 			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
 		end)
 
+		-- #246: the bridge leaves the name out while it cannot tell yet whether
+		-- the lamp's Hue name is its device's or its own (right after a start).
+		it("keeps the Hue Name row and the stored name when a configure carries no name", function()
+			local env, c4 = load_light()
+			configure(env)
+			local nameless = {}
+			for k, v in pairs(CONFIGURE) do nameless[k] = v end
+			nameless.name = nil
+			env.ExecuteCommand("HUE_CONFIGURE", nameless)
+			assert.equal("Desk", env.Properties["Hue Name"])
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+			assert.equal("Desk", c4.persist.hue_name)
+			configure(env, { name = "Desk Lamp" })
+			assert.equal("Desk Lamp", env.Properties["Hue Name"])
+		end)
+
 		it("re-reports known state after a re-configure", function()
 			local env, c4 = lit_light()
 			configure(env)
