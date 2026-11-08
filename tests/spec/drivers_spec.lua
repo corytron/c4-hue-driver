@@ -946,6 +946,39 @@ describe("Hue Bridge driver", function()
 			assert.equal(check, c4.last_transfer(), "no stream on a rejected key")
 		end)
 
+		-- #246: the stream address self-check's 401 or 403 rebuilt the stream
+		-- right after the rejection, and the rebuild's stop wrote "Stopped".
+		for _, code in ipairs({ 401, 403 }) do
+			it("#246: a " .. code .. " to the stream address self-check reads the key-rejected text, not Stopped",
+				function()
+					local REJECTED = "Stopped: key rejected (HTTP " .. code .. ")"
+					local env, c4 = paired_driver()
+					env.OnDriverLateInit("DIT_STARTUP")
+					answer_identity(c4)
+					local check = c4.last_transfer()
+					assert.equal(CHECK_URL, check.url)
+					check:respond(code, "<html>unauthorized</html>")
+					assert.equal(REJECTED, env.Properties["Event Stream"])
+					assert.equal(KEY_STATUS:gsub("403", tostring(code)), env.Properties["Status"])
+					c4.fire_timers() -- the rows' coalescing timer: nothing waiting overwrites it
+					assert.equal(REJECTED, env.Properties["Event Stream"])
+					assert.equal(check, c4.last_transfer(), "no stream on a rejected key")
+
+					-- A rebuild while the key stays rejected keeps the text too.
+					env.Properties["Stream Timeout (s)"] = "900"
+					env.OnPropertyChanged("Stream Timeout (s)")
+					assert.equal(REJECTED, env.Properties["Event Stream"])
+					assert.equal(check, c4.last_transfer(), "still no stream")
+
+					-- The re-check of D8 still runs 5 minutes later, and its 200 lifts the stop.
+					c4.advance(301 * 1000)
+					local t = c4.last_transfer()
+					assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
+					t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
+					assert.equal("Paired", env.Properties["Status"])
+				end)
+		end
+
 		it("checks TLS with a decoy bundle and no key before the first keyed request", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")
