@@ -236,10 +236,12 @@ seven assets attached (the three `.c4z` files, `SHA256SUMS.txt`,
 `manifest.json` and the provenance in two forms; "How a release is cut"
 below). Since 2026-10-26 (#304) every X.Y has its own codename from Star
 Wars: Andor, kept by all its builds and betas: an X.0 a widely recognised
-character, place or object, a point release a decidedly less important one.
-Before the first build of a new X.Y the coordinator proposes one and the
-owner approves it; it goes into `.github/codenames.json`, which
-`tools/changelog.py` reads (used so far: 1.0 Cassian, 1.1 Brasso). The driver files carry the
+character, place or object, a point release a lesser-known one tied
+specifically to its X.0's name (#394; for 1.0, Cassian's sister, mother,
+homeworld or ship). Before the first build of a new X.Y the coordinator
+proposes one and the owner approves it; it goes into
+`.github/codenames.json`, which `tools/changelog.py` reads (used so far:
+1.0 Cassian, 1.1 Brasso, 1.2 Taramyn). The driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
 integer there); it is named in the release's `manifest.json`, in the
 release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the

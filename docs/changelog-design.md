@@ -63,8 +63,11 @@ Rules the checker enforces:
 Owner, 2026-10-26: each X.Y release has its own codename from Star Wars:
 Andor, instead of one per major version. An X.0 gets a widely recognised
 character, place or object from the show, a point release (X.Y with Y of 1
-or more) a decidedly less important one. 1.0 is "Cassian" and 1.1 is
-"Brasso". One file names them, and the tool takes every codename from it:
+or more) a decidedly less important one. Since 2026-11-07 (#394) that
+lesser name is tied specifically to its X.0's name: for 1.0 "Cassian", his
+sister, his mother, his homeworld or his ship. 1.0 is "Cassian", 1.1
+"Brasso" and 1.2 "Taramyn", the last two named before that rule. One file
+names them, and the tool takes every codename from it:
 
 ```json
 {
