@@ -32,6 +32,11 @@ for about 3 s of a 10 s ramp ended near 46 %).
   `zone_lights:member_lights` resolves them) and keeps the members that are
   **on**, according to the driver's cached light state. That set is fixed for
   the whole hold: members that change during it are not re-read.
+  **Amended 2026-11-07 (A1):** an `up` start with no lit member takes
+  **all** members as its set, and the mode follows the total member count.
+  A hold from off sends a 1 % start and the dim up about 600 ms later,
+  before the event stream has reported the lamps on. Without A1, every hold
+  from off would take G6's old path.
 - **G4. Per-light mode: 1 to `PER_LIGHT_MAX` (10) lit members.** The start
   goes to each lit member through the **light** queue, as a single Hue Light's
   hold does: `{ dim = action, delta = 100, rate = duration }`, in member
@@ -57,9 +62,16 @@ for about 3 s of a 10 s ramp ended near 46 %).
   only cut short the step already in flight, which finishes Hue's short
   default transition. The result moves visibly in steps, softened by Hue's
   default transition, and keeps the lights' relative levels.
-- **G6. No lit member** (an `up` from all off, a group the cache does not
-  know, or no members): the start and its stop go to the group queue exactly
+- **G6. No lit member on a `down`** (a group the cache does not know, no
+  members, or a `down` with every member off): the start and its stop go to the group queue exactly
   as today, including `rate` and `level`. Nothing gets worse.
+- **G6a. Keep Hue scenes running (A2, amended 2026-11-07).** A change to a
+  single light ends a running time-based (smart) scene and stops a dynamic
+  palette, while a grouped_light dim leaves them running (V11,
+  `docs/smart-scenes-design.md` Decision 6). So when `keep_group` says a
+  smart scene is active, or a scene is playing dynamically, on the
+  grouped_light's room or zone, the hold uses **stepped** mode whatever the
+  member count. Its log line adds `(scene running)`.
 - **G7. One hold per grouped_light.** A new start on a grouped_light whose
   hold is still running ends that hold first, as its stop would, then begins.
   A stop with no running hold on that grouped_light passes to the group queue
@@ -85,6 +97,7 @@ local gh = group_hold.new({
 	light_set  = function(light_rid, fields) return true|false end,       -- light queue :set
 	group_set  = function(grouped_light_rid, fields) return true|false end, -- group queue :set
 	set_timer  = function(delay_ms, fn) return timer end,                  -- C4:SetTimer; timer:Cancel()
+	keep_group = function(grouped_light_rid) return true|false end,       -- G6a; raising or missing = false
 	log        = log,                                                      -- common.log
 })
 gh:dim(grouped_light_rid, body, level)  --> true when something was queued (the group_dim contract)
@@ -100,7 +113,7 @@ reach the queue unchanged.
 
 | Owner | Files |
 | --- | --- |
-| Agent **G** (code) | new `src/hue_bridge/bridge/group_hold.lua`; new `tests/spec/group_hold_spec.lua`; a read-only helper in `src/hue_bridge/bridge/zone_lights.lua` (member light rids of a grouped_light, for `members`), if none exists, with its cases in `tests/spec/zone_lights_spec.lua` |
+| Agent **G** (code) | new `src/hue_bridge/bridge/group_hold.lua`; new `tests/spec/group_hold_spec.lua`; read-only helpers in `src/hue_bridge/bridge/zone_lights.lua` and (for G6a) `src/hue_bridge/bridge/scenes.lua` (cases in `tests/spec/scenes_spec.lua`), plus (member light rids of a grouped_light, for `members`), if none exists, with its cases in `tests/spec/zone_lights_spec.lua` |
 | Agent **D** (docs) | `src/hue_scene/www/documentation.html`, `src/hue_bridge/www/documentation.html` (the zone and room light sections), `docs/keypad-design.md`, `docs/zone-light-design.md` (Decision 6), and any other design note describing group holds, except `docs/design.md` |
 | Coordinator | this document; `src/hue_bridge/driver.lua` (the `group_dim` hook and the wiring, after #373 lands, because the driver's main chunk has no room for another local until then); `docs/design.md`, `CHANGELOG.md`, `docs/status.md`, git |
 
@@ -113,3 +126,8 @@ reach the queue unchanged.
   per-light dims only to lit members on that basis].
 - A stepped hold on a large group moves in steps of the expected size, one a
   second.
+- A hold from off (A1) ramps smoothly from 1 %.
+- A hold on a room whose time-based scene runs leaves the schedule running
+  (G6a).
+- Not in this change: the scene slider's ramp time on a grouped_light
+  (`HUE_SCENE_LEVEL`) may be ignored the same way; not measured.

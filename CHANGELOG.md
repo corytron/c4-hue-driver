@@ -15,6 +15,11 @@ listed.
 ## Unreleased
 
 ### Changed
+- Keypad holds on a Hue Scene, a zone light or a room light now ramp instead
+  of jumping to full or off in about a second: smoothly, lamp by lamp, with
+  up to 10 lamps on, and in steps of a second with more lamps on or while a
+  time-of-day or moving scene plays there. Lamps that are off stay off, and
+  a hold from off starts at 1 % as before (#249).
 - The project's GitHub page names all four drivers: the Download list links
   Hue Motion too, motion sensors are no longer called a beta feature, and the
   security policy, contributing guide and checklists count four packages and

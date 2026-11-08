@@ -62,6 +62,11 @@ of it is live.
   Scene devices: taps, hold-to-dim through Hue's relative dimming, keypad
   LEDs, decoupled Control4 switches, and the keypad settings shown in
   Composer since 2026-10-25 (#59).
+- [`group-hold-design.md`](group-hold-design.md): holds on Hue Scene
+  devices, zone lights and room lights (#249): Hue ignores the ramp time on
+  a whole-group dim, so from 1.3 a hold dims each lit lamp (up to 10) or
+  steps the group once a second (more, or while a time-of-day or dynamic
+  scene runs there).
 - [`bridge-compat-design.md`](bridge-compat-design.md): bridge generations
   and software: what pairing refuses (the round BSB001, a device that is not
   a Hue bridge, software older than 1948086000), the same model check at

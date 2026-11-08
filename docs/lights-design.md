@@ -174,7 +174,11 @@ with the scenes and the zone lights (#56).
   `rate` > 0 [assumed: `dynamics.duration` is the transition field; confirm
   on hardware]. No arrays, so `C4:JsonEncode` is fine. Verified 2026-10-21
   and 2026-10-23 (`docs/design.md`, "Color mapping"): the bridge accepts
-  `dynamics.duration` on a light and on a grouped_light.
+  `dynamics.duration` on a light and on a grouped_light. Corrected
+  2026-10-25 (#249): accepted is not honoured everywhere: for a
+  grouped_light `dimming_delta` Hue ignores the duration and covers the
+  delta in about a second; on a light it honours it
+  (`docs/group-hold-design.md`).
 - `send` is `http.request` with method PUT to `/clip/v2/resource/light/<rid>`
   on the dotted address; `done(result)`. On 429 or 5xx: retry after
   `BACKOFF_MS = 500` doubling to 8 s; on 4xx other than 429: drop and log.

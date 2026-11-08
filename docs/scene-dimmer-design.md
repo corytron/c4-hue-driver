@@ -136,3 +136,13 @@ behaves correctly, and the Bedside Lights Switch's keypad LEDs follow Shine
 between 0 % and on. The keypad hold-to-dim from build 154 also works on the
 same switch (2026-10-23), which confirms Hue accepts `dimming_delta` with
 `dynamics` and the `stop` action on a grouped_light.
+Corrected (2026-10-25, #249): accepts, but does not honour. Measured, Hue
+ignores `dynamics.duration` for a grouped_light `dimming_delta` and covers
+the whole delta in about a second, so those holds ran to full or off and
+the release's `stop` came too late; on a single light it honours both.
+From 1.3 a hold reaches the room or zone's lit lamps one by one (up to 10
+lit) or as timed group steps (more, or always while a smart scene runs or
+a scene plays dynamically there), `docs/group-hold-design.md`. Whether
+the slider's `HUE_SCENE_LEVEL` rate (a smaller `brightness_delta` with
+`dynamics.duration`) is ignored the same way was not measured; it still
+goes to the grouped_light (G2).

@@ -19,6 +19,10 @@ parity"); a scene device is a dimmer whose on state follows the on rule
 rate or button colour settings and the defaults below apply. Superseded
 (2026-10-25, #59): both declare it False now, so Composer lists those
 settings once the controller has been rebooted after the install.
+Corrected (2026-10-25, #249): the scene holds "verified" above only
+stopped; they never ramped. From 1.3 a hold on a scene, zone light or
+room light no longer reaches Hue as one grouped_light dim: see "Group
+holds (1.3, #249)" at the end and `docs/group-hold-design.md`.
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
@@ -189,7 +193,7 @@ through dims from its own buttons".
 
 | Message | Direction | Params (all strings) | Meaning |
 |---|---|---|---|
-| `HUE_SCENE_DIM` | scene → bridge | `rid`, `device_id`, `direction` (`up` / `down` / `stop`), `duration` (ms, up/down only) | Dim the scene's group: one grouped_light PUT `{"dimming_delta":{"action":"up"/"down","brightness_delta":100},"dynamics":{"duration":<ms>}}` to start, `{"dimming_delta":{"action":"stop"}}` to stop. Relative, so the scene's colours and per-light differences are kept. `stop` and `dynamics` on a grouped_light were assumed; **verified on the house with build 154 (2026-10-23)**. |
+| `HUE_SCENE_DIM` | scene → bridge | `rid`, `device_id`, `direction` (`up` / `down` / `stop`), `duration` (ms, up/down only) | Dim the scene's group: one grouped_light PUT `{"dimming_delta":{"action":"up"/"down","brightness_delta":100},"dynamics":{"duration":<ms>}}` to start, `{"dimming_delta":{"action":"stop"}}` to stop. Relative, so the scene's colours and per-light differences are kept. `stop` and `dynamics` on a grouped_light were assumed; **verified on the house with build 154 (2026-10-23)**. Corrected (2026-10-25, #249): build 154 showed that Hue accepts the body (HTTP 200), not that it ramps. Measured, Hue ignores `dynamics.duration` for a grouped_light `dimming_delta` and covers the whole delta in about a second, so the `stop` comes too late and the lights end at full or off. From 1.3 the bridge turns this message into per-light dims or timed group steps ("Group holds (1.3, #249)"). |
 | `HUE_SCENE_RECALL` | scene → bridge | adds optional `brightness` (1–100) | Recall with `recall.dimming.brightness` override (used for "hold top while off": recall at 1 %; since the dimmer also for a slider target from off). |
 | `HUE_SCENE_GROUP` | bridge → scene | `rid`, and `on` (`true`/`false`) and/or `other_active` (`true`) | The scene's room/zone grouped_light turned on/off (from the event feed or the resync), or another scene of the same group became active. Sent at resync (current `on`) and on change. Since 2026-10-23 also `level`, the group's brightness, and sent in a hello answer (`docs/scene-dimmer-design.md`). |
 
@@ -224,6 +228,13 @@ second with a burst of 3, and a hold's start and stop skip that bucket
 (`src/hue_bridge/driver.lua:new_group_queue`,
 `src/hue_bridge/bridge/commands.lua:urgent`; `docs/zone-light-design.md`
 Decision 9).
+Current (1.3, #249): `group_dim` hands every call to
+`bridge/group_hold.lua` (`gh:dim(grouped_light_rid, body, level)`), which
+sends a hold's start and stop to the lit member lights through the light
+queue (1 to 10 lit; every member for a hold up from off), or timed group
+steps (more than 10, or while a smart scene runs or a scene plays
+dynamically there), and passes everything else to the group queue with
+the same fields (`docs/group-hold-design.md` G1 to G6a).
 
 ### Scene device (`src/hue_scene/driver.lua`)
 
@@ -298,6 +309,8 @@ Builds that change only Lua or connections take effect at once, as build
 `docs/composer-remote.md` rule 10). With the reboot, the scene holds, the
 LEDs following Shine and the dimmer were verified
 (`docs/scene-dimmer-design.md`, "Verified on hardware").
+Corrected (2026-10-25, #249): the holds only in that they stopped at the
+release; the ramp was not measured then, and it runs in about a second.
 
 ### Light parity (owner, 2026-10-23: "whatever capabilities we implement for scenes get intelligently carried over to the individual light driver as well")
 
@@ -334,6 +347,15 @@ LEDs following Shine and the dimmer were verified
   request bucket (`commands.urgent`). That Hue keeps the speed and stops at
   the end of the range is assumed until the hold on the house that #232
   asks for.
+  Measured 2026-10-25 (#249): on a single **light** Hue honours the
+  duration and the stop (a lamp held for about 3 s of a 10 s ramp ended
+  near 46 %); on a **grouped_light** it ignores the duration and covers the
+  whole delta in about a second, so a zone light's hold ran to the end.
+  Current (1.3, #249): a zone or room light's `HUE_DIM` reaches each lit
+  lamp with the whole rate, each ramping from its own level (1 to 10 lit),
+  or becomes timed group steps (more than 10 lit, or a smart or dynamic
+  scene playing on the zone); "Group holds (1.3, #249)" below. A single
+  Hue Light's hold is unchanged.
 
 ### Queue support (`src/hue_bridge/bridge/commands.lua`)
 
@@ -346,3 +368,65 @@ brightness: the stop's `level` (lights), else the group level recorded at
 the ramp's start (`scenes.group_level`, from grouped_light reports) moved by
 the elapsed share of the ramp (scenes). Without either the ramp runs to its
 end and a warning is logged.
+Current (1.3, #249): the group fallback now serves only the holds that
+still go to the grouped_light (no lit member, `docs/group-hold-design.md`
+G6). A per-light group hold's stops carry no `level` and the light queue
+has no `level_of`, so a lamp whose stop is refused runs to the end of its
+ramp, with the warning; a stepped hold sends no stop (G4, G5).
+
+### Group holds (1.3, #249)
+
+Measured on the house on 2026-10-25 (rounds 47b and 47c, and direct
+requests through the dev loop; issue #249): every keypad hold on a Hue
+Scene device or a zone light jumped to full or off. A grouped_light
+`dimming_delta` down with `brightness_delta` 100 and `dynamics.duration`
+10 000 ms, stopped about 6 s later, left the zone's lamps at 0 % from 80 %
+(an honoured ramp would have left about 20 %), and keypad holds of 1.5 s
+(1.1 s to the stop) took the room or zone from 100 % or 50 % to 0 %. The
+same request on one lamp's **light** resource, stopped after about 3 s,
+left it near 46 % from 80 %. Hue therefore ignores `dynamics.duration`
+on a grouped_light dim and honours it on a light.
+
+Owner's choice (2026-11-07): the mix, option 3 of the issue. The contract
+is `docs/group-hold-design.md`; in short:
+
+- The devices are unchanged: the scene still sends `HUE_SCENE_DIM` and a
+  zone or room light `HUE_DIM`, with the hold rate, the proxy's
+  `LIGHT_BRIGHTNESS_CHANGING` and the 100 ms estimate as before. The
+  bridge's `group_dim` hook hands every call to `bridge/group_hold.lua`,
+  which looks at the grouped_light's member lights that are **on** in the
+  bridge's cache when the hold starts (G3) and fixes that set for the hold.
+  A hold **up with none lit** takes every member, and the mode follows the
+  member count (A1): a hold from off dims up 600 ms after the 1 % start
+  (`DIM_AFTER_ON_MS`), before the event stream has reported the lamps on,
+  so without A1 every hold from off would take the old path.
+- **1 to 10 lit (`PER_LIGHT_MAX`)**: each lit member gets the hold as a
+  single Hue Light's hold, `{ dim = up|down, delta = 100, rate = hold rate }`
+  through the light queue, and the release a `stop` to each (G4). Smooth,
+  relative levels kept, stops where released; two requests per lamp per
+  hold, which the light queue sends at once (`commands.urgent`).
+- **More than 10 lit**: one group `dimming_delta` step at once and one
+  every `STEP_MS` (1000 ms) while held, each `min(100, 100 × 1000 / rate)`
+  percent without a duration (20 % at the default 5000 ms), until they add
+  up to 100 or the release, which only cancels the timer (G5). Visible
+  steps, softened by Hue's default transition; relative levels kept.
+- **A smart scene running, or a scene playing dynamically**, on the
+  grouped_light's room or zone (`keep_group`): stepped whatever the count,
+  and the log line adds `(scene running)` (G6a, A2). A change to a single
+  light ends a scene's active status and a dynamic palette (V11), and a
+  time-based scene device follows Hue's state
+  (`docs/smart-scenes-design.md` Decision 2), so a per-light hold there
+  would end the schedule and turn the device off; a whole-group step
+  leaves both running (V11's relative group dim did).
+- **Members unknown, or a hold down with none lit**: the start and its
+  stop go to the group queue as before, `rate` and `level` included (G6),
+  which still runs to the end in about a second.
+- One hold per grouped_light (G7); teardown cancels the step timers (G8).
+
+To verify on the house (contract §5): a per-light hold on several lamps,
+the stepped hold's step size and pace, that a group `dimming_delta` leaves
+lamps that are off alone **[assumed]**, that a hold from off ramps
+smoothly from 1 % (A1), and that a hold on a room whose time-based scene
+runs leaves the schedule running (G6a). A per-light hold on an ordinary,
+static scene may still end Hue's "active" for it, as any change to one
+light does; the scene device's on rule keeps its tile on.

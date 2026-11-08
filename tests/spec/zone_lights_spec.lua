@@ -1705,4 +1705,53 @@ describe("bridge.zone_lights", function()
 			assert.equal("454", c4.sent[#c4.sent].params.mirek_max, "the CONFIGURE says the same")
 		end)
 	end)
+
+	-- Issue #249 (docs/group-hold-design.md G3): the members a hold on a
+	-- grouped_light fans out over, for any zone or room of the cache.
+	describe("lights_of_grouped_light (issue #249)", function()
+		it("gives a zone's light children in the zone's order, without any zone light registered", function()
+			assert.same({}, Z:device_ids(), "nothing registered")
+			assert.same({ F.rids.garage, F.rids.living }, Z:lights_of_grouped_light(G_DOWNSTAIRS))
+		end)
+
+		it("gives a room's lights through its device children, in the room's order", function()
+			assert.same({ F.rids.hallway, F.rids.living }, Z:lights_of_grouped_light(G_LIVING))
+			assert.same({ F.rids.garage }, Z:lights_of_grouped_light(G_GARAGE))
+		end)
+
+		it("is empty for the bridge_home, an unknown grouped_light, a group rid or no rid at all", function()
+			assert.same({}, Z:lights_of_grouped_light(F.grouped_light_rids.home))
+			assert.same({}, Z:lights_of_grouped_light("8e7d6c5b-0000-4000-8000-00000000g0ff"))
+			assert.same({}, Z:lights_of_grouped_light(DOWNSTAIRS), "a zone's own rid is not its grouped_light")
+			assert.same({}, Z:lights_of_grouped_light(nil))
+			assert.same({}, Z:lights_of_grouped_light(""))
+			assert.same({}, Z:lights_of_grouped_light(42))
+		end)
+
+		it("is empty without a group cache", function()
+			Z = zone_lights.new({ http = http_ctx })
+			assert.same({}, Z:lights_of_grouped_light(G_DOWNSTAIRS))
+		end)
+
+		it("follows the zone's members and its grouped_light: joined, emptied, refilled", function()
+			add_downstairs()
+			feed(F.events.zone_children)  -- Hallway Ambiance joins Downstairs
+			assert.same({ F.rids.garage, F.rids.living, F.rids.hallway }, Z:lights_of_grouped_light(G_DOWNSTAIRS))
+			feed(F.events.zone_emptied)
+			assert.same({}, Z:lights_of_grouped_light(G_DOWNSTAIRS), "the deleted grouped_light names nothing")
+			feed(F.events.zone_refilled)
+			assert.same({}, Z:lights_of_grouped_light(G_DOWNSTAIRS))
+			assert.same({ F.rids.garage }, Z:lights_of_grouped_light(F.refilled_grouped_light_rid))
+		end)
+
+		it("hands out a fresh table each call and changes nothing", function()
+			local first = Z:lights_of_grouped_light(G_LIVING)
+			first[1] = "changed"
+			assert.same({ F.rids.hallway, F.rids.living }, Z:lights_of_grouped_light(G_LIVING))
+			assert.equal(0, #c4.sent)
+			assert.equal(0, #c4.transfers)
+			assert.same({}, sets)
+			assert.same({}, dims)
+		end)
+	end)
 end)

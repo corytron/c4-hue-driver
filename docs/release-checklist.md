@@ -106,7 +106,15 @@ calls the old names keeps working, and step 11 checks that it does:
    a drag a burst of three grouped_light PUTs, then at most one a second.
 6. Scene round trip on Shine (1162): ON → one scene recall PUT; OFF → one
    grouped_light off; the keypad hold (owner) → `dimming_delta` up/down and
-   `stop`.
+   `stop`. From 1.3 (#249, `docs/group-hold-design.md`): with 1 to 10
+   lamps of the room on, that start and stop go to each lit lamp's light
+   resource (the bridge logs `group hold <rid> up: per-light, <n> lights,
+   <ms> ms`) and the lamps ramp at the hold rate and stop at the release;
+   with more lit, group steps without a duration, one a second
+   (`stepped, <n> lights, <step> % a step`); from off, every lamp of the
+   room counts; with Shine recalled dynamically, or a time-based scene of
+   the room running, stepped whatever the count (`(scene running)` in the
+   line).
 7. Time-of-day scene: Golden hours (1164) ON → `smart_scene` activate; OFF →
    deactivate and the room off.
 8. Light lifecycle: `Add From Hue` of one light (Left Bedside Light) into
