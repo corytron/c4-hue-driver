@@ -922,6 +922,32 @@ function scenes:grouped_light_of(group_rid)
 	return group and group.grouped_light_rid or nil
 end
 
+-- Whether a Hue scene is running on the room or zone whose grouped_light is
+-- `grouped_light_rid`, as the catalogues last heard: a time-based scene
+-- `active`, or a scene playing its dynamic palette (status.active
+-- "dynamic_palette"). A keypad hold there then stays on the grouped_light
+-- (stepped; bridge/group_hold.lua, docs/group-hold-design.md G6a): a relative
+-- or absolute group dim left a time-based scene active and a dynamic palette
+-- playing, while a change to one light ended a scene [verified: V11,
+-- docs/smart-scenes-research.md]. Read only, for any scene on the bridge,
+-- registered or not; false for an unknown or missing rid.
+function scenes:scene_running_on(grouped_light_rid)
+	if type(grouped_light_rid) ~= "string" or grouped_light_rid == "" then
+		return false
+	end
+	for _, record in pairs(self.smart_catalogue) do
+		if record.state == "active" and self:grouped_light_of(record.group_rid) == grouped_light_rid then
+			return true
+		end
+	end
+	for _, record in pairs(self.catalogue) do
+		if record.active == "dynamic_palette" and self:grouped_light_of(record.group_rid) == grouped_light_rid then
+			return true
+		end
+	end
+	return false
+end
+
 -- HUE_SCENE_GROUP { rid, on?, level? } to one registered scene's device;
 -- `fields` holds the strings sent besides the rid.
 function scenes:send_group(rid, fields)

@@ -18,6 +18,7 @@ local DEVICE_ID = 2001 -- the first id the fake's AddDevice hands out
 local BRIDGE_ID = 15
 local T0 = 1761000000
 local GROUPED = "https://192.0.2.10/clip/v2/resource/grouped_light/"
+local LIGHT = "https://192.0.2.10/clip/v2/resource/light/"
 
 local function proxy_calls(env, command)
 	local out = {}
@@ -42,7 +43,7 @@ local function sent_params(c4, command)
 end
 
 describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-link, deleted in Composer", function()
-	local bridge, light, bc4, L, Z, Q, now, last_hello
+	local bridge, light, bc4, L, Z, Q, LQ, GH, now, last_hello
 
 	local function http_ctx(req, cb)
 		req.ip = "192.0.2.10"
@@ -95,12 +96,13 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		log.set_prefix("Hue Bridge")
 
 		for _, m in ipairs({ "bridge.http", "bridge.hue_model", "bridge.registry", "bridge.groups", "bridge.lights",
-			"bridge.commands", "bridge.zone_lights" }) do
+			"bridge.commands", "bridge.zone_lights", "bridge.group_hold" }) do
 			package.loaded[m] = nil
 		end
 		local lights = require("bridge.lights")
 		local commands = require("bridge.commands")
 		local zone_lights = require("bridge.zone_lights")
+		local group_hold = require("bridge.group_hold")
 		L = lights.new({ http = http_ctx, now = function() return now end })
 		L:absorb({ light = decode_data(F.light), device = decode_data(F.device), room = decode_data(F.room),
 			zone = decode_data(F.zone), bridge_home = decode_data(F.bridge_home) })
@@ -130,17 +132,30 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 				Q:set(rid, fields)
 				return true
 			end,
+			-- As driver.lua's group_dim hook: bridge/group_hold.lua decides (#249).
 			group_dim = function(rid, body, level)
-				Q:set(rid, {
-					dim = body.dimming_delta.action,
-					delta = body.dimming_delta.brightness_delta,
-					rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
-					level = tonumber(level),
-				})
-				return true
+				return GH:dim(rid, body, level) == true
 			end,
 		})
 		Z:load()
+		-- The light queue and the hold module as driver.lua creates them.
+		LQ = commands.new({
+			send = function(rid, body, done)
+				http_ctx({ method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }, done)
+			end,
+		})
+		GH = group_hold.new({
+			members = function(rid) return Z:lights_of_grouped_light(rid) end,
+			is_on = function(rid)
+				local model = L:record_of(rid)
+				return model ~= nil and model.on == true
+			end,
+			light_set = function(rid, fields) LQ:set(rid, fields) return true end,
+			group_set = function(rid, fields) Q:set(rid, fields) return true end,
+			set_timer = function(ms, fn) return bridge.C4:SetTimer(ms, fn) end,
+			keep_group = function() return false end,
+			log = log,
+		})
 
 		-- What driver.lua does with a zone light's messages.
 		bridge.ExecuteCommand = function(command, params)
@@ -249,22 +264,32 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.is_true(#br >= 1)
 		assert.equal(math.floor(tonumber(state.brightness) + 0.5), br[#br].LIGHT_BRIGHTNESS_CURRENT)
 
-		-- A keypad hold (HUE_DIM as the light driver sends it): the start is
-		-- dimming_delta up over the whole range with the ramp, the stop is a
-		-- stop; both go out at once (urgent, Decision 9).
+		-- A keypad hold (HUE_DIM as the light driver sends it) on a zone with
+		-- one lamp on (#249, docs/group-hold-design.md G4): the start is that
+		-- lamp's dimming_delta up over the whole range with the ramp, the stop
+		-- is a stop to the same lamp; both go out at once (urgent).
+		local lit = {}
+		for _, rid in ipairs(Z:lights_of_grouped_light(F.grouped_light_rids.downstairs)) do
+			local model = L:record_of(rid)
+			if model and model.on == true then
+				lit[#lit + 1] = rid
+			end
+		end
+		assert.equal(1, #lit, "the fixtures have one lamp of the zone on")
 		bc4.sent = {}
 		before = #bc4.transfers
 		bridge.ExecuteCommand("HUE_DIM", { rid = F.group_rids.downstairs, device_id = tostring(DEVICE_ID),
 			direction = "up", duration = "5000" })
 		put, body = flush_put()
 		assert.equal(before + 1, #bc4.transfers)
-		assert.equal(GROUPED .. F.grouped_light_rids.downstairs, put.url)
+		assert.equal(LIGHT .. lit[1], put.url)
 		assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 5000 } }, body)
 		answer_put(put)
 		bridge.ExecuteCommand("HUE_DIM", { rid = F.group_rids.downstairs, device_id = tostring(DEVICE_ID),
 			direction = "stop", level = "60" })
 		put, body = flush_put()
 		assert.equal(before + 2, #bc4.transfers)
+		assert.equal(LIGHT .. lit[1], put.url)
 		assert.same({ dimming_delta = { action = "stop" } }, body)
 		answer_put(put)
 

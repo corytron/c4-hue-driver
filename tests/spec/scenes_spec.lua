@@ -2851,4 +2851,73 @@ describe("bridge.scenes", function()
 			no_commas(items)
 		end)
 	end)
+
+	-- Issue #249 (docs/group-hold-design.md G6a): a hold on a group where a
+	-- Hue scene runs stays on the grouped_light.
+	describe("scene_running_on (issue #249)", function()
+		local G_LIVING, G_DOWNSTAIRS, G_GARAGE = F.grouped_light_rids.living_room, F.grouped_light_rids.downstairs,
+			F.grouped_light_rids.garage
+
+		local function smart_state(key, state)
+			return '[{"creationtime":"2026-10-24T16:00:00Z","id":"9de116fc-00f3-4a2b-8c3d-0000000000f3","type":"update",'
+				.. '"data":[{"id":"' .. F.smart_scene_rids[key] .. '","type":"smart_scene","state":"' .. state .. '"}]}]'
+		end
+
+		before_each(function()
+			resync({ smart = F.smart_scenes })
+			c4.sent = {}
+		end)
+
+		it("is false while no scene runs, a static scene included, and for no or unknown rids", function()
+			assert.equal("static", S:scene(F.scene_rids.nightlight).active, "Nightlight is static in Downstairs")
+			for _, rid in ipairs({ G_LIVING, G_DOWNSTAIRS, G_GARAGE, F.grouped_light_rids.home,
+				"8e7d6c5b-0000-4000-8000-00000000g0ff", F.group_rids.living_room }) do
+				assert.is_false(S:scene_running_on(rid), rid)
+			end
+			assert.is_false(S:scene_running_on(nil))
+			assert.is_false(S:scene_running_on(""))
+			assert.is_false(S:scene_running_on(7))
+		end)
+
+		it("is true while a scene of the group plays its dynamic palette, until it turns static", function()
+			S:on_container(container(F.events.scene_dynamic))  -- Savanna sunset, Living Room
+			assert.is_true(S:scene_running_on(G_LIVING))
+			assert.is_false(S:scene_running_on(G_DOWNSTAIRS))
+			assert.is_false(S:scene_running_on(G_GARAGE))
+			S:on_container(container(F.events.smart_slot_scene))  -- Savanna sunset static
+			assert.is_false(S:scene_running_on(G_LIVING))
+		end)
+
+		it("is true while a time-based scene of the group is active, room or zone", function()
+			S:on_container(container(F.events.smart_activated))  -- Golden hours 4, Living Room
+			assert.is_true(S:scene_running_on(G_LIVING))
+			assert.is_false(S:scene_running_on(G_DOWNSTAIRS))
+			S:on_container(container(F.events.smart_inactive))
+			assert.is_false(S:scene_running_on(G_LIVING))
+
+			S:on_container(container(smart_state("golden", "active")))  -- Golden hours, Downstairs (zone)
+			assert.is_true(S:scene_running_on(G_DOWNSTAIRS))
+			assert.is_false(S:scene_running_on(G_LIVING))
+		end)
+
+		it("is true for an unregistered scene and false once the groups are not cached", function()
+			assert.is_nil(next(S.registry), "nothing registered")
+			S:on_container(container(F.events.scene_dynamic))
+			assert.is_true(S:scene_running_on(G_LIVING))
+			L.groups = require("bridge.groups").new()
+			assert.is_false(S:scene_running_on(G_LIVING), "no group knows that grouped_light")
+		end)
+
+		it("changes and sends nothing", function()
+			S:on_container(container(F.events.smart_activated))
+			c4.sent = {}
+			local transfers = #c4.transfers
+			S:scene_running_on(G_LIVING)
+			assert.same({}, c4.sent)
+			assert.equal(transfers, #c4.transfers)
+			assert.same({}, dims)
+			assert.same({}, sets)
+			assert.same({}, offs)
+		end)
+	end)
 end)

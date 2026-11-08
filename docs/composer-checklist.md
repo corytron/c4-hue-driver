@@ -495,6 +495,17 @@ A Hue Scene on the keypad (Shine):
     its percentage moves at most once a second and settles on the level Hue
     reports about a second after you let go. Letting go never also plays or
     turns off the scene. **Done 2026-10-23** (build 154: hold-to-dim works).
+    Reopened 2026-10-25 (#249): measured, every such hold ran to full or
+    off in about a second, because Hue ignores the ramp time on a dim of a
+    whole room or zone; the 2026-10-23 pass saw the hold stop, not ramp.
+    **Open** for 1.3 (`docs/group-hold-design.md`): on a room or zone with
+    up to 10 lamps on, a hold down from 100 % released after about 2.5 s
+    (2 s of dimming after the 0.4 s hold delay, at the default 5 s for the
+    range) ends at roughly 60 %, the lamps' differences kept and lamps that
+    were off still off; on more than 10, the same hold moves in steps of
+    20 %, one a second, and so does any hold while a time-of-day scene runs
+    in the room or a scene plays there with moving colours, which keep
+    running.
 38. With the room off, hold top: Shine starts at its dimmest (1 %), the LEDs
     show on at once, and it brightens until you let go. Hold bottom while
     off: nothing happens. **Done in part 2026-10-25** through Shine's Lua

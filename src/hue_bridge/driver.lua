@@ -26,6 +26,7 @@ local housekeeping = require("bridge.housekeeping")
 local discovery_mod = require("bridge.discovery")
 local actions_mod = require("bridge.actions")
 local names_mod = require("bridge.names")
+local group_hold_mod = require("bridge.group_hold")
 local rows_mod = require("bridge.rows")
 local bridges_found_mod = require("bridge.bridges_found")
 local away_mod = require("bridge.away")
@@ -70,6 +71,7 @@ local state = {
 	motion_diag = nil,   -- bridge.motion_diag, Log Motion Diagnostics
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
+	group_hold = nil,    -- bridge.group_hold (docs/group-hold-design.md, #249), created in OnDriverLateInit
 	late_init_done = false,
 	destroyed = false,   -- OnDriverDestroyed ran: what this code still has in flight starts nothing
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
@@ -481,22 +483,10 @@ local group_hooks = {
 		end
 		return false
 	end,
-	-- Hold-to-dim on a keypad: dimming_delta start/stop on the grouped_light
-	-- (docs/keypad-design.md). The queue builds the PUT from a "dim" field.
+	-- Hold-to-dim on a keypad and a scene slider's relative move: bridge/group_hold.lua
+	-- decides how each reaches Hue (docs/group-hold-design.md, #249).
 	group_dim = function(grouped_light_rid, body, level)
-		local delta = type(body) == "table" and body.dimming_delta or nil
-		if not state.group_queue or type(delta) ~= "table" then
-			return false
-		end
-		state.group_queue:set(grouped_light_rid, {
-			dim = delta.action,
-			delta = delta.brightness_delta,
-			rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
-			-- A zone light's stop carries the level it ended at, written
-			-- only if the bridge refuses the stop (as the light queue does).
-			level = tonumber(level),
-		})
-		return true
+		return state.group_hold ~= nil and state.group_hold:dim(grouped_light_rid, body, level) == true
 	end,
 	-- Absolute fields on the grouped_light: a scene slider while the group's
 	-- level is unknown (docs/scene-dimmer-design.md), every zone light
@@ -2237,6 +2227,39 @@ function OnDriverLateInit(dit)
 	state.lights:configure_all()
 	state.queue = new_queue()
 	state.group_queue = new_group_queue()
+	-- Keypad holds on scenes, zone lights and room lights (#249): per-light
+	-- dims through the light queue for up to 10 lamps, stepped group dims above
+	-- that or while a scene runs, the group queue as before otherwise. Read
+	-- live: the zone lights and scenes are created below, and the lights'
+	-- models change at resyncs.
+	state.group_hold = group_hold_mod.new({
+		members = function(grouped_light_rid)
+			return state.zone_lights and state.zone_lights:lights_of_grouped_light(grouped_light_rid) or {}
+		end,
+		is_on = function(light_rid)
+			local model = state.lights and state.lights:record_of(light_rid)
+			return model ~= nil and model.on == true
+		end,
+		light_set = function(light_rid, fields)
+			if not state.queue then
+				return false
+			end
+			state.queue:set(light_rid, fields)
+			return true
+		end,
+		group_set = function(grouped_light_rid, fields)
+			if not state.group_queue then
+				return false
+			end
+			state.group_queue:set(grouped_light_rid, fields)
+			return true
+		end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end, -- [verified: API 34/_1]
+		keep_group = function(grouped_light_rid)
+			return state.scenes ~= nil and state.scenes:scene_running_on(grouped_light_rid) == true
+		end,
+		log = log,
+	})
 	state.scenes = scenes_mod.new(module_ctx())
 	state.scenes:load()
 	state.scenes:configure_all()
@@ -2373,6 +2396,9 @@ function OnDriverDestroyed()
 		state.stream:stop()
 	end
 	netstream.retire() -- and no object of this code's netstream connects again
+	if state.group_hold then
+		state.group_hold:stop_all() -- before the queues: no step lands in a stopped queue
+	end
 	if state.queue then
 		state.queue:stop()
 	end
