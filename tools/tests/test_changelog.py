@@ -1115,13 +1115,9 @@ class NotesTest(CliCase):
         self.assertEqual(code, 0, err)
         self.assertTrue(out.startswith('## 1.1 beta 1 "Brasso" (build 360)\n'), out[:80])
         self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
-        self.assertIn(
-            "Codename **Brasso**: each X.Y release of this project has its own codename from Star Wars: Andor "
-            "(a widely recognised name for an X.0; for a point release, a lesser-known character, place or object "
-            "tied to its X.0's name), and "
-            "every build of 1.1, prereleases included, keeps it.",
-            out,
-        )
+        # The name is in the title only; how names are chosen stays out of public text (#416).
+        self.assertNotIn("Andor", out)
+        self.assertNotIn("codename", out.lower())
         self.assertIn(
             "- Keypad LEDs follow a scene recalled in the Hue app,\n  also after a bridge restart (#302).", out
         )
@@ -1154,7 +1150,7 @@ class NotesTest(CliCase):
                 )
                 self.assertEqual(code, 0, err)
                 self.assertTrue(out.startswith('## 1.1 beta %d "Brasso" (build 400)\n' % beta), out[:80])
-                self.assertIn("Codename **Brasso**", out)
+                self.assertNotIn("Andor", out)  # the name is in the title only (#416)
 
     def test_the_repository_templates_count_no_packages(self):
         for path in (changelog.TEMPLATE_FILE, changelog.PRERELEASE_TEMPLATE_FILE):
@@ -1173,13 +1169,9 @@ class NotesTest(CliCase):
         self.assertIn('### 1.0 "Cassian", build 259 (2026-10-24)', out)
         self.assertNotIn("Ferrix", out)
         self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
-        self.assertIn(
-            "Codename: **Cassian**. Each X.Y release of this project has its own codename from Star Wars: Andor "
-            "(a widely recognised name for an X.0; for a point release, a lesser-known character, place or object "
-            "tied to its X.0's name); "
-            "every build of 1.0 keeps it.",
-            out,
-        )
+        # The name is in the title only; how names are chosen stays out of public text (#416).
+        self.assertNotIn("Andor", out)
+        self.assertNotIn("codename", out.lower())
 
 
 class StampTest(CliCase):

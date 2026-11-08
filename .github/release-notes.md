@@ -1,6 +1,6 @@
 ## {version} "{codename}" (build {build})
 
-Codename: **{codename}**. Each X.Y release of this project has its own codename from Star Wars: Andor (a widely recognised name for an X.0; for a point release, a lesser-known character, place or object tied to its X.0's name); every build of {version} keeps it. Released {date}.
+Released {date}.
 
 Install every `.c4z` file of the release at once through Driver ▸ "Add or Update Driver or Agent…" in Composer Pro, updating every device in place; never delete and re-add the Hue Bridge driver (that loses the pairing). When the changes below say a driver's capabilities changed, reboot the controller from System Manager afterwards: on OS 3.x, Composer's "Restart Director?" does not load them.
 
@@ -13,6 +13,7 @@ Install every `.c4z` file of the release at once through Driver ▸ "Add or Upda
 - **Hue Bridge** driver: pairing with the link button, the bridge's event stream for live two-way state, room mappings, import of lights, lifecycle handling (renames, deletions, re-links, restores), scenes and time-of-day scenes, zone and room lights, readable Composer properties, and a Documentation tab with the full owner's manual.
 - **Hue Light** driver (light_v2): on/off, dimming, colour temperature and colour where the bulb supports them; a Hue zone or room as one light; keypad Button Links (Top, Bottom, Toggle) with hold-to-dim and LEDs.
 - **Hue Scene** driver (light_v2 dimmer): ordinary and time-of-day scenes with a slider in sync with the Hue app and keypad LEDs.
+- **Hue Motion** driver (a stock Control4 motion sensor): Hue motion sensors and MotionAware areas (Hue Bridge Pro), with an occupancy hold time and the temperature and light level where the sensor has them.
 
 Each driver's Documentation tab ends with the full list of releases.
 

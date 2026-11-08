@@ -163,10 +163,7 @@ nine):
 Take the release marked **Latest** on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases)
 (<https://github.com/corytron/c4-hue-driver/releases/latest> always points at
-it). Releases are numbered `X.Y` and tagged `vX.Y`; each X.Y carries its own
-codename from Star Wars: Andor: a major character, place or object for an X.0,
-and for a point release a lesser-known one tied to its X.0's name.
-1.0 is **"Cassian"**, 1.1 **"Brasso"**, 1.2 **"Taramyn"**.
+it). Releases are numbered `X.Y` and tagged `vX.Y`.
 Prereleases for testers (`X.Y-beta.N`) are on the same page, marked
 **Pre-release**; they are never **Latest**, and the Download links above
 never serve them. Install all four drivers of a release, or of a
