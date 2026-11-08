@@ -34,6 +34,9 @@ listed.
 - Hue Scene: a keypad hold started part-way up or down now moves the
   scene's slider on Navigators at the same speed as the lights, instead of
   more slowly (#243).
+- Hue Light: turning a light on from off no longer shows its old level for an
+  instant before the level asked for; a change made elsewhere at that moment
+  shows up at most a second after the ramp (#308).
 
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
