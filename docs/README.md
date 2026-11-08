@@ -166,6 +166,12 @@ are dated research; what was built from them is in the contracts and
   areas as Control4 motion sensors (2026-10-26, #268): `hue_motion.c4z` as a
   stock `contactsingle_motionsensor`, the decisions D1–D16, the messages
   between the bridge and the device, the diagnostics for testers.
+- [`motion-hold-restart-design.md`](motion-hold-restart-design.md): the
+  motion devices' Occupancy Hold Time across a restart (2026-11-07, #371): a
+  hold the device saw begin resumes for the time it has left, timed on the
+  controller's clock alone, while the bridge reports the same end of motion;
+  why the controller's and the bridge's clocks are never compared, the
+  decisions R1–R12 and the corner cases L1–L27.
 - [`relative-level-design.md`](relative-level-design.md): the Hue Light's
   Raise Level By and Restore Saved Level programming commands (2026-10-26,
   #297), for motion programming that raises lamps and puts them back.

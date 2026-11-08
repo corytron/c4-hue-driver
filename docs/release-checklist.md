@@ -13,7 +13,7 @@ findings as comments), and `docs/status.md` sums them up.
 
 ## 0. On this VM
 
-- `tools/check.sh --strict --only lua-lint lua-test shell python-lint
+- `tools/check.sh --strict --only lua-lint lua-test lua-limits shell python-lint
   python-test xml workflows secrets house` passes (every check but
   `powershell`, which needs `pwsh`; CI runs that one): `luacheck src tests
   tools` clean, `busted tests` green, the shell and Python tooling clean,

@@ -95,7 +95,7 @@ two device drivers share `common/device.lua` (their plumbing since
   through `bridge_request` in `src/hue_bridge/driver.lua`. It answers at
   once with one refusal while one holds (`keyed_refusal`: `not paired`,
   `TLS check failed`, `key rejected`), sends nothing until the unkeyed
-  identity check (`verify_identity`: `GET /api/0/config` must report the
+  identity check (`bridge/identity.lua` since #373: `GET /api/0/config` must report the
   paired bridge id) and the TLS self-check below have passed for the
   current start and address, and drops any TLS table the caller passed. A
   keyed request refuses redirects: a 3xx answer ends it as `redirect
@@ -180,8 +180,8 @@ blocking rule, `docs/security-fixes-design.md`):
   - Anything against an active attacker. The decoy request is easy to
     recognise on the wire (the first TLS handshake after the identity GET),
     so whoever can drop it makes the check `inconclusive` at will.
-- **Verdicts and what the driver does** (`tls_gate` in
-  `src/hue_bridge/driver.lua`):
+- **Verdicts and what the driver does** (the TLS gate in
+  `src/hue_bridge/bridge/identity.lua` since #373):
   - `pinned` (the request fails certificate verification): the expected
     answer. The driver records the running Director version,
     `C4:GetVersionInfo().version` **[verified: API

@@ -111,7 +111,8 @@ Four jobs; **their `name:` strings are the required status checks on
 
 1. `Lint and test (Lua 5.1)`: as today (apt Lua 5.1, luarocks, luacheck,
    busted, dkjson, every rock at an exact version since 2026-10-25, §5.5),
-   then `tools/check.sh --strict --only lua-lint lua-test`.
+   then `tools/check.sh --strict --only lua-lint lua-test lua-limits` (the
+   last since #373: no Lua function over 180 locals or 50 upvalues).
    Cache `~/.luarocks` and `/usr/local/lib/luarocks` keyed on the workflow
    file if it saves time; otherwise leave it.
 2. `Build the .c4z packages` (named `Build the three .c4z packages` until #391): as today (`needs: test`, full-depth
