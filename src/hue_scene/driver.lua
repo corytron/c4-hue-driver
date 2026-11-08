@@ -1229,15 +1229,34 @@ local function send_dim(direction, duration)
 	return send("HUE_SCENE_DIM", params)
 end
 
--- The proxy hears a hold as a CHANGING toward the end of the range over the
--- hold rate when it starts (docs/scene-dimmer-design.md, Keypad holds); the
--- bridge's level reports settle it. It replaces whatever target was pending.
+-- The bound the bridge holds a scene's hold rate to (scenes.DIM_MAX_DURATION,
+-- 100 minutes): a longer rate reaches Hue as this, so the tile's ramp is
+-- worked out from it too (#243), as a Hue Light's is (#234).
+local HOLD_MAX_MS = 6000000
+
+-- The proxy hears a hold as a CHANGING toward the end of the range when it
+-- starts (docs/scene-dimmer-design.md, Keypad holds); the bridge's level
+-- reports settle it. It replaces whatever target was pending.
+--
+-- #243: a hold rate is the time of the whole range [verified: proxy
+-- reference, HOLD_RATE_UP/DOWN], and Hue covers the whole range at that
+-- speed from any level (docs/group-hold-design.md: each lit lamp ramps at
+-- the hold rate, or the group's steps are sized so the range takes it), so
+-- from mid-range it reaches the end in the share of the rate the distance
+-- left takes. The tile hears that share, at Hue's speed, as a Hue Light's
+-- does (#232); the dim to the bridge keeps the whole rate (send_dim). A hold
+-- from off starts the tile at 0 and keeps the whole rate; one from the end
+-- of the range has no distance left (RATE 0). The tile is an estimate: the
+-- level is the lamps' average, so lamps below it reach the end later, and
+-- the bridge's level reports correct the tile during and after the hold.
 local function hold_changing(h, current, up, duration)
+	local target = up and 100 or 1
+	local full = math.min(duration, HOLD_MAX_MS)
 	settle()
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
-		LIGHT_BRIGHTNESS_TARGET = up and 100 or 1,
-		RATE = duration,
+		LIGHT_BRIGHTNESS_TARGET = target,
+		RATE = math.floor(full * math.abs(target - current) / 100),
 	})
 	h.changing = true
 end
