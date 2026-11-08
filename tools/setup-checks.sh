@@ -15,7 +15,10 @@
 # `python3 -m pip` fails with a clear line (there is no pipx or uv fallback).
 # actionlint and gitleaks are release binaries downloaded with curl into a
 # fresh temporary directory, verified against the sha256 below before anything
-# is moved into ~/.local/bin, and never run from the download directory. A
+# is moved into ~/.local/bin, and never run from the download directory. When
+# the release URL fails (github.com answered 504 for hours on 2026-11-08, #419),
+# the same asset is fetched by its pinned id from the REST API instead; the
+# sha256 check is the same either way, so the source does not matter. A
 # tool already present at the pinned version is skipped; shellcheck-py is
 # skipped whenever any shellcheck is on PATH. Prints one line per tool, then
 # every version. In GitHub Actions ($GITHUB_PATH set) ~/.local/bin is appended
@@ -48,11 +51,15 @@ ACTIONLINT_VERSION=1.7.12
 ACTIONLINT_ASSET="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
 ACTIONLINT_URL="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${ACTIONLINT_ASSET}"
 ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+# The same asset through the REST API (its id: `gh api
+# repos/rhysd/actionlint/releases/tags/v1.7.12`, whose digest matches the sha256).
+ACTIONLINT_API_URL="https://api.github.com/repos/rhysd/actionlint/releases/assets/384924896"
 
 GITLEAKS_VERSION=8.30.1
 GITLEAKS_ASSET="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
 GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${GITLEAKS_ASSET}"
 GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+GITLEAKS_API_URL="https://api.github.com/repos/gitleaks/gitleaks/releases/assets/378332058"
 
 BIN="$HOME/.local/bin"
 mkdir -p "$BIN"
@@ -114,10 +121,12 @@ install_pip_tool() {
 	echo "$cmd $want: installed ($(command -v "$cmd"), sha256 verified by pip)"
 }
 
-# install_release_binary <command> <version> <url> <asset name> <sha256>
-# The archive holds the binary at its top level under the command's name.
+# install_release_binary <command> <version> <url> <asset name> <sha256> <api url>
+# The archive holds the binary at its top level under the command's name. The
+# API URL serves the same asset (Accept: application/octet-stream) and is tried
+# only when the release URL fails; it is unauthenticated, one request per tool.
 install_release_binary() {
-	local cmd="$1" want="$2" url="$3" asset="$4" sha256="$5" have actual dir
+	local cmd="$1" want="$2" url="$3" asset="$4" sha256="$5" api_url="$6" have actual dir
 	have="$(version_of "$cmd")"
 	if [[ "$have" == "$want" ]]; then
 		echo "$cmd $want: already installed ($(command -v "$cmd"))"
@@ -129,8 +138,12 @@ install_release_binary() {
 	fi
 	dir="$WORK/$cmd"
 	mkdir -p "$dir/extract"
-	curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
-		--output "$dir/$asset" "$url"
+	if ! curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+		--output "$dir/$asset" "$url"; then
+		echo "setup-checks.sh: $url failed; trying the same asset through the GitHub API" >&2
+		curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+			--header 'Accept: application/octet-stream' --output "$dir/$asset" "$api_url"
+	fi
 	actual="$(sha256sum "$dir/$asset" | awk '{ print $1 }')"
 	if [[ "$actual" != "$sha256" ]]; then
 		echo "setup-checks.sh: sha256 mismatch for $asset: expected $sha256, got $actual; not installed" >&2
@@ -153,8 +166,10 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
 	install_pip_tool shellcheck shellcheck-py "$SHELLCHECK_PY_VERSION" "$SHELLCHECK_VERSION"
 fi
-install_release_binary actionlint "$ACTIONLINT_VERSION" "$ACTIONLINT_URL" "$ACTIONLINT_ASSET" "$ACTIONLINT_SHA256"
-install_release_binary gitleaks "$GITLEAKS_VERSION" "$GITLEAKS_URL" "$GITLEAKS_ASSET" "$GITLEAKS_SHA256"
+install_release_binary actionlint "$ACTIONLINT_VERSION" "$ACTIONLINT_URL" "$ACTIONLINT_ASSET" "$ACTIONLINT_SHA256" \
+	"$ACTIONLINT_API_URL"
+install_release_binary gitleaks "$GITLEAKS_VERSION" "$GITLEAKS_URL" "$GITLEAKS_ASSET" "$GITLEAKS_SHA256" \
+	"$GITLEAKS_API_URL"
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
 	echo "$BIN" >> "$GITHUB_PATH"
