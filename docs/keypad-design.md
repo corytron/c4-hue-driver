@@ -102,7 +102,11 @@ Settings persist per device (`preset_level`, `click_rate_up`,
 `click_rate_down`, `hold_rate_up`, `hold_rate_down`); defaults 100 %,
 250 ms, 250 ms, 5000 ms, 5000 ms. `ON` and `TOGGLE` from programming keep
 going to 100 % (unchanged; the preset is a keypad matter until the on-mode
-preset API is adopted).
+preset API is adopted). Superseded (2026-11-08, #233, owner's Option 1):
+`ON` and `TOGGLE` from off go to the On preset too, at rate 0 (the click
+rates stay with taps), and `ON` on a lit light sets it to the preset as a
+top tap does; the on-mode preset API is still not adopted
+(`docs/lights-design.md`, light_v2 proxy commands).
 
 Hue Scene (`src/hue_scene/driver.lua`): echo every action; click or release
 of top = recall (ON), bottom = OFF, toggle = toggle; holds do nothing.

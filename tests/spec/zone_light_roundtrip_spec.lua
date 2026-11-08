@@ -238,7 +238,8 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal("group", last_hello.kind)
 
 		-- ON from the proxy: HUE_SET to the bridge, one absolute PUT on the
-		-- zone's grouped_light (Decision 4: on at 100 %).
+		-- zone's grouped_light (Decision 4: on at the Default On Brightness,
+		-- 100 % while it was never changed; #233).
 		light.C4.calls = {}
 		bc4.sent = {}
 		local before = #bc4.transfers
@@ -359,6 +360,36 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.is_nil(bc4.persist.hue_zone_light_tombstones[F.group_rids.garage])
 		assert.equal(2002, bc4.persist.hue_zone_lights[F.group_rids.garage].device_id)
 		assert.equal("Garage Lights", bc4.added[2].name, "a room light is named <Room> Lights")
+	end)
+
+	-- #233: the zone light's own Default On Brightness reaches every lamp
+	-- for ON and for TOGGLE from off, as on a single light; TOGGLE from on
+	-- is one group off.
+	it("turns the zone on at the zone light's Default On Brightness for ON and TOGGLE", function()
+		Z:resync()
+		answer_grouped_light_get()
+		Z:add(F.group_rids.downstairs, nil, function() end)
+		fake.pair(bridge, light, { light_id = DEVICE_ID, bind = false })
+		fake.as(light, light.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		fake.as(light, light.ReceivedFromProxy, 5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+		assert.equal(60, light.C4.persist.preset_level)
+
+		local function command(name)
+			fake.as(light, light.ReceivedFromProxy, 5001, name, {})
+			assert.is_true(fake.pump() >= 1, "HUE_SET reached the bridge")
+			local put, body = flush_put()
+			assert.equal(GROUPED .. F.grouped_light_rids.downstairs, put.url)
+			answer_put(put)
+			return body
+		end
+
+		-- The zone is on (the fixtures have one lamp lit): ON sets every lamp to 60.
+		assert.same({ on = { on = true }, dimming = { brightness = 60 } }, command("ON"))
+		assert.same({ on = { on = false } }, command("TOGGLE"))
+		event(F.events.zone_off)
+		fake.pump()
+		assert.same({ on = { on = true }, dimming = { brightness = 60 } }, command("TOGGLE"))
 	end)
 
 	-- Issue #58: the bridge clamps a zone light's colour temperature to the

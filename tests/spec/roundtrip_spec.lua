@@ -311,6 +311,26 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(1, light_event(14, { dimming = { brightness = 30.04 } }))
 		assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 30 } }, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
 
+		-- #233: with Default On Brightness 60, a TOGGLE from off is one PUT
+		-- at 60, at once, and the same wait for its level as above.
+		fake.as(light, light.ReceivedFromProxy, 5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+		assert.equal(1, light_event(15, { on = { on = false } }))
+		light.C4.calls = {}
+		fake.as(light, light.ReceivedFromProxy, 5001, "TOGGLE", {})
+		assert.equal(1, fake.pump(), "the HUE_SET")
+		assert.is_true(fire_fast_timers(bridge, 80) >= 1, "debounce timer")
+		put = bc4.last_transfer()
+		body = json.decode(put.data)
+		assert.same({ true, 60 }, { body.on.on, body.dimming.brightness })
+		assert.is_nil(body.dynamics, "at once, as before")
+		fake.as(bridge, function()
+			put:respond(200, '{"data":[{"rid":"' .. F.rids.living .. '","rtype":"light"}],"errors":[]}')
+		end)
+		assert.equal(1, light_event(16, { on = { on = true } }))
+		assert.same({}, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"), "not the 30 % the lamp had")
+		assert.equal(1, light_event(17, { dimming = { brightness = 60.24 } }))
+		assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60 } }, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
+
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the
 		-- binding goes, and Import All New Lights would skip it; Add Light
 		-- re-creates it in its mapped room and clears the tombstone.
