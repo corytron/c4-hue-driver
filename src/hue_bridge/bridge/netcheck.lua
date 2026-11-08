@@ -29,14 +29,27 @@
 -- project, from a persisted counter (COUNTER_NAME), FIRST_ID (6100) up to
 -- LAST_ID (6999); 6001 is the stream's, 6002 and 6003 were used by
 -- earlier builds, 6004 to 6007 are the dev-only 1.2 probe's, 6008 is
--- bridge/discovery.lua's mDNS binding and 6009 its spare. Each id is used once: CreateNetworkConnection, then
--- SetBindingAddress with the bridge's address, NetPortOptions, NetConnect;
--- NetDisconnect and SetBindingAddress with '' (as netstream.clear_address
--- does for 6001) when its probe is done; then never touched again. The
--- counter is written before the id is used, so no restart can hand it out
--- twice, and this run keeps its own copy too (PersistGetValue may not yet
--- return what was just written). Past LAST_ID the check answers
--- "inconclusive" ("probe binding ids exhausted", logged once per run).
+-- bridge/discovery.lua's mDNS binding and 6009 its spare. Each id is used
+-- once: CreateNetworkConnection, then SetBindingAddress with the bridge's
+-- address, NetPortOptions, NetConnect; when its probe is done, NetDisconnect,
+-- SetBindingAddress with '' (as netstream.clear_address does for 6001) and
+-- RemoveDynamicBinding (#329); then never touched again. The counter is
+-- written before the id is used, so no restart can hand it out twice, and
+-- this run keeps its own copy too (PersistGetValue may not yet return what
+-- was just written). Past LAST_ID the check answers "inconclusive" ("probe
+-- binding ids exhausted", logged once per run).
+--
+-- Leftovers (#329): earlier builds only disconnected and cleared their probe
+-- ids, and a run that stops in mid-probe without OnDriverDestroyed (a power
+-- cut) removes nothing. So the end of a check (a verdict or a cancel: tidy)
+-- also removes, once per controller, every id from the persisted mark
+-- (REMOVED_NAME: every probe id below it has been removed) up to the counter
+-- as it stood when the check started, then moves the mark to this run's
+-- counter. Never at the start of a check: a removal just before a decoy
+-- could disturb its creation, and a disturbed decoy reads "pinned". A failed
+-- removal moves the mark too (one warning, never a growing list of
+-- retries). The ids below FIRST_ID are never removed. Worst case 900
+-- removals in one tidy (every id used); realistically a few, once.
 --
 -- That budget lasts: the check runs once per Director version. run()
 -- answers "pinned" from the memory (pinned_before) on a version that
@@ -92,12 +105,13 @@
 --
 -- Timing: a probe's end is noted inside Director's callbacks and acted on
 -- from a 1 ms timer (close, next probe, verdict); no binding is created less
--- than GAP_MS after the last close of a probe binding, checked against the
--- clock (C4:GetTime) whatever the timer did. At the verdict, every probe id
--- of the check still open is closed and cleared, before the verdict is
--- delivered. Reports on an id that is not the open probe's (a closed probe's)
--- are ignored: a fresh id has no earlier connection whose late "OFFLINE"
--- could be taken for its own.
+-- than GAP_MS after the last close or removal of a probe binding, checked
+-- against the clock (C4:GetTime) whatever the timer did. At the verdict and
+-- at a cancel, every probe id of the check still open is closed, cleared and
+-- removed, then the leftovers (above), before the verdict is delivered.
+-- Reports on an id that is not the open probe's (a closed or removed
+-- probe's) are ignored: a fresh id has no earlier connection whose late
+-- "OFFLINE" could be taken for its own.
 --
 -- What the check cannot prove:
 --  (a) As tlscheck's (a): that the file replaces the system's CA store
@@ -121,11 +135,15 @@
 -- DriverWorks calls: those of bridge/netstream.lua, whose header cites the
 -- SDK file of each (CreateNetworkConnection, SetBindingAddress,
 -- NetPortOptions, NetConnect, SendToNetwork, NetDisconnect), and
--- C4:SetTimer and C4:GetTime as there; PersistSetValue and PersistGetValue
--- for the counter (a number [verified: SDK 26.5_persistence/_4]) and, as in
--- bridge/tlscheck.lua, for the memory (with GetVersionInfo through
--- tlscheck.director_version). None runs before OnDriverLateInit: the driver
--- checks once the identity check has passed.
+-- C4:SetTimer and C4:GetTime as there; C4:RemoveDynamicBinding(id), which
+-- removes a dynamically created binding [verified: API 22/_31, from 1.6.0,
+-- not in OnDriverInit]: that it removes one made by CreateNetworkConnection
+-- is [assumed] until the house shows it (#329), and where it raises or does
+-- nothing the id stays disconnected and cleared, as before; PersistSetValue
+-- and PersistGetValue for the counter and the mark (numbers [verified: SDK
+-- 26.5_persistence/_4]) and, as in bridge/tlscheck.lua, for the memory (with
+-- GetVersionInfo through tlscheck.director_version). None runs before
+-- OnDriverLateInit: the driver checks once the identity check has passed.
 --
 -- The memory: remember_pinned() stores the running Director version under
 -- STORE_NAME, apart from tlscheck's: each check speaks for its own API.
@@ -143,6 +161,7 @@ local netcheck = {}
 netcheck.FIRST_ID = 6100     -- the probe binding ids; network bindings are 6000-6999 (SDK 32/_1)
 netcheck.LAST_ID = 6999
 netcheck.COUNTER_NAME = "netcheck_next_binding" -- persisted: the next probe binding id to hand out
+netcheck.REMOVED_NAME = "netcheck_removed_below" -- persisted: every probe binding id below it is removed (#329)
 netcheck.PORT = netstream.PORT                  -- 443
 netcheck.CONNECTION_TYPE = netstream.CONNECTION_TYPE -- "SSL"
 netcheck.DECOY_CA = tlscheck.DECOY_CA           -- "certs/decoy_ca.pem"
@@ -164,11 +183,13 @@ local STEPS = { "decoy", "control" }
 -- phase = "waiting" | "opening" | "open" | "closing" | "done", ids = { [step]
 -- = id }, open = { [id] = true }, online_at, answer_after, received, timer
 -- (the probe's TIMEOUT), wait_timer (the gap, or the 1 ms step after a
--- probe's end), decoy (how the decoy failed) }.
+-- probe's end), decoy (how the decoy failed), sweep_to (the counter when the
+-- check started: its tidy removes the leftovers below it) }.
 local current = nil
 local delivery = nil          -- the 1 ms timer that delivers a verdict
-local last_close = nil        -- ms clock of the last close of a probe binding
+local last_close = nil        -- ms clock of the last close or removal of a probe binding
 local next_id = nil           -- this run's copy of the counter
+local removed_below = nil     -- this run's copy of the mark (REMOVED_NAME)
 local exhausted_logged = false
 local remembered = nil        -- what remember_pinned() wrote in this run
 
@@ -227,10 +248,11 @@ function netcheck.retry_delay(attempt)
 	return math.min(netcheck.RETRY_MIN * 2 ^ (n - 1), netcheck.RETRY_MAX)
 end
 
--- The counter as stored: a whole number from FIRST_ID up, else FIRST_ID.
-local function stored_next_id()
+-- A persisted probe binding id, the counter (COUNTER_NAME) or the mark
+-- (REMOVED_NAME), as stored: a whole number from FIRST_ID up, else FIRST_ID.
+local function stored_id(name)
 	local ok, value = pcall(function()
-		return C4:PersistGetValue(netcheck.COUNTER_NAME)
+		return C4:PersistGetValue(name)
 	end)
 	local n = ok and tonumber(value) or nil
 	if n and n == math.floor(n) and n >= netcheck.FIRST_ID then
@@ -239,21 +261,26 @@ local function stored_next_id()
 	return netcheck.FIRST_ID
 end
 
+-- PersistSetValue under pcall; a store that raises is logged.
+local function store(name, value, what)
+	local ok, err = pcall(function()
+		C4:PersistSetValue(name, value)
+	end)
+	if not ok then
+		log.warn("network connection TLS check: could not store %s: %s", what, tostring(err))
+	end
+end
+
 -- A probe binding id never handed out before, or nil when none is left. The
 -- counter moves on, in the store and in this run, before the id is used.
 local function allocate_id()
-	local id = math.max(next_id or netcheck.FIRST_ID, stored_next_id())
+	local id = math.max(next_id or netcheck.FIRST_ID, stored_id(netcheck.COUNTER_NAME))
 	next_id = id
 	if id > netcheck.LAST_ID then
 		return nil
 	end
 	next_id = id + 1
-	local ok, err = pcall(function()
-		C4:PersistSetValue(netcheck.COUNTER_NAME, next_id)
-	end)
-	if not ok then
-		log.warn("network connection TLS check: could not store the next probe binding id: %s", tostring(err))
-	end
+	store(netcheck.COUNTER_NAME, next_id, "the next probe binding id")
 	return id
 end
 
@@ -273,8 +300,19 @@ local function connected(check)
 	return check.phase == "opening" or check.phase == "open"
 end
 
--- NetDisconnect a probe id and clear its address, each call under pcall; the
--- id is never touched again.
+-- C4:RemoveDynamicBinding(id) under pcall (#329; see the header for what is
+-- verified and what assumed): nil, or what went wrong.
+local function remove(id)
+	local ok, err = pcall(function()
+		C4:RemoveDynamicBinding(id)
+	end)
+	return not ok and tostring(err) or nil
+end
+
+-- NetDisconnect a probe id, clear its address and remove it, each call under
+-- pcall; the id is never touched again. The clear stays before the removal:
+-- where RemoveDynamicBinding does nothing to a network binding [assumed
+-- possible, #329], the id is left as it was before #329.
 local function close(check, id)
 	check.open[id] = nil
 	last_close = now_ms()
@@ -290,6 +328,10 @@ local function close(check, id)
 	if not ok then
 		log.warn("network connection TLS check: could not clear binding %d: %s", id, tostring(err))
 	end
+	err = remove(id)
+	if err then
+		log.warn("network connection TLS check: could not remove binding %d: %s", id, err)
+	end
 end
 
 -- Close every probe id of the check still open, the decoy's first.
@@ -302,9 +344,44 @@ local function close_open(check)
 	end
 end
 
--- The verdict: the check's probe ids closed and cleared, then the verdict
--- from a 1 ms timer. Once per check; nothing for a check cancelled or
--- replaced. Never called inside Director's callbacks (see the header).
+-- The end of a check, at its verdict or its cancel, never before a decoy
+-- (see "Leftovers" in the header): its probe ids still open closed, cleared
+-- and removed; then the ids earlier runs handed out and never removed, from
+-- the mark up to check.sweep_to, within FIRST_ID to LAST_ID, in order (the
+-- removals count as a close for GAP_MS); then the mark moves to this run's
+-- counter: every id this run handed out has been through close() by then,
+-- since only one check is ever in flight.
+local function tidy(check)
+	close_open(check)
+	local from = math.max(removed_below or netcheck.FIRST_ID, stored_id(netcheck.REMOVED_NAME))
+	local to = math.min(check.sweep_to or from, netcheck.LAST_ID + 1)
+	if to > from then
+		local failed, first_err = 0, nil
+		for id = from, to - 1 do
+			local err = remove(id)
+			if err then
+				failed, first_err = failed + 1, first_err or err
+			end
+		end
+		last_close = now_ms()
+		if failed == 0 then
+			log.debug("network connection TLS check: removed the probe bindings %d to %d left by earlier runs",
+				from, to - 1)
+		else
+			log.warn("network connection TLS check: %d of the probe bindings %d to %d left by earlier runs could "
+				.. "not be removed: %s", failed, from, to - 1, first_err)
+		end
+	end
+	local mark = math.min(math.max(from, to, next_id or 0), netcheck.LAST_ID + 1)
+	if mark > from then
+		removed_below = mark
+		store(netcheck.REMOVED_NAME, mark, "the probe binding removal mark")
+	end
+end
+
+-- The verdict: the check's tidy, then the verdict from a 1 ms timer. Once
+-- per check; nothing for a check cancelled or replaced. Never called inside
+-- Director's callbacks (see the header).
 local function finish(check, verdict, detail)
 	if current ~= check then
 		return
@@ -312,7 +389,7 @@ local function finish(check, verdict, detail)
 	current = nil
 	cancel_timers(check)
 	check.phase = "done"
-	close_open(check)
+	tidy(check)
 	log.debug("network connection TLS check: %s (%s)", verdict, detail)
 	delivery = C4:SetTimer(1, function()
 		delivery = nil
@@ -444,7 +521,8 @@ end
 -- before, the answer is "pinned" at once, without a probe (see the header).
 function netcheck.run(ip, callback)
 	netcheck.cancel()
-	local check = { ip = ip, callback = callback, phase = "waiting", ids = {}, open = {} }
+	local check = { ip = ip, callback = callback, phase = "waiting", ids = {}, open = {},
+		sweep_to = math.max(next_id or netcheck.FIRST_ID, stored_id(netcheck.COUNTER_NAME)) }
 	current = check
 	if not header_safe(ip) then
 		return finish(check, "inconclusive", "the bridge address cannot go into a request")
@@ -457,7 +535,8 @@ function netcheck.run(ip, callback)
 end
 
 -- Drop the check in flight, and a verdict not yet delivered: no callback.
--- A probe id still open is closed and cleared.
+-- The check's tidy: a probe id still open is closed, cleared and removed,
+-- then the leftovers of earlier runs.
 function netcheck.cancel()
 	if delivery then
 		delivery:Cancel()
@@ -469,7 +548,7 @@ function netcheck.cancel()
 	end
 	current = nil
 	cancel_timers(check)
-	close_open(check)
+	tidy(check)
 	check.phase = "done"
 	log.debug("network connection TLS check cancelled")
 end

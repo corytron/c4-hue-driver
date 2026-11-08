@@ -2387,7 +2387,7 @@ function OnDriverDestroyed()
 		state.unbound_confirm_timer = nil
 	end
 	state.identity:cancel_retry()
-	net_gate:reset() -- closes and clears the probe binding of a check in flight
+	net_gate:reset() -- closes, clears and removes the probe binding of a check in flight (#329)
 	if version_timer then
 		version_timer:Cancel()
 		version_timer = nil

@@ -30,6 +30,11 @@ listed.
   security policy, contributing guide and checklists count four packages and
   eight release files (#389).
 
+### Fixed
+- The network connection's TLS check now removes the test connections it
+  opened once it has answered, and once clears away those that earlier
+  versions left behind (#329).
+
 ## 1.2 "Taramyn", build 488 (2026-11-05)
 
 ### Added
