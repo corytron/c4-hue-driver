@@ -15,6 +15,11 @@ listed.
 ## Unreleased
 
 ### Changed
+- Motion sensors and MotionAware areas: a hold interrupted by a driver update,
+  a Director restart or a controller reboot now goes on only for the rest of
+  its Occupancy Hold Time instead of starting again in full. One that ran out
+  meanwhile closes as soon as the bridge answers, and "stops sensing motion"
+  still fires once (#371).
 - The project's GitHub page names all four drivers: the Download list links
   Hue Motion too, motion sensors are no longer called a beta feature, and the
   security policy, contributing guide and checklists count four packages and
