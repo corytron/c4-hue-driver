@@ -859,7 +859,8 @@ local function new_c4(env)
 
 	-- Dynamic network connections [verified: API 32/_1 CreateNetworkConnection,
 	-- 32/_25 NetPortOptions, 32/_23 NetConnect, 32/_24 NetDisconnect, 32/_20
-	-- SendToNetwork, 32/_16 SetBindingAddress, 32/_2 GetBindingAddress]:
+	-- SendToNetwork, 32/_16 SetBindingAddress, 32/_2 GetBindingAddress; 22/_31
+	-- RemoveDynamicBinding]:
 	--   c4.network[binding] = { address, type, ports = { [port] = port } }
 	--   port = { ip_type, options, state, connects, sent }
 	-- NetPortOptions keeps a copy of its table as options; NetConnect makes
@@ -868,7 +869,7 @@ local function new_c4(env)
 	-- SendToNetwork on a binding never created raise; NetDisconnect and
 	-- SetBindingAddress there only record the call [assumed: Director ignores
 	-- them]. Creating a binding again changes its address and type and keeps
-	-- its ports [assumed].
+	-- its ports [assumed]. RemoveDynamicBinding forgets the binding (below).
 	--
 	-- Director's side is the spec's: c4.net_status(binding, port,
 	-- "ONLINE"|"OFFLINE") makes the port "online" or "closed" and calls the
@@ -924,6 +925,18 @@ local function new_c4(env)
 		if conn and conn.ports[port] then
 			conn.ports[port].state = "closed"
 		end
+	end
+
+	-- C4:RemoveDynamicBinding(binding) [verified: API 22/_31, from 1.6.0; that
+	-- it removes a binding made by CreateNetworkConnection is assumed, #329]:
+	-- the binding is forgotten, so NetPortOptions, NetConnect and SendToNetwork
+	-- on it raise as on one never created, and a later CreateNetworkConnection
+	-- starts it afresh. On a binding that does not exist it only records the
+	-- call [assumed]. c4.net_status and c4.net_receive still deliver reports
+	-- for a removed id, as a late report from Director would look.
+	function c4:RemoveDynamicBinding(binding)
+		record("RemoveDynamicBinding", binding)
+		c4.network[binding] = nil
 	end
 
 	function c4:SendToNetwork(binding, port, data)

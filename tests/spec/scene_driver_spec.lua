@@ -1004,8 +1004,8 @@ describe("Hue Scene driver", function()
 			env.ReceivedFromProxy(200, "DO_PUSH", {})
 			c4.fire_timers() -- the hold time: the dim up fails
 			assert.same({ "HUE_SCENE_DIM" }, tried)
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
-				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "at the end of the range: no distance left (#243)")
 			assert.same({ 100 }, changed(c4))
 			env.ReceivedFromProxy(200, "DO_RELEASE", {})
 			assert.same({ "HUE_SCENE_DIM" }, tried, "no stop for a dim that never started")
@@ -2024,12 +2024,12 @@ describe("Hue Scene driver", function()
 		end)
 
 		describe("keypad holds", function()
-			it("report CHANGING toward 100 (top) or 1 (bottom) over the hold rate; level reports settle it", function()
+			it("report CHANGING toward 100 (top) or 1 (bottom) over the distance left; level reports settle it", function()
 				local env, c4 = lit_scene(60)
 				env.ReceivedFromProxy(200, "DO_PUSH", {})
 				c4.fire_timers()
-				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
-					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 2000 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "the 40 % left at 100 % per 5000 ms (#243)")
 				group(env, { level = "72" })
 				assert.same({ 72 }, changed(c4), "during the ramp")
 				env.ReceivedFromProxy(200, "DO_RELEASE", {})
@@ -2041,8 +2041,115 @@ describe("Hue Scene driver", function()
 				env.ReceivedFromProxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "3000" })
 				env.ReceivedFromProxy(201, "DO_PUSH", {})
 				c4.fire_timers()
-				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 79, LIGHT_BRIGHTNESS_TARGET = 1, RATE = 3000 } },
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 79, LIGHT_BRIGHTNESS_TARGET = 1, RATE = 2340 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "the 78 % down to 1 at 100 % per 3000 ms (#243)")
+			end)
+
+			-- Issue #243: the tile heard the whole hold rate from any level, while
+			-- Hue covers the whole range at that rate (docs/group-hold-design.md),
+			-- so from mid-range the tile moved slower than the lamps. It now hears
+			-- the share of the rate the distance left takes; HUE_SCENE_DIM keeps the
+			-- whole rate.
+			local function dims(c4)
+				local out = {}
+				for _, m in ipairs(messages(c4, "HUE_SCENE_DIM")) do out[#out + 1] = m.params end
+				return out
+			end
+
+			-- Hold `button` (200 top, 201 bottom) on a scene lit at `level`, after
+			-- hold rates `rates` ({ up = ms, down = ms }) set through the proxy;
+			-- returns the one HUE_SCENE_DIM and the one CHANGING the hold sent.
+			local function hold(level, button, rates)
+				local env, c4 = lit_scene(level)
+				for key, rate in pairs(rates or {}) do
+					env.ReceivedFromProxy(5001, key == "up" and "SET_HOLD_RATE_UP" or "SET_HOLD_RATE_DOWN",
+						{ RATE = tostring(rate) })
+				end
+				c4.calls, c4.sent = {}, {}
+				env.ReceivedFromProxy(button, "DO_PUSH", {})
+				c4.fire_timers() -- the hold time
+				local sent, changing = dims(c4), notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")
+				assert.equal(1, #sent)
+				assert.equal(1, #changing)
+				return sent[1], changing[1], env, c4
+			end
+
+			it("from mid-range: the tile reaches the end at Hue's speed, Hue keeps the whole hold rate (#243)", function()
+				for _, case in ipairs({
+					{ button = 200, direction = "up", to = 100, rate = 3000 }, -- 60 % of 5000 ms
+					-- Down ends at 1 %, the lowest a lit scene reads (Hue's dim down
+					-- never turns the lamps off): 39 % of 5000 ms, the speed at which
+					-- Hue would reach 0 % in 2000 ms.
+					{ button = 201, direction = "down", to = 1, rate = 1950 },
+				}) do
+					local dim, changing = hold(40, case.button)
+					assert.same({ rid = "s1", device_id = "2061", direction = case.direction, duration = "5000" }, dim,
+						"Hue: the whole range over the whole hold rate")
+					assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = case.to, RATE = case.rate },
+						changing)
+					local hue_per_ms = 100 / tonumber(dim.duration)
+					local tile_per_ms = math.abs(case.to - 40) / changing.RATE
+					assert.is_true(math.abs(hue_per_ms - tile_per_ms) < 1e-9,
+						string.format("%s: Hue %.4f %%/ms, the tile %.4f %%/ms", case.direction, hue_per_ms, tile_per_ms))
+				end
+			end)
+
+			it("from mid-range at other hold rates: the share of each direction's own rate (#243)", function()
+				local dim, changing = hold(25, 200, { up = 2000, down = 8000 })
+				assert.equal("2000", dim.duration)
+				assert.equal(1500, changing.RATE, "75 % of 2000 ms")
+				dim, changing = hold(25, 201, { up = 2000, down = 8000 })
+				assert.equal("8000", dim.duration)
+				assert.equal(1920, changing.RATE, "24 % of 8000 ms")
+			end)
+
+			it("from the end of the range: no distance left, and the dim still goes to Hue (#243)", function()
+				local dim, changing = hold(100, 200)
+				assert.same({ rid = "s1", device_id = "2061", direction = "up", duration = "5000" }, dim)
+				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 }, changing)
+				dim, changing = hold(1, 201)
+				assert.same({ rid = "s1", device_id = "2061", direction = "down", duration = "5000" }, dim)
+				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 1, LIGHT_BRIGHTNESS_TARGET = 1, RATE = 0 }, changing)
+			end)
+
+			it("at a hold rate of 0: the tile and Hue both jump (#243)", function()
+				local dim, changing = hold(40, 200, { up = 0 })
+				assert.same({ rid = "s1", device_id = "2061", direction = "up", duration = "0" }, dim)
+				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 }, changing)
+			end)
+
+			it("above the bridge's bound of 6 000 000 ms: the tile's share of the bound, Hue the rate as set (#243)",
+				function()
+					local dim, changing = hold(40, 200, { up = 86400000 })
+					assert.equal("86400000", dim.duration, "the bridge holds it to 6 000 000 ms (scenes.DIM_MAX_DURATION)")
+					assert.equal(3600000, changing.RATE, "60 % of the bound")
+				end)
+
+			it("from off: the tile keeps the whole hold rate from 0, the dim up the whole rate too (#243)", function()
+				local env, c4 = known_scene("inactive")
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				c4.fire_timers() -- the hold time: the 1 % recall
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 5000 } },
 					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				c4.fire_timers() -- 600 ms later: the dim up
+				assert.equal("5000", dims(c4)[1].duration)
+			end)
+
+			it("from mid-range: the bridge's level reports still correct the tile, during and after (#243)", function()
+				local _, changing, env, c4 = hold(40, 200)
+				assert.equal(3000, changing.RATE)
+				group(env, { level = "47.2" }) -- the lamps' average, behind the estimate
+				assert.same({ 47 }, changed(c4), "during the hold, at once")
+				group(env, { level = "55" })
+				assert.same({ 47 }, changed(c4), "within the second: held back")
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				assert.equal("stop", dims(c4)[2].direction)
+				group(env, { level = "61.6" })
+				assert.same({ 47, 62 }, changed(c4), "the report after the release settles the hold at once")
+				c4.fire_timers() -- the click guard and the throttle window run out
+				assert.same({ 47, 62 }, changed(c4), "settled: no fallback CHANGED follows")
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 47, 62, 62 }, changed(c4), "the tile reads Hue's level, not the estimate")
 			end)
 
 			it("close the CHANGING with the cached level 1 s after the release when no level report comes", function()

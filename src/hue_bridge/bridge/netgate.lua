@@ -13,8 +13,8 @@
 --                        (the driver re-enters choose_stream_address)
 --   gate:reset()         an address change, a transport change, Forget
 --                        Pairing or OnDriverDestroyed: the waiter, the probe
---                        in flight (its binding closed) and the backoff go;
---                        the run's verdict stays
+--                        in flight (its binding closed, cleared and removed,
+--                        #329) and the backoff go; the run's verdict stays
 --   netgate.ATTENTION    the Attention text of a decoy accepted
 --
 -- pinned, or inconclusive on a Director version that answered pinned before

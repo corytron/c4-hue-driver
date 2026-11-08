@@ -33,7 +33,7 @@ local HTTP_ANSWER = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConten
 local NET_ATTENTION = "Event stream: the network connection did not verify the bridge's certificate on this "
 	.. "controller; using Web transfer (#317)"
 local OPEN = { "CreateNetworkConnection", "SetBindingAddress", "NetPortOptions", "NetConnect" }
-local CLOSE = { "NetDisconnect", "clear" }
+local CLOSE = { "NetDisconnect", "clear", "RemoveDynamicBinding" }
 
 -- The lists one after the other, as one list.
 local function seq(...)
@@ -94,13 +94,31 @@ local function ca_files(c4, binding)
 	return out
 end
 
--- The binding's calls end with its close and clear, the only ones it got.
+-- The binding's calls end with its close, clear and removal (#329), the
+-- only ones it got.
 local function closed_once(c4, binding)
-	local names, disconnects = probe_calls(c4, binding), 0
+	local names, disconnects, removals = probe_calls(c4, binding), 0, 0
 	for _, name in ipairs(names) do
 		if name == "NetDisconnect" then disconnects = disconnects + 1 end
+		if name == "RemoveDynamicBinding" then removals = removals + 1 end
 	end
-	return disconnects == 1 and names[#names - 1] == "NetDisconnect" and names[#names] == "clear"
+	return disconnects == 1 and removals == 1 and names[#names - 2] == "NetDisconnect" and names[#names - 1] == "clear"
+		and names[#names] == "RemoveDynamicBinding"
+end
+
+-- The binding ids RemoveDynamicBinding was called for, in order (#329).
+local function removed_ids(c4)
+	local out = {}
+	for _, args in ipairs(c4.calls_to("RemoveDynamicBinding")) do out[#out + 1] = args[1] end
+	return out
+end
+
+-- The position in c4.calls of the first call of one name for one binding, or nil.
+local function first_call(c4, name, binding)
+	for i, call in ipairs(c4.calls) do
+		if call.name == name and call.args[1] == binding then return i end
+	end
+	return nil
 end
 
 describe("bridge.netcheck", function()
@@ -187,7 +205,7 @@ describe("bridge.netcheck", function()
 			assert.is_true(stored[6100] < created[6100] and stored[6101] < created[6101])
 		end)
 
-		it("are used once each: created, addressed, optioned, connected, closed, cleared, never touched again", function()
+		it("are used once: created, addressed, optioned, connected; closed, cleared, removed; never again", function()
 			at_control()
 			answers()
 			assert.equal("pinned", verdict())
@@ -263,10 +281,13 @@ describe("bridge.netcheck", function()
 			local v, detail = verdict()
 			assert.equal("inconclusive", v)
 			assert.equal("probe binding ids exhausted", detail)
+			assert.equal(900, #removed_ids(c4), "its tidy removed 6100 to 6999 (#329)")
 			verdicts = {}
 			run()
+			wait_gap() -- the removals count as a close: the next attempt waits 1.5 s
 			assert.equal("inconclusive", verdict())
 			assert.same({}, ids())
+			assert.equal(900, #removed_ids(c4), "once")
 			local warnings = 0
 			for _, line in ipairs(lines) do
 				if line:find("exhausted", 1, true) then warnings = warnings + 1 end
@@ -295,6 +316,8 @@ describe("bridge.netcheck", function()
 			assert.equal("Director " .. c4.director_version .. " answered pinned before; no probe", detail)
 			assert.same({}, ids())
 			assert.is_nil(c4.persist.netcheck_next_binding)
+			assert.same({}, removed_ids(c4), "a fresh install has nothing to remove")
+			assert.is_nil(c4.persist.netcheck_removed_below)
 		end)
 
 		it("are spent again after a Director update, from where the counter stands", function()
@@ -333,7 +356,7 @@ describe("bridge.netcheck", function()
 			assert.equal("pinned", verdict())
 			assert.same({ DECOY }, ca_files(c4, 6100))
 			assert.same({ SIGNIFY }, ca_files(c4, 6101))
-			assert.same(netstream.port_options(), options_of(6101), "the stream's own options")
+			assert.same(netstream.port_options(), calls_on(c4, "NetPortOptions", 6101)[1][4], "the stream's own options")
 		end)
 
 		it("act on a probe's end from a timer: nothing is closed inside Director's callback", function()
@@ -551,18 +574,182 @@ describe("bridge.netcheck", function()
 			["inconclusive, the control silent"] = function() at_control(); timeout() end,
 		}
 		for name, drive in pairs(endings) do
-			it("every probe id of the check is closed and cleared, once, before the verdict: " .. name, function()
+			it("every probe id of the check is closed, cleared and removed, once, before the verdict: " .. name, function()
 				drive()
 				settle()
 				for _, id in ipairs(ids()) do
 					assert.is_true(closed_once(c4, id), "binding " .. id)
-					assert.equal("", c4.network[id].address)
+					assert.is_nil(c4.network[id], "binding " .. id .. " removed")
 				end
 				assert.same({}, verdicts)
 				settle()
 				assert.equal(1, #verdicts)
 			end)
 		end
+	end)
+
+	describe("removal (#329)", function()
+		it("removes the failed decoy after its close and clear, before the control, 1.5 s before it at least", function()
+			run()
+			timeout()
+			settle()
+			local closed = c4.now_ms
+			assert.same(seq(OPEN, CLOSE), probe_calls(c4, 6100), "the decision removed the decoy")
+			assert.is_nil(c4.network[6100])
+			assert.equal(1, wait_gap())
+			assert.same({ 6100, 6101 }, ids())
+			assert.is_true(first_call(c4, "RemoveDynamicBinding", 6100) < first_call(c4, "CreateNetworkConnection", 6101))
+			assert.is_true(c4.now_ms - closed >= GAP_MS)
+		end)
+
+		it("removes the ids earlier runs left, once per controller, in order, before the verdict; the mark persists",
+			function()
+				c4.persist.netcheck_pinned_on_v2 = c4.director_version
+				c4.persist.netcheck_next_binding = 6104
+				run()
+				assert.same({ 6100, 6101, 6102, 6103 }, removed_ids(c4))
+				assert.same({}, verdicts, "removed before the verdict is delivered")
+				assert.equal("pinned", verdict())
+				assert.same({}, ids(), "nothing created")
+				assert.equal(6104, c4.persist.netcheck_removed_below)
+				assert.equal(6104, c4.persist.netcheck_next_binding, "the counter untouched")
+				verdicts = {}
+				run()
+				assert.equal("pinned", verdict())
+				-- A restart: the module afresh, the store as it was.
+				package.loaded["bridge.netcheck"] = nil
+				netcheck = require("bridge.netcheck")
+				verdicts = {}
+				run()
+				assert.equal("pinned", verdict())
+				assert.same({ 6100, 6101, 6102, 6103 }, removed_ids(c4), "nothing removed twice")
+				assert.equal(1, #calls_on(c4, "PersistSetValue", "netcheck_removed_below"), "the mark written once")
+			end)
+
+		it("moves the mark past a full check's ids, so no later run removes them again", function()
+			at_control()
+			answers()
+			assert.equal("pinned", verdict())
+			assert.same({ 6100, 6101 }, removed_ids(c4))
+			assert.equal(6102, c4.persist.netcheck_removed_below)
+			package.loaded["bridge.netcheck"] = nil
+			netcheck = require("bridge.netcheck")
+			verdicts = {}
+			c4.now_ms = c4.now_ms + 30000
+			at_control()
+			answers()
+			assert.equal("pinned", verdict())
+			assert.same({ 6100, 6101, 6102, 6103 }, removed_ids(c4))
+			assert.equal(6104, c4.persist.netcheck_removed_below)
+		end)
+
+		it("keeps its own copy of the mark while the store does not yet return it", function()
+			c4.persist.netcheck_next_binding = 6102
+			at_control()
+			answers()
+			assert.equal("pinned", verdict())
+			assert.same({ 6102, 6103, 6100, 6101 }, removed_ids(c4))
+			c4.PersistGetValue = function() return nil end
+			verdicts = {}
+			c4.now_ms = c4.now_ms + 30000
+			at_control()
+			answers()
+			assert.equal("pinned", verdict())
+			assert.same({ 6102, 6103, 6100, 6101, 6104, 6105 }, removed_ids(c4))
+		end)
+
+		it("cancel() during the decoy removes it and moves the mark", function()
+			run()
+			netcheck.cancel()
+			assert.is_true(closed_once(c4, 6100))
+			assert.same({ 6100 }, removed_ids(c4))
+			assert.equal(6101, c4.persist.netcheck_removed_below)
+		end)
+
+		it("contains a RemoveDynamicBinding that raises: the same verdict, the ids cleared, a warning each, the mark "
+			.. "moved", function()
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = line end
+				c4.RemoveDynamicBinding = function() error("RemoveDynamicBinding failed") end
+				c4.persist.netcheck_next_binding = 6102 -- earlier runs left 6100 and 6101
+				at_control()
+				answers()
+				local v, detail = verdict()
+				assert.equal("pinned", v)
+				assert.equal("the probe with the decoy CA file was silent for 10 s; the Signify roots answered", detail)
+				for _, id in ipairs({ 6102, 6103 }) do
+					local names = probe_calls(c4, id)
+					assert.same({ "NetDisconnect", "clear" }, { names[#names - 1], names[#names] }, "binding " .. id)
+					assert.equal("", c4.network[id].address, "left as before #329")
+				end
+				local warnings = {}
+				for _, line in ipairs(lines) do
+					if line:find("[WARN]", 1, true) then warnings[#warnings + 1] = line end
+				end
+				assert.equal(3, #warnings, table.concat(warnings, "\n"))
+				assert.truthy(warnings[1]:find("could not remove binding 6102: .*RemoveDynamicBinding failed"))
+				assert.truthy(warnings[2]:find("could not remove binding 6103", 1, true))
+				assert.truthy(warnings[3]:find("2 of the probe bindings 6100 to 6101 left by earlier runs could not be "
+					.. "removed", 1, true))
+				assert.equal(6104, c4.persist.netcheck_removed_below)
+			end)
+
+		it("never runs before a decoy: the leftovers go at the check's end, after the check's own ids", function()
+			c4.persist.netcheck_next_binding = 6104
+			run()
+			assert.same({ 6104 }, ids())
+			assert.same({}, removed_ids(c4), "nothing removed before the decoy")
+			timeout()
+			settle()
+			assert.same({ 6104 }, removed_ids(c4), "the failed decoy only")
+			wait_gap()
+			assert.same({ 6104, 6105 }, ids())
+			assert.same({ 6104 }, removed_ids(c4), "nothing removed before the control")
+			answers()
+			assert.equal("pinned", verdict())
+			assert.same({ 6104, 6105, 6100, 6101, 6102, 6103 }, removed_ids(c4))
+		end)
+
+		it("leaves 1.5 s on the clock from removing the leftovers to the next decoy, when a run replaces a check", function()
+			c4.persist.netcheck_next_binding = 6104
+			run()
+			timeout()
+			settle() -- the decoy 6104 closed; the check waits for the gap before its control
+			c4.now_ms = c4.now_ms + 1000
+			run() -- the old check's tidy removes 6100 to 6103 now
+			assert.same({ 6104, 6100, 6101, 6102, 6103 }, removed_ids(c4))
+			c4.advance(GAP_MS - 1)
+			assert.same({ 6104 }, ids(), "1 ms short of 1.5 s after the removals")
+			c4.advance(1)
+			assert.same({ 6104, 6105 }, ids())
+		end)
+
+		it("never removes an id outside 6100 to 6999, whatever the store says", function()
+			c4.persist.netcheck_next_binding = 1e9
+			run()
+			local v, detail = verdict()
+			assert.equal("inconclusive", v)
+			assert.equal("probe binding ids exhausted", detail)
+			local list = removed_ids(c4)
+			assert.equal(900, #list)
+			assert.equal(6100, list[1])
+			assert.equal(6999, list[900])
+			assert.equal(7000, c4.persist.netcheck_removed_below)
+			for _, mark in ipairs({ "garbage", 42, 6002, 6100.5, true }) do
+				c4 = fake.install_c4()
+				package.loaded["bridge.netcheck"] = nil
+				netcheck = require("bridge.netcheck")
+				c4.persist.netcheck_pinned_on_v2 = c4.director_version
+				c4.persist.netcheck_next_binding = 6102
+				c4.persist.netcheck_removed_below = mark
+				run()
+				assert.same({ 6100, 6101 }, removed_ids(c4), "a mark of " .. tostring(mark) .. " counts as 6100")
+			end
+			c4.persist.netcheck_removed_below = 1e9
+			run()
+			assert.same({ 6100, 6101 }, removed_ids(c4), "a mark past the counter: nothing more")
+			assert.equal(1e9, c4.persist.netcheck_removed_below, "and it stays")
+		end)
 	end)
 
 	describe("the application key", function()
@@ -598,7 +785,7 @@ describe("bridge.netcheck", function()
 	end)
 
 	describe("cancel and run again", function()
-		it("cancel() during the decoy: closed and cleared, no verdict, its reports ignored", function()
+		it("cancel() during the decoy: closed, cleared and removed, no verdict, its reports ignored", function()
 			run()
 			netcheck.cancel()
 			assert.is_true(closed_once(c4, 6100))
@@ -818,6 +1005,14 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 	-- The stream's connection was created on binding 6001.
 	local function stream_created(c4) return #calls_on(c4, "CreateNetworkConnection", STREAM) > 0 end
 
+	-- No binding outside the probe ids 6100 to 6999 was ever removed (#329).
+	local function removed_probe_ids_only(c4)
+		for _, id in ipairs(removed_ids(c4)) do
+			if id < 6100 or id > 6999 then return false end
+		end
+		return true
+	end
+
 	local function warned(text)
 		for _, line in ipairs(lines) do
 			if line:find("[WARN]", 1, true) and line:find(text, 1, true) then return true end
@@ -872,6 +1067,33 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		assert.same({}, sent_on(c4, 6100), "the silent decoy never went online")
 		assert.same({ PROBE_REQUEST }, sent_on(c4, 6101))
 		assert.equal("None", fake.attention(env))
+		local stream_at = first_call(c4, "CreateNetworkConnection", STREAM)
+		assert.is_true(first_call(c4, "RemoveDynamicBinding", 6100) < stream_at)
+		assert.is_true(first_call(c4, "RemoveDynamicBinding", 6101) < stream_at)
+		assert.same({ 6100, 6101 }, removed_ids(c4))
+		assert.is_true(removed_probe_ids_only(c4), "never 6001 or 6008")
+		assert.equal(6102, c4.persist.netcheck_removed_below)
+	end)
+
+	it("an update from a build that left probe ids: the first start removes them before the stream, once", function()
+		local store = { netcheck_next_binding = 6104 }
+		local env, c4 = paired_bridge(nil, store)
+		c4.persist.netcheck_pinned_on_v2 = c4.director_version
+		env.OnDriverLateInit("DIT_STARTUP")
+		answer_identity(c4)
+		deliver(c4)
+		assert.same({}, probe_ids(c4), "answered from the memory")
+		assert.same({ 6100, 6101, 6102, 6103 }, removed_ids(c4))
+		assert.is_true(stream_created(c4))
+		assert.is_true(first_call(c4, "RemoveDynamicBinding", 6103) < first_call(c4, "CreateNetworkConnection", STREAM))
+		assert.equal(6104, c4.persist.netcheck_removed_below)
+
+		local env2, c42 = paired_bridge(nil, c4.persist)
+		env2.OnDriverLateInit("DIT_STARTUP")
+		answer_identity(c42)
+		deliver(c42)
+		assert.is_true(stream_created(c42))
+		assert.same({}, removed_ids(c42), "the next start removes nothing")
 	end)
 
 	it("a restart on the same Director version spends no id; one on a new version probes with the next ids",
@@ -1000,7 +1222,7 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		assert.equal(0, #c4.calls_to("CreateNetworkConnection"))
 	end)
 
-	it("an address change cancels the check: closed and cleared, then the new address on a fresh id", function()
+	it("an address change cancels the check: closed, cleared and removed, then the new address on a fresh id", function()
 		local env, c4 = at_decoy(paired_bridge())
 		env.Properties["Bridge IP Address"] = NEW_IP
 		env.OnPropertyChanged("Bridge IP Address")
@@ -1015,22 +1237,25 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		assert.same({ STREAM, NEW_IP, "SSL" }, calls_on(c4, "CreateNetworkConnection", STREAM)[1])
 	end)
 
-	it("Forget Pairing and OnDriverDestroyed close and clear a probe in flight; the check answers no one", function()
-		for _, stop in ipairs({
-			function(env) env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing", Confirm = "Yes, forget" }) end,
-			function(env) env.OnDriverDestroyed() end,
-		}) do
-			local env, c4 = at_decoy(paired_bridge())
-			stop(env)
-			assert.is_true(closed_once(c4, 6100))
-			probe_answers(c4, 300)
-			deliver(c4)
-			wait_gap(c4)
-			assert.same({ 6100 }, probe_ids(c4))
-			assert.is_false(stream_created(c4))
-			assert.is_nil(c4.persist.netcheck_pinned_on_v2)
-		end
-	end)
+	it("Forget Pairing and OnDriverDestroyed close, clear and remove a probe in flight; the check answers no one",
+		function()
+			for _, stop in ipairs({
+				function(env) env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Pairing", Confirm = "Yes, forget" }) end,
+				function(env) env.OnDriverDestroyed() end,
+			}) do
+				local env, c4 = at_decoy(paired_bridge())
+				stop(env)
+				assert.is_true(closed_once(c4, 6100))
+				probe_answers(c4, 300)
+				deliver(c4)
+				wait_gap(c4)
+				assert.same({ 6100 }, probe_ids(c4))
+				assert.is_false(stream_created(c4))
+				assert.is_nil(c4.persist.netcheck_pinned_on_v2)
+				assert.same({ 6100 }, removed_ids(c4))
+				assert.is_true(removed_probe_ids_only(c4), "never 6001 or 6008")
+			end
+		end)
 
 	it("switching the transport during the check starts no stream twice", function()
 		local env, c4 = at_decoy(paired_bridge())

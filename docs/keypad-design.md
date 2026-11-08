@@ -262,7 +262,9 @@ the same fields (`docs/group-hold-design.md` G1 to G6a).
   (`SET_HOLD_RATE_UP/DOWN`), default 5000 ms; `driver.xml` declares
   `hold_rates` True, `hold_rate_min` 1000. Since the dimmer a hold also
   sends the proxy `LIGHT_BRIGHTNESS_CHANGING` toward 100 or 1 at its start
-  and settles on the group's level reports after the release.
+  and settles on the group's level reports after the release; since 1.3
+  (#243) its `RATE` covers only the distance left, so the tile keeps pace
+  with the lamps.
   Current (2026-10-25, build 316): a time-based scene held from off is
   started instead, and the dim up follows once the bridge reports its
   group on with a level (1.5 s at the latest) while the button is still
