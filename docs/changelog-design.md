@@ -63,8 +63,11 @@ Rules the checker enforces:
 Owner, 2026-10-26: each X.Y release has its own codename from Star Wars:
 Andor, instead of one per major version. An X.0 gets a widely recognised
 character, place or object from the show, a point release (X.Y with Y of 1
-or more) a decidedly less important one. 1.0 is "Cassian" and 1.1 is
-"Brasso". One file names them, and the tool takes every codename from it:
+or more) a decidedly less important one. Since 2026-11-07 (#394) that
+lesser name is tied specifically to its X.0's name: for 1.0 "Cassian", his
+sister, his mother, his homeworld or his ship. 1.0 is "Cassian", 1.1
+"Brasso" and 1.2 "Taramyn", the last two named before that rule. One file
+names them, and the tool takes every codename from it:
 
 ```json
 {
@@ -195,9 +198,10 @@ heading "New in build {build}" and `{history}` under "Earlier builds of
 - `tools/check.sh` gains the check `changelog` (`changelog.py check`),
   run by CI's tooling job.
 - Before the first build of a new X.Y, its first prerelease included, the
-  coordinator proposes its codename by the rule of §1 and waits for the
-  owner's approval; a pull request then adds it to `.github/codenames.json`
-  (#304).
+  coordinator picks its codename by the rule of §1 and reports it,
+  without waiting for approval (#396; the names in line for 1.0's point
+  releases are in `docs/release-checklist.md`); a pull request then adds
+  it to `.github/codenames.json` (#304).
 
 ## 6. Who owns which file
 

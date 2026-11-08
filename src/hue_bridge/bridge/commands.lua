@@ -205,8 +205,10 @@ function commands.body(pending, limits)
 	local body = {}
 	if pending.dim then
 		-- Hue ramps the whole range over `rate` and keeps the lights' relative
-		-- levels; "stop" ends a ramp where it is [verified on a grouped_light
-		-- 2026-10-23; assumed for a single light; docs/keypad-design.md].
+		-- levels; "stop" ends a ramp where it is [verified on a single light
+		-- 2026-10-25, #249]. On a grouped_light Hue accepts the body but ignores
+		-- the duration and covers the delta in about a second, so group holds go
+		-- through bridge/group_hold.lua (docs/group-hold-design.md).
 		if pending.dim == "stop" then
 			body.dimming_delta = { action = "stop" }
 		else

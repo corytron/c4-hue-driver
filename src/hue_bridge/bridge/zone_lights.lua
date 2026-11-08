@@ -371,6 +371,26 @@ function zone_lights:grouped_light_of(group_rid)
 	return grouped
 end
 
+-- The member light rids of the zone or room whose grouped_light is
+-- `grouped_light_rid`, in the group's order (member_lights): what a keypad
+-- hold on a scene, a zone light or a room light fans out over
+-- (bridge/group_hold.lua, docs/group-hold-design.md G3). Read only, and for
+-- any zone or room in the lights' cache, registered here or not (a scene's
+-- group need not have a zone light). {} for an unknown or deleted
+-- grouped_light, the bridge_home's, or a group whose members are not cached.
+-- A fresh table each call.
+function zone_lights:lights_of_grouped_light(grouped_light_rid)
+	if type(grouped_light_rid) ~= "string" or grouped_light_rid == "" then
+		return {}
+	end
+	for _, group in ipairs(self:groups():groups()) do  -- rooms, then zones; never the bridge_home
+		if self:grouped_light_of(group.rid) == grouped_light_rid then
+			return self:member_lights(group)
+		end
+	end
+	return {}
+end
+
 -- Labels ---------------------------------------------------------------------
 
 function zone_lights.entry_label(_self, _rid, entry)

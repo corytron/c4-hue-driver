@@ -38,7 +38,7 @@
 --       the driver accepts "inconclusive" only on a Director version that has
 --       answered "pinned" before (remember_pinned and pinned_before, below);
 --       on a new or upgraded OS nothing keyed is sent until a conclusive
---       answer (hue_bridge/driver.lua tls_gate, docs/design.md "TLS
+--       answer (bridge/identity.lua, the TLS gate, docs/design.md "TLS
 --       self-check in release builds").
 --
 -- tlscheck.run(ip, callback) calls callback(verdict, detail) once:

@@ -1,4 +1,4 @@
-# Status of the Hue driver (2026-11-05)
+# Status of the Hue driver (2026-11-07)
 
 **Now (2026-11-05).** **1.2 "Taramyn", build 488, is released** (Latest;
 [Discussion #387](https://github.com/corytron/c4-hue-driver/discussions/387))
@@ -471,51 +471,52 @@ What was left is under "Open" (#38, #61, #62).
 ## Open
 
 Every open item is an issue (`gh issue list --state open`); this list says
-where each stands on 2026-10-27.
+where each stands on 2026-11-07.
 
-- **On State Follows on the house** (#310, closed by PR #311; report in
-  Discussions #314): once beta 4 is installed, the owner checks a scene
-  keypad with the room changed from the Hue app.
-- **#305** The tester's round of 1.1 beta 3 (motion sensors): it comes back
-  as Beta feedback issues, and the diagnostics' output settles the open Hue
-  questions of `docs/motion-hue-research.md` §7.1. The first is **#309**,
-  "Motion sensors not detected" (a square Hue Bridge v2, BSB002): the
-  tester reports that the bridge's GETs time out while the event stream is
-  connected and answer while it is stopped.
-- **#280** The Hue automation audit (Control4 is the source of truth):
-  research done (`docs/hue-automations-research.md`,
+- **1.3 "Kerri"** (#398): its three pieces are merged on `main` but not yet
+  released. The agents' reports and the review are in
+  [Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401).
+  - **#373** (PR #400, build 514 on `main`): the bridge driver's main chunk
+    is down from 199 locals to 137, with seven groups moved into `bridge/`
+    modules. A read-only review found no change in behaviour. The new
+    `lua-limits` check fails above 180 locals or 50 upvalues in any function.
+  - **#249** (PR #402, build 514): a hold on a scene, zone light or room light
+    ramps lamp by lamp with up to 10 lamps on. Above that, or while a
+    time-based or moving scene runs on the group, it moves in steps of a
+    second (`docs/group-hold-design.md`).
+  - **#371** (PR #403, build 506): after a restart, a motion hold whose end
+    the device saw resumes only the time that is left
+    (`docs/motion-hold-restart-design.md`).
+  - **Next:** a hardware round on the house before the release. It covers:
+    - a lamp-by-lamp hold and a stepped hold, each stopping where released;
+    - a hold from off;
+    - a time-based scene that keeps running through a stepped hold;
+    - a motion hold that resumes across a driver update;
+    - the refactored bridge (pairing, outage, Bridges Found).
+- **Not yet exercised on the house from 1.2:** the write paths of the new
+  actions, the re-link by radio and the bridge-away Attention items (see
+  "Now").
+- **#280** The Hue automation audit (Control4 is the source of truth): the
+  research is done (`docs/hue-automations-research.md`,
   `docs/edge-cases-automations.md`, draft PR #285); the contract and the
   owner's decisions come next.
-- **#312** Composer automation notes: since 2026-10-27 the Windows session
-  binds Connections by synthetic drag (from the top pane onto the lower
-  list), which `docs/composer-remote.md` and `docs/design.md` still say
-  cannot be done with synthesized input, and it builds programming by drag;
-  PR #316 documents the rules.
-- **#249** Holds on scenes, zone and room lights jump to the end of the
-  range (Hue ignores `dynamics.duration` on grouped_light dims); 1.1.
-- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness; 1.1.
-- **#40** Time-of-day scenes, parked for the next major release.
-- **#65** Read the Event Stream reconnect count after a day on a build.
+- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness.
+- **#65** Read the Event Stream reconnect count and the event rate after a
+  day on a build.
 - **#38** The owner's pass on the phone and keypads, and saving and backing
   up the Composer project.
-- **#62** The owner deletes the old edit revisions on PRs #6 and #2;
+- **#62** The owner deletes the old edit revisions on PRs #6 and #2; the
   GitHub Support ticket for the purge is pending.
 - **#238** After the next reboot from System Manager: no device marked
   unbound at startup.
-- **#237** Tooling: the tag ruleset (a command for the owner).
+- **#237** Tooling: deploy.py accepts a watchdog below driver.xml's minimum,
+  and the tag ruleset blocks deletion only.
 - **#308** A Hue Light turned on from off reports its old level for an
-  instant (70 % for about 16 ms before 30 %, on the first turn-on after
-  beta 3's install; no flash on the lamps); low priority.
-- **#243, #246, #247** Smaller bugs: a scene hold from mid-range, two
-  texts, dev reloads and the four-transfer limit.
+  instant (about 16 ms; no flash on the lamps); low priority.
+- **#329** The TLS check's probe bindings stay registered in Director after
+  the check.
+- **#243, #246** Smaller bugs: a scene hold from mid-range, two texts.
+- **#247, #376** Dev loop only: reloads forget the old instance's stream
+  transfers, and an overlapping reload can orphan an event stream.
+- **#40** Time-of-day scenes, parked for 2.0.
 
-Decided, not open:
-
-- **Accepted** (security review and fixes of 2026-10-25, #217;
-  `docs/dev-loop.md`, "What is left"): names the device drivers build from
-  cleaned Hue names ("<Room> Lights", "<Zone> <Scene>") are bounded but not
-  cut; hostname verification stays off for the bridge (no C4:url option); a
-  Hue Request `POST /api` in a dev build logs the newly minted key.
-- **Code scanning** after every merge (CLAUDE.md): on 2026-10-25 every
-  alert is fixed or dismissed with its reason; the triage workflow keeps one
-  issue open only while alerts are.

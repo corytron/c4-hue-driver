@@ -95,7 +95,7 @@ two device drivers share `common/device.lua` (their plumbing since
   through `bridge_request` in `src/hue_bridge/driver.lua`. It answers at
   once with one refusal while one holds (`keyed_refusal`: `not paired`,
   `TLS check failed`, `key rejected`), sends nothing until the unkeyed
-  identity check (`verify_identity`: `GET /api/0/config` must report the
+  identity check (`bridge/identity.lua` since #373: `GET /api/0/config` must report the
   paired bridge id) and the TLS self-check below have passed for the
   current start and address, and drops any TLS table the caller passed. A
   keyed request refuses redirects: a 3xx answer ends it as `redirect
@@ -180,8 +180,8 @@ blocking rule, `docs/security-fixes-design.md`):
   - Anything against an active attacker. The decoy request is easy to
     recognise on the wire (the first TLS handshake after the identity GET),
     so whoever can drop it makes the check `inconclusive` at will.
-- **Verdicts and what the driver does** (`tls_gate` in
-  `src/hue_bridge/driver.lua`):
+- **Verdicts and what the driver does** (the TLS gate in
+  `src/hue_bridge/bridge/identity.lua` since #373):
   - `pinned` (the request fails certificate verification): the expected
     answer. The driver records the running Director version,
     `C4:GetVersionInfo().version` **[verified: API
@@ -756,7 +756,12 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   kept, stopping on release: Hue accepts `dimming_delta` up/down with
   `brightness_delta` and `dynamics.duration`, and the bare
   `{"dimming_delta":{"action":"stop"}}`, on a **grouped_light**
-  **[verified]**.
+  **[verified]**. Corrected 2026-10-25 (#249): Hue accepts those bodies, but
+  on a grouped_light it ignores `dynamics.duration` and covers the whole
+  delta in about a second, so a hold ran to the end; "stopping on release"
+  was an observation, not a measured ramp. A single light honours the
+  duration and the stop. 1.3 ramps group holds lamp by lamp or in steps
+  (`docs/group-hold-design.md`).
 - **Scene dimmer, build 160 (2026-10-24).** Installed with "Add or Update
   Driver or Agent…"; "Restart Director?" did not load the new capabilities,
   the owner's reboot from System Manager did (Director lost 23:55:14, back
@@ -1343,7 +1348,8 @@ and the pairing survives it.
   exist; recall body to be confirmed from the API reference]**.
   Superseded (2026-10-21/23): the recall body `{"recall":{"action":…}}`
   (also with `duration`) and the grouped_light `dimming_delta` with
-  `dynamics` and `stop` are verified on hardware; a recall at a level
+  `dynamics` and `stop` are verified on hardware (accepted; the duration is
+  ignored on a grouped_light, #249); a recall at a level
   (`recall.dimming.brightness`) is **[assumed]**. Verified 2026-10-25 (#41):
   a recall at 1 % set both lamps of Shine to 1.19 % in the scene's own
   colours ("Hardware pass of 2026-10-25 night").

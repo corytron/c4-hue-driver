@@ -13,7 +13,7 @@ findings as comments), and `docs/status.md` sums them up.
 
 ## 0. On this VM
 
-- `tools/check.sh --strict --only lua-lint lua-test shell python-lint
+- `tools/check.sh --strict --only lua-lint lua-test lua-limits shell python-lint
   python-test xml workflows secrets house` passes (every check but
   `powershell`, which needs `pwsh`; CI runs that one): `luacheck src tests
   tools` clean, `busted tests` green, the shell and Python tooling clean,
@@ -106,7 +106,15 @@ calls the old names keeps working, and step 11 checks that it does:
    a drag a burst of three grouped_light PUTs, then at most one a second.
 6. Scene round trip on Shine (1162): ON → one scene recall PUT; OFF → one
    grouped_light off; the keypad hold (owner) → `dimming_delta` up/down and
-   `stop`.
+   `stop`. From 1.3 (#249, `docs/group-hold-design.md`): with 1 to 10
+   lamps of the room on, that start and stop go to each lit lamp's light
+   resource (the bridge logs `group hold <rid> up: per-light, <n> lights,
+   <ms> ms`) and the lamps ramp at the hold rate and stop at the release;
+   with more lit, group steps without a duration, one a second
+   (`stepped, <n> lights, <step> % a step`); from off, every lamp of the
+   room counts; with Shine recalled dynamically, or a time-based scene of
+   the room running, stepped whatever the count (`(scene running)` in the
+   line).
 7. Time-of-day scene: Golden hours (1164) ON → `smart_scene` activate; OFF →
    deactivate and the room off.
 8. Light lifecycle: `Add From Hue` of one light (Left Bedside Light) into
@@ -236,10 +244,16 @@ seven assets attached (the three `.c4z` files, `SHA256SUMS.txt`,
 `manifest.json` and the provenance in two forms; "How a release is cut"
 below). Since 2026-10-26 (#304) every X.Y has its own codename from Star
 Wars: Andor, kept by all its builds and betas: an X.0 a widely recognised
-character, place or object, a point release a decidedly less important one.
-Before the first build of a new X.Y the coordinator proposes one and the
-owner approves it; it goes into `.github/codenames.json`, which
-`tools/changelog.py` reads (used so far: 1.0 Cassian, 1.1 Brasso). The driver files carry the
+character, place or object, a point release a lesser-known one tied
+specifically to its X.0's name (#394; for 1.0, Cassian's sister, mother,
+homeworld or ship). Before the first build of a new X.Y the coordinator
+picks one by that rule and reports it, without waiting for approval
+(#396); it goes into `.github/codenames.json`, which `tools/changelog.py`
+reads (used so far: 1.0 Cassian, 1.1 Brasso, 1.2 Taramyn). The owner
+approved the names for 1.0's next point releases, taken in this order:
+Kerri (Cassian's sister), Maarva (his adoptive mother), Kenari (his
+homeworld), Kassa (his birth name), Clem (his adoptive father) and B2EMO
+(the family droid). The driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
 integer there); it is named in the release's `manifest.json`, in the
 release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the

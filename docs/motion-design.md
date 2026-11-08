@@ -26,7 +26,7 @@ sensors. The owner owns none. The house has a Hue Bridge Pro and no sensors.
 | D7 | Writes to Hue (C4R Q9, EC Q5) | **None.** The driver never changes anything on the Hue side. |
 | D8 | A motion episode missed while the stream was down (EC Q6) | Logged only, never replayed. |
 | D9 | Stuck motion (EC Q7) | One bounded GET of that one motion resource when motion has shown for 5 minutes with no news. It is the only polling. |
-| D10 | Occupancy hold time (C4R Q6) | An **Occupancy Hold Time (s)** property on the device, 0 to 3600, default 0. Hue's "no motion" is held that long before `CLOSED` is sent. New motion cancels the wait. |
+| D10 | Occupancy hold time (C4R Q6) | An **Occupancy Hold Time (s)** property on the device, 0 to 3600, default 0. Hue's "no motion" is held that long before `CLOSED` is sent. New motion cancels the wait. Superseded in part (2026-11-07, #371): across a restart (a driver update in place, a Director restart, a controller reboot), a hold the device was running when it stopped resumes for the time it has left, measured on the controller's clock from when the device began it, provided the bridge still reports the same end of motion (the same `motion_changed`, compared only for equality). A hold that ran out while the driver was down closes at once at the first reading, as `CLOSED`, so "stops sensing motion" fires once. In every other case (an end of motion the device did not see, another change time or none, a clock not to be trusted, another rid) the hold starts in full from the first reading, as before. A resumed hold uses the current setting. The rules and corner cases are in [`motion-hold-restart-design.md`](motion-hold-restart-design.md). |
 | D11 | History (C4R Q8) | No `C4:RecordHistory` in beta 1. Motion history is the proxy's own. |
 | D12 | Bridge connection (C4R Q10) | The existing provider binding 1, `HUE_BRIDGE`. No new connection on the bridge. |
 | D13 | Room, zone and home motion (`grouped_motion`), sensor groups, cameras | Not in beta 1. The diagnostics count them. |
@@ -116,6 +116,7 @@ BOOL Online, BOOL Enabled, BOOL Battery Low, NUMBER Light Level (0–100000), NU
 - **Hold time:**
   - Hue "motion" sends `OPENED` at once and cancels any pending close.
   - Hue "no motion" starts the hold timer (`C4:SetTimer`). When it ends, `CLOSED` is sent.
+  - After a restart (2026-11-07, #371): a hold that was running resumes for what is left of it, or closes at once when that ran out, provided the bridge still reports the same end of motion; otherwise it starts in full from the first reading. See [`motion-hold-restart-design.md`](motion-hold-restart-design.md) (D10).
   - A hold time of 0 closes at once.
   - The hold is never applied to a deliberate end.
 - **Deliberate end** (`HUE_MOTION_STATE` with `ended` set): `CLOSED` once if the state shows motion, at once, ignoring the hold.

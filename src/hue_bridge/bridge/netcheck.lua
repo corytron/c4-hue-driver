@@ -74,7 +74,7 @@
 --                   that cannot go into a request
 -- `detail` says what happened (with the timing of a decoy answer), for the
 -- log and the Event Stream row. run() remembers nothing itself: the driver
--- calls remember_pinned() on "pinned" (hue_bridge/driver.lua, net_gate).
+-- calls remember_pinned() on "pinned" (bridge/netgate.lua, since #373).
 --
 -- Why a silent decoy reads "pinned": on OS 3.4.3 a refused handshake is
 -- silent, and silence alone could also be a connect that was never made. The
