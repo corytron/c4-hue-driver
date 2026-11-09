@@ -222,3 +222,43 @@ The full checklist the project keeps is `docs/c4-lighting-guidelines.md`
 (#422). Its rows for #421 are L3, L4, L12, L15, L16, L38, L44, L45 and L46
 (its §4, item 1); L46, the light's own button events, stays out of this
 issue (section 8) and goes to #432.
+
+## 10. Measured on the house, and scenes (2026-11-09)
+
+Measured through the dev loop on build 552, with the owner watching the
+lamps (one single light, one two-lamp zone, one two-lamp room and its
+scene). The results are also in #421.
+
+| Step | Result | Status |
+| --- | --- | --- |
+| L1 | The bridge reports a timed target at once, about 50 ms after the PUT, while the lamp is still fading | [verified] D10's hold-back is needed |
+| L2 | `dimming_delta` stop halts a timed absolute fade on a light: the lamp held at about 60 % | [verified: owner watching] |
+| L2, bridge | After such a stop the bridge keeps the fade's target as the level, and computes relative commands without a duration from it, until about 10 s after the fade's planned end, when it reads the lamp (57.31 % against an estimate of 57.6) | [verified] |
+| D9 instant | Writing the estimate at once (rate 0) showed a small step down: Hue's fade runs slightly behind a linear estimate | [verified: owner watching] |
+| D9 glide | Writing the estimate with a 1000 ms transition looked smooth, and the bridge then reports the estimate at once | [verified: owner watching, twice] |
+| Z1 | A grouped_light honours an absolute `dynamics.duration`: a zone faded over 20 s | [verified: owner watching] |
+| Z2 | The gliding level stop on a grouped_light is smooth on every lamp | [verified: owner watching] |
+| S1 | A scene recall with `duration` fades the scene in over that time | [verified: owner watching] |
+| S2 | A grouped_light `dimming_delta` stop halts a scene's fade-in partway, each lamp at its own level | [verified: owner watching] |
+| S3 | A per-lamp `dimming_delta` with a duration (a hold) right after such a stop rises smoothly from where the lamps stopped, not from the bridge's stale level | [verified: owner watching] |
+| S4 | A grouped_light `on: false` with a duration fades out, and a stop leaves the lamps lit at a dimmer level | [verified: owner watching] |
+
+**Decisions from the measurement:**
+
+- D8/D9: `STOP_MODE = "level"` with `STOP_GLIDE_MS = 1000` for Hue Light
+  devices, single and zone or room alike (Z1, Z2 passed, so D14's
+  follow-up is not needed).
+- D1 is changed by the owner (2026-11-09: "Scenes can ramp so tap to stop
+  ramp should apply to them too"): **Hue Scene devices get tap ramps and
+  tap stops too.**
+
+### 10.1 Scenes
+
+| # | Decision |
+| --- | --- |
+| S-D1 | A top tap, or a toggle tap while the scene is off, recalls the scene over `click up × (100 − level) / 100`, as the scene's recall with a `duration` (S1). A tap on an ordinary scene that is already on at 100 does nothing at Hue and reports CHANGED. |
+| S-D2 | A bottom tap, or a toggle tap while it is on, turns the scene's group off over `click down × level / 100`: the grouped_light `on: false` with a `duration` (S4). |
+| S-D3 | The stop is the grouped_light `dimming_delta` stop (S2): **not** a level write, which would bring every lamp to one level and lose the scene's look. It goes out as `HUE_SCENE_DIM` with `direction = "stop"` and the estimate as `level`, which the bridge writes only if Hue refuses the stop. The device reports its estimate as CHANGED at once. The bridge's report of the real level arrives about 10 s after the fade's planned end; it goes through. Holds right after a stop are safe (S3). |
+| S-D4 | The same machine as the lights: the double-tap window (D4), the stop on the press (D5), `SET_BRIGHTNESS_STOP` and `STOP_SCENE_RAMP` (D7), the reporting (D10), and other commands taking over (D11). The hooks `dev.ramp_active` and `dev.on_ramp_stop` are implemented by the scene driver. |
+| S-D5 | Time-based (smart) scenes keep today's taps: activate and deactivate have no duration at Hue, so there is nothing to ramp or stop. Departure from C4 §8 row 1, forced by Hue. The double-tap window still applies. |
+| S-D6 | `HUE_SCENE_OFF` gains an optional `duration` (ms, clamped as a recall's); the bridge passes it to the group off as `dynamics.duration`. A keypad tap's recall and off are urgent, as D12. |
