@@ -261,6 +261,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		} })
 		fake.as(bridge, function() stream_t:chunk("id: 10:0\ndata: " .. event .. "\n\n") end)
 		assert.equal(1, fake.pump(), "one HUE_STATE to the living room lamp")
+		-- The target came with a rate (400 ms): its report is held until the ramp
+		-- ends (#421 D10).
+		fake.as(light, light.C4.advance, 400)
 		br = proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED")
 		assert.equal(50, br[#br].LIGHT_BRIGHTNESS_CURRENT)
 		col = proxy_calls(light, "LIGHT_COLOR_CHANGED")
@@ -309,6 +312,7 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(1, light_event(13, { on = { on = true } }), "a HUE_STATE with the on alone")
 		assert.same({}, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
 		assert.equal(1, light_event(14, { dimming = { brightness = 30.04 } }))
+		fake.as(light, light.C4.advance, 1000) -- held until the 1000 ms ramp ends (#421 D10)
 		assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 30 } }, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
 
 		-- #233: with Default On Brightness 60, a TOGGLE from off is one PUT
