@@ -1,11 +1,38 @@
-# Status of the Hue driver (2026-11-08)
+# Status of the Hue driver (2026-11-09)
 
-**Now (2026-11-08).** **1.3 "Kerri", build 539, is released** (Latest;
-[release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.3);
+**Now (2026-11-09).** **1.4 "Maarva", build 565, is released** (Latest;
+[release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.4);
+build reports, the house measurement and the keypad test in
+[Discussion #439](https://github.com/corytron/c4-hue-driver/discussions/439))
+and goes onto the house (`deploy/house.yaml`, #441). What 1.4 changes
+(#421, contract `docs/tap-stop-design.md`):
+- **Hue Lights** (single, zone and room): a keypad tap ramps to the Default
+  On Brightness or to off over 3 s for the whole range (was 250 ms), and a
+  tap while it ramps stops it, written as the device's estimate with a 1 s
+  glide.
+- **Hue Scenes:** a tap fades the scene in or its group out over a fixed
+  3 s, and a stop keeps every lamp at its own level. Time-of-day scenes
+  stay instant.
+- **Double taps:** a second tap within 0.6 s changes nothing.
+- **Real stops:** `SET_BRIGHTNESS_STOP` and the Brightness Stop link now
+  stop the lamp.
+- **Measured on the house** on 2026-11-09 with the owner watching (§10 of
+  the contract). A keypad test on a zone light passed: "All looks good and
+  right". Scene taps on a keypad were not tried: the owner shipped first.
+- **House settings changed the same night:**
+  - the four Hue Light devices' Click Rates are 3.000 / 3.000 s (were
+    0.250 / 0.750);
+  - the stairwell motion device's hold time is 60 s (was 300);
+  - the bedroom switches' ambient LED profile never turns the LEDs off.
+- **Process:** the Control4 lighting guidelines rule and checklist
+  (`docs/c4-lighting-guidelines.md`, #422). Its gaps are filed as #427 to
+  #435.
+
+Before 1.4: **1.3 "Kerri", build 539**, was released on 2026-11-08
+([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.3);
 agent reports and the hardware round in
-[Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401))
-and goes onto the house (`deploy/house.yaml`; `python3 tools/deploy.py status`
-says whether it is installed). What 1.3 changes is in `CHANGELOG.md`:
+[Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401)).
+What 1.3 changed is in `CHANGELOG.md`:
 - **Holds:** a hold on a scene, zone light or room light ramps instead of
   jumping (#249).
 - **Motion:** a motion hold resumes after a restart (#371).
@@ -137,7 +164,7 @@ this page disagree about the present, this page and the code win.
   first Control4 motion programming, built in Composer by the Windows
   session (two walks, both correct): two lamps raised by 30 points when the
   MotionAware area senses motion and restored to their saved level when it
-  stops (#297); the motion device's hold time is 300 s since then. A light
+  stops (#297); the motion device's hold time was 300 s from then, and is 60 s since 2026-11-09. A light
   that had failed its start on build 381 came up by itself (#298). Beta 2
   (build 381) ran from 20:05 that day, beta 1 (build 376) from 16:17. The
   motion device stands for the house's one MotionAware area (the bridge has

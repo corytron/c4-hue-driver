@@ -13,6 +13,8 @@ listed.
 
 ## Unreleased
 
+## 1.4 "Maarva", build 565 (2026-11-09)
+
 ### Changed
 - Keypad taps on a Hue Light, zone light or room light now work as on a
   Control4 dimmer: a tap ramps the light to its Default On Brightness or to
