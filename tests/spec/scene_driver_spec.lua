@@ -543,11 +543,11 @@ describe("Hue Scene driver", function()
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
 
-		it("carries the ramp in CHANGING but never to the bridge", function()
+		it("carries the ramp in CHANGING and to the bridge as the off's duration (#421 S-D6)", function()
 			local env, c4 = known_scene("static")
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "3000" })
 			assert.equal(3000, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].RATE)
-			assert.same({ rid = "s1" }, last_sent(c4).params)
+			assert.same({ rid = "s1", duration = "3000" }, last_sent(c4).params)
 		end)
 
 		it("lets the bridge's STATE inactive settle it", function()
@@ -588,6 +588,7 @@ describe("Hue Scene driver", function()
 			env.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "50", TIME = "2000" })
 			assert.same({ rid = "s1", action = "active", brightness = "50", duration = "2000" }, last_sent(c4).params)
 			state(env, "static", { reason = "recall" })
+			c4.advance(2000) -- the recall's ramp ends; its status comes out then (#421 D10)
 			env.ReceivedFromProxy(5001, "RAMP_TO_LEVEL", { LEVEL = "30", TIME = "4000" })
 			assert.same({ id = BRIDGE_ID, command = "HUE_SCENE_LEVEL",
 				params = { rid = "s1", device_id = "2061", level = "30", rate = "4000" } }, last_sent(c4))
@@ -1389,6 +1390,7 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.sent)
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "2" })
 			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+			c4.advance(3000) -- the tap's fade has run its time (#421 S-D1): the next tap is no stop
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "2" })
 			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
 			assert.equal(3, #notifies(c4, "BUTTON_ACTION"))
@@ -1403,6 +1405,7 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.sent)
 			env.ReceivedFromProxy(200, "DO_CLICK", {})
 			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+			c4.advance(3000) -- the tap's fade has run its time (#421 S-D1)
 			env.ReceivedFromProxy(201, "DO_CLICK", {})
 			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
 			local xml = io.open("src/hue_scene/driver.xml"):read("*a")
@@ -1543,6 +1546,7 @@ describe("Hue Scene driver", function()
 			assert.same({ 1000, false }, timers[#timers])
 			env.ReceivedFromProxy(200, "DO_CLICK", {})
 			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"), "the keypad's click after the hold")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", level = "60" }) -- the hold's end, below 100
 			c4.fire_timers() -- 1 s later
 			env.ReceivedFromProxy(200, "DO_CLICK", {})
 			assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
@@ -1623,13 +1627,17 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
 
-		it("ends with a bottom tap: OFF to the bridge and CHANGED 0 when it settles", function()
+		it("ends with a bottom tap: OFF to the bridge and CHANGED 0 when its fade ends (#421 S-D2)", function()
 			local env, c4 = dimmed_scene()
 			state(env, "inactive")
 			env.ReceivedFromProxy(201, "DO_CLICK", {})
 			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
 			state(env, "inactive")
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "held back while the group fades")
+			assert.is_true(c4.persist.held_on, "on until the fade ends")
+			c4.advance(3000)
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.is_false(c4.persist.held_on)
 		end)
 
 		it("makes TOGGLE turn the scene off although Hue reports it inactive", function()
@@ -1789,13 +1797,13 @@ describe("Hue Scene driver", function()
 				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 80, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 500 } },
 					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
 				assert.same({}, changed(c4))
-				local timers = c4.active_timers()
-				assert.equal(1, #timers)
-				assert.equal(1500, timers[1].delay, "the ramp plus 1 s")
+				assert.same({ 500, 1500 }, delays(c4), "the ramp (#421 D6), and the fallback: the ramp plus 1 s")
 
 				group(env, { level = "40.39" })
+				assert.same({}, changed(c4), "held back until the ramp ends (#421 D10)")
+				c4.advance(500)
 				assert.same({ 40 }, changed(c4), "a whole percent")
-				c4.fire_timers()
+				c4.advance(5000)
 				assert.same({ 40 }, changed(c4), "settled: no fallback CHANGED follows")
 				assert.equal(0, #c4.active_timers())
 			end)
@@ -1836,6 +1844,8 @@ describe("Hue Scene driver", function()
 				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 35, RATE = 1200 } },
 					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
 				state(env, "static", { reason = "recall" })
+				assert.same({}, changed(c4), "held back until the ramp ends (#421 D10)")
+				c4.advance(1200)
 				assert.same({ 35 }, changed(c4))
 				assert.equal(0, #c4.active_timers())
 				assert.is_true(c4.persist.held_on)
@@ -1868,24 +1878,32 @@ describe("Hue Scene driver", function()
 				assert.equal(1, #c4.active_timers(), "the recall replaced the off's fallback")
 			end)
 
-			it("to 0 turns the scene off over the rate and ends the held state", function()
+			it("to 0 turns the scene off over the rate and ends the held state at the ramp's end (#421)", function()
 				local env, c4 = lit_scene(80)
 				state(env, "inactive")
 				assert.is_true(c4.persist.held_on)
 				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "800" })
-				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_OFF", params = { rid = "s1" } } }, c4.sent)
+				assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_OFF", params = { rid = "s1", duration = "800" } } },
+					c4.sent)
 				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 80, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 800 } },
 					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
-				assert.is_false(c4.persist.held_on)
+				assert.is_true(c4.persist.held_on, "the scene shows on while its group fades")
 				state(env, "inactive", { reason = "recall" })
+				group(env, { on = "false" })
+				assert.same({}, changed(c4))
+				c4.advance(800)
 				assert.same({ 0 }, changed(c4))
+				assert.is_false(c4.persist.held_on)
 			end)
 
-			it("SET_BRIGHTNESS_STOP during a level move reports the cached level and cancels the fallback", function()
+			it("SET_BRIGHTNESS_STOP during a level move stops it at Hue at the estimate and cancels the fallback", function()
 				local env, c4 = lit_scene(80)
 				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "3000" })
+				c4.advance(1500)
 				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
-				assert.same({ 80 }, changed(c4))
+				assert.same({ 60 }, changed(c4))
+				assert.same({ rid = "s1", device_id = "2061", direction = "stop", level = "60" },
+					messages(c4, "HUE_SCENE_DIM")[1].params)
 				assert.equal(0, #c4.active_timers())
 			end)
 		end)
@@ -2849,6 +2867,471 @@ describe("Hue Scene driver", function()
 				local proxy_id = fake.project.devices[SCENE_ID].proxy_id
 				env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
 				assert.same({ { proxy_id, "Natural light" } }, c4.calls_to("RenameDevice"))
+			end)
+		end)
+	end)
+
+	describe("tap ramps and tap stops (#421, docs/tap-stop-design.md §10.1)", function()
+		-- An ordinary scene Hue reports `active`, its group reported lit at
+		-- `level` (none for nil), in "This scene" unless opts names another
+		-- load; every timer run out and the recording cleared.
+		local function scene(active, level, opts)
+			local env, c4 = known_scene(active, opts)
+			if level then
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = tostring(level) })
+			end
+			c4.advance(5000)
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function action(env, button, act)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = act })
+		end
+		local function press(env, button) action(env, button, "1") end
+		local function click(env, button) action(env, button, "2") end
+		local function release(env, button) action(env, button, "0") end
+		local function tap(env, button)
+			press(env, button)
+			click(env, button)
+		end
+
+		-- Params of every SendToDevice with that command, in order.
+		local function params_of(c4, command)
+			local out = {}
+			for _, m in ipairs(messages(c4, command)) do out[#out + 1] = m.params end
+			return out
+		end
+
+		-- Every LIGHT_BRIGHTNESS_CURRENT the proxy heard as CHANGED, in order.
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		-- Every CHANGING as { current, target, rate }, in order.
+		local function changing(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")) do
+				out[#out + 1] = { p.LIGHT_BRIGHTNESS_CURRENT, p.LIGHT_BRIGHTNESS_TARGET, p.RATE }
+			end
+			return out
+		end
+
+		-- Every MATCH_LED_STATE the Top Button Link (200) heard, in order.
+		local function led_states(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do
+				if args[1] == 200 and args[2] == "MATCH_LED_STATE" then out[#out + 1] = args[3].STATE end
+			end
+			return out
+		end
+
+		-- The HUE_SCENE_DIM a stop sends at `level`: the group's dimming stop.
+		local function stop_at(level)
+			return { rid = "s1", device_id = "2061", direction = "stop", level = level }
+		end
+
+		describe("idle taps (S-D1, S-D2)", function()
+			it("top or toggle from off fades the scene in over the whole click rate up, urgent (S-D1)", function()
+				for _, button in ipairs({ 0, 2 }) do
+					local env, c4 = scene("inactive")
+					tap(env, button)
+					assert.same({ { rid = "s1", action = "active", duration = "3000", urgent = "true" } },
+						params_of(c4, "HUE_SCENE_RECALL"), "button " .. button)
+					assert.same({ { 0, 100, 3000 } }, changing(c4))
+					assert.same({}, levels(c4))
+				end
+			end)
+
+			it("top on a scene dimmed below 100 fades it in over the rest of the rate", function()
+				local env, c4 = scene("static", 40)
+				state(env, "inactive") -- Hue calls a dimmed scene inactive; the on rule keeps it on
+				tap(env, 0)
+				assert.same({ { rid = "s1", action = "active", duration = "1800", urgent = "true" } },
+					params_of(c4, "HUE_SCENE_RECALL"))
+				assert.same({ { 40, 100, 1800 } }, changing(c4))
+			end)
+
+			it("top on a scene Hue reports active at 100 sends nothing to Hue and reports the level", function()
+				for _, level in ipairs({ false, 100, 99.6 }) do -- none reported reads as 100
+					local env, c4 = scene("static", level or nil)
+					tap(env, 0)
+					assert.same({}, c4.sent, tostring(level))
+					assert.same({}, changing(c4))
+					assert.same({ 100 }, levels(c4))
+					assert.equal(0, #c4.active_timers(), "no ramp, no fallback")
+				end
+			end)
+
+			it("top on a scene shown on only because something else lights its room recalls it over the whole rate",
+				function()
+					local env, c4 = scene("inactive", nil, { rid = "s1", follow = false }) -- Room/zone lights
+					env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "100" })
+					env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", other_active = "true" })
+					c4.advance(5000)
+					c4.calls, c4.sent = {}, {}
+					tap(env, 0)
+					assert.same({ { rid = "s1", action = "active", duration = "3000", urgent = "true" } },
+						params_of(c4, "HUE_SCENE_RECALL"))
+					assert.same({ { 100, 100, 3000 } }, changing(c4), "the tile shows the room at 100")
+				end)
+
+			it("top on a scene held on at 100 that Hue no longer calls active recalls its look at once", function()
+				local env, c4 = scene("static", 100)
+				state(env, "inactive") -- a lamp changed in the Hue app: no longer the scene as designed
+				tap(env, 0)
+				assert.same({ { rid = "s1", action = "active", urgent = "true" } }, params_of(c4, "HUE_SCENE_RECALL"))
+				assert.same({ { 100, 100, 0 } }, changing(c4))
+			end)
+
+			it("bottom, or toggle while on, fades the group out over the click rate down's share of the level (S-D2)",
+				function()
+					for _, button in ipairs({ 1, 2 }) do
+						local env, c4 = scene("static", 40)
+						tap(env, button)
+						assert.same({ { rid = "s1", duration = "1200", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"),
+							"button " .. button)
+						assert.same({ { 40, 0, 1200 } }, changing(c4))
+					end
+				end)
+
+			it("bottom on a scene that shows off turns its group off at once, as before, with nothing to stop", function()
+				local env, c4 = scene("inactive")
+				tap(env, 1)
+				assert.same({ { rid = "s1", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"))
+				assert.same({ { 0, 0, 0 } }, changing(c4))
+				assert.same({ 2000 }, delays(c4), "the off's fallback, no ramp")
+				tap(env, 0)
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"), "nothing to stop: the press is a tap")
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+			end)
+
+			it("with nothing known yet, top fades in and bottom fades out over the whole rate", function()
+				local env, c4 = load_scene({ rid = "s1" })
+				configure(env)
+				c4.calls, c4.sent = {}, {}
+				tap(env, 0)
+				assert.same({ { 0, 100, 3000 } }, changing(c4))
+				env, c4 = load_scene({ rid = "s1" })
+				configure(env)
+				c4.calls, c4.sent = {}, {}
+				tap(env, 1)
+				assert.same({ { rid = "s1", duration = "3000", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"))
+				assert.same({ { 100, 0, 3000 } }, changing(c4))
+			end)
+
+			it("uses the default click rates whatever the proxy sends: the scene declares none (D3)", function()
+				local env, c4 = scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_CLICK_RATE_UP", { RATE = "500" })
+				assert.same({}, notifies(c4, "CLICK_RATE_UP"), "no click rate setting to answer")
+				assert.is_nil(c4.persist.click_rate_up)
+				tap(env, 0)
+				assert.equal("3000", params_of(c4, "HUE_SCENE_RECALL")[1].duration)
+			end)
+		end)
+
+		describe("the stop (S-D3, D4, D5)", function()
+			it("a press outside the window, on any button, stops the fade with the group's dimming stop", function()
+				for _, button in ipairs({ 0, 1, 2 }) do
+					local env, c4 = scene("inactive")
+					tap(env, 0) -- 0 to 100 over 3000 ms
+					c4.advance(900)
+					press(env, button)
+					assert.same({ stop_at("30") }, params_of(c4, "HUE_SCENE_DIM"), "button " .. button)
+					assert.same({ 30 }, levels(c4), "the estimate at once")
+					click(env, button)
+					assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"), "the click is swallowed")
+					assert.equal(0, #messages(c4, "HUE_SCENE_OFF"))
+					assert.equal(0, #messages(c4, "HUE_SCENE_LEVEL"), "never a level: the scene keeps its look")
+					assert.equal(0, #c4.active_timers(), "no ramp, no fallback")
+					assert.is_true(c4.persist.held_on, "a recall stopped partway: the scene played from here")
+					c4.advance(15000)
+					assert.same({ 30 }, levels(c4), "one CHANGED for the ramp")
+					env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "27.6" })
+					assert.same({ 30, 28 }, levels(c4), "the bridge's later report corrects the estimate")
+				end
+			end)
+
+			it("a stop partway down leaves the scene lit at the estimate and on, as before the off (S4)", function()
+				local env, c4 = scene("static", 80)
+				tap(env, 1) -- 80 to 0 over 2400 ms
+				state(env, "inactive", { reason = "recall" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+				assert.same({}, levels(c4), "held back while the group fades")
+				c4.advance(1200)
+				press(env, 0)
+				click(env, 0)
+				assert.same({ stop_at("40") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.same({ 40 }, levels(c4))
+				assert.is_true(c4.persist.held_on, "the off never ended")
+				assert.same({}, led_states(c4), "the LEDs never went off")
+				assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"), "the top press only stopped")
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({ 40, 40 }, levels(c4))
+			end)
+
+			it("stops at 1 % at the start of a fade in and near the end of a fade out: the scene stays lit", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				press(env, 1) -- 0 ms elapsed
+				assert.same({ stop_at("1") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.same({ 1 }, levels(c4))
+				env, c4 = scene("static", 50)
+				tap(env, 1) -- 50 to 0 over 1500 ms
+				c4.advance(1490)
+				press(env, 0)
+				assert.same({ stop_at("1") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.same({ 1 }, levels(c4))
+			end)
+
+			it("stops near the end of a fade in at the estimate there", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				c4.advance(2950)
+				press(env, 1)
+				assert.same({ stop_at("98") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.same({ 98 }, levels(c4))
+			end)
+
+			it("a press within the window of the same button starts and stops nothing: the fade goes on (D4)", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				c4.advance(300)
+				tap(env, 0) -- a double tap: the keypad's own event
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"))
+				assert.same({}, levels(c4))
+				c4.advance(300)
+				press(env, 1)
+				assert.same({ stop_at("20") }, params_of(c4, "HUE_SCENE_DIM"), "still fading: 600 of 3000 ms")
+			end)
+
+			it("a double tap on a scene already at 100 does nothing beyond the first tap's report", function()
+				local env, c4 = scene("static")
+				tap(env, 0)
+				c4.advance(300)
+				tap(env, 0)
+				assert.same({}, c4.sent)
+				assert.same({ 100 }, levels(c4))
+			end)
+
+			it("a stopping press held on holds from the stopped level: top up, bottom down, toggle by the on state",
+				function()
+					for _, case in ipairs({ { 0, "up", { 50, 100, 2500 } }, { 1, "down", { 50, 1, 2450 } },
+						{ 2, "down", { 50, 1, 2450 } } }) do
+						local env, c4 = scene("inactive")
+						tap(env, 0)
+						c4.advance(1500)
+						press(env, case[1])
+						c4.advance(400) -- the hold time
+						local dims = params_of(c4, "HUE_SCENE_DIM")
+						assert.same(stop_at("50"), dims[1], "button " .. case[1])
+						assert.same({ rid = "s1", device_id = "2061", direction = case[2], duration = "5000" }, dims[2])
+						local all = changing(c4)
+						assert.same(case[3], all[#all])
+						release(env, case[1])
+						assert.same({ rid = "s1", device_id = "2061", direction = "stop" }, params_of(c4, "HUE_SCENE_DIM")[3],
+							"the hold's own stop")
+					end
+				end)
+
+			it("a click that finds a fade begun after its press stops it rather than tapping", function()
+				local env, c4 = scene("static", 80)
+				press(env, 1)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "4000" })
+				c4.advance(200)
+				click(env, 1)
+				assert.same({ stop_at("76") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.equal(1, #messages(c4, "HUE_SCENE_OFF"), "programming's off only")
+			end)
+
+			it("a hold that begins while a fade from programming runs holds from its estimate and ends it", function()
+				local env, c4 = scene("static", 80)
+				press(env, 0)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "4000" })
+				c4.advance(400) -- the hold time
+				local all = changing(c4)
+				assert.same({ 76, 100, 1200 }, all[#all])
+				assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } },
+					params_of(c4, "HUE_SCENE_DIM"), "no stop for the fade: the hold's dim replaces it")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.equal(1, #messages(c4, "HUE_SCENE_DIM"), "no fade left to stop")
+			end)
+		end)
+
+		describe("SET_BRIGHTNESS_STOP and STOP_SCENE_RAMP (D7, D6)", function()
+			it("stop a tap's fade at Hue as a tap does; with none running nothing goes to Hue", function()
+				for _, command in ipairs({ "SET_BRIGHTNESS_STOP", "STOP_SCENE_RAMP" }) do
+					local env, c4 = scene("inactive")
+					tap(env, 0)
+					c4.advance(600)
+					env.ReceivedFromProxy(5001, command, {})
+					assert.same({ stop_at("20") }, params_of(c4, "HUE_SCENE_DIM"), command)
+					assert.same({ 20 }, levels(c4))
+					assert.equal(0, #c4.active_timers())
+					env.ReceivedFromProxy(5001, command, {})
+					assert.equal(1, #messages(c4, "HUE_SCENE_DIM"), "nothing running: the stop only reports")
+					assert.same({ 20, 20 }, levels(c4))
+				end
+			end)
+
+			it("stop a timed recall or off from programming, Navigator or a lighting scene too (D6)", function()
+				local env, c4 = scene("inactive")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "2000" })
+				assert.same({ { rid = "s1", action = "active", duration = "2000" } }, params_of(c4, "HUE_SCENE_RECALL"),
+					"no tap: not urgent")
+				c4.advance(1000)
+				press(env, 1)
+				assert.same({ stop_at("50") }, params_of(c4, "HUE_SCENE_DIM"), "a keypad press stops it")
+				env, c4 = scene("static", 60)
+				env.ReceivedFromProxy(5001, "RAMP_TO_LEVEL", { LEVEL = "0", TIME = "6000" })
+				c4.advance(3000)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.same({ stop_at("30") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.same({ 30 }, levels(c4))
+			end)
+		end)
+
+		describe("reporting while a fade runs (D10)", function()
+			it("sends CHANGING once, holds back what the fade explains, and CHANGED once at its end", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				assert.same({ true }, led_states(c4), "the LEDs light as the fade starts")
+				state(env, "static", { reason = "recall" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "70" })
+				c4.advance(2999)
+				assert.same({}, levels(c4))
+				c4.advance(1)
+				assert.same({ 70 }, levels(c4), "the scene's own level, at the end")
+				assert.equal(1, #changing(c4))
+				c4.advance(10000)
+				assert.same({ 70 }, levels(c4), "no fallback CHANGED follows")
+				assert.same({ true }, led_states(c4))
+				assert.is_true(c4.persist.held_on)
+			end)
+
+			it("keeps the on rule through a fade: a status Hue changes during it still holds the scene on", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				state(env, "static", { reason = "recall" })
+				state(env, "inactive", { reason = "event" })
+				c4.advance(3000)
+				assert.same({ 100 }, levels(c4))
+				assert.is_true(c4.persist.held_on)
+			end)
+
+			it("lets the group off or another scene through while fading in, and ends the fade", function()
+				for _, report in ipairs({ { rid = "s1", on = "false" }, { rid = "s1", other_active = "true" } }) do
+					local env, c4 = scene("inactive")
+					tap(env, 0)
+					env.ExecuteCommand("HUE_SCENE_GROUP", report)
+					assert.same({ 0 }, levels(c4), report.on and "group off" or "another scene")
+					assert.same({ true, false }, led_states(c4))
+					assert.equal(0, #c4.active_timers(), "the fade and its fallback are over")
+					press(env, 1)
+					assert.equal(0, #messages(c4, "HUE_SCENE_DIM"), "nothing left to stop")
+				end
+			end)
+
+			it("ends at a recall that fails: the bridge's inactive on a scene not held goes through", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				state(env, "inactive", { reason = "recall" })
+				assert.same({ 0 }, levels(c4))
+				assert.same({ true, false }, led_states(c4))
+				assert.equal(0, #c4.active_timers())
+			end)
+
+			it("holds a fade out's inactive and group off until its end, the LEDs on; lets an on through", function()
+				local env, c4 = scene("static", 60)
+				tap(env, 1) -- 60 to 0 over 1800 ms
+				state(env, "inactive", { reason = "recall" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+				assert.same({}, levels(c4))
+				assert.same({}, led_states(c4), "on until the fade ends")
+				assert.is_true(c4.persist.held_on)
+				c4.advance(1800)
+				assert.same({ 0 }, levels(c4))
+				assert.same({ false }, led_states(c4))
+				assert.is_false(c4.persist.held_on)
+
+				env, c4 = scene("static", 60)
+				tap(env, 1)
+				state(env, "inactive", { reason = "recall" })
+				state(env, "static", { reason = "event" }) -- recalled again, in the Hue app
+				assert.same({ 60 }, levels(c4), "someone's recall: through at once")
+				assert.equal(0, #c4.active_timers(), "the fade is over")
+				assert.is_true(c4.persist.held_on)
+			end)
+
+			it("ends a timed level move at a level outside it, and lets that level through", function()
+				local env, c4 = scene("static", 80)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "3000" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", level = "60" })
+				assert.same({}, levels(c4), "on the way: held back")
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", level = "20" })
+				assert.same({ 20 }, levels(c4), "not this move's: through")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"), "nothing left to stop")
+			end)
+		end)
+
+		describe("other commands during a fade (D11)", function()
+			it("a brightness command replaces the fade, from its estimate, and leaves nothing to stop", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				c4.advance(1500)
+				env.ReceivedFromProxy(5001, "OFF", {})
+				assert.same({ 50, 0, 0 }, changing(c4)[2])
+				assert.same({ rid = "s1" }, params_of(c4, "HUE_SCENE_OFF")[1])
+				c4.advance(1000)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"))
+			end)
+
+			it("a Navigator slider during a fade recalls at its level at once, replacing the fade", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				c4.advance(600)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30", RATE = "0" })
+				assert.same({ rid = "s1", action = "active", brightness = "30" }, params_of(c4, "HUE_SCENE_RECALL")[2])
+				assert.same({ 20, 30, 0 }, changing(c4)[2])
+				press(env, 1)
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"), "nothing left to stop")
+			end)
+
+			it("a timed command replaces it with a fade of its own", function()
+				local env, c4 = scene("inactive")
+				tap(env, 0)
+				c4.advance(1500)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "2000" })
+				assert.same({ rid = "s1", duration = "2000" }, params_of(c4, "HUE_SCENE_OFF")[1])
+				assert.same({ 50, 0, 2000 }, changing(c4)[2])
+				c4.advance(1000)
+				press(env, 0)
+				assert.same({ stop_at("25") }, params_of(c4, "HUE_SCENE_DIM"))
+				assert.same({ 25 }, levels(c4), "stopped partway: lit at the estimate")
+			end)
+		end)
+
+		describe("time-based scenes (S-D5)", function()
+			it("keep their taps at once: no duration, no ramp, no stop; the double-tap window still applies", function()
+				local env, c4 = smart_scene("inactive")
+				tap(env, 0)
+				assert.same({ { rid = "s1", action = "active" } }, params_of(c4, "HUE_SCENE_RECALL"))
+				assert.same({ 2000 }, delays(c4), "the start's fallback only")
+				c4.advance(300)
+				tap(env, 0) -- a double tap: the keypad's own event
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				tap(env, 1) -- no ramp: a tap, not a stop
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"))
+				assert.same({ { rid = "s1" } }, params_of(c4, "HUE_SCENE_OFF"))
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "2000" })
+				assert.same({ rid = "s1" }, params_of(c4, "HUE_SCENE_OFF")[2], "a stop has no duration at Hue")
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"))
 			end)
 		end)
 	end)
