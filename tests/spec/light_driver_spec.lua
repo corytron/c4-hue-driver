@@ -98,6 +98,24 @@ local function dims(c4)
 	return out
 end
 
+-- Params of every ramp stop sent, in order. Since the house measurement
+-- (#421 §7, measured 2026-11-09) a stop is STOP_MODE "level": an urgent
+-- HUE_SET of the estimate, on, over the STOP_GLIDE_MS glide of 1000 ms.
+local function stops(c4)
+	local out = {}
+	for _, m in ipairs(c4.sent) do
+		if m.command == "HUE_SET" and m.params.urgent == "true" and m.params.rate == "1000" then
+			out[#out + 1] = m.params
+		end
+	end
+	return out
+end
+
+-- The stop at `level` (a string) for `rid` (default "l1").
+local function stop_at(level, rid)
+	return { rid = rid or "l1", on = "true", brightness = level, rate = "1000", urgent = "true" }
+end
+
 local function last_sent(c4)
 	return c4.sent[#c4.sent]
 end
@@ -144,9 +162,10 @@ local function load_light_with_dev(opts)
 	return env, c4, assert(dev, "the driver made its device instance")
 end
 
--- Load a light whose driver.lua says STOP_MODE = "level" (#421 D9), as the
--- house measurement may decide, through the loadfile fake.load_driver uses.
-local function load_light_level_mode(opts)
+-- Load a light whose driver.lua says STOP_MODE = "stop" (#421 D8, the
+-- alternative the house measurement set aside), through the loadfile
+-- fake.load_driver uses: a test-only seam, no global of the driver's.
+local function load_light_stop_mode(opts)
 	local real = loadfile
 	local swapped = 0
 	rawset(_G, "loadfile", function(path, ...)
@@ -154,7 +173,7 @@ local function load_light_level_mode(opts)
 			local file = assert(io.open(path))
 			local source = file:read("*a")
 			file:close()
-			source, swapped = source:gsub('local STOP_MODE = "stop"', 'local STOP_MODE = "level"')
+			source, swapped = source:gsub('local STOP_MODE = "level"', 'local STOP_MODE = "stop"')
 			return loadstring(source, "@" .. path)
 		end
 		return real(path, ...)
@@ -162,7 +181,7 @@ local function load_light_level_mode(opts)
 	local ok, env, c4 = pcall(load_light, opts)
 	rawset(_G, "loadfile", real)
 	assert(ok, env)
-	assert(swapped == 1, "driver.lua declares STOP_MODE = \"stop\" once")
+	assert(swapped == 1, "driver.lua declares STOP_MODE = \"level\" once")
 	return env, c4
 end
 
@@ -807,12 +826,12 @@ describe("Hue Light driver", function()
 			assert.equal(2, #c4.active_timers(), "the ramp's end and the fallback")
 			c4.advance(2000) -- 35 points over 5 s: 14 in 2 s
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
-			assert.same({ { rid = "l1", direction = "stop", level = "54" } }, dims(c4))
+			assert.same({ stop_at("54") }, stops(c4))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 54 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.equal(0, #c4.active_timers())
 			assert.equal(0, c4.fire_timers())
 			assert.equal(1, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "no second CHANGED")
-			assert.equal(1, #messages(c4, "HUE_SET"), "the start only: the stop is a HUE_DIM")
+			assert.equal(2, #messages(c4, "HUE_SET"), "the start and the stop")
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "55.3" })
 			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 55 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2],
 				"the bridge's later word corrects the estimate")
@@ -865,11 +884,11 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "5000" })
 			c4.advance(2500) -- half way to off
 			env.ReceivedFromProxy(5001, "STOP_SCENE_RAMP", {})
-			assert.same({ { rid = "l1", direction = "stop", level = "20" } }, dims(c4))
+			assert.same({ stop_at("20") }, stops(c4))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 20 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.equal(0, #c4.active_timers())
 			env.ReceivedFromProxy(5001, "STOP_SCENE_RAMP", {})
-			assert.equal(1, #dims(c4), "no ramp left: a second stop only reports")
+			assert.equal(1, #stops(c4), "no ramp left: a second stop only reports")
 			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 20 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
 		end)
 	end)
@@ -1387,7 +1406,7 @@ describe("Hue Light driver", function()
 			hue_state(env, { on = "true", brightness = "70" })
 			c4.advance(500)
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
-			assert.same({ rid = "l1", direction = "stop", level = "15" }, dims(c4)[1])
+			assert.same({ stop_at("15") }, stops(c4))
 			assert.same({ 15 }, levels(c4))
 			assert.equal(0, #c4.active_timers())
 			hue_state(env, { brightness = "16.4" }) -- the bridge's own word, later
@@ -1976,10 +1995,6 @@ describe("Hue Light driver", function()
 			return out
 		end
 
-		local function stop_at(level)
-			return { rid = "l1", direction = "stop", level = level }
-		end
-
 		describe("idle taps (§3)", function()
 			it("top or toggle from off ramps to the preset over the click rate up's share of it", function()
 				for _, button in ipairs({ 0, 2 }) do
@@ -2042,7 +2057,7 @@ describe("Hue Light driver", function()
 				tap(env, 0)
 				assert.same({ { rid = "l1", on = "true", brightness = "100", rate = "0", urgent = "true" } }, sets(c4))
 				tap(env, 1)
-				assert.equal(0, #dims(c4), "no ramp ran: the bottom press is a tap, not a stop")
+				assert.equal(0, #stops(c4), "no ramp ran: the bottom press is a tap, not a stop")
 				assert.equal("false", sets(c4)[2].on)
 			end)
 
@@ -2064,10 +2079,10 @@ describe("Hue Light driver", function()
 					tap(env, 0)
 					c4.advance(900)
 					press(env, button)
-					assert.same({ stop_at("70") }, dims(c4), "button " .. button)
+					assert.same({ stop_at("70") }, stops(c4), "button " .. button)
 					assert.same({ 70 }, levels(c4), "the estimate at once")
 					click(env, button)
-					assert.equal(1, #sets(c4), "the click is swallowed: no tap")
+					assert.equal(2, #sets(c4), "the start and the stop: the click is swallowed")
 					assert.equal(0, #c4.active_timers(), "no ramp, no fallback: the CHANGED is sent")
 					c4.advance(5000)
 					assert.same({ 70 }, levels(c4), "one CHANGED for the ramp")
@@ -2082,11 +2097,11 @@ describe("Hue Light driver", function()
 				c4.advance(300)
 				tap(env, 0) -- a double tap: the keypad's own event
 				assert.equal(1, #sets(c4))
-				assert.equal(0, #dims(c4))
+				assert.equal(0, #stops(c4))
 				assert.same({}, levels(c4))
 				c4.advance(300)
 				press(env, 1)
-				assert.same({ stop_at("60") }, dims(c4), "still ramping: 600 of 1800 ms")
+				assert.same({ stop_at("60") }, stops(c4), "still ramping: 600 of 1800 ms")
 			end)
 
 			it("a stopping press held on holds from the stopped level: top up, bottom down, toggle by the on state", function()
@@ -2097,12 +2112,13 @@ describe("Hue Light driver", function()
 					c4.advance(900)
 					press(env, case[1])
 					c4.advance(400) -- the hold time
-					assert.same({ stop_at("70"), { rid = "l1", direction = case[2], duration = "5000" } }, dims(c4),
+					assert.same({ stop_at("70") }, stops(c4))
+					assert.same({ { rid = "l1", direction = case[2], duration = "5000" } }, dims(c4),
 						"button " .. case[1])
 					local all = changing(c4)
 					assert.same(case[3], all[#all])
 					release(env, case[1])
-					assert.same(stop_at("70"), dims(c4)[3], "the hold's own stop")
+					assert.same({ rid = "l1", direction = "stop", level = "70" }, dims(c4)[2], "the hold's own stop")
 				end
 			end)
 
@@ -2112,7 +2128,7 @@ describe("Hue Light driver", function()
 					tap(env, 0)
 					c4.advance(case[1])
 					press(env, 1)
-					assert.same({ stop_at(case[2]) }, dims(c4), case[1] .. " ms")
+					assert.same({ stop_at(case[2]) }, stops(c4), case[1] .. " ms")
 				end
 			end)
 
@@ -2120,14 +2136,14 @@ describe("Hue Light driver", function()
 				local env, c4 = light(0)
 				tap(env, 0)
 				press(env, 1) -- 0 % elapsed
-				assert.same({ stop_at("1") }, dims(c4))
+				assert.same({ stop_at("1") }, stops(c4))
 				assert.same({ 1 }, levels(c4))
 
 				env, c4 = light(40)
 				tap(env, 1) -- 40 to off over 1200 ms
 				c4.advance(1190)
 				press(env, 0)
-				assert.same({ stop_at("1") }, dims(c4), "0.33 rounds to 0, and a stop never turns the light off")
+				assert.same({ stop_at("1") }, stops(c4), "0.33 rounds to 0, and a stop never turns the light off")
 				assert.same({ 1 }, levels(c4))
 				assert.same({}, led_states(c4), "the LEDs never went off")
 			end)
@@ -2137,22 +2153,44 @@ describe("Hue Light driver", function()
 				tap(env, 0)
 				c4.advance(1799)
 				press(env, 1)
-				assert.same({ stop_at("100") }, dims(c4))
+				assert.same({ stop_at("100") }, stops(c4))
 			end)
 
-			it("STOP_MODE \"level\" (D9): the stop is the estimate as a level, rate 0, urgent", function()
-				local env, c4 = load_light_level_mode({ rid = "l1" })
+			it("stops with the estimate as a level over a 1000 ms glide, and stays idle through it (D9, §7)", function()
+				local env, c4 = light(40)
+				tap(env, 0)
+				c4.advance(900)
+				press(env, 1)
+				assert.same({ rid = "l1", on = "true", brightness = "70", rate = "1000", urgent = "true" }, sets(c4)[2],
+					"a glide, not a jump: Hue's fade runs a little behind the estimate")
+				assert.equal(0, #dims(c4), "no dimming_delta stop")
+				assert.same({ 70 }, levels(c4))
+				local timers = c4.active_timers()
+				assert.same({ 400 }, { timers[1].delay, timers[2] and timers[2].delay },
+					"only the press's hold timer: the glide is no ramp and arms no fallback")
+				click(env, 1)
+				assert.equal(2, #sets(c4))
+				-- The bridge reports the estimate at once: it matches, so no second CHANGED.
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "70.08", reason = "event" })
+				assert.same({ 70 }, levels(c4))
+				c4.advance(700)
+				tap(env, 1) -- idle: a tap, not a stop
+				assert.same({ rid = "l1", on = "false", rate = "2100", urgent = "true" }, sets(c4)[3])
+			end)
+
+			it("STOP_MODE \"stop\" (D8), the alternative: HUE_DIM stop with the estimate", function()
+				local env, c4 = load_light_stop_mode({ rid = "l1" })
 				configure(env)
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40", online = "true" })
 				c4.calls, c4.sent = {}, {}
 				tap(env, 0)
 				c4.advance(900)
 				press(env, 1)
-				assert.same({ rid = "l1", on = "true", brightness = "70", rate = "0", urgent = "true" }, sets(c4)[2])
-				assert.equal(0, #dims(c4))
+				assert.same({ { rid = "l1", direction = "stop", level = "70" } }, dims(c4))
+				assert.equal(1, #sets(c4), "the start only")
 				assert.same({ 70 }, levels(c4))
 				click(env, 1)
-				assert.equal(2, #sets(c4))
+				assert.equal(1, #sets(c4))
 			end)
 
 			it("stops a timed target from programming too (D6), through the hooks the machine calls", function()
@@ -2167,11 +2205,11 @@ describe("Hue Light driver", function()
 				assert.is_true(dev.ramp_active())
 				c4.advance(1000)
 				dev.on_ramp_stop(1)
-				assert.same({ stop_at("50") }, dims(c4))
+				assert.same({ stop_at("50") }, stops(c4))
 				assert.is_false(dev.ramp_active())
 				assert.same({ 50 }, levels(c4))
 				dev.on_ramp_stop(1)
-				assert.equal(1, #dims(c4), "nothing to stop")
+				assert.equal(1, #stops(c4), "nothing to stop")
 
 				env.ReceivedFromProxy(5001, "RAMP_TO_LEVEL", { LEVEL = "80", TIME = "1000" })
 				assert.is_true(dev.ramp_active())
@@ -2190,8 +2228,8 @@ describe("Hue Light driver", function()
 				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "1800" })
 				c4.advance(900)
 				tap(env, 2)
-				assert.same({ stop_at("70") }, dims(c4))
-				assert.equal(1, #sets(c4))
+				assert.same({ stop_at("70") }, stops(c4))
+				assert.equal(2, #sets(c4), "the target and the stop")
 
 				env, c4 = light(40)
 				tap(env, 0)
@@ -2205,8 +2243,8 @@ describe("Hue Light driver", function()
 				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "1800" })
 				c4.advance(100)
 				click(env, 0)
-				assert.same({ stop_at("43") }, dims(c4))
-				assert.equal(1, #sets(c4), "only the target")
+				assert.same({ stop_at("43") }, stops(c4))
+				assert.equal(2, #sets(c4), "the target and the stop: no tap")
 			end)
 
 			it("a hold that begins while a ramp runs holds from its estimate and ends it", function()
@@ -2269,7 +2307,7 @@ describe("Hue Light driver", function()
 				assert.equal(0, #c4.active_timers())
 				c4.advance(1800)
 				press(env, 1)
-				assert.equal(0, #dims(c4), "no ramp left to stop")
+				assert.equal(0, #stops(c4), "no ramp left to stop")
 			end)
 
 			it("holds the off at the end of a ramp to off, with the LEDs on, and lets an on through", function()
@@ -2314,7 +2352,7 @@ describe("Hue Light driver", function()
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "70" })
 				c4.advance(450)
 				press(env, 1)
-				assert.same({ stop_at("15") }, dims(c4))
+				assert.same({ stop_at("15") }, stops(c4))
 				assert.same({ 15 }, levels(c4))
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "16.2" })
 				assert.same({ 15, 16 }, levels(c4))
@@ -2334,7 +2372,7 @@ describe("Hue Light driver", function()
 					env.ReceivedFromProxy(5001, case[1], case[2])
 					assert.equal(70, changing(c4)[2][1], case[1] .. ": the CHANGING starts where the tile is")
 					press(env, 1)
-					assert.equal(0, #dims(c4), case[1] .. ": idle again")
+					assert.equal(0, #stops(c4), case[1] .. ": idle again")
 				end
 			end)
 
@@ -2346,7 +2384,7 @@ describe("Hue Light driver", function()
 				assert.same({ 70, 20, 1000 }, changing(c4)[2])
 				c4.advance(500)
 				press(env, 1)
-				assert.same({ stop_at("45") }, dims(c4))
+				assert.same({ stop_at("45") }, stops(c4))
 			end)
 
 			it("a colour command leaves the ramp running", function()
@@ -2357,7 +2395,7 @@ describe("Hue Light driver", function()
 				assert.same({ rid = "l1", x = "0.4", y = "0.35", rate = "0" }, sets(c4)[2])
 				c4.advance(900)
 				press(env, 1)
-				assert.same({ stop_at("70") }, dims(c4))
+				assert.same({ stop_at("70") }, stops(c4))
 			end)
 		end)
 	end)
@@ -2914,11 +2952,11 @@ describe("Hue Light driver", function()
 				assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the group's level waits for the ramp's end")
 				c4.advance(900)
 				env.ReceivedFromProxy(201, "DO_PUSH", {})
-				assert.same({ { rid = base.rid, direction = "stop", level = "70" } }, dims(c4))
+				assert.same({ stop_at("70", base.rid) }, stops(c4))
 				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 70 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 				env.ReceivedFromProxy(201, "DO_RELEASE", {})
 				env.ReceivedFromProxy(201, "DO_CLICK", {})
-				assert.equal(1, #messages(c4, "HUE_SET"), "the click after the stop is swallowed")
+				assert.equal(2, #messages(c4, "HUE_SET"), "the start and the stop: the click after it is swallowed")
 			end
 		end)
 

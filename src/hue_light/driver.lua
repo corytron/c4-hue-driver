@@ -347,9 +347,10 @@ end
 -- (#421 D6), kept in `ramp`: a keypad tap's, and a timed target from
 -- programming, Navigator or a lighting scene. While it runs the bridge's
 -- reports of on and brightness are held back the same way (D10), because
--- Hue may report the target as soon as the transition starts while the lamp
--- still moves and the tile animates from the CHANGING [assumed: Hue §5, to
--- be measured on the house, #421 §7 L1]. A report the ramp explains (a
+-- Hue reports the target as soon as the transition starts, about 50 ms
+-- after the request, while the lamp still moves and the tile animates from
+-- the CHANGING [verified: house, #421 §7 L1, measured 2026-11-09]. A report
+-- the ramp explains (a
 -- level between where it started and its target, within a point; off at
 -- the end of a ramp to off) waits for the ramp's end, then goes into the
 -- cache and out as the ramp's one CHANGED. One it cannot explain (off while
@@ -522,21 +523,39 @@ local function hold_back(params)
 	return out
 end
 
--- #421 D9: how a ramp is stopped at Hue. "stop" (D8, option B): HUE_DIM
--- stop, which the bridge sends as Hue's dimming_delta stop, writing the
--- estimate only if Hue refuses it [assumed: the stop halts an absolute
--- transition as it halts a dim, #421 §7 L2]. "level" (option C): the
--- estimate as an absolute level, rate 0, urgent, which ends any transition
--- [assumed: §7 L8]. The house measurement decides which ships; no property.
-local STOP_MODE = "stop"
+-- #421 D9: how a ramp is stopped at Hue; no property. The default since the
+-- house measurement (#421 §7, measured 2026-11-09) is "level" (option C):
+-- the estimate as an absolute HUE_SET, on, urgent (D12), over
+-- STOP_GLIDE_MS. A new absolute command replaces the running transition,
+-- and the bridge reports the estimate straight back, so the bridge, the Hue
+-- app and Control4 agree at once [verified: house, the level-mode runs of
+-- §7]. The alternative, "stop" (D8, option B), sends HUE_DIM stop, which
+-- the bridge turns into Hue's dimming_delta stop (writing the estimate only
+-- if Hue refuses it). It does halt an absolute transition on a light, but
+-- the bridge keeps its cached level at the old target until the original
+-- transition time is over (26 s in one run) and computes relative commands
+-- from that stale level: a +10 nudge read target + 10 [verified: house, §7
+-- L2]. A hold or a Raise in that window would start from the wrong level,
+-- so "stop" lost. It stays for a later bridge firmware that corrects its
+-- cache at the stop.
+local STOP_MODE = "level"
+-- A "level" stop glides to the estimate over this long instead of jumping:
+-- Hue's fade runs slightly behind a linear estimate, so an instant level
+-- (rate 0) showed as a small jump down, and a 1000 ms glide looked smooth
+-- [verified: house, owner watching, #421 §7, measured 2026-11-09]. The
+-- glide is no ramp of the device's (no record, nothing to stop): the cache
+-- and the proxy hold the estimate already.
+local STOP_GLIDE_MS = 1000
 
 -- #421 D5, D7: stop the running ramp where the light is by the clock; false
 -- when none runs. The estimate is at least 1, so a stop near off leaves the
 -- light on, as a dimmer stopped near the bottom does (§3). It goes into the
 -- cache, where a hold or the next tap starts from it, and out as the ramp's
--- CHANGED at once; the bridge's next report goes through and corrects it
--- (Hue reports a stopped level only some seconds later [assumed: Hue §5]).
--- A #308 wait ends with it. `why` names the stop in the log.
+-- CHANGED at once. With nothing pending and no ramp, the bridge's next
+-- report goes straight through: in "level" mode the estimate itself, at
+-- once, which matches the cache and sends no second CHANGED; any other
+-- level corrects it. A #308 wait ends with it. `why` names the stop in the
+-- log.
 local function stop_ramp(why)
 	local r = ramp
 	if not r then
@@ -548,7 +567,7 @@ local function stop_ramp(why)
 	log.debug("%s: the %sramp to %d %% stopped at %d %% after %d of %d ms", why, r.tap and "tap " or "", r.to, level,
 		elapsed, r.time)
 	if STOP_MODE == "level" then
-		local params = state.from_brightness_target(st, level, 0)
+		local params = state.from_brightness_target(st, level, STOP_GLIDE_MS)
 		params.urgent = "true" -- #421 D12
 		send("HUE_SET", params)
 	else
@@ -1144,12 +1163,11 @@ end
 -- both carry no parameters [verified: proxy-protocol reference, light_v2
 -- SET_BRIGHTNESS_STOP, SET_COLOR_STOP, reduced_als_support,
 -- supports_brightness_stop]. A brightness stop while a ramp runs stops it
--- at Hue exactly as a keypad tap does (#421 D7, stop_ramp): the stop goes to
--- the bridge and the proxy hears the estimate. That Hue's dimming_delta stop
--- halts an absolute transition is [assumed] until the house measures it
--- (#421 §7 L2; STOP_MODE "level" if not). With no ramp running, nothing goes
--- to the bridge: the proxy only needs its CHANGED (stop). A colour
--- transition has no stop at Hue: SET_COLOR_STOP only closes the proxy's.
+-- at Hue exactly as a keypad tap does (#421 D7, stop_ramp, STOP_MODE): the
+-- stop goes to the bridge and the proxy hears the estimate. With no ramp
+-- running, nothing goes to the bridge: the proxy only needs its CHANGED
+-- (stop). A colour transition has no stop at Hue: SET_COLOR_STOP only
+-- closes the proxy's.
 dispatch.proxy["SET_BRIGHTNESS_STOP"] = function()
 	if not stop_ramp("brightness stop") then
 		stop("brightness", report_brightness)

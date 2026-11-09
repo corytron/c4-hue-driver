@@ -443,10 +443,12 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "2" })
 		end
 
-		local function dims(c4)
+		-- Params of every ramp stop: an urgent HUE_SET of the estimate over the
+		-- 1000 ms glide (STOP_MODE "level", #421 §7, measured 2026-11-09).
+		local function stops(c4)
 			local out = {}
-			for _, m in ipairs(c4.sent) do
-				if m.command == "HUE_DIM" then out[#out + 1] = m.params end
+			for _, p in ipairs(sets(c4)) do
+				if p.urgent == "true" and p.rate == "1000" then out[#out + 1] = p end
 			end
 			return out
 		end
@@ -489,10 +491,10 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			raise(env, "30", "2000")
 			c4.advance(1000)
 			tap(env, 0)
-			assert.same({ { rid = "l1", direction = "stop", level = "55" } }, dims(c4))
+			assert.same({ { rid = "l1", on = "true", brightness = "55", rate = "1000", urgent = "true" } }, stops(c4))
 			restore(env, "1000")
 			assert.equal("Not restored: changed to 55 % since the raise; saved level forgotten", fake.last_action(env))
-			assert.equal(1, #sets(c4))
+			assert.equal(2, #sets(c4), "the raise and the stop")
 		end)
 
 		it("a Restore that finds someone else's ramp forgets and leaves that ramp running", function()
@@ -506,7 +508,8 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			assert.equal(2, #sets(c4))
 			c4.advance(1000)
 			tap(env, 1)
-			assert.same({ { rid = "l1", direction = "stop", level = "80" } }, dims(c4), "still running")
+			assert.same({ { rid = "l1", on = "true", brightness = "80", rate = "1000", urgent = "true" } }, stops(c4),
+				"still running")
 		end)
 	end)
 
