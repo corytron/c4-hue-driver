@@ -323,6 +323,7 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			local env, c4 = light_at(40)
 			raise(env, "30", "1000")
 			report(env, 70)
+			c4.advance(1000) -- the raise's ramp ends: the report it held back comes out (#421 D10)
 			restore(env, "1000")
 			assert.same({ rid = "l1", on = "true", brightness = "40", rate = "1000" }, sets(c4)[2])
 			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 70, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 1000 },
@@ -419,16 +420,96 @@ describe("Hue Light: Raise Level By and Restore Saved Level (#297)", function()
 			raise(env, "30", "2500")
 			assert.equal("2500", sets(c4)[1].rate)
 			assert.equal(2500, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].RATE)
-			assert.same({ 3500 }, delays(c4), "the fallback: the ramp plus 1000 ms")
-			report(env, 70) -- the bridge confirms: the fallback is settled
+			assert.same({ 3500, 2500 }, delays(c4), "the fallback (the ramp plus 1000 ms) and the ramp's end (#421)")
+			report(env, 70) -- the bridge confirms, held back until the ramp ends (#421 D10)
+			c4.advance(2500) -- then the fallback is settled
+			assert.same({}, delays(c4))
 			restore(env, "45000")
 			assert.equal("45000", sets(c4)[2].rate)
 			assert.equal(45000, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[2].RATE)
-			assert.same({ 46000 }, delays(c4))
+			assert.same({ 46000, 45000 }, delays(c4))
 
 			env, c4 = light_at(40)
 			raise(env, "30", "0")
 			assert.equal("0", sets(c4)[1].rate, "0 is a jump")
+		end)
+	end)
+
+	-- #421: a timed change is a ramp a tap can stop (D6), and Raise and
+	-- Restore replace a running one (D11), reading the level it heads for.
+	describe("during a ramp (#421)", function()
+		local function tap(env, button)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "1" })
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "2" })
+		end
+
+		-- Params of every ramp stop: an urgent HUE_SET of the estimate over the
+		-- 1000 ms glide (STOP_MODE "level", #421 §7, measured 2026-11-09).
+		local function stops(c4)
+			local out = {}
+			for _, p in ipairs(sets(c4)) do
+				if p.urgent == "true" and p.rate == "1000" then out[#out + 1] = p end
+			end
+			return out
+		end
+
+		it("a Restore during the Raise's own ramp puts the light back, from where the tile is", function()
+			local env, c4 = light_at(40)
+			raise(env, "30", "2000")
+			c4.advance(1000) -- half way, 55 by the clock; the bridge has said nothing yet
+			restore(env, "1000")
+			assert.equal("Restored to 40 %", fake.last_action(env))
+			assert.same({ rid = "l1", on = "true", brightness = "40", rate = "1000" }, sets(c4)[2])
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 55, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 1000 },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[2])
+			assert.same({ 2000, 1000 }, delays(c4), "the Restore's fallback and ramp; the Raise's are gone")
+		end)
+
+		it("a second Raise during the first's ramp raises from the saved level again: the light never climbs", function()
+			local env, c4 = light_at(40)
+			raise(env, "30", "2000")
+			c4.advance(1000)
+			raise(env, "30", "2000")
+			assert.equal("70", sets(c4)[2].brightness)
+			assert.same({ 40, 70 }, stored(c4))
+			assert.truthy(fake.last_action(env):find("Raised from 40 % to 70 % again", 1, true), fake.last_action(env))
+		end)
+
+		it("a Raise during a tap's ramp to off raises from off, where that ramp heads, and replaces it", function()
+			local env, c4 = light_at(40)
+			tap(env, 1) -- off over 1200 ms
+			c4.advance(600)
+			raise(env, "30", "1000")
+			assert.equal("Raised from off to 30 % (saved off)", fake.last_action(env))
+			assert.same({ rid = "l1", on = "true", brightness = "30", rate = "1000" }, sets(c4)[2])
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 20, LIGHT_BRIGHTNESS_TARGET = 30, RATE = 1000 },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[2])
+		end)
+
+		it("a tap stops a Raise's ramp (D6); the next Restore finds the stopped level changed and forgets", function()
+			local env, c4 = light_at(40)
+			raise(env, "30", "2000")
+			c4.advance(1000)
+			tap(env, 0)
+			assert.same({ { rid = "l1", on = "true", brightness = "55", rate = "1000", urgent = "true" } }, stops(c4))
+			restore(env, "1000")
+			assert.equal("Not restored: changed to 55 % since the raise; saved level forgotten", fake.last_action(env))
+			assert.equal(2, #sets(c4), "the raise and the stop")
+		end)
+
+		it("a Restore that finds someone else's ramp forgets and leaves that ramp running", function()
+			local env, c4 = light_at(40)
+			raise(env, "30", "1000")
+			report(env, 70)
+			c4.advance(1000)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "90", RATE = "2000" })
+			restore(env, "1000")
+			assert.equal("Not restored: changed to 90 % since the raise; saved level forgotten", fake.last_action(env))
+			assert.equal(2, #sets(c4))
+			c4.advance(1000)
+			tap(env, 1)
+			assert.same({ { rid = "l1", on = "true", brightness = "80", rate = "1000", urgent = "true" } }, stops(c4),
+				"still running")
 		end)
 	end)
 

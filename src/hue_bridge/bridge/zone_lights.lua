@@ -1100,15 +1100,18 @@ function zone_lights:entry_for_command(params, what)
 	return rid, entry, grouped
 end
 
--- HUE_SET { rid, on?, brightness?, x?, y?, mirek?, rate? } (strings): the
--- absolute body of Decision 5 on the group's grouped_light through
+-- HUE_SET { rid, on?, brightness?, x?, y?, mirek?, rate?, urgent? } (strings):
+-- the absolute body of Decision 5 on the group's grouped_light through
 -- ctx.group_set (coalesced per group by the driver's group queue, which
 -- builds the PUT: on, dimming.brightness, color.xy or
 -- color_temperature.mirek, dynamics). ON from the device arrives as on=true
 -- with the device's Default On Brightness as brightness, 100 unless the
 -- dealer changed it (Decision 4, #233); a colour while off is kept by the
 -- device for the next turn-on (Decision 7), so nothing is held here.
--- Returns true when queued.
+-- urgent = "true" (a keypad tap's start, or a tap stop sent as a level)
+-- becomes `urgent = true` in the fields, so the group queue sends it past
+-- its one-a-second bucket (#421 D12, bridge/commands.lua); it is not
+-- something to set on its own. Returns true when queued.
 function zone_lights:set(params)
 	params = params or {}
 	local rid, entry, grouped = self:entry_for_command(params, "HUE_SET")
@@ -1127,6 +1130,9 @@ function zone_lights:set(params)
 	elseif params.on == "false" or params.on == false then
 		fields.on = false
 	end
+	if params.urgent == "true" or params.urgent == true then
+		fields.urgent = true
+	end
 	if fields.on == nil and fields.brightness == nil and fields.mirek == nil and not (fields.x and fields.y) then
 		self.ctx.log.warn("zone_lights: HUE_SET for %s (device %d) carries nothing to set", self:entry_label(rid, entry),
 			entry.device_id)
@@ -1134,9 +1140,9 @@ function zone_lights:set(params)
 	end
 	if self.ctx.log.enabled("info") then   -- a slider drag sends several of these a second
 		self.ctx.log.info("zone_lights: HUE_SET %s (device %d): grouped_light %s on=%s brightness=%s x=%s y=%s mirek=%s "
-			.. "rate=%s", self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), tostring(fields.on),
+			.. "rate=%s%s", self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), tostring(fields.on),
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
-			tostring(fields.rate))
+			tostring(fields.rate), fields.urgent and " urgent" or "")
 	end
 	if self.ctx.group_set(grouped, fields) ~= true then
 		self.ctx.log.warn("zone_lights: HUE_SET for %s (device %d): nothing queued", self:entry_label(rid, entry),
@@ -1151,7 +1157,11 @@ end
 -- (Decision 6; verified on a grouped_light 2026-10-23): up/down run the
 -- whole range over `duration` ms (clamped to 0..DIM_MAX_DURATION, default
 -- DIM_DEFAULT_DURATION), stop ends it; the device's level estimate goes with
--- a stop, for the queue's fallback. No STATE is sent. Returns true when queued.
+-- a stop, for the queue's fallback. A tap's stop takes the same path (#421
+-- D14): with no hold running, group_hold passes it to the group queue
+-- unchanged (its G7), which turns it into that level at once if the tap's
+-- start is still waiting there (D13). No STATE is sent. Returns true when
+-- queued.
 function zone_lights:dim(params)
 	params = params or {}
 	local rid, entry, grouped = self:entry_for_command(params, "HUE_DIM")

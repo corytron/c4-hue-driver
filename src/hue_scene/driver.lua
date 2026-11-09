@@ -7,8 +7,10 @@
 -- OFF stops it (docs/smart-scenes-design.md). It never speaks to the bridge
 -- itself: commands go to the Hue Bridge driver it is bound to (consumer
 -- binding 1, class HUE_BRIDGE) with C4:SendToDevice, and the bridge pushes
--- configuration and state back through ExecuteCommand. The message contract
--- is docs/scenes-design.md §2, this device §3, extended by
+-- configuration and state back through ExecuteCommand. Keypad taps fade an
+-- ordinary scene in or its group out over the click rate, and a press while
+-- it fades stops it where it is (#421, docs/tap-stop-design.md §10.1). The
+-- message contract is docs/scenes-design.md §2, this device §3, extended by
 -- docs/keypad-design.md, docs/scene-dimmer-design.md and
 -- docs/smart-scenes-design.md; the structure is the Hue Light driver's
 -- (src/hue_light/driver.lua) with everything colour specific left out.
@@ -112,6 +114,10 @@ local level_window = nil   -- { timer, dirty } for LEVEL_REPORT_MS after a level
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local pending = nil          -- { timer, assume, on } while a recall/off awaits its STATE
 local follow = nil           -- what follows a time-based scene's start from off (arm_follow)
+-- The brightness ramp an ordinary scene is running (#421 S-D4, D6), nil
+-- while none is: { from, to, time, started, tap, recall, lo, hi, timer,
+-- held }. "Ramps" below says when one begins and ends.
+local ramp = nil
 
 -- The plumbing both device drivers share (common/device.lua): properties and
 -- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
@@ -119,7 +125,8 @@ local follow = nil           -- what follows a time-based scene's start from off
 -- Links, settings, the press machine), the binding re-check, the goodbye, and
 -- in dev builds the dev loop's log forwarding and DEV_RELOAD
 -- (docs/scenes-design.md §6). Its hooks (is_on, on_bridge_found, on_click,
--- on_hold, on_finish, on_end_hold) are set below.
+-- on_hold, on_finish, on_end_hold, and for #421 ramp_active and
+-- on_ramp_stop) are set below.
 local dev = device.new({
 	prefix = LOG_PREFIX,
 	tree = "scene", -- the dev loop's name for this driver's source tree
@@ -347,8 +354,14 @@ end
 -- MATCH_LED_STATE on each Button Link and BUTTON_INFO per button follow the
 -- scene (common/device.lua, docs/keypad-design.md "Keypad LEDs"): what they
 -- follow here is shown_on(), nil while neither a status, a held-on state nor
--- (in the lights mode) the group's on/off is known yet.
+-- (in the lights mode) the group's on/off is known yet. While a ramp runs
+-- whose start or end is lit, the scene is on throughout, whatever the cache
+-- says before its held reports come out (#421 D10): a tap from off lights
+-- the LEDs as it starts, and an off keeps them on until its ramp ends.
 function dev.is_on()
+	if ramp and (ramp.from > 0 or ramp.to > 0) then
+		return true
+	end
 	if brightness() == nil then
 		return nil
 	end
@@ -505,6 +518,256 @@ local function recall_params(rate)
 	return params
 end
 
+-- Ramps (#421) --------------------------------------------------------------
+-- A brightness change of an ordinary scene with a time above 0 whose send
+-- succeeded is a ramp (#421 S-D4, D6): a keypad tap's recall or off (S-D1,
+-- S-D2), and a timed target from programming, Navigator or a lighting scene
+-- (a recall, an off or a level move with a rate). Levels are the tile's
+-- percent: `to` is 0 for an off and 100 for a recall as designed (the
+-- target its CHANGING names); lo..hi are the levels the ramp explains, none
+-- for a recall as designed (only Hue knows the scene's own level, and any
+-- lit level is its look). `time` and `started` are controller ms.
+--
+-- While it runs the bridge's reports are judged (#421 D10). One the ramp
+-- explains (the recall's own status and group on, the off's inactive and
+-- group off, a level within lo..hi, any status during a level move) is held
+-- back in `held`, out of the cache and away from the proxy: Hue reports a
+-- timed target as soon as the fade starts [verified: house, #421 §10 L1].
+-- One it cannot explain (the group off or another scene active while it
+-- ramps up, a recall failing, the scene or its group on while it ramps to
+-- off, a level outside lo..hi) goes through with what was held under it and
+-- ends the ramp. At the ramp's end what was held goes into the cache and out
+-- as its one CHANGED, settling the target; with nothing held, the next
+-- report or the fallback (the ramp plus FALLBACK_MS) closes it. A stop drops
+-- what was held (stop_ramp); any other brightness command (D11) or a hold
+-- ends the ramp with what was held taken into the cache, and reports for
+-- itself.
+--
+-- The on state during an off ramp: the scene shows on until the ramp ends.
+-- turn_off defers the end of the held state (the on rule) to the ramp's end,
+-- the bridge's inactive and group off are held back meanwhile, and
+-- dev.is_on() is true while a ramp runs from or to a lit level, so the LEDs
+-- stay on too. A stop therefore leaves the scene as it was before the off,
+-- lit at the estimate.
+--
+-- Time-based scenes never ramp (S-D5): Hue's activate and deactivate have no
+-- duration, so their taps and targets act at once as before.
+
+-- The controller's clock in ms [verified: API 34_timer/_2-GetTime, OS 3.2.3
+-- on], or os.time() where it is missing, as the Hue Light driver reads it.
+local function now_ms()
+	local ok, t = pcall(function() return C4:GetTime() end)
+	return ok and type(t) == "number" and t or os.time() * 1000
+end
+
+-- Where a ramp has the scene now, by the clock: from + (to - from) x elapsed
+-- / time, rounded (#421 §4.2); and the ms elapsed, 0 to its time.
+local function ramp_estimate(r)
+	local elapsed = math.max(0, math.min(r.time, now_ms() - r.started))
+	return math.floor(r.from + (r.to - r.from) * elapsed / r.time + 0.5), elapsed
+end
+
+-- Where the tile is: a running ramp's estimate, else the level shown, else
+-- `default` (a CHANGING's current).
+local function tile_level(default)
+	if ramp then
+		return (ramp_estimate(ramp))
+	end
+	return brightness() or default
+end
+
+-- What a ramp held back goes into the cache as HUE_SCENE_GROUP and
+-- HUE_SCENE_STATE would have put it there, without a report: the group's
+-- level, its on/off (off ends the held state) and the scene's status, an on
+-- one first (`seen_on`), which holds the scene on under a later inactive as
+-- the on rule does.
+local function apply_held(h)
+	if not h then
+		return
+	end
+	if h.level then
+		st.level = h.level
+		level_seq = level_seq + 1
+	end
+	if h.on ~= nil then
+		group_on = h.on
+		if not h.on then
+			set_held(false)
+		end
+	end
+	if h.seen_on then
+		take_status(h.seen_on)
+	end
+	if h.active then
+		take_status(h.active)
+	end
+end
+
+-- The ramp ends before its time: its timer stops, and `keep` takes what it
+-- held back into the cache (D11, a report it cannot explain; a stop drops it).
+local function end_ramp(keep)
+	local r = ramp
+	if not r then
+		return
+	end
+	r.timer:Cancel()
+	ramp = nil
+	if keep then
+		apply_held(r.held)
+	end
+end
+
+-- #421 D10: the ramp's time ran out. An off ends the held state now (turn_off
+-- deferred it). What the ramp held back goes into the cache and out as its
+-- one CHANGED, and settles the target; with nothing held, the LEDs follow
+-- the cache and the bridge's next report or the fallback closes it.
+local function ramp_done(r)
+	if ramp ~= r then
+		return
+	end
+	ramp = nil
+	if r.to == 0 then
+		set_held(false)
+	end
+	local held_back = r.held
+	if not held_back then
+		return update_leds()
+	end
+	apply_held(held_back)
+	local p = pending
+	settle()
+	if p and p.kind == "switch" then
+		take_recalled_level(p)
+	end
+	report_unchanged(r.to)
+	if held_back.level then
+		open_level_window()
+	end
+end
+
+-- After a successful send with a time above 0: the ramp's record and its end
+-- on a timer; the LEDs light as a ramp from off starts (dev.is_on).
+local function begin_ramp(r)
+	r.started = now_ms()
+	r.timer = C4:SetTimer(math.max(1, r.time), function() -- [verified: API 34/_1]
+		ramp_done(r)
+	end)
+	ramp = r
+	update_leds()
+end
+
+-- #421 D10 for a HUE_SCENE_STATE while a ramp runs: true when the ramp holds
+-- it back. An on status while it ramps to off is someone's recall; an
+-- inactive while a recall ramps up, on a scene neither held on nor reported
+-- on since, is the recall failing (the bridge answers a failed PUT with the
+-- status it had). Both go through and end the ramp, with what was held under
+-- them. A level move holds back any status: Hue calls a dimmed scene
+-- inactive, which the on rule ignores.
+local function hold_status(active)
+	local r = ramp
+	if not r then
+		return false
+	end
+	local lit = active ~= "inactive"
+	local foreign
+	if r.to == 0 then
+		foreign = lit
+	else
+		foreign = not lit and r.recall and not held() and not (r.held and r.held.seen_on)
+	end
+	if foreign then
+		log.debug("status %s is not the ramp to %d %%: it ends", active, r.to)
+		end_ramp(true)
+		return false
+	end
+	r.held = r.held or {}
+	r.held.active = active
+	if lit then
+		r.held.seen_on = active
+	end
+	log.debug("status %s held back until the ramp to %d %% ends", active, r.to)
+	return true
+end
+
+-- #421 D10 for a HUE_SCENE_GROUP while a ramp runs (`level` a lit level or
+-- nil, `on` nil when the report does not say, `other` another scene of the
+-- group became active): true when the ramp holds it back. Another scene, the
+-- group off while it ramps up, on while it ramps to off, or a level outside
+-- lo..hi go through and end the ramp, with what was held under them.
+local function hold_group(level, on, other)
+	local r = ramp
+	if not r then
+		return false
+	end
+	local outside = level and r.lo and (level < r.lo - 1 or level > r.hi + 1)
+	if other or (on ~= nil and on == (r.to == 0)) or outside then
+		log.debug("group on=%s level=%s%s is not the ramp to %d %%: it ends", tostring(on), tostring(level),
+			other and ", another scene active" or "", r.to)
+		end_ramp(true)
+		return false
+	end
+	r.held = r.held or {}
+	r.held.level = level or r.held.level
+	if on ~= nil then
+		r.held.on = on
+	end
+	log.debug("group on=%s level=%s held back until the ramp to %d %% ends", tostring(on), tostring(level), r.to)
+	return true
+end
+
+-- HUE_SCENE_DIM to the bridge: up / down over `duration` ms (a hold), or
+-- stop; a ramp's stop carries its estimate as `level`, which the bridge
+-- writes only should Hue refuse the stop (#421 S-D3). True when it went out
+-- (common/device.lua logs a failure).
+local function send_dim(direction, duration, level)
+	local params = { rid = st.rid, device_id = device_id(), direction = direction }
+	if duration then
+		params.duration = string.format("%d", duration)
+	end
+	if level then
+		params.level = string.format("%d", level)
+	end
+	log.debug("dim %s%s%s", direction, duration and (" over " .. params.duration .. " ms") or "",
+		level and (" at " .. params.level .. " %") or "")
+	return send("HUE_SCENE_DIM", params)
+end
+
+-- #421 S-D3, D5, D7: stop the running ramp where the scene is by the clock;
+-- false when none runs. The stop is the group's dimming_delta stop, which
+-- halts a scene's fade with each lamp at its own level [verified: house,
+-- #421 §10 S2, S4], never a level, which would bring every lamp to one level
+-- and lose the scene's look. The estimate, at least 1 (a stop near off
+-- leaves the scene lit, §3), goes with it for the bridge to write only
+-- should Hue refuse the stop, into the cache, where a hold (S3) or the next
+-- tap starts from it, and out as the ramp's CHANGED at once. What the ramp
+-- held back is dropped: the bridge's report of the real level, about 10 s
+-- after the fade's planned end (§10 L2), goes through and corrects the
+-- estimate. A recall stopped partway leaves the scene held on (the on rule:
+-- it was played from here); an off stopped partway leaves it as it was,
+-- held on too should nothing else show it lit (its recall never confirmed):
+-- the stop leaves its lamps lit. A stop that never reaches the bridge
+-- (logged) still closes the proxy's ramp.
+-- `why` names the stop in the log.
+local function stop_ramp(why)
+	local r = ramp
+	if not r then
+		return false
+	end
+	local level, elapsed = ramp_estimate(r)
+	level = math.max(1, level)
+	end_ramp(false)
+	settle()
+	log.debug("%s: the %sramp to %d %% stopped at %d %% after %d of %d ms", why, r.tap and "tap " or "", r.to, level,
+		elapsed, r.time)
+	send_dim("stop", nil, level)
+	st.level = level
+	if r.recall or not shown_on() then
+		set_held(true)
+	end
+	report_unchanged(level)
+	return true
+end
+
 -- Time-based scenes: what follows a start from off (docs/smart-scenes-design.md,
 -- Decision 4). The slider's level below 100, or a held button's dim up, waits
 -- until the bridge reports the scene's group on with a level (the slot's look
@@ -634,8 +897,13 @@ end
 -- The bridge's STATE settles it. The fallback's assumption is not a report:
 -- it does not hold the scene on, so a later inactive report still corrects it.
 -- A time-based scene starts instead (start_smart). A recall that never
--- reaches the bridge (logged) reports the unchanged state.
-local function turn_on(rate, level)
+-- reaches the bridge (logged) reports the unchanged state. With a rate the
+-- recall fades the scene in over it [verified: house, #421 §10 S1] and is a
+-- ramp (#421 S-D1, D6): its STATE then settles it at the ramp's end, and the
+-- fallback waits the ramp out too. A ramp running is replaced (D11), the
+-- CHANGING starting from its estimate. `urgent` (a keypad tap, S-D6, D12)
+-- sends the recall past the bridge's request bucket.
+local function turn_on(rate, level, urgent)
 	rate = tonumber(rate) or 0
 	-- 100 % from off is the scene as designed: a brightness override would
 	-- set every light to 100 % and lose its look, and a Navigator's plain
@@ -647,7 +915,8 @@ local function turn_on(rate, level)
 		return
 	end
 	cancel_follow()
-	local current = brightness() or 0
+	local current = tile_level(0)
+	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = level or 100,
@@ -658,6 +927,9 @@ local function turn_on(rate, level)
 	end
 	local action = recall_action
 	local params = recall_params(rate)
+	if urgent then
+		params.urgent = "true"
+	end
 	if level then
 		params.brightness = string.format("%d", level)
 		log.info("ON: recalling as %s at %d %%", action, level)
@@ -668,64 +940,96 @@ local function turn_on(rate, level)
 		return report_unchanged(current)
 	end
 	local p = { kind = "switch", on = true, level = level, seq = level_seq }
+	local delay = rate + FALLBACK_MS
 	p.assume = function()
-		log.debug("recall (%s) unconfirmed after %d ms; assuming the scene is on", action, FALLBACK_MS)
+		log.debug("recall (%s) unconfirmed after %d ms; assuming the scene is on", action, delay)
 		st.active = assumed_active(action)
 		take_recalled_level(p)
 		report_brightness()
 	end
-	arm(p, FALLBACK_MS)
+	arm(p, delay)
+	if rate > 0 then
+		begin_ramp({ from = current, to = level or 100, time = rate, tap = urgent, recall = true,
+			lo = level and math.min(current, level), hi = level and math.max(current, level) })
+	end
 end
 
 -- This device turning the scene off ends the held state at once. A
 -- time-based scene stops: the bridge deactivates it, then turns the group
 -- off (docs/smart-scenes-design.md, Decision 5). An off that never reaches
--- the bridge (logged) ends nothing and reports the unchanged state.
-local function turn_off(rate)
+-- the bridge (logged) ends nothing and reports the unchanged state. An
+-- ordinary scene's off with a rate fades the group out over it as its
+-- `duration` [verified: house, #421 §10 S4; S-D6]; a time-based scene's stop
+-- has none at Hue (S-D5). From a lit level that is a ramp (#421 S-D2, D6),
+-- which ends the held state at its end rather than now (Ramps above), and
+-- the fallback waits it out. A ramp running is replaced (D11). `urgent` (a
+-- keypad tap, S-D6, D12) sends the off past the bridge's request bucket.
+local function turn_off(rate, urgent)
 	rate = tonumber(rate) or 0
 	if not ready("OFF") then
 		return
 	end
 	cancel_follow()
-	local current = brightness() or 100
+	local current = tile_level(100)
+	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = 0,
 		RATE = rate,
 	})
+	local params = { rid = st.rid }
+	if rate > 0 and not is_smart() then
+		params.duration = string.format("%d", rate)
+	end
+	if urgent then
+		params.urgent = "true"
+	end
+	local timed = params.duration ~= nil and current > 0
 	local was_held = held_on
-	set_held(false)
-	if not send("HUE_SCENE_OFF", { rid = st.rid }) then
+	if not timed then
+		set_held(false)
+	end
+	if not send("HUE_SCENE_OFF", params) then
 		set_held(was_held)
 		return report_unchanged(current)
 	end
+	local delay = (timed and rate or 0) + FALLBACK_MS
 	arm({ kind = "switch", on = false, assume = function()
-		log.debug("off unconfirmed after %d ms; assuming the scene is off", FALLBACK_MS)
+		log.debug("off unconfirmed after %d ms; assuming the scene is off", delay)
 		st.active = "inactive"
 		if is_smart() then
 			refresh_status()
 		end
 		report_brightness()
-	end }, FALLBACK_MS)
+	end }, delay)
+	if timed then
+		begin_ramp({ from = current, to = 0, time = rate, tap = urgent, lo = 0, hi = current })
+	end
 end
 
 -- The slider while the scene is on: the bridge moves the group to `level`
 -- relative to its current level, so the scene's per-light differences stay
 -- (HUE_SCENE_LEVEL, docs/scene-dimmer-design.md). The proxy hears CHANGED
 -- with the bridge's next level report, or the target after the ramp plus
--- LEVEL_FALLBACK_MS (send_level).
+-- LEVEL_FALLBACK_MS (send_level). An ordinary scene's move with a rate is a
+-- ramp (#421 D6): the level reports it explains wait for its end (D10). A
+-- ramp running is replaced (D11).
 local function move_level(level, rate)
 	if not ready("brightness target") then
 		return
 	end
 	cancel_follow()
-	local current = brightness() or 100
+	local current = tile_level(100)
+	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = level,
 		RATE = rate,
 	})
-	send_level(level, rate, false, current)
+	if send_level(level, rate, false, current) and rate > 0 and not is_smart() then
+		begin_ramp({ from = current, to = level, time = rate, lo = math.min(current, level),
+			hi = math.max(current, level) })
+	end
 end
 
 -- SET_BRIGHTNESS_TARGET (and SET_LEVEL / RAMP_TO_LEVEL): 0 turns the scene off
@@ -762,7 +1066,8 @@ local function set_target(target, rate)
 	move_level(level, rate)
 end
 
--- SET_BRIGHTNESS_STOP: the proxy wants the transition closed now. The cached
+-- SET_BRIGHTNESS_STOP with no ramp running: the proxy wants the transition
+-- closed now. The cached
 -- state goes out as CHANGED (the bridge's next real report corrects it if
 -- need be). With nothing cached yet the target is assumed, as the fallback
 -- would have, so the proxy never waits on a CHANGING. What was to follow a
@@ -901,6 +1206,7 @@ local function take_kind(params)
 	end
 	st.kind = kind
 	cancel_follow()
+	end_ramp(false) -- a time-based scene never ramps (#421 S-D5)
 	if is_smart() then
 		set_held(false)
 	end
@@ -938,6 +1244,7 @@ dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE"
 	apply_recall_as()
 	if st.gone then
 		cancel_follow()
+		end_ramp(false)
 		log.debug("configured as deleted in Hue%s", st.gone_since and (" since " .. st.gone_since) or "")
 	end
 	report_brightness() -- the proxy hears the cached status again, if any
@@ -963,6 +1270,8 @@ end
 -- start from off has something to follow (starting()), that closes the
 -- proxy's transaction: active only confirms the start (the LEDs follow), and
 -- inactive ends it with nothing to follow (the start failed or was undone).
+-- While an ordinary scene's ramp runs, a status it explains waits for its
+-- end, and one it cannot explain ends it first (#421 D10, hold_status).
 dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
@@ -970,6 +1279,9 @@ dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", functi
 	end
 	if not ACTIVE_VALUES[params.active] then
 		return log.warn("HUE_SCENE_STATE without a known status (%s) ignored", tostring(params.active))
+	end
+	if hold_status(params.active) then
+		return
 	end
 	local before = brightness()
 	take_status(params.active)
@@ -1013,18 +1325,30 @@ end)
 -- the held state; on="true" alone changes nothing (the scene's own status
 -- says whether it is active). A level of 0 means none of the group's lights
 -- is lit, which says nothing about the scene's level: the last lit one stays.
+-- While an ordinary scene's ramp runs, what it explains waits for its end;
+-- what it cannot explain ends it and closes the proxy's ramp with the state
+-- the report leaves (#421 D10, hold_group).
 dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_SCENE_GROUP for rid %s ignored (ours is %s)", params.rid, st.rid)
 	end
-	local before = brightness()
 	local level = tonumber(params.level)
-	if level and level > 0 then
-		st.level = math.min(level, 100)
+	local lit = level and level > 0 and math.min(level, 100) or nil
+	local on = to_bool(params.on)
+	local other = to_bool(params.other_active) == true
+	local foreign = false
+	if ramp and (lit or on ~= nil or other) then
+		if hold_group(lit, on, other) then
+			return
+		end
+		foreign = true
+	end
+	local before = brightness()
+	if lit then
+		st.level = lit
 		level_seq = level_seq + 1
 	end
-	local on = to_bool(params.on)
 	if on ~= nil then
 		group_on = on
 	end
@@ -1048,12 +1372,20 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 		end
 	end
 	-- other_active says nothing to a time-based scene: its own status does.
-	local ended = on == false or (to_bool(params.other_active) == true and not is_smart())
+	local ended = on == false or (other and not is_smart())
 	if ended then
 		if held_on then
 			log.debug("held-on state ended: %s", on == false and "the group went off" or "another scene is active")
 		end
 		set_held(false)
+	end
+	if foreign then
+		settle()
+		report_unchanged(before or 0)
+		if lit then
+			open_level_window()
+		end
+		return
 	end
 	if pending and pending.kind == "level" and (level or ended) then
 		settle()
@@ -1082,6 +1414,7 @@ dispatch.commands["HUE_SCENE_FORGOTTEN"] = after_late_init("HUE_SCENE_FORGOTTEN"
 	st.forgotten = { name = text(params.name) or st.name }
 	settle()
 	cancel_follow()
+	end_ramp(false)
 	log.warn("forgotten by the bridge (was Hue scene %s)", st.forgotten.name or st.rid or "unknown")
 	prop("Last Action", "Forgotten by the bridge")
 	refresh_status()
@@ -1157,11 +1490,15 @@ end
 -- Advanced Lighting Scenes with reduced_als_support drive the scene with
 -- SET_BRIGHTNESS_TARGET and end a scene ramp with these; both carry no
 -- parameters [verified: proxy ref, SET_BRIGHTNESS_STOP, reduced_als_support,
--- supports_brightness_stop]. Nothing goes to the bridge: a scene recall
--- cannot be stopped, the proxy only needs its CHANGED (a level move's
--- end comes with the bridge's next level report).
+-- supports_brightness_stop]. A ramp running (#421 D6: a tap's, or a timed
+-- recall, off or level move's) stops at Hue exactly as a tap stops it (#421
+-- D7, S-D3, stop_ramp), and the proxy hears the estimate. With none running
+-- nothing goes to the bridge: the proxy only needs its CHANGED (stop; a
+-- level move's end comes with the bridge's next level report).
 dispatch.proxy["SET_BRIGHTNESS_STOP"] = function()
-	stop()
+	if not stop_ramp("brightness stop") then
+		stop()
+	end
 end
 
 -- The ALS section lists STOP_SCENE_RAMP among what a reduced-ALS driver must
@@ -1190,23 +1527,89 @@ dispatch.proxy["OFF"] = function() turn_off(0) end
 
 -- Keypad buttons -------------------------------------------------------------
 -- What a tap and a hold do to a scene; the press / click / release machine
--- and the proxy's hold rates are common/device.lua's. A tap of the top button
--- recalls, of the bottom button turns the group off, of the toggle button
--- toggles. A hold dims the scene's group relatively, so its colours and
--- per-light differences stay; holding top while off recalls at 1 % first. A
--- hold's record carries changing (the proxy heard the hold's CHANGING) and
--- dim_sent (a dim went out: the release stops it). docs/keypad-design.md.
+-- (with the double-tap window and the stop on the press, #421 D4, D5) and
+-- the proxy's hold rates are common/device.lua's. A tap of the top button
+-- fades the scene in, of the bottom button fades its group out, of the
+-- toggle button does either by the on state, and a press while a fade runs
+-- stops it there (#421 §10.1). A hold dims the scene's group relatively, so
+-- its colours and per-light differences stay; holding top while off recalls
+-- at 1 % first. A hold's record carries changing (the proxy heard the hold's
+-- CHANGING) and dim_sent (a dim went out: the release stops it).
+-- docs/keypad-design.md.
 local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 local setting = dev.setting
 
+-- A tap's ramp time: a click rate is the time of the whole range (#421 D3),
+-- so a tap takes its share of the distance, rounded to whole ms. The
+-- scene's driver.xml declares no click rates, so Composer shows none, the
+-- proxy sends none and none is loaded (opts.settings above): setting()
+-- always gives common/device.lua's defaults, 3000 ms each.
+local function share(rate, distance)
+	return math.floor(rate * distance / 100 + 0.5)
+end
+
+-- A tap (#421 §10.1). A ramp still running here began between the press and
+-- its click (the machine stops one running at the press and swallows its
+-- click): it is stopped instead. Top, or toggle while the scene shows off
+-- or is heading off, fades the scene in over the click rate up's share of
+-- the distance from the scene's own level to 100 (S-D1): the whole rate
+-- from off or when only its room is lit by something else (On State
+-- Follows "Room/zone lights"), the rest of it from a level the scene was
+-- dimmed to. A scene Hue reports active at 100 is there already: nothing
+-- goes to Hue and the proxy hears the level. Bottom, or toggle while it
+-- shows on, fades the group out over the click rate down's share of the
+-- level shown (S-D2): at once while it shows off (the group goes off as
+-- before), over the whole rate while nothing is known. Both go past the
+-- bridge's request bucket (S-D6, D12). A time-based scene keeps its taps,
+-- at once (S-D5), and the double-tap window. A device that cannot be driven
+-- drops the tap with its reason, as it drops a target.
 function dev.on_click(button)
-	if button == BUTTON_TOP then
-		turn_on(0)
-	elseif button == BUTTON_BOTTOM then
-		turn_off(0)
-	else
-		dispatch.proxy["TOGGLE"]()
+	if stop_ramp("tap") then
+		return
 	end
+	if is_smart() then
+		if button == BUTTON_TOP then
+			turn_on(0)
+		elseif button == BUTTON_BOTTOM then
+			turn_off(0)
+		else
+			dispatch.proxy["TOGGLE"]()
+		end
+		return
+	end
+	if not ready("tap") then
+		return
+	end
+	local up = button == BUTTON_TOP
+	if button ~= BUTTON_TOP and button ~= BUTTON_BOTTOM then
+		if pending then
+			up = not pending.on
+		else
+			up = not shown_on()
+		end
+	end
+	local level = brightness()
+	if not up then
+		return turn_off(share(setting("click_down"), level or 100), true)
+	end
+	if is_on() and level == 100 then
+		log.debug("tap: the scene is on at 100 %% already")
+		return report_brightness()
+	end
+	local own = effective_on() and level or 0
+	turn_on(share(setting("click_up"), 100 - own), nil, true)
+end
+
+-- The machine's hooks for the stop (#421 S-D4, D5, common/device.lua): a
+-- press outside the double-tap window while a ramp runs stops it on the
+-- push, on any button; a press held on afterwards holds from the stopped
+-- level. A time-based scene never ramps, so its presses get only the window.
+function dev.ramp_active()
+	return ramp ~= nil
+end
+
+function dev.on_ramp_stop()
+	stop_ramp("tap")
 end
 
 -- A press that ends: a time-based scene this hold started has its dim
@@ -1216,17 +1619,6 @@ function dev.on_end_hold(h)
 	if follow and follow.hold == h then
 		cancel_follow()
 	end
-end
-
--- HUE_SCENE_DIM to the bridge: up / down over `duration` ms, or stop. True
--- when it went out (common/device.lua logs a failure).
-local function send_dim(direction, duration)
-	local params = { rid = st.rid, device_id = device_id(), direction = direction }
-	if duration then
-		params.duration = string.format("%d", duration)
-	end
-	log.debug("hold: dim %s%s", direction, duration and (" over " .. params.duration .. " ms") or "")
-	return send("HUE_SCENE_DIM", params)
 end
 
 -- The bound the bridge holds a scene's hold rate to (scenes.DIM_MAX_DURATION,
@@ -1289,12 +1681,18 @@ end
 -- (logged) leaves the scene as it was, not held by this hold, and closes the
 -- hold's CHANGING with the unchanged state; the dim that follows a recall
 -- that did go out is then just not sent (no stop at the release), and the
--- bridge's level reports close the hold as they do after any recall.
+-- bridge's level reports close the hold as they do after any recall. A
+-- press that stopped a ramp (#421 D5) holds from the level the stop left in
+-- the cache (S3: a hold right after a stop rises from where the lamps
+-- stopped). A ramp that began after the press (programming, say) ends here,
+-- and the hold starts from its estimate.
 function dev.on_hold(h, up, on)
 	if not ready("hold") then
 		return
 	end
 	cancel_follow()
+	local estimate = ramp and (ramp_estimate(ramp))
+	end_ramp(true)
 	local duration = setting(up and "hold_up" or "hold_down")
 	local was_held = held_on
 	if not is_smart() then
@@ -1306,7 +1704,7 @@ function dev.on_hold(h, up, on)
 		report_unchanged(current)
 	end
 	if on then
-		local current = brightness() or 100
+		local current = estimate and math.max(1, estimate) or brightness() or 100
 		hold_changing(h, current, up, duration)
 		if send_dim(up and "up" or "down", duration) then
 			h.dim_sent = true
@@ -1419,6 +1817,7 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 		bridge = nil
 		settle()
 		cancel_follow()
+		end_ramp(false)
 		refresh_status()
 		report_online()
 	end
@@ -1434,6 +1833,7 @@ end
 function OnDriverDestroyed()
 	settle()
 	cancel_follow()
+	end_ramp(false)
 	dev.cancel_timers() -- a keypad press and the click guard, the binding re-check, the Driver Version looks
 	close_level_window()
 end

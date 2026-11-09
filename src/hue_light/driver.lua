@@ -68,13 +68,19 @@ local UNLINKED_REMEDY = "use Link Device on the Hue Bridge"
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
 local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaTimer, assume = fn }
+-- The brightness ramp the light is running (#421 D6), nil while none is:
+-- { from, to, time, started, tap, timer }, levels in proxy percent (to 0 for
+-- off), time and started in controller ms. "Targets" below says when one
+-- begins and ends.
+local ramp = nil
 
 -- The plumbing both device drivers share (common/device.lua): properties and
 -- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
 -- for bridge messages that arrive before late init, the keypad (LEDs, Button
 -- Links, settings, the press machine), the binding re-check, the goodbye, and
 -- in dev builds the dev loop's log forwarding and DEV_RELOAD. Its hooks
--- (is_on, on_bridge_found, on_click, on_hold, on_finish) are set below.
+-- (is_on, on_bridge_found, on_click, on_hold, on_finish, and for #421
+-- ramp_active and on_ramp_stop) are set below.
 local dev = device.new({
 	prefix = LOG_PREFIX,
 	tree = "light", -- the dev loop's name for this driver's source tree
@@ -275,8 +281,14 @@ end
 -- Keypad LEDs ----------------------------------------------------------------
 -- MATCH_LED_STATE on each Button Link and BUTTON_INFO per button follow the
 -- light (common/device.lua, docs/keypad-design.md "Keypad LEDs"); what they
--- follow here is st.on, nil until the bridge has reported.
+-- follow here is st.on, nil until the bridge has reported. While a ramp runs
+-- whose start or end is lit, the lamp is on throughout, whatever the cache
+-- says before its held reports come out (#421 D10): a tap from off lights
+-- the LEDs as it starts, not when its ramp ends.
 function dev.is_on()
+	if ramp and (ramp.from > 0 or ramp.to > 0) then
+		return true
+	end
 	return st.on
 end
 
@@ -330,20 +342,64 @@ end
 -- the ramp plus FALLBACK_MS (as long as the driver waits for any
 -- confirmation), they are reported: a change made elsewhere meanwhile is
 -- late by at most that, never lost.
+--
+-- A brightness change with a time above 0 whose send succeeded is a ramp
+-- (#421 D6), kept in `ramp`: a keypad tap's, and a timed target from
+-- programming, Navigator or a lighting scene. While it runs the bridge's
+-- reports of on and brightness are held back the same way (D10), because
+-- Hue reports the target as soon as the transition starts, about 50 ms
+-- after the request, while the lamp still moves and the tile animates from
+-- the CHANGING [verified: house, #421 §7 L1, measured 2026-11-09]. A report
+-- the ramp explains (a
+-- level between where it started and its target, within a point; off at
+-- the end of a ramp to off) waits for the ramp's end, then goes into the
+-- cache and out as the ramp's one CHANGED. One it cannot explain (off while
+-- it ramps up, on while it ramps to off, a level outside that span) is
+-- someone else's change: it goes through at once and ends the ramp. A level
+-- held back for #308 keeps waiting for the turn-on's goal, as above, and a
+-- ramp whose time ran out without a report leaves its CHANGED to the
+-- bridge's next report or the fallback. A ramp also ends at a stop
+-- (stop_ramp), at any other brightness command (D11) or the start of a
+-- hold, and with its target (settle). A colour command leaves it alone.
 
 -- The level the proxy shows for a light on at `brightness` (Hue percent).
 local function on_level(brightness)
 	return state.to_proxy_brightness({ on = true, brightness = brightness })
 end
 
+-- The controller's clock in ms [verified: API 34_timer/_2-GetTime, OS 3.2.3
+-- on], or os.time() where it is missing, as common/devloop.lua reads it.
+local function now_ms()
+	local ok, t = pcall(function() return C4:GetTime() end)
+	return ok and type(t) == "number" and t or os.time() * 1000
+end
+
+-- Where a ramp has the light now, by the clock: from + (to - from) x elapsed
+-- / time, rounded (#421 §4.2); and the ms elapsed, 0 to its time.
+local function ramp_estimate(r)
+	local elapsed = math.max(0, math.min(r.time, now_ms() - r.started))
+	return math.floor(r.from + (r.to - r.from) * elapsed / r.time + 0.5), elapsed
+end
+
+local function end_ramp()
+	if ramp then
+		ramp.timer:Cancel()
+		ramp = nil
+	end
+end
+
 -- Held fields into the cache; apply_hue's answer, nil when none were held.
 local function release(pending)
 	local held = pending.held
-	pending.held = nil
+	pending.held, pending.stale = nil, nil
 	return held and state.apply_hue(st, held)
 end
 
+-- The target is over, and for brightness so is its ramp.
 local function settle(kind)
+	if kind == "brightness" then
+		end_ramp()
+	end
 	local pending = fallback[kind]
 	if pending then
 		pending.timer:Cancel()
@@ -361,12 +417,14 @@ local function arm(kind, rate, assume, goal)
 	local pending = { assume = assume, goal = goal, ramp = rate > 0 }
 	pending.timer = C4:SetTimer(rate + FALLBACK_MS, function()
 		fallback[kind] = nil
+		if kind == "brightness" then
+			end_ramp() -- its time is past (the ramp's own timer fires first on the clock)
+		end
 		local changed = release(pending)
 		if not changed then
 			return assume()
 		end
-		log.debug("turn-on to %d %% unconfirmed after %d ms; showing what the bridge reported", goal,
-			rate + FALLBACK_MS)
+		log.debug("brightness target unconfirmed after %d ms; showing what the bridge reported", rate + FALLBACK_MS)
 		report_brightness()
 		if changed.color then
 			report_color()
@@ -375,48 +433,156 @@ local function arm(kind, rate, assume, goal)
 	fallback[kind] = pending
 end
 
--- A HUE_STATE while a turn-on from off waits for its level: the params to
--- apply, with the held fields under them when the report goes through, or
--- without their on and brightness when these are held back too.
-local function hold_stale(params)
+-- #421 D10: a ramp's time ran out. A report it held back goes into the
+-- cache and out as its one CHANGED, and settles the target; without one
+-- (or with only a #308 one) the bridge's next report or the fallback ends
+-- the target, as for any other.
+local function ramp_done(r)
+	if ramp ~= r then
+		return
+	end
+	ramp = nil
 	local pending = fallback.brightness
-	if not (pending and pending.goal) or (params.on == nil and params.brightness == nil) then
+	if pending and pending.held and not pending.stale then
+		settle("brightness")
+		report_brightness()
+	end
+end
+
+-- After a successful send with a time above 0 (#421 D6): the ramp's record,
+-- its end on a timer, and the LEDs, which a ramp from off lights at once
+-- (dev.is_on).
+local function begin_ramp(from, to, time, tap)
+	local r = { from = from, to = math.max(0, math.min(100, to)), time = time, started = now_ms(), tap = tap }
+	r.timer = C4:SetTimer(math.max(1, math.floor(time + 0.5)), function()
+		ramp_done(r)
+	end)
+	ramp = r
+	update_leds()
+end
+
+-- A HUE_STATE while a turn-on from off waits for its level (#308) or a ramp
+-- runs (#421 D10): the params to apply, with the held fields under them when
+-- the report goes through, or without their on and brightness when these
+-- are held back too. A report the ramp cannot explain ends it here.
+local function hold_back(params)
+	local pending = fallback.brightness
+	if not (pending and (pending.goal or ramp)) or (params.on == nil and params.brightness == nil) then
 		return params
 	end
 	local held = pending.held or {}
 	local merged = { on = params.on or held.on, brightness = params.brightness or held.brightness }
-	local on = device.to_bool(merged.on)
+	local said = device.to_bool(merged.on) -- nil when the report does not say
+	local on = said
 	if on == nil then
 		on = st.on
 	end
-	local through = on == false and merged.on ~= nil -- an off always goes through
-	if on then
-		-- No level known at all (a plug never reports one): nothing to be stale.
-		local brightness = tonumber(merged.brightness) or st.brightness
-		local level = brightness and on_level(brightness)
-		through = not level or math.abs(level - pending.goal) <= 1 or (pending.ramp and level <= pending.goal)
+	-- No level known at all (a plug never reports one): nothing to compare.
+	local brightness = tonumber(merged.brightness) or st.brightness
+	local level = on and brightness and on_level(brightness) or nil
+	local verdict = nil -- "stale" (#308), "ramp" (D10, held), "foreign" (through, ends the ramp)
+	if pending.goal and said ~= false then -- an off always gets past #308
+		if not on then
+			verdict = "stale" -- a level while the light still shows off
+		elseif level and math.abs(level - pending.goal) > 1 and not (pending.ramp and level <= pending.goal) then
+			verdict = "stale"
+		end
+	end
+	if not verdict and ramp then
+		local lo, hi = math.min(ramp.from, ramp.to), math.max(ramp.from, ramp.to)
+		if (said == false and ramp.to > 0) or (said == true and ramp.to == 0)
+			or (level and (level < lo - 1 or level > hi + 1)) then
+			verdict = "foreign"
+		else
+			verdict = "ramp"
+		end
 	end
 	local out = {}
 	for k, v in pairs(params) do
 		out[k] = v
 	end
-	if through then
-		pending.held = nil
-		out.on, out.brightness = merged.on, merged.brightness
-	else
-		pending.held = merged
+	if verdict == "stale" or verdict == "ramp" then
+		pending.held, pending.stale = merged, verdict == "stale" or nil
 		out.on, out.brightness = nil, nil
-		log.debug("held back on=%s brightness=%s: the turn-on waits for %d %%", tostring(merged.on),
-			tostring(merged.brightness), pending.goal)
+		if verdict == "stale" then
+			log.debug("held back on=%s brightness=%s: the turn-on waits for %d %%", tostring(merged.on),
+				tostring(merged.brightness), pending.goal)
+		else
+			log.debug("held back on=%s brightness=%s until the ramp to %d %% ends", tostring(merged.on),
+				tostring(merged.brightness), ramp.to)
+		end
+		return out
 	end
+	if verdict == "foreign" then
+		log.debug("on=%s brightness=%s is not the ramp to %d %%: it ends", tostring(merged.on),
+			tostring(merged.brightness), ramp.to)
+		end_ramp()
+	end
+	pending.held, pending.stale = nil, nil
+	out.on, out.brightness = merged.on, merged.brightness
 	return out
 end
 
--- SET_BRIGHTNESS_STOP / SET_COLOR_STOP: the proxy wants the transition closed
--- now. The cached value goes out as CHANGED (the next real report corrects
--- it if the bulb went on ramping; Hue has no stop primitive, so it does).
--- With nothing cached yet the target is assumed, as the fallback would have,
--- so the proxy never waits on a CHANGING.
+-- #421 D9: how a ramp is stopped at Hue; no property. The default since the
+-- house measurement (#421 §7, measured 2026-11-09) is "level" (option C):
+-- the estimate as an absolute HUE_SET, on, urgent (D12), over
+-- STOP_GLIDE_MS. A new absolute command replaces the running transition,
+-- and the bridge reports the estimate straight back, so the bridge, the Hue
+-- app and Control4 agree at once [verified: house, the level-mode runs of
+-- §7]. The alternative, "stop" (D8, option B), sends HUE_DIM stop, which
+-- the bridge turns into Hue's dimming_delta stop (writing the estimate only
+-- if Hue refuses it). It does halt an absolute transition on a light, but
+-- the bridge keeps its cached level at the old target until the original
+-- transition time is over (26 s in one run) and computes relative commands
+-- from that stale level: a +10 nudge read target + 10 [verified: house, §7
+-- L2]. A hold or a Raise in that window would start from the wrong level,
+-- so "stop" lost. It stays for a later bridge firmware that corrects its
+-- cache at the stop.
+local STOP_MODE = "level"
+-- A "level" stop glides to the estimate over this long instead of jumping:
+-- Hue's fade runs slightly behind a linear estimate, so an instant level
+-- (rate 0) showed as a small jump down, and a 1000 ms glide looked smooth
+-- [verified: house, owner watching, #421 §7, measured 2026-11-09]. The
+-- glide is no ramp of the device's (no record, nothing to stop): the cache
+-- and the proxy hold the estimate already.
+local STOP_GLIDE_MS = 1000
+
+-- #421 D5, D7: stop the running ramp where the light is by the clock; false
+-- when none runs. The estimate is at least 1, so a stop near off leaves the
+-- light on, as a dimmer stopped near the bottom does (§3). It goes into the
+-- cache, where a hold or the next tap starts from it, and out as the ramp's
+-- CHANGED at once. With nothing pending and no ramp, the bridge's next
+-- report goes straight through: in "level" mode the estimate itself, at
+-- once, which matches the cache and sends no second CHANGED; any other
+-- level corrects it. A #308 wait ends with it. `why` names the stop in the
+-- log.
+local function stop_ramp(why)
+	local r = ramp
+	if not r then
+		return false
+	end
+	local level, elapsed = ramp_estimate(r)
+	level = math.max(1, level)
+	settle("brightness")
+	log.debug("%s: the %sramp to %d %% stopped at %d %% after %d of %d ms", why, r.tap and "tap " or "", r.to, level,
+		elapsed, r.time)
+	if STOP_MODE == "level" then
+		local params = state.from_brightness_target(st, level, STOP_GLIDE_MS)
+		params.urgent = "true" -- #421 D12
+		send("HUE_SET", params)
+	else
+		send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
+	end
+	state.apply_hue(st, { on = "true", brightness = tostring(level) })
+	report_brightness()
+	return true
+end
+
+-- SET_BRIGHTNESS_STOP / SET_COLOR_STOP with no ramp running: the proxy wants
+-- the transition closed now. The cached value goes out as CHANGED (the next
+-- real report corrects it if the bulb went on changing). With nothing cached
+-- yet the target is assumed, as the fallback would have, so the proxy never
+-- waits on a CHANGING.
 local function stop(kind, report)
 	local pending = fallback[kind]
 	settle(kind)
@@ -440,8 +606,11 @@ end
 -- True when the target went to the bridge. When the send fails
 -- (common/device.lua logs why) nothing changed: the proxy hears CHANGED with
 -- the level its CHANGING came from, and a colour kept for the next turn-on
--- keeps waiting for it.
-local function set_brightness(target, rate)
+-- keeps waiting for it. A running ramp is replaced (#421 D11): the CHANGING
+-- starts from its estimate, where the tile is. `urgent` (a keypad tap, D12)
+-- sends the HUE_SET past the bridge's request bucket; `tap` marks the ramp
+-- a tap's, for the log.
+local function set_brightness(target, rate, urgent, tap)
 	target, rate = tonumber(target), tonumber(rate) or 0
 	if not target then
 		return log.warn("brightness command without a target")
@@ -449,7 +618,8 @@ local function set_brightness(target, rate)
 	if not ready("brightness target") then
 		return
 	end
-	local current = state.to_proxy_brightness(st) or 0
+	local current = ramp and ramp_estimate(ramp) or state.to_proxy_brightness(st) or 0
+	end_ramp()
 	-- From off, the level the turn-on waits for (#308); Hue raises a level
 	-- below the bulb's lowest to that.
 	local goal = st.on == false and target > 0 and on_level(math.max(target, st.min_dim or 0)) or nil
@@ -460,6 +630,9 @@ local function set_brightness(target, rate)
 	})
 	local stored = st.pending_color
 	local params = state.from_brightness_target(st, target, rate)
+	if urgent then
+		params.urgent = "true"
+	end
 	if not send("HUE_SET", params) then
 		st.pending_color = stored
 		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = current })
@@ -473,6 +646,9 @@ local function set_brightness(target, rate)
 			report_color() -- the turn-on carried a colour stored while off
 		end
 	end, goal)
+	if rate > 0 then
+		begin_ramp(current, target, rate, tap)
+	end
 	return true
 end
 
@@ -627,10 +803,11 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
 	end
-	params = hold_stale(params)
+	params = hold_back(params)
 	local changed = state.apply_hue(st, params)
-	-- Any report of a pending field settles the target, whatever the value:
-	-- the proxy heard CHANGING and must hear CHANGED.
+	-- Any report of a pending field that got past hold_back settles the
+	-- target, whatever the value: the proxy heard CHANGING and must hear
+	-- CHANGED. One held back for a ramp settles it at the ramp's end.
 	if fallback.brightness and (params.on ~= nil or params.brightness ~= nil) then
 		settle("brightness")
 		changed.brightness = true
@@ -822,6 +999,29 @@ local function load_saved()
 	end
 end
 
+-- The level Raise Level By and Restore Saved Level take the light to be at:
+-- the one it shows; while a ramp runs (#421 D6), the level the ramp heads
+-- for, where the light ends without further input (the light_v2 guidance's
+-- target), or what the bridge reported meanwhile, held back for the ramp's
+-- end (D10). A ramp's own way to its target is nobody's change: a Restore
+-- during the Raise's ramp still restores, and a second Raise during it does
+-- not climb. A tap stop is a change: it leaves its estimate in the cache.
+local function level_now()
+	if not ramp then
+		return state.to_proxy_brightness(st)
+	end
+	local pending = fallback.brightness
+	local held = pending and not pending.stale and pending.held
+	if not held then
+		return math.floor(ramp.to + 0.5)
+	end
+	local on = device.to_bool(held.on)
+	if on == nil then
+		on = st.on
+	end
+	return state.to_proxy_brightness({ on = on, brightness = tonumber(held.brightness) or st.brightness })
+end
+
 -- " (capped; saved 40 %)": the notes after a Raise, "" without any.
 local function notes(list)
 	if #list == 0 then
@@ -840,18 +1040,19 @@ end
 -- starting point, so a Raise never lowers a light turned up by hand; the
 -- old saved level is dropped and the current one saved. Nothing is saved when the command never
 -- reached the bridge (set_brightness logs it and closes the proxy's
--- CHANGING).
+-- CHANGING). A ramp running meanwhile is replaced (#421 D11), and the level
+-- it heads for counts as the light's (level_now).
 dispatch.commands["Raise_Level_By"] = after_late_init("Raise Level By", function(params)
-	local points, ramp, why
+	local points, ramp_ms, why
 	points, why = param(params, POINTS)
 	if points then
-		ramp, why = param(params, RAMP)
+		ramp_ms, why = param(params, RAMP)
 	end
 	why = why or blocker()
 	if why then
 		return result("Not raised: " .. why)
 	end
-	local now = state.to_proxy_brightness(st)
+	local now = level_now()
 	local restarted = nil
 	-- Still at the saved level counts as unchanged too: the bridge may not
 	-- have reported the last Raise's level yet.
@@ -864,7 +1065,7 @@ dispatch.commands["Raise_Level_By"] = after_late_init("Raise Level By", function
 		return result(string.format("Not raised: the %s's level is not known yet", what()))
 	end
 	local target = math.min(100, from + points)
-	if not set_brightness(target, ramp) then
+	if not set_brightness(target, ramp_ms) then
 		return result("Not raised: the command did not reach the bridge")
 	end
 	local list = {}
@@ -892,18 +1093,22 @@ end)
 -- back as 70.08). Any other level, or off, is someone's change, which a
 -- Restore must not undo: the light stays, and the saved level is dropped.
 -- A level not known yet (a restart the bridge has not answered) is no
--- change: the saved level stays for the next Restore.
+-- change: the saved level stays for the next Restore. While a ramp runs the
+-- level it heads for counts (level_now): a Restore during the Raise's own
+-- ramp still puts the light back and replaces that ramp (#421 D11); one
+-- that finds someone else's change leaves the ramp alone, as it leaves the
+-- light.
 dispatch.commands["Restore_Saved_Level"] = after_late_init("Restore Saved Level", function(params)
 	if not saved then
 		return result("Nothing to restore")
 	end
 	local kept = string.format(" (saved %s kept)", level_text(saved.level))
-	local ramp, why = param(params, RAMP)
+	local ramp_ms, why = param(params, RAMP)
 	why = why or blocker()
 	if why then
 		return result("Not restored: " .. why .. kept)
 	end
-	local now = state.to_proxy_brightness(st)
+	local now = level_now()
 	if now == nil then
 		return result(string.format("Not restored: the %s's level is not known yet%s", what(), kept))
 	end
@@ -913,7 +1118,7 @@ dispatch.commands["Restore_Saved_Level"] = after_late_init("Restore Saved Level"
 			now == 0 and "turned off" or string.format("changed to %d %%", now)))
 	end
 	local level = saved.level
-	if not set_brightness(level, ramp) then
+	if not set_brightness(level, ramp_ms) then
 		return result("Not restored: the command did not reach the bridge" .. kept)
 	end
 	forget_saved()
@@ -957,10 +1162,16 @@ end
 -- SET_BRIGHTNESS_TARGET / SET_COLOR_TARGET and end a scene ramp with these;
 -- both carry no parameters [verified: proxy-protocol reference, light_v2
 -- SET_BRIGHTNESS_STOP, SET_COLOR_STOP, reduced_als_support,
--- supports_brightness_stop]. Nothing goes to the bridge: Hue cannot stop a
--- transition, the proxy only needs its CHANGED.
+-- supports_brightness_stop]. A brightness stop while a ramp runs stops it
+-- at Hue exactly as a keypad tap does (#421 D7, stop_ramp, STOP_MODE): the
+-- stop goes to the bridge and the proxy hears the estimate. With no ramp
+-- running, nothing goes to the bridge: the proxy only needs its CHANGED
+-- (stop). A colour transition has no stop at Hue: SET_COLOR_STOP only
+-- closes the proxy's.
 dispatch.proxy["SET_BRIGHTNESS_STOP"] = function()
-	stop("brightness", report_brightness)
+	if not stop_ramp("brightness stop") then
+		stop("brightness", report_brightness)
+	end
 end
 
 dispatch.proxy["SET_COLOR_STOP"] = function()
@@ -998,7 +1209,8 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVE
 -- Keypad buttons ----------------------------------------------------------
 -- What a tap and a hold do to a light; the press / click / release machine
 -- and the proxy's preset and rates are common/device.lua's. A hold's record
--- carries the ramp: ramping, the level estimate, its step and its end (to).
+-- carries its own ramp (#249; `ramp` above is a tap's or a timed target's,
+-- #421): ramping, the level estimate, its step and its end (to).
 -- Behaviour: docs/keypad-design.md, "Driver behaviour" and "Light parity".
 local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 local HOLD_TICK_MS = 100 -- the level estimate advances this often during a ramp
@@ -1008,18 +1220,60 @@ local HOLD_TICK_MS = 100 -- the level estimate advances this often during a ramp
 -- lacked (#234).
 local HOLD_MAX_MS = 6000000
 
--- A tap: top goes to the On preset over the click rate up, bottom off over
--- the click rate down, toggle either way from the state the light shows.
+-- A tap ramps the light, and a press while it ramps stops it (#421,
+-- docs/tap-stop-design.md §3). Click rates are whole-range times, as hold
+-- rates are (D3): a tap's ramp takes the rate's share of the distance,
+-- rounded to whole ms; a rate of 0 is a change at once, with nothing to
+-- stop. The start goes past the bridge's request bucket (D12).
+local function tap(target, rate, distance)
+	set_brightness(target, math.floor(rate * distance / 100 + 0.5), true, true)
+end
+
+-- An idle tap (§3). Top goes to the On preset (D2, #233): from off over the
+-- click rate up's share of the preset, up to it from below, down to it from
+-- above over the click rate down; at it (within a point) nothing goes to
+-- Hue and the proxy hears the level. Bottom goes off over the click rate
+-- down's share of the level; off already, nothing. Toggle goes off while
+-- the light shows on, else as top from off. A light whose state is not
+-- known yet is taken as off by top and toggle, and bottom turns it off over
+-- the whole rate. The machine stops a running ramp on the press and
+-- swallows its click (D5, common/device.lua), so a click reaches here during
+-- a ramp only when the ramp began between the press and the click: it stops
+-- that one too. A device that cannot be driven drops the tap with its
+-- reason, as it drops a target.
 function dev.on_click(button)
-	if button == BUTTON_TOP then
-		set_brightness(setting("preset"), setting("click_up"))
-	elseif button == BUTTON_BOTTOM then
-		set_brightness(0, setting("click_down"))
-	elseif st.on then
-		set_brightness(0, setting("click_down"))
-	else
-		set_brightness(setting("preset"), setting("click_up"))
+	if stop_ramp("tap") or not ready("brightness target") then
+		return
 	end
+	local preset, on, level = setting("preset"), st.on, state.to_proxy_brightness(st)
+	if button == BUTTON_BOTTOM or (button ~= BUTTON_TOP and on) then
+		if on == false then
+			return log.debug("tap: the %s is off already", what())
+		end
+		return tap(0, setting("click_down"), level or 100)
+	end
+	if not on then
+		return tap(preset, setting("click_up"), preset)
+	end
+	if math.abs(level - preset) <= 1 then
+		log.debug("tap: at the On preset (%d %%) already", preset)
+		return report_brightness()
+	end
+	if level < preset then
+		return tap(preset, setting("click_up"), preset - level)
+	end
+	tap(preset, setting("click_down"), level - preset)
+end
+
+-- The machine's hooks for the stop (#421 D5, common/device.lua): a press
+-- outside the double-tap window while a ramp runs stops it on the push, on
+-- any button; a press held on afterwards holds from the stopped level.
+function dev.ramp_active()
+	return ramp ~= nil
+end
+
+function dev.on_ramp_stop()
+	stop_ramp("tap")
 end
 
 -- A hold uses Hue's own relative dim (HUE_DIM up / down to the bridge: a
@@ -1061,7 +1315,8 @@ local function start_ramp(h, up, from)
 			h.timer:Cancel()
 		end
 	end, true)
-	-- The ramp replaces whatever target was pending (the turn-on at 1 %).
+	-- The ramp replaces whatever target was pending (the turn-on at 1 %), and
+	-- a brightness ramp still running (#421: a hold ends it).
 	settle("brightness")
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = from,
@@ -1080,13 +1335,18 @@ end
 
 -- A hold began (the machine chose the direction; down from off does
 -- nothing): on, the ramp starts from the level shown; off, the light turns
--- on at 1 % first and the ramp up follows (dev.dim_after_on).
+-- on at 1 % first and the ramp up follows (dev.dim_after_on). A press that
+-- stopped a ramp (#421 D5, h.stopped) holds from the stopped level, which
+-- the stop left in the cache. A ramp that began after the press (from
+-- programming, say) holds from its estimate, and the hold's dim replaces it
+-- at Hue [assumed: #421 §7 L9]; start_ramp ends its record.
 function dev.on_hold(h, up, on)
 	if not ready("hold") then
 		return
 	end
 	if on then
-		return start_ramp(h, up, state.to_proxy_brightness(st) or 1)
+		local from = ramp and ramp_estimate(ramp) or state.to_proxy_brightness(st) or 1
+		return start_ramp(h, up, math.max(1, from))
 	end
 	if not set_brightness(1, 0) then
 		return -- the turn-on never reached the bridge (logged): nothing to dim up from

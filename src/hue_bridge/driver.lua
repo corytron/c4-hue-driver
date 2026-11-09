@@ -475,10 +475,15 @@ end
 -- grouped_light PUT goes through the group queue (one coalescing entry per
 -- group, so a "room off" reaching several devices sends one PUT).
 local group_hooks = {
-	-- Scene OFF / zone light OFF.
-	group_off = function(grouped_light_rid)
+	-- Scene OFF / zone light OFF. A scene's keypad tap fades the group out
+	-- over `opts.rate` ms, past the request bucket (#421 S-D2, S-D6).
+	group_off = function(grouped_light_rid, opts)
 		if state.group_queue then
-			state.group_queue:set(grouped_light_rid, { on = false })
+			local fields = { on = false }
+			if type(opts) == "table" then
+				fields.rate, fields.urgent = opts.rate, opts.urgent
+			end
+			state.group_queue:set(grouped_light_rid, fields)
 			return true
 		end
 		return false
@@ -1787,12 +1792,15 @@ dispatch.commands["HUE_SET"] = function(params)
 		y = tonumber(params.y),
 		mirek = tonumber(params.mirek),
 		rate = tonumber(params.rate),
+		-- A keypad tap's start, or a tap stop sent as a level, goes out at once,
+		-- past the request bucket (#421 D12, commands.urgent).
+		urgent = (params.urgent == "true" or params.urgent == true) or nil,
 	}
 	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
 	if log.enabled("info") then
-		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s", rid:sub(1, 8), tostring(fields.on),
+		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s%s", rid:sub(1, 8), tostring(fields.on),
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
-			tostring(fields.rate))
+			tostring(fields.rate), fields.urgent and " urgent" or "")
 	end
 	set_light_limits(rid)
 	state.queue:set(rid, fields)

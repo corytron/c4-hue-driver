@@ -1109,6 +1109,21 @@ describe("bridge.scenes", function()
 			end
 		end)
 
+		it("sends a tap's recall as the recall with its duration, the urgency only deciding when (#421 S-D1, S1)",
+			function()
+			add_relax()
+			c4.sent = {}
+			local n = #c4.transfers
+			assert.is_true(S:recall({ rid = F.scene_rids.relax, action = "active", duration = "2400", urgent = "true" }))
+			assert.equal(n + 1, #c4.transfers, "straight to the bridge: no queue, no bucket")
+			local put = c4.last_transfer()
+			assert.equal("https://192.0.2.10/clip/v2/resource/scene/" .. F.scene_rids.relax, put.url)
+			assert.same({ recall = { action = "active", duration = 2400 } }, json.decode(put.data), "no urgent in the body")
+			respond_ok(put)
+			assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
+				params = { rid = F.scene_rids.relax, active = "static", reason = "recall" } } }, c4.sent)
+		end)
+
 		-- #47 F9 (scenes.RECALL_WINDOW_MS): a recall within 300 ms of the
 		-- scene's last recall PUT waits for the window to end; those that waited
 		-- leave as one PUT carrying the latest parameters.
@@ -1158,6 +1173,49 @@ describe("bridge.scenes", function()
 				assert.same({}, c4.active_timers())
 				assert.is_true(S:recall({ rid = F.scene_rids.relax }))
 				assert.equal(n + 3, #c4.transfers, "at once again")
+			end)
+
+			it("sends a tap's recall at once inside the window, replacing the one waiting there (#421 S-D1)", function()
+				add_relax()
+				local relax = F.scene_rids.relax
+				local n = #c4.transfers
+				S:recall({ rid = relax })  -- opens the window
+				local first = c4.last_transfer()
+				assert.is_true(S:recall({ rid = relax, brightness = "50" }))  -- waits
+				assert.equal(n + 1, #c4.transfers)
+				local window_timer = c4.active_timers()[1]
+				c4.sent = {}
+				assert.is_true(S:recall({ rid = relax, duration = "2400", urgent = "true" }))
+				assert.equal(n + 2, #c4.transfers, "the tap does not wait")
+				local tap = c4.last_transfer()
+				assert.same({ recall = { action = "active", duration = 2400 } }, json.decode(tap.data))
+				assert.is_true(saw_log("a waiting recall of " .. relax .. " dropped: a tap's recall replaces it (#421 S-D1)"))
+				assert.is_false(window_timer.active, "the window it skipped is closed")
+				assert.equal(1, #c4.active_timers(), "the tap's PUT opened the next window")
+				respond_ok(first)
+				assert.same({}, c4.sent, "the first one's answer reports nothing: the tap superseded it")
+				respond_ok(tap)
+				assert.equal(1, #c4.sent)
+				assert.equal("static", c4.sent[1].params.active)
+				window_timer.callback(window_timer, 0)  -- a late callback of the skipped window
+				assert.equal(n + 2, #c4.transfers, "the dropped recall never goes")
+
+				-- An ordinary recall right after the tap is paced by the tap's window.
+				assert.is_true(S:recall({ rid = relax, brightness = "70" }))
+				assert.equal(n + 2, #c4.transfers)
+				window_ends()
+				assert.equal(n + 3, #c4.transfers)
+				assert.same({ recall = { action = "active", dimming = { brightness = 70 } } },
+					json.decode(c4.last_transfer().data))
+
+				-- A tap inside a window with nothing waiting goes at once too; urgent may be a boolean.
+				respond_ok(c4.last_transfer())
+				logged = {}
+				assert.is_true(S:recall({ rid = relax, duration = "900", urgent = true }))
+				assert.equal(n + 4, #c4.transfers)
+				assert.same({ recall = { action = "active", duration = 900 } }, json.decode(c4.last_transfer().data))
+				assert.is_false(saw_log("dropped"), "nothing was waiting")
+				assert.equal(1, #c4.active_timers())
 			end)
 
 			it("drops a waiting recall when an OFF of the scene comes after it", function()
@@ -1478,6 +1536,146 @@ describe("bridge.scenes", function()
 			assert.is_false(S:dim({ rid = F.scene_rids.relax, direction = "up" }))
 			assert.is_true(saw_log("no group_dim in ctx"))
 		end)
+
+		it("hands a tap stop's level to group_dim as its third argument; none for up, down or a bad level (#421 S-D3)",
+			function()
+			add_relax()
+			local got = {}
+			S.ctx.group_dim = function(rid, body, level)
+				got[#got + 1] = { rid = rid, body = body, level = level }
+				return true
+			end
+			local function stop(level)
+				assert.is_true(S:dim({ rid = F.scene_rids.relax, device_id = "2001", direction = "stop", level = level }))
+				return got[#got]
+			end
+			assert.same({ rid = F.grouped_light_rids.living_room, body = { dimming_delta = { action = "stop" } }, level = 42 },
+				stop("42"), "the stop itself, the level beside it")
+			assert.is_true(saw_log("dim Relax stop (device 2001): grouped_light "
+				.. F.grouped_light_rids.living_room:sub(1, 8) .. ", 42 % if refused"))
+			assert.equal(57.6, stop("57.6").level)
+			assert.equal(100, stop("150").level)
+			assert.equal(0, stop("-3").level)
+			for _, none in ipairs({ "soon", "nan", "" }) do
+				assert.is_nil(stop(none).level, none)
+			end
+			assert.is_nil(stop(nil).level)
+			assert.same({ dimming_delta = { action = "stop" } }, got[#got].body)
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, direction = "up", duration = "3000", level = "42" }))
+			assert.is_nil(got[#got].level, "only a stop carries a level")
+		end)
+	end)
+
+	-- #421 S-D3, S-D6 end to end on the bridge side: scenes, then the driver's
+	-- group hooks as docs/tap-stop-design.md §10.1 has them (group_dim to
+	-- bridge.group_hold, group_off with its options to the group queue), then
+	-- the real group queue (bridge.commands, set up as driver.lua's
+	-- new_group_queue), whose PUTs are recorded.
+	describe("tap ramps through group_hold and the group queue (#421 S-D3, S-D6)", function()
+		local commands, group_hold, q, gh, puts
+
+		local function hook_off(rid, opts)
+			local fields = { on = false }
+			if type(opts) == "table" then
+				fields.rate, fields.urgent = opts.rate, opts.urgent
+			end
+			q:set(rid, fields)
+			return true
+		end
+
+		local function debounce_ends()
+			return c4.fire_timers_of(commands.DEBOUNCE_MS)
+		end
+
+		before_each(function()
+			package.loaded["bridge.commands"] = nil
+			package.loaded["bridge.group_hold"] = nil
+			commands = require("bridge.commands")
+			group_hold = require("bridge.group_hold")
+			puts = {}
+			q = commands.new({
+				label = "grouped_light",
+				rate_per_sec = 1,
+				burst = 3,
+				now = function() return c4.now_ms end,
+				send = function(rid, body, cb) puts[#puts + 1] = { rid = rid, body = body, done = cb } end,
+				level_of = function(rid) return S.group_level[rid] end,
+			})
+			gh = group_hold.new({
+				members = function() return {} end,
+				is_on = function() return false end,
+				light_set = function() return false end,
+				group_set = function(rid, fields) q:set(rid, fields); return true end,
+				set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end,
+				keep_group = function(rid) return S:scene_running_on(rid) == true end,
+			})
+			S.ctx.group_dim = function(rid, body, level) return gh:dim(rid, body, level) == true end
+			S.ctx.group_off = hook_off
+		end)
+
+		it("sends a stop with no hold running as the grouped_light dimming_delta stop alone", function()
+			add_relax()
+			assert.is_true(S:dim({ rid = F.scene_rids.relax, device_id = "2001", direction = "stop", level = "42" }))
+			assert.same({}, puts, "after the queue's debounce")
+			debounce_ends()
+			assert.equal(1, #puts)
+			assert.equal(F.grouped_light_rids.living_room, puts[1].rid)
+			assert.same({ dimming_delta = { action = "stop" } }, puts[1].body, "no level written")
+			puts[1].done({ ok = true, code = 200 })
+			assert.equal(1, #puts, "nothing follows an accepted stop")
+			assert.is_false(q:busy())
+		end)
+
+		it("writes the stop's level only when Hue refuses the stop", function()
+			add_relax()
+			S:dim({ rid = F.scene_rids.relax, direction = "stop", level = "42" })
+			debounce_ends()
+			puts[1].done({ ok = false, code = 400, err = "HTTP 400" })
+			assert.equal(2, #puts)
+			assert.same({ on = { on = true }, dimming = { brightness = 42 } }, puts[2].body)
+			assert.is_true(saw_log("the bridge refused the dim stop; setting 42 % instead"))
+		end)
+
+		it("sends a tap's off as on false with its duration past an empty bucket, and a stop during the fade after it",
+			function()
+			add_relax()
+			S:on_container(container(F.events.scene_recalled))
+			-- A slider drag on three other groups empties the bucket (burst 3).
+			for i = 1, 3 do
+				q:set("other-" .. i, { brightness = 10 * i })
+			end
+			debounce_ends()
+			assert.equal(3, #puts)
+			puts = {}
+			assert.is_true(S:off({ rid = F.scene_rids.relax, duration = "3000", urgent = "true" }))
+			debounce_ends()
+			assert.equal(1, #puts, "urgent: no wait for a token")
+			assert.same({ on = { on = false }, dynamics = { duration = 3000 } }, puts[1].body)
+			assert.is_true(saw_log("grouped_light " .. F.grouped_light_rids.living_room:sub(1, 8)
+				.. " off over 3000 ms (urgent)"))
+			puts[1].done({ ok = true, code = 200 })
+			S:dim({ rid = F.scene_rids.relax, direction = "stop", level = "35" })
+			debounce_ends()
+			assert.equal(2, #puts)
+			assert.same({ dimming_delta = { action = "stop" } }, puts[2].body, "S4: the lamps stay lit where they are")
+		end)
+
+		it("sends a plain off as before: on false, no duration, paced by the bucket", function()
+			add_relax()
+			for i = 1, 3 do
+				q:set("other-" .. i, { brightness = 10 * i })
+			end
+			debounce_ends()
+			puts = {}
+			assert.is_true(S:off({ rid = F.scene_rids.relax }))
+			debounce_ends()
+			assert.same({}, puts, "it waits for a token")
+			c4.advance(999)
+			assert.same({}, puts)
+			c4.advance(1)
+			assert.equal(1, #puts)
+			assert.same({ on = { on = false } }, puts[1].body)
+		end)
 	end)
 
 	describe("level (HUE_SCENE_LEVEL)", function()
@@ -1608,6 +1806,78 @@ describe("bridge.scenes", function()
 			assert.is_false(S:off({ rid = "nope" }))
 			assert.is_false(S:off({}))
 			assert.equal(1, #c4.sent)
+		end)
+
+		describe("a tap's off (#421 S-D2, S-D6)", function()
+			local calls
+
+			before_each(function()
+				calls = {}
+			end)
+
+			local function capture(...)
+				calls[#calls + 1] = { n = select("#", ...), ... }
+				return true
+			end
+
+			it("passes its duration and urgency to group_off as { rate, urgent } and reports inactive", function()
+				add_relax()
+				S:on_container(container(F.events.scene_recalled))
+				S.ctx.group_off = capture
+				c4.sent = {}
+				assert.is_true(S:off({ rid = F.scene_rids.relax, device_id = "2001", duration = "3000", urgent = "true" }))
+				assert.equal(1, #calls)
+				assert.equal(F.grouped_light_rids.living_room, calls[1][1])
+				assert.same({ rate = 3000, urgent = true }, calls[1][2])
+				assert.is_true(saw_log("off for Relax (device 2001): grouped_light "
+					.. F.grouped_light_rids.living_room:sub(1, 8) .. " off over 3000 ms (urgent)"))
+				assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
+					params = { rid = F.scene_rids.relax, active = "inactive", reason = "recall" } } }, c4.sent)
+				assert.equal("inactive", S:scene(F.scene_rids.relax).active)
+				assert.equal(3, #c4.transfers, "no transfer of its own")
+			end)
+
+			it("clamps the duration as a recall's and passes each part only when given", function()
+				add_relax()
+				S.ctx.group_off = capture
+				local cases = {
+					{ { duration = "99999999" }, { rate = 6000000 } },
+					{ { duration = "1e400", urgent = "true" }, { rate = 6000000, urgent = true } },
+					{ { duration = "0.4" }, { rate = 0 } },
+					{ { urgent = true }, { urgent = true } },
+					{ { duration = "-5", urgent = "true" }, { urgent = true } },
+					{ { duration = "soon", urgent = "false" }, nil },
+				}
+				for i, case in ipairs(cases) do
+					local params = case[1]
+					params.rid = F.scene_rids.relax
+					assert.is_true(S:off(params))
+					assert.same(case[2], calls[i][2], tostring(i))
+				end
+			end)
+
+			it("leaves an off without a duration or urgency as it was: group_off with no options", function()
+				add_relax()
+				S.ctx.group_off = capture
+				for _, params in ipairs({ { rid = F.scene_rids.relax }, { rid = F.scene_rids.relax, duration = "0" },
+					{ rid = F.scene_rids.relax, duration = "", urgent = "" } }) do
+					assert.is_true(S:off(params))
+					assert.is_nil(calls[#calls][2])
+				end
+				assert.is_true(saw_log("grouped_light " .. F.grouped_light_rids.living_room:sub(1, 8) .. " off"))
+				assert.is_false(saw_log(" off over"))
+				assert.is_false(saw_log("(urgent)"))
+			end)
+
+			it("reports the unchanged state when the timed off could queue nothing", function()
+				add_relax()
+				S:on_container(container(F.events.scene_recalled))
+				S.ctx.group_off = function() return false end
+				c4.sent = {}
+				assert.is_false(S:off({ rid = F.scene_rids.relax, duration = "3000", urgent = "true" }))
+				assert.equal("static", c4.sent[1].params.active)
+				assert.is_true(saw_log("nothing queued; state unchanged"))
+			end)
 		end)
 	end)
 
@@ -2501,6 +2771,29 @@ describe("bridge.scenes", function()
 				assert.is_false(S:off({ rid = SMART.living }))
 				assert.equal(n, #c4.transfers)
 				assert.same({ rid = SMART.living, active = "inactive", reason = "recall" }, c4.sent[1].params)
+			end)
+
+			it("OFF with a tap's duration and urgency is unchanged: deactivate, then group_off with no options (#421 S-D5)",
+				function()
+				add_living()
+				S:on_container(container(F.events.smart_activated))
+				local calls = {}
+				S.ctx.group_off = function(...)
+					calls[#calls + 1] = { n = select("#", ...), ... }
+					return true
+				end
+				c4.sent = {}
+				assert.is_true(S:off({ rid = SMART.living, duration = "3000", urgent = "true" }))
+				local put = c4.last_transfer()
+				assert.equal("https://192.0.2.10/clip/v2/resource/smart_scene/" .. SMART.living, put.url)
+				assert.same({ recall = { action = "deactivate" } }, json.decode(put.data))
+				assert.is_true(saw_log("off of time-based Golden hours (device 2001): no fade for a time-based scene; "
+					.. "ignored duration 3000 (#421 S-D5)"))
+				assert.same({}, calls, "the group waits for the deactivate")
+				put:respond(200, OK_SMART)
+				assert.equal(1, #calls)
+				assert.same({ n = 1, F.grouped_light_rids.living_room }, calls[1], "the rid alone, as before")
+				assert.equal("inactive", c4.sent[1].params.active)
 			end)
 
 			it("dims and levels the group as for an ordinary scene", function()

@@ -339,6 +339,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 			put:respond(200, '{"data":[{"rid":"' .. F.scene_rids.savanna .. '","rtype":"scene"}],"errors":[]}')
 		end)
 		fake.pump()
+		scene.C4.advance(400) -- the 400 ms recall is a ramp: its report waits for its end (#421 S-D4)
 		local br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
 		assert.equal(100, br[#br].LIGHT_BRIGHTNESS_CURRENT)
 		assert.equal("dynamic_palette", S:scene(F.scene_rids.savanna).active)
