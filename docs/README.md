@@ -24,6 +24,12 @@ the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
   verification rounds, discovery (not built), commands and rate limiting,
   colour mapping and storage. Dated sections; each API claim is marked
   verified or assumed.
+- [`c4-lighting-guidelines.md`](c4-lighting-guidelines.md): Control4's lighting
+  guidelines for function and UI as one checklist (89 rows, from the light_v2
+  best practices, the proxy protocols and Control4's dealer documentation),
+  each with the drivers' status and its evidence; the gaps ranked with their
+  issues, and the departures Hue forces. Every lighting feature contract cites
+  its rows in a "Control4 guidelines" section (#422).
 - [`release-checklist.md`](release-checklist.md): what a build must pass on
   the development machine, on the dev loop, in Composer and on the owner's
   phone and keypads before it is called good, and what to check after a
