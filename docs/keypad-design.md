@@ -29,6 +29,10 @@ later tap on any of its buttons stops it where it is; a second press within
 600 ms of the previous one on the same button is part of a double tap and
 does nothing, on lights and scenes alike. See "Tap ramps and tap stops
 (#421)" at the end and [the contract](tap-stop-design.md).
+Current (2026-11-09, #421 contract section 10): measured on the house, a
+light's stop writes its estimate with a 1 s glide, zone and room lights
+ramp and stop as one group, and Hue Scene devices get tap fades and tap
+stops too (time-based scenes keep instant taps).
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
@@ -93,7 +97,9 @@ The light takes the preset, click and hold settings, the scene the hold
 rates only. Current (2026-11-08, #421): the machine also keeps the time of
 each button's last press for a 600 ms double-tap window (`DOUBLE_TAP_MS`)
 and has two more hooks, `dev.ramp_active` and `dev.on_ramp_stop`, which
-only the light fills in ("Tap ramps and tap stops (#421)").
+only the light fills in ("Tap ramps and tap stops (#421)"). Superseded
+(2026-11-09, #421 S-D4): the scene fills them in too, and takes the click
+rates as well as the hold rates.
 
 Hue Light (`src/hue_light/driver.lua`):
 
@@ -297,7 +303,14 @@ the same fields (`docs/group-hold-design.md` G1 to G6a).
   press on the same button is part of a double tap and its click is
   swallowed, so a double tap on toggle leaves the scene on; held, it is a
   hold as usual. Scene taps stay a recall or an off, with no ramp to
-  stop.
+  stop. Superseded (2026-11-09, owner, #421 S-D1 to S-D6): a top tap (or
+  toggle while off) recalls the scene with a duration of
+  `click up × (100 − level) / 100`, a bottom tap (or toggle while on)
+  turns the group off with a duration of `click down × level / 100`, and
+  a press outside the window while that fade runs stops it with the
+  grouped_light `dimming_delta` stop, so each lamp keeps its own level.
+  Time-based scenes keep instant taps. See "Tap ramps and tap stops
+  (#421)", "Scenes (2026-11-09)".
 
 ### Keypad LEDs (both device drivers) [verified: Snap One's
 `drivers-template-code-public` `c4hook_light_v2.lua`]
@@ -478,13 +491,22 @@ row (contract section 9).
 The contract is [`tap-stop-design.md`](tap-stop-design.md); the research
 behind it is [the Control4 side](tap-stop-research-c4.md) and
 [the Hue side](tap-stop-research-hue.md). Written 2026-11-08, before the
-build; nothing in it has been seen on the house yet.
+build. Current (2026-11-09): the dev-loop measurement on build 552 (the
+contract's section 10, also in #421) settled the stop at Hue and the
+zone and room lights, and the owner extended tap ramps and tap stops to
+Hue Scene devices; the bullets below carry dated notes where it changed
+them, and "Scenes (2026-11-09)" at the end has the scene rules. The keypad
+checks at a switch (contract section 7 item 2) had not been done as this
+is written.
 
 Decisions, in short (D numbers are the contract's):
 
 - **Devices (D1).** Hue Light devices (single, zone and room lights) get
   tap ramps and tap stops. Hue Scene devices get only the double-tap
   window; a scene tap stays a recall or an off. Hue Motion has no buttons.
+  Superseded (2026-11-09, owner: "Scenes can ramp so tap to stop ramp
+  should apply to them too"): Hue Scene devices get tap fades and tap
+  stops as well ("Scenes (2026-11-09)" below).
 - **Where a tap goes (D2).** Top to the On preset (Default On Brightness,
   #233), down to it from above; bottom to off; toggle by the on state.
 - **Speed (D3).** Click rates are the time of the whole range, as hold
@@ -516,6 +538,16 @@ Decisions, in short (D numbers are the contract's):
   Hue does not stop an absolute transition, `STOP_MODE = "level"` in
   `src/hue_light/driver.lua` sends the estimate as an absolute level
   instead (option C). One constant, no property.
+  Current (2026-11-09, measured, contract section 10): `STOP_MODE =
+  "level"` with `STOP_GLIDE_MS = 1000`, for single, zone and room lights
+  alike. The `dimming_delta` stop did halt a light's timed fade (L2), but
+  the bridge then kept the fade's target as the level until it read the
+  lamp about 10 s after the fade's planned end. Writing the estimate at
+  once (rate 0) showed a small step, because Hue's fade runs slightly
+  behind a linear estimate; writing it with a 1000 ms transition looked
+  smooth, and the bridge reports the estimate at once, so the bridge, the
+  Hue app and Control4 agree straight away. The lamp halts where it is
+  and settles within a second; the stop is not claimed to be exact.
 - **Reporting (D10).** `LIGHT_BRIGHTNESS_CHANGING` at the start (current,
   target, ramp time), one `LIGHT_BRIGHTNESS_CHANGED` at the stop (the
   estimate) or at the end; bridge level reports are held back while the
@@ -533,6 +565,10 @@ Decisions, in short (D numbers are the contract's):
   absolute duration and honours the stop is measured first (Hue §9, Z1 and
   Z2); if not, a group tap stays a quick change and a follow-up issue
   builds group tap ramps from group_hold's per-lamp split.
+  Current (2026-11-09, measured): Z1 and Z2 passed. A grouped_light keeps
+  an absolute `dynamics.duration` (a zone faded over 20 s), and the
+  gliding level stop is smooth on every lamp, so zone and room lights
+  ramp and stop as one group and the follow-up is not needed.
 - **Stored click rates (D15).** A changed default does not reach a stored
   value, so the install brief has the Windows session read every Hue Light
   device's Click Rate Up and Down and set any that differ to 3000 ms; that
@@ -571,7 +607,71 @@ false, `on_ramp_stop` empty) leave a scene with the window alone;
 `started`, `tap`), the estimate and `stop_ramp`; the bridge's queues carry
 `urgent` and D13. No `<capabilities>` change: `click_rates`,
 `supports_target` and `supports_brightness_stop` were declared already, so
-the install needs no controller reboot.
+the install needs no controller reboot. Superseded in part (2026-11-09,
+#421 S-D4): the scene driver fills in the two hooks too. Hue Light
+devices still need no capability change, but Composer lists a scene's
+click rates only if `src/hue_scene/driver.xml` declares `click_rates` True
+(it declared False through 1.3) [verified: `docs/tap-stop-research-c4.md`
+§3.3, LV2 `_11-CLICKRATES`]: a capability change, so the install that
+brings it needs a controller reboot from System Manager. Without it a
+scene uses the 3000 ms defaults.
+
+### Scenes (2026-11-09, contract section 10.1)
+
+The owner extended tap ramps and tap stops to Hue Scene devices on
+2026-11-09, after the measurement showed that Hue fades a scene recall
+over a `duration` (S1), stops such a fade with a grouped_light
+`dimming_delta` stop, each lamp at its own level (S2), lets a hold start
+smoothly right after that stop (S3), and fades a grouped_light
+`on: false` with a duration, which the same stop interrupts with the
+lamps still lit (S4).
+
+- **Fade in (S-D1).** A top tap, or a toggle tap while the scene is off,
+  recalls the scene over `click up × (100 − level) / 100` (3 s from off at
+  the default rate). An ordinary scene already on at 100 does nothing at
+  Hue and reports CHANGED.
+- **Fade out (S-D2).** A bottom tap, or a toggle tap while it is on,
+  turns the scene's group off over `click down × level / 100`: the
+  grouped_light `on: false` with a duration (`HUE_SCENE_OFF` gains an
+  optional `duration`, S-D6).
+- **The stop (S-D3).** The grouped_light `dimming_delta` stop, sent as
+  `HUE_SCENE_DIM` with `direction = "stop"` and the estimate as `level`,
+  which the bridge writes only if Hue refuses the stop. Not a level
+  write: that would bring every lamp to one level and lose the scene's
+  look. The device reports its estimate as CHANGED at once; the bridge's
+  report of the real level arrives about 10 s after the fade's planned
+  end and goes through.
+- **The same machine (S-D4).** The double-tap window (D4), the stop on
+  the press (D5), `SET_BRIGHTNESS_STOP` and `STOP_SCENE_RAMP` (D7), the
+  reporting (D10) and other commands taking over (D11) work as on a
+  light; the scene driver implements `dev.ramp_active` and
+  `dev.on_ramp_stop`. A press held past `HOLD_AFTER_MS` during a fade
+  stops it, then holds from there (safe right after the stop, S3).
+- **Time-based scenes (S-D5).** Activate and deactivate take no duration
+  at Hue, so their taps stay instant, with nothing to ramp or stop: a
+  departure from Control4's guideline (contract section 9, row 1) forced
+  by Hue. The double-tap window still applies.
+- **Urgent (S-D6).** A keypad tap's recall and off go out at once, as a
+  light's tap start does (D12).
+
+The scene's click rates default to 3000 ms each and are the time of the
+whole range, as the light's are; a rate of 0 is an instant recall or off
+with nothing to stop. The scene rows of the rule ("level" is the scene's
+reported level):
+
+| State | Input | Action |
+|---|---|---|
+| idle, off | top tap or toggle tap | recall over `click up` (the whole range) |
+| idle, on below 100 | top tap | recall over `click up × (100 − level) / 100` |
+| idle, on at 100 | top tap | nothing at Hue; CHANGED with the level |
+| idle, on | bottom tap or toggle tap | group off over `click down × level / 100` |
+| idle, off | bottom tap | nothing |
+| any | a press within the window | ignored; a running fade goes on; held, a hold |
+| fading | a press outside the window, any button | grouped_light `dimming_delta` stop; the following click is swallowed |
+| fading | that press held past `HOLD_AFTER_MS` | stop, then hold from there |
+| fading | `SET_BRIGHTNESS_STOP` or `STOP_SCENE_RAMP` | stop |
+| fading | any brightness command | the command takes over; idle |
+| any, time-based scene | a tap | as before #421: start or stop the schedule at once |
 
 This section supersedes, above: the click rows of the Hue Light table and
 the 250 ms click rate defaults ("Driver behaviour"), and the light's
@@ -586,4 +686,7 @@ switch with the owner, the order and timing of a tap's and a double tap's
 commands, the keypad's real double-tap window, and whether the Brightness
 Stop link sends `SET_BRIGHTNESS_STOP`; then the release and D15's click
 rate read-back. The Composer steps are `docs/composer-checklist.md`
-section M (steps 88 to 95).
+section M (steps 88 to 95). Current (2026-11-09): the measurement is done
+(contract section 10: `"level"` with a 1 s glide, Z1 and Z2 passed, and
+the scene steps S1 to S4); the switch checks and the release remain, and
+section M now runs to step 98, with the scene steps 96 to 98.

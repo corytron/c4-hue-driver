@@ -1203,28 +1203,41 @@ Written on 2026-11-08 from the contract (`docs/tap-stop-design.md`,
 decisions D1 to D15 and the rule of its section 3), before the build; check
 every quoted text against the first build that brings it and paste what
 differs. The owner's manual says the same in prose: the Hue Light's own
-Documentation tab and the bridge's chapter 11. The build changes no
-`<capabilities>`, so the install needs no reboot. The dev-loop measurement
-of the contract's section 7 (`docs/tap-stop-research-hue.md` §9, L1 to L11
-and Z1 to Z7) comes first: it decides how a stop reaches Hue and whether a
-zone light ramps as one, and it is not a Composer step. The owner taps the
+Documentation tab and the bridge's chapter 11. The Hue Light changes no
+`<capabilities>`. A build that also lists click rates on the Hue Scene
+changes the scene's (`click_rates` True in its `driver.xml`;
+`docs/keypad-design.md`, "Tap ramps and tap stops (#421)"), and then the
+install needs the owner's reboot from System Manager before step 89. The
+dev-loop measurement of the contract's section 7
+(`docs/tap-stop-research-hue.md` §9, L1 to L11 and Z1 to Z7) came first;
+it is not a Composer step. Updated on 2026-11-09 from its results (the
+contract's section 10): a light's stop sends the device's estimate with a
+one-second glide, so the lamp halts and settles within a second and Hue
+reports the same level at once; zone and room lights ramp and stop as one
+group; and the owner extended tap fades and tap stops to Hue Scene
+devices, time-of-day scenes excepted (steps 96 to 98). The owner taps the
 switches and watches the lamps; the Windows session reads Composer, sets
 `Debug Mode`, makes the drags and pastes the Lua output. Each step takes
 under a minute.
 
 Setup: a Hue Light device for one lamp, bound to a switch run as a
 2-button keypad (steps 33, 34 and 39); a zone light of two or three lamps
-for step 94; the light's Default On Brightness at 100. Wait for each ramp
+for step 94; the light's Default On Brightness at 100; for steps 96 to 98,
+a Hue Scene device of an ordinary scene whose lamps sit at clearly
+different levels, and one of a time-of-day scene (the bridge's manual,
+9.11), each bound to a switch as in steps 33 and 34. Wait for each ramp
 to end, about 3 s, before the next tap unless a step says otherwise. Set
-the light's `Debug Mode` to On for steps 89 to 95 and back to Off at the
-end: its Lua tab then shows each command from the proxy as
+the device's `Debug Mode` to On for steps 89 to 98 (the light's, then the
+scene's) and back to Off at the end: its Lua tab then shows each command from the proxy as
 `ReceivedFromProxy <binding> <command>` and each notice to it as `-> proxy
 <command> <parameters>`.
 
 88. **Install, and the click rates read back** (contract D15 and section 7
     item 3). Install in place, all four files (step 1 or the deploy brief):
-    expect no "Restart Director?" and every Hue device on the new `Driver
-    Version`. Then, on every Hue Light device (single lights, zone lights
+    expect no "Restart Director?" unless the build lists click rates on the
+    Hue Scene (section intro; then answer Yes and the owner reboots the
+    controller from System Manager), and every Hue device on the new
+    `Driver Version`. Then, on every Hue Light device (single lights, zone lights
     and room lights), read Click Rate Up and Click Rate Down on the proxy's
     settings page above "Advanced Properties" (step 35) and paste both for
     each device as found. A device whose rates were never edited shows
@@ -1234,7 +1247,8 @@ end: its Lua tab then shows each command from the proxy as
     answers. If Composer refuses `3.000`, or shows a smaller value after
     Enter, stop there and paste it: issue #430's explicit maximum comes
     first (contract D15). Leave the hold rates (`5.000`) and the Default On
-    Brightness as they are.
+    Brightness as they are. On a Hue Scene device, once Composer lists
+    them, Click Rate Up and Click Rate Down read `3.000`; paste them.
     - **Done:** open.
 89. **A tap ramps, up and down** (contract D2 and D3; rule rows 1 to 6).
     Light off: tap top once. The lamp brightens smoothly to 100 % in about
@@ -1251,12 +1265,12 @@ end: its Lua tab then shows each command from the proxy as
     - **Done:** open.
 90. **A second tap stops** (contract D5; rule row "ramping, a press
     outside the window"). Light off: tap top, and about 1.5 s later tap top
-    again: the lamp stops where it is, about half bright, and stays on; the
-    Lua tab shows one `LIGHT_BRIGHTNESS_CHANGED` with the estimate (near
-    50) at the second tap and no second CHANGING. Paste the tile's level at
-    once, about 5 s later and about 15 s later: Hue's own report may move
-    it by a few points (the Hue research expects that report within about
-    10 s). A few seconds later tap bottom: it fades to off from there.
+    again: the lamp halts about half bright and settles there within a
+    second, with no visible jump, and stays on; the Lua tab shows one
+    `LIGHT_BRIGHTNESS_CHANGED` with the estimate (near 50) at the second
+    tap and no second CHANGING. Paste the tile's level at once, about 5 s
+    later and about 15 s later: with the glide Hue reports the same level
+    at once, so it should not move (paste it if it does). A few seconds later tap bottom: it fades to off from there.
     From 100 %: tap bottom, and about 1.5 s later tap **top**: it stops
     near half and does not turn round. Optional, the edge: from 100 %, tap
     bottom and tap again just before the end (about 2.8 s): the lamp stays
@@ -1294,7 +1308,7 @@ end: its Lua tab then shows each command from the proxy as
     tile's slider moves smoothly up to 100 % over about 3 s rather than
     jumping at the end (paste what it does). Tap top from off and again
     about 1.5 s later: the slider stops where the lamp stopped and stays
-    there, apart from the few points Hue's report may move it. A ramp from
+    there. A ramp from
     programming: with a program that sets the light to 100 % with a 10 s
     ramp, on an event the owner can fire (a spare keypad button's tap, for
     example; the Windows session's drags), fire it with the light off and
@@ -1308,11 +1322,11 @@ end: its Lua tab then shows each command from the proxy as
     and Z2). Bind a switch to a zone light of two or three lamps (step 34).
     Tap top from off: every lamp brightens together to 100 % over about
     3 s. Tap top from off and again about 1.5 s later: every lamp stops
-    near half, and the tile with them. Tap bottom: they fade to off. If the
-    lamps jump in about a second instead, or the second tap finds them at
-    the end already, say so: Hue does not keep the time for a whole group,
-    and the coordinator follows contract D14 (the measurement's Z1 and Z2
-    should have shown it first). A hold still moves the lamps one by one,
+    near half, settling within a second, and the tile with them. Tap
+    bottom: they fade to off. The measurement's Z1 and Z2 showed a zone
+    fading over its whole time and its stop smooth on every lamp (contract
+    section 10); if the lamps jump in about a second instead, or the second
+    tap finds them at the end already, paste what they did. A hold still moves the lamps one by one,
     as in step 37. Optional: the same on a room light.
     - **Done:** open.
 95. **The Brightness Stop link** (contract D7 and section 7 item 2;
@@ -1325,6 +1339,50 @@ end: its Lua tab then shows each command from the proxy as
     SET_BRIGHTNESS_STOP` (paste whatever arrives). Press the spare button
     again with the light still: nothing changes. Unbind the spare button
     afterwards.
+    - **Done:** open.
+96. **A scene tap fades in and out** (contract §10.1, S-D1, S-D2 and S-D6;
+    the house measurement S1 and S4, in the contract's section 10). On the switch bound to the ordinary scene's
+    device, with its room or zone off: tap top once. The scene fades in
+    over about 3 s (time it), each lamp to its own level of the scene, and
+    the top LED lights within about a second; the scene's Lua tab shows
+    one `-> proxy LIGHT_BRIGHTNESS_CHANGING` at the tap, with `RATE` near
+    3000, then one `LIGHT_BRIGHTNESS_CHANGED` at the end; paste both. Tap
+    bottom: the room or zone fades out to off over about 3 s from full, or
+    its share from a lower level (paste the tile's level before the tap
+    and the time). If a toggle button is bound: a tap fades the scene in
+    while it is off and out while it is on. Double tap top from off, well
+    within half a second: the scene fades in as for one tap and does not
+    stop. With the scene playing as designed, tap top: the lamps stay as
+    they are (paste the Lua lines).
+    - **Done:** open.
+97. **A scene stop keeps the look** (contract §10.1, S-D3 and S-D4;
+    measurement S2 to S4). Scene off: tap top, and about 1.5 s later tap
+    top again: every lamp halts partway, each at its own level, so the
+    lamps that are brighter in the scene stay brighter: the scene's look,
+    dimmer, not every lamp at one level. The Lua tab shows one
+    `LIGHT_BRIGHTNESS_CHANGED` with the estimate at the second tap and no
+    second CHANGING; paste the tile's level at once and about 15 s later
+    (Hue's report of the real level comes about 10 s after the fade would
+    have ended and may move it). With the scene playing: tap bottom, and
+    about 1.5 s later tap **top**: the lamps stop lit, dimmer, and do not
+    turn round. Scene off: tap top, and about 1 s later press and hold
+    top: the fade stops, then the lamps brighten smoothly from where they
+    stopped until you let go, with no jump first. Optional, the Brightness
+    Stop link: bind a spare button to the scene's "Brightness Stop" link
+    as in step 95, tap top from off and press the spare button about 1.5 s
+    later: the fade stops the same way, and the Lua tab shows
+    `ReceivedFromProxy <binding> SET_BRIGHTNESS_STOP`; unbind it
+    afterwards.
+    - **Done:** open.
+98. **A time-of-day scene stays instant** (contract §10.1, S-D5). On the
+    switch bound to the time-of-day scene's device, with its room or zone
+    off: tap top. The schedule starts within about a second with the time
+    slot's look, with no 3-second fade; paste the Lua lines. Tap top again
+    about 1.5 s later: there is no fade to stop, and the look stays the
+    time slot's (paste what the lamps do). Tap bottom: the schedule stops
+    and the room or zone turns off at once, with no fade. Double tap top
+    from off: the schedule starts once, and the second tap changes
+    nothing.
     - **Done:** open.
 
 ## What to paste back
