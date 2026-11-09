@@ -85,6 +85,8 @@ scenes.LEVEL_MIN_DELTA = 0.5
 -- one PUT carrying the latest parameters (docs/review-leftovers-design.md,
 -- #47 F9). The first recall of a quiet scene goes at once: no tap is slowed,
 -- and a keypad hold's recall at 1 % keeps its lead over the dim that follows.
+-- A keypad tap's recall (urgent) never waits in a window (#421 S-D1,
+-- scenes:skip_recall_window).
 scenes.RECALL_WINDOW_MS = 300
 
 -- recall.action values [community: openhue/aiohue; `active` verified on hardware].
@@ -161,9 +163,12 @@ scenes.REFRESH_CLEARS = { "id_v1" }
 --   project                  the project calls of docs/import-design.md §13 (defaults: bridge.project)
 --   lights                   the bridge.lights instance: its live `groups` cache, `reg:room_mapping()`,
 --                            `groups_loaded`
---   group_off(grouped_light_rid)   the coalesced grouped_light off of driver.lua (§5)
---   group_dim(grouped_light_rid, body)   the coalesced grouped_light dimming_delta PUT of driver.lua
---                            (docs/keypad-design.md "Scene hold-to-dim"); true when queued
+--   group_off(grouped_light_rid, opts?)   the coalesced grouped_light off of driver.lua (§5); opts, given
+--                            only for a timed or urgent off, is { rate = ms?, urgent = true? }: the
+--                            fade-out time (dynamics.duration) and a keypad tap's urgency (#421 S-D6)
+--   group_dim(grouped_light_rid, body, level?)   the coalesced grouped_light dimming_delta PUT of
+--                            driver.lua (docs/keypad-design.md "Scene hold-to-dim"); true when queued;
+--                            a tap stop's level, written only if Hue refuses the stop (#421 S-D3)
 --   group_set(grouped_light_rid, fields)  the coalesced absolute grouped_light PUT of driver.lua,
 --                            fields { brightness, rate } (docs/scene-dimmer-design.md); true when queued
 --   set_timer(delay_ms, fn)  C4:SetTimer(delay_ms, fn), an object with Cancel() [verified: API 34/_1]
@@ -1618,6 +1623,12 @@ function scenes:still_current(rid, entry, gen)
 	return self.recall_gen[rid] == gen
 end
 
+-- A keypad tap's recall or off: `urgent = "true"` (#421 S-D6, as D12 for
+-- the lights).
+local function is_urgent(params)
+	return params.urgent == true or params.urgent == "true"
+end
+
 -- Why a PUT failed, for a warning: "HTTP 404 (<hint>)", "HTTP <code>", or
 -- the transfer error.
 local function failure_text(r, hint)
@@ -1686,7 +1697,7 @@ end
 -- waiting recall must not overtake it: an OFF of the scene drops it (the OFF
 -- is the latest word), and any other command of the scenes (a dim, a level,
 -- another scene's recall or off) sends it first. So at most one recall waits
--- at a time.
+-- at a time. A keypad tap's recall does not wait (skip_recall_window).
 
 function scenes:open_recall_window(rid)
 	local window = {}
@@ -1748,6 +1759,25 @@ function scenes:release_recalls(keep)
 	end
 end
 
+-- #421 S-D1: a keypad tap's recall (urgent) goes at once even inside its
+-- scene's window. The tap starts a fade the device times from the press, and
+-- the owner's next press stops it there; a recall held back up to
+-- RECALL_WINDOW_MS would fade in late and the stop would catch it short of
+-- the device's estimate. The recall waiting in the window, if any, is
+-- dropped (the tap is the latest word, as the latest parameters win in a
+-- window anyway), the window closes, and the tap's PUT opens the next one, so
+-- recalls after it are paced as before. Recalls go straight to the bridge
+-- (ctx.http), not through a command queue, so there is no bucket to pass.
+function scenes:skip_recall_window(rid, window)
+	if window.timer then
+		window.timer:Cancel()
+	end
+	self.recall_windows[rid] = nil
+	if window.params then
+		self.ctx.log.debug("scenes: a waiting recall of %s dropped: a tap's recall replaces it (#421 S-D1)", rid)
+	end
+end
+
 -- An OFF of scene `rid`: the recall waiting in its window is dropped (the
 -- window stays, so recalls after the OFF are still paced).
 function scenes:drop_waiting_recall(rid)
@@ -1758,15 +1788,16 @@ function scenes:drop_waiting_recall(rid)
 	end
 end
 
--- HUE_SCENE_RECALL { rid, action?, duration?, brightness? }: PUT the recall
--- (a brightness 1-100 overrides the scene's as recall.dimming, a duration
--- in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with the state
--- the action produces (reason "recall") so the device settles even if the
--- stream item is missed; on failure a warning and STATE with the cached
--- status. A recall within RECALL_WINDOW_MS of the scene's last recall PUT
--- waits for the window to end (open_recall_window). A time-based scene is
--- activated instead (scenes:activate). Returns true when a PUT was started
--- or waits to be.
+-- HUE_SCENE_RECALL { rid, action?, duration?, brightness?, urgent? }: PUT
+-- the recall (a brightness 1-100 overrides the scene's as recall.dimming, a
+-- duration in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with
+-- the state the action produces (reason "recall") so the device settles even
+-- if the stream item is missed; on failure a warning and STATE with the
+-- cached status. A recall within RECALL_WINDOW_MS of the scene's last recall
+-- PUT waits for the window to end (open_recall_window), unless it is a
+-- keypad tap's (urgent = "true", #421 S-D1: skip_recall_window). A
+-- time-based scene is activated instead (scenes:activate). Returns true when
+-- a PUT was started or waits to be.
 function scenes:recall(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_RECALL")
@@ -1781,6 +1812,10 @@ function scenes:recall(params)
 	end
 	self:release_recalls(rid)
 	local window = self.recall_windows[rid]
+	if window and is_urgent(params) then
+		self:skip_recall_window(rid, window)  -- #421 S-D1
+		window = nil
+	end
 	if window then
 		window.params, window.device_id = params, entry.device_id
 		self:next_recall_gen(rid)  -- the answer of the PUT before it no longer reports
@@ -1809,9 +1844,10 @@ function scenes:send_recall(rid, entry, params)
 	local body = { recall = { action = action } }
 	local duration = util.positive(params.duration)
 	if duration then
-		-- [assumed: recall.duration in ms; confirm once on hardware] Clamped as
-		-- the dim and level durations are: "1e400" is inf, which no JSON body
-		-- can carry (code analysis 2026-10-22, F12).
+		-- recall.duration in ms fades the scene in over it [verified: house
+		-- 2026-11-09, #421 S1; a keypad tap's ramp, S-D1]. Clamped as the dim
+		-- and level durations are: "1e400" is inf, which no JSON body can carry
+		-- (code analysis 2026-10-22, F12).
 		body.recall.duration = math.floor(math.min(scenes.DIM_MAX_DURATION, duration))
 	end
 	local brightness = tonumber(params.brightness)
@@ -1902,12 +1938,46 @@ function scenes:deactivate(rid, entry)
 	return true
 end
 
--- HUE_SCENE_OFF { rid }: the scene's group grouped_light off through
--- ctx.group_off (coalesced per group by the driver), then STATE inactive. A
--- group without a grouped_light (an empty zone), an unknown group or a gone
--- scene report inactive without a call. A time-based scene is deactivated
--- first (scenes:deactivate). Returns true when group_off was called (for a
--- time-based scene: when the deactivate PUT was started).
+-- The group off's options for a HUE_SCENE_OFF (#421 S-D2, S-D6): `rate`,
+-- the duration in ms clamped as a recall's (send_recall), and `urgent`, each
+-- only when given; nil for neither, so a plain off stays group_off(grouped).
+local function off_options(params)
+	local opts = {}
+	local duration = util.positive(params.duration)
+	if duration then
+		opts.rate = math.floor(math.min(scenes.DIM_MAX_DURATION, duration))
+	end
+	if is_urgent(params) then
+		opts.urgent = true
+	end
+	if next(opts) == nil then
+		return nil
+	end
+	return opts
+end
+
+-- " over <n> ms (urgent)", or the part of it the options carry, for the log.
+local function off_text(opts)
+	if not opts then
+		return ""
+	end
+	return (opts.rate and string.format(" over %d ms", opts.rate) or "") .. (opts.urgent and " (urgent)" or "")
+end
+
+-- HUE_SCENE_OFF { rid, duration?, urgent? }: the scene's group grouped_light
+-- off through ctx.group_off (coalesced per group by the driver), then STATE
+-- inactive. A group without a grouped_light (an empty zone), an unknown
+-- group or a gone scene report inactive without a call. A time-based scene
+-- is deactivated first (scenes:deactivate). Returns true when group_off was
+-- called (for a time-based scene: when the deactivate PUT was started).
+--
+-- A keypad tap's off (#421 S-D2, S-D6) carries `duration` (ms) and
+-- `urgent = "true"`: the call becomes ctx.group_off(grouped, { rate, urgent
+-- }), and the group queue sends `on: false` with dynamics.duration, past its
+-- bucket. The lamps fade out over it, and a dimming_delta stop during the
+-- fade leaves them lit [verified: house 2026-11-09, #421 S4]. A time-based
+-- scene's off is unchanged (S-D5): its deactivate has no duration at Hue, so
+-- the options are ignored and its group goes off at once, as before.
 function scenes:off(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_OFF")
@@ -1916,7 +1986,12 @@ function scenes:off(params)
 	end
 	self:drop_waiting_recall(rid)
 	self:release_recalls(rid)
+	local opts = off_options(params)
 	if is_smart(entry) then
+		if opts and opts.rate then
+			self.ctx.log.debug("scenes: off of time-based %s (device %d): no fade for a time-based scene; ignored "
+				.. "duration %d (#421 S-D5)", self:entry_label(rid, entry), entry.device_id, opts.rate)
+		end
 		return self:deactivate(rid, entry)
 	end
 	self:next_recall_gen(rid)
@@ -1929,9 +2004,9 @@ function scenes:off(params)
 		local group = self:groups():group(scene.group_rid)
 		local grouped = group and group.grouped_light_rid or nil
 		if grouped then
-			self.ctx.log.info("scenes: off for %s (device %d): grouped_light %s off", self:entry_label(rid, entry),
-				entry.device_id, tostring(grouped):sub(1, 8))
-			if not self.ctx.group_off(grouped) then
+			self.ctx.log.info("scenes: off for %s (device %d): grouped_light %s off%s", self:entry_label(rid, entry),
+				entry.device_id, tostring(grouped):sub(1, 8), off_text(opts))
+			if not self.ctx.group_off(grouped, opts) then
 				-- Nothing queued (not paired): the scene stays as it is and the
 				-- device hears the truth [code analysis 2026-10-22, F4].
 				self.ctx.log.warn("scenes: off for %s (device %d): nothing queued; state unchanged",
@@ -1950,15 +2025,36 @@ function scenes:off(params)
 	return called
 end
 
--- HUE_SCENE_DIM { rid, device_id, direction = up | down | stop, duration? }:
--- one relative dimming_delta on the scene's group grouped_light through
--- ctx.group_dim (coalesced per group by the driver), so the scene's colours
--- and per-light differences are kept. up/down run 0 -> 100 % over `duration`
--- ms (clamped to 0..DIM_MAX_DURATION, default DIM_DEFAULT_DURATION), stop
--- ends it [verified on hardware 2026-10-23: Hue accepts `dimming_delta` with
--- `dynamics` and the `stop` action on a grouped_light]. No STATE is sent. The
--- same for a time-based scene: a whole-room dim leaves it running (V11,
--- docs/smart-scenes-design.md Decision 6). Returns true when queued.
+-- A tap stop's `level` (#421 S-D3): a number clamped to 0..100, else nil.
+local function stop_level(value)
+	local level = tonumber(value)
+	if not level or level ~= level then
+		return nil
+	end
+	return math.max(0, math.min(100, level))
+end
+
+-- HUE_SCENE_DIM { rid, device_id, direction = up | down | stop, duration?,
+-- level? }: one relative dimming_delta on the scene's group grouped_light
+-- through ctx.group_dim (coalesced per group by the driver), so the scene's
+-- colours and per-light differences are kept. up/down run 0 -> 100 % over
+-- `duration` ms (clamped to 0..DIM_MAX_DURATION, default
+-- DIM_DEFAULT_DURATION), stop ends it [verified on hardware 2026-10-23: Hue
+-- accepts `dimming_delta` with `dynamics` and the `stop` action on a
+-- grouped_light]. No STATE is sent. The same for a time-based scene: a
+-- whole-room dim leaves it running (V11, docs/smart-scenes-design.md
+-- Decision 6). Returns true when queued.
+--
+-- #421 S-D3: a keypad tap's stop is this stop with the device's estimate as
+-- `level`. It halts a tap's fade-in (a recall with a duration) or fade-out
+-- (an off with one) with each lamp where it is [verified: house 2026-11-09,
+-- S2, S4]. The level goes to ctx.group_dim as its third argument; with no
+-- hold running on the group, group_hold passes the stop to the group queue
+-- unchanged with it (G7), and the queue writes it only if Hue refuses the
+-- stop: a level write would bring every lamp to one level and lose the
+-- scene's look. group_level is left alone: after a stop the bridge keeps the
+-- fade's target as the group's level until it reads the lamps again (L2),
+-- and a slider move measured from that is what Hue applies it to.
 function scenes:dim(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_DIM")
@@ -1983,9 +2079,10 @@ function scenes:dim(params)
 			self:entry_label(rid, entry), entry.device_id)
 		return false
 	end
-	local body
+	local body, level
 	if direction == "stop" then
 		body = { dimming_delta = { action = "stop" } }
+		level = stop_level(params.level)
 	else
 		local duration = tonumber(params.duration)
 		if not duration or duration ~= duration then
@@ -1994,10 +2091,10 @@ function scenes:dim(params)
 		duration = math.floor(math.max(0, math.min(scenes.DIM_MAX_DURATION, duration)))
 		body = { dimming_delta = { action = direction, brightness_delta = 100 }, dynamics = { duration = duration } }
 	end
-	self.ctx.log.info("scenes: dim %s %s (device %d): grouped_light %s", self:entry_label(rid, entry), direction,
-		entry.device_id, tostring(grouped):sub(1, 8))
+	self.ctx.log.info("scenes: dim %s %s (device %d): grouped_light %s%s", self:entry_label(rid, entry), direction,
+		entry.device_id, tostring(grouped):sub(1, 8), level and (", " .. level_text(level) .. " % if refused") or "")
 	self:release_recalls()  -- a recall still waiting goes before the dim
-	if self.ctx.group_dim(grouped, body) ~= true then
+	if self.ctx.group_dim(grouped, body, level) ~= true then
 		self.ctx.log.warn("scenes: dim of %s (device %d): nothing queued", self:entry_label(rid, entry), entry.device_id)
 		return false
 	end

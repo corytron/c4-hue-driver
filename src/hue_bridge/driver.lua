@@ -475,10 +475,15 @@ end
 -- grouped_light PUT goes through the group queue (one coalescing entry per
 -- group, so a "room off" reaching several devices sends one PUT).
 local group_hooks = {
-	-- Scene OFF / zone light OFF.
-	group_off = function(grouped_light_rid)
+	-- Scene OFF / zone light OFF. A scene's keypad tap fades the group out
+	-- over `opts.rate` ms, past the request bucket (#421 S-D2, S-D6).
+	group_off = function(grouped_light_rid, opts)
 		if state.group_queue then
-			state.group_queue:set(grouped_light_rid, { on = false })
+			local fields = { on = false }
+			if type(opts) == "table" then
+				fields.rate, fields.urgent = opts.rate, opts.urgent
+			end
+			state.group_queue:set(grouped_light_rid, fields)
 			return true
 		end
 		return false
