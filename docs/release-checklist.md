@@ -282,7 +282,7 @@ development here is finished.
    (`docs/changelog-design.md`): before dispatching, make sure its
    `## Unreleased` entry lists what this build changes (a run with an empty
    entry fails), and for the first release of a new major version that the
-   codename is agreed (Andor rule). Check the release page: eight assets
+   codename is in `.github/codenames.json` (#396). Check the release page: eight assets
    (four since 1.1 added `hue_motion.c4z`),
    the title `<version> "<codename>"`, the notes' first heading with this
    build. After the release, the desired-state PR also runs
