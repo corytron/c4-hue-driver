@@ -1065,6 +1065,77 @@ describe("bridge.zone_lights", function()
 			assert.is_false(Z:set({ rid = DOWNSTAIRS, on = "true" }))
 			assert.is_true(saw_log("no group_set in ctx"))
 		end)
+
+		it("passes a tap's urgent on as urgent = true and says so in its log line (#421 D12)", function()
+			add_downstairs()
+			assert.is_true(Z:set({ rid = DOWNSTAIRS, on = "true", brightness = "100", rate = "3000", urgent = "true" }))
+			assert.same({ on = true, brightness = 100, rate = 3000, urgent = true }, sets[1].fields)
+			assert.is_true(saw_log("grouped_light 8e7d6c5b on=true brightness=100 x=nil y=nil mirek=nil rate=3000 urgent"))
+			assert.is_true(Z:set({ rid = DOWNSTAIRS, on = true, brightness = "42", rate = "0", urgent = true }))
+			assert.same({ on = true, brightness = 42, rate = 0, urgent = true }, sets[2].fields, "a stop sent as a level")
+			logged = {}
+			assert.is_true(Z:set({ rid = DOWNSTAIRS, brightness = "50", urgent = "false" }))
+			assert.same({ brightness = 50 }, sets[3].fields, "anything else is not urgent")
+			assert.is_false(saw_log("urgent"))
+			assert.is_false(Z:set({ rid = DOWNSTAIRS, urgent = "true" }), "urgent alone is nothing to set")
+			assert.is_true(saw_log("carries nothing to set"))
+			assert.equal(3, #sets)
+		end)
+
+		-- #421 D14: a zone light's tap is the same code path as a single
+		-- light's, here on the real group queue (one PUT a second, a burst of
+		-- three, as driver.lua's new_group_queue) and the real group_hold.
+		it("sends a tap's start past the group bucket, and its stop as a dimming_delta stop or, unsent, a level (#421)",
+			function()
+				add_downstairs()
+				local commands = require("bridge.commands")
+				local group_hold = require("bridge.group_hold")
+				local puts = {}
+				local q = commands.new({ label = "grouped_light", rate_per_sec = 1, burst = 3,
+					send = function(rid, body, cb) puts[#puts + 1] = { rid = rid, body = body, done = cb } end })
+				local function group_set(rid, fields)
+					q:set(rid, fields)
+					return true
+				end
+				local gh = group_hold.new({ group_set = group_set, log = log })
+				Z.ctx.group_set = group_set
+				Z.ctx.group_dim = function(rid, body, level) return gh:dim(rid, body, level) end
+				local function flush()
+					c4.fire_timers_of(commands.DEBOUNCE_MS)
+				end
+
+				-- A slider drag on other groups has emptied the group bucket.
+				for i = 1, 3 do
+					q:set("other" .. i, { brightness = 10 * i })
+				end
+				flush()
+				assert.equal(3, #puts)
+
+				-- The tap's start goes at once.
+				assert.is_true(Z:set({ rid = DOWNSTAIRS, on = "true", brightness = "100", rate = "3000", urgent = "true" }))
+				flush()
+				assert.equal(4, #puts, "the tap's start did not wait for a token")
+				assert.equal(G_DOWNSTAIRS, puts[4].rid)
+				assert.same({ on = { on = true }, dimming = { brightness = 100 }, dynamics = { duration = 3000 } },
+					puts[4].body)
+				puts[4].done({ ok = true, code = 200 })
+
+				-- Its stop, after the start went out, with no hold running
+				-- (group_hold G7): a dimming_delta stop, at once.
+				assert.is_true(Z:dim({ rid = DOWNSTAIRS, direction = "stop", level = "61" }))
+				flush()
+				assert.equal(5, #puts)
+				assert.same({ dimming_delta = { action = "stop" } }, puts[5].body)
+				puts[5].done({ ok = true, code = 200 })
+
+				-- A start and a stop that meet in the queue: the stop's level at
+				-- once, and nothing ramps (D13).
+				assert.is_true(Z:set({ rid = DOWNSTAIRS, brightness = "0", rate = "2500", urgent = "true" }))
+				assert.is_true(Z:dim({ rid = DOWNSTAIRS, direction = "stop", level = "35" }))
+				flush()
+				assert.equal(6, #puts)
+				assert.same({ on = { on = true }, dimming = { brightness = 35 } }, puts[6].body)
+			end)
 	end)
 
 	describe("dim (HUE_DIM)", function()
