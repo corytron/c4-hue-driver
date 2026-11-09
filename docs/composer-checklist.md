@@ -479,6 +479,9 @@ Setup (done for Shine on the Bedside Lights Switch):
     went out over 40 ms; Composer kept the value once the drivers answered
     with the bare value (rounds 41 and 42, `common/device.lua`). **Open**: a
     changed rate on a physical keypad.
+    Superseded (2026-11-08, #421): the click rates default to 3 s each and
+    are the time of the whole range; step 88 reads them back on every Hue
+    Light device.
 
 A Hue Scene on the keypad (Shine):
 
@@ -522,6 +525,9 @@ A Hue Light on a keypad (needs a light; the Floor Lamp Switch is free):
     or from any lower level, and the top LED lights. Tap bottom: off over
     250 ms, and the bottom LED lights. (100 % and 250 ms are the defaults;
     since #59 they are the light's own On preset and click rates, step 35.)
+    Superseded (2026-11-08, #421): a tap ramps over the click rate, now
+    3 s for the whole range by default, and a later tap stops the ramp;
+    section M (steps 88 to 95).
 41. With the light on, hold top: it brightens until you let go (the full
     range in about 5 s) and stays at the level reached; the tile settles on
     the level Hue reports, or on the driver's estimate a second later. Hold
@@ -1189,6 +1195,136 @@ forget or rename say so and undo what they did.
     30 s: State "Closed", Motion Test Off +1, `Last Action` "Test: no
     motion sent; back to Hue's state, the test is over"; click once more and wait 40 s: State back
     to Hue's (Closed in an empty room) 30 s after the click.
+    - **Done:** open.
+
+## M. Tap ramps and tap stops (#421)
+
+Written on 2026-11-08 from the contract (`docs/tap-stop-design.md`,
+decisions D1 to D15 and the rule of its section 3), before the build; check
+every quoted text against the first build that brings it and paste what
+differs. The owner's manual says the same in prose: the Hue Light's own
+Documentation tab and the bridge's chapter 11. The build changes no
+`<capabilities>`, so the install needs no reboot. The dev-loop measurement
+of the contract's section 7 (`docs/tap-stop-research-hue.md` §9, L1 to L11
+and Z1 to Z7) comes first: it decides how a stop reaches Hue and whether a
+zone light ramps as one, and it is not a Composer step. The owner taps the
+switches and watches the lamps; the Windows session reads Composer, sets
+`Debug Mode`, makes the drags and pastes the Lua output. Each step takes
+under a minute.
+
+Setup: a Hue Light device for one lamp, bound to a switch run as a
+2-button keypad (steps 33, 34 and 39); a zone light of two or three lamps
+for step 94; the light's Default On Brightness at 100. Wait for each ramp
+to end, about 3 s, before the next tap unless a step says otherwise. Set
+the light's `Debug Mode` to On for steps 89 to 95 and back to Off at the
+end: its Lua tab then shows each command from the proxy as
+`ReceivedFromProxy <binding> <command>` and each notice to it as `-> proxy
+<command> <parameters>`.
+
+88. **Install, and the click rates read back** (contract D15 and section 7
+    item 3). Install in place, all four files (step 1 or the deploy brief):
+    expect no "Restart Director?" and every Hue device on the new `Driver
+    Version`. Then, on every Hue Light device (single lights, zone lights
+    and room lights), read Click Rate Up and Click Rate Down on the proxy's
+    settings page above "Advanced Properties" (step 35) and paste both for
+    each device as found. A device whose rates were never edited shows
+    `3.000` for both; any other value was stored by an earlier edit (the
+    zone light of step 42 ran at 0.75 s). Set each one that differs to
+    `3.000` and press Enter: Composer keeps `3.000` once the driver
+    answers. If Composer refuses `3.000`, or shows a smaller value after
+    Enter, stop there and paste it: issue #430's explicit maximum comes
+    first (contract D15). Leave the hold rates (`5.000`) and the Default On
+    Brightness as they are.
+    - **Done:** open.
+89. **A tap ramps, up and down** (contract D2 and D3; rule rows 1 to 6).
+    Light off: tap top once. The lamp brightens smoothly to 100 % in about
+    3 s (time it), the top LED lights within about a second, and the Lua
+    tab shows one `-> proxy LIGHT_BRIGHTNESS_CHANGING` at the tap, with
+    `LIGHT_BRIGHTNESS_TARGET=100` and `RATE` near 3000, then one
+    `LIGHT_BRIGHTNESS_CHANGED` with 100 at the end; paste both. Tap bottom:
+    it fades to off in about 3 s, and the bottom LED lights at the end. Set
+    the light to 50 % with the slider and tap bottom: off in about 1.5 s.
+    Set the Default On Brightness to 40 (Enter), the light to 80 %, and tap
+    top: it dims to 40 % in about 1.2 s; tap top again: nothing changes (a
+    `LIGHT_BRIGHTNESS_CHANGED` with 40, no CHANGING). Put the Default On
+    Brightness back to 100. With the light off, tap bottom: nothing.
+    - **Done:** open.
+90. **A second tap stops** (contract D5; rule row "ramping, a press
+    outside the window"). Light off: tap top, and about 1.5 s later tap top
+    again: the lamp stops where it is, about half bright, and stays on; the
+    Lua tab shows one `LIGHT_BRIGHTNESS_CHANGED` with the estimate (near
+    50) at the second tap and no second CHANGING. Paste the tile's level at
+    once, about 5 s later and about 15 s later: Hue's own report may move
+    it by a few points (the Hue research expects that report within about
+    10 s). A few seconds later tap bottom: it fades to off from there.
+    From 100 %: tap bottom, and about 1.5 s later tap **top**: it stops
+    near half and does not turn round. Optional, the edge: from 100 %, tap
+    bottom and tap again just before the end (about 2.8 s): the lamp stays
+    on, at 1 % or more.
+    - **Done:** open.
+91. **A double tap does nothing** (contract D4 and section 7 item 2;
+    `docs/tap-stop-research-c4.md` §9 items 1 and 2). Light off: tap top
+    twice quickly, well within half a second: the lamp ramps to 100 % as
+    for one tap and does not stop. Paste every `ReceivedFromProxy` line of
+    a single tap and of the double tap, in order and with their times: the
+    order of `DO_PUSH`, `DO_RELEASE` and `DO_CLICK`, the gap between the
+    two pushes, and any command not named here. With the light on, double
+    tap bottom: it fades to off and does not stop. Light off: tap top, and
+    tap again about 0.8 s later: outside the window, so this one stops the
+    ramp. The keypad's own window: put a program on the switch's
+    double-tap event for its top button (a variable change will do; the
+    Windows session's drags, `docs/composer-remote.md`), double tap with
+    growing gaps and note the longest gap that still fires it (expected
+    about half a second; the driver's window is 600 ms). Note whether
+    `DO_CLICK` comes later on the button with double-tap programming than
+    without, and that the lamp ramps on while the program runs. Remove the
+    program afterwards.
+    - **Done:** open.
+92. **A hold during a ramp** (rule row "that press held past
+    `HOLD_AFTER_MS`"). Light off: tap top, and about 1 s later press and
+    hold bottom: the lamp stops, then dims from there while held, and stays
+    where you let go, never off. From 100 %: tap bottom, and about 1 s
+    later hold top: it stops, then brightens until you let go. A tap on the
+    same button within a second of letting go is ignored, as in step 41.
+    Paste the Lua lines from the second press to the release.
+    - **Done:** open.
+93. **The tile moves and freezes; ramps from elsewhere stop too** (contract
+    D6, D10 and D11; section 9 rows 10, 11 and 13). With the light's room
+    open in the Control4 app or on a touch screen, tap top from off: the
+    tile's slider moves smoothly up to 100 % over about 3 s rather than
+    jumping at the end (paste what it does). Tap top from off and again
+    about 1.5 s later: the slider stops where the lamp stopped and stays
+    there, apart from the few points Hue's report may move it. A ramp from
+    programming: with a program that sets the light to 100 % with a 10 s
+    ramp, on an event the owner can fire (a spare keypad button's tap, for
+    example; the Windows session's drags), fire it with the light off and
+    tap top on the light's switch about 3 s later: the lamp and the tile
+    stop near 30 %. Fire it again and, during the ramp, pick a colour on
+    the tile if it has a colour wheel: the driver keeps the ramp going
+    (whether Hue does after a colour change has not been measured; paste
+    what the lamp does). Remove the program afterwards.
+    - **Done:** open.
+94. **A zone light** (contract D14; `docs/tap-stop-research-hue.md` §9, Z1
+    and Z2). Bind a switch to a zone light of two or three lamps (step 34).
+    Tap top from off: every lamp brightens together to 100 % over about
+    3 s. Tap top from off and again about 1.5 s later: every lamp stops
+    near half, and the tile with them. Tap bottom: they fade to off. If the
+    lamps jump in about a second instead, or the second tap finds them at
+    the end already, say so: Hue does not keep the time for a whole group,
+    and the coordinator follows contract D14 (the measurement's Z1 and Z2
+    should have shown it first). A hold still moves the lamps one by one,
+    as in step 37. Optional: the same on a room light.
+    - **Done:** open.
+95. **The Brightness Stop link** (contract D7 and section 7 item 2;
+    `docs/tap-stop-research-c4.md` §9 item 3). In Connections, select the
+    Hue Light and paste where Composer lists its "Brightness Stop" link
+    (the proxy creates it; `docs/keypad-design.md`, "Hardware findings").
+    Bind a spare keypad button to it, as in step 34. Tap top on the light's
+    switch from off and press the spare button about 1.5 s later: the lamp
+    stops where it is, and the Lua tab shows `ReceivedFromProxy <binding>
+    SET_BRIGHTNESS_STOP` (paste whatever arrives). Press the spare button
+    again with the light still: nothing changes. Unbind the spare button
+    afterwards.
     - **Done:** open.
 
 ## What to paste back

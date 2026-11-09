@@ -14,6 +14,16 @@ listed.
 
 ## Unreleased
 
+### Changed
+- Keypad taps on a Hue Light, zone light or room light now work as on a
+  Control4 dimmer: a tap ramps the light to its Default On Brightness or to
+  off, over 3 seconds for the whole range by default (was 250 ms), and a tap
+  on any of its buttons while it ramps stops it where it is. A second tap
+  within about 0.6 s is part of a double tap and changes nothing, on Hue
+  Scene devices too. Ramps from programming, Navigator and lighting scenes
+  stop the same way, and Control4's stop command and the Brightness Stop
+  link now stop the lamp (#421).
+
 ## 1.3 "Kerri", build 539 (2026-11-08)
 
 ### Changed

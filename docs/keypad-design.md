@@ -23,6 +23,12 @@ Corrected (2026-10-25, #249): the scene holds "verified" above only
 stopped; they never ramped. From 1.3 a hold on a scene, zone light or
 room light no longer reaches Hue as one grouped_light dim: see "Group
 holds (1.3, #249)" at the end and `docs/group-hold-design.md`.
+Current (2026-11-08, #421): a tap on a Hue Light starts a ramp over the
+click rate, now the time of the whole range (3000 ms by default), and a
+later tap on any of its buttons stops it where it is; a second press within
+600 ms of the previous one on the same button is part of a double tap and
+does nothing, on lights and scenes alike. See "Tap ramps and tap stops
+(#421)" at the end and [the contract](tap-stop-design.md).
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
@@ -84,7 +90,10 @@ the button colours are one module shared by both drivers,
 `load_settings`, `update_leds`). Each driver keeps what a tap and a hold
 do, through the hooks `dev.on_click`, `dev.on_hold` and `dev.on_finish`.
 The light takes the preset, click and hold settings, the scene the hold
-rates only.
+rates only. Current (2026-11-08, #421): the machine also keeps the time of
+each button's last press for a 600 ms double-tap window (`DOUBLE_TAP_MS`)
+and has two more hooks, `dev.ramp_active` and `dev.on_ramp_stop`, which
+only the light fills in ("Tap ramps and tap stops (#421)").
 
 Hue Light (`src/hue_light/driver.lua`):
 
@@ -98,9 +107,18 @@ Hue Light (`src/hue_light/driver.lua`):
 | release after hold | Current: `HUE_DIM stop` with the estimate as `level` (written only if the bridge refuses the stop). Originally: the estimate written as the brightness |
 | release-as-click after a ramp started | same as stop; a click on the same button within 1 s after a hold's release is ignored |
 
+Superseded (2026-11-08, #421): the three click rows. A click starts a ramp
+the light driver keeps, to the preset (from below or from above) or to 0,
+over `click rate × distance / 100`; a press outside the double-tap window
+while it runs stops it, and a press inside the window does nothing. The
+rule table is in "Tap ramps and tap stops (#421)".
+
 Settings persist per device (`preset_level`, `click_rate_up`,
 `click_rate_down`, `hold_rate_up`, `hold_rate_down`); defaults 100 %,
-250 ms, 250 ms, 5000 ms, 5000 ms. `ON` and `TOGGLE` from programming keep
+250 ms, 250 ms, 5000 ms, 5000 ms. Superseded (2026-11-08, #421 D3): the
+click rates default to 3000 ms each and are the time of the whole range,
+as the hold rates are; a stored click rate keeps its number and takes the
+new meaning (D15). `ON` and `TOGGLE` from programming keep
 going to 100 % (unchanged; the preset is a keypad matter until the on-mode
 preset API is adopted). Superseded (2026-11-08, #233, owner's Option 1):
 `ON` and `TOGGLE` from off go to the On preset too, at rate 0 (the click
@@ -135,7 +153,10 @@ from the keypad's own row (`docs/composer-remote.md`, "Learned
 ## Hardware findings (2026-10-22, builds 144 and 146 installed)
 
 The proxy creates only the "Brightness Stop" and "Color Stop" Button Links
-from the capabilities; the Top, Bottom and Toggle Button Links are
+from the capabilities (current, 2026-11-08, #421 D7: the light's
+`SET_BRIGHTNESS_STOP` now stops a running ramp at Hue; that the Brightness
+Stop link sends it is **[assumed]** until the house check of the contract's
+section 7); the Top, Bottom and Toggle Button Links are
 connections the **protocol driver declares itself** (ids 200, 201, 202,
 class BUTTON_LINK, provider side, shown under the light's Control Outputs
 in Composer), and a bound keypad button delivers `DO_PUSH`, `DO_RELEASE`
@@ -272,6 +293,11 @@ the same fields (`docs/group-hold-design.md` G1 to G6a).
   `src/hue_scene/driver.lua:start_smart_hold`).
 - A click arriving within 1 s after a hold's release on the same button is
   ignored (some keypads may send it).
+  Current (2026-11-08, #421 D1, D4): a press within 600 ms of the previous
+  press on the same button is part of a double tap and its click is
+  swallowed, so a double tap on toggle leaves the scene on; held, it is a
+  hold as usual. Scene taps stay a recall or an off, with no ramp to
+  stop.
 
 ### Keypad LEDs (both device drivers) [verified: Snap One's
 `drivers-template-code-public` `c4hook_light_v2.lua`]
@@ -436,3 +462,128 @@ smoothly from 1 % (A1), and that a hold on a room whose time-based scene
 runs leaves the schedule running (G6a). A per-light hold on an ordinary,
 static scene may still end Hue's "active" for it, as any change to one
 light does; the scene device's on rule keeps its tile on.
+
+## Tap ramps and tap stops (#421)
+
+Owner's request (2026-11-08): a keypad tap on a Hue light behaves like a
+Control4 dimmer on a regular bulb, beside the 1.3 holds. A tap ramps from
+wherever the light is, the top button to the On preset and the bottom to
+off; a later tap stops the ramp where it is; that later tap has to come
+after Control4's double-tap window, because a double tap is its own event
+and can trigger programming; and the default click rates are slow enough
+to catch the light on the way. The same day the owner made Control4's
+lighting guidance a standing rule (#422), which this design follows row by
+row (contract section 9).
+
+The contract is [`tap-stop-design.md`](tap-stop-design.md); the research
+behind it is [the Control4 side](tap-stop-research-c4.md) and
+[the Hue side](tap-stop-research-hue.md). Written 2026-11-08, before the
+build; nothing in it has been seen on the house yet.
+
+Decisions, in short (D numbers are the contract's):
+
+- **Devices (D1).** Hue Light devices (single, zone and room lights) get
+  tap ramps and tap stops. Hue Scene devices get only the double-tap
+  window; a scene tap stays a recall or an off. Hue Motion has no buttons.
+- **Where a tap goes (D2).** Top to the On preset (Default On Brightness,
+  #233), down to it from above; bottom to off; toggle by the on state.
+- **Speed (D3).** Click rates are the time of the whole range, as hold
+  rates are: a tap ramp lasts `click rate × distance / 100`. Click Rate Up
+  and Down default to 3000 ms (were 250 ms); hold rates stay 5000 ms, so
+  Control4's "Fast" presets stay faster than its "Slow" ones.
+- **Double-tap window (D4).** A press within `DOUBLE_TAP_MS` = 600 ms of the
+  previous press on the same button is part of a double or triple tap: it
+  starts and stops nothing, a running ramp goes on, it is still echoed, and
+  held past `HOLD_AFTER_MS` it is a hold. Fixed in the code, no property.
+  The first tap acts at once; waiting out the window would delay every tap.
+- **The stop (D5).** While a ramp runs, the **press** of any button outside
+  the window stops it where it is, the other button and the toggle
+  included: the light never turns round. The click after that press is
+  swallowed. Held past `HOLD_AFTER_MS`, the press stops the ramp and then
+  holds from the stopped level.
+- **What a tap stops (D6).** Any brightness ramp the light driver runs with
+  a time above 0: a tap ramp, and a timed target from programming,
+  Navigator or lighting scenes. Holds keep their own machine (#249).
+- **Stop entry points (D7).** `SET_BRIGHTNESS_STOP` and `STOP_SCENE_RAMP`
+  stop a running ramp at Hue as a tap does. Until #421 they only reported
+  the cached level while the lamp went on to the end, because the light
+  driver had no way to stop a ramp at Hue.
+- **At Hue (D8, D9).** The start is the absolute target with a duration
+  (`HUE_SET` with `brightness` and `rate`, as a tap sent before); the stop
+  is `HUE_DIM` with `direction = "stop"` and the device's estimate as
+  `level`, which the bridge sends as `dimming_delta` stop and writes as a
+  level only if Hue refuses the stop. If the house measurement shows that
+  Hue does not stop an absolute transition, `STOP_MODE = "level"` in
+  `src/hue_light/driver.lua` sends the estimate as an absolute level
+  instead (option C). One constant, no property.
+- **Reporting (D10).** `LIGHT_BRIGHTNESS_CHANGING` at the start (current,
+  target, ramp time), one `LIGHT_BRIGHTNESS_CHANGED` at the stop (the
+  estimate) or at the end; bridge level reports are held back while the
+  ramp runs, because Hue may report the target at once. An off report or a
+  change from elsewhere goes through and ends the ramp; after a stop, the
+  bridge's next report corrects the estimate.
+- **Other commands (D11).** Any brightness command replaces the ramp; a
+  colour command does not end it.
+- **Queues (D12, D13).** A tap's start and a `"level"` stop go out at once,
+  past the request bucket (`HUE_SET` with `urgent = "true"`), as a hold's
+  start and stop do. A stop that finds its start still unsent in the
+  bridge's queue replaces both with the stop's level, rate 0.
+- **Zone and room lights (D14).** The same path to the grouped_light,
+  through `zone_lights` and `group_hold`. Whether a grouped_light keeps an
+  absolute duration and honours the stop is measured first (Hue §9, Z1 and
+  Z2); if not, a group tap stays a quick change and a follow-up issue
+  builds group tap ramps from group_hold's per-lamp split.
+- **Stored click rates (D15).** A changed default does not reach a stored
+  value, so the install brief has the Windows session read every Hue Light
+  device's Click Rate Up and Down and set any that differ to 3000 ms; that
+  also shows whether Composer accepts 3000 ms (#430).
+
+The rule ("within the window": a press within 600 ms of the previous press
+on the same button; "ramping": a ramp of D6 runs; "at the preset": within
+1 point):
+
+| State | Input | Action |
+|---|---|---|
+| idle, off | top tap or toggle tap | ramp to the preset over `click up × preset / 100` |
+| idle, on below the preset | top tap | ramp up to the preset over `click up × distance / 100` |
+| idle, on above the preset | top tap | ramp down to the preset over `click down × distance / 100` |
+| idle, at the preset | top tap | nothing at Hue; CHANGED with the level |
+| idle, on | bottom tap or toggle tap | ramp to off over `click down × level / 100` |
+| idle, off | bottom tap | nothing |
+| any | a press within the window | ignored; a running ramp goes on; held, a hold |
+| ramping | a press outside the window, any button | stop; the following click is swallowed |
+| ramping | that press held past `HOLD_AFTER_MS` | stop, then hold from the stopped level (top up, bottom down, toggle by the on state) |
+| ramping | the ramp's time runs out | idle; the end level from Hue's report, or the target after the fallback time |
+| ramping | `SET_BRIGHTNESS_STOP` or `STOP_SCENE_RAMP` | stop |
+| ramping | any brightness command | the command takes over; idle |
+| ramping | a colour command | the ramp goes on |
+| holding | anything | unchanged (#249) |
+| idle, within 1 s after a hold's release, same button | click | ignored (unchanged) |
+
+A click rate of 0 is an instant change with nothing to stop, as before. A
+stop very close to off (an estimate below 1) stops at 1 %: the light stays
+on, as a dimmer stopped near the bottom does.
+
+The split in the code (contract section 4): `src/common/device.lua` keeps
+the window and calls the two new hooks, whose defaults (`ramp_active`
+false, `on_ramp_stop` empty) leave a scene with the window alone;
+`src/hue_light/driver.lua` keeps the ramp record (`from`, `to`, `time`,
+`started`, `tap`), the estimate and `stop_ramp`; the bridge's queues carry
+`urgent` and D13. No `<capabilities>` change: `click_rates`,
+`supports_target` and `supports_brightness_stop` were declared already, so
+the install needs no controller reboot.
+
+This section supersedes, above: the click rows of the Hue Light table and
+the 250 ms click rate defaults ("Driver behaviour"), and the light's
+`SET_BRIGHTNESS_STOP` reporting only the cached level ("Hardware
+findings"). Holds, the 1 s click guard after a hold, the LEDs and the
+button colours are unchanged.
+
+To verify on the house (contract section 7): first the dev-loop
+measurement (Hue §9, L1 to L11 on one lamp, Z1 to Z7 on one zone), which
+decides `STOP_MODE` and whether zone and room lights ramp as one; then, at a
+switch with the owner, the order and timing of a tap's and a double tap's
+commands, the keypad's real double-tap window, and whether the Brightness
+Stop link sends `SET_BRIGHTNESS_STOP`; then the release and D15's click
+rate read-back. The Composer steps are `docs/composer-checklist.md`
+section M (steps 88 to 95).
