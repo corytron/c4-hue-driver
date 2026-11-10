@@ -88,14 +88,47 @@ codename from it:
   has published builds also means correcting those releases' titles and
   notes and their Discussions announcements, as #304 did for the 1.1 betas.
 
+### Codename notes: `.github/codename-notes.json` (#464)
+
+Owner, 2026-11-10: the notes of every release, past and future, open with a
+blurb as their first sentence: what the release's codename means in the
+show and, where it fits, how that ties to what the release changed. One
+file holds the blurbs, and `notes` takes each from it:
+
+```json
+{
+  "1.0": "Cassian Andor, ..., names the first release: the bridge, lights, scenes and zone lights ...",
+  "1.1": "Brasso, ..., names the release that brings Hue motion sensors ..."
+}
+```
+
+- One JSON object keyed like `.github/codenames.json`: each key a version
+  X.Y without leading zeros, once, and exactly the versions that file
+  names. Every X.Y with a codename has a blurb, and an X.Y without one has
+  none. A prerelease X.Y-beta.N has no key of its own: every build of X.Y,
+  its betas included, opens with the blurb of X.Y.
+- Each blurb is one line of text that is not blank: no line break, since
+  the notes open with it as one paragraph. It shows in the release's notes
+  on GitHub only, never in a Documentation tab.
+- A blurb says what the name means; how the names are chosen stays out of
+  it, as out of all public text (#416).
+- `check` reports what breaks these rules, each as
+  `.github/codename-notes.json: message`, so CI's `changelog` check and
+  every build fail on a version that has a codename but no blurb.
+- `notes` refuses a version whose X.Y has no blurb or an empty one, before
+  it prints any notes, so the Release workflow's build job fails before any
+  release is created or changed (§2). `html` and `stamp` do not read the
+  file.
+
 ## 2. The tool: `tools/changelog.py` (Python 3.12, standard library only)
 
 ```
 changelog.py check  [--file CHANGELOG.md] [--codenames .github/codenames.json]
+                    [--codename-notes .github/codename-notes.json]
 changelog.py html   [--file F] [--codenames C]
                     [--release VERSION --build N --date YYYY-MM-DD]
                     [--dev-build N] [--codename NAME]
-changelog.py notes  [--file F] [--codenames C]
+changelog.py notes  [--file F] [--codenames C] [--codename-notes B]
                     --version VERSION --build N --date YYYY-MM-DD
                     [--codename NAME] [--template .github/release-notes.md]
 changelog.py stamp  [--file F] [--codenames C]
@@ -103,12 +136,16 @@ changelog.py stamp  [--file F] [--codenames C]
                     [--codename NAME]
 ```
 
-`--codenames` names another codenames file than `.github/codenames.json`
-(the tests use their own).
+`--codenames` names another codenames file than `.github/codenames.json`,
+and `--codename-notes` (`check` and `notes` only) another codename notes
+file than `.github/codename-notes.json` (the tests use their own). The
+Release workflow passes neither: it reads the files of the commit it
+builds.
 
-- `check`: validates §1, the codenames file included; prints
-  `CHANGELOG.md: ok (N releases)` or every problem (in `CHANGELOG.md` with
-  its line number) and the number of each file's problems, and exits 1.
+- `check`: validates §1, the codenames and codename notes files included;
+  prints `CHANGELOG.md: ok (N releases)` or every problem (in
+  `CHANGELOG.md` with its line number) and the number of each file's
+  problems, and exits 1.
 - `html`: prints an HTML fragment (no `<html>`/`<body>`) for a
   Documentation tab:
   `<h2 id="changelog">Changelog</h2>`, one sentence of introduction, then
@@ -129,12 +166,23 @@ changelog.py stamp  [--file F] [--codenames C]
   - An empty `Unreleased` is never rendered.
 - `notes`: prints the Markdown that the Release workflow publishes as the
   release's notes, from `.github/release-notes.md` (§4) with its
-  placeholders filled: `{version}`, `{codename}`, `{build}`, `{date}`,
-  `{this_build}` (the `Unreleased` entry's sections as Markdown, under no
-  heading of its own) and `{history}` (every released entry of the same
-  version, newest first, each as a `###` heading and its sections as
-  bold category lines and bullets). It refuses (exit 1) when `Unreleased`
-  has no bullets: a release must say what it changes.
+  placeholders filled: `{version}`, `{codename}`, `{codename_note}` (the
+  blurb `.github/codename-notes.json` gives the version's X.Y, §1),
+  `{build}`, `{date}`, `{this_build}` (the `Unreleased` entry's sections as
+  Markdown, under no heading of its own) and `{history}` (every released
+  entry of the same version, newest first, each as a `###` heading and its
+  sections as bold category lines and bullets). Every placeholder is filled
+  in one pass, so a value that holds `{build}` keeps it as written. It
+  refuses (exit 1, nothing printed on stdout) when `Unreleased` has no
+  bullets (a release must say what it changes), when the version's X.Y has
+  no blurb or an empty one, when the codename notes file fails `check`,
+  and when the template lacks `{this_build}` or `{codename_note}`. The
+  refusals for a blurb read:
+
+  ```
+  error: 1.6 has no blurb in .github/codename-notes.json: each X.Y gets one there before its first build, saying what its codename means; the notes open with it
+  error: the blurb of 1.6 in .github/codename-notes.json is empty: it says what the codename "Name" means, and the notes open with it
+  ```
 - `stamp`: rewrites the file: the `Unreleased` heading becomes the
   released heading for `--version`, `--build` and `--date` (codename from
   `.github/codenames.json`), and a new empty `## Unreleased` is inserted
@@ -147,9 +195,10 @@ Prereleases (#269, `docs/prerelease-design.md`): `--version` and `html
 (prerelease), build N (date)`, with the codename of 1.1, never as the
 release. `notes` fills `.github/prerelease-notes.md` (its default for a
 prerelease) with `{version}`
-(`1.1-beta.1`), `{release}` (`1.1`), `{beta}`, `{codename}`, `{build}`,
-`{date}`, `{this_build}`, `{stable}` and `{stable_version}` (the newest
-released entry, which the prerelease follows), and with no `{history}`.
+(`1.1-beta.1`), `{release}` (`1.1`), `{beta}`, `{codename}`,
+`{codename_note}` (the blurb of `1.1`), `{build}`, `{date}`,
+`{this_build}`, `{stable}` and `{stable_version}` (the newest released
+entry, which the prerelease follows), and with no `{history}`.
 `stamp` refuses a prerelease, and `html` and `notes` refuse a prerelease of a
 version the file lists already: a prerelease comes before its release.
 
@@ -172,7 +221,7 @@ Exit codes: 0 done, 1 refused or invalid, 2 usage.
   run (`gh release create --notes-file`, or `gh release edit --notes-file`
   when the release exists). The notes are no longer edited by hand; the
   title stays `<version> "<codename>"`. A release run with an empty
-  `Unreleased` fails in the build job.
+  `Unreleased`, or for an X.Y without a blurb, fails in the build job.
 - **GitHub, the running list:** `CHANGELOG.md` itself, linked from the
   README, from each release's notes and from the Discussions announcement.
 
@@ -180,8 +229,11 @@ Exit codes: 0 done, 1 refused or invalid, 2 usage.
 
 The fixed part of every release's notes (what you get, requirements,
 install, verify, licence), taken from today's v1.0 notes and kept in the
-repository, with the placeholders of §2. `{this_build}` comes under a
-heading "New in build {build}" and `{history}` under "Earlier builds of
+repository, with the placeholders of §2. `{codename_note}` is the first
+paragraph, on its own line right after the `##` heading and before
+"Released {date}." (#464); `.github/prerelease-notes.md` has it in the same
+place, before its bold first line. `{this_build}` comes under a heading
+"New in build {build}" and `{history}` under "Earlier builds of
 {version}", followed by a link to `CHANGELOG.md`.
 
 ## 5. Process (CLAUDE.md, release checklist)
@@ -196,7 +248,8 @@ heading "New in build {build}" and `{history}` under "Earlier builds of
 - Before the first build of a new X.Y, its first prerelease included, the
   coordinator picks its codename and reports it, without waiting for
   approval (#396); a pull request then adds it to
-  `.github/codenames.json` (#304).
+  `.github/codenames.json` (#304) and its blurb to
+  `.github/codename-notes.json` (#464).
 
 ## 6. Who owns which file
 

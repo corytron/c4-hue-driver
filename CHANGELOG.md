@@ -13,6 +13,11 @@ listed.
 
 ## Unreleased
 
+### Changed
+- Every release's notes now open with what its name means and how that
+  ties to what the release changes; the published releases were updated
+  the same way (#464).
+
 ## 1.5 "Kenari", build 609 (2026-11-10)
 
 ### Added
