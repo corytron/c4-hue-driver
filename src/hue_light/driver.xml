@@ -41,6 +41,13 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- The Control4 load groups this device is in (#435, docs/load-groups-design.md §6.1). -->
+			<property>
+				<name>Load Groups</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
 			<property>
 				<name>Hue Light ID</name>
 				<default></default>
@@ -162,6 +169,10 @@
 		<color_on_mode_fade>True</color_on_mode_fade>
 		<cold_start>False</cold_start>
 		<has_leds>True</has_leds>
+		<!-- #432 D2 (docs/light-events-design.md §6.1): the light's own button events
+		     fire, as on a Control4 dimmer, and multi-taps (OS 3.4.2+). -->
+		<has_button_events>True</has_button_events>
+		<multi_click>True</multi_click>
 		<supports_target>True</supports_target>
 		<supports_brightness_stop>True</supports_brightness_stop>
 		<supports_color_stop>True</supports_color_stop>
@@ -173,7 +184,8 @@
 		<hide_proxy_events>False</hide_proxy_events>
 		<reduced_als_support>True</reduced_als_support>
 		<advanced_scene_support>False</advanced_scene_support>
-		<load_group_support>False</load_group_support>
+		<!-- #435 (docs/load-groups-design.md §6.1): single, zone and room lights join Control4 load groups. -->
+		<load_group_support>True</load_group_support>
 	</capabilities>
 	<events/>
 	<connections>

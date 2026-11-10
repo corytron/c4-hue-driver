@@ -13,7 +13,10 @@
 -- the On and Dim colours, the colour on modes, the rate ranges) in
 -- docs/turn-on-design.md (#429, #427, #430), whose decisions the comments
 -- cite as D<n>; the bridge's link offline and its answers to commands that
--- did not land in docs/offline-design.md, cited as #428 D<n>.
+-- did not land in docs/offline-design.md, cited as #428 D<n>; Control4 load
+-- groups (the GROUP_* commands, the Load Groups row) in
+-- docs/load-groups-design.md, cited as #435 D<n>; the throttle of Hue-side
+-- level reports in docs/light-events-design.md, cited as #433 D<n>.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -21,6 +24,8 @@ local device = require("common.device")
 local state = require("light.state")
 local caps = require("light.caps")
 local turnon = require("light.turnon")
+local load_group = require("light.load_group")
+local throttle = require("light.throttle")
 
 -- Binding IDs, see driver.xml; common/device.lua holds the proxy's (5001).
 local BRIDGE_BINDING = device.BRIDGE_BINDING
@@ -28,6 +33,11 @@ local BRIDGE_BINDING = device.BRIDGE_BINDING
 -- Grace after the requested ramp before a target the bridge never confirmed
 -- is reported as reached, so the UI never sticks in "changing".
 local FALLBACK_MS = 1000
+
+-- #433 D12: a level Hue reports while it moves reaches the proxy at most
+-- once per this window, the last one exact (light.throttle), as the Hue
+-- Scene device's level reports do.
+local LEVEL_REPORT_MS = 1000
 
 -- Prefix of every line this driver logs.
 local LOG_PREFIX = "Hue Light"
@@ -101,6 +111,11 @@ local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaT
 -- off), time and started in controller ms. "Targets" below says when one
 -- begins and ends.
 local ramp = nil
+-- The device's Control4 load groups (#435): light.load_group's instance,
+-- made under "Load groups" below, once the paths it drives exist. It keeps
+-- the memberships (D6) and the group hold (D3), a hold no keypad button
+-- owns, whose dim and stop run through start_ramp and finish.
+local groups
 
 -- The turn-on behaviour's own state (docs/turn-on-design.md). The proxy's
 -- On Modes and presets, and the decisions made from them, live in the
@@ -366,6 +381,12 @@ end
 -- Proxy notifies -----------------------------------------------------------
 -- The report_* functions return true when they had something to report.
 
+-- #433 D12 to D14: the throttle of Hue-side level reports (light.throttle),
+-- made after report_brightness below. Every CHANGING closes its window
+-- (brightness_changing, D13) and every CHANGED records its level
+-- (brightness_changed, D14); HUE_STATE decides which reports wait (D12).
+local levels
+
 -- #429 D7: the brightness notifies name presets, so the proxy can move the
 -- light when a preset's level changes (the Daylight Agent) [verified: LV2
 -- notif _10.2-LIGHTBRIGHTNESSCHANGED.md, _10.3-LIGHTBRIGHTNESSCHANGING.md].
@@ -382,7 +403,13 @@ local function preset_at(level)
 end
 
 -- LIGHT_BRIGHTNESS_CHANGING; `preset_id` the preset the target is, or nil.
+-- The one helper every CHANGING goes through (#433 D13, the contract's
+-- changing()): a target's, a tap's, a hold's (keypad or load group, #435)
+-- and a turn-on's (#429). It closes the throttle's window, so a Hue-side
+-- level still waiting there never goes out as a stale CHANGED while the
+-- tile animates the Control4 ramp; the ramp's own CHANGED ends it.
 local function brightness_changing(current, target, rate, preset_id)
+	levels:close()
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = target,
@@ -396,7 +423,10 @@ end
 -- LIGHT_BRIGHTNESS_CHANGED with `level`. The last level above 0 is what a
 -- Previous turn-on goes back to (#429 D6), as the proxy remembers the last
 -- non-zero level reported before a 0 [verified: LV2 caps
--- _7-brightnessonmodeprevious.md].
+-- _7-brightnessonmodeprevious.md]. Every CHANGED goes through here and is
+-- recorded as the last level sent (#433 D14): the throttle's trailing report
+-- goes out only when the cache differs from it, so a stop's estimate or an
+-- unsent command's CHANGED is never repeated.
 local function brightness_changed(level)
 	local id = preset_at(level)
 	if not id then
@@ -406,6 +436,7 @@ local function brightness_changed(level)
 		mem.last_on = level
 	end
 	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = level, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = id })
+	levels:sent(level)
 end
 
 local function report_brightness()
@@ -417,6 +448,14 @@ local function report_brightness()
 	update_leds()
 	return true
 end
+
+-- #433 D12 (docs/light-events-design.md §6.4, §6.5): the window's trailing
+-- report is the cache's level, through report_brightness (which records it).
+levels = throttle.new({
+	ms = LEVEL_REPORT_MS,
+	current = function() return state.to_proxy_brightness(st) end,
+	send = function() report_brightness() end,
+})
 
 -- How close a reported colour must be to one Control4 sent to count as it
 -- (§7.4, §7.7): Hue rounds what it stores.
@@ -670,9 +709,11 @@ end
 
 -- After a successful send with a time above 0 (#421 D6): the ramp's record,
 -- its end on a timer, and the LEDs, which a ramp from off lights at once
--- (dev.is_on).
-local function begin_ramp(from, to, time, tap)
-	local r = { from = from, to = math.max(0, math.min(100, to)), time = time, started = now_ms(), tap = tap }
+-- (dev.is_on). `group` is the GROUP ID of a load group's GROUP_RAMP_TO_LEVEL
+-- (#435 D12): that group's GROUP_STOP_RAMP stops this ramp, tagged.
+local function begin_ramp(from, to, time, tap, group)
+	local r = { from = from, to = math.max(0, math.min(100, to)), time = time, started = now_ms(), tap = tap,
+		group = group }
 	r.timer = C4:SetTimer(math.max(1, math.floor(time + 0.5)), function()
 		ramp_done(r)
 	end)
@@ -793,6 +834,20 @@ local function heading()
 	return state.to_proxy_brightness(st)
 end
 
+-- The level the tile shows now (proxy percent; nil while unknown): a ramp's
+-- estimate, a load group's hold's estimate (#435 D3), else the cache. A
+-- target that replaces either starts its CHANGING from there.
+local function shown()
+	if ramp then
+		return (ramp_estimate(ramp))
+	end
+	local held = groups and groups:holding()
+	if held and held.ramping and held.level then
+		return math.floor(held.level + 0.5)
+	end
+	return state.to_proxy_brightness(st)
+end
+
 -- What light.turnon decides from (§7.4): the On preset's level (Default On
 -- Brightness), a zone or room light, the last level above 0 reported, the
 -- level Hue keeps while the light is off, and the bulb's colour abilities.
@@ -842,8 +897,12 @@ end
 -- once, which matches the cache and sends no second CHANGED; any other
 -- level corrects it. A #308 wait ends with it. `why` names the stop in the
 -- log. In "level" mode the stop carries the blend for the estimate while one
--- runs (#427 D15); HUE_DIM stop has no colour.
-local function stop_ramp(why)
+-- runs (#427 D15); HUE_DIM stop has no colour. `group` tags the stop with a
+-- load group's GROUP ID when that group's GROUP_STOP_RAMP stops it, so the
+-- bridge batches it with the other members' stops (#435 D12, D5); the
+-- light's own stops (a tap, SET_BRIGHTNESS_STOP) pass none, whatever
+-- started the ramp, and go out untagged (D11).
+local function stop_ramp(why, group)
 	local r = ramp
 	if not r then
 		return false
@@ -857,12 +916,12 @@ local function stop_ramp(why)
 		local c = turnon.level_color(modes, level, context())
 		local fields = c and state.color_fields(st, c.x, c.y, c.mode) or nil
 		local params, which = state.from_brightness_target(st, level, STOP_GLIDE_MS, { color = fields })
-		params.urgent = "true" -- #421 D12
+		params.urgent, params.group = "true", group -- #421 D12; #435 D12
 		if send("HUE_SET", params) and which == "given" then
 			color_sent(c, STOP_GLIDE_MS, params)
 		end
 	else
-		send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
+		send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level), group = group })
 	end
 	mem.preset = nil -- a stop is no preset
 	apply({ on = "true", brightness = tostring(level) })
@@ -925,10 +984,14 @@ end
 --              `target` is only what the proxy is told (#429 D6), and no
 --              #308 goal is set, since the group's level is only known from
 --              Hue
+--   group      the GROUP ID of the Control4 load group whose command this
+--              is (#435 D5): the HUE_SET carries it, so the bridge batches
+--              the members' requests, and a ramp keeps it (D12)
 -- A target above 0 carries the colour of target_color (#427), unless a
 -- colour stored while the light was off wins (D11); a turn-on from off then
 -- starts or skips the blend (turnon.started). The rate is clamped (#430
--- D20).
+-- D20). A load group's hold still running ends without a stop: the target
+-- replaces its dim at Hue (#435, #421 D11).
 local function set_brightness(target, rate, opts)
 	opts = opts or {}
 	target, rate = tonumber(target), clamp_rate(rate)
@@ -940,8 +1003,9 @@ local function set_brightness(target, rate, opts)
 	end
 	cancel_hold_color()
 	local was_lit = lit()
-	local current = ramp and ramp_estimate(ramp) or state.to_proxy_brightness(st) or 0
+	local current = shown() or 0
 	end_ramp()
+	groups:end_hold("a brightness target")
 	-- From off, the level the turn-on waits for (#308); Hue raises a level
 	-- below the bulb's lowest to that.
 	local goal = st.on == false and target > 0 and not opts.native and on_level(math.max(target, st.min_dim or 0))
@@ -959,6 +1023,7 @@ local function set_brightness(target, rate, opts)
 	if opts.urgent then
 		params.urgent = "true"
 	end
+	params.group = opts.group
 	if not send("HUE_SET", params) then
 		st.pending_color = stored
 		mem.preset = mark
@@ -985,7 +1050,7 @@ local function set_brightness(target, rate, opts)
 	-- CHANGING, as a send that fails does above.
 	fallback.brightness.before = { preset = mark }
 	if rate > 0 then
-		begin_ramp(current, target, rate, opts.tap)
+		begin_ramp(current, target, rate, opts.tap, opts.group)
 	end
 	return true
 end
@@ -1093,7 +1158,9 @@ end
 
 -- Announce ourselves; the bridge answers with HUE_CONFIGURE and full state
 -- when it knows the rid. `hint` is the device id OnBindingChanged named, for
--- when Director's lookup does not reflect the new binding yet.
+-- when Director's lookup does not reflect the new binding yet. The load
+-- groups follow every hello (#435 D6, E19: the bridge keeps them in memory
+-- only), and the Load Groups row is written with them (E5: names read now).
 local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
@@ -1101,6 +1168,7 @@ local function hello(hint)
 		dev.flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
+	groups:announce()
 end
 
 local function load_identity()
@@ -1272,6 +1340,31 @@ function dev.on_link(_, changed)
 	refresh_status()
 end
 
+-- #433 D12: a HUE_STATE that changed the level the proxy shows, already in
+-- the cache. It goes out at once, and the throttle's window starts again
+-- after it, when it settled a pending Control4 target (a ramp's foreign
+-- report included: the proxy heard CHANGING and waits for its CHANGED),
+-- when it turns the light on or off against the last level sent (the
+-- first report of all too; L53, L6), or when it is a full state (`reason`
+-- hello, resync or import, not "event"; L5). Anything else is a level Hue
+-- reports while it moves (the Hue app, a Hue switch, a Hue automation): at
+-- most one CHANGED per LEVEL_REPORT_MS, the first at once and the latest at
+-- the window's end (L7). Only the notification waits: the cache already
+-- holds the level, so Raise, Restore, the tap rule and the next CHANGING
+-- read it exactly, and the LEDs follow it now (they change only with an
+-- on or off, which never waits).
+local function report_level(reason, settled)
+	local full = reason ~= nil and reason ~= "" and reason ~= "event"
+	if settled or full or levels:edge(state.to_proxy_brightness(st)) then
+		if report_brightness() then
+			levels:open()
+		end
+		return
+	end
+	update_leds()
+	levels:report()
+end
+
 dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
@@ -1285,10 +1378,12 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	local changed = apply(params)
 	-- Any report of a pending field that got past hold_back settles the
 	-- target, whatever the value: the proxy heard CHANGING and must hear
-	-- CHANGED. One held back for a ramp settles it at the ramp's end.
+	-- CHANGED, at once (#433 D12). One held back for a ramp settles it at
+	-- the ramp's end.
+	local settled = false
 	if fallback.brightness and (params.on ~= nil or params.brightness ~= nil) then
 		settle("brightness")
-		changed.brightness = true
+		changed.brightness, settled = true, true
 	end
 	if colored then
 		noticed_color(confirming)
@@ -1297,7 +1392,8 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 		settle("color")
 		changed.color = true
 	end
-	if changed.brightness then report_brightness() end
+	-- Colour reports are not throttled (#433 D16, owner 2026-11-09).
+	if changed.brightness then report_level(params.reason, settled) end
 	if changed.color then report_color() end
 	if changed.online then
 		report_online()
@@ -1315,6 +1411,7 @@ dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(p
 	st.forgotten = { name = params.name or st.name }
 	settle("brightness")
 	settle("color")
+	levels:close() -- #433 §6.5: no Hue-side level of a forgotten light still to come
 	log.warn("forgotten by the bridge (was %s)", was_label())
 	-- A group's Status names the group, so the instruction goes here.
 	prop("Last Action", state.is_group(st) and FORGOTTEN_INSTRUCTION or "Forgotten by the bridge")
@@ -1672,10 +1769,11 @@ end
 -- at Hue exactly as a keypad tap does (#421 D7, stop_ramp, STOP_MODE): the
 -- stop goes to the bridge and the proxy hears the estimate. With no ramp
 -- running, nothing goes to the bridge: the proxy only needs its CHANGED
--- (stop). A colour transition has no stop at Hue: SET_COLOR_STOP only
--- closes the proxy's.
+-- (stop). A load group's hold is stopped as its own GROUP_STOP_RAMP would,
+-- untagged (#435 D12, D11). A colour transition has no stop at Hue:
+-- SET_COLOR_STOP only closes the proxy's.
 dispatch.proxy["SET_BRIGHTNESS_STOP"] = function()
-	if not stop_ramp("brightness stop") then
+	if not stop_ramp("brightness stop") and not groups:stop_hold("brightness stop") then
 		stop("brightness", report_brightness)
 	end
 end
@@ -1838,10 +1936,10 @@ end
 -- (set_brightness, #427). The machine stops a running ramp on the press and
 -- swallows its click (D5, common/device.lua), so a click reaches here during
 -- a ramp only when the ramp began between the press and the click: it stops
--- that one too. A device that cannot be driven drops the tap with its
--- reason, as it drops a target.
+-- that one too, and so a load group's hold (#435 D12). A device that cannot
+-- be driven drops the tap with its reason, as it drops a target.
 function dev.on_click(button)
-	if stop_ramp("tap") or not ready("brightness target") then
+	if stop_ramp("tap") or groups:stop_hold("tap") or not ready("brightness target") then
 		return
 	end
 	local on, level = st.on, state.to_proxy_brightness(st)
@@ -1869,13 +1967,17 @@ end
 
 -- The machine's hooks for the stop (#421 D5, common/device.lua): a press
 -- outside the double-tap window while a ramp runs stops it on the push, on
--- any button; a press held on afterwards holds from the stopped level.
+-- any button; a press held on afterwards holds from the stopped level. A
+-- load group's hold is stopped the same way (#435 D12), its stop untagged
+-- (D11): the light's own keypad wins over its group.
 function dev.ramp_active()
-	return ramp ~= nil
+	return ramp ~= nil or groups:holding() ~= nil
 end
 
 function dev.on_ramp_stop()
-	stop_ramp("tap")
+	if not stop_ramp("tap") then
+		groups:stop_hold("tap")
+	end
 end
 
 -- A hold uses Hue's own relative dim (HUE_DIM up / down to the bridge: a
@@ -1901,14 +2003,20 @@ end
 -- A dim that never reaches the bridge (logged) moves nothing: the tick
 -- stops, the release has nothing to stop, and the proxy hears the level the
 -- hold began at.
-local function start_ramp(h, up, from)
-	local to = up and 100 or 1
-	local full = math.floor(math.min(setting(up and "hold_up" or "hold_down"), HOLD_MAX_MS))
-	local duration = math.floor(full * math.abs(to - from) / 100)
+--
+-- `h` is the keypad machine's press record, or a load group's hold record
+-- (#435 D3, light.load_group): `alive(h)` says whether it still runs
+-- (dev.holding for a press, the record's active flag for a group hold),
+-- `rate` is the whole-range time (a Hold Rate, or the group's RATE), and
+-- the arithmetic is load_group.hold_plan's, one copy for both. A group
+-- hold's dim carries its GROUP ID (h.group), so the members' dims batch.
+local function start_ramp(h, up, from, alive, rate)
+	local plan = load_group.hold_plan(from, up, rate, HOLD_MAX_MS)
+	local to, full, duration = plan.to, plan.full, plan.duration
 	h.ramping, h.level, h.to = true, from, to
-	h.step = (to - from) / math.max(1, duration / HOLD_TICK_MS)
+	h.step = plan.step
 	h.timer = C4:SetTimer(HOLD_TICK_MS, function()
-		if not dev.holding(h) then
+		if not alive(h) then
 			return
 		end
 		h.level = h.level + h.step
@@ -1924,7 +2032,7 @@ local function start_ramp(h, up, from)
 	log.debug("hold: dim %s from %d, the tile over %d ms, Hue the whole range over %d ms", up and "up" or "down",
 		from, duration, full)
 	if not send("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
-		duration = string.format("%d", full) }) then
+		duration = string.format("%d", full), group = h.group }) then
 		h.timer:Cancel()
 		h.timer, h.ramping = nil, false
 		brightness_changed(from)
@@ -1937,21 +2045,25 @@ end
 -- stopped a ramp (#421 D5, h.stopped) holds from the stopped level, which
 -- the stop left in the cache. A ramp that began after the press (from
 -- programming, say) holds from its estimate, and the hold's dim replaces it
--- at Hue [assumed: #421 §7 L9]; start_ramp ends its record.
+-- at Hue [assumed: #421 §7 L9]; start_ramp ends its record. So does a load
+-- group's hold still running (a press in the double-tap window stops
+-- nothing): the keypad wins, its record ends without a stop (#435 §6.6).
 function dev.on_hold(h, up, on)
 	cancel_hold_color()
 	if not ready("hold") then
 		return
 	end
 	if on then
-		local from = ramp and ramp_estimate(ramp) or state.to_proxy_brightness(st) or 1
-		return start_ramp(h, up, math.max(1, from))
+		local from = shown() or 1
+		groups:end_hold("a keypad hold")
+		return start_ramp(h, up, math.max(1, from), dev.holding, setting(up and "hold_up" or "hold_down"))
 	end
+	groups:end_hold("a keypad hold")
 	if not set_brightness(1, 0) then
 		return -- the turn-on never reached the bridge (logged): nothing to dim up from
 	end
 	dev.dim_after_on(h, function()
-		start_ramp(h, true, st.on == true and state.to_proxy_brightness(st) or 1)
+		start_ramp(h, true, st.on == true and state.to_proxy_brightness(st) or 1, dev.holding, setting("hold_up"))
 	end)
 end
 
@@ -1998,19 +2110,26 @@ end
 -- report, or the estimate after the fallback time, also when the stop
 -- itself never reaches the bridge (logged; Hue then dims on to the end of
 -- the range and reports it). The machine has armed the click guard. The
--- blend follows (hold_color).
-function dev.on_finish(h)
+-- blend follows (hold_color). A load group's hold ends here too (#435 D12):
+-- `group` tags the stop when the group's own GROUP_STOP_RAMP ended it, so
+-- it batches with the other members' stops; the light's own stop of it
+-- goes untagged (D11).
+local function finish(h, group)
 	if not (h.ramping and bridge and st.rid) then
 		return
 	end
 	local level = math.floor(h.level + 0.5)
-	send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
+	send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level), group = group })
 	arm("brightness", 0, function()
 		log.debug("dim stop unconfirmed after %d ms; assuming %d %%", FALLBACK_MS, level)
 		apply({ on = "true", brightness = tostring(level) })
 		report_brightness()
 	end)
 	hold_color(level)
+end
+
+function dev.on_finish(h)
+	finish(h)
 end
 
 -- #427 D15: any new press cancels a hold's blend still waiting. Every keypad
@@ -2022,6 +2141,77 @@ function dev.button_action(button, action)
 		cancel_hold_color()
 	end
 	return machine_action(button, action)
+end
+
+-- Load groups (#435, docs/load-groups-design.md) ------------------------------
+-- A Control4 Load Group sends each member JOIN_GROUP, LEAVE_GROUP,
+-- SET_GROUP_SYNC and the GROUP_* commands through the member's light_v2
+-- proxy [verified: LV2 cmds _14 to _20; that the Load Group sends each
+-- group command to every member is assumed, A2]. light.load_group keeps the
+-- memberships (D6) and turns each group command into the path of its
+-- ordinary counterpart (D3, §6.2): set_brightness with the group's tag for
+-- GROUP_SET_LEVEL and GROUP_RAMP_TO_LEVEL, which then follow the turn-on
+-- design's brightness-target rules (D4: no On Mode, the default rate where
+-- no TIME is given), and start_ramp and finish for the group hold. What it
+-- does to the light, the bridge and Composer goes through these callbacks.
+-- A command the light cannot act on is dropped by ready() with its reason
+-- in Status, as any command (L56); its GROUP ID is learnt all the same.
+
+groups = load_group.new({
+	-- One value: Director's PersistGetValue returns none for a key never
+	-- written (#298). The list is a table (§6.4) [verified: API 26.5/_4].
+	persist_get = function(key) return (C4:PersistGetValue(key)) end,
+	persist_set = function(key, value) C4:PersistSetValue(key, value) end,
+	display_name = function(id) return C4:GetDeviceDisplayName(id) end, -- [verified: API 32/_6]
+	log = log,
+	set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end,
+	-- §6.3: the list, with what the bridge keys it by; nothing while unbound
+	-- (the next hello carries it).
+	send_groups = function(wire)
+		if bridge then
+			send("HUE_LOAD_GROUPS", { device_id = device_id(), rid = st.rid,
+				kind = state.is_group(st) and state.KIND_GROUP or nil, groups = wire })
+		end
+	end,
+	show = function(text) prop("Load Groups", text) end,
+	ready = ready,
+	is_on = function() return dev.is_on() end,
+	level = shown,
+	set_brightness = function(level, rate, group) return set_brightness(level, rate, { group = group }) end,
+	default_rate = default_rate,
+	hold_rate = function(up) return setting(up and "hold_up" or "hold_down") end,
+	ramp = function() return ramp end,
+	stop_ramp = stop_ramp,
+	-- CHANGED with the cache, closing the group's CHANGING (a hold whose
+	-- GROUP_STOP_RAMP never came, E10; a stop with nothing of its group's
+	-- running, D12), as SET_BRIGHTNESS_STOP with nothing running does. A
+	-- target still waiting for the bridge (the light's own stop of the group
+	-- hold, a target that replaced it) closes its own CHANGING with the
+	-- bridge's word instead: the cache still shows the level before it.
+	report = function()
+		if not fallback.brightness then
+			report_brightness()
+		end
+	end,
+	-- The group hold's dim, as dev.on_hold starts a keypad's: a blend still
+	-- waiting goes first (#427 D15); the record's own flag is its liveness.
+	start_dim = function(rec, up, from, rate)
+		cancel_hold_color()
+		start_ramp(rec, up, from, function(r) return r.active == true end, rate)
+	end,
+	finish_dim = finish,
+})
+
+-- §6.2: every command name (the alias SET_GROUP_LEVEL too). Like the
+-- bridge's messages they wait for late init, where the memberships are
+-- loaded and UpdateProperty is safe (after_late_init).
+for command in pairs(load_group.COMMANDS) do
+	local handle = after_late_init(command, function(params)
+		groups:handle(command, params)
+	end)
+	dispatch.proxy[command] = function(_, params)
+		handle(params)
+	end
 end
 
 -- Presets at start (#427 D19) ---------------------------------------------
@@ -2040,8 +2230,8 @@ local function setup_from(source, read)
 		return 0
 	end
 	log.debug("%s: %s", source, text:sub(1, SETUP_LOG_MAX))
-	local colors, levels = turnon.take_setup(modes, text)
-	log.debug("%s: %d colour and %d brightness presets", source, colors, levels)
+	local colors, presets = turnon.take_setup(modes, text)
+	log.debug("%s: %d colour and %d brightness presets", source, colors, presets)
 	return colors
 end
 
@@ -2095,6 +2285,7 @@ function OnDriverLateInit()
 	dev.load_settings()
 	dev.load_colors()
 	turnon.load(modes) -- the On Modes and presets persisted before (#429, #427 §7.6)
+	groups:load() -- the load groups persisted before (#435 D6); the hello below announces them
 	cancel_setup_read() -- a late init run again (a dev reload) starts one read
 	mem.setup_timer = C4:SetTimer(SETUP_READ_MS, read_setup)
 	dispatch.replay_properties(Properties)
@@ -2139,7 +2330,9 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 		dev.link = nil -- the next bridge's hello answer says its own (#428 D4)
 		settle("brightness")
 		settle("color")
+		levels:close() -- #433 §6.5: the window's level came from the bridge just unbound
 		cancel_hold_color()
+		groups:end_hold("unbound from the bridge") -- #435: nothing left to stop it through
 		refresh_status()
 		report_online()
 	end
@@ -2155,7 +2348,9 @@ end
 function OnDriverDestroyed()
 	settle("brightness")
 	settle("color")
+	levels:close() -- #433 §6.5: the window's timer
 	cancel_hold_color()
+	groups:end_hold("driver destroyed") -- #435: its tick and end-of-range timers
 	cancel_setup_read()
 	dev.cancel_timers() -- a keypad press and the click guard, the binding re-check, the Driver Version looks
 end

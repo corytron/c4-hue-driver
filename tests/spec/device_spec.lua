@@ -578,6 +578,94 @@ describe("common.device", function()
 			assert.equal("[WARN] Hue Test: SET_BUTTON_COLOR without a known BUTTON_ID (7)", lines[2])
 			assert.equal(1, #proxied(c4, "BUTTON_COLORS"))
 		end)
+
+		-- #432 D11 (docs/light-events-design.md §8.1).
+		it("SET_ALL_LED sets every button's on and off colour, persists them and tells the links and the proxy", function()
+			local dev, c4, _, dispatch, st = new_device()
+			st.on = true
+			dispatch.received_from_proxy(5001, "SET_ALL_LED", { COLOR = "FF0000" })
+			local RED = { ON_COLOR = "ff0000", OFF_COLOR = "ff0000", CURRENT_COLOR = "ff0000" }
+			local function red(button)
+				local t = { BUTTON_ID = button }
+				for k, v in pairs(RED) do t[k] = v end
+				return t
+			end
+			assert.same({ button_0_on_color = "ff0000", button_0_off_color = "ff0000", button_1_on_color = "ff0000",
+				button_1_off_color = "ff0000", button_2_on_color = "ff0000", button_2_off_color = "ff0000" }, c4.persist)
+			local sent = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do sent[#sent + 1] = { args[1], args[2], args[3] } end
+			assert.same({
+				{ 200, "BUTTON_COLORS", red(0) },
+				{ 201, "BUTTON_COLORS", red(1) },
+				{ 202, "BUTTON_COLORS", red(2) },
+				{ 5001, "BUTTON_INFO", red(0) },
+				{ 5001, "BUTTON_INFO", red(1) },
+				{ 5001, "BUTTON_INFO", red(2) },
+				{ 200, "MATCH_LED_STATE", { STATE = true } },
+				{ 201, "MATCH_LED_STATE", { STATE = true } },
+				{ 202, "MATCH_LED_STATE", { STATE = true } },
+			}, sent, "the links' colours, the proxy's per button, then the LED state")
+			dev.update_leds()
+			assert.equal(3, #proxied(c4, "MATCH_LED_STATE"), "the LEDs are known to show on: nothing again")
+
+			-- While the on state is unknown: the colours and the proxy, no LED state.
+			_, c4, _, dispatch = new_device()
+			dispatch.received_from_proxy(5001, "SET_ALL_LED", { COLOR = "00ff00" })
+			assert.equal(3, #proxied(c4, "BUTTON_COLORS"))
+			assert.equal("00ff00", proxied(c4, "BUTTON_INFO")[3][2].CURRENT_COLOR)
+			assert.same({}, proxied(c4, "MATCH_LED_STATE"))
+
+			-- A restart reads them back (load_colors), whatever the state.
+			local persisted = c4.persist
+			dev, c4, _, _, st = new_device()
+			c4.persist = persisted
+			dev.load_colors()
+			st.on = false
+			dev.update_leds()
+			for _, info in ipairs(proxied(c4, "BUTTON_INFO")) do
+				assert.same({ "00ff00", "00ff00", "00ff00" }, { info[2].ON_COLOR, info[2].OFF_COLOR, info[2].CURRENT_COLOR })
+			end
+		end)
+
+		it("SET_ALL_LED with a colour that is not 6-digit hex changes nothing and reports the colours kept", function()
+			local _, c4, _, dispatch, st = new_device()
+			st.on = false
+			local lines = capture_log()
+			for _, params in ipairs({ { COLOR = "red" }, { COLOR = "12345" }, { COLOR = "1234567" }, {} }) do
+				dispatch.received_from_proxy(5001, "SET_ALL_LED", params)
+			end
+			assert.same({
+				'[WARN] Hue Test: SET_ALL_LED: COLOR "red" is not a 6-digit hex colour; the LED colours are kept',
+				'[WARN] Hue Test: SET_ALL_LED: COLOR "12345" is not a 6-digit hex colour; the LED colours are kept',
+				'[WARN] Hue Test: SET_ALL_LED: COLOR "1234567" is not a 6-digit hex colour; the LED colours are kept',
+				"[WARN] Hue Test: SET_ALL_LED without a COLOR; the LED colours are kept",
+			}, lines)
+			assert.equal(0, #c4.calls_to("PersistSetValue"), "nothing stored")
+			assert.same({}, proxied(c4, "BUTTON_COLORS"))
+			assert.same({}, proxied(c4, "MATCH_LED_STATE"))
+			local info = proxied(c4, "BUTTON_INFO")
+			assert.equal(12, #info, "the colours kept, per button, at each call")
+			assert.same({
+				{ 5001, { BUTTON_ID = 0, ON_COLOR = "0000ff", OFF_COLOR = "000000", CURRENT_COLOR = "000000" } },
+				{ 5001, { BUTTON_ID = 1, ON_COLOR = "000000", OFF_COLOR = "0000ff", CURRENT_COLOR = "0000ff" } },
+				{ 5001, { BUTTON_ID = 2, ON_COLOR = "0000ff", OFF_COLOR = "000000", CURRENT_COLOR = "000000" } },
+			}, { info[10], info[11], info[12] })
+		end)
+
+		it("a later SET_BUTTON_COLOR overrides one colour SET_ALL_LED set", function()
+			local _, c4, _, dispatch, st = new_device()
+			st.on = true
+			dispatch.received_from_proxy(5001, "SET_ALL_LED", { COLOR = "00ff00" })
+			dispatch.received_from_proxy(5001, "SET_BUTTON_COLOR", { BUTTON_ID = "1", ON_COLOR = "FFFFFF" })
+			assert.same({ button_0_on_color = "00ff00", button_0_off_color = "00ff00", button_1_on_color = "ffffff",
+				button_1_off_color = "00ff00", button_2_on_color = "00ff00", button_2_off_color = "00ff00" }, c4.persist)
+			assert.same({ 201, { BUTTON_ID = 1, ON_COLOR = "ffffff", OFF_COLOR = "00ff00", CURRENT_COLOR = "ffffff" } },
+				proxied(c4, "BUTTON_COLORS")[4])
+			assert.same({ 5001, { BUTTON_ID = 1, ON_COLOR = "ffffff", OFF_COLOR = "00ff00", CURRENT_COLOR = "ffffff" } },
+				proxied(c4, "BUTTON_INFO")[4])
+			dispatch.received_from_proxy(5001, "SET_ALL_LED", { COLOR = "0000ff" })
+			assert.equal("0000ff", c4.persist.button_1_on_color, "and SET_ALL_LED sets all six again")
+		end)
 	end)
 
 	describe("keypad buttons", function()
@@ -606,7 +694,9 @@ describe("common.device", function()
 			dispatch.received_from_proxy("202", "DO_CLICK", {})
 			assert.same({ { 0, device.ACT_PRESS }, { 1, device.ACT_RELEASE }, { 2, device.ACT_CLICK } }, st.buttons)
 			assert.same({ 0, 1, 2 }, { device.ACT_RELEASE, device.ACT_PRESS, device.ACT_CLICK })
-			assert.equal(0, #c4.calls_to("SendToProxy"), "no echo on the link route")
+			assert.same({ { 5001, { BUTTON_ID = 0, ACTION = 1 } } }, proxied(c4, "BUTTON_ACTION"),
+				"#432 D4: the push is notified; a release or click on a button not down notifies nothing")
+			assert.equal(1, #c4.calls_to("SendToProxy"))
 		end)
 
 		it("ignores the link commands on a binding that is no link, with a warning", function()
@@ -729,10 +819,10 @@ describe("common.device", function()
 		it("a click before the hold time is a tap: the press ends, then on_click; a click alone too", function()
 			local dev, c4, _, _, st = new_keypad()
 			dev.button_action(0, PRESS)
-			assert.same({ 400, false }, c4.calls_to("SetTimer")[1])
+			assert.same({ 400, 600 }, delays(c4), "the hold time, and the tap count's window (#432 D6)")
 			dev.button_action(0, CLICK)
 			assert.same({ { "end", 0 }, { "click", 0 } }, st.calls)
-			assert.same({}, delays(c4), "the hold timer is cancelled")
+			assert.same({ 600 }, delays(c4), "the hold timer is cancelled; the count's window runs on")
 			dev.button_action(2, CLICK)
 			assert.same({ "click", 2 }, st.calls[3])
 		end)
@@ -747,7 +837,7 @@ describe("common.device", function()
 				local dev, c4, _, _, st = new_keypad()
 				st.on = case[2]
 				dev.button_action(case[1], PRESS)
-				assert.same({ 400 }, delays(c4))
+				assert.same({ 400, 600 }, delays(c4), "the hold time, and the tap count's window (#432 D6)")
 				c4.fire_timers()
 				assert.same({ { "hold", case[1], case[3], case[4] } }, st.calls)
 			end
@@ -813,7 +903,7 @@ describe("common.device", function()
 			dev.button_action(0, PRESS)
 			dev.button_action(0, RELEASE)
 			assert.same({ { "end", 0 } }, st.calls)
-			assert.same({}, delays(c4))
+			assert.same({ 600 }, delays(c4), "only the tap count's window (#432 D6)")
 			dev.button_action(0, CLICK) -- the click a keypad sends after such a release is the tap
 			assert.same({ { "end", 0 }, { "click", 0 } }, st.calls)
 		end)
@@ -823,7 +913,8 @@ describe("common.device", function()
 			dev.button_action(0, PRESS)
 			dev.button_action(1, PRESS)
 			assert.same({ { "end", 0 } }, st.calls)
-			assert.same({ 400 }, delays(c4), "only the new press's hold timer")
+			assert.same({ 400, 600, 600 }, delays(c4),
+				"only the new press's hold timer, beside each button's tap count window (#432 D6)")
 			c4.fire_timers()
 			assert.same({ { "end", 0 }, { "hold", 1, false, true } }, st.calls)
 		end)
@@ -853,7 +944,9 @@ describe("common.device", function()
 				end
 				dev.button_action(0, PRESS)
 				c4.fire_timers() -- the hold time
-				assert.same({ 600, false }, c4.calls_to("SetTimer")[2], case)
+				local timers = c4.calls_to("SetTimer")
+				assert.same({ 600, false }, timers[#timers], case)
+				assert.same({ 600 }, delays(c4), case .. ": the dim only; the hold closed the tap count (#432 D6)")
 				if case == "released" then dev.button_action(0, RELEASE) end
 				if case == "unbound" then st.bridge = nil end
 				if case == "no rid" then st.rid = nil end
@@ -985,7 +1078,8 @@ describe("common.device", function()
 			c4.fire_timers()
 			dispatch.received_from_proxy(5001, "BUTTON_ACTION", { BUTTON_ID = "1", ACTION = "0" })
 			assert.same({ { "hold", 1, false, true }, { "end", 1 }, { "finish", 1 } }, st.calls)
-			assert.same({ { 5001, { BUTTON_ID = 1, ACTION = 0 } } }, proxied(c4, "BUTTON_ACTION"))
+			assert.same({ { 5001, { BUTTON_ID = 1, ACTION = 1 } }, { 5001, { BUTTON_ID = 1, ACTION = 0 } } },
+				proxied(c4, "BUTTON_ACTION"), "the link's push notified (#432 D4), the proxy's release echoed")
 		end)
 
 		it("arms the click guard before on_finish, so a failing hook still leaves the keypad's click ignored", function()
@@ -1111,7 +1205,7 @@ describe("common.device", function()
 						local k, _, c4, st = on_route(route)
 						k.tap(0)
 						assert.same({ { "end", 0 }, { "click", 0 } }, st.calls)
-						assert.same({}, delays(c4), "no hold timer, no guard")
+						assert.same({ 600 }, delays(c4), "no hold timer, no guard: only the tap count's window (#432 D6)")
 					end)
 
 					it("a second press within 600 ms on the same button is swallowed, a third too, all echoed", function()
@@ -1122,8 +1216,8 @@ describe("common.device", function()
 						c4.advance(599) -- measured from the second press, not the first
 						k.tap(2)
 						assert.same({ { "end", 2 }, { "click", 2 }, { "end", 2 }, { "end", 2 } }, st.calls)
-						assert.equal(route.echoes and 6 or 0, #proxied(c4, "BUTTON_ACTION"),
-							"the proxy route echoes every action, the swallowed ones too")
+						assert.equal(6, #proxied(c4, "BUTTON_ACTION"),
+							"the proxy route echoes every action, the swallowed ones too; the links notify them (#432 D4)")
 					end)
 
 					it("a press 600 ms or more after the last is a fresh tap; so is one after the clock went back", function()
@@ -1154,10 +1248,10 @@ describe("common.device", function()
 							st.ramping = true
 							k.press(button)
 							assert.same({ { "stop", button } }, st.calls, "on the push, before any click")
-							assert.same({ 400 }, delays(c4), "the hold timer starts as before")
+							assert.same({ 400, 600 }, delays(c4), "the hold timer starts as before, beside the count's window")
 							k.click(button)
 							assert.same({ { "stop", button }, { "end", button } }, st.calls, "no tap, no second stop")
-							assert.same({}, delays(c4), "a stop arms no guard")
+							assert.same({ 600 }, delays(c4), "a stop arms no guard; the tap count's window (#432 D8)")
 							c4.advance(600)
 							k.tap(button)
 							assert.same({ "click", button }, st.calls[4], "the next tap acts from the stopped level")
@@ -1224,7 +1318,7 @@ describe("common.device", function()
 						c4.advance(100)
 						k.click(0)               -- another button's window does not count: stops
 						assert.same({ { "click", 0 }, { "stop", 0 }, { "click", 1 }, { "stop", 0 } }, st.calls)
-						assert.same({}, delays(c4))
+						assert.same({ 600, 600 }, delays(c4), "the two buttons' tap count windows (#432 D6)")
 					end)
 
 					it("push, release, click: the click follows its press's verdict and judges nothing again", function()
@@ -1279,6 +1373,329 @@ describe("common.device", function()
 					end)
 				end)
 			end
+		end)
+
+		-- #432 (docs/light-events-design.md §3.1, §8.1): the light's own button
+		-- events, sent beside the machine. On the fake clock: c4.advance moves
+		-- C4:GetTime and fires what falls due on the way.
+		describe("the light's own button events (#432)", function()
+			local COMMANDS = { [PRESS] = "DO_PUSH", [CLICK] = "DO_CLICK", [RELEASE] = "DO_RELEASE" }
+
+			after_each(function()
+				local loaded = package.loaded["common.device"]
+				if loaded then loaded.BUTTON_EVENTS_MODE = "count" end
+			end)
+
+			-- An instance whose machine runs with the light's ramp hooks (as in
+			-- the #421 block above), and the presses by either route: k.push,
+			-- k.click, k.release and k.tap (push then click) on the Button Links,
+			-- k.proxy(button, action) on the proxy's BUTTON_ACTION.
+			local function keypad(opts)
+				local dev, c4, _, dispatch, st = new_keypad(opts)
+				st.ramping = false
+				dev.ramp_active = function() return st.ramping end
+				dev.on_ramp_stop = function(button)
+					st.calls[#st.calls + 1] = { "stop", button }
+					st.ramping = false
+				end
+				dev.on_click = function(button)
+					st.calls[#st.calls + 1] = { "click", button }
+					if st.tap_ramps then st.ramping = true end
+				end
+				local k = {}
+				for name, action in pairs({ push = PRESS, click = CLICK, release = RELEASE }) do
+					k[name] = function(button) dispatch.received_from_proxy(200 + button, COMMANDS[action], {}) end
+				end
+				function k.tap(button)
+					k.push(button)
+					k.click(button)
+				end
+				function k.proxy(button, action)
+					dispatch.received_from_proxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button),
+						ACTION = tostring(action) })
+				end
+				return k, dev, c4, st
+			end
+
+			-- The button notifications to the proxy in order: "<button>:<action>"
+			-- for BUTTON_ACTION, "count <button>:<count>" for CLICK_COUNT. Each
+			-- goes to 5001 with numbers (a NOTIFY: SendToProxy's default on 5001).
+			local function events(c4)
+				local out = {}
+				for _, args in ipairs(c4.calls_to("SendToProxy")) do
+					local command, params = args[2], args[3]
+					if command == "BUTTON_ACTION" or command == "CLICK_COUNT" then
+						assert.equal(5001, args[1])
+						assert.is_number(params.BUTTON_ID)
+						if command == "BUTTON_ACTION" then
+							assert.is_number(params.ACTION)
+							out[#out + 1] = params.BUTTON_ID .. ":" .. params.ACTION
+						else
+							assert.is_number(params.COUNT)
+							out[#out + 1] = "count " .. params.BUTTON_ID .. ":" .. params.COUNT
+						end
+					end
+				end
+				return out
+			end
+
+			it("a Button Link press notifies BUTTON_ACTION 1, its click 2, a hold's release 0", function()
+				local k, _, c4, st = keypad()
+				k.push(0)
+				assert.same({ "0:1" }, events(c4), "at the push, before any click")
+				assert.same({ { 5001, { BUTTON_ID = 0, ACTION = 1 } } }, proxied(c4, "BUTTON_ACTION"))
+				k.click(0)
+				assert.same({ "0:1", "0:2" }, events(c4))
+				c4.advance(1000)
+				k.push(0)
+				k.release(0) -- before the hold time: a click
+				c4.advance(1000)
+				k.push(1)
+				c4.advance(400) -- a hold
+				k.release(1)
+				c4.advance(1000)
+				k.push(2)
+				c4.advance(400)
+				k.click(2) -- a hold's release as a click
+				assert.same({ "0:1", "0:2", "count 0:1", "0:1", "0:2", "count 0:1", "1:1", "1:0", "2:1", "2:0" },
+					events(c4))
+				assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 }, { "hold", 1, false, true }, { "end", 1 },
+					{ "finish", 1 }, { "hold", 2, false, true }, { "end", 2 }, { "finish", 2 } }, st.calls,
+					"what the light does is unchanged")
+			end)
+
+			it("PUSH, RELEASE, CLICK on a link notifies one release", function()
+				local k, _, c4, st = keypad()
+				k.push(0)
+				k.release(0)
+				k.click(0)
+				assert.same({ "0:1", "0:2" }, events(c4), "the click after the release sends nothing")
+				assert.same({ { "end", 0 }, { "click", 0 } }, st.calls, "the click is still the tap")
+				c4.advance(600)
+				assert.same({ "0:1", "0:2", "count 0:1" }, events(c4))
+			end)
+
+			it("a push while the button is still down notifies the missing release first", function()
+				local k, _, c4 = keypad()
+				k.push(0)
+				c4.advance(200) -- its DO_RELEASE never came
+				k.push(0)
+				k.click(0)
+				assert.same({ "0:1", "0:0", "0:1", "0:2" }, events(c4))
+				c4.advance(1000)
+				k.proxy(1, PRESS) -- the proxy's own route marks the button down too (D5)
+				k.push(1)
+				k.release(1)
+				assert.same({ "1:1", "1:0", "1:1", "1:2" }, { unpack(events(c4), 6) })
+				local pushes, releases = 0, 0
+				for _, e in ipairs(events(c4)) do
+					if e:find(":1$") and not e:find("^count") then pushes = pushes + 1 end
+					if e:find(":[02]$") and not e:find("^count") then releases = releases + 1 end
+				end
+				assert.equal(pushes, releases, "exactly one release for every push the proxy heard")
+			end)
+
+			it("the keypad's click after a hold's release notifies nothing", function()
+				local k, _, c4, st = keypad()
+				k.push(0)
+				c4.advance(400)
+				k.release(0)
+				k.click(0)
+				assert.same({ { "hold", 0, true, true }, { "end", 0 }, { "finish", 0 } }, st.calls, "the guard ignores it")
+				c4.advance(2000)
+				assert.same({ "0:1", "0:0" }, events(c4), "no release twice, and a hold counts no tap")
+			end)
+
+			it("a single tap sends CLICK_COUNT 1 DOUBLE_TAP_MS after its press", function()
+				local k, _, c4 = keypad()
+				k.push(0)
+				c4.advance(150)
+				k.click(0)
+				c4.advance(449)
+				assert.same({ "0:1", "0:2" }, events(c4), "599 ms after the press: the window is still open")
+				c4.advance(1)
+				assert.same({ { 5001, { BUTTON_ID = 0, COUNT = 1 } } }, proxied(c4, "CLICK_COUNT"))
+				c4.advance(5000)
+				assert.equal(1, #proxied(c4, "CLICK_COUNT"), "once")
+				assert.same({}, delays(c4))
+			end)
+
+			it("a double tap sends CLICK_COUNT 2 once, and the second tap still changes nothing", function()
+				local k, _, c4, st = keypad()
+				st.tap_ramps = true
+				k.tap(0)
+				c4.advance(300)
+				k.tap(0)
+				assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 } }, st.calls, "the second tap is swallowed (#421 D4)")
+				assert.is_true(st.ramping, "the first tap's ramp keeps going (D8)")
+				c4.advance(599)
+				assert.same({ "0:1", "0:2", "0:1", "0:2" }, events(c4), "no single tap in between")
+				c4.advance(1)
+				assert.same({ { 5001, { BUTTON_ID = 0, COUNT = 2 } } }, proxied(c4, "CLICK_COUNT"))
+				c4.advance(5000)
+				assert.same({ "0:1", "0:2", "0:1", "0:2", "count 0:2" }, events(c4))
+			end)
+
+			it("a triple tap sends CLICK_COUNT 3, and a fourth tap in the window adds nothing", function()
+				local k, _, c4, st = keypad()
+				for i = 1, 4 do
+					if i > 1 then c4.advance(200) end
+					k.tap(0)
+				end
+				assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 }, { "end", 0 }, { "end", 0 } }, st.calls,
+					"one tap reached the light, the rest are the keypad's")
+				c4.advance(599) -- measured from the fourth press
+				assert.same({}, proxied(c4, "CLICK_COUNT"))
+				c4.advance(1)
+				assert.same({ { 5001, { BUTTON_ID = 0, COUNT = 3 } } }, proxied(c4, "CLICK_COUNT"))
+				c4.advance(600)
+				k.tap(0)
+				c4.advance(600)
+				assert.same({ 5001, { BUTTON_ID = 0, COUNT = 1 } }, proxied(c4, "CLICK_COUNT")[2], "a new sequence")
+			end)
+
+			it("a press that becomes a hold closes the sequence with the taps before it and counts none for itself", function()
+				local k, _, c4 = keypad()
+				k.tap(0)
+				c4.advance(300)
+				k.push(0)
+				c4.advance(399)
+				assert.same({ "0:1", "0:2", "0:1" }, events(c4))
+				c4.advance(1) -- the hold
+				assert.same({ "0:1", "0:2", "0:1", "count 0:1" }, events(c4), "the tap before it, at once")
+				c4.advance(2000)
+				k.release(0)
+				assert.same({ "0:1", "0:2", "0:1", "count 0:1", "0:0" }, events(c4))
+
+				-- A hold alone counts nothing; a hold after three taps keeps the three.
+				k, _, c4 = keypad()
+				k.push(1)
+				c4.advance(400)
+				k.release(1)
+				c4.advance(2000)
+				assert.same({}, proxied(c4, "CLICK_COUNT"))
+				for _ = 1, 3 do
+					k.tap(1)
+					c4.advance(200)
+				end
+				k.push(1)
+				c4.advance(400)
+				assert.same({ { 5001, { BUTTON_ID = 1, COUNT = 3 } } }, proxied(c4, "CLICK_COUNT"))
+				k.release(1)
+				assert.same({ "1:1", "count 1:3", "1:0" }, { unpack(events(c4), #events(c4) - 2) },
+					"the count at the hold; its release is a hold's")
+			end)
+
+			it("a tap that stops a ramp counts as a tap", function()
+				local k, dev, c4, st = keypad()
+				st.tap_ramps = true
+				k.tap(0)
+				c4.advance(1000)
+				k.tap(1) -- outside any window: stops the first tap's ramp (#421 D5)
+				assert.same({ { "end", 0 }, { "click", 0 }, { "stop", 1 }, { "end", 1 } }, st.calls)
+				c4.advance(600)
+				assert.same({ { 5001, { BUTTON_ID = 0, COUNT = 1 } }, { 5001, { BUTTON_ID = 1, COUNT = 1 } } },
+					proxied(c4, "CLICK_COUNT"), "two separate single taps")
+
+				-- A stop that fails (logged by dispatch) still counts its press (D3).
+				dev.on_ramp_stop = function() error("boom") end
+				st.ramping = true
+				local lines = capture_log()
+				k.tap(2)
+				assert.equal(1, #lines)
+				c4.advance(600)
+				assert.same({ 5001, { BUTTON_ID = 2, COUNT = 1 } }, proxied(c4, "CLICK_COUNT")[3])
+			end)
+
+			it("taps on different buttons are counted apart", function()
+				local k, _, c4 = keypad()
+				k.tap(0)
+				c4.advance(100)
+				k.tap(1)
+				c4.advance(100)
+				k.tap(0) -- 200 ms after the top's first press: its second tap
+				c4.advance(2000)
+				assert.same({ "0:1", "0:2", "1:1", "1:2", "0:1", "0:2", "count 1:1", "count 0:2" }, events(c4))
+			end)
+
+			it("the proxy route echoes as before and sends the same CLICK_COUNT", function()
+				-- The same presses by both routes: a double tap on top, then a hold on bottom.
+				local function run(by_proxy)
+					local k, _, c4, st = keypad()
+					local function act(button, action)
+						if by_proxy then return k.proxy(button, action) end
+						k[action == PRESS and "push" or action == CLICK and "click" or "release"](button)
+					end
+					act(0, PRESS)
+					act(0, CLICK)
+					c4.advance(300)
+					act(0, PRESS)
+					act(0, CLICK)
+					c4.advance(1000)
+					act(1, PRESS)
+					c4.advance(400)
+					act(1, RELEASE)
+					c4.advance(2000)
+					return events(c4), st.calls
+				end
+				local proxy_events, proxy_calls = run(true)
+				local link_events, link_calls = run(false)
+				assert.same({ "0:1", "0:2", "0:1", "0:2", "count 0:2", "1:1", "1:0" }, proxy_events,
+					"every action echoed as received, then the count")
+				assert.same(proxy_events, link_events, "the proxy hears one sequence from both routes")
+				assert.same(proxy_calls, link_calls)
+			end)
+
+			it("in mode action the close sends BUTTON_ACTION 2, 3 or 4, link releases notify 0, "
+				.. "and no CLICK_COUNT goes out", function()
+					local k, _, c4 = keypad()
+					require("common.device").BUTTON_EVENTS_MODE = "action"
+					for taps = 1, 3 do
+						for i = 1, taps do
+							if i > 1 then c4.advance(200) end
+							k.tap(0)
+						end
+						c4.advance(1000)
+					end
+					k.push(1)
+					c4.advance(400)
+					k.release(1)
+					c4.advance(1000)
+					k.proxy(2, PRESS)
+					k.proxy(2, CLICK)
+					c4.advance(1000)
+					assert.same({
+						"0:1", "0:0", "0:2",
+						"0:1", "0:0", "0:1", "0:0", "0:3",
+						"0:1", "0:0", "0:1", "0:0", "0:1", "0:0", "0:4",
+						"1:1", "1:0",
+						"2:1", "2:2", "2:2",
+					}, events(c4), "the proxy route's echo is unchanged; its close is BUTTON_ACTION 2 too")
+					assert.same({}, proxied(c4, "CLICK_COUNT"))
+				end)
+
+			it("cancel_timers drops an open sequence and releases a button still down", function()
+				local k, dev, c4 = keypad()
+				k.tap(0)
+				c4.advance(100)
+				k.push(2)
+				assert.same({ "0:1", "0:2", "2:1" }, events(c4))
+				dev.cancel_timers()
+				assert.same({ "0:1", "0:2", "2:1", "2:0" }, events(c4), "the release the proxy waits for (E9)")
+				assert.same({}, delays(c4), "the count's window went too")
+				c4.advance(5000)
+				assert.same({}, proxied(c4, "CLICK_COUNT"), "dropped, not sent")
+
+				-- Every button still down, in order; nothing down, nothing sent.
+				k, dev, c4 = keypad()
+				k.push(2)
+				k.proxy(0, PRESS)
+				dev.cancel_timers()
+				assert.same({ "2:1", "0:1", "0:0", "2:0" }, events(c4))
+				dev.cancel_timers()
+				k.push(2)
+				assert.same({ "2:1", "0:1", "0:0", "2:0", "2:1" }, events(c4), "the new code starts with nothing down")
+			end)
 		end)
 	end)
 

@@ -335,7 +335,10 @@ Without the token, or with a wrong one: 401.
     `devloop.keep` keeps one list per load until a dev `.c4z` install.
 - Signed commands: the bridge's development commands (`Hue Request`, `Probe
   Call`, `Probe Project`, `Probe Errors`, `Probe Scenes`, `Proxy Command`,
-  `Lights Report`, and `Test Connection` with a `Host`) are not in its
+  `Lights Report`, `Link Offline After` (#428), `Watch Events` (#432: logs
+  which proxy events of a light fire, e.g. `Light=<device>
+  Events=5001-5015`; `Events=none` stops), and `Test Connection` with a
+  `Host`) are not in its
   dispatch table. `bridge/devtools.lua` hands them to
   `devloop.set_signed_commands(handlers)`, keyed by dispatch name, at every
   load of `driver.lua`, a reload's included; `devloop.execute(command,
@@ -618,8 +621,8 @@ signed, and the key never crosses the wire.
   `Check CA Pinning`) and the `Dev Server` property, plus `HUE_LOG`
   (`devtools.install`). The rest runs only for a signed `execute` command
   (above): `Hue Request`, `Probe Project`, `Probe Errors`, `Probe Scenes`,
-  `Probe Call`, `Proxy Command`, `Lights Report` and `Test Connection`'s
-  `Host` variant. Composer's `Test Connection` is the driver's own handler,
+  `Probe Call`, `Proxy Command`, `Lights Report`, `Link Offline After`,
+  `Watch Events` and `Test Connection`'s `Host` variant. Composer's `Test Connection` is the driver's own handler,
   which takes no parameters; another driver that sends it with a `Host`
   gets the dotted address.
 - **`HUE_LOG` stays reachable.** The light and scene devices send their log

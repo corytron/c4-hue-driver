@@ -49,12 +49,20 @@ local function configure(env, extra)
 	env.ExecuteCommand("HUE_CONFIGURE", params)
 end
 
--- A configured, on, white light at 40%.
+-- The window of the light's Hue-side level reports (#433 D12, LEVEL_REPORT_MS).
+local LEVEL_REPORT_MS = 1000
+-- The double-tap window, after which a press's tap count goes to the proxy
+-- (#432 D6, common/device.lua DOUBLE_TAP_MS).
+local DOUBLE_TAP_MS = 600
+
+-- A configured, on, white light at 40%. The hello's report opened the level
+-- window (#433 D12); it has run out quietly, so the light starts idle.
 local function lit_light()
 	local env, c4 = load_light({ rid = "l1" })
 	configure(env)
 	env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40", mirek = "370",
 		color_mode = "ct", online = "true", reason = "hello" })
+	assert(c4.fire_timers_of(LEVEL_REPORT_MS) == 1, "the hello's report opens the level window")
 	c4.calls = {}
 	c4.sent = {}
 	return env, c4
@@ -130,6 +138,25 @@ end
 
 local function last_sent(c4)
 	return c4.sent[#c4.sent]
+end
+
+-- The delays of the active timers, lowest first.
+local function delays_of(c4)
+	local out = {}
+	for _, timer in ipairs(c4.active_timers()) do out[#out + 1] = timer.delay end
+	table.sort(out)
+	return out
+end
+
+-- What a hello sends since #435 (docs/load-groups-design.md §6.3, D6,
+-- E19): HUE_HELLO with `hello`, then HUE_LOAD_GROUPS with the device's id,
+-- rid and kind as the hello names them, and `groups` ("none" by default).
+local function greeting(hello, groups)
+	return {
+		{ id = BRIDGE_ID, command = "HUE_HELLO", params = hello },
+		{ id = BRIDGE_ID, command = "HUE_LOAD_GROUPS", params = { device_id = hello.device_id, rid = hello.rid,
+			kind = hello.kind == "group" and "group" or nil, groups = groups or "none" } },
+	}
 end
 
 -- Every SendToDevice with that command, in order.
@@ -215,8 +242,9 @@ describe("Hue Light driver", function()
 	describe("startup and binding", function()
 		it("greets the bridge with its persisted rid on late init", function()
 			local env, c4 = load_light({ rid = "l1" })
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 			assert.equal("l1", env.Properties["Hue Light ID"])
+			assert.equal("None", env.Properties["Load Groups"], "#435 §6.1")
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 			assert.equal("", env.Properties["Online"], "not known until the bridge says")
 			assert.equal("1", env.Properties["Driver Version"])
@@ -256,7 +284,7 @@ describe("Hue Light driver", function()
 
 		it("greets without a rid key when it has none (SendToDevice drops empty values)", function()
 			local _, c4 = load_light()
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ device_id = "2001" }), c4.sent)
 		end)
 
 		it("greets with its persisted name and model too, and shows them before the bridge answers", function()
@@ -264,8 +292,7 @@ describe("Hue Light driver", function()
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			c4.persist.hue_rid, c4.persist.hue_name, c4.persist.hue_model = "l1", "Desk", "Hue color lamp"
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" }), c4.sent)
 			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
 			assert.equal("", env.Properties["Online"], "still not known until the bridge says")
 		end)
@@ -298,7 +325,7 @@ describe("Hue Light driver", function()
 			local env, c4 = load_light({ bind = false, rid = "l1" })
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 
 			c4.calls = {}
@@ -312,7 +339,7 @@ describe("Hue Light driver", function()
 		it("trusts the device id in the binding notification when the lookup lags behind", function()
 			local env, c4 = load_light({ bind = false, rid = "l1" })
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 		end)
 
 		it("ignores binding changes other than the bridge's", function()
@@ -523,10 +550,12 @@ describe("Hue Light driver", function()
 			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
 			assert.equal("l1", c4.persist.hue_rid)
 			assert.equal(2, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			-- The second, a Hue-side level, comes at the end of the window the
+			-- resync's report opened (#433 D12).
+			assert.equal(1, c4.fire_timers_of(LEVEL_REPORT_MS))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 }, { LIGHT_BRIGHTNESS_CURRENT = 55 } },
 				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "both states, in arrival order")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" } } }, c4.sent,
+			assert.same(greeting({ rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" }), c4.sent,
 				"the hello carries the identity the buffered configure delivered")
 			local online = notifies(c4, "ONLINE_CHANGED")
 			assert.same({ STATE = true }, online[#online])
@@ -564,7 +593,7 @@ describe("Hue Light driver", function()
 
 			-- Director's lookup does not show the binding yet at late init.
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 			local delays = {}
 			for _, timer in ipairs(c4.active_timers()) do delays[#delays + 1] = timer.delay end
@@ -996,6 +1025,263 @@ describe("Hue Light driver", function()
 		end)
 	end)
 
+	-- #433 (docs/light-events-design.md D12 to D14, §6.5, §8.1): a level Hue
+	-- reports while it moves (the Hue app's slider, a Hue dimmer switch, a Hue
+	-- automation) reaches the proxy at most once per LEVEL_REPORT_MS window,
+	-- the first at once and the latest, exact, at the window's end. An on or
+	-- an off, the report that settles a Control4 target and a full state go
+	-- out at once; every CHANGING drops a report still waiting; the cache
+	-- always holds the latest level.
+	describe("Hue-side level reports (#433)", function()
+		local ZONE_RID = "b90ea7b4-aaaa-4bbb-8ccc-ddddeeeeffff"
+		local ZONE = { rid = ZONE_RID, kind = "group", group_type = "zone", name = "Bedside Lights", light_count = "2",
+			model = "Hue zone", hue_room = "Bedside Lights (zone)", id_v1 = "/groups/2", has_color = "true",
+			has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "1" }
+
+		-- A HUE_STATE for `rid` (default "l1"), reason "event" unless `params` names one.
+		local function hue(env, params, rid)
+			params.rid = rid or "l1"
+			params.reason = params.reason or "event"
+			env.ExecuteCommand("HUE_STATE", params)
+		end
+
+		-- Every LIGHT_BRIGHTNESS_CURRENT the proxy heard as CHANGED, in order.
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		-- From now on, every CHANGED as { ms since now on the fake clock, level }.
+		local function timeline(c4)
+			local out, start, original = {}, c4.now_ms, c4.SendToProxy
+			c4.SendToProxy = function(self, binding, command, params, message_type)
+				if binding == 5001 and command == "LIGHT_BRIGHTNESS_CHANGED" then
+					out[#out + 1] = { c4.now_ms - start, params.LIGHT_BRIGHTNESS_CURRENT }
+				end
+				return original(self, binding, command, params, message_type)
+			end
+			return out
+		end
+
+		local function button(env, id, action)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(id), ACTION = action })
+		end
+
+		-- Params of every HUE_SET sent, in order.
+		local function sets_of(c4)
+			local out = {}
+			for _, m in ipairs(messages(c4, "HUE_SET")) do out[#out + 1] = m.params end
+			return out
+		end
+
+		it("Hue-side level reports reach the proxy at most once a second, the last one exact", function()
+			local env, c4 = lit_light() -- on at 40 %, the hello's window run out
+			local start = c4.now_ms
+			local seen = timeline(c4)
+			-- The Hue app's slider dragged up for about 2 s: an event every
+			-- 300 ms (the bridge sends at most about two containers a second).
+			for i, level in ipairs({ "45", "50", "55", "60", "65", "70", "72.4" }) do
+				if i > 1 then c4.advance(300) end
+				hue(env, { brightness = level })
+			end
+			local let_go = c4.now_ms - start -- 1800
+			c4.advance(5000)
+			assert.same({ { 0, 45 }, { 1000, 60 }, { 2000, 72 } }, seen,
+				"the first at once, then the latest level at each window's end")
+			for i = 2, #seen do
+				assert.is_true(seen[i][1] - seen[i - 1][1] >= LEVEL_REPORT_MS, "at most one a second")
+			end
+			assert.equal(72, seen[#seen][2], "the last one exact: Hue's 72.4 as the proxy's whole percent")
+			assert.is_true(seen[#seen][1] - let_go <= LEVEL_REPORT_MS, "within a second of the last report")
+			assert.equal(0, #c4.active_timers(), "a window that ends with nothing new closes")
+			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "Hue-side changes send no CHANGING")
+		end)
+
+		it("an off or an on from Hue goes to the proxy at once, inside a window", function()
+			local env, c4 = lit_light()
+			local seen = timeline(c4)
+			hue(env, { brightness = "50" }) -- 0: at once, a window opens
+			c4.advance(200)
+			hue(env, { brightness = "55" }) -- 200: waits for the window's end
+			c4.advance(200)
+			hue(env, { on = "false" }) -- 400: off
+			c4.advance(200)
+			hue(env, { on = "true", brightness = "30" }) -- 600: on again
+			assert.same({ { 0, 50 }, { 400, 0 }, { 600, 30 } }, seen, "on and off at once")
+			c4.advance(5000)
+			assert.same({ { 0, 50 }, { 400, 0 }, { 600, 30 } }, seen, "the 55 never shows: the off came after it")
+		end)
+
+		it("a report that settles a Control4 target goes out at once", function()
+			-- The proxy heard CHANGING and waits for its CHANGED, even when the
+			-- level is the one it shows already.
+			local env, c4 = lit_light() -- on at 40 %
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+			hue(env, { brightness = "40.2" })
+			assert.same({ 40 }, levels(c4))
+			hue(env, { brightness = "45" }) -- a Hue-side level waits for the window the CHANGED opened
+			assert.same({ 40 }, levels(c4))
+			c4.advance(LEVEL_REPORT_MS)
+			assert.same({ 40, 45 }, levels(c4))
+
+			-- A hold's release has no CHANGING of its own: the stop's report
+			-- settles it, also while Hue's levels of the dim wait in a window.
+			env, c4 = lit_light()
+			button(env, 0, "1")
+			c4.advance(400) -- the hold: HUE_DIM up, CHANGING toward 100
+			hue(env, { brightness = "45" }) -- Hue reports the dim as it goes: at once, a window opens
+			c4.advance(300)
+			hue(env, { brightness = "50" }) -- waits in the window
+			button(env, 0, "0") -- the release: HUE_DIM stop, a target the bridge's report settles
+			assert.equal("stop", dims(c4)[2].direction)
+			hue(env, { brightness = "52.3" })
+			assert.same({ 45, 52 }, levels(c4), "at once, inside the window")
+			c4.advance(5000)
+			assert.same({ 45, 52 }, levels(c4), "and never repeated")
+		end)
+
+		it("a resync or hello state is not throttled", function()
+			local env, c4 = lit_light()
+			hue(env, { brightness = "50" }) -- at once, a window opens
+			hue(env, { on = "true", brightness = "60", reason = "resync" })
+			hue(env, { on = "true", brightness = "65", reason = "hello" })
+			hue(env, { on = "true", brightness = "70", reason = "import" })
+			assert.same({ 50, 60, 65, 70 }, levels(c4), "each full state at once, inside the window")
+			-- A report without a reason is Hue's word as it moves, as "event":
+			-- it waits for the window the import's report started again.
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "75" })
+			assert.same({ 50, 60, 65, 70 }, levels(c4))
+			c4.advance(LEVEL_REPORT_MS)
+			assert.same({ 50, 60, 65, 70, 75 }, levels(c4))
+		end)
+
+		it("a report from outside HUE_STATE goes at once, and the window's end does not repeat it", function()
+			local env, c4 = lit_light()
+			hue(env, { brightness = "50" }) -- at once, a window opens
+			hue(env, { brightness = "55" }) -- waits
+			env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+			assert.same({ 50, 55 }, levels(c4), "the proxy asked: the cache's level at once")
+			c4.advance(5000)
+			assert.same({ 50, 55 }, levels(c4), "it was the last level sent (D14)")
+		end)
+
+		it("a brightness command closes the window: no stale CHANGED during its ramp", function()
+			local env, c4 = lit_light() -- on at 40 %
+			hue(env, { brightness = "50" }) -- 0: at once, a window opens until 1000
+			c4.advance(300)
+			hue(env, { brightness = "55" }) -- 300: waits for the window's end
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "3000" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 55, LIGHT_BRIGHTNESS_TARGET = 80, RATE = 3000 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "from the level the light is at, not the 50 the proxy shows")
+			hue(env, { brightness = "80" }) -- Hue reports the target as the transition starts: held (#421 D10)
+			c4.advance(2999)
+			assert.same({ 50 }, levels(c4), "no 55 at the window's end, nothing while the tile animates")
+			c4.advance(1)
+			assert.same({ 50, 80 }, levels(c4), "the ramp's one CHANGED")
+			c4.advance(5000)
+			assert.same({ 50, 80 }, levels(c4))
+		end)
+
+		it("a hold's CHANGING closes the window", function()
+			local env, c4 = lit_light() -- on at 40 %
+			hue(env, { brightness = "50" }) -- 0: at once, a window opens until 1000
+			c4.advance(300)
+			hue(env, { brightness = "55" }) -- 300: waits for the window's end
+			button(env, 1, "1")
+			c4.advance(400) -- 700: the hold starts, down from the level the light is at
+			local changing = notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")
+			assert.same({ 55, 1 }, { changing[1].LIGHT_BRIGHTNESS_CURRENT, changing[1].LIGHT_BRIGHTNESS_TARGET })
+			c4.advance(500) -- 1200: past the window's end
+			assert.same({ 50 }, levels(c4), "no stale 55 while the tile animates the hold")
+			button(env, 1, "0")
+			hue(env, { brightness = "47.3" }) -- the stop's level
+			assert.same({ 50, 47 }, levels(c4))
+		end)
+
+		it("a load group's CHANGING closes the window too (#435)", function()
+			local env, c4 = lit_light() -- on at 40 %
+			env.ReceivedFromProxy(5001, "JOIN_GROUP", { GROUP_ID = "1234", KEEP_SYNC = "0" })
+			hue(env, { brightness = "50" }) -- 0: at once, a window opens until 1000
+			c4.advance(300)
+			hue(env, { brightness = "55" }) -- 300: waits for the window's end
+			env.ReceivedFromProxy(5001, "GROUP_START_RAMP", { GROUP_ID = "1234", RAMP_UP = "1", RATE = "4000" })
+			local changing = notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")
+			assert.same({ 55, 100 }, { changing[1].LIGHT_BRIGHTNESS_CURRENT, changing[1].LIGHT_BRIGHTNESS_TARGET })
+			c4.advance(1000) -- 1300: past the window's end
+			assert.same({ 50 }, levels(c4), "no stale 55 while the tile animates the group's hold")
+			env.ReceivedFromProxy(5001, "GROUP_STOP_RAMP", { GROUP_ID = "1234" })
+			hue(env, { brightness = "70" }) -- the stop's level
+			assert.same({ 50, 70 }, levels(c4))
+
+			env.ReceivedFromProxy(5001, "GROUP_SET_LEVEL", { GROUP_ID = "1234", LEVEL = "20" })
+			assert.equal(2, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "a group level is a target as any other")
+		end)
+
+		it("the LEDs follow an on or off from Hue at once", function()
+			local env, c4 = lit_light() -- on at 40 %, the LEDs lit
+			local captured = capture_proxy(c4)
+			hue(env, { brightness = "50" }) -- at once, a window opens
+			c4.advance(200)
+			hue(env, { brightness = "55" }) -- waits; a level changes no LED
+			assert.same({}, with_command(captured, "MATCH_LED_STATE"))
+			hue(env, { on = "false" })
+			assert.same(leds(false), with_command(captured, "MATCH_LED_STATE"), "off, inside the window")
+			c4.advance(200)
+			hue(env, { on = "true", brightness = "30" })
+			local all = with_command(captured, "MATCH_LED_STATE")
+			assert.same(leds(true), { all[4], all[5], all[6] }, "on again, inside the off's window")
+			assert.equal(6, #all)
+		end)
+
+		it("Raise Level By reads the exact level while a report waits in the window", function()
+			local env, c4 = lit_light() -- on at 40 %
+			hue(env, { brightness = "50" }) -- at once, a window opens
+			hue(env, { brightness = "55" }) -- the proxy still shows 50
+			assert.same({ 50 }, levels(c4))
+			env.ExecuteCommand("Raise Level By", { Points = "10", ["Ramp (ms)"] = "0" })
+			assert.same({ { rid = "l1", on = "true", brightness = "65", rate = "0" } }, sets_of(c4),
+				"55 + 10: the level the light is at")
+			assert.truthy(fake.last_action(env):find("Raised from 55 % to 65 %", 1, true), fake.last_action(env))
+		end)
+
+		it("a zone light's level reports are throttled the same way", function()
+			local env, c4 = load_light({ rid = ZONE_RID })
+			env.ExecuteCommand("HUE_CONFIGURE", ZONE)
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "40", x = "0.4", y = "0.35",
+				color_mode = "xy", online = "true", reason = "hello" })
+			assert.equal(1, c4.fire_timers_of(LEVEL_REPORT_MS), "the hello's report opened a window")
+			local seen = timeline(c4)
+			hue(env, { brightness = "50" }, ZONE_RID) -- 0: at once
+			c4.advance(300)
+			hue(env, { brightness = "55" }, ZONE_RID) -- 300: waits
+			c4.advance(300)
+			hue(env, { brightness = "60.4" }, ZONE_RID) -- 600: waits
+			c4.advance(600)
+			hue(env, { on = "false" }, ZONE_RID) -- 1200: off, at once
+			c4.advance(5000)
+			assert.same({ { 0, 50 }, { 1000, 60 }, { 1200, 0 } }, seen)
+		end)
+
+		it("HUE_FORGOTTEN, an unbind from the bridge and destroy drop a report still waiting", function()
+			for _, ending in ipairs({ "forgotten", "unbound", "destroyed" }) do
+				local env, c4 = lit_light()
+				hue(env, { brightness = "50" }) -- at once, a window opens
+				hue(env, { brightness = "55" }) -- waits for the window's end
+				if ending == "forgotten" then
+					env.ExecuteCommand("HUE_FORGOTTEN", { rid = "l1", name = "Desk" })
+				elseif ending == "unbound" then
+					c4.bindings = {}
+					env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+				else
+					env.OnDriverDestroyed()
+				end
+				c4.advance(5000)
+				assert.same({ 50 }, levels(c4), ending)
+			end
+		end)
+	end)
+
 	describe("SYNCHRONIZE", function()
 		it("replays online, brightness and colour", function()
 			local env, c4 = lit_light()
@@ -1050,7 +1336,7 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "0" })
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "75", reason = "event" })
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 75 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "at once")
-			assert.equal(0, #c4.active_timers())
+			assert.same({ LEVEL_REPORT_MS }, delays_of(c4), "no fallback; only the level window it opened (#433 D12)")
 
 			env, c4 = lit_light()
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "75", RATE = "500" })
@@ -1258,6 +1544,7 @@ describe("Hue Light driver", function()
 			configure(env, extra)
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "70", mirek = "370",
 				color_mode = "ct", online = "true", reason = "hello" })
+			assert(c4.fire_timers_of(LEVEL_REPORT_MS) == 1, "the hello's level window (#433 D12) runs out")
 			c4.calls, c4.sent = {}, {}
 			return env, c4
 		end
@@ -1339,14 +1626,14 @@ describe("Hue Light driver", function()
 			turn_on(env, "30", "0")
 			hue_state(env, { on = "false" })
 			assert.same({ 0 }, levels(c4))
-			assert.equal(0, #c4.active_timers())
+			assert.same({ LEVEL_REPORT_MS }, delays_of(c4), "no fallback; only the level window the report opened")
 
 			env, c4 = dark_at_70()
 			turn_on(env, "30", "0")
 			hue_state(env, { on = "true", brightness = "70" })
 			hue_state(env, { on = "false" })
 			assert.same({ 0 }, levels(c4))
-			assert.equal(0, #c4.active_timers())
+			assert.same({ LEVEL_REPORT_MS }, delays_of(c4), "no fallback; only the level window the report opened")
 		end)
 
 		it("shows a held level once the ramp plus 1 s passed without the target, and later ones at once", function()
@@ -1375,6 +1662,10 @@ describe("Hue Light driver", function()
 			turn_on(env, "30", "0")
 			hue_state(env, { on = "true", brightness = "30" })
 			hue_state(env, { brightness = "70" })
+			-- Into the cache at once; to the proxy as a Hue-side level, at the
+			-- end of the window the target's report opened (#433 D12).
+			assert.same({ 30 }, levels(c4))
+			c4.advance(LEVEL_REPORT_MS)
 			assert.same({ 30, 70 }, levels(c4))
 		end)
 
@@ -1405,7 +1696,7 @@ describe("Hue Light driver", function()
 				assert.same({}, levels(c4), command .. ": the 70 % the cache still holds is not shown")
 				hue_state(env, { brightness = "30.2", reason = "event" })
 				assert.same({ 30 }, levels(c4))
-				assert.equal(0, #c4.active_timers(), "the fallback is settled")
+				assert.same({ LEVEL_REPORT_MS }, delays_of(c4), "the fallback is settled; the level window is open")
 			end
 		end)
 
@@ -1533,7 +1824,7 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.35",
 				LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
 			assert.equal(0, #messages(c4, "HUE_SET"), "nothing goes to the bridge while off")
-			assert.equal(0, #c4.active_timers())
+			assert.same({ LEVEL_REPORT_MS }, delays_of(c4), "no fallback; only the level window the off opened (#433)")
 			assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGING"))
 			assert.same({ { LIGHT_COLOR_CURRENT_X = 0.4, LIGHT_COLOR_CURRENT_Y = 0.35, LIGHT_COLOR_CURRENT_COLOR_MODE = 0 } },
 				notifies(c4, "LIGHT_COLOR_CHANGED"))
@@ -1618,11 +1909,12 @@ describe("Hue Light driver", function()
 
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.equal(2, #sends)
+			assert.equal(3, #sends)
 			assert.equal("HUE_HELLO", sends[1].command)
 			assert.same({ id = BRIDGE_ID, command = "HUE_LOG",
 				params = { rid = "l1", line = "[INFO] Hue Light: warming up" },
 				allow_empty = false, log_command = false }, sends[2], "allowEmptyValues and logCommand off")
+			assert.equal("HUE_LOAD_GROUPS", sends[3].command, "the load groups follow the hello (#435)")
 		end)
 
 		it("keeps only the newest 30 lines while the bridge is unknown", function()
@@ -1646,7 +1938,8 @@ describe("Hue Light driver", function()
 			log.debug("noise after binding")
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true" }) -- dispatch logs it at debug
 			assert.equal(0, #messages(c4, "HUE_LOG"))
-			assert.equal(1, #c4.sent, "just the HUE_HELLO")
+			assert.same({ "HUE_HELLO", "HUE_LOAD_GROUPS" }, { c4.sent[1].command, c4.sent[2].command })
+			assert.equal(2, #c4.sent, "just the HUE_HELLO and its HUE_LOAD_GROUPS (#435)")
 		end)
 
 		it("sends lines straight through once bound, log.always included", function()
@@ -1974,6 +2267,7 @@ describe("Hue Light driver", function()
 			local on = tonumber(level) > 0
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = tostring(on), brightness = on and tostring(level) or "70",
 				mirek = "370", color_mode = "ct", online = "true", reason = "hello" })
+			assert(c4.fire_timers_of(LEVEL_REPORT_MS) == 1, "the hello's level window (#433 D12) runs out")
 			settings = settings or {}
 			if settings.preset then
 				env.ReceivedFromProxy(5001, "SET_PRESET_LEVEL", { LEVEL = tostring(settings.preset) })
@@ -2063,7 +2357,7 @@ describe("Hue Light driver", function()
 					assert.same({}, sets(c4), case[1])
 					assert.same({}, changing(c4))
 					assert.same({ case[2] }, levels(c4))
-					assert.equal(0, #c4.active_timers(), "no ramp, no fallback")
+					assert.same({ DOUBLE_TAP_MS }, delays_of(c4), "no ramp, no fallback: only the tap's count (#432 D6)")
 				end
 				local env, c4 = light(62, { preset = 60 })
 				tap(env, 0)
@@ -2119,7 +2413,8 @@ describe("Hue Light driver", function()
 					assert.same({ 70 }, levels(c4), "the estimate at once")
 					click(env, button)
 					assert.equal(2, #sets(c4), "the start and the stop: the click is swallowed")
-					assert.equal(0, #c4.active_timers(), "no ramp, no fallback: the CHANGED is sent")
+					assert.same({ DOUBLE_TAP_MS }, delays_of(c4),
+						"no ramp, no fallback: the CHANGED is sent; only the stopping press's tap count (#432 D8)")
 					c4.advance(5000)
 					assert.same({ 70 }, levels(c4), "one CHANGED for the ramp")
 					env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "68.6" })
@@ -2201,9 +2496,8 @@ describe("Hue Light driver", function()
 					"a glide, not a jump: Hue's fade runs a little behind the estimate")
 				assert.equal(0, #dims(c4), "no dimming_delta stop")
 				assert.same({ 70 }, levels(c4))
-				local timers = c4.active_timers()
-				assert.same({ 400 }, { timers[1].delay, timers[2] and timers[2].delay },
-					"only the press's hold timer: the glide is no ramp and arms no fallback")
+				assert.same({ 400, DOUBLE_TAP_MS }, delays_of(c4),
+					"only the press's hold timer and its tap count (#432 D6): the glide is no ramp and arms no fallback")
 				click(env, 1)
 				assert.equal(2, #sets(c4))
 				-- The bridge reports the estimate at once: it matches, so no second CHANGED.
@@ -2332,15 +2626,17 @@ describe("Hue Light driver", function()
 				tap(env, 0)
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
 				assert.same({ 0 }, levels(c4))
-				assert.equal(0, #c4.active_timers())
+				-- No ramp and no fallback left: the tap's count (#432 D6) and the
+				-- level window the report opened (#433 D12).
+				assert.same({ DOUBLE_TAP_MS, LEVEL_REPORT_MS }, delays_of(c4))
 
 				env, c4 = light(40)
 				tap(env, 0)
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "39" }) -- within a point of the start
 				assert.same({}, levels(c4))
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "20" }) -- the Hue app, say
-				assert.same({ 20 }, levels(c4))
-				assert.equal(0, #c4.active_timers())
+				assert.same({ 20 }, levels(c4), "at once: it settles the tap's target (#433 D12)")
+				assert.same({ DOUBLE_TAP_MS, LEVEL_REPORT_MS }, delays_of(c4))
 				c4.advance(1800)
 				press(env, 1)
 				assert.equal(0, #stops(c4), "no ramp left to stop")
@@ -2360,7 +2656,8 @@ describe("Hue Light driver", function()
 				tap(env, 1)
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40", reason = "resync" })
 				assert.same({ 40 }, levels(c4))
-				assert.equal(0, #c4.active_timers())
+				assert.same({ DOUBLE_TAP_MS, LEVEL_REPORT_MS }, delays_of(c4),
+					"no ramp, no fallback: the tap's count (#432 D6) and the level window (#433 D12)")
 			end)
 
 			it("lights the LEDs as a tap from off starts", function()
@@ -2515,7 +2812,7 @@ describe("Hue Light driver", function()
 			end
 		end)
 
-		it("a click on binding 200 turns on to the preset, on 201 off, with no proxy echo", function()
+		it("a click on binding 200 turns on to the preset, on 201 off, with the link notifies", function()
 			local env, c4 = lit_light()
 			c4.sent = {}
 			c4.calls = {}
@@ -2524,8 +2821,13 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(200, "DO_CLICK", {})
 			assert.equal(1, #messages(c4, "HUE_SET"))
 			assert.equal("100", tostring(messages(c4, "HUE_SET")[1].params.brightness))
-			assert.equal(0, #notifies(c4, "BUTTON_ACTION"))
+			-- #432 D4: the proxy hears the link press as its own route would echo
+			-- it, the push and its click, so it can fire Top Press and Release;
+			-- the keypad's DO_CLICK after the DO_RELEASE adds nothing.
+			assert.same({ { BUTTON_ID = 0, ACTION = 1 }, { BUTTON_ID = 0, ACTION = 2 } }, notifies(c4, "BUTTON_ACTION"))
 			c4.advance(1800) -- the ramp runs out; a click during it would stop it (#421 D5)
+			assert.same({ { BUTTON_ID = 0, COUNT = 1 } }, notifies(c4, "CLICK_COUNT"),
+				"one tap, counted DOUBLE_TAP_MS after its press (#432 D6, mode \"count\")")
 			c4.sent = {}
 			env.ReceivedFromProxy(201, "DO_CLICK", {})
 			assert.equal("false", tostring(messages(c4, "HUE_SET")[1].params.on))
@@ -2686,8 +2988,7 @@ describe("Hue Light driver", function()
 			c4.persist.hue_rid, c4.persist.hue_name = ZONE_RID, "Bedside Lights"
 			c4.persist.hue_model, c4.persist.hue_kind = "Hue zone", "group"
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" } } }, c4.sent)
+			assert.same(greeting({ rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" }), c4.sent)
 			assert.equal("Hue zone Bedside Lights", env.Properties["Status"],
 				"the persisted model stands in for the type until the bridge answers")
 			assert.equal(ZONE_RID, env.Properties["Hue Light ID"])
@@ -2723,8 +3024,7 @@ describe("Hue Light driver", function()
 			assert.equal(0, #c4.calls_to("PersistSetValue"))
 			env.OnDriverLateInit("DIT_STARTUP")
 			assert.equal("Hue zone Bedside Lights (2 lights)", env.Properties["Status"])
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" } } }, c4.sent)
+			assert.same(greeting({ rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" }), c4.sent)
 		end)
 
 		it("a light told kind light persists it and says so in its hello; one never told stays silent", function()
@@ -2948,8 +3248,9 @@ describe("Hue Light driver", function()
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 56 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.equal(1, notifies(c4, "LIGHT_COLOR_CHANGED")[1].LIGHT_COLOR_CURRENT_COLOR_MODE)
 			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "false" })
-			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
-			assert.equal(1, #c4.active_timers(), "only the hold's click guard is left: both targets were confirmed")
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2], "an off: at once")
+			assert.equal(2, #c4.active_timers(),
+				"only the hold's click guard and the level window the off opened (#433 D12): both targets were confirmed")
 		end)
 
 		it("ON and TOGGLE set every lamp to the zone light's own Default On Brightness, as on a light (#233)", function()
@@ -3241,6 +3542,7 @@ describe("Hue Light driver", function()
 				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 25, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = DIM_PRESET } },
 					notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "40" }) -- someone moved it in Hue
+				c4.advance(LEVEL_REPORT_MS) -- a Hue-side level: at the end of the target's window (#433 D12)
 				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
 
 				c4.calls = {}
@@ -3360,7 +3662,8 @@ describe("Hue Light driver", function()
 				local changed = notifies(c4, "LIGHT_COLOR_CHANGED")
 				assert.equal(1, #changed)
 				assert.equal(ON_COLOR, changed[1].LIGHT_COLOR_CURRENT_PRESET_ID)
-				assert.equal(0, #c4.active_timers(), "the report settles both targets")
+				assert.same({ LEVEL_REPORT_MS }, delays_of(c4),
+					"the report settles both targets; only the level window it opened is left (#433 D12)")
 			end)
 
 			it("turns on blended toward the Dim colour below the preset (D13, F14)", function()

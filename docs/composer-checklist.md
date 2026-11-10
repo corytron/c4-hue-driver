@@ -1622,6 +1622,202 @@ steps 117 to 122; Off on both at the end.
      brief; a release install ends the dev loop). The 30 s setting is gone
      (5 minutes again). Nothing else to check. Set `Debug Mode` Off on the
      bridge and the light if it is still On.
+
+## Q. Load groups (#435)
+
+Written on 2026-11-09 from the contract (`docs/load-groups-design.md`,
+decisions D1 to D18, assumptions A1 to A10 and the checks H0 to H8 of its
+§8.2), before the build; check every quoted text against the first build
+that brings it and paste what differs. The owner's manual says the same in
+prose: the Hue Light's own Documentation tab ("Load groups") and the
+bridge's chapter 11 ("Load groups"). Step 99 (H0) comes before any code
+and needs no new build. The build changes the capabilities of
+`hue_light.c4z` (`load_group_support`): answer Yes to "Restart Director?",
+then the owner reboots the controller from System Manager; the release
+that carries it (1.5, with #429 and #427) needs that one reboot in all.
+The Windows session reads Composer, adds and deletes the test Load Group,
+picks its members, makes the drags, sets `Debug Mode` and pastes the Lua
+output (standing approval: no need to ask); the owner watches the lamps
+where a step says so. Each step takes under a minute.
+
+Setup: a Hue zone of two lamps, with a Hue Light device for each lamp
+and a zone light for the zone (the bridge's Add From Hue; its manual,
+chapter 7); one more Hue Light device for a lamp in another Hue room, for
+step 127; a switch run as a 2-button keypad for step 128 (step 33). Set
+`Debug Mode` On on the two lamps and on the Hue Bridge for steps 126 to
+107, and back to Off at the end. A light's Lua tab then shows each command
+from the proxy as `ReceivedFromProxy <binding> <command>`, its JOIN, LEAVE
+and sync changes, and the first group command of each name in full; the
+bridge's shows each `HUE_SET` and `HUE_DIM` with ` group <id>` when a
+group command caused it, and one line per group command, for example
+`load group 1234: 6 lights in 40 ms: Kitchen (room) as 1 request, 2
+lights alone`.
+
+124. **Control4's Load Group, before any code** (H0; contract D17, A1 to
+    A4, A7 and A8). Read only, plus one temporary device. In Composer,
+    search Items for "Load Group". Add one to a test room, open its
+    Properties and Documentation tabs and screenshot them. Open its member
+    picker and note which devices it offers: Hue devices should not appear
+    yet. Then delete it. Record in #435: the driver's name, its properties
+    (sync, level reporting), and what its documentation says about
+    members, commands and keypads. If it does not take third-party lights
+    on OS 3.4.2, or works much unlike A1 to A3, stop: the coordinator
+    opens a `question` issue for the owner before any code (D17).
+    - **Done:** open.
+125. **Install, reboot, and the picker** (H1; contract D1, D2 and §9).
+     Install all four files in place (step 1 or the deploy brief): Composer
+     asks "Restart Director?" for the Hue Light; answer Yes, then the owner
+     reboots the controller from System Manager, then File » Refresh
+     Navigators. Every Hue Light device (single lights, zone lights and
+     room lights) shows a new row `Load Groups` right under `Status`,
+     reading `None`; paste one. Add a Load Group to a test room: its picker
+     offers Hue Light devices (a single light, a zone light, a room light)
+     and no Hue Scene device. Paste the list it offers.
+     - **Done:** open.
+126. **Two lamps join** (H2; contract D6, D7 and D16). Add the two lamps of
+     the zone to the Load Group. Each lamp's `Load Groups` row names the
+     group, for example `Test Group`. Each lamp's Lua tab shows the
+     `JOIN_GROUP` it received and the join: paste those lines, with the
+     parameters where they show, since their spelling (underscores or
+     spaces) matters. Then turn the group on from its tile and paste the
+     bridge's lines for it: each lamp's `HUE_SET … group <id>` with its
+     time, and the `load group <id>: …` line. The gap between the two
+     lamps' requests sets the batch wait (`BATCH_MS`, 150 ms in the
+     contract).
+     - **Done:** open.
+127. **Together, or one after another** (H3; contract D8 and §2.4). Owner
+     watching. From a Navigator, turn the group on, off, and set it to 40 %.
+     The two lamps move together, and the bridge's line names the zone
+     (or a Hue room of just those two lamps) `as 1 request`. Then take one
+     of the two lamps out of the group and put in the lamp from the other
+     Hue room, so the group's lamps make up no whole Hue room or zone: on,
+     off and 40 % again. The line says
+     `2 lights alone`; the owner says whether a stagger between the lamps
+     is visible. Put the second lamp of the zone back for the next steps.
+     - **Done:** open.
+128. **A keypad on the group** (H4; contract D3, D9, D12, D14 and A7). In
+     Connections, bind the switch's buttons to the Load Group (paste what
+     the Load Group offers to bind to). Tap top, tap bottom, double tap
+     top, hold top and let go, hold bottom and let go, and tap during a
+     ramp. Paste which group commands reach each lamp (its
+     `ReceivedFromProxy … GROUP_…` lines and the parameters of the first
+     of each name), and say whether each hold stops where it is let go and
+     whether the switch's LED follows the group. Optional (L44): while a
+     group ramp runs, tap a lamp's own switch, if it has one: only that
+     lamp stops.
+     - **Done:** open.
+129. **Keep loads in sync** (H5; contract D13 and A4). Turn the Load
+     Group's "keep loads in sync" on: both lamps go to one level, and each
+     `Load Groups` row reads `<group name> (in sync)`. Change one lamp in
+     the Hue app and record whether the other follows. Neither driver
+     passes such a change on (D13), so a follow is the Load Group's doing.
+     Turn the setting off again; the rows lose `(in sync)`.
+     - **Done:** open.
+130. **Leave, and delete the group** (H6; contract D6, E3 and A8). Remove
+     one lamp from the group: its `Load Groups` row reads `None`. Delete
+     the Load Group, and paste the other lamp's row: `None` means it heard
+     `LEAVE_GROUP`; the group's name or `device <id> (not found)` means it
+     did not (harmless, contract E3). Add a new Load Group with both lamps
+     for the next steps.
+     - **Done:** open.
+131. **After a restart** (H7; contract A6 and E19). Composer has no
+     "Restart Director" command (step 13), so this is a controller reboot
+     from System Manager, by the owner; the next reboot that happens
+     anyway will do. Afterwards both lamps' `Load Groups` rows are
+     unchanged; paste whether a `JOIN_GROUP` came again in the lamps' Lua
+     tabs. A group command still moves both lamps.
+     - **Done:** open.
+132. **The zone light and its lamps in one group** (H8; contract D8 a and
+     E21). Add the zone light of the same zone to the group, so it holds
+     the zone light and both its lamps. Turn the group on, off and to
+     40 %: each time the bridge's line says `1 request` and the lamps move
+     together.
+     - **Done:** open.
+
+## R. The light's own button events, Set All LEDs, Hue-side reports (#432, #433)
+
+Written on 2026-11-10 from the contract (`docs/light-events-design.md`,
+decisions D1 to D17 and the checks of its §8.2), before the build; check
+every quoted text against the first build that brings it and paste what
+differs. The owner's manual says the same in prose: the Hue Light's own
+Documentation tab ("Button events and Set All LEDs", "Changes made in
+Hue") and the Hue Scene's ("Button events and Set All LEDs"). The build
+changes the capabilities of `hue_light.c4z` and `hue_scene.c4z`
+(`has_button_events`, `multi_click`), so run these steps on the 1.5 dev
+build with its capabilities live, after the owner's reboot of the
+controller from System Manager (`docs/turn-on-design.md` D27: one reboot
+for all of 1.5). Steps 134 and 135 need the dev loop (`docs/dev-loop.md`):
+its signed `Watch Events` command logs each button event the device's
+proxy fires, with the controller's clock, which a release build cannot
+do. The Windows session reads Composer, sets fields and `Debug Mode` and
+pastes the Lua output; the coordinator runs `tools/devctl.py` and pastes
+the bridge's `event …` lines (standing approval: no need to ask). The
+owner presses keypad buttons and drags sliders in the Hue app where a step
+says so. Each step takes under a minute.
+
+Setup: `Debug Mode` On on the devices a step names, Off on all of them at
+the end. A device's Lua tab then shows each command from the proxy as
+`ReceivedFromProxy <binding> <command>` and each notice to it as
+`-> proxy <command> <parameters>`. Step 134 picks
+`BUTTON_EVENTS_MODE` (`src/common/device.lua`, `"count"` or `"action"`,
+contract D7) before the release is built (contract §8.3).
+
+133. **The events are listed** (#432 D2). In Programming, select a Hue
+     Light, a zone light and a Hue Scene device. Each lists Top, Bottom
+     and Toggle with Press, Release, Single Tap, Double Tap and Triple Tap
+     (paste the list for one device, in Composer's own words). Before the
+     reboot they are absent.
+     - **Done:** open.
+134. **Proxy route, no hands** (D5, D7). `tools/devctl.py run "Watch
+     Events" Light=<zone light> Events=5001-5015`. Then, through
+     `tools/devctl.py run "Proxy Command" Light=<zone light>
+     Command=BUTTON_ACTION`: Top press (`BUTTON_ID=0 ACTION=1`), then
+     click (`ACTION=2`). Then the same twice within 0.3 s. Then a press, a
+     1.5 s wait, and a release (`ACTION=0`). Paste the `event …` lines.
+     Expected in mode `"count"`: the tap gives Top Push and Top Single
+     (Single about 0.6 s after the press), and perhaps Top Release. The
+     double gives two Pushes and one Top Double, no Single. The hold gives
+     Push and Release, no tap event. If Single fires at the click, or
+     twice, or with the Double, or if no tap event fires at all, the
+     coordinator sets `BUTTON_EVENTS_MODE = "action"` (Lua only), reloads
+     through the dev loop and repeats. Record which mode passed in #432.
+     - **Done:** open.
+135. **Link route, the owner's hands, under a minute** (D4, D6). With
+     Watch Events on the device a keypad is bound to (the bedroom switch
+     and Golden hours, or a zone light bound to a switch for the test as
+     in step 94): tap top once, double tap top, triple tap top, hold top
+     about 2 s. Same expectations as step 134 (Triple instead of Double
+     for the triple). The light: the first tap ramps; the second and third
+     taps of a multi-tap change nothing (tap-stop D4). No
+     `ReceivedFromProxy 5001 BUTTON_ACTION` appears after a link press, so
+     the proxy sends nothing back (paste the Lua lines). The keypad's own
+     double-tap programming, if any, still fires.
+     - **Done:** open.
+136. **A tap that stops still counts** (D8). Tap top from off, and about
+     1.5 s later tap top again: the ramp stops as in 1.4, and the events
+     show two separate Single taps.
+     - **Done:** open.
+137. **Set All LEDs** (#432 D11). Read and paste the device's six LED
+     colours first. `tools/devctl.py run "Proxy Command" Light=<device>
+     Command=SET_ALL_LED COLOR=ff0000` on the device bound to the keypad,
+     with `Debug Mode` On on it. Composer's LED colour rows read
+     ff0000 for all six, and the keypad's bound buttons show red lit and
+     unlit (owner glance, optional). Then set the six colours back as
+     read, in Composer.
+     - **Done:** open.
+138. **Hue-side reports, once a second** (#433 D12). On a single Hue
+     Light: drag its slider in the Hue app slowly for about 5 s, then let
+     go. The Lua tab shows at most one `LIGHT_BRIGHTNESS_CHANGED` per
+     second during the drag, and the last one equals the Hue app's final
+     level within a point, at most about 1 s after letting go. Turn it off
+     in the Hue app: the tile and LEDs go off within about a second. Paste
+     the timestamps.
+     - **Done:** open.
+139. **A Control4 ramp after a Hue drag** (#433 D13). Drag in the Hue app,
+     and within a second start a timed level from the Navigator (or
+     `tools/devctl.py run "Proxy Command" Light=<light>
+     Command=SET_BRIGHTNESS_TARGET LIGHT_BRIGHTNESS_TARGET=80 RATE=3000`).
+     The tile animates to 80 without jumping back to the Hue level partway.
      - **Done:** open.
 
 ## What to paste back

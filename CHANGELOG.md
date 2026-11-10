@@ -14,6 +14,15 @@ listed.
 ## Unreleased
 
 ### Added
+- Hue Light devices (single lights, zone lights and room lights) can join
+  Control4 load groups and follow the group's on, off, level, ramp and hold
+  commands, so a load group can drive Hue lights in Control4 programming.
+  When the Hue lights of a load group make up whole Hue rooms or zones, each
+  such room or zone gets one request and its lamps move together; other
+  lamps get one request each, a few hundredths of a second apart. Each
+  light's new Load Groups row shows its groups. Hue Scene devices cannot
+  join. After this update, reboot the controller from System Manager once
+  (#435).
 - The Hue Bridge checks the automations stored on the Hue bridge (schedules,
   wake-ups, timers, coming home, motion and MotionAware set-ups, Hue switches)
   and lists them on a new Hue Automations row; the ones that move lights
@@ -24,6 +33,20 @@ listed.
   off, such as a MotionAware area's, get the Hue app steps instead (#280).
 
 ### Changed
+- Hue Light and Hue Scene devices now fire their own button events in
+  Programming, as a Control4 dimmer does: Press, Release, Single Tap,
+  Double Tap and Triple Tap on the Top, Bottom and Toggle buttons, for
+  presses from keypads bound to their Button Links. The keypad's own button
+  events still fire on the keypad; program one or the other for a press.
+  The events appear after the controller is rebooted from System Manager
+  following the update (#432).
+- The light's Set All LEDs command now sets every button's LED colour, lit
+  and unlit, on Hue Light and Hue Scene devices, and the colours are kept
+  (#432).
+- A level change made in the Hue app, on a Hue dimmer switch or by a Hue
+  automation now reaches Control4 at most once a second while it moves, and
+  ends on the exact level, so programming on Brightness Changed fires less
+  often. Turning a light on or off in Hue still shows at once (#433).
 - When the Hue bridge has not answered, or has refused the pairing, for 5
   minutes, every Hue Light, zone light, room light and Hue Scene goes
   offline: Navigators disable its tile and keypad buttons do nothing until
