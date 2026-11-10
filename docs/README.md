@@ -94,6 +94,9 @@ of it is live.
   security review of 2026-10-25 (#217): the gate on keyed requests, the TLS
   verdict, the limit on open stream transfers, cleaned names, the
   development handlers, the two-job Release workflow and its pinned inputs.
+- [`offline-design.md`](offline-design.md): Hue devices go offline after the
+  bridge has been unreachable for 5 minutes (#428), and a command that could
+  not be delivered never shows as done (2026-11-09).
 - [`raw-stream-design.md`](raw-stream-design.md): historical, never built: the
   event stream on a raw SSL network connection instead of `C4:url`. Kept as
   the documented alternative to the padded-address design in `design.md`.
