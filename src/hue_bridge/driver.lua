@@ -18,6 +18,7 @@ local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
 local motion_mod = require("bridge.motion")
 local motion_diag_mod = require("bridge.motion_diag")
+local automations_mod = require("bridge.automations")
 local commands = require("bridge.commands")
 local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
@@ -68,6 +69,7 @@ local state = {
 	scenes = nil,        -- bridge.scenes (docs/scenes-design.md), created in OnDriverLateInit
 	zone_lights = nil,   -- bridge.zone_lights (docs/zone-light-design.md), created in OnDriverLateInit
 	motion = nil,        -- bridge.motion (docs/motion-design.md), created in OnDriverLateInit
+	automations = nil,   -- bridge.automations (docs/hue-automation-audit-design.md, #280), created in OnDriverLateInit
 	motion_diag = nil,   -- bridge.motion_diag, Log Motion Diagnostics
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
@@ -606,6 +608,12 @@ local function attention_text()
 			items[#items + 1] = item
 		end
 	end
+	-- Hue automations acting on Control4 lights (#280, contract §6.4).
+	if state.automations then
+		for _, item in ipairs(state.automations:attention_items() or {}) do
+			items[#items + 1] = item
+		end
+	end
 	-- Names that wait for the bridge, that Hue refused, or that changed in
 	-- bulk (bridge/names.lua; each ends in "(Resolve Names)").
 	if state.names then
@@ -647,6 +655,10 @@ local function refresh_lights_props()
 	if not state.zone_lights then
 		return -- before late init created the modules
 	end
+	-- The audit's view is computed from the devices, never stored (#280 D19).
+	if state.automations then
+		state.automations:evaluate()
+	end
 	show_module_list("Lights", state.lights)
 	local attention = attention_text()
 	if attention ~= state.attention_sent then
@@ -658,6 +670,9 @@ local function refresh_lights_props()
 	show_module_list("Zone Lights", state.zone_lights)
 	if state.motion then
 		show_module_list("Motion Sensors", state.motion)
+	end
+	if state.automations then
+		show_module_list("Hue Automations", state.automations)
 	end
 end
 
@@ -729,10 +744,17 @@ local function resync_all(done, tier)
 				note("zone light", zok, zerr, zsent)
 				state.motion:resync(function(mok, merr, msent)
 					note("motion", mok, merr, msent)
-					refresh_lights_props()
-					if done then
-						done(failures)
-					end
+					-- The Hue automations last: the full tier reads them, the
+					-- quick tier answers at once (#280 D18).
+					state.automations:resync(function(aok, aerr, asent)
+						if tier ~= "quick" then
+							note("automation", aok, aerr, asent)
+						end
+						refresh_lights_props()
+						if done then
+							done(failures)
+						end
+					end, tier)
 				end)
 			end, grouped)
 		end)
@@ -854,11 +876,13 @@ local function new_stream()
 			state.zone_lights:on_container(container)
 			state.motion:on_container(container)
 			state.motion_diag:on_container(container)
+			local automations_changed = state.automations and state.automations:on_container(container)
 			-- A resource appearing or disappearing changes the counts and the
 			-- Attention list; plain updates (state, names) do not, except the
 			-- motion devices' battery, reachability and switched-off state,
 			-- which Attention lists at once (docs/motion-design.md D5, D6).
-			if container.type == "add" or container.type == "delete" or motion_rows_changed(container) then
+			if container.type == "add" or container.type == "delete" or motion_rows_changed(container)
+				or automations_changed then
 				refresh_lights_props()
 			end
 			prop_soon("Events Received", state.stream.stats.containers)
@@ -892,7 +916,8 @@ local function show_bridge_info(info)
 	prop("Bridge Model", config.model_label(info.model))
 	state.bridges_found:show() -- its summary names the model
 	prop("Bridge Name", util.display_name(info.name))
-	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
+	state.bridge_firmware = config.firmware_label(info.sw_version, info.api_version)
+	prop("Bridge Firmware", state.bridge_firmware)
 	if config.firmware_check(info.sw_version) == "old" then
 		log.warn("bridge firmware %s is older than %d: the CLIP v2 API may be missing", tostring(info.sw_version),
 			config.MIN_FIRMWARE)
@@ -1290,6 +1315,7 @@ dispatch.properties["Lights"] = list_pick("Lights")
 dispatch.properties["Scenes"] = list_pick("Scenes")
 dispatch.properties["Zone_Lights"] = list_pick("Zone Lights")
 dispatch.properties["Motion_Sensors"] = list_pick("Motion Sensors")
+dispatch.properties["Hue_Automations"] = list_pick("Hue Automations")
 
 -- False, with the reason in Last Action, when an action cannot run.
 local function can()
@@ -1889,6 +1915,7 @@ dispatch.commands["Forget_Pairing"] = function()
 	prop("Stream Address", "")
 	prop("Bridge Model", "")
 	prop("Bridge Name", "")
+	state.bridge_firmware = nil
 	prop("Bridge Firmware", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
@@ -2107,6 +2134,134 @@ local diagnostics = {
 	[D.CHECK_PINNING] = { order = 9, dev = true, text = "(dev) Check CA pinning", run = dev_command("Check_CA_Pinning") },
 }
 
+-- Hue automation audit (#280, docs/hue-automation-audit-design.md §6.1) -------
+-- The context the audit runs on: which lights Control4 controls (Hue Light
+-- devices directly, and the members of rooms and zones with a zone light or
+-- Hue Scene device, D3), how a Hue reference expands to lights (D4), and the
+-- driver's own hooks. Built in a function so the main chunk keeps its locals.
+local function new_automations()
+	local function composer_name(entry)
+		local ok, name = pcall(function() return C4:GetDeviceDisplayName(entry.device_id) end)
+		if ok and type(name) == "string" and name ~= "" then
+			return name
+		end
+		return entry.device_name or entry.name
+	end
+	local function lights_of(rid, rtype, out, seen)
+		if rid == nil or seen[rid] then
+			return out
+		end
+		seen[rid] = true
+		local groups = state.lights and state.lights.groups
+		local devices = state.lights and state.lights.devices or {}
+		if rtype == "light" then
+			out[#out + 1] = rid
+		elseif rtype == "device" then
+			for _, light in ipairs(devices[rid] and devices[rid].light_rids or {}) do
+				out[#out + 1] = light
+			end
+		elseif rtype == "room" or rtype == "zone" or rtype == "bridge_home" then
+			local group = groups and groups:group(rid)
+			for _, child in ipairs(group and group.children or {}) do
+				local child_type = (group.child_rtypes and group.child_rtypes[child]) or group.child_rtype
+				if devices[child] then
+					child_type = "device"
+				elseif groups:group(child) then
+					child_type = groups:group(child).type
+				end
+				lights_of(child, child_type, out, seen)
+			end
+		elseif rtype == "grouped_light" then
+			for _, group in ipairs(groups and groups:groups() or {}) do
+				if group.grouped_light_rid == rid then
+					lights_of(group.rid, group.type, out, seen)
+				end
+			end
+			local home = groups and groups:groups("bridge_home") or {}
+			for _, group in ipairs(home) do
+				if group.grouped_light_rid == rid then
+					lights_of(group.rid, group.type, out, seen)
+				end
+			end
+		elseif rtype == "scene" or rtype == "smart_scene" then
+			local scene = state.scenes and state.scenes:scene(rid)
+			local group_rid = scene and scene.group_rid
+			local group = group_rid and groups and groups:group(group_rid)
+			if group then
+				lights_of(group.rid, group.type, out, seen)
+			end
+		end
+		return out
+	end
+	local function expand(rid, rtype)
+		return lights_of(rid, rtype, {}, {})
+	end
+	return automations_mod.new(module_ctx({
+		bridge_id = function() return paired() and state.creds.bridge_id or nil end,
+		firmware = function() return state.bridge_firmware end, -- D12: refusals per firmware
+		paired = function() return connection() ~= nil and not state.key_rejected end,
+		control4 = function()
+			local lights, via = {}, {}
+			for rid, entry in pairs(state.lights and state.lights.registry or {}) do
+				if entry.state ~= "gone" then
+					lights[rid] = composer_name(entry)
+				end
+			end
+			for group_rid, entry in pairs(state.zone_lights and state.zone_lights.registry or {}) do
+				if entry.state ~= "gone" then
+					local group = state.lights.groups and state.lights.groups:group(group_rid)
+					for _, light in ipairs(group and expand(group_rid, group.type) or {}) do
+						via[light] = via[light] or composer_name(entry)
+					end
+				end
+			end
+			for scene_rid, entry in pairs(state.scenes and state.scenes.registry or {}) do
+				if entry.state ~= "gone" then
+					for _, light in ipairs(expand(scene_rid, "scene")) do
+						via[light] = via[light] or composer_name(entry)
+					end
+				end
+			end
+			return { lights = lights, via = via }
+		end,
+		expand = expand,
+		light_name = function(rid)
+			local model = state.lights and state.lights.models and state.lights.models[rid]
+			return model and model.name or nil
+		end,
+		motion_device = function(rid)
+			local entry = state.motion and state.motion.registry and state.motion.registry[rid]
+			if entry and entry.state ~= "gone" then
+				return composer_name(entry)
+			end
+			return nil
+		end,
+		last_action = function(text) last_action(text) end,
+		changed = function() refresh_lights_props() end,
+		busy = function() return nil end,
+		wrote = function() state.last_write_ms = C4:GetTime() end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end, -- [verified: API 34/_1]
+	}))
+end
+
+-- The action's one picker returns Composer's list and its Back link (§6.2).
+function HueAutomationList(folder)
+	if not state.automations then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	local ok, list, back = pcall(state.automations.picker, state.automations, folder)
+	if ok and type(list) == "table" then
+		return list, back
+	end
+	log.warn("HueAutomationList: %s", tostring(list))
+	return { { text = "(error building the list; see Lua output)", value = "" } }
+end
+dispatch.commands["Hue_Automations"] = function(params)
+	if can() then
+		state.automations:run(params)
+	end
+end
+
 local function new_actions()
 	return actions_mod.new({
 		lights = state.lights, scenes = state.scenes, zone_lights = state.zone_lights, motion = state.motion,
@@ -2153,8 +2308,11 @@ dispatch.commands["Forget_Pairing"] = function(params)
 	if (params or {}).Confirm ~= actions_mod.CONFIRM_YES then
 		return last_action(actions_mod.NOT_CONFIRMED)
 	end
+	-- C8: what Control4 disabled in Hue stays disabled; say so (#280).
+	local automations_text = state.automations and state.automations:forget_pairing_text()
 	forget_pairing(params)
-	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept")
+	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept"
+		.. (automations_text and (". " .. automations_text) or ""))
 end
 
 -- Set Room Mapping's second picker is "Control4 Room" in 1.2; "Room" still
@@ -2282,6 +2440,8 @@ function OnDriverLateInit(dit)
 	state.motion:load()
 	state.motion:configure_all()
 	state.motion:reconcile()
+	state.automations = new_automations()
+	state.automations:load()
 	-- The diagnostics' output goes into public issues: everything that
 	-- identifies this bridge is scrubbed from every line (docs/motion-design.md §4.3).
 	-- Attention items that wait an hour (a sensor unreachable, an area
@@ -2375,6 +2535,15 @@ end
 -- started by unloaded code holds binding 6001 beside the new code's, never
 -- sees a report, and ends the new code's connection with its own connect
 -- timeout and retries (the flapping of 2026-11-05).
+-- The driver deleted from the project (API 22_miscellaneous/_26-OnDriverRemovedFromProject.md):
+-- what Control4 disabled in Hue stays disabled; the log says which (#280 C9).
+function OnDriverRemovedFromProject()
+	local text = state.automations and state.automations:removal_text()
+	if text then
+		log.always("%s", text)
+	end
+end
+
 function OnDriverDestroyed()
 	state.destroyed = true
 	pair_window:close()

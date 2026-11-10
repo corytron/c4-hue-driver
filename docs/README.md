@@ -144,9 +144,10 @@ are dated research; what was built from them is in the contracts and
   (2026-10-26, #280).
 - [`hue-automation-audit-design.md`](hue-automation-audit-design.md): the
   contract for the Hue automation audit: what counts as a conflict, the
-  Attention items and the "Hue Automations" row, the one-click Disable and
-  Restore with their record, and the Hue app steps for what the API refuses
-  (2026-11-09, #280).
+  Attention items and the "Hue Automations" row, the tenth bridge action
+  with its one-click Disable, Restore and Keep on the Hue side, the record
+  that survives updates and reboots, and the Hue app steps for what the API
+  refuses (2026-11-09, #280; target release 1.5).
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
@@ -163,7 +164,8 @@ are dated research; what was built from them is in the contracts and
   a Navigator, a keypad or the Hue app can show, as the owner runs them, with
   a "Done" line per step; section L is release 1.2's (#334: the nine bridge
   actions and the background tasks), its quoted texts checked against the
-  code.
+  code; section N holds the house checks of the Hue automation audit
+  (#280).
 - [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
   2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the
