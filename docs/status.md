@@ -18,12 +18,21 @@ and goes onto the house (`deploy/house.yaml`, #441). What 1.4 changes
   stop the lamp.
 - **Measured on the house** on 2026-11-09 with the owner watching (§10 of
   the contract). A keypad test on a zone light passed: "All looks good and
-  right". Scene taps on a keypad were not tried: the owner shipped first.
+  right". Scene taps on a keypad were tried later the same day and work
+  (owner: "scene taps work fine").
 - **House settings changed the same night:**
   - the four Hue Light devices' Click Rates are 3.000 / 3.000 s (were
     0.250 / 0.750);
   - the stairwell motion device's hold time is 60 s (was 300);
   - the bedroom switches' ambient LED profile never turns the LEDs off.
+- **Next: 1.5** (one controller reboot), built on feature branches on
+  2026-11-09 after the owner's decisions on the audit issues: the Hue
+  automation audit (#280, PR #285, merged first: no reboot of its own),
+  Composer tooltips (#434, merged), turn-on behaviour (#429, #427, #430,
+  PR #451), load groups (#435, PR #452), offline after 5 minutes (#428,
+  PR #453), the light's button events and throttled reports (#432, #433,
+  PR #454); the house round for #238, #65, #431 and #40 follows the install
+  (`docs/house-checks-plan.md`). #38 closed as not needed.
 - **Process:** the Control4 lighting guidelines rule and checklist
   (`docs/c4-lighting-guidelines.md`, #422). Its gaps are filed as #427 to
   #435.

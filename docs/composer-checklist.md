@@ -14,7 +14,8 @@ Bridge, Import All New, Add From Hue, Link Device, Forget Device, Resolve
 Names, Set Room Mapping, Diagnostics, Forget Pairing), the Hue Light and Hue
 Scene none, the Hue Motion Sensor one (Test Motion Programming), and much of
 what was a click is a background task. Section L holds the checks of 1.2 and
-the table of where each old action went. The steps of sections A to K keep
+the table of where each old action went. Release 1.5 adds a tenth bridge
+action, **Hue Automations** (#280, section N). The steps of sections A to K keep
 the action names of the build they were written for, as the record of what
 was checked; repeat one on 1.2 through the action that replaced it.
 
@@ -1384,6 +1385,68 @@ scene's) and back to Off at the end: its Lua tab then shows each command from th
     from off: the schedule starts once, and the second tap changes
     nothing.
     - **Done:** open.
+
+## N. Hue automation audit (#280)
+
+Written on 2026-11-09 from the contract
+(`docs/hue-automation-audit-design.md`, sections 6.2 to 6.5 and the house
+checks of section 8), before the build; check every quoted text against
+the first build that brings it and paste what differs. The owner's manual
+says the same in prose: the bridge's chapter 15 ("Hue automations"). The
+feature adds one property and one action to the Hue Bridge and changes no
+`<capabilities>`, so the install needs no reboot. The house bridge's only
+Hue automation today is its MotionAware area's, set to Do nothing on
+2026-10-26 (Discussion #290), so the first run should show no conflict.
+The reads of step 101 need a `--dev` build and the dev loop's `Hue Request`
+(`docs/dev-loop.md`). Standing approval covers every write here; each one
+is put back at once. Each step takes under a minute.
+
+99. **The row after install** (HC1). On the bridge's Properties page the
+    **Hue Automations** row reads `1 on bridge, 0 on Control4 lights, 0
+    disabled by Control4` (or the house's current count; paste it). Open
+    its drop-down: it shows `Does nothing: <area> (MotionAware), Control4
+    decides`, and its last line is `Not seen here: other apps' v1 rules,
+    Hue Labs, Alexa, Google, Apple Home routines`. **Attention** has no
+    automation item. The bridge's Lua output shows no `PUT` to
+    `behavior_instance`. Paste the row, the drop-down lines and Attention.
+    - **Done:** open.
+100. **A full read leaves it unchanged** (HC2). **Diagnostics** ▸
+     `Read everything from the bridge now`. The **Hue Automations** row reads
+     as in step 99, and **Last Action** names the read. Paste both.
+     - **Done:** open.
+101. **The area's automation refuses a switch-off** (HC3; dev loop,
+     `Hue Request`). Send `PUT /clip/v2/resource/behavior_instance/<the
+     area's instance>` with `{"enabled": false}`. Paste the HTTP status and
+     the error words (expected: 400). If the bridge accepts it, send
+     `{"enabled": true}` at once and note whether motion kept reaching the
+     area's Hue Motion device meanwhile.
+     - **Done:** open.
+102. **A Hue schedule on a Control4 lamp, end to end** (HC4; the owner's
+     phone, about a minute). In the Hue app make a Lighting schedule on one
+     lamp that has a Hue Light device. Within seconds the **Hue Automations**
+     row lists it under `On Control4 lights`, and **Attention** names it in
+     its `… on Control4 lights: <name> (Hue Automations)` item (paste the
+     item as written).
+     Run **Hue Automations** ▸ `Disable in Hue (…)` ▸ the schedule:
+     **Last Action** reads `Disabled in Hue: <name>. It stays on the bridge
+     and shows as off in the Hue app; Hue Automations ▸ Restore turns it on
+     again.`, and the Hue app shows the schedule off. Run **Hue
+     Automations** ▸ `Restore (…)` ▸ the schedule: it is on again, and
+     **Last Action** says it is now kept. Disable it once more, edit it in
+     the Hue app while it is disabled, and paste whether it comes back
+     enabled and whether it keeps its id (the row's line, and the Lua
+     output). Delete it in the Hue app: the row drops it. Read the Hue app
+     steps texts of the contract's section 6.5 (MotionAware, motion sensor,
+     Hue switch, Mimic presence) against the app's labels and paste every
+     label that differs.
+     - **Done:** open.
+103. **The record survives an update and a reboot** (HC5). With one Hue
+     automation disabled by Control4 (step 102's schedule, made again),
+     update the bridge driver in place, then reboot the controller: after
+     each, the **Hue Automations** row still lists it as
+     `Disabled by Control4 <date>`. Restore it and delete it in the Hue
+     app afterwards.
+     - **Done:** open.
 
 ## What to paste back
 

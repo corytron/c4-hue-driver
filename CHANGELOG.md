@@ -13,6 +13,16 @@ listed.
 
 ## Unreleased
 
+### Added
+- The Hue Bridge checks the automations stored on the Hue bridge (schedules,
+  wake-ups, timers, coming home, motion and MotionAware set-ups, Hue switches)
+  and lists them on a new Hue Automations row; the ones that move lights
+  Control4 controls by themselves appear in Attention. The new Hue Automations
+  action switches a chosen one off in Hue with one click (never deletes it),
+  remembers what it switched off and turns it back on with Restore, or keeps it
+  on the Hue side on purpose. Set-ups the bridge does not let other apps switch
+  off, such as a MotionAware area's, get the Hue app steps instead (#280).
+
 ### Changed
 - Composer shows a tooltip on Recall As, On State Follows, Occupancy Hold
   Time and Debug Mode, and lists the Hue Motion Sensor's events in
