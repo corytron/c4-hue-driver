@@ -65,8 +65,19 @@ EMPTY_UNRELEASED = SAMPLE.replace(UNRELEASED_BODY, "")
 CODENAME_OF = {"0.9": "Ferrix", "1.0": "Cassian", "1.1": "Brasso"}
 CODENAMES = json.dumps(CODENAME_OF, indent=2) + "\n"
 
+# The codename notes file of the tests (.github/codename-notes.json, issue #464): a blurb for each
+# version of CODENAME_OF, the first paragraph of every release's notes.
+CODENAME_NOTE_OF = {
+    "0.9": "Ferrix, the town of the tests, names the build that came first.",
+    "1.0": "Cassian, the hero of the tests, names the release every test builds on.",
+    "1.1": "Brasso, the friend who keeps watch, names the release after it.",
+}
+CODENAME_NOTES = json.dumps(CODENAME_NOTE_OF, indent=2) + "\n"
+
 TEMPLATE = (
     '## {version} "{codename}" (build {build})\n'
+    "\n"
+    "{codename_note}\n"
     "\n"
     'Released {date}. Braces that name no placeholder stay: {"key": 1}, ${{ github.sha }}, {Version}.\n'
     "\n"
@@ -91,6 +102,8 @@ HTML_PRERELEASE = ("--release", "1.1-beta.1", "--build", "360", "--date", "2026-
 PRERELEASE_H3 = "<h3>1.1 beta 1 &quot;Brasso&quot; (prerelease), build 360 (2026-11-02)</h3>"
 PRERELEASE_TEMPLATE = (
     '## {release} beta {beta} "{codename}" (build {build})\n'
+    "\n"
+    "{codename_note}\n"
     "\n"
     "Version {version}, built {date}, follows [{stable}](https://example.com/v{stable_version}).\n"
     "\n"
@@ -589,6 +602,111 @@ class CodenamesFileTest(unittest.TestCase):
         self.assertEqual((codenames.names[(1, 0)], codenames.names[(1, 1)]), ("Cassian", "Brasso"))
 
 
+class CodenameNotesFileTest(unittest.TestCase):
+    """.github/codename-notes.json (docs/changelog-design.md, section 1; issue #464): one blurb per X.Y,
+    keyed like .github/codenames.json, that every release's notes open with."""
+
+    CODENAMES = changelog.parse_codenames(CODENAMES)
+
+    def problems(self, text):
+        return changelog.parse_codename_notes(text, self.CODENAMES).problems
+
+    def test_a_blurb_for_each_version(self):
+        notes = changelog.parse_codename_notes(CODENAME_NOTES, self.CODENAMES)
+        self.assertEqual(
+            (notes.path, notes.blurbs, notes.problems),
+            (
+                changelog.CODENAME_NOTES_FILE,
+                {(0, 9): CODENAME_NOTE_OF["0.9"], (1, 0): CODENAME_NOTE_OF["1.0"], (1, 1): CODENAME_NOTE_OF["1.1"]},
+                [],
+            ),
+        )
+        empty = changelog.parse_codenames("{}")
+        self.assertEqual(changelog.parse_codename_notes("{}", empty).problems, [])
+
+    def test_keyed_like_the_codenames_file(self):
+        # Every version the codenames file names has a blurb, in the codenames file's order ...
+        self.assertEqual(
+            self.problems(json.dumps({"1.0": "Cassian."})),
+            [
+                '0.9 has no blurb: .github/codenames.json names it "Ferrix", and each X.Y gets a blurb before its '
+                "first build",
+                '1.1 has no blurb: .github/codenames.json names it "Brasso", and each X.Y gets a blurb before its '
+                "first build",
+            ],
+        )
+        # ... and no version it does not name has one.
+        self.assertEqual(
+            self.problems(json.dumps({**CODENAME_NOTE_OF, "2.0": "Mon Mothma."})),
+            ['"2.0": 2.0 has no codename in .github/codenames.json, so it has no blurb either'],
+        )
+
+    def test_a_key_is_a_version_x_y(self):
+        for key in ("1.1-beta.1", "v1.1", "1", "1.1.0", "01.1", "1.01", "", " 1.1"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    self.problems(json.dumps({**CODENAME_NOTE_OF, key: "Brasso."})),
+                    [
+                        '%s: a key is a version X.Y, such as "1.1", without leading zeros; a beta takes the blurb '
+                        "of its X.Y" % json.dumps(key)
+                    ],
+                )
+
+    def test_a_version_once(self):
+        text = '{"0.9": "Ferrix.", "1.0": "Cassian.", "1.1": "Brasso.", "1.1": "Brasso again."}'
+        notes = changelog.parse_codename_notes(text, self.CODENAMES)
+        self.assertEqual(notes.problems, ['"1.1" is a key twice: each X.Y has one blurb'])
+        self.assertEqual(notes.blurbs[(1, 1)], "Brasso.")
+
+    def test_a_blurb_is_one_line_of_text(self):
+        for value, message in (
+            ('""', "the blurb is empty: it says what the codename of 1.1 means"),
+            ('"  "', "the blurb is empty: it says what the codename of 1.1 means"),
+            ('"\\n"', "the blurb is empty: it says what the codename of 1.1 means"),
+            ('"Brasso,\\nwho keeps watch."', "a blurb is one line of text, with no line break"),
+            ('"Brasso.\\r\\n"', "a blurb is one line of text, with no line break"),
+            ('"Brasso.\\n\\n## A heading"', "a blurb is one line of text, with no line break"),
+            ("42", "a blurb is one line of text, not 42"),
+            ("null", "a blurb is one line of text, not null"),
+            ('["Brasso."]', "a blurb is one line of text, not an array"),
+            ('{"text": "Brasso."}', "a blurb is one line of text, not an object"),
+        ):
+            with self.subTest(value=value):
+                problems = self.problems('{"0.9": "Ferrix.", "1.0": "Cassian.", "1.1": %s}' % value)
+                self.assertEqual(len(problems), 1, problems)
+                self.assertTrue(problems[0].startswith('"1.1": ' + message), problems[0])
+
+    def test_refuses_what_is_not_one_json_object(self):
+        for text, fragment in (
+            ("", ".github/codename-notes.json is not JSON: Expecting value: line 1 column 1"),
+            ('{"1.1": "Brasso.",}', ".github/codename-notes.json is not JSON: "),
+            (
+                '["Brasso."]',
+                ".github/codename-notes.json holds one JSON object that gives each version X.Y its blurb, such as "
+                '{"1.1": "Brasso, ..."}, not an array',
+            ),
+            ('"Brasso."', 'not "Brasso."'),
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(changelog.ChangelogError) as raised:
+                    changelog.parse_codename_notes(text, self.CODENAMES)
+                self.assertIn(fragment, str(raised.exception))
+
+    def test_the_repository_file_has_a_blurb_for_every_codename(self):
+        self.assertEqual(
+            changelog.CODENAME_NOTES_FILE, os.path.join(os.path.dirname(TOOLS), ".github", "codename-notes.json")
+        )
+        codenames = changelog.read_codenames(changelog.CODENAMES_FILE)
+        notes = changelog.read_codename_notes(changelog.CODENAME_NOTES_FILE, codenames)
+        self.assertEqual(notes.problems, [])
+        self.assertEqual(sorted(notes.blurbs), sorted(codenames.names))
+        for version, name in codenames.names.items():
+            with self.subTest(version=version):
+                blurb = notes.blurbs[version]
+                self.assertTrue(isinstance(blurb, str) and blurb.strip(), blurb)
+                self.assertIn(name, blurb)  # it says what the name means
+
+
 # ---------------------------------------------------------------------------
 # The command line
 # ---------------------------------------------------------------------------
@@ -601,8 +719,10 @@ class CliCase(unittest.TestCase):
         self.file = os.path.join(self.tmp.name, "CHANGELOG.md")
         self.template = os.path.join(self.tmp.name, "release-notes.md")
         self.codenames = os.path.join(self.tmp.name, "codenames.json")
+        self.codename_notes = os.path.join(self.tmp.name, "codename-notes.json")
         self.write(SAMPLE)
         self.write_codenames(CODENAMES)
+        self.write_codename_notes(CODENAME_NOTES)
         with open(self.template, "w", encoding="utf-8") as handle:
             handle.write(TEMPLATE)
 
@@ -614,6 +734,17 @@ class CliCase(unittest.TestCase):
         with open(self.codenames, "w", encoding="utf-8") as handle:
             handle.write(text)
 
+    def write_codename_notes(self, text):
+        with open(self.codename_notes, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def files(self, command):
+        """The test's own files: the codename notes file only for check and notes, which read it."""
+        files = ["--file", self.file, "--codenames", self.codenames]
+        if command in ("check", "notes"):
+            files += ["--codename-notes", self.codename_notes]
+        return files
+
     def read(self):
         with open(self.file, encoding="utf-8", newline="") as handle:
             return handle.read()
@@ -621,7 +752,7 @@ class CliCase(unittest.TestCase):
     def run_main(self, command, *argv):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = changelog.main([command, "--file", self.file, "--codenames", self.codenames, *argv])
+            code = changelog.main([command, *self.files(command), *argv])
         return code, out.getvalue(), err.getvalue()
 
     def usage_error(self, command, *argv):
@@ -629,7 +760,7 @@ class CliCase(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as raised:
-                changelog.main([command, "--file", self.file, "--codenames", self.codenames, *argv])
+                changelog.main([command, *self.files(command), *argv])
         return raised.exception.code, err.getvalue()
 
     def html(self, *argv):
@@ -668,6 +799,7 @@ class CheckCommandTest(CliCase):
 
     def test_every_release_against_the_codenames_file(self):
         self.write_codenames(json.dumps({"1.0": "Cassian", "1.1": "Brasso", "1.2": "brasso"}))
+        self.write_codename_notes(json.dumps({"1.0": "Cassian.", "1.1": "Brasso.", "1.2": "Another Brasso."}))
         self.write(SAMPLE.replace('## 1.0 "Cassian", build 259', '## 1.0 "Luthen", build 259'))
         code, out, err = self.run_main("check")
         self.assertEqual((code, out), (1, ""))
@@ -704,6 +836,37 @@ class CheckCommandTest(CliCase):
         code, out, err = self.run_main("check")
         self.assertEqual((code, out), (1, ""))
         self.assertIn("error: cannot read %s" % self.codenames, err)
+
+    def test_every_problem_of_the_codename_notes_file(self):
+        self.write_codename_notes(json.dumps({"0.9": "Ferrix.", "1.0": "", "2.0": "Mon Mothma."}))
+        self.write(SAMPLE.replace("### Changed", "### Removed"))
+        code, out, err = self.run_main("check")
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(
+            err.splitlines(),
+            [
+                "%s:21: unknown category 'Removed': %s" % (self.file, changelog.CATEGORY_ORDER),
+                '%s: "1.0": the blurb is empty: it says what the codename of 1.0 means' % self.codename_notes,
+                '%s: "2.0": 2.0 has no codename in %s, so it has no blurb either'
+                % (self.codename_notes, self.codenames),
+                '%s: 1.1 has no blurb: %s names it "Brasso", and each X.Y gets a blurb before its first build'
+                % (self.codename_notes, self.codenames),
+                "%s: 1 problem" % self.file,
+                "%s: 3 problems" % self.codename_notes,
+            ],
+        )
+
+    def test_a_codename_notes_file_that_cannot_be_read(self):
+        self.write_codename_notes("[]")
+        code, out, err = self.run_main("check")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            "error: %s holds one JSON object that gives each version X.Y its blurb" % self.codename_notes, err
+        )
+        os.unlink(self.codename_notes)
+        code, out, err = self.run_main("check")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("error: cannot read %s" % self.codename_notes, err)
 
 
 class HtmlTest(CliCase):
@@ -956,6 +1119,8 @@ class NotesTest(CliCase):
             out,
             '## 1.0 "Cassian" (build 360)\n'
             "\n"
+            "Cassian, the hero of the tests, names the release every test builds on.\n"
+            "\n"
             'Released 2026-11-02. Braces that name no placeholder stay: {"key": 1}, ${{ github.sha }}, {Version}.\n'
             "\n"
             "### New in build 360\n"
@@ -1010,8 +1175,18 @@ class NotesTest(CliCase):
                 self.assertIn("error: 2.0 has no codename in %s" % self.codenames, err)
         self.write_codenames(json.dumps({**CODENAME_OF, "2.0": "Mon Mothma"}))
         code, out, err = self.notes(*argv)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(
+            err,
+            "error: 2.0 has no blurb in %s: each X.Y gets one there before its first build, saying what its "
+            "codename means; the notes open with it\n" % self.codename_notes,
+        )
+        self.write_codename_notes(json.dumps({**CODENAME_NOTE_OF, "2.0": "Mon Mothma, who speaks up, names 2.0."}))
+        code, out, err = self.notes(*argv)
         self.assertEqual(code, 0, err)
-        self.assertTrue(out.startswith('## 2.0 "Mon Mothma" (build 360)\n'), out)
+        self.assertTrue(
+            out.startswith('## 2.0 "Mon Mothma" (build 360)\n\nMon Mothma, who speaks up, names 2.0.\n'), out
+        )
 
     def test_codename_option_must_agree_with_the_codenames_file(self):
         for argv, version, name in (
@@ -1034,8 +1209,12 @@ class NotesTest(CliCase):
 
     def test_template_refusals(self):
         for template, fragment in (
-            (TEMPLATE + "{tag}\n", "names {tag}; the placeholders are {version}, {codename}"),
+            (TEMPLATE + "{tag}\n", "names {tag}; the placeholders are {version}, {codename}, {codename_note}, {build}"),
             (TEMPLATE.replace("{this_build}", "nothing"), "has no {this_build}"),
+            (
+                TEMPLATE.replace("{codename_note}\n\n", ""),
+                "has no {codename_note}: the notes would not open with what the codename means",
+            ),
         ):
             with self.subTest(fragment=fragment):
                 with open(self.template, "w", encoding="utf-8") as handle:
@@ -1056,6 +1235,8 @@ class NotesTest(CliCase):
         self.assertEqual(
             out,
             '## 1.1 beta 1 "Brasso" (build 360)\n'
+            "\n"
+            "Brasso, the friend who keeps watch, names the release after it.\n"
             "\n"
             'Version 1.1-beta.1, built 2026-11-02, follows [1.0 "Cassian", build 349 (2026-10-25)]'
             "(https://example.com/v1.0).\n"
@@ -1087,8 +1268,8 @@ class NotesTest(CliCase):
         code, out, err = self.notes(*PRERELEASE)
         self.assertEqual((code, out), (1, ""))
         self.assertIn(
-            "names {history}; the placeholders are {version}, {release}, {beta}, {codename}, {build}, {date}, "
-            "{this_build}, {stable}, {stable_version}",
+            "names {history}; the placeholders are {version}, {release}, {beta}, {codename}, {codename_note}, {build}, "
+            "{date}, {this_build}, {stable}, {stable_version}",
             err,
         )
         with open(self.template, "w", encoding="utf-8") as handle:
@@ -1114,8 +1295,9 @@ class NotesTest(CliCase):
         code, out, err = self.run_main("notes", "--template", changelog.PRERELEASE_TEMPLATE_FILE, *PRERELEASE)
         self.assertEqual(code, 0, err)
         self.assertTrue(out.startswith('## 1.1 beta 1 "Brasso" (build 360)\n'), out[:80])
+        self.assertEqual(out.split("\n")[1:4], ["", CODENAME_NOTE_OF["1.1"], ""])  # the blurb of 1.1 opens them
         self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
-        # The name is in the title only; how names are chosen stays out of public text (#416).
+        # The notes never say "codename": how names are chosen stays out of public text (#416).
         self.assertNotIn("codename", out.lower())
         self.assertIn(
             "- Keypad LEDs follow a scene recalled in the Hue app,\n  also after a bridge restart (#302).", out
@@ -1149,7 +1331,8 @@ class NotesTest(CliCase):
                 )
                 self.assertEqual(code, 0, err)
                 self.assertTrue(out.startswith('## 1.1 beta %d "Brasso" (build 400)\n' % beta), out[:80])
-                self.assertNotIn("codename", out.lower())  # the name is in the title only (#416)
+                self.assertEqual(out.split("\n")[2], CODENAME_NOTE_OF["1.1"])  # and the blurb of 1.1 (#464)
+                self.assertNotIn("codename", out.lower())  # never the word (#416)
 
     def test_the_repository_templates_count_no_packages(self):
         for path in (changelog.TEMPLATE_FILE, changelog.PRERELEASE_TEMPLATE_FILE):
@@ -1167,9 +1350,130 @@ class NotesTest(CliCase):
         )
         self.assertIn('### 1.0 "Cassian", build 259 (2026-10-24)', out)
         self.assertNotIn("Ferrix", out)
+        self.assertEqual(out.split("\n")[:4], ['## 1.0 "Cassian" (build 360)', "", CODENAME_NOTE_OF["1.0"], ""])
+        self.assertTrue(out.split("\n")[4].startswith("Released 2026-11-02."), out[:400])
         self.assertIsNone(changelog.PLACEHOLDER_RE.search(out), "every placeholder is filled")
-        # The name is in the title only; how names are chosen stays out of public text (#416).
+        # The notes never say "codename": how names are chosen stays out of public text (#416).
         self.assertNotIn("codename", out.lower())
+
+    def test_the_repository_templates_open_with_the_blurb(self):
+        """Issue #464: {codename_note} is the first paragraph, right after the heading, and only there."""
+        for path in (changelog.TEMPLATE_FILE, changelog.PRERELEASE_TEMPLATE_FILE):
+            with self.subTest(path=path):
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+                lines = text.split("\n")
+                self.assertTrue(lines[0].startswith("## "), lines[0])
+                self.assertEqual(lines[1:4], ["", "{codename_note}", ""])
+                self.assertEqual(text.count("{codename_note}"), 1)
+
+    def test_the_blurb_of_the_version_opens_the_notes(self):
+        """{codename_note} is the blurb of the version's X.Y, for a release and every beta of it."""
+        for argv, heading, version in (
+            (RELEASE, '## 1.0 "Cassian" (build 360)', "1.0"),
+            (("--version", "1.1", "--build", "360", "--date", "2026-11-02"), '## 1.1 "Brasso" (build 360)', "1.1"),
+        ):
+            with self.subTest(argv=argv):
+                code, out, err = self.notes(*argv)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(out.split("\n")[:4], [heading, "", CODENAME_NOTE_OF[version], ""])
+                self.assertTrue(out.split("\n")[4].startswith("Released 2026-11-02."), out[:400])
+        with open(self.template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE)
+        for beta in (1, 3, 12):
+            with self.subTest(beta=beta):
+                code, out, err = self.notes("--version", "1.1-beta.%d" % beta, "--build", "360", "--date", "2026-11-02")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(
+                    out.split("\n")[:3], ['## 1.1 beta %d "Brasso" (build 360)' % beta, "", CODENAME_NOTE_OF["1.1"]]
+                )
+
+    def test_a_blurb_is_not_filled_in_again(self):
+        self.write_codename_notes(json.dumps({**CODENAME_NOTE_OF, "1.0": "Cassian names {version}, build {build}."}))
+        code, out, err = self.notes(*RELEASE)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.split("\n")[2], "Cassian names {version}, build {build}.")
+
+    def test_refuses_a_version_without_a_blurb(self):
+        """The Release workflow's notes step fails before anything is published (#464)."""
+        self.write_codename_notes(json.dumps({"0.9": "Ferrix.", "1.0": "Cassian."}))
+        missing = (
+            "error: 1.1 has no blurb in %s: each X.Y gets one there before its first build, saying what its "
+            "codename means; the notes open with it\n" % self.codename_notes
+        )
+        release = ("--version", "1.1", "--build", "360", "--date", "2026-11-02")
+        self.assertEqual(self.notes(*release), (1, "", missing))
+        with open(self.template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE)
+        self.assertEqual(
+            self.notes("--version", "1.1-beta.3", "--build", "360", "--date", "2026-11-02"), (1, "", missing)
+        )
+
+    def test_refuses_an_empty_blurb(self):
+        for blurb in ("", "   ", "\t"):
+            with self.subTest(blurb=blurb):
+                self.write_codename_notes(json.dumps({**CODENAME_NOTE_OF, "1.0": blurb}))
+                self.assertEqual(
+                    self.notes(*RELEASE),
+                    (
+                        1,
+                        "",
+                        'error: the blurb of 1.0 in %s is empty: it says what the codename "Cassian" means, and the '
+                        "notes open with it\n" % self.codename_notes,
+                    ),
+                )
+        self.write_codename_notes(json.dumps({**CODENAME_NOTE_OF, "1.1": ""}))
+        with open(self.template, "w", encoding="utf-8") as handle:
+            handle.write(PRERELEASE_TEMPLATE)
+        code, out, err = self.notes(*PRERELEASE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn(
+            'error: the blurb of 1.1 in %s is empty: it says what the codename "Brasso" means' % self.codename_notes,
+            err,
+        )
+
+    def test_refuses_a_codename_notes_file_that_fails_check(self):
+        # The release's own blurb is there; a problem elsewhere in the file still stops the notes.
+        self.write_codename_notes(json.dumps({**CODENAME_NOTE_OF, "0.9": 42, "2.0": "Mon Mothma."}))
+        code, out, err = self.notes(*RELEASE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(
+            err.splitlines(),
+            [
+                '%s: "0.9": a blurb is one line of text, not 42' % self.codename_notes,
+                '%s: "2.0": 2.0 has no codename in %s, so it has no blurb either'
+                % (self.codename_notes, self.codenames),
+                "error: %s fails check: nothing done" % self.codename_notes,
+            ],
+        )
+        self.write_codename_notes('{"1.0": "Cassian.",}')
+        code, out, err = self.notes(*RELEASE)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("error: %s is not JSON: " % self.codename_notes, err)
+
+    def test_the_default_codename_notes_file_is_the_repository_one(self):
+        self.write(SAMPLE[: SAMPLE.index('## 0.9 "Ferrix"')])
+        with open(changelog.CODENAME_NOTES_FILE, encoding="utf-8") as handle:
+            blurb = json.load(handle)["1.0"]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = changelog.main(["notes", "--file", self.file, "--template", self.template, *RELEASE])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(out.getvalue().split("\n")[2], blurb)
+
+    def test_only_check_and_notes_read_the_codename_notes_file(self):
+        self.addCleanup(setattr, changelog, "CODENAME_NOTES_FILE", changelog.CODENAME_NOTES_FILE)
+        changelog.CODENAME_NOTES_FILE = os.path.join(self.tmp.name, "missing.json")
+        for argv in (["check"], ["notes", "--template", self.template, *RELEASE]):
+            with self.subTest(argv=argv):
+                err = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = changelog.main([*argv, "--file", self.file, "--codenames", self.codenames])
+                self.assertEqual(code, 1)
+                self.assertIn("error: cannot read %s" % changelog.CODENAME_NOTES_FILE, err.getvalue())
+        # html (every build) and stamp (the desired-state PR) never show a blurb.
+        self.assertIn("<h3>1.0 &quot;Cassian&quot;, build 360 (2026-11-02)</h3>", self.html(*HTML_RELEASE))
+        self.assertEqual(self.run_main("stamp", *RELEASE)[0], 0)
 
 
 class StampTest(CliCase):
@@ -1257,6 +1561,7 @@ class StampTest(CliCase):
         # 2.0 once the file names it, with a space in the name.
         self.write(self.read().replace("## Unreleased\n", "## Unreleased\n\n### Fixed\n- A third fix.\n", 1))
         self.write_codenames(json.dumps({**CODENAME_OF, "2.0": "Mon Mothma"}))
+        self.write_codename_notes(json.dumps({**CODENAME_NOTE_OF, "2.0": "Mon Mothma names 2.0."}))
         code, _out, err = self.run_main("stamp", "--version", "2.0", "--build", "380", "--date", "2026-11-04")
         self.assertEqual(code, 0, err)
         self.assertIn('\n## 2.0 "Mon Mothma", build 380 (2026-11-04)\n', self.read())
@@ -1359,6 +1664,10 @@ class CommandLineTest(CliCase):
                 self.assertIn("--file" if argv else "Exit codes: 0 done, 1 refused or invalid, 2 usage.", done.stdout)
                 if argv:
                     self.assertIn("--codenames", done.stdout)
+                if argv in (["check"], ["notes"]):
+                    self.assertIn("--codename-notes", done.stdout)
+                elif argv:  # html and stamp never show a blurb
+                    self.assertNotIn("--codename-notes", done.stdout)
 
     def test_usage_errors_exit_2_and_change_nothing(self):
         for command, *argv in (

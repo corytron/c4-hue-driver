@@ -2,10 +2,11 @@
 """Check CHANGELOG.md and render it for the Documentation tabs, the release notes and a release.
 
   changelog.py check  [--file CHANGELOG.md] [--codenames .github/codenames.json]
+                      [--codename-notes .github/codename-notes.json]
   changelog.py html   [--file F] [--codenames C] [--release VERSION --build N --date YYYY-MM-DD]
                       [--dev-build N] [--codename NAME]
-  changelog.py notes  [--file F] [--codenames C] --version VERSION --build N --date YYYY-MM-DD
-                      [--codename NAME] [--template .github/release-notes.md]
+  changelog.py notes  [--file F] [--codenames C] [--codename-notes B] --version VERSION --build N
+                      --date YYYY-MM-DD [--codename NAME] [--template .github/release-notes.md]
   changelog.py stamp  [--file F] [--codenames C] --version VERSION --build N --date YYYY-MM-DD
                       [--codename NAME]
 
@@ -18,21 +19,23 @@ the Unreleased entry as '1.1 beta 1 "Brasso" (prerelease), build N (date)', neve
 notes fills .github/prerelease-notes.md; stamp refuses it. A prerelease of a version the file lists
 already is refused: it comes before its release.
 
-check   validates section 1, the codenames file included, and prints "CHANGELOG.md: ok (N
-        releases)", or every problem on stderr (FILE:LINE: message for the changelog, FILE: message
-        for the codenames file) and the number of each file's problems.
+check   validates section 1, the codenames and codename notes files included, and prints
+        "CHANGELOG.md: ok (N releases)", or every problem on stderr (FILE:LINE: message for the
+        changelog, FILE: message for the other two) and the number of each file's problems.
 html    prints the fragment tools/build.sh puts in place of the <!-- CHANGELOG --> line of each
         driver's documentation.html: plain h2, h3, p, b, ul, li and code, no attribute but the h2's
         id, no script, no link, no external resource, ASCII only. A non-empty Unreleased entry
         shows as the release (or prerelease) with --release, as "Unreleased (development build N)"
         with --dev-build, else as "Unreleased"; an empty one never shows.
-notes   prints the release's notes: the template with {version}, {codename}, {build}, {date},
-        {this_build} (the Unreleased entry's categories and bullets) and {history} (the earlier
-        builds of the version) filled in. Refuses an empty Unreleased entry. For a prerelease the
-        template is .github/prerelease-notes.md, with {version} (1.1-beta.1), {release} (1.1),
-        {beta} (1), {codename}, {build}, {date}, {this_build}, {stable} (the heading of the newest
-        release in the file, the one the prerelease follows) and {stable_version} (its version), and
-        no {history}.
+notes   prints the release's notes: the template with {version}, {codename}, {codename_note} (the
+        blurb of the version's X.Y), {build}, {date}, {this_build} (the Unreleased entry's
+        categories and bullets) and {history} (the earlier builds of the version) filled in.
+        Refuses an empty Unreleased entry, a version whose X.Y has no blurb or an empty one, and a
+        template without {this_build} or {codename_note}. For a prerelease the template is
+        .github/prerelease-notes.md, with {version} (1.1-beta.1), {release} (1.1), {beta} (1),
+        {codename}, {codename_note}, {build}, {date}, {this_build}, {stable} (the heading of the
+        newest release in the file, the one the prerelease follows) and {stable_version} (its
+        version), and no {history}.
 stamp   turns "## Unreleased" into the release's heading below a new, empty "## Unreleased" and
         writes the file only when the result passes check. Refuses an empty Unreleased entry, a
         build that has an entry already and a prerelease.
@@ -45,6 +48,13 @@ and every build of X.Y takes that name, its prereleases X.Y-beta.N included; htm
 refuse a version the file does not name, and --codename only confirms: it must be the file's name.
 html, notes and stamp refuse a changelog or codenames file that fails check, and a release whose
 build or date would not make it the newest entry.
+
+Codename notes (issue #464): every release's notes open with a blurb that says what its codename
+means, from .github/codename-notes.json: a JSON object such as {"1.1": "Brasso, ..."}, keyed like
+the codenames file, each value one line of text that is not blank, every version the codenames file
+names with a blurb and no blurb for a version it does not name. Every build of X.Y takes the blurb
+of X.Y, its prereleases included. notes refuses a version without a blurb or with an empty one, and
+a codename notes file that fails check; html and stamp do not read it.
 
 Standard library only. Exit codes: 0 done, 1 refused or invalid, 2 usage.
 """
@@ -64,6 +74,7 @@ CHANGELOG_FILE = os.path.join(ROOT, "CHANGELOG.md")
 TEMPLATE_FILE = os.path.join(ROOT, ".github", "release-notes.md")
 PRERELEASE_TEMPLATE_FILE = os.path.join(ROOT, ".github", "prerelease-notes.md")
 CODENAMES_FILE = os.path.join(ROOT, ".github", "codenames.json")
+CODENAME_NOTES_FILE = os.path.join(ROOT, ".github", "codename-notes.json")
 
 TITLE = "# Changelog"
 UNRELEASED = "## Unreleased"
@@ -72,13 +83,14 @@ CATEGORIES = ("Added", "Changed", "Fixed", "Security", "Known limits")
 RELEASE_RE = re.compile(r'^## (\d+)\.(\d+) "([^"]+)", build (\d+) \((\d{4}-\d{2}-\d{2})\)$', re.ASCII)
 RELEASE_SHAPE = '## 1.0 "Cassian", build 349 (2026-10-25)'
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-PLACEHOLDERS = ("version", "codename", "build", "date", "this_build", "history")
+PLACEHOLDERS = ("version", "codename", "codename_note", "build", "date", "this_build", "history")
 # A prerelease's notes have no {history}: prereleases are not entries of CHANGELOG.md.
 PRERELEASE_PLACEHOLDERS = (
     "version",
     "release",
     "beta",
     "codename",
+    "codename_note",
     "build",
     "date",
     "this_build",
@@ -324,6 +336,108 @@ def other_codename(codenames, version, codename):
         display_path(codenames.path),
         codename,
     )
+
+
+# ---------------------------------------------------------------------------
+# The codename notes file (section 1; issue #464)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class CodenameNotes:
+    """The codename notes file at path. blurbs maps each version (major, minor) a well-formed key
+    names to the value there, a blurb unless problems says otherwise; problems are messages, those
+    of its keys in file order, then one for each version of the codenames file without a blurb."""
+
+    path: str
+    blurbs: dict
+    problems: list
+
+
+def blurb_problem(value, key, version):
+    """Why value, the value of key (version (major, minor)) in the codename notes file, is not a
+    blurb: one line of text that is not blank. None when it is one."""
+    if not isinstance(value, str):
+        return "%s: a blurb is one line of text, not %s" % (json.dumps(key), json_text(value))
+    if not value.strip():
+        return "%s: the blurb is empty: it says what the codename of %d.%d means" % (json.dumps(key), *version)
+    if "\n" in value or "\r" in value:
+        return "%s: a blurb is one line of text, with no line break: the notes open with it as one paragraph" % (
+            json.dumps(key)
+        )
+    return None
+
+
+def parse_codename_notes(text, codenames, path=CODENAME_NOTES_FILE):
+    """text, the codename notes file at path, as CodenameNotes with every problem of its rules
+    (section 1), keyed like codenames (Codenames). Refuses text that is not one JSON object."""
+    try:
+        data = json.loads(text, object_pairs_hook=JsonObject)
+    except ValueError as err:  # json.JSONDecodeError among them
+        raise ChangelogError("%s is not JSON: %s" % (display_path(path), err)) from err
+    if not isinstance(data, JsonObject):
+        raise ChangelogError(
+            '%s holds one JSON object that gives each version X.Y its blurb, such as {"1.1": "Brasso, ..."}, not %s'
+            % (display_path(path), json_text(data))
+        )
+    blurbs, problems = {}, []
+    for key, value in data:
+        match = CODENAMES_KEY_RE.fullmatch(key)
+        if not match:
+            problems.append(
+                '%s: a key is a version X.Y, such as "1.1", without leading zeros; a beta takes the blurb of its X.Y'
+                % json.dumps(key)
+            )
+            continue
+        version = (int(match.group(1)), int(match.group(2)))
+        if version in blurbs:
+            problems.append("%s is a key twice: each X.Y has one blurb" % json.dumps(key))
+            continue
+        blurbs[version] = value
+        message = blurb_problem(value, key, version)
+        if message is None and version not in codenames.names:
+            message = "%s: %d.%d has no codename in %s, so it has no blurb either" % (
+                json.dumps(key),
+                *version,
+                display_path(codenames.path),
+            )
+        if message:
+            problems.append(message)
+    for version, name in codenames.names.items():
+        if version not in blurbs:
+            problems.append(
+                "%d.%d has no blurb: %s names it %s, and each X.Y gets a blurb before its first build"
+                % (*version, display_path(codenames.path), json_text(name))
+            )
+    return CodenameNotes(path, blurbs, problems)
+
+
+def read_codename_notes(path, codenames):
+    """The codename notes file at path as CodenameNotes, keyed like codenames (Codenames); refuses one
+    that cannot be read or is not a JSON object."""
+    return parse_codename_notes(read_text(path), codenames, path)
+
+
+def codename_note(notes, codenames, version):
+    """The blurb of version (major, minor), which the codenames file names, that a release's notes
+    open with. Refuses a version without a blurb or with an empty one, then a codename notes file
+    that fails check, with every problem printed."""
+    if version not in notes.blurbs:
+        raise ChangelogError(
+            "%d.%d has no blurb in %s: each X.Y gets one there before its first build, saying what its codename "
+            "means; the notes open with it" % (*version, display_path(notes.path))
+        )
+    blurb = notes.blurbs[version]
+    if isinstance(blurb, str) and not blurb.strip():
+        raise ChangelogError(
+            "the blurb of %d.%d in %s is empty: it says what the codename %s means, and the notes open with it"
+            % (*version, display_path(notes.path), json_text(codenames.names[version]))
+        )
+    for message in notes.problems:
+        print("%s: %s" % (display_path(notes.path), message), file=sys.stderr)
+    if notes.problems:
+        raise ChangelogError("%s fails check: nothing done" % display_path(notes.path))
+    return blurb
 
 
 # ---------------------------------------------------------------------------
@@ -772,7 +886,8 @@ def markdown_history(changelog, version, build):
 
 def fill(template, values, name):
     """The template with every {placeholder} replaced in one pass, so nothing a value brings in is
-    replaced again. Refuses a placeholder it does not know and a template without {this_build}."""
+    replaced again. Refuses a placeholder it does not know and a template without {this_build} or
+    {codename_note}."""
     unknown = sorted({match.group(1) for match in PLACEHOLDER_RE.finditer(template)} - set(values))
     if unknown:
         raise ChangelogError(
@@ -781,6 +896,8 @@ def fill(template, values, name):
         )
     if "{this_build}" not in template:
         raise ChangelogError("%s has no {this_build}: the notes would not say what the release changes" % name)
+    if "{codename_note}" not in template:
+        raise ChangelogError("%s has no {codename_note}: the notes would not open with what the codename means" % name)
     return PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template).rstrip("\n") + "\n"
 
 
@@ -855,19 +972,21 @@ def report(problems, path):
         print("%s:%d: %s" % (display_path(path), number, message), file=sys.stderr)
 
 
-def report_all(changelog, codenames, path):
-    """Print every problem of the changelog at path and of the codenames file; return (shown path,
-    number of problems) of each that has some, the changelog first."""
+def report_all(changelog, path, *files):
+    """Print every problem of the changelog at path and of each of files (the codenames file, and
+    for check the codename notes file); return (shown path, number of problems) of each that has
+    some, the changelog first."""
     report(changelog.problems, path)
-    for message in codenames.problems:
-        print("%s: %s" % (display_path(codenames.path), message), file=sys.stderr)
-    files = ((path, changelog.problems), (codenames.path, codenames.problems))
-    return [(display_path(name), len(problems)) for name, problems in files if problems]
+    for other in files:
+        for message in other.problems:
+            print("%s: %s" % (display_path(other.path), message), file=sys.stderr)
+    found = [(path, changelog.problems)] + [(other.path, other.problems) for other in files]
+    return [(display_path(name), len(problems)) for name, problems in found if problems]
 
 
 def checked(changelog, codenames, path):
     """changelog, refused with every problem printed unless it and the codenames file pass check."""
-    failed = report_all(changelog, codenames, path)
+    failed = report_all(changelog, path, codenames)
     if failed:
         names = " and ".join(name for name, _count in failed)
         raise ChangelogError("%s %s check: nothing done" % (names, "fails" if len(failed) == 1 else "fail"))
@@ -897,8 +1016,9 @@ def plural(count, noun):
 def cmd_check(args):
     text = read_text(args.file)
     codenames = read_codenames(args.codenames)
+    notes = read_codename_notes(args.codename_notes, codenames)
     changelog = parse(text, codenames)
-    failed = report_all(changelog, codenames, args.file)
+    failed = report_all(changelog, args.file, codenames, notes)
     for name, count in failed:
         print("%s: %s" % (name, plural(count, "problem")), file=sys.stderr)
     if failed:
@@ -912,6 +1032,12 @@ def load(args):
     text = read_text(args.file)
     codenames = read_codenames(args.codenames)
     return text, checked(parse(text, codenames), codenames, args.file), codenames
+
+
+def blurb_of(args, codenames, version):
+    """The blurb of version (major, minor) in the codename notes file args.codename_notes; refuses what
+    codename_note refuses."""
+    return codename_note(read_codename_notes(args.codename_notes, codenames), codenames, version)
 
 
 def cmd_html(args):
@@ -946,6 +1072,7 @@ def cmd_notes(args):
         values = {
             "version": "%d.%d" % version.release,
             "codename": codename,
+            "codename_note": blurb_of(args, codenames, version.release),
             "build": str(args.build),
             "date": args.date,
             "this_build": markdown_sections(unreleased),
@@ -965,6 +1092,7 @@ def cmd_notes(args):
             "release": "%d.%d" % version.release,
             "beta": str(version.beta),
             "codename": codename,
+            "codename_note": blurb_of(args, codenames, version.release),
             "build": str(args.build),
             "date": args.date,
             "this_build": markdown_sections(unreleased),
@@ -1044,6 +1172,15 @@ def parse_args(argv):
         help="the codename of each version X.Y (default .github/codenames.json)",
     )
 
+    # Only check and notes read the codename notes file: html and stamp never show a blurb.
+    blurbs = argparse.ArgumentParser(add_help=False)
+    blurbs.add_argument(
+        "--codename-notes",
+        default=CODENAME_NOTES_FILE,
+        metavar="PATH",
+        help="the blurb that opens the notes of each version X.Y (default .github/codename-notes.json)",
+    )
+
     release = argparse.ArgumentParser(add_help=False)
     release.add_argument(
         "--version",
@@ -1072,7 +1209,7 @@ def parse_args(argv):
     sub = parser.add_subparsers(dest="command", metavar="command")
     sub.required = True
 
-    p = sub.add_parser("check", parents=[common], help="validate the file; every problem with its line number")
+    p = sub.add_parser("check", parents=[common, blurbs], help="validate the files; every problem with its line number")
     p.set_defaults(func=cmd_check)
 
     html = sub.add_parser(
@@ -1106,8 +1243,9 @@ def parse_args(argv):
 
     p = sub.add_parser(
         "notes",
-        parents=[common, release],
-        help="print the release's notes from the template; refuses an empty Unreleased entry",
+        parents=[common, blurbs, release],
+        help="print the release's notes from the template; refuses an empty Unreleased entry and a version "
+        "without a blurb",
     )
     p.add_argument(
         "--template",

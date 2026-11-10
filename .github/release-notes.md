@@ -1,5 +1,7 @@
 ## {version} "{codename}" (build {build})
 
+{codename_note}
+
 Released {date}.
 
 Install every `.c4z` file of the release at once through Driver ▸ "Add or Update Driver or Agent…" in Composer Pro, updating every device in place; never delete and re-add the Hue Bridge driver (that loses the pairing). When the changes below say a driver's capabilities changed, reboot the controller from System Manager afterwards: on OS 3.x, Composer's "Restart Director?" does not load them.

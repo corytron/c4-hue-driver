@@ -245,8 +245,13 @@ seven assets attached (the three `.c4z` files, `SHA256SUMS.txt`,
 below). Since 2026-10-26 (#304) every X.Y has its own codename, kept by
 all its builds and betas. Before the first build of a new X.Y the
 coordinator picks one and reports it, without waiting for approval
-(#396); it goes into `.github/codenames.json`, which `tools/changelog.py`
-reads. How the names are chosen stays out of public text (#416). The
+(#396); then one pull request adds the name to `.github/codenames.json`
+and its blurb to `.github/codename-notes.json` (#464), both read by
+`tools/changelog.py`. The blurb is one line that opens the notes of every
+build of the X.Y, its betas included: what the name means in the show and,
+where it fits, how that ties to what the release changes. The rule for how
+names are picked is never written down in public text, the blurbs, release
+notes and this checklist included (#416). The
 driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
 integer there); it is named in the release's `manifest.json`, in the
@@ -281,11 +286,13 @@ development here is finished.
 4. The release's title and notes come from `CHANGELOG.md` on every run
    (`docs/changelog-design.md`): before dispatching, make sure its
    `## Unreleased` entry lists what this build changes (a run with an empty
-   entry fails), and for the first release of a new major version that the
-   codename is in `.github/codenames.json` (#396). Check the release page: eight assets
+   entry fails), and for the first build of a new X.Y that its codename is
+   in `.github/codenames.json` (#396) and its blurb in
+   `.github/codename-notes.json` (#464; a run without one fails before
+   anything is published). Check the release page: eight assets
    (four since 1.1 added `hue_motion.c4z`),
    the title `<version> "<codename>"`, the notes' first heading with this
-   build. After the release, the desired-state PR also runs
+   build and the blurb as their first paragraph. After the release, the desired-state PR also runs
    `python3 tools/changelog.py stamp --version X.Y --build N --date
    YYYY-MM-DD`, so `CHANGELOG.md` names the build that was published, and
    each driver's Documentation tab ends with the same list.
@@ -394,8 +401,9 @@ only. What differs:
    version (Release ▸ Run workflow ▸ `1.1-beta.1`): it tags `main`'s head
    `v1.1-beta.1`. The tag never moves, so a version whose tag exists fails
    before anything is built; take the next `N`. A prerelease carries its X.Y's
-   codename from `.github/codenames.json` (1.1-beta.1 is "Brasso"); a new
-   X.Y needs its name there first.
+   codename from `.github/codenames.json` (1.1-beta.1 is "Brasso") and the
+   blurb of its X.Y from `.github/codename-notes.json`; a new X.Y needs
+   both there first.
 2. **Changelog.** Nothing changes in `CHANGELOG.md`: the notes come from the
    same `## Unreleased` entry, which holds everything since the last release,
    and a prerelease is never stamped (`changelog.py stamp` refuses one); the
@@ -406,8 +414,8 @@ only. What differs:
    release. Check the title, `1.1 beta 1 "Brasso" (build N)`, the
    Pre-release mark, and the assets: every package, `SHA256SUMS.txt`,
    `manifest.json` and the two provenance files. The notes come from
-   `.github/prerelease-notes.md`: what it is, the release it follows, the
-   changes, how to install, how to go back, where to report, how to verify,
+   `.github/prerelease-notes.md`: the blurb of its X.Y, what it is, the
+   release it follows, the changes, how to install, how to go back, where to report, how to verify,
    the license.
 4. **Feedback.** The tester gets the release page's link. Reports come through
    the "Beta feedback" issue form (label `beta-feedback`); feedback that
