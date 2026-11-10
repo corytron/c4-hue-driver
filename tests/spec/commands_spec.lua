@@ -1114,4 +1114,183 @@ describe("bridge.commands", function()
 			end)
 		end
 	end)
+
+	-- #428 D8 (docs/offline-design.md §6.6): every PUT that fails is reported
+	-- through on_undelivered, once per failed attempt, after the queue has
+	-- settled its own state; never for an ok answer. Both queues are the same
+	-- code (driver.lua new_queue, new_group_queue), and both are run.
+	describe("on_undelivered (#428 D8)", function()
+		local OK = { ok = true, code = 200 }
+		local told
+
+		for _, kind in ipairs({
+			{ name = "light queue", opts = {} },
+			{ name = "group queue", opts = { rate_per_sec = 1, burst = 3, label = "grouped_light" } },
+		}) do
+			describe(kind.name, function()
+				before_each(function()
+					told = {}
+					local opts = { send = fake_send, on_undelivered = function(rid, err)
+						told[#told + 1] = { rid = rid, err = err, pending = q:pending(rid), timers = timer_delays() }
+					end }
+					for k, v in pairs(kind.opts) do opts[k] = v end
+					q = commands.new(opts)
+				end)
+
+				it("is never called for an ok answer", function()
+					set_now("a", { brightness = 50 })
+					sends[1].done(OK)
+					assert.same({}, told)
+				end)
+
+				it("is called at each failed attempt that is retried, with the state folded back first", function()
+					set_now("a", { brightness = 50 })
+					sends[1].done({ ok = false, err = "bridge identity not verified yet" })
+					assert.equal(1, #told)
+					assert.equal("a", told[1].rid)
+					assert.equal("bridge identity not verified yet", told[1].err)
+					assert.same({ brightness = 50, on = true }, told[1].pending, "the retry's state is in place")
+					assert.same({ commands.BACKOFF_MS }, told[1].timers, "and its timer armed")
+					c4.now_ms = c4.now_ms + commands.BACKOFF_MS
+					c4.fire_timers()
+					sends[2].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.equal(2, #told, "the second failure is answered too")
+					assert.equal("HTTP 503", told[2].err)
+					c4.now_ms = c4.now_ms + 2 * commands.BACKOFF_MS
+					c4.fire_timers()
+					sends[3].done({ ok = false, code = 429, err = "HTTP 429" })
+					assert.equal(3, #told)
+					c4.now_ms = c4.now_ms + 4 * commands.BACKOFF_MS
+					c4.fire_timers()
+					sends[4].done(OK)
+					assert.equal(3, #told, "the retry that lands is not")
+				end)
+
+				it("is called once at the drop at the age limit, with nothing left pending", function()
+					set_now("a", { brightness = 50 })
+					sends[1].done({ ok = false, err = "transfer failed (28): Timeout was reached" })
+					c4.now_ms = c4.now_ms + 30000
+					c4.fire_timers()
+					sends[2].done({ ok = false, err = "transfer failed (7): Failed to connect" })
+					assert.equal(2, #told, "the retry and the drop")
+					assert.equal("transfer failed (7): Failed to connect", told[2].err)
+					assert.is_nil(told[2].pending, "dropped before the owner hears")
+					assert.same({}, told[2].timers)
+				end)
+
+				for _, err in ipairs({ "not paired", "key rejected", "TLS check failed" }) do
+					it("is called once for the final refusal '" .. err .. "', every time it comes", function()
+						set_now("a", { on = true })
+						sends[1].done({ ok = false, err = err, code = err == "key rejected" and 403 or nil })
+						assert.equal(1, #told)
+						assert.equal(err, told[1].err)
+						assert.is_nil(told[1].pending)
+						c4.now_ms = c4.now_ms + 1000
+						set_now("a", { on = false })
+						sends[2].done({ ok = false, err = err })
+						assert.equal(2, #told, "warned once, but each refused command is answered")
+					end)
+				end
+
+				it("is called once for another 4xx", function()
+					set_now("a", { brightness = 50 })
+					sends[1].done({ ok = false, code = 404, err = "HTTP 404" })
+					assert.equal(1, #told)
+					assert.equal("HTTP 404", told[1].err)
+					assert.same({}, timer_delays(), "no retry")
+				end)
+
+				it("is called before a change that arrived during the failed PUT goes out", function()
+					set_now("a", { brightness = 50 })
+					q:set("a", { brightness = 60 })
+					sends[1].done({ ok = false, code = 400, err = "HTTP 400" })
+					assert.equal(1, #told)
+					assert.same({ brightness = 60, on = true }, told[1].pending, "the newer change was still waiting")
+					assert.equal(2, #sends, "and goes out after")
+					assert.same({ on = { on = true }, dimming = { brightness = 60 } }, sends[2].body)
+				end)
+
+				it("is called for a refused dim stop, and its level fallback still goes out", function()
+					set_now("a", { dim = "up", rate = 3000 })
+					sends[1].done(OK)
+					c4.now_ms = c4.now_ms + 1000
+					set_now("a", { dim = "stop", level = 40 })
+					sends[2].done({ ok = false, code = 400, err = "HTTP 400" })
+					assert.equal(1, #told)
+					assert.equal(3, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 40 } }, sends[3].body)
+				end)
+
+				it("is called when a stop that waited behind a failed tap start becomes its level (D13)", function()
+					set_now("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+					q:set("t", { dim = "stop", level = 64 })
+					c4.fire_timers()
+					sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.equal(1, #told)
+					assert.same({ on = true, brightness = 64, rate = 0, urgent = true }, told[1].pending,
+						"the D13 merge is unchanged")
+					c4.fire_timers()
+					assert.same({ on = { on = true }, dimming = { brightness = 64 } }, sends[2].body)
+				end)
+
+				it("is called when a send raises", function()
+					q = commands.new({ send = function() error("boom") end, on_undelivered = function(rid, err)
+						told[#told + 1] = { rid = rid, err = err }
+					end })
+					set_now("a", { on = true })
+					assert.equal(1, #told)
+					assert.equal("a", told[1].rid)
+					assert.truthy(told[1].err:find("boom", 1, true), told[1].err)
+				end)
+
+				it("is not called again when a send answered through done() before it raised", function()
+					q = commands.new({ send = function(_, _, done)
+						done({ ok = false, code = 400, err = "HTTP 400" })
+						error("boom")
+					end, on_undelivered = function(rid, err)
+						told[#told + 1] = { rid = rid, err = err }
+					end })
+					set_now("a", { on = true })
+					assert.equal(1, #told)
+					assert.equal("HTTP 400", told[1].err)
+				end)
+
+				it("is not called for a late done() after stop()", function()
+					set_now("a", { on = true })
+					q:stop()
+					sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.same({}, told)
+				end)
+
+				it("does not break the queue when the callback raises", function()
+					local calls = 0
+					local opts = { send = fake_send, on_undelivered = function()
+						calls = calls + 1
+						error("callback boom")
+					end }
+					for k, v in pairs(kind.opts) do opts[k] = v end
+					q = commands.new(opts)
+					set_now("a", { brightness = 50 })
+					sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.equal(1, calls)
+					assert.truthy(last_line():find("on_undelivered for a failed: ", 1, true), last_line())
+					assert.same({ commands.BACKOFF_MS }, timer_delays(), "the retry is still armed")
+					c4.now_ms = c4.now_ms + commands.BACKOFF_MS
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					sends[2].done(OK)
+					c4.now_ms = c4.now_ms + 1000
+					set_now("b", { on = true })
+					assert.equal(3, #sends, "later sets are served")
+				end)
+
+				it("is optional: a queue without it behaves as before", function()
+					q = commands.new({ send = fake_send })
+					set_now("a", { brightness = 50 })
+					sends[1].done({ ok = false, code = 404, err = "HTTP 404" })
+					assert.is_nil(q:pending("a"))
+				end)
+			end)
+		end
+	end)
 end)

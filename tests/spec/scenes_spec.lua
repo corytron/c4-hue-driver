@@ -1047,13 +1047,16 @@ describe("bridge.scenes", function()
 			assert.is_true(saw_log("unknown recall action sideways"))
 		end)
 
-		it("on failure warns and sends the cached status so the switch settles", function()
+		it("on failure warns and sends the cached status, reason undelivered, from a 1 ms timer (#428 D8)", function()
 			add_relax()
 			S:on_container(container(F.events.scene_recalled))
 			c4.sent = {}
 			S:recall({ rid = F.scene_rids.relax })
 			c4.last_transfer():respond(404, '{"errors":[{"description":"Not Found"}],"data":[]}')
-			assert.same({ rid = F.scene_rids.relax, active = "static", reason = "recall" }, c4.sent[1].params)
+			assert.same({}, c4.sent, "not inside the PUT's answer")
+			assert.equal(1, c4.fire_timers_of(1))
+			assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
+				params = { rid = F.scene_rids.relax, active = "static", reason = "undelivered" } } }, c4.sent)
 			assert.is_true(saw_log("Relax (device 2001): Recall failed: HTTP 404 (scene gone?)"))
 			window_ends()
 			S:recall({ rid = F.scene_rids.relax })
@@ -1063,7 +1066,11 @@ describe("bridge.scenes", function()
 			S:recall({ rid = F.scene_rids.relax })
 			c4.last_transfer():done(7, "Couldn't connect")
 			assert.is_true(saw_log("Recall failed: transfer failed (7): Couldn't connect"))
+			window_ends()
 			assert.equal(3, #c4.sent)
+			for _, m in ipairs(c4.sent) do
+				assert.equal("undelivered", m.params.reason)
+			end
 		end)
 
 		it("does not PUT for a gone scene, an unregistered scene or a missing rid; a gone one settles OFF", function()
@@ -1877,6 +1884,192 @@ describe("bridge.scenes", function()
 				assert.is_false(S:off({ rid = F.scene_rids.relax, duration = "3000", urgent = "true" }))
 				assert.equal("static", c4.sent[1].params.active)
 				assert.is_true(saw_log("nothing queued; state unchanged"))
+			end)
+		end)
+	end)
+
+	-- #428 D8 (docs/offline-design.md §6.2): a recall or activation that
+	-- fails is answered "undelivered" from a 1 ms timer; a failed PUT on a
+	-- grouped_light (the group queue's on_undelivered) is answered with
+	-- HUE_SCENE_GROUP, the cached on and level, to every linked scene on it.
+	describe("undelivered (#428 D8)", function()
+		local RELAX, G_LIVING = F.scene_rids.relax, F.grouped_light_rids.living_room
+
+		-- bridge_request's refusals call back at once, inside the device's own
+		-- HUE_SCENE_RECALL (offline-design §1.4).
+		local function refuse_at_once()
+			S.ctx.http = function(_, cb)
+				return cb({ ok = false, err = "bridge identity not verified yet" })
+			end
+		end
+
+		local function states_sent()
+			local out = {}
+			for _, m in ipairs(c4.sent) do
+				if m.command == "HUE_SCENE_STATE" then out[#out + 1] = m end
+			end
+			return out
+		end
+
+		describe("recall", function()
+			it("answers a refusal given inside the recall from a 1 ms timer, never at once", function()
+				add_relax()
+				refuse_at_once()
+				c4.sent = {}
+				assert.is_true(S:recall({ rid = RELAX, action = "active" }))
+				assert.same({}, c4.sent, "nothing inside the device's own message")
+				assert.is_true(saw_log("Relax (device 2001): Recall failed: bridge identity not verified yet"))
+				assert.equal(1, c4.fire_timers_of(1))
+				assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
+					params = { rid = RELAX, active = S:current_active(RELAX), reason = "undelivered" } } }, c4.sent)
+			end)
+
+			it("answers with the status the bridge last reported, not the one asked for", function()
+				add_relax()
+				S:on_container(container(F.events.scene_recalled))  -- static
+				refuse_at_once()
+				c4.sent = {}
+				S:recall({ rid = RELAX, action = "dynamic_palette" })
+				c4.fire_timers_of(1)
+				assert.equal("static", c4.sent[1].params.active)
+				assert.equal("undelivered", c4.sent[1].params.reason)
+			end)
+
+			it("sends nothing when an OFF of the scene came before the timer", function()
+				add_relax()
+				refuse_at_once()
+				S:recall({ rid = RELAX })
+				c4.sent = {}
+				assert.is_true(S:off({ rid = RELAX }))
+				assert.same({ { id = 2001, command = "HUE_SCENE_STATE",
+					params = { rid = RELAX, active = "inactive", reason = "recall" } } }, c4.sent)
+				c4.fire_timers_of(1)
+				assert.equal(1, #c4.sent, "the failed recall's answer is stale")
+			end)
+
+			it("sends nothing when the scene was forgotten before the timer", function()
+				add_relax()
+				refuse_at_once()
+				S:recall({ rid = RELAX })
+				S:forget(2001)
+				c4.sent = {}
+				c4.fire_timers_of(1)
+				assert.same({}, states_sent())
+			end)
+
+			it("keeps reason recall and no timer for a recall the bridge took", function()
+				add_relax()
+				c4.sent = {}
+				S:recall({ rid = RELAX, action = "active" })
+				c4.last_transfer():respond(200, '{"data":[{"rid":"' .. RELAX .. '","rtype":"scene"}],"errors":[]}')
+				assert.equal("recall", c4.sent[1].params.reason)
+				assert.equal(0, c4.fire_timers_of(1))
+				assert.equal(1, #c4.sent)
+			end)
+
+			it("survives a send that raises in the timer", function()
+				add_relax()
+				refuse_at_once()
+				S:recall({ rid = RELAX })
+				S.ctx.send = function() error("boom") end
+				assert.equal(1, c4.fire_timers_of(1))
+				assert.is_true(saw_log("undelivered recall failed: "))
+			end)
+		end)
+
+		describe("group (HUE_SCENE_GROUP)", function()
+			-- Relax (2001) and Savanna sunset (2002) in the Living Room,
+			-- Concentrate (2003) in the Garage.
+			local function add_three(opts)
+				resync(opts)
+				S:add_all_of_group(F.group_rids.living_room, done)
+				S:add_scene(F.scene_rids.concentrate, nil, done)
+				c4.sent = {}
+			end
+
+			it("tells every linked scene on that grouped_light its cached on and level, reason undelivered", function()
+				add_three({ grouped = grouped_lights({ living_room = true, garage = false }) })
+				assert.equal(2, S:undelivered_group(G_LIVING))
+				assert.same({
+					{ id = 2001, command = "HUE_SCENE_GROUP",
+						params = { rid = RELAX, on = "true", level = "50", reason = "undelivered" } },
+					{ id = 2002, command = "HUE_SCENE_GROUP",
+						params = { rid = F.scene_rids.savanna, on = "true", level = "50", reason = "undelivered" } },
+				}, c4.sent, "the Garage's scene hears nothing")
+			end)
+
+			it("answers a failed OFF with the group still on", function()
+				add_relax({ grouped = grouped_lights({ living_room = true }) })
+				assert.is_true(S:off({ rid = RELAX }))
+				c4.sent = {}
+				assert.equal(1, S:undelivered_group(G_LIVING))
+				assert.same({ rid = RELAX, on = "true", level = "50", reason = "undelivered" }, c4.sent[1].params)
+			end)
+
+			it("puts back the level a failed slider move assumed, and measures the next move from it", function()
+				add_relax({ grouped = grouped_lights({ living_room = true }) })
+				assert.is_true(S:level({ rid = RELAX, level = "75", rate = "400" }))
+				assert.equal(75, S.group_level[G_LIVING], "assumed until Hue reports")
+				c4.sent = {}
+				S:undelivered_group(G_LIVING)
+				assert.equal(50, S.group_level[G_LIVING])
+				assert.same({ rid = RELAX, on = "true", level = "50", reason = "undelivered" }, c4.sent[1].params)
+				assert.is_true(S:level({ rid = RELAX, level = "60", rate = "0" }))
+				assert.same({ action = "up", brightness_delta = 10 }, dims[2].body.dimming_delta, "from 50, not from 75")
+				-- The level sent is the group's last sent: Hue reporting the same adds nothing.
+				S:undelivered_group(G_LIVING)
+				c4.sent = {}
+				assert.equal(0, S:on_container(container(grouped_light_event("living_room", nil, 50))))
+			end)
+
+			it("keeps a level the bridge reported after the move", function()
+				add_relax({ grouped = grouped_lights({ living_room = true }) })
+				S:level({ rid = RELAX, level = "75", rate = "400" })
+				S:level({ rid = RELAX, level = "80", rate = "400" })
+				S:on_container(container(grouped_light_event("living_room", nil, 70)))
+				c4.sent = {}
+				S:undelivered_group(G_LIVING)
+				assert.equal(70, S.group_level[G_LIVING])
+				assert.equal("70", c4.sent[1].params.level)
+			end)
+
+			it("answers with the reason alone when neither on nor level is known", function()
+				add_relax()
+				assert.is_true(S:level({ rid = RELAX, level = "40", rate = "0" }))  -- absolute: the level was unknown
+				c4.sent = {}
+				assert.equal(1, S:undelivered_group(G_LIVING))
+				assert.same({ { id = 2001, command = "HUE_SCENE_GROUP", params = { rid = RELAX, reason = "undelivered" } } },
+					c4.sent)
+				assert.is_nil(S.group_level[G_LIVING], "the assumed 40 is gone")
+			end)
+
+			it("tells nobody for a grouped_light no scene is on, an unknown one, or none", function()
+				add_three({ grouped = grouped_lights({ living_room = true, garage = false }) })
+				assert.equal(0, S:undelivered_group(F.grouped_light_rids.downstairs))
+				assert.equal(0, S:undelivered_group("ffffffff-0000-4000-8000-0000000000aa"))
+				assert.equal(0, S:undelivered_group(""))
+				assert.equal(0, S:undelivered_group(nil))
+				assert.same({}, c4.sent)
+			end)
+
+			it("reaches the scenes through a real group queue after its debounce, not inside the command", function()
+				package.loaded["bridge.commands"] = nil
+				local commands = require("bridge.commands")
+				local q = commands.new({
+					label = "grouped_light", rate_per_sec = 1, burst = 3,
+					now = function() return c4.now_ms end,
+					send = function(_, _, cb) return cb({ ok = false, err = "bridge identity not verified yet" }) end,
+					on_undelivered = function(rid) S:undelivered_group(rid) end,
+				})
+				S.ctx.group_off = function(rid) q:set(rid, { on = false }); return true end
+				add_relax({ grouped = grouped_lights({ living_room = true }) })
+				c4.sent = {}
+				assert.is_true(S:off({ rid = RELAX }))
+				assert.same({ "HUE_SCENE_STATE@2001" }, commands_sent(), "inactive at once, as before")
+				c4.fire_timers_of(commands.DEBOUNCE_MS)
+				assert.same({ "HUE_SCENE_STATE@2001", "HUE_SCENE_GROUP@2001" }, commands_sent())
+				assert.same({ rid = RELAX, on = "true", level = "50", reason = "undelivered" }, c4.sent[2].params)
+				q:stop()
 			end)
 		end)
 	end)
@@ -2696,7 +2889,9 @@ describe("bridge.scenes", function()
 				c4.sent = {}
 				S:recall({ rid = SMART.living })
 				c4.last_transfer():respond(404, '{"errors":[{"description":"Not Found"}],"data":[]}')
-				assert.same({ rid = SMART.living, active = "inactive", reason = "recall", slot_name = "Savanna sunset",
+				assert.same({}, c4.sent, "from a 1 ms timer (#428 D8)")
+				assert.equal(1, c4.fire_timers_of(1))
+				assert.same({ rid = SMART.living, active = "inactive", reason = "undelivered", slot_name = "Savanna sunset",
 					slot_start = "07:00" }, c4.sent[1].params)
 				assert.is_true(saw_log("Golden hours (device 2001): Recall failed: HTTP 404 (time-based scene gone?)"))
 				S:on_container(container(F.events.smart_deleted))

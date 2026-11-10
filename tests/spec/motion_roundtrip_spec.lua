@@ -303,7 +303,8 @@ describe("motion round trip", function()
 			go_live(sensor, SENSOR_ID)
 			assert.same({ { id = BRIDGE_ID, command = "HUE_MOTION_HELLO", params = { rid = "", device_id = "2001" } } },
 				sensor.C4.sent)
-			assert.same({ "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
+			-- The link first in every hello answer (#428 D4).
+			assert.same({ "HUE_BRIDGE_LINK", "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
 			assert.same({ rid = M.devices.hallway, reason = "hello", online = "true", enabled = "true", lux = "63",
 				temperature = "21.37", battery_level = "87", battery_state = "normal", motion = "false",
 				motion_changed = M.changed.hallway_motion }, last_sent(SENSOR_ID, "HUE_MOTION_STATE"))
@@ -340,7 +341,7 @@ describe("motion round trip", function()
 				has_battery = "false" }, last_sent(AREA_ID, "HUE_MOTION_CONFIGURE"))
 			bc4.sent = {}
 			go_live(area, AREA_ID)
-			assert.same({ "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(AREA_ID))
+			assert.same({ "HUE_BRIDGE_LINK", "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(AREA_ID))
 			assert.same({ rid = M.area, reason = "hello", online = "true", enabled = "true", motion = "false",
 				motion_changed = M.changed.convenience }, last_sent(AREA_ID, "HUE_MOTION_STATE"))
 			assert.same({ "STATE_CLOSED" }, contact(area))
@@ -418,7 +419,7 @@ describe("motion round trip", function()
 			bc4.sent = {}
 			fake.as(sensor, sensor.ExecuteCommand, "LUA_ACTION", { ACTION = "Refresh From Bridge" })
 			fake.pump()
-			assert.same({ "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
+			assert.same({ "HUE_BRIDGE_LINK", "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
 			assert.equal("deleted", last_sent(SENSOR_ID, "HUE_MOTION_STATE").ended)
 			assert.same({ "OPENED", "CLOSED" }, contact(sensor))
 		end)
@@ -609,7 +610,8 @@ describe("motion round trip", function()
 			fake.project.devices[AREA_ID].name = "Porch sensor"
 			fake.as(area, area.OnDriverLateInit, "DIT_ADDING")
 			fake.as(bridge, function() bc4:Bind(BRIDGE_ID, 1, AREA_ID, 1, "HUE_BRIDGE") end)
-			assert.equal(1, fake.pump(), "its hello")
+			-- Its hello, and the link the bridge answers every hello with (#428 D4).
+			assert.equal(2, fake.pump(), "its hello")
 			assert.equal("Bound; waiting for the bridge", area.Properties["Status"])
 			assert.is_nil((bc4.persist.hue_motion or {})[M.devices.porch])
 

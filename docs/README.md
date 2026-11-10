@@ -98,6 +98,9 @@ of it is live.
   load groups (#435): the group commands on each member, and the bridge
   sending one request per whole Hue room or zone so those lamps move
   together (2026-11-09).
+- [`offline-design.md`](offline-design.md): Hue devices go offline after the
+  bridge has been unreachable for 5 minutes (#428), and a command that could
+  not be delivered never shows as done (2026-11-09).
 - [`raw-stream-design.md`](raw-stream-design.md): historical, never built: the
   event stream on a raw SSL network connection instead of `C4:url`. Kept as
   the documented alternative to the padded-address design in `design.md`.

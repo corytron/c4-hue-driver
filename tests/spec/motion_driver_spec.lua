@@ -1055,6 +1055,289 @@ describe("Hue Motion driver", function()
 		end)
 	end)
 
+	describe("the bridge's link (#428 D4, D14; docs/offline-design.md §6)", function()
+		-- HUE_BRIDGE_LINK as the bridge sends it (§6.1): since in epoch seconds,
+		-- as a decimal string.
+		local function bridge_link(env, link_state, reason, since)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = link_state, reason = reason,
+				since = since and string.format("%d", since) or nil })
+		end
+
+		-- common/link.lua's clock (§6.3): "14:02" today, "10-26 14:02" on another day.
+		local function clock_of(t)
+			if os.date("%Y-%m-%d", t) == os.date("%Y-%m-%d") then
+				return os.date("%H:%M", t)
+			end
+			return os.date("%m-%d %H:%M", t)
+		end
+
+		local function online_rows(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("UpdateProperty")) do
+				if args[1] == "Online" then out[#out + 1] = args[2] end
+			end
+			return out
+		end
+
+		it("goes offline with the link: Online No, Offline once, the temperature unavailable once, the contact "
+			.. "as it is, and the link's Status", function()
+			local env, c4 = known({ motion = "true" })
+			state(env, { lux = "30", temperature = "20.5", battery_level = "70", battery_state = "normal" })
+			clear(c4)
+			local since = os.time() - 400
+			bridge_link(env, "offline", "not_answering", since)
+			assert.same({}, contact(c4), "the contact stays as it is (D14, motion Q1)")
+			assert.equal("No", env.Properties["Online"])
+			assert.equal("0", variable(c4, "Online"))
+			assert.is_true(env.TestCondition("BOOL_ONLINE", { VALUE = "False" }))
+			assert.same({ 5 }, c4.events_fired)
+			assert.same({ { "VALUE_UNAVAILABLE", { STATUS = "offline" } } }, output(c4))
+			assert.equal("Hue Bridge not answering since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			assert.matches("^Motion", env.Properties["Hue Motion"], "Hue's last state stays")
+			-- The readings are old from the time the bridge's trouble began.
+			local old = " (old, " .. os.date("%H:%M", since) .. ")"
+			assert.equal("30 lux" .. old, env.Properties["Light Level"])
+			assert.equal("20.5 °C (68.9 °F)" .. old, env.Properties["Temperature"])
+			assert.equal("70 % (normal)" .. old, env.Properties["Battery"])
+			local values = c4.persist.motion_values
+			assert.equal(since, values.offline_since)
+			assert.is_true(values.online, "the sensor's own word is persisted as it is")
+			assert.is_true(values.link_offline)
+			assert.equal("not_answering", values.link_reason)
+			assert.equal(since, values.link_since)
+
+			-- The same link again (a hello answer, the bridge's first evaluation): nothing.
+			clear(c4)
+			bridge_link(env, "offline", "not_answering", since)
+			assert.same({}, c4.events_fired)
+			assert.same({}, output(c4))
+			assert.same({}, contact(c4))
+			assert.same({}, c4.calls_to("SetVariable"))
+			assert.same({}, c4.calls_to("UpdateProperty"))
+		end)
+
+		it("comes back at the link's online: the Online event while the sensor is online, fresh rows, and the "
+			.. "temperature with the next reading", function()
+			local env, c4 = known()
+			state(env, { lux = "30", temperature = "20.5" })
+			bridge_link(env, "offline", "key_rejected", os.time() - 400)
+			clear(c4)
+			bridge_link(env, "online")
+			assert.equal("Yes", env.Properties["Online"])
+			assert.equal("1", variable(c4, "Online"))
+			assert.same({ 6 }, c4.events_fired)
+			assert.equal(SENSOR_STATUS, env.Properties["Status"])
+			assert.equal("30 lux", env.Properties["Light Level"])
+			assert.equal("20.5 °C (68.9 °F)", env.Properties["Temperature"])
+			assert.is_nil(c4.persist.motion_values.offline_since)
+			assert.is_nil(c4.persist.motion_values.link_offline)
+			assert.is_nil(c4.persist.motion_values.link_reason)
+			assert.same({}, output(c4), "the next reading brings the value, as after a sensor that comes back")
+			assert.same({}, contact(c4))
+
+			-- The resync after the contact: the readings, no event for an unchanged Online.
+			state(env, { reason = "resync", motion = "false", online = "true", enabled = "true", temperature = "20.7" })
+			assert.equal("VALUE_CHANGED", output(c4)[1][1])
+			assert.equal("20.7", output(c4)[1][2].CELSIUS)
+			assert.same({ 6 }, c4.events_fired)
+			assert.same({}, contact(c4), "no motion already shown")
+		end)
+
+		it("keeps a sensor that is unreachable during the outage offline, with no extra events", function()
+			local env, c4 = known()
+			bridge_link(env, "offline", "not_answering", os.time() - 400)
+			state(env, { online = "false", status = "Not reachable since 14:02; motion not current" })
+			assert.same({ 5 }, c4.events_fired)
+			assert.matches("^Hue Bridge not answering since ", env.Properties["Status"], "the link's text first")
+			bridge_link(env, "online")
+			assert.same({ 5 }, c4.events_fired, "the sensor's own word is offline: no Online event")
+			assert.equal("No", env.Properties["Online"])
+			assert.equal("0", variable(c4, "Online"))
+			assert.equal("Not reachable since 14:02; motion not current", env.Properties["Status"])
+			assert.is_false(c4.persist.motion_values.online)
+		end)
+
+		it("leaves a sensor already unreachable before the outage as it was: no event, its own old mark", function()
+			local env, c4 = known()
+			state(env, { lux = "30", online = "false", status = "Not reachable since 14:02; motion not current" })
+			assert.same({ 5 }, c4.events_fired)
+			local sensor_since = c4.persist.motion_values.offline_since
+			clear(c4)
+			bridge_link(env, "offline", "not_answering", sensor_since - 600)
+			assert.same({}, c4.events_fired)
+			assert.same({}, output(c4))
+			assert.equal(sensor_since, c4.persist.motion_values.offline_since)
+			assert.equal("30 lux (old, " .. os.date("%H:%M", sensor_since) .. ")", env.Properties["Light Level"])
+			bridge_link(env, "online")
+			assert.same({}, c4.events_fired)
+			assert.equal("No", env.Properties["Online"])
+			assert.equal(sensor_since, c4.persist.motion_values.offline_since)
+		end)
+
+		it("shows a reason change while offline, and fires nothing more", function()
+			local env, c4 = known()
+			local since = os.time() - 400
+			bridge_link(env, "offline", "not_answering", since)
+			bridge_link(env, "offline", "key_rejected", since)
+			assert.equal("Hue Bridge refuses the pairing since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			bridge_link(env, "offline", "blocked", since)
+			assert.equal("Hue Bridge not usable since " .. clock_of(since) .. " (see its Status); motion not current",
+				env.Properties["Status"])
+			bridge_link(env, "offline", "other_bridge", since)
+			assert.equal("Hue Bridge not at its address since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			bridge_link(env, "offline", "not_paired", since)
+			assert.equal("Hue Bridge not paired since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			assert.same({ 5 }, c4.events_fired)
+			assert.equal(since, c4.persist.motion_values.offline_since)
+		end)
+
+		it("names no time without a since, and marks the readings old from the time it arrived", function()
+			local env, c4 = known()
+			state(env, { lux = "30" })
+			local before = os.time()
+			bridge_link(env, "offline", "blocked")
+			assert.equal("Hue Bridge not usable (see its Status); motion not current", env.Properties["Status"])
+			local at = c4.persist.motion_values.offline_since
+			assert.is_true(at >= before and at <= os.time())
+			assert.same({ 5 }, c4.events_fired)
+		end)
+
+		it("keeps the sensor's word and the link across a restart: no second Offline, and the Online at the end",
+			function()
+			local env, c4 = known()
+			state(env, { temperature = "20" })
+			local since = os.time() - 400
+			bridge_link(env, "offline", "not_answering", since)
+			assert.same({ 5 }, c4.events_fired)
+			env.OnDriverDestroyed()
+
+			local persisted = {}
+			for k, v in pairs(c4.persist) do persisted[k] = v end
+			env, c4 = load_motion({ persist = persisted })
+			local text = "Hue Bridge not answering since " .. clock_of(since) .. "; motion not current"
+			assert.equal("0", variable(c4, "Online"))
+			assert.equal("No", env.Properties["Online"])
+			assert.equal(text, env.Properties["Status"])
+			assert.equal("20.0 °C (68.0 °F) (old, " .. os.date("%H:%M", since) .. ")", env.Properties["Temperature"])
+
+			-- The hello answer: the link first, then the configure and the state (D4).
+			configure(env)
+			bridge_link(env, "offline", "not_answering", since)
+			state(env, { reason = "hello", motion = "false", motion_changed = iso(os.time()), online = "true",
+				enabled = "true" })
+			assert.same({}, c4.events_fired, "no second Offline")
+			assert.same({ "No" }, online_rows(c4), "the Online row never read Yes")
+			assert.equal(text, env.Properties["Status"])
+			assert.same({}, output(c4))
+
+			-- The bridge answers again.
+			bridge_link(env, "online")
+			assert.same({ 6 }, c4.events_fired)
+			assert.equal("Yes", env.Properties["Online"])
+			assert.equal(SENSOR_STATUS, env.Properties["Status"])
+		end)
+
+		it("applies a link that arrived before late init first: the Online row never reads Yes", function()
+			local since = os.time() - 400
+			local env, c4 = fake.load_driver("hue_motion", {}, { device_id = MOTION_ID })
+			c4.persist.hue_rid, c4.persist.hue_kind = RID, "sensor"
+			c4.persist.motion_values = { online = true, enabled = true }
+			env.OnDriverInit("DIT_STARTUP")
+			c4:Bind(BRIDGE_ID, 1, MOTION_ID, 1, "HUE_BRIDGE")
+			bridge_link(env, "offline", "not_answering", since)
+			configure(env)
+			state(env, { reason = "hello", motion = "false", online = "true", enabled = "true" })
+			assert.same({}, c4.calls_to("UpdateProperty"), "held until late init")
+			env.OnDriverLateInit("DIT_STARTUP")
+			assert.same({ "No" }, online_rows(c4))
+			assert.equal("Hue Bridge not answering since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			assert.same({ 5 }, c4.events_fired, "Online was Yes in its earlier life")
+			assert.same({ "STATE_CLOSED" }, contact(c4), "the contact as the bridge reports it")
+		end)
+
+		it("leaves the deliberate ends their Status: deleted, forgotten, unbound; an unbind forgets the link",
+			function()
+			local since = os.time() - 400
+			local env, c4 = known()
+			bridge_link(env, "offline", "not_answering", since)
+			configure(env, SENSOR, { gone = "true" })
+			assert.equal("Sensor deleted in Hue; Link or Forget Device", env.Properties["Status"])
+			state(env, { ended = "deleted", online = "false", status = "Deleted in Hue on 11-08; Link or Forget Device" })
+			assert.equal("Deleted in Hue on 11-08; Link or Forget Device", env.Properties["Status"])
+			bridge_link(env, "online")
+			assert.equal("No", env.Properties["Online"])
+			assert.same({ 5 }, c4.events_fired)
+
+			env, c4 = known()
+			bridge_link(env, "offline", "not_answering", since)
+			env.ExecuteCommand("HUE_MOTION_FORGOTTEN", { rid = RID })
+			assert.equal("Forgotten by the bridge (was Hue motion sensor Hallway sensor)", env.Properties["Status"])
+			assert.same({ 5 }, c4.events_fired)
+
+			env, c4 = known()
+			bridge_link(env, "offline", "not_answering", since)
+			c4:Unbind(MOTION_ID, 1)
+			env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+			assert.equal("No", env.Properties["Online"])
+			assert.same({ 5 }, c4.events_fired)
+			assert.is_nil(c4.persist.motion_values.link_offline, "what the bridge last said is forgotten")
+			assert.is_false(c4.persist.motion_values.online)
+		end)
+
+		it("takes an area offline and back the same way, with nothing on the temperature output", function()
+			local env, c4 = known({ base = AREA })
+			local since = os.time() - 400
+			bridge_link(env, "offline", "not_answering", since)
+			assert.equal("No", env.Properties["Online"])
+			assert.same({ 5 }, c4.events_fired)
+			assert.equal("Hue Bridge not answering since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			bridge_link(env, "online")
+			assert.same({ 5, 6 }, c4.events_fired)
+			assert.equal(AREA_STATUS, env.Properties["Status"])
+			assert.same({}, output(c4))
+		end)
+
+		it("ignores a link whose state it does not know, and says so once", function()
+			local env, c4 = known()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "sideways", reason = "blocked", since = "12" })
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "sideways" })
+			env.ExecuteCommand("HUE_BRIDGE_LINK", {})
+			local warned = {}
+			for _, line in ipairs(lines) do
+				if line:find("HUE_BRIDGE_LINK", 1, true) then warned[#warned + 1] = line end
+			end
+			assert.same({ "[WARN] Hue Motion: HUE_BRIDGE_LINK with state \"sideways\" ignored" }, warned)
+			assert.equal("Yes", env.Properties["Online"])
+			assert.equal(SENSOR_STATUS, env.Properties["Status"])
+			assert.same({}, c4.events_fired)
+		end)
+
+		it("reads a persisted link with an unknown reason as not answering, and ignores a malformed one", function()
+			local since = os.time() - 400
+			local env = load_motion({ persist = { hue_rid = RID, hue_kind = "sensor", motion_values = {
+				online = true, link_offline = true, link_reason = "a later one", link_since = since } } })
+			assert.equal("Hue Bridge not answering since " .. clock_of(since) .. "; motion not current",
+				env.Properties["Status"])
+			assert.equal("No", env.Properties["Online"])
+
+			local c4
+			env, c4 = load_motion({ persist = { hue_rid = RID, hue_kind = "sensor", motion_values = {
+				online = true, link_offline = "yes", link_reason = "blocked", link_since = since } } })
+			assert.equal("Yes", env.Properties["Online"])
+			assert.equal("1", variable(c4, "Online"))
+			assert.equal("Waiting for the bridge", env.Properties["Status"])
+		end)
+	end)
+
 	describe("the temperature output (§2.7, C4R §3.1)", function()
 		it("sends VALUE_CHANGED with CELSIUS, FAHRENHEIT and TIMESTAMP on binding 2 for a reading", function()
 			local env, c4 = known()

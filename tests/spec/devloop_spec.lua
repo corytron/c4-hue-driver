@@ -2645,6 +2645,38 @@ describe("bridge/devtools.lua development requests", function()
 		assert.truthy(env.Properties["Status"]:find("^Test OK: HTTP 200 via 10.000.2.143"))
 	end)
 
+	-- #428 D15 (docs/offline-design.md §8.2 step 99): the house check's short
+	-- outage time, for signed dev loop commands only, clamped to 10-3600 s.
+	it("sets bridge/link.lua's offline time for the run with Link Offline After, signed only", function()
+		paired()
+		local link_mod = require("bridge.link")
+		local logged = #lines
+		env.ExecuteCommand("Link Offline After", { Seconds = "30" }) -- C4:SendToDevice from any driver
+		action("Link Offline After", { Seconds = "30" })             -- the same, dressed as a Composer action
+		assert.equal(300, link_mod.OFFLINE_AFTER_S)
+		assert.equal(logged, #lines, "no handler ran")
+		signed("Link Offline After", { Seconds = "30" })
+		assert.equal(30, link_mod.OFFLINE_AFTER_S)
+		assert.equal("Link Offline After: Hue devices go offline after 30 s of bridge trouble, for this run",
+			fake.last_action(env))
+		signed("Link Offline After", { Seconds = "2" })
+		assert.equal(10, link_mod.OFFLINE_AFTER_S)
+		signed("Link Offline After", { Seconds = "99999.5" })
+		assert.equal(3600, link_mod.OFFLINE_AFTER_S)
+		signed("Link Offline After", { Seconds = "soon" })
+		assert.equal(3600, link_mod.OFFLINE_AFTER_S, "unchanged")
+		assert.equal('Link Offline After: Seconds "soon" is not a number (10 to 3600); unchanged at 3600 s',
+			fake.last_action(env))
+		-- A release build has no way to change it: no bridge/devtools.lua.
+		as_release(function()
+			paired(false)
+			local release_link = require("bridge.link")
+			assert.is_nil(require("common.dispatch").commands["Link_Offline_After"])
+			env.ExecuteCommand("Link Offline After", { Seconds = "30" })
+			assert.equal(300, release_link.OFFLINE_AFTER_S)
+		end)
+	end)
+
 	it("prints a device's HUE_LOG message as one line, whatever it holds", function()
 		paired()
 		env.ExecuteCommand("HUE_LOG", { rid = "rid-1\nx", line = "[INFO] Hue Light: one\nHue Bridge: Test OK\r\tforged" })

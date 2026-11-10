@@ -302,6 +302,107 @@ describe("bridge/away.lua (#373)", function()
 		end)
 	end)
 
+	-- The bridge link's inputs (bridge/link.lua; #428 D2, D12, docs/offline-design.md §6.6).
+	describe("the link (#428)", function()
+		local calls, seen
+
+		before_each(function()
+			calls, seen = {}, {}
+			local function note(name)
+				return function()
+					calls[#calls + 1] = name
+					-- What the link reads when it derives its reason (D3).
+					seen[#seen + 1] = { name, state.unreachable_ms, state.away_ms, state.away_other }
+				end
+			end
+			-- Set after away.new, as the driver may: looked up at every call.
+			a.ctx.link = { trouble = note("trouble"), contact = note("contact"), first_look = note("first_look") }
+		end)
+
+		it("is trouble at a drop of a running, connected stream; not at a stop or an attempt that never connected",
+			function()
+				state.identity_ok = true
+				a:stream_status("Connecting")
+				a:stream_status("Disconnected: connection refused")
+				assert.same({}, calls, "never connected")
+				a:stream_status("Connected since 14:02")
+				running = false
+				a:stream_status("Stopped")
+				assert.same({ "contact" }, calls, "a stop (Diagnostics, a rejected key) is not trouble")
+				running = true
+				a:stream_status("Connected since 14:03")
+				a:stream_status("Disconnected: no data for 600 s (watchdog)")
+				a:stream_status("Connecting")
+				a:stream_status("Disconnected: connection refused")
+				assert.same({ "contact", "contact", "trouble" }, calls, "one trouble per drop")
+			end)
+
+		it("is contact at every \"Connected since\"", function()
+			a:stream_status("Connected since 14:02")
+			a:stream_status("Connected since 14:02")
+			assert.same({ "contact", "contact" }, calls)
+		end)
+
+		it("is trouble, then the first look, when nothing or another bridge answers, with the measures set", function()
+			a:unreachable()
+			assert.same({ "trouble", "first_look" }, calls)
+			assert.same({ "trouble", T0, T0, nil }, seen[1])
+			a:other_bridge(OTHER_ID)
+			assert.same({ "trouble", "first_look", "trouble", "first_look" }, calls)
+			assert.same({ "trouble", T0, T0, OTHER_ID }, seen[3])
+			c4.advance(MIN)
+			a:unreachable()
+			assert.same({ "trouble", T0, T0, nil }, seen[5], "nothing answers now: no other bridge")
+		end)
+
+		it("is contact when the identity passes without a keyed refusal, and the first look always", function()
+			a:unreachable()
+			calls, seen = {}, {}
+			a:answered(IP)
+			assert.same({ "contact", "first_look" }, calls)
+			assert.same({ "contact", nil, nil, nil }, seen[1], "the away measures went first")
+			calls = {}
+			refusal = "key rejected"
+			a:answered(IP)
+			assert.same({ "first_look" }, calls, "a rejected key: no contact")
+		end)
+
+		it("changes nothing without a link, or with a link that lacks a method", function()
+			for _, given in ipairs({ false, {} }) do
+				a.ctx.link = given or nil
+				state.identity_ok = true
+				a:stream_status("Connected since 14:02")
+				a:stream_status("Disconnected")
+				a:unreachable()
+				a:other_bridge(OTHER_ID)
+				a:answered(IP)
+				c4.advance(60 * S)
+			end
+			assert.equal(2, #verifies, "the outage check still runs")
+			assert.equal(IP, state.last_good_ip)
+		end)
+
+		it("logs a link that raises and goes on", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			local function boom() error("link broke") end
+			a.ctx.link = { trouble = boom, contact = boom, first_look = boom }
+			state.identity_ok = true
+			a:stream_status("Connected since 14:02")
+			a:stream_status("Disconnected")
+			a:unreachable()
+			a:answered(IP)
+			c4.advance(60 * S)
+			assert.equal(1, #verifies, "the outage check was armed after the trouble call")
+			assert.equal(IP, state.last_good_ip)
+			assert.is_nil(state.away_ms)
+			assert.equal(1, refreshes, "the away item went at once")
+			assert.equal(6, #lines)
+			assert.is_truthy(lines[1]:find("[ERROR] bridge link: contact failed: ", 1, true), lines[1])
+			assert.is_truthy(lines[2]:find("[ERROR] bridge link: trouble failed: ", 1, true), lines[2])
+		end)
+	end)
+
 	describe("the resync a connect needs", function()
 		it("is full at the first connect, quick after a short silence, full after a long outage or an error", function()
 			assert.equal("full", a:connect_tier(), "the first connect of the run")
