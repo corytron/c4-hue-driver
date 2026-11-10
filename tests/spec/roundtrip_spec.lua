@@ -333,7 +333,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(1, light_event(16, { on = { on = true } }))
 		assert.same({}, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"), "not the 30 % the lamp had")
 		assert.equal(1, light_event(17, { dimming = { brightness = 60.24 } }))
-		assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60 } }, proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
+		-- The On preset's id rides with a turn-on's CHANGED (#429 D7).
+		assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = 1 } },
+			proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
 
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the
 		-- binding goes, and Import All New Lights would skip it; Add Light

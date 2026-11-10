@@ -1,7 +1,10 @@
--- The DYNAMIC_CAPABILITIES_CHANGED notify for one light. The proxy docs
+-- The DYNAMIC_CAPABILITIES_CHANGED notifies for one light. The proxy docs
 -- require supports_color and supports_color_correlated_temperature in a
 -- single notify (otherwise colour presets get their mode rewritten), and
--- the CCT bounds in Kelvin as multiples of 10 within 500..20000.
+-- the CCT bounds in Kelvin as multiples of 10 within 500..20000. The rate
+-- ranges go in a second notify of their own (caps.rate_params, #430 D20).
+
+local device = require("common.device")
 
 local caps = {}
 
@@ -38,6 +41,27 @@ function caps.params(st)
 		p.color_correlated_temperature_max = hi
 	end
 	return p
+end
+
+-- Params for the second DYNAMIC_CAPABILITIES_CHANGED, sent right after the
+-- colour one (docs/turn-on-design.md §7.2, #430 D20): the brightness and
+-- colour rate ranges the light really honours, 0 to device.RATE_MAX
+-- (6 000 000 ms, the longest duration the repo sends Hue), and one rate for
+-- colour and brightness (color_rate_behavior 1), since Hue takes one
+-- duration per request. All dynamic [verified: LV2 caps
+-- _1-BRIGHTNESSRATEMAX, _1.5-BRIGHTNESSRATEMIN, _8.6-COLORRATEBEHAVIOR,
+-- _8.7-COLORRATEMAX, _8.8-COLORRATEMIN]. A separate notify, so a proxy that
+-- refuses a maximum above the "0-INT16 MAX" the dynamic-capabilities page
+-- prints cannot take the colour flags down with it [assumed: whether any
+-- proxy refuses it; LV2 notif _8-DYNAMICCAPABILITIESCHANGED].
+function caps.rate_params()
+	return {
+		brightness_rate_min = 0,
+		brightness_rate_max = device.RATE_MAX,
+		color_rate_behavior = 1,
+		color_rate_min = 0,
+		color_rate_max = device.RATE_MAX,
+	}
 end
 
 return caps

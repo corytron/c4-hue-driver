@@ -40,14 +40,17 @@
 -- prop(), notify(), device_id(), result(), bound_bridge(), proxy_id(),
 -- send(), after_late_init(), late_init(), binding_changed(),
 -- replay_bindings(), show_driver_version(), load_colors(), update_leds(),
--- setting(), load_settings(), button_action(), holding(), dim_after_on(),
+-- setting(), take_setting(), load_settings(), rate_default(), rate_caps(),
+-- first_arrival(), button_action(), holding(), dim_after_on(),
 -- link_button(), schedule_recheck(), cancel_recheck(), cancel_timers() and
 -- goodbye(). It registers the Driver_Version and Debug_Mode property
 -- handlers, the proxy's BUTTON_ACTION, DO_PUSH, DO_RELEASE, DO_CLICK,
 -- REQUEST_BUTTON_COLORS and SET_BUTTON_COLOR, the SET_* command of each
--- keypad setting it takes, and DEV_RELOAD in dev builds.
+-- keypad setting it takes, UPDATE_BRIGHTNESS_RATE_DEFAULT and
+-- UPDATE_COLOR_RATE_DEFAULT (#430 D8), and DEV_RELOAD in dev builds.
 --
--- OnDriverLateInit in both drivers: load_settings() and load_colors() with
+-- OnDriverLateInit in both drivers: load_settings() (the keypad settings
+-- and the default rates) and load_colors() with
 -- the persisted identity, read the binding (bound_bridge), then late_init()
 -- (the buffered bridge messages), greet, and replay_bindings() last;
 -- OnDriverDestroyed calls cancel_timers().
@@ -113,6 +116,19 @@ local function now_ms()
 	return os.time() * 1000
 end
 
+-- #430 D20 (docs/turn-on-design.md): the longest ramp the drivers take,
+-- 6 000 000 ms (100 minutes), the Hue duration ceiling the bridge already
+-- holds scene and group durations to (bridge/scenes.lua,
+-- bridge/zone_lights.lua) [assumed for a single light's PUT, D20]. It is the
+-- click and hold rates' maximum below, the default rates' (D8), the
+-- click_rate_max and hold_rate_max both driver.xml files declare, and the
+-- dynamic brightness_rate_max (rate_caps). Until #430 the click and hold
+-- rates took up to 86 400 000 ms, the documented hold_rate_max default
+-- [verified: LV2 caps _16-HOLDRATEMAX.md]; a stored rate above the new
+-- maximum is dropped at load with one warning (load_settings).
+device.RATE_MAX = 6000000
+local RATE_MAX = device.RATE_MAX
+
 -- The keypad settings the light_v2 proxy sends when the dealer edits them in
 -- Composer [verified: proxy-protocol reference, light_v2 SET_PRESET_LEVEL
 -- {LEVEL}, SET_CLICK_RATE_* and SET_HOLD_RATE_* {RATE ms}]: the persisted key,
@@ -130,18 +146,28 @@ end
 -- as the hold rates are [verified: proxy reference, CLICK_RATE_UP/DOWN], and
 -- default to 3000 ms so a tap's ramp is slow enough to catch with a second
 -- tap after the double-tap window (#421 D3; 250 ms until then). A device
--- with a stored rate keeps it.
+-- with a stored rate keeps it. Click and hold rates run 0..RATE_MAX (#430
+-- D20), the range driver.xml declares, so Composer and the driver agree.
 local SETTINGS = {
 	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL",
 		notify = "PRESET_LEVEL", min = 1, max = 100 },
 	click_up = { key = "click_rate_up", default = 3000, command = "SET_CLICK_RATE_UP", param = "RATE",
-		notify = "CLICK_RATE_UP", min = 0, max = 86400000 },
+		notify = "CLICK_RATE_UP", min = 0, max = RATE_MAX },
 	click_down = { key = "click_rate_down", default = 3000, command = "SET_CLICK_RATE_DOWN", param = "RATE",
-		notify = "CLICK_RATE_DOWN", min = 0, max = 86400000 },
+		notify = "CLICK_RATE_DOWN", min = 0, max = RATE_MAX },
 	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE",
-		notify = "HOLD_RATE_UP", min = 0, max = 86400000 },
+		notify = "HOLD_RATE_UP", min = 0, max = RATE_MAX },
 	hold_down = { key = "hold_rate_down", default = 5000, command = "SET_HOLD_RATE_DOWN", param = "RATE",
-		notify = "HOLD_RATE_DOWN", min = 0, max = 86400000 },
+		notify = "HOLD_RATE_DOWN", min = 0, max = RATE_MAX },
+}
+
+-- #430 D8: the proxy's default rates [verified: LV2 cmds
+-- _20.2-UPDATEBRIGHTNESSRATEDEFAULT.md, _20.5-UPDATECOLORRATEDEFAULT.md:
+-- RATE in ms, the rate used where a command names none], in the order they
+-- load: the persisted key and the command that sets each.
+local RATE_DEFAULTS = {
+	{ which = "brightness", key = "brightness_rate_default", command = "UPDATE_BRIGHTNESS_RATE_DEFAULT" },
+	{ which = "color", key = "color_rate_default", command = "UPDATE_COLOR_RATE_DEFAULT" },
 }
 
 -- The binding re-check's gaps: checks at 5, 15, 30 and 60 s after start.
@@ -511,6 +537,94 @@ function device.new(opts)
 		end
 	end
 
+	-- First arrivals (#429, #427, #430) ------------------------------------
+	-- docs/turn-on-design.md §7.3: the first arrival of each proxy command
+	-- the feature reads is logged at debug with every parameter, once per
+	-- driver start, so a Debug Mode session shows the names the proxy really
+	-- sends (its pages print some with spaces; D27's checks read them). A
+	-- command that arrives while Debug Mode is off is not marked: the first
+	-- one after Debug Mode is turned on is logged instead.
+
+	local first_seen = {}
+
+	function dev.first_arrival(command, params)
+		if first_seen[command] or not log.enabled("debug") then
+			return
+		end
+		first_seen[command] = true
+		local parts = {}
+		for k, v in pairs(params or {}) do parts[#parts + 1] = tostring(k) .. "=" .. tostring(v) end
+		table.sort(parts)
+		log.debug("first %s from the proxy: %s", command, #parts > 0 and table.concat(parts, " ") or "no parameters")
+	end
+
+	-- Default rates (#430 D8) ----------------------------------------------
+	-- What ON, OFF, TOGGLE, DYNAMIC_ON, DYNAMIC_OFF and a
+	-- SET_BRIGHTNESS_TARGET without a RATE fade over (the colour one: a
+	-- SET_COLOR_TARGET without one), in both drivers. Each is taken in
+	-- 0..RATE_MAX, persisted, loaded by load_settings(), and 0 while the
+	-- proxy never sent one, so those commands stay instant as before #430.
+	-- Nothing is notified back: the proxy owns these values and the pages
+	-- document no answer [assumed: it does not wait for one, as it does for
+	-- the keypad settings below]. A Hue Scene device keeps the colour one
+	-- and never uses it.
+
+	local rate_defaults = {} -- "brightness" / "color" -> whole ms; nil while never heard
+
+	function dev.rate_default(which)
+		return rate_defaults[which] or 0
+	end
+
+	local function valid_rate(value)
+		return value ~= nil and value >= 0 and value <= RATE_MAX
+	end
+
+	-- At load one out of range or not a number reads as 0 and is deleted,
+	-- with one warning (L83), as a keypad setting is.
+	local function load_rate_defaults()
+		for _, d in ipairs(RATE_DEFAULTS) do
+			local raw = C4:PersistGetValue(d.key) -- may return no value at all (#298)
+			local value = tonumber(raw)
+			if raw ~= nil and not valid_rate(value) then
+				if value then
+					log.warn("%s %s is out of range; using 0", d.key, tostring(raw))
+				else
+					log.warn("%s %q is not a number; using 0", d.key, tostring(raw))
+				end
+				C4:PersistDeleteValue(d.key)
+				value = nil
+			end
+			rate_defaults[d.which] = value and math.floor(value + 0.5) or nil
+		end
+	end
+
+	for _, d in ipairs(RATE_DEFAULTS) do
+		dispatch.proxy[d.command] = function(_, params)
+			dev.first_arrival(d.command, params)
+			local raw = params.RATE
+			local value = tonumber(raw)
+			if raw == nil then
+				return log.warn("%s without a value; kept %d", d.key, dev.rate_default(d.which))
+			elseif not value then
+				return log.warn("%s %q is not a number; kept %d", d.key, tostring(raw), dev.rate_default(d.which))
+			elseif not valid_rate(value) then
+				return log.warn("%s %s is out of range; kept %d", d.key, tostring(raw), dev.rate_default(d.which))
+			end
+			value = math.floor(value + 0.5)
+			rate_defaults[d.which] = value
+			C4:PersistSetValue(d.key, value)
+			log.debug("%s default rate: %d ms", d.which, value)
+		end
+	end
+
+	-- #430 D20: the dynamic brightness rate range [verified: LV2 caps
+	-- _1-BRIGHTNESSRATEMAX.md, _1.5-BRIGHTNESSRATEMIN.md: dynamic], for one
+	-- DYNAMIC_CAPABILITIES_CHANGED of its own (the driver sends it). A fresh
+	-- table per call.
+	function dev.rate_caps()
+		return { brightness_rate_min = 0, brightness_rate_max = RATE_MAX }
+	end
+
 	-- Keypad settings (SETTINGS) -------------------------------------------
 	-- Persisted per device; one never set reads as its default.
 
@@ -540,7 +654,9 @@ function device.new(opts)
 	-- At late init: the persisted values, each reported to the proxy. One out
 	-- of range reads as the default and is deleted, so it is warned about once
 	-- rather than at every start (Composer shows the default, so nobody has a
-	-- reason to edit the field and overwrite it).
+	-- reason to edit the field and overwrite it): since #430 D20 that includes
+	-- a click or hold rate above RATE_MAX stored before #430. Then the default
+	-- rates (above), which are not reported.
 	function dev.load_settings()
 		for _, name in ipairs(setting_names) do
 			-- The extra parentheses keep one value: Director's PersistGetValue
@@ -556,26 +672,56 @@ function device.new(opts)
 			settings[name] = value
 			report_setting(name)
 		end
+		load_rate_defaults()
+	end
+
+	-- The value `raw` names when it is a number in range, else nil once the
+	-- warning says what was kept.
+	local function checked(name, raw)
+		local value = tonumber(raw)
+		if not value then
+			log.warn("%s %s; kept %s", SETTINGS[name].key,
+				raw == nil and "without a value" or string.format("%q is not a number", tostring(raw)),
+				tostring(dev.setting(name)))
+			return nil
+		end
+		if not in_range(name, value) then
+			log.warn("%s %s is out of range; kept %s", SETTINGS[name].key, tostring(value), tostring(dev.setting(name)))
+			return nil
+		end
+		return value
 	end
 
 	-- A value that is not a number is refused as one out of range is: the
 	-- proxy hears the value kept, so Composer shows that one again rather
 	-- than what was typed (#234).
 	local function save_setting(name, raw)
-		local value = tonumber(raw)
-		if not value then
-			log.warn("%s %s; kept %s", SETTINGS[name].key,
-				raw == nil and "without a value" or string.format("%q is not a number", tostring(raw)),
-				tostring(dev.setting(name)))
-			return report_setting(name)
+		local value = checked(name, raw)
+		if value then
+			settings[name] = value
+			C4:PersistSetValue(SETTINGS[name].key, value)
 		end
-		if not in_range(name, value) then
-			log.warn("%s %s is out of range; kept %s", SETTINGS[name].key, tostring(value), tostring(dev.setting(name)))
-			return report_setting(name)
+		report_setting(name)
+	end
+
+	-- #429 D4: a value the proxy sent of its own accord (the On preset's
+	-- level in UPDATE_BRIGHTNESS_PRESET) is checked, stored and persisted as
+	-- a SET_* command's is, but never echoed: the proxy told us, and an echo
+	-- could loop if the proxy answered every set. True when taken; refused
+	-- (not a number, out of range, or no such setting), it warns, keeps the
+	-- old value and sends nothing.
+	function dev.take_setting(name, raw)
+		if not SETTINGS[name] then
+			log.warn("no keypad setting %s to take", tostring(name))
+			return false
+		end
+		local value = checked(name, raw)
+		if not value then
+			return false
 		end
 		settings[name] = value
 		C4:PersistSetValue(SETTINGS[name].key, value)
-		report_setting(name)
+		return true
 	end
 
 	for _, name in ipairs(setting_names) do

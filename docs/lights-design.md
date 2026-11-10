@@ -16,6 +16,10 @@ light-side lifecycle), `docs/keypad-design.md` (Button Links, `HUE_DIM`,
 keypad LEDs) and `docs/scenes-design.md` §6 (a third dev-loop tree). The
 parts those changed are marked "Superseded" below; `docs/status.md`
 describes the present (the house has no Hue Light device at the moment).
+Current (2026-11-09, #429, #427, #430): turn-ons follow Control4's
+brightness On Mode and colour on modes, and the driver declares the rate
+ranges Control4 enforces; [the turn-on contract](turn-on-design.md) has
+the rules, and dated notes below say where it changed this file.
 
 ## Roles
 
@@ -204,6 +208,9 @@ with the scenes and the zone lights (#56).
 
 Modules under `src/hue_light/light/`: `state.lua` (cached Hue state, the
 mapping both ways), `caps.lua` (capability notify), plus `driver.lua`.
+Current (2026-11-09, #429, #427): `turnon.lua` joins them, pure Lua: the
+On Mode, the learned brightness and colour presets, the turn-on, turn-off
+and blend colours, persisted per device (turn-on contract §7.4, §7.6).
 Properties in `driver.xml`: `Hue Light ID`, `Hue Name`, `Model`, `Online`
 ("Online"/"Offline"/"" when unknown; read-only) alongside the existing
 ones (`Hue Room` and `Last Action` added by `docs/import-design.md` §7).
@@ -225,6 +232,13 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   report that shows the light on at another level (the lamp's previous
   brightness, seen for about 16 ms on the house) is held back until the
   target arrives or that deadline passes; an off always goes through.
+  Current (2026-11-09): a target without `RATE` uses the proxy's default
+  brightness rate (#430 D8), and every `HUE_SET` rate is clamped to 0 to
+  6 000 000 ms (D20). `LIGHT_BRIGHTNESS_TARGET_PRESET_ID` is read, and
+  CHANGING and CHANGED carry the preset ids (#429 D7); a zone or room
+  light's target from off naming the Previous preset is a group on with no
+  brightness (D6). A target above 0 carries the colour of the colour on
+  mode, and a target of 0 with a rate the Dim colour (#427 D11 to D15).
 - `SET_COLOR_TARGET` with xy and mode [assumed param keys:
   `LIGHT_COLOR_TARGET_X`, `LIGHT_COLOR_TARGET_Y`,
   `LIGHT_COLOR_TARGET_COLOR_MODE`, `LIGHT_COLOR_TARGET_RATE`; the docs print
@@ -237,7 +251,15 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   (`docs/design.md`, "Hardware pass of 2026-10-25 night"): the mode arrives
   as `LIGHT_COLOR_TARGET_MODE`, 1 for a Navigator temperature pick and 0 for
   a colour pick; the driver reads both mode spellings
-  (`src/hue_light/driver.lua`, `COLOR_KEYS`).
+  (`src/hue_light/driver.lua`, `COLOR_KEYS`). Current (2026-11-09, #427
+  D16, D17): a colour is stored only while the light is off **and** no
+  Control4 turn-on is pending; one that follows a turn-on before Hue
+  reports the light on is sent, so brightness-then-colour no longer loses
+  the colour. `LIGHT_COLOR_TARGET_PRESET_ID` and `…_PRESET_ORIGIN` are
+  read; a target without x and y is looked up among the learned colour
+  presets; a target that is the on colour leaves the blend running, any
+  other ends it (Preset mode). A target without a rate uses the colour
+  default rate (#430 D8).
 - Legacy, defensively: `ON` → target 100 (or the last on level),
   `OFF` → 0, `SET_LEVEL`/`RAMP_TO_LEVEL` { `LEVEL`, `TIME` } → the same path
   [assumed these may still arrive from old programming]. As built, `ON`
@@ -260,6 +282,16 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   or programming's "Turn On" arrives as is still unverified: the reference
   says a Navigator uses the On preset when a driver lacks `DYNAMIC_ON`
   (`_1.3-DYNAMICON.md`), and the driver reports its preset to the proxy.
+  Current (2026-11-09, #429 D5, D6, D25; #430 D8): the on-mode preset API
+  is adopted. `ON`, `TOGGLE` from off and `DYNAMIC_ON` follow the On Mode
+  (Preset: the on mode preset's level, normally the On preset; Previous:
+  the last level reported to the proxy, else Hue's remembered level, else
+  the On preset, and on a zone or room light `HUE_SET {on = "true"}` with
+  no brightness) over the proxy's default brightness rate, 0 until the
+  proxy sends one. `OFF`, `TOGGLE` from on and `DYNAMIC_OFF` go off over
+  the same rate, with the Dim colour when it is above 0. Which command a
+  Navigator's tap arrives as is still to be logged (check T3 of the
+  turn-on contract, for #431).
 - `SYNCHRONIZE` → report cached state (brightness, colour, online).
 
 Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
@@ -268,6 +300,12 @@ Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
   `color_correlated_temperature_min`, `color_correlated_temperature_max`
   (Kelvin = 1000000 / mirek_max and / mirek_min, rounded) [verified: the
   docs require both supports_* in a single notify]; properties updated.
+  Current (2026-11-09, #430 D20): a second `DYNAMIC_CAPABILITIES_CHANGED`
+  follows it with `brightness_rate_min` 0, `brightness_rate_max` 6000000,
+  `color_rate_behavior` 1, `color_rate_min` 0 and `color_rate_max` 6000000
+  (`caps.rate_params()`), so a proxy that refused those values would keep
+  the colour flags. 3 s after late init the driver asks its proxy for
+  `GET_SETUP` to learn the presets (#427 D19).
 - `HUE_STATE`: `on=false` → `LIGHT_BRIGHTNESS_CHANGED` 0; `on=true` with
   `brightness` → that value rounded to a whole percent, at least 1. Hue
   reports its Zigbee level as a decimal percent (a requested 20 comes back
