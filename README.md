@@ -234,7 +234,8 @@ busted tests
 ```
 
 `tools/check.sh` runs these two and every other check CI runs (shell, Python,
-XML, PowerShell, workflows, secrets, the house's desired state), and
+XML, PowerShell, workflows, secrets, the house's desired state) at the same
+time, on every core (`JOBS=1` runs them one at a time), and
 `tools/setup-checks.sh` installs the shell, Python, workflow and secrets
 tools it needs (ruff, zizmor, shellcheck, actionlint, gitleaks) into
 `~/.local/bin` without sudo; [CONTRIBUTING.md](CONTRIBUTING.md) lists the
@@ -406,7 +407,8 @@ src/hue_scene/     the scene driver (light_v2 proxy, a dimmer), www/ as for the 
 tests/             busted specs (spec/), the fake DriverWorks runtime (helpers/), invented
                    Hue resources (fixtures/)
 tools/             build.sh; check.sh (every check, as CI runs it) and setup-checks.sh (its
-                   tools, the Python ones hash-pinned in requirements-checks.txt); deploy.py
+                   tools, the Python ones hash-pinned in requirements-checks.txt); parallel.py
+                   (luacheck, busted and the Python tests on every core); deploy.py
                    (the house: release download and verification, the deployment record, the
                    brief); changelog.py (CHANGELOG.md: its check, the release notes, the
                    Documentation tabs' list); check_links.py (the links check);

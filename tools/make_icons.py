@@ -52,14 +52,20 @@ also writes the 512 px masters (icons_v2_master_<name>.png) and a sheet
 (icons_v2_sheet.png) showing each icon at 1x, 4x and 8x on white and on
 Composer's #f0f0f0, for eyeballing.
 
+The six icons are drawn at the same time, one process each (up to JOBS,
+environment; default nproc, JOBS=1 one after the other; issue #456).
+
 Pillow only (12.x) plus the standard library. Deterministic: the grain
 comes from a seeded generator, and the PNGs carry no timestamps.
 """
 
 import colorsys
+import concurrent.futures
 import math
+import multiprocessing
 import os
 import random
+import re
 import sys
 
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
@@ -630,22 +636,50 @@ FINISH = {
 }
 
 
+def job_count(environ=None):
+    """JOBS when set (a whole number from 1), else the number of cores this process may use."""
+    environ = os.environ if environ is None else environ
+    text = environ.get("JOBS", "")
+    if text:
+        if not re.fullmatch(r"[1-9][0-9]*", text):
+            sys.exit("make_icons.py: JOBS must be a whole number from 1 (JOBS=1 runs serially), not %r" % text)
+        return int(text)
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # not Linux
+        return max(1, os.cpu_count() or 1)
+
+
+def render_one(job):
+    """(master, icon) of one (driver, name, size, render, args)."""
+    _driver, _name, size, render, args = job
+    master = render(*args)
+    sharpen, contrast, gamma = FINISH[size]
+    return master, finish(master, size, sharpen, contrast, gamma)
+
+
 def build_all():
-    """Returns [(driver, name, size, master, icon)] in output order."""
+    """Returns [(driver, name, size, master, icon)] in output order; the icons are drawn in forked
+    processes, at most job_count() at once, when the platform can fork."""
     jobs = [
-        ("hue_bridge", "hue_bridge_pro", 16, lambda: render_bridge(16)),
-        ("hue_bridge", "hue_bridge_pro", 32, lambda: render_bridge(32)),
-        ("hue_light", "hue_light", 16, lambda: render_dimmer(16, False)),
-        ("hue_light", "hue_light", 32, lambda: render_dimmer(32, False)),
-        ("hue_scene", "hue_scene", 16, lambda: render_dimmer(16, True)),
-        ("hue_scene", "hue_scene", 32, lambda: render_dimmer(32, True)),
+        ("hue_bridge", "hue_bridge_pro", 16, render_bridge, (16,)),
+        ("hue_bridge", "hue_bridge_pro", 32, render_bridge, (32,)),
+        ("hue_light", "hue_light", 16, render_dimmer, (16, False)),
+        ("hue_light", "hue_light", 32, render_dimmer, (32, False)),
+        ("hue_scene", "hue_scene", 16, render_dimmer, (16, True)),
+        ("hue_scene", "hue_scene", 32, render_dimmer, (32, True)),
     ]
-    out = []
-    for driver, name, size, fn in jobs:
-        master = fn()
-        sharpen, contrast, gamma = FINISH[size]
-        out.append((driver, name, size, master, finish(master, size, sharpen, contrast, gamma)))
-    return out
+    workers = min(job_count(), len(jobs))
+    if workers > 1 and "fork" in multiprocessing.get_all_start_methods():
+        context = multiprocessing.get_context("fork")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+            rendered = list(pool.map(render_one, jobs))
+    else:
+        rendered = [render_one(job) for job in jobs]
+    return [
+        (driver, name, size, master, icon)
+        for (driver, name, size, _render, _args), (master, icon) in zip(jobs, rendered, strict=True)
+    ]
 
 
 def save(img, path):

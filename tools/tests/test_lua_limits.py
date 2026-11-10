@@ -277,6 +277,28 @@ class FakeTree(unittest.TestCase):
         )
         self.assertTrue(out.splitlines()[1].startswith("lua-limits: 1 file, 2 functions, 0 problems;"))
 
+    def test_many_files_at_once_report_what_one_at_a_time_reports(self):
+        """Issue #456: luac runs JOBS at a time; the report keeps the order of the files."""
+        for number in range(12):
+            text = listing((0, 170 + number, 0), (5, 3, 45 + number))
+            self.add("src/m%02d/driver.lua" % number, text)
+        self.add("src/bad/x.lua", status=1, errors="luac5.1: src/bad/x.lua:1: unexpected symbol near 'x'\n")
+        with mock.patch.dict(os.environ, {"JOBS": "1"}):
+            serial = lua_limits.check(self.root)
+        with mock.patch.dict(os.environ, {"JOBS": "5"}):
+            together = lua_limits.check(self.root)
+        self.assertEqual(serial, together)
+        self.assertEqual(len(serial.problems), 1 + 1 + 6)  # the bad file, 181 locals, 51 to 56 upvalues
+        self.assertTrue(serial.problems[0].startswith("src/bad/x.lua: luac5.1 cannot compile it"))
+
+    def test_a_bad_jobs_value_is_a_usage_error(self):
+        self.add("src/a/driver.lua", listing((0, 5, 0)))
+        for value in ("0", "many", "-1"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"JOBS": value}):
+                status, out, err = self.run_main()
+                self.assertEqual((status, out), (2, ""))
+                self.assertIn("JOBS must be a whole number from 1", err)
+
     def test_main_without_lua_files_is_a_usage_error(self):
         os.makedirs(os.path.join(self.root, "src", "a"))
         status, out, err = self.run_main()

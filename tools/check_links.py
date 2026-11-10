@@ -36,17 +36,24 @@ project's GitHub page find the document useful?), so it never changes the exit s
 Output: every broken link as FILE:LINE: message, then "links: N files, M links, K problems", where M
 counts the links checked (relative ones and those to this repository) and K the broken ones.
 
+The files are read and parsed by a pool of up to JOBS processes (environment; default nproc, JOBS=1
+one at a time; issue #456) when there are enough of them to pay for the pool.
+
 Standard library only; git runs read-only (rev-parse, ls-files). Exit codes: 0 no broken link,
-1 broken links, 2 usage (argparse, or --root not the top of a git work tree).
+1 broken links, 2 usage (argparse, --root not the top of a git work tree, or JOBS not a whole number
+from 1).
 """
 
 import argparse
 import bisect
+import concurrent.futures
 import dataclasses
 import difflib
 import fnmatch
+import functools
 import html
 import html.parser
+import multiprocessing
 import os
 import posixpath
 import re
@@ -1144,13 +1151,54 @@ class Checker:
         return [path for path in markdown if listed(path) and path not in reached]
 
 
-def check(root, tracked):
+# Fewer files than this are read in this process: forking the pool would cost more than it saves.
+POOL_MIN_FILES = 24
+# Files a pool process gets at least.
+POOL_FILES_PER_PROCESS = 4
+
+
+def job_count(environ=None):
+    """JOBS when set (a whole number from 1), else the number of cores this process may use."""
+    environ = os.environ if environ is None else environ
+    text = environ.get("JOBS", "")
+    if text:
+        if not re.fullmatch(r"[1-9][0-9]*", text):
+            raise UsageError("JOBS must be a whole number from 1 (JOBS=1 runs serially), not %r" % text)
+        return int(text)
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # not Linux
+        return max(1, os.cpu_count() or 1)
+
+
+def load_all(root, paths, jobs):
+    """load() of every path, {path: Document}: in forked processes, the largest files first, when there
+    are enough files and cores to pay for the pool; in this process otherwise."""
+    workers = min(jobs, len(paths) // POOL_FILES_PER_PROCESS)
+    if workers < 2 or len(paths) < POOL_MIN_FILES or "fork" not in multiprocessing.get_all_start_methods():
+        return {path: load(root, path) for path in paths}
+
+    def size(path):
+        try:
+            return os.path.getsize(os.path.join(root, *path.split("/")))
+        except OSError:
+            return 0
+
+    order = sorted(paths, key=lambda path: (-size(path), path))
+    context = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+        return dict(zip(order, pool.map(functools.partial(load, root), order), strict=True))
+
+
+def check(root, tracked, jobs=1):
     """Check every link of the tracked Markdown files and of the manuals. tracked lists every file git
-    tracks, as repository-relative paths with forward slashes."""
+    tracks, as repository-relative paths with forward slashes; jobs is how many processes may read
+    them."""
     tracked = sorted(set(tracked))
     checker = Checker(root, tracked)
     markdown = [path for path in tracked if path.endswith(".md")]
     manuals = [path for path in tracked if fnmatch.fnmatchcase(path, MANUALS)]
+    checker.documents.update(load_all(root, markdown + manuals, jobs))
     for path in markdown + manuals:
         checker.check_file(path)
     problems = sorted(checker.problems, key=lambda problem: (problem[0], problem[1]))
@@ -1220,11 +1268,12 @@ def parse_args(argv):
 def main(argv):
     args = parse_args(argv)
     try:
+        jobs = job_count()
         tracked = tracked_files(args.root)
     except UsageError as err:
         print("check_links.py: error: %s" % err, file=sys.stderr)
         return EXIT_USAGE
-    report = check(args.root, tracked)
+    report = check(args.root, tracked, jobs)
     for path, line, message in report.problems:
         print("%s:%d: %s" % (path, line, message))
     if args.unlinked:
