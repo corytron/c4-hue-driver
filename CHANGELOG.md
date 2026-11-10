@@ -13,6 +13,11 @@ listed.
 
 ## Unreleased
 
+### Changed
+- Composer shows a tooltip on Recall As, On State Follows, Occupancy Hold
+  Time and Debug Mode, and lists the Hue Motion Sensor's events in
+  Programming in pairs: Hue on/off, online/offline, readings, battery (#434).
+
 ## 1.4 "Maarva", build 565 (2026-11-09)
 
 ### Changed
