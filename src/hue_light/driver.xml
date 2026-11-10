@@ -139,18 +139,27 @@
 	     drive it with SET_BRIGHTNESS_TARGET / SET_COLOR_TARGET; the proxy reference
 	     asks reduced-ALS drivers to declare supports_brightness_stop so scene ramps
 	     end correctly, and SET_COLOR_STOP "requires the capability supports_color_stop"
-	     (named only there; dropped if Composer objects). -->
+	     (named only there; dropped if Composer objects).
+	     1.5 (docs/turn-on-design.md §7.1): Control4's brightness On Mode (Preset,
+	     Previous; #429) replaces the deprecated supports_default_on, the colour on
+	     modes (#427) are declared, and the click and hold rate maxima match the
+	     6 000 000 ms the driver clamps to (#430). The colour and brightness rate
+	     ranges are dynamic (sent in a configure notify). The deprecated ramp_level,
+	     on_off, min_max and buttons_are_virtual are gone (D22). -->
 	<capabilities>
 		<dimmer>True</dimmer>
 		<set_level>True</set_level>
-		<ramp_level>True</ramp_level>
-		<on_off>True</on_off>
-		<min_max>False</min_max>
 		<click_rates>True</click_rates>
 		<click_rate_min>0</click_rate_min>
+		<click_rate_max>6000000</click_rate_max>
 		<hold_rates>True</hold_rates>
 		<hold_rate_min>1000</hold_rate_min>
-		<supports_default_on>True</supports_default_on>
+		<hold_rate_max>6000000</hold_rate_max>
+		<brightness_on_mode_preset>True</brightness_on_mode_preset>
+		<brightness_on_mode_previous>True</brightness_on_mode_previous>
+		<color_on_mode_preset>True</color_on_mode_preset>
+		<color_on_mode_previous>True</color_on_mode_previous>
+		<color_on_mode_fade>True</color_on_mode_fade>
 		<cold_start>False</cold_start>
 		<has_leds>True</has_leds>
 		<supports_target>True</supports_target>
@@ -165,7 +174,6 @@
 		<reduced_als_support>True</reduced_als_support>
 		<advanced_scene_support>False</advanced_scene_support>
 		<load_group_support>False</load_group_support>
-		<buttons_are_virtual>True</buttons_are_virtual>
 	</capabilities>
 	<events/>
 	<connections>
