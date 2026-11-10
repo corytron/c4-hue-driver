@@ -94,6 +94,10 @@ of it is live.
   security review of 2026-10-25 (#217): the gate on keyed requests, the TLS
   verdict, the limit on open stream transfers, cleaned names, the
   development handlers, the two-job Release workflow and its pinned inputs.
+- [`load-groups-design.md`](load-groups-design.md): Hue lights in Control4
+  load groups (#435): the group commands on each member, and the bridge
+  sending one request per whole Hue room or zone so those lamps move
+  together (2026-11-09).
 - [`offline-design.md`](offline-design.md): Hue devices go offline after the
   bridge has been unreachable for 5 minutes (#428), and a command that could
   not be delivered never shows as done (2026-11-09).

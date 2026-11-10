@@ -132,6 +132,17 @@ local function last_sent(c4)
 	return c4.sent[#c4.sent]
 end
 
+-- What a hello sends since #435 (docs/load-groups-design.md §6.3, D6,
+-- E19): HUE_HELLO with `hello`, then HUE_LOAD_GROUPS with the device's id,
+-- rid and kind as the hello names them, and `groups` ("none" by default).
+local function greeting(hello, groups)
+	return {
+		{ id = BRIDGE_ID, command = "HUE_HELLO", params = hello },
+		{ id = BRIDGE_ID, command = "HUE_LOAD_GROUPS", params = { device_id = hello.device_id, rid = hello.rid,
+			kind = hello.kind == "group" and "group" or nil, groups = groups or "none" } },
+	}
+end
+
 -- Every SendToDevice with that command, in order.
 local function messages(c4, command)
 	local out = {}
@@ -215,8 +226,9 @@ describe("Hue Light driver", function()
 	describe("startup and binding", function()
 		it("greets the bridge with its persisted rid on late init", function()
 			local env, c4 = load_light({ rid = "l1" })
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 			assert.equal("l1", env.Properties["Hue Light ID"])
+			assert.equal("None", env.Properties["Load Groups"], "#435 §6.1")
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 			assert.equal("", env.Properties["Online"], "not known until the bridge says")
 			assert.equal("1", env.Properties["Driver Version"])
@@ -256,7 +268,7 @@ describe("Hue Light driver", function()
 
 		it("greets without a rid key when it has none (SendToDevice drops empty values)", function()
 			local _, c4 = load_light()
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ device_id = "2001" }), c4.sent)
 		end)
 
 		it("greets with its persisted name and model too, and shows them before the bridge answers", function()
@@ -264,8 +276,7 @@ describe("Hue Light driver", function()
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			c4.persist.hue_rid, c4.persist.hue_name, c4.persist.hue_model = "l1", "Desk", "Hue color lamp"
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" }), c4.sent)
 			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
 			assert.equal("", env.Properties["Online"], "still not known until the bridge says")
 		end)
@@ -298,7 +309,7 @@ describe("Hue Light driver", function()
 			local env, c4 = load_light({ bind = false, rid = "l1" })
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 
 			c4.calls = {}
@@ -312,7 +323,7 @@ describe("Hue Light driver", function()
 		it("trusts the device id in the binding notification when the lookup lags behind", function()
 			local env, c4 = load_light({ bind = false, rid = "l1" })
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 		end)
 
 		it("ignores binding changes other than the bridge's", function()
@@ -525,8 +536,7 @@ describe("Hue Light driver", function()
 			assert.equal(2, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 }, { LIGHT_BRIGHTNESS_CURRENT = 55 } },
 				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "both states, in arrival order")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" } } }, c4.sent,
+			assert.same(greeting({ rid = "l1", device_id = "2001", name = "Desk", model = "Hue color lamp" }), c4.sent,
 				"the hello carries the identity the buffered configure delivered")
 			local online = notifies(c4, "ONLINE_CHANGED")
 			assert.same({ STATE = true }, online[#online])
@@ -564,7 +574,7 @@ describe("Hue Light driver", function()
 
 			-- Director's lookup does not show the binding yet at late init.
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
+			assert.same(greeting({ rid = "l1", device_id = "2001" }), c4.sent)
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
 			local delays = {}
 			for _, timer in ipairs(c4.active_timers()) do delays[#delays + 1] = timer.delay end
@@ -1618,11 +1628,12 @@ describe("Hue Light driver", function()
 
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
-			assert.equal(2, #sends)
+			assert.equal(3, #sends)
 			assert.equal("HUE_HELLO", sends[1].command)
 			assert.same({ id = BRIDGE_ID, command = "HUE_LOG",
 				params = { rid = "l1", line = "[INFO] Hue Light: warming up" },
 				allow_empty = false, log_command = false }, sends[2], "allowEmptyValues and logCommand off")
+			assert.equal("HUE_LOAD_GROUPS", sends[3].command, "the load groups follow the hello (#435)")
 		end)
 
 		it("keeps only the newest 30 lines while the bridge is unknown", function()
@@ -1646,7 +1657,8 @@ describe("Hue Light driver", function()
 			log.debug("noise after binding")
 			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true" }) -- dispatch logs it at debug
 			assert.equal(0, #messages(c4, "HUE_LOG"))
-			assert.equal(1, #c4.sent, "just the HUE_HELLO")
+			assert.same({ "HUE_HELLO", "HUE_LOAD_GROUPS" }, { c4.sent[1].command, c4.sent[2].command })
+			assert.equal(2, #c4.sent, "just the HUE_HELLO and its HUE_LOAD_GROUPS (#435)")
 		end)
 
 		it("sends lines straight through once bound, log.always included", function()
@@ -2686,8 +2698,7 @@ describe("Hue Light driver", function()
 			c4.persist.hue_rid, c4.persist.hue_name = ZONE_RID, "Bedside Lights"
 			c4.persist.hue_model, c4.persist.hue_kind = "Hue zone", "group"
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" } } }, c4.sent)
+			assert.same(greeting({ rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" }), c4.sent)
 			assert.equal("Hue zone Bedside Lights", env.Properties["Status"],
 				"the persisted model stands in for the type until the bridge answers")
 			assert.equal(ZONE_RID, env.Properties["Hue Light ID"])
@@ -2723,8 +2734,7 @@ describe("Hue Light driver", function()
 			assert.equal(0, #c4.calls_to("PersistSetValue"))
 			env.OnDriverLateInit("DIT_STARTUP")
 			assert.equal("Hue zone Bedside Lights (2 lights)", env.Properties["Status"])
-			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
-				params = { rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" } } }, c4.sent)
+			assert.same(greeting({ rid = ZONE_RID, device_id = "2001", name = "Bedside Lights", kind = "group" }), c4.sent)
 		end)
 
 		it("a light told kind light persists it and says so in its hello; one never told stays silent", function()
