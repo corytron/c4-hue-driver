@@ -33,6 +33,13 @@ Current (2026-11-09, #421 contract section 10): measured on the house, a
 light's stop writes its estimate with a 1 s glide, zone and room lights
 ramp and stop as one group, and Hue Scene devices get tap fades and tap
 stops too (time-based scenes keep instant taps).
+Current (2026-11-09, #429, #427, #430, [the turn-on contract](turn-on-design.md)):
+a Hue Light's turn-ons, its taps included, follow Control4's brightness On
+Mode (Preset, the default, or Previous) and carry the colour its colour on
+mode asks for; the light declares the on mode capabilities instead of
+`supports_default_on`; click and hold rates go up to 6 000 000 ms on light
+and scene; and the Hue Scene lists its click rates. A static change: the
+install needs the owner's reboot from System Manager.
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
@@ -53,7 +60,15 @@ findings".
   preset changes, for drivers declaring `supports_default_on` (deprecated
   in favour of the on-mode preset capability, but the documented path for
   this command; the two must not be combined) **[assumed until seen on
-  hardware]**.
+  hardware]**. Current (2026-11-09, #429 D2 to D4): the light declares
+  `brightness_on_mode_preset` and `brightness_on_mode_previous` instead of
+  `supports_default_on`, and handles `UPDATE_BRIGHTNESS_ON_MODE` and
+  `UPDATE_BRIGHTNESS_PRESET` (`src/hue_light/light/turnon.lua`). An
+  `UPDATE_BRIGHTNESS_PRESET` for the On preset stores its level in the
+  `preset` setting without a `PRESET_LEVEL` echo (`dev.take_setting`);
+  `SET_PRESET_LEVEL` is still handled as before [assumed until check T2 of
+  the turn-on contract: which of the two arrives once the on modes are
+  declared].
 - Rates: `SET_CLICK_RATE_UP/DOWN` and `SET_HOLD_RATE_UP/DOWN {RATE ms}`
   arrive when the dealer edits them in Composer; the properties appear only
   for drivers declaring `click_rates` and `hold_rates`.
@@ -75,14 +90,24 @@ findings".
   refused: from the proxy, the value kept is reported back; persisted, it is
   deleted, warned about once, and the default used. Current (2026-10-25,
   #234): a value from the proxy that is not a number is refused the same
-  way, with the value kept reported back.
+  way, with the value kept reported back. Current (2026-11-09, #430 D20):
+  rates 0 to 6 000 000 ms (`device.RATE_MAX`), the `click_rate_max` and
+  `hold_rate_max` both `driver.xml` declare; a persisted rate above it is
+  dropped at load the same way. The proxy's default rates
+  (`UPDATE_BRIGHTNESS_RATE_DEFAULT`, `UPDATE_COLOR_RATE_DEFAULT`) are kept
+  in the same range and persisted, with no notify back (D8).
 - Colour on mode (#234): `SET_COLOR_ON_MODE {PRESET ID}` sets the proxy's
   own setting; a driver takes part only by declaring `color_on_mode_preset`,
   `_previous` or `_fade` (static capabilities) and then handling
   `UPDATE_COLOR_ON_MODE` and `UPDATE_COLOR_PRESET`, and no notification
   confirms it [verified: proxy reference, What's New in 3.3.2 and those
   commands]. The Hue Light declares none, so it neither handles nor uses it;
-  its manual says so.
+  its manual says so. Current (2026-11-09, #427 D9 to D16): the Hue Light
+  declares all three and handles `UPDATE_COLOR_ON_MODE` and
+  `UPDATE_COLOR_PRESET` (`src/hue_light/light/turnon.lua`): the On colour
+  on every Control4 turn-on, blended toward the Dim colour at low levels,
+  the Dim colour on a timed turn-off, and Fade as Control4's warm dim. Its
+  manual describes the modes.
 
 ## Driver behaviour
 
@@ -130,7 +155,16 @@ preset API is adopted). Superseded (2026-11-08, #233, owner's Option 1):
 `ON` and `TOGGLE` from off go to the On preset too, at rate 0 (the click
 rates stay with taps), and `ON` on a lit light sets it to the preset as a
 top tap does; the on-mode preset API is still not adopted
-(`docs/lights-design.md`, light_v2 proxy commands).
+(`docs/lights-design.md`, light_v2 proxy commands). Current (2026-11-09,
+#429 D5, D6; #430 D8): the on-mode preset API is adopted. `ON`, `TOGGLE`
+from off, `DYNAMIC_ON` and a top or toggle tap from off follow the On
+Mode: Preset goes to the on mode preset's level (the On preset unless the
+proxy names another), Previous to the last level reported (a zone or room
+light: a group on with no brightness, each lamp at its own level). While
+on, a top tap and `ON` go to the on mode preset's level in Preset and to
+the On preset in Previous. `ON`, `OFF`, `TOGGLE` and a target without a
+rate use the proxy's default brightness rate, 0 until it sends one; taps
+keep the click rates.
 
 Hue Scene (`src/hue_scene/driver.lua`): echo every action; click or release
 of top = recall (ON), bottom = OFF, toggle = toggle; holds do nothing.
@@ -141,7 +175,12 @@ hold-to-dim and keypad LEDs" below.
 true; `click_rate_min` 0, `hold_rate_min` 1000. Scene: unchanged.
 Superseded (2026-10-23): the scene declares `hold_rates` (min 1000) and
 `has_leds` (below) and, since build 160, `dimmer`, `set_level` and
-`ramp_level` (`docs/scene-dimmer-design.md`).
+`ramp_level` (`docs/scene-dimmer-design.md`). Current (2026-11-09, turn-on
+contract §7.1): the light declares `click_rate_max` and `hold_rate_max`
+6000000 and the five on mode capabilities instead of `supports_default_on`;
+the scene declares `click_rates` True with `click_rate_min` 0 and
+`click_rate_max` 6000000, and `hold_rate_max` 6000000; both dropped
+`ramp_level`, `on_off`, `min_max` and `buttons_are_virtual` (D22).
 
 ## Verification
 
@@ -509,6 +548,10 @@ Decisions, in short (D numbers are the contract's):
   stops as well ("Scenes (2026-11-09)" below).
 - **Where a tap goes (D2).** Top to the On preset (Default On Brightness,
   #233), down to it from above; bottom to off; toggle by the on state.
+  Current (2026-11-09, #429 D5): with On Mode Previous a top or toggle tap
+  from off goes to the previous level; while on, the top tap still goes to
+  the On preset. A tap also carries the colour of the colour on mode (#427
+  D11 to D15).
 - **Speed (D3).** Click rates are the time of the whole range, as hold
   rates are: a tap ramp lasts `click rate × distance / 100`. Click Rate Up
   and Down default to 3000 ms (were 250 ms); hold rates stay 5000 ms, so
@@ -596,6 +639,15 @@ on the same button; "ramping": a ramp of D6 runs; "at the preset": within
 | holding | anything | unchanged (#249) |
 | idle, within 1 s after a hold's release, same button | click | ignored (unchanged) |
 
+Current (2026-11-09, #429, #427; `docs/turn-on-design.md` §4): "the
+preset" in the rows above is, from off, the On Mode's level (the previous
+level in Previous) and, while on, the on mode preset's level (the On
+preset in Previous). A tap's `HUE_SET` also carries the colour of the
+colour on mode: the On colour blended for the level on a turn-on and on
+taps while the blend runs, the Dim colour on a tap to off, nothing in
+colour on mode Previous. A tap stop carries the blend for the estimate; a
+hold carries no colour, and the blend follows 500 ms after its release.
+
 A click rate of 0 is an instant change with nothing to stop, as before. A
 stop very close to off (an estimate below 1) stops at 1 %: the light stays
 on, as a dimmer stopped near the bottom does.
@@ -614,7 +666,11 @@ click rates only if `src/hue_scene/driver.xml` declares `click_rates` True
 (it declared False through 1.3) [verified: `docs/tap-stop-research-c4.md`
 §3.3, LV2 `_11-CLICKRATES`]: a capability change, so the install that
 brings it needs a controller reboot from System Manager. Without it a
-scene uses the 3000 ms defaults.
+scene uses the 3000 ms defaults. Current (2026-11-09, #430 D21):
+`src/hue_scene/driver.xml` declares `click_rates` True with
+`click_rate_min` 0 and `click_rate_max` 6000000, and the scene loads and
+reports `click_up` and `click_down`; the reboot of the turn-on contract
+brings them to Composer.
 
 ### Scenes (2026-11-09, contract section 10.1)
 

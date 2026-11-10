@@ -13,7 +13,38 @@ listed.
 
 ## Unreleased
 
+### Added
+- The Hue Bridge checks the automations stored on the Hue bridge (schedules,
+  wake-ups, timers, coming home, motion and MotionAware set-ups, Hue switches)
+  and lists them on a new Hue Automations row; the ones that move lights
+  Control4 controls by themselves appear in Attention. The new Hue Automations
+  action switches a chosen one off in Hue with one click (never deletes it),
+  remembers what it switched off and turns it back on with Restore, or keeps it
+  on the Hue side on purpose. Set-ups the bridge does not let other apps switch
+  off, such as a MotionAware area's, get the Hue app steps instead (#280).
+
 ### Changed
+- Hue Light devices (single lights, zone lights and room lights) follow
+  Control4's brightness On Mode. Preset, the default, turns the light on at
+  its Default On Brightness as before; Previous turns it on at the level it
+  had when it went off, and a zone or room light brings every lamp back at
+  its own level. Keypad taps, Turn On, Toggle and Navigator tiles all follow
+  it, and the Daylight Agent can follow the light's presets (#429).
+- Hue Light devices with colour now turn on in Control4's Default On
+  Colour, blend toward the Dim colour at low levels, and fade toward the Dim
+  colour when they fade off. Colour On Mode Fade gives Control4's warm dim;
+  Previous keeps Hue's last colour, as before this release. **Dealers:** set
+  each colour light's On and Dim colours and its Colour On Mode in Composer
+  after this update; until then a light turns on in the On colour Composer
+  shows (#427).
+- Ramp times: lights and scenes accept click, hold and ramp rates up to
+  6 000 000 ms (100 minutes), the longest Hue takes; Composer and
+  programming now offer that range. Turn On, Turn Off and Toggle use the
+  proxy's default brightness rate. Hue Scene devices list Click Rate Up and
+  Down, the fade time of a keypad tap (#430).
+- This update changes the capabilities of the Hue Light and Hue Scene
+  drivers: after installing it, reboot the controller from System Manager
+  (#429, #427, #430).
 - Composer shows a tooltip on Recall As, On State Follows, Occupancy Hold
   Time and Debug Mode, and lists the Hue Motion Sensor's events in
   Programming in pairs: Hue on/off, online/offline, readings, battery (#434).

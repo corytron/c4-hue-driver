@@ -7,7 +7,7 @@
 --
 -- A row:
 --   id          P (pairing and connection), R (rooms), L (lights), Z (zone lights),
---               N (names), S (scenes), M (motion), G (every driver), and a number
+--               N (names), S (scenes), M (motion), A (Hue automations, 1.5), G (every driver), and a number
 --   capability  what the owner or dealer can do, in the words of the ledger
 --   gate        how it starts today (§4): "click" (an action), "auto" (the driver,
 --               by itself), "prop" (a property the owner sets), "prog" (Control4
@@ -759,6 +759,28 @@ ledger.rows = {
 				test = "shows the sensors and areas in the Motion Sensors row, and a low battery in Attention" } },
 		},
 	},
+	-- Hue automation audit (1.5, #280, docs/hue-automation-audit-design.md) ------
+	{
+		id = "A1",
+		capability = "Hue Automations row and Attention items: Hue automations that act on Control4 lights",
+		gate = { "auto" },
+		paths = {
+			{ property = "Hue Automations", type = "DYNAMIC_LIST" },
+			{ property = "Attention", type = "STRING" },
+			{ auto = "every full resync and event", proof = { spec = "tests/spec/automations_roundtrip_spec.lua",
+				test = "lists a conflicting Hue automation in the row and in Attention" } },
+		},
+	},
+	{
+		id = "A2",
+		capability = "Disable, Restore, Keep and Stop keeping a Hue automation",
+		gate = { "click" },
+		paths = {
+			{ action = "Hue Automations", params = { "Automation" } },
+			{ auto = "a click", proof = { spec = "tests/spec/automations_roundtrip_spec.lua",
+				test = "disables a conflicting automation from the action and restores it" } },
+		},
+	},
 
 	-- Every driver ---------------------------------------------------------------
 	{
@@ -813,6 +835,7 @@ ledger.actions = {
 		{ command = "Forget Device", params = { "Device", "Confirm" } },
 		{ command = "Resolve Names", params = { "Names" } },
 		{ command = "Set Room Mapping", params = { "Hue Room", "Control4 Room" } },
+		{ command = "Hue Automations", params = { "Automation" } }, -- 1.5, #280 (owner's Q1)
 		{ command = "Diagnostics", params = { "What" } },
 		{ command = "Forget Pairing", params = { "Confirm" } },
 	},

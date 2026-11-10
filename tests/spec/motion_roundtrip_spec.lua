@@ -37,7 +37,8 @@ local HOLD_TIME = "Occupancy Hold Time (s)"
 -- then the motion module's eight (docs/motion-design.md §4.2).
 local CHAIN = { "light", "device", "zigbee_connectivity", "room", "zone", "bridge_home", "scene", "smart_scene",
 	"grouped_light", "motion", "light_level", "temperature", "device_power", "zigbee_connectivity",
-	"motion_area_configuration", "convenience_area_motion", "security_area_motion" }
+	"motion_area_configuration", "convenience_area_motion", "security_area_motion", "behavior_instance",
+	"behavior_script" }
 
 local BODIES = {
 	light = M.light, device = M.device, zigbee_connectivity = M.zigbee_connectivity, room = M.room, zone = M.zone,
@@ -45,6 +46,8 @@ local BODIES = {
 	motion = M.motion_body, light_level = M.light_level_body, temperature = M.temperature_body,
 	device_power = M.device_power_body, motion_area_configuration = M.motion_area_configuration,
 	convenience_area_motion = M.convenience_area_motion, security_area_motion = M.security_area_motion,
+	-- The Hue automation audit reads last (#280 D18); none on this bridge.
+	behavior_instance = M.empty, behavior_script = M.empty,
 }
 
 -- Log Motion Diagnostics' pass: one GET per type of docs/motion-hue-research.md
@@ -776,14 +779,21 @@ describe("motion round trip", function()
 			bc4.sent = {}
 			local first = #logged + 1
 			bc4.advance(2500) -- the on_connected deferral, then the background resync's 2 s debounce
-			local order = {}
+			local order, motion_read = {}, false
 			for kind in answer_next, BODIES do
 				order[#order + 1] = kind
-				if #order < #CHAIN then
+				-- The motion resync's last GET is security_area_motion; the Hue
+				-- automation audit's reads follow it (#280 D18).
+				motion_read = motion_read or kind == "security_area_motion"
+				if not motion_read then
 					assert.same({}, messages_to(SENSOR_ID), "a message to the device after GET " .. kind)
 				end
 			end
-			assert.same(CHAIN, order)
+			-- The scripts were read at the first resync and are read again only
+			-- for an unknown script or a new firmware (#280 D18).
+			local again = {}
+			for i = 1, #CHAIN - 1 do again[i] = CHAIN[i] end
+			assert.same(again, order)
 			assert.same({ "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
 			assert.same({ rid = M.devices.hallway, reason = "resync", online = "true", enabled = "true", lux = "63",
 				temperature = "21.37", battery_level = "87", battery_state = "normal", motion = "false",

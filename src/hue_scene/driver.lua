@@ -9,7 +9,12 @@
 -- binding 1, class HUE_BRIDGE) with C4:SendToDevice, and the bridge pushes
 -- configuration and state back through ExecuteCommand. Keypad taps fade an
 -- ordinary scene in or its group out over the click rate, and a press while
--- it fades stops it where it is (#421, docs/tap-stop-design.md §10.1). The
+-- it fades stops it where it is (#421, docs/tap-stop-design.md §10.1).
+-- Since #430 ON, OFF, TOGGLE, DYNAMIC_ON, DYNAMIC_OFF and a rate-less target
+-- fade over the proxy's default brightness rate, the click rates show in
+-- Composer, and the rate range goes to the proxy as a dynamic capability
+-- (docs/turn-on-design.md D8, D20, D21, D25); a scene has no On Mode
+-- (D1: its "on level" is the scene's own set of lamp levels). The
 -- message contract is docs/scenes-design.md §2, this device §3, extended by
 -- docs/keypad-design.md, docs/scene-dimmer-design.md and
 -- docs/smart-scenes-design.md; the structure is the Hue Light driver's
@@ -133,7 +138,8 @@ local dev = device.new({
 	bridge = function() return bridge end,
 	rid = function() return st.rid end,
 	noun = "scene",
-	settings = { "hold_up", "hold_down" }, -- driver.xml declares hold_rates
+	-- driver.xml declares click_rates (#430 D21) and hold_rates
+	settings = { "click_up", "click_down", "hold_up", "hold_down" },
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
@@ -436,6 +442,22 @@ end
 
 local function report_online()
 	notify("ONLINE_CHANGED", { STATE = is_online() })
+end
+
+-- #430 D20: the brightness rate range the scene honours, 0 to 6 000 000 ms
+-- (common/device.lua's rate_caps, the bridge's bound on scene and group
+-- durations), in a DYNAMIC_CAPABILITIES_CHANGED of its own [verified: LV2
+-- caps _1-BRIGHTNESSRATEMAX.md, _1.5-BRIGHTNESSRATEMIN.md: dynamic]; sent at
+-- late init and with every configure. Nothing else goes with it: the scene
+-- declares its other capabilities, colour included, statically.
+local function report_rate_caps()
+	notify("DYNAMIC_CAPABILITIES_CHANGED", dev.rate_caps())
+end
+
+-- #430 D8: the proxy's default brightness rate (common/device.lua), 0 until
+-- it sends one.
+local function default_rate()
+	return dev.rate_default("brightness")
 end
 
 -- The status an ON is expected to end in, for the fallback and for a stop
@@ -1247,6 +1269,7 @@ dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE"
 		end_ramp(false)
 		log.debug("configured as deleted in Hue%s", st.gone_since and (" since " .. st.gone_since) or "")
 	end
+	report_rate_caps() -- with every configure, as the light sends its capabilities (#430 D20)
 	report_brightness() -- the proxy hears the cached status again, if any
 	report_online()
 	refresh_status()
@@ -1482,9 +1505,17 @@ end
 
 -- With supports_target the proxy sends LIGHT_BRIGHTNESS_TARGET and RATE
 -- [verified: proxy ref, SET_BRIGHTNESS_TARGET]; the Navigator slider is this
--- (set_target above).
+-- (set_target above). One without a RATE (or with one that is no number)
+-- fades over the proxy's default brightness rate (#430 D8,
+-- common/device.lua). A LIGHT_BRIGHTNESS_TARGET_PRESET_ID is not read: a
+-- scene has no On Mode (#429 D1), so a target is the level it names.
 dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
-	set_target(params.LIGHT_BRIGHTNESS_TARGET, params.RATE)
+	dev.first_arrival("SET_BRIGHTNESS_TARGET", params)
+	local rate = tonumber(params.RATE)
+	if rate == nil then
+		rate = default_rate()
+	end
+	set_target(params.LIGHT_BRIGHTNESS_TARGET, rate)
 end
 
 -- Advanced Lighting Scenes with reduced_als_support drive the scene with
@@ -1507,8 +1538,10 @@ end
 dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
 
 -- Toggle relative to where the scene is heading: a pending recall counts as
--- on, so two quick presses end up off [verified: proxy ref, TOGGLE].
-dispatch.proxy["TOGGLE"] = function()
+-- on, so two quick presses end up off [verified: proxy ref, TOGGLE]. Over
+-- `rate`: the proxy's TOGGLE fades over the default brightness rate (#430
+-- D8), a time-based scene's toggle tap acts at once (S-D5).
+local function toggle(rate)
 	local on
 	if pending then
 		on = pending.on
@@ -1516,14 +1549,35 @@ dispatch.proxy["TOGGLE"] = function()
 		on = shown_on()
 	end
 	if on then
-		turn_off(0)
+		turn_off(rate)
 	else
-		turn_on(0)
+		turn_on(rate)
 	end
 end
 
-dispatch.proxy["ON"] = function() turn_on(0) end
-dispatch.proxy["OFF"] = function() turn_off(0) end
+-- #430 D8: ON, OFF and TOGGLE fade over the proxy's default brightness rate
+-- (UPDATE_BRIGHTNESS_RATE_DEFAULT, common/device.lua), 0 until the proxy
+-- sends one, so they stay instant as before. ON is the scene as designed: a
+-- scene has no On Mode (#429 D1). Keypad taps keep the click rates.
+dispatch.proxy["TOGGLE"] = function() toggle(default_rate()) end
+dispatch.proxy["ON"] = function() turn_on(default_rate()) end
+dispatch.proxy["OFF"] = function() turn_off(default_rate()) end
+
+-- #430 D25: Navigators from OS 3.3.2 on send DYNAMIC_ON and DYNAMIC_OFF; a
+-- driver without dynamic on gets the On brightness preset instead [verified:
+-- LV2 cmds _1.3-DYNAMICON.md, _1.2-DYNAMICOFF.md, no parameters]. Whether
+-- the proxy ever forwards them to a driver is [assumed]; if it does, they
+-- are ON and OFF over the default rate. First arrivals are logged at debug
+-- (docs/turn-on-design.md §7.3, check T3).
+dispatch.proxy["DYNAMIC_ON"] = function(_, params)
+	dev.first_arrival("DYNAMIC_ON", params)
+	turn_on(default_rate())
+end
+
+dispatch.proxy["DYNAMIC_OFF"] = function(_, params)
+	dev.first_arrival("DYNAMIC_OFF", params)
+	turn_off(default_rate())
+end
 
 -- Keypad buttons -------------------------------------------------------------
 -- What a tap and a hold do to a scene; the press / click / release machine
@@ -1540,10 +1594,12 @@ local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 local setting = dev.setting
 
 -- A tap's ramp time: a click rate is the time of the whole range (#421 D3),
--- so a tap takes its share of the distance, rounded to whole ms. The
--- scene's driver.xml declares no click rates, so Composer shows none, the
--- proxy sends none and none is loaded (opts.settings above): setting()
--- always gives common/device.lua's defaults, 3000 ms each.
+-- so a tap takes its share of the distance, rounded to whole ms. Since #430
+-- (D21) the scene's driver.xml declares click rates: Composer shows
+-- Click Rate Up and Down (0 to 6 000 000 ms), the proxy's SET_CLICK_RATE_*
+-- reach common/device.lua, which persists and confirms them, and setting()
+-- gives the rate the dealer set, else the 3000 ms default each that scene
+-- taps used before Composer could show them (#421 S-D1).
 local function share(rate, distance)
 	return math.floor(rate * distance / 100 + 0.5)
 end
@@ -1573,7 +1629,7 @@ function dev.on_click(button)
 		elseif button == BUTTON_BOTTOM then
 			turn_off(0)
 		else
-			dispatch.proxy["TOGGLE"]()
+			toggle(0)
 		end
 		return
 	end
@@ -1623,8 +1679,10 @@ end
 
 -- The bound the bridge holds a scene's hold rate to (scenes.DIM_MAX_DURATION,
 -- 100 minutes): a longer rate reaches Hue as this, so the tile's ramp is
--- worked out from it too (#243), as a Hue Light's is (#234).
-local HOLD_MAX_MS = 6000000
+-- worked out from it too (#243), as a Hue Light's is (#234). Since #430
+-- (D20) common/device.lua refuses a longer hold rate (RATE_MAX), so this
+-- bound only guards.
+local HOLD_MAX_MS = device.RATE_MAX
 
 -- The proxy hears a hold as a CHANGING toward the end of the range when it
 -- starts (docs/scene-dimmer-design.md, Keypad holds); the bridge's level
@@ -1772,6 +1830,7 @@ function OnDriverLateInit()
 	recall_as_hidden = nil -- Recall As is shown or hidden again at every late init
 	load_identity()
 	dev.load_settings()
+	report_rate_caps()
 	dev.load_colors()
 	load_held()
 	dispatch.replay_properties(Properties)

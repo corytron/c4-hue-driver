@@ -96,6 +96,13 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    `30_Light_v2_variables/_0-HEADER.md`]. The bridge passes the level
    through unchanged (`zone_lights:set`), so nothing changed there; with
    the preset at 100 the PUT is the one above.
+   Current (2026-11-09, #429 D6, [the turn-on contract](turn-on-design.md)):
+   this is On Mode Preset, the default. With On Mode Previous a zone or
+   room light turns on with `HUE_SET {on = "true"}` and no brightness, so
+   Hue brings every lamp back at its own level (H2 below, still [assumed];
+   the contract's check T4), and CHANGING names the last level reported as
+   the target, with no #308 goal. ON, OFF and TOGGLE use the proxy's
+   default brightness rate, 0 until it sends one (#430 D8).
 5. **Slider and targets are absolute** (`dimming.brightness` on the group),
    not relative as the scene devices move: a light device's level is a
    promise (40 % means every lamp at 40 %) and the tile's average then
@@ -124,7 +131,10 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
 7. **Colour and CT** go to the grouped_light (`color.xy` or
    `color_temperature.mirek`, one of the two, with `dynamics` when a rate is
    given; a colour sent while the group is off is stored for the next turn-on
-   as the light driver already does). **Capabilities = the union** of the
+   as the light driver already does). Current (2026-11-09, #427 D18): a
+   Control4 turn-on also carries the zone light's On colour, or its blend
+   for the level, as one colour to the grouped_light; colour on mode
+   Previous sends none, so each lamp keeps its own. **Capabilities = the union** of the
    members: `has_color` if any member has `color`, `has_cct` if any has
    `color_temperature`; the mirek range is the intersection of the
    CT-capable members' ranges (max of minimums, min of maximums; the first
@@ -420,7 +430,10 @@ and both scene devices.
 1. **ON = 100 % or Hue's "last state"?** 100 % (Decision 4), parity with the
    Hue Light; the Hue app keeps its own semantics. Superseded (2026-11-08,
    #233): ON is the device's Default On Brightness, still in parity with
-   the Hue Light and still never Hue's "last state".
+   the Hue Light and still never Hue's "last state". Current (2026-11-09,
+   #429): Hue's "last state" is offered as Control4's On Mode Previous, in
+   parity with the Hue Light; Preset, the Default On Brightness, stays the
+   default.
 2. **Absolute slider vs relative moves?** Absolute (Decision 5).
 3. **"Add All Zones"?** No: 23 devices in one click is the flood the scenes
    contract avoided; one click per zone is deliberate.
@@ -484,7 +497,9 @@ section, this section wins.
    light queue) is a follow-up. H2 does not affect the driver (ON always
    sends brightness 100). Current (2026-11-08, #233): ON sends the device's
    Default On Brightness; it still always sends a brightness, so H2 still
-   does not affect it.
+   does not affect it. Current (2026-11-09, #429 D6): On Mode Previous sends
+   no brightness, so H2 now decides what it shows; check T4 of the turn-on
+   contract settles it on the house.
 4. **Split** as §6, with `hue_model.lua`, `hue_model_spec.lua` and the
    fixtures folded into the bridge-module agent so that no agent waits on
    another; `tests/spec/zone_light_roundtrip_spec.lua` and the `drivers_spec`
