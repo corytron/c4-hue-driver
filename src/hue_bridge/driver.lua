@@ -36,6 +36,7 @@ local identity_mod = require("bridge.identity")
 local tasks_mod = require("bridge.tasks")
 local netgate_mod = require("bridge.netgate")
 local pair_window_mod = require("bridge.pair_window")
+local load_groups_mod = require("bridge.load_groups")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -75,6 +76,7 @@ local state = {
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
 	group_hold = nil,    -- bridge.group_hold (docs/group-hold-design.md, #249), created in OnDriverLateInit
+	load_groups = nil,   -- bridge.load_groups (docs/load-groups-design.md, #435), created in OnDriverLateInit
 	late_init_done = false,
 	destroyed = false,   -- OnDriverDestroyed ran: what this code still has in flight starts nothing
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
@@ -1624,6 +1626,9 @@ end
 -- From a light (or zone light) being deleted in Composer (docs/import-design.md §4).
 dispatch.commands["HUE_GOODBYE"] = function(params)
 	params = params or {}
+	-- Its load groups and its unsent batch entries go first, while its rid
+	-- still resolves: a deleted device commands nothing (#435 E7).
+	state.load_groups:forget_device(params.device_id)
 	if zone_light_device(params.device_id) then
 		state.zone_lights:goodbye(params)
 	else
@@ -1875,10 +1880,21 @@ local function set_light_limits(rid)
 end
 
 -- From a light driver: a proxy command mapped to Hue fields (strings).
+-- Control4 load groups (#435, docs/load-groups-design.md §6.9): a request a
+-- group command caused carries `group`, the GROUP ID (D5), and goes into that
+-- group's batch (bridge/load_groups.lua, D7 to D10), which sends it at its
+-- close through the same paths as below. Any other request first sends that
+-- light's entry of an open batch alone, so a group request never lands after
+-- the light's own (D11). A tagged request the batching refuses (a GROUP ID
+-- that is no positive integer) is an untagged one.
 dispatch.commands["HUE_SET"] = function(params)
 	params = params or {}
 	local rid = params.rid
 	if is_zone_light_rid(rid) then
+		if params.group ~= nil and state.load_groups:command("set", params, "zone") then
+			return
+		end
+		state.load_groups:release(rid)
 		return state.zone_lights:set(params)
 	end
 	if not rid or rid == "" or not state.lights:device_for(rid) then
@@ -1897,10 +1913,15 @@ dispatch.commands["HUE_SET"] = function(params)
 	}
 	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
 	if log.enabled("info") then
-		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s%s", rid:sub(1, 8), tostring(fields.on),
+		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s%s%s", rid:sub(1, 8), tostring(fields.on),
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
-			tostring(fields.rate), fields.urgent and " urgent" or "")
+			tostring(fields.rate), fields.urgent and " urgent" or "",
+			params.group ~= nil and (" group " .. tostring(params.group)) or "")
 	end
+	if params.group ~= nil and state.load_groups:command("set", params, "light") then
+		return
+	end
+	state.load_groups:release(rid)
 	set_light_limits(rid)
 	state.queue:set(rid, fields)
 end
@@ -1908,10 +1929,16 @@ end
 -- HUE_DIM { rid, direction up | down | stop, duration ms, level }: a keypad
 -- hold on a Hue Light, as Hue's relative dim (docs/keypad-design.md). The
 -- level goes with a stop and is written only if the bridge refuses the stop.
+-- A load group's hold (`group`, #435 D9) is batched as HUE_SET's requests
+-- are: never covered, lamp by lamp, the lamps past the tenth paced.
 dispatch.commands["HUE_DIM"] = function(params)
 	params = params or {}
 	local rid = params.rid
 	if is_zone_light_rid(rid) then
+		if params.group ~= nil and state.load_groups:command("dim", params, "zone") then
+			return
+		end
+		state.load_groups:release(rid)
 		return state.zone_lights:dim(params)
 	end
 	if not rid or rid == "" or not state.lights:device_for(rid) then
@@ -1924,9 +1951,13 @@ dispatch.commands["HUE_DIM"] = function(params)
 		return
 	end
 	if log.enabled("info") then
-		log.info("HUE_DIM %s: %s duration=%s level=%s", rid:sub(1, 8), dir, tostring(params.duration),
-			tostring(params.level))
+		log.info("HUE_DIM %s: %s duration=%s level=%s%s", rid:sub(1, 8), dir, tostring(params.duration),
+			tostring(params.level), params.group ~= nil and (" group " .. tostring(params.group)) or "")
 	end
+	if params.group ~= nil and state.load_groups:command("dim", params, "light") then
+		return
+	end
+	state.load_groups:release(rid)
 	set_light_limits(rid)
 	state.queue:set(rid, { dim = dir, rate = tonumber(params.duration), level = tonumber(params.level) })
 end
@@ -1947,6 +1978,16 @@ dispatch.commands["HUE_HELLO"] = function(params)
 	if not state.lights:hello(rid, params) then
 		log.debug("HUE_HELLO from unregistered light %q (device %s)", tostring(rid), tostring(params.device_id))
 	end
+end
+
+-- From a light or zone light device after every hello and every change of
+-- its Load Groups (#435 D6, docs/load-groups-design.md §6.3): { device_id,
+-- rid, kind, groups = "1234:1,5678:0" or "none" }. The memberships only let a
+-- batch close as soon as every member has sent (D7); the sync flags are not
+-- kept (D13).
+dispatch.commands["HUE_LOAD_GROUPS"] = function(params)
+	params = params or {}
+	state.load_groups:memberships(tonumber(params.device_id), params.groups)
 end
 
 dispatch.commands["Connect_Event_Stream"] = function()
@@ -2127,7 +2168,11 @@ end
 -- late init (Director's inter-driver order is not guaranteed) and the
 -- handlers index state that does not exist yet [code analysis 2026-10-22,
 -- H1]: hellos are queued and replayed after late init, anything else dropped.
-local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true }
+-- A light's HUE_LOAD_GROUPS follows its hello (#435 D6, E19) and is queued
+-- with it, so a Director restart keeps the load group memberships; one that
+-- names no group tells a bridge that has just started nothing, and is
+-- dropped quietly rather than taking a hello's place.
+local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true, HUE_LOAD_GROUPS = true }
 local EARLY_MAX = 200
 local early_commands = {}
 local execute_command = dispatch.execute_command
@@ -2136,6 +2181,9 @@ dispatch.execute_command = function(command, params)
 		local name = command
 		if command == "LUA_ACTION" and type(params) == "table" and params.ACTION then
 			name = params.ACTION
+		end
+		if name == "HUE_LOAD_GROUPS" and type(params) == "table" and (params.groups == nil or params.groups == "none") then
+			return
 		end
 		if EARLY_QUEUED[name] and #early_commands < EARLY_MAX then
 			early_commands[#early_commands + 1] = { command, params }
@@ -2518,6 +2566,79 @@ function OnDriverLateInit(dit)
 		end,
 		log = log,
 	})
+	-- Control4 load groups (#435, docs/load-groups-design.md §6.7, §6.9): the
+	-- members' tagged HUE_SET and HUE_DIM collected per GROUP ID and sent
+	-- together, whole Hue rooms and zones as one grouped_light request (D7 to
+	-- D10). The hooks read the modules live: the zone lights are created
+	-- below, and the lights' caches change at every resync.
+	state.load_groups = load_groups_mod.new({
+		-- A lamp's request as the HUE_SET and HUE_DIM handlers send it: its
+		-- limits, then the light queue, `paced` included (§6.8).
+		light_set = function(light_rid, fields)
+			if not state.queue then
+				return false
+			end
+			set_light_limits(light_rid)
+			state.queue:set(light_rid, fields)
+			return true
+		end,
+		zone_set = function(params) return state.zone_lights ~= nil and state.zone_lights:set(params) end,
+		zone_dim = function(params) return state.zone_lights ~= nil and state.zone_lights:dim(params) end,
+		group_set = group_hooks.group_set,
+		-- A zone or room rid: its grouped_light and member lights (D8 a); nil
+		-- for a lamp, an unknown rid, or a zone without lights.
+		zone_lights = function(rid)
+			local zl = state.zone_lights
+			local group = zl and zl:group_of(rid)
+			local grouped = group and zl:grouped_light_of(rid)
+			if not grouped then
+				return nil
+			end
+			return grouped, zl:member_lights(group)
+		end,
+		-- Every Hue room and zone in the lights' cache with a grouped_light and
+		-- at least COVER_MIN lights, named as the zone lights name them,
+		-- "Kitchen (room)" (D8 b).
+		covers = function()
+			local out, zl = {}, state.zone_lights
+			for _, group in ipairs(zl and zl:groups():groups() or {}) do
+				local grouped = zl:grouped_light_of(group.rid)
+				local lights = grouped and zl:member_lights(group) or {}
+				if #lights >= load_groups_mod.COVER_MIN then
+					out[#out + 1] = { grouped_light = grouped, label = zl:group_label(group), lights = lights }
+				end
+			end
+			return out
+		end,
+		-- The rid and kind of a member device that can send (D7): its registry
+		-- entry "linked", so neither gone in Hue nor unbound from this bridge
+		-- (an unbound device cannot reach it), and a zone light with lights
+		-- (without, the device drops every command). nil otherwise.
+		rid_of = function(device_id)
+			local id = tonumber(device_id)
+			local zl = state.zone_lights
+			for rid, entry in pairs(id and zl and zl.registry or {}) do
+				if entry.device_id == id then
+					if entry.state == "linked" and zl:grouped_light_of(rid) then
+						return rid, "group"
+					end
+					return nil
+				end
+			end
+			local rid = id and state.lights and state.lights:rid_for(id)
+			local entry = rid and state.lights.registry[rid]
+			if entry and entry.state == "linked" then
+				return rid, "light"
+			end
+			return nil
+		end,
+		light_idle = function(rid) return state.queue ~= nil and state.queue:idle(rid) end,
+		group_idle = function(rid) return state.group_queue ~= nil and state.group_queue:idle(rid) end,
+		group_token = function() return state.group_queue ~= nil and state.group_queue:token_ready() end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end, -- [verified: API 34/_1]
+		now = function() return C4:GetTime() end,                   -- [verified: API 34/_2]
+		log = log,
+	})
 	state.scenes = scenes_mod.new(module_ctx())
 	state.scenes:load()
 	state.scenes:configure_all()
@@ -2667,6 +2788,9 @@ function OnDriverDestroyed()
 		state.stream:stop()
 	end
 	netstream.retire() -- and no object of this code's netstream connects again
+	if state.load_groups then
+		state.load_groups:stop_all() -- open batches dropped unsent and their timers cancelled (#435)
+	end
 	if state.group_hold then
 		state.group_hold:stop_all() -- before the queues: no step lands in a stopped queue
 	end

@@ -98,6 +98,10 @@ of it is live.
   events (single, double and triple tap) firing as on a Control4 dimmer,
   `SET_ALL_LED`, and Hue-side level reports throttled to one a second
   (#432, #433, 2026-11-09).
+- [`load-groups-design.md`](load-groups-design.md): Hue lights in Control4
+  load groups (#435): the group commands on each member, and the bridge
+  sending one request per whole Hue room or zone so those lamps move
+  together (2026-11-09).
 - [`offline-design.md`](offline-design.md): Hue devices go offline after the
   bridge has been unreachable for 5 minutes (#428), and a command that could
   not be delivered never shows as done (2026-11-09).

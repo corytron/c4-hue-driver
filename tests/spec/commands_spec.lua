@@ -1293,4 +1293,388 @@ describe("bridge.commands", function()
 			end)
 		end
 	end)
+
+	-- #435 (docs/load-groups-design.md §6.8): what bridge/load_groups.lua reads
+	-- and sets. idle(rid) and token_ready() let a load group's batch send a
+	-- whole Hue room or zone as one grouped_light request only when nothing
+	-- older could land after it (D8); `paced` makes a light dim past the
+	-- batch's tenth lamp take the bucket's tokens instead of jumping it (D9,
+	-- D10). The light queue and the grouped_light queue are the same code,
+	-- and both are run.
+	describe("load groups (#435)", function()
+		local OK = { ok = true, code = 200 }
+
+		it("urgent() is false for a paced state, a hold's start and stop and an urgent state included (D9)", function()
+			assert.is_false(commands.urgent({ dim = "up", rate = 3000, paced = true }))
+			assert.is_false(commands.urgent({ dim = "down", delta = 100, rate = 3000, paced = true }))
+			assert.is_false(commands.urgent({ dim = "stop", level = 40, paced = true }))
+			assert.is_false(commands.urgent({ on = true, brightness = 55, rate = 0, urgent = true, paced = true }))
+			assert.is_true(commands.urgent({ dim = "up", rate = 3000 }), "without paced a hold is urgent as before")
+			assert.is_true(commands.urgent({ dim = "stop", paced = false }), "only paced = true paces")
+		end)
+
+		it("never puts paced in a body", function()
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 3000 } },
+				commands.body({ dim = "up", rate = 3000, paced = true }))
+			assert.same({ dimming_delta = { action = "stop" } }, commands.body({ dim = "stop", level = 40, paced = true }))
+			assert.same({ on = { on = true }, dimming = { brightness = 55 } },
+				commands.body({ on = true, brightness = 55, rate = 0, urgent = true, paced = true }))
+		end)
+
+		-- D9 over 25 lamps on the light queue: the first ten holds are urgent,
+		-- the other fifteen are paced. With a full bucket ten of those go at
+		-- once on its tokens and five follow one per 100 ms; the stops leave
+		-- in the same order and at the same spacing, so every lamp ramps for
+		-- exactly as long as the button was held.
+		it("paces a load group's hold past the tenth lamp through the bucket, stops in the order of the starts (D9)",
+			function()
+				local at = {}
+				q = commands.new({ send = function(rid, body, done)
+					table.insert(sends, { rid = rid, body = body, done = done, at = c4.now_ms })
+				end })
+				local function hold(fields_of)
+					for i = 1, 25 do
+						local fields = fields_of(i)
+						if i > 10 then fields.paced = true end
+						q:set("l" .. i, fields)
+					end
+				end
+				local t0 = c4.now_ms
+				hold(function() return { dim = "up", rate = 5000 } end)
+				c4.advance(commands.DEBOUNCE_MS)
+				assert.equal(20, #sends, "ten urgent starts and ten on the bucket's tokens")
+				assert.equal(0, q.tokens)
+				c4.advance(500)
+				assert.equal(25, #sends, "the last five one per 100 ms")
+				for i, s in ipairs(sends) do
+					assert.equal("l" .. i, s.rid, "starts in arrival order")
+					assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 5000 } },
+						s.body, "no paced in the PUT")
+					local expected = t0 + commands.DEBOUNCE_MS + (i > 20 and 100 * (i - 20) or 0)
+					assert.equal(expected, s.at, "start of l" .. i)
+					at[s.rid] = s.at
+					s.done(OK)
+				end
+
+				-- The release, 2 s after the starts went out: the bucket is full again.
+				c4.now_ms = t0 + 2000
+				hold(function(i) return { dim = "stop", level = 40 + i } end)
+				c4.advance(commands.DEBOUNCE_MS)
+				assert.equal(45, #sends)
+				c4.advance(500)
+				assert.equal(50, #sends)
+				for i = 26, 50 do
+					local s = sends[i]
+					assert.equal("l" .. (i - 25), s.rid, "stops in the order of the starts")
+					assert.same({ dimming_delta = { action = "stop" } }, s.body)
+					assert.equal(2000, s.at - at[s.rid], "l" .. (i - 25) .. " ramped as long as the button was held")
+				end
+				assert.same({}, timer_delays())
+			end)
+
+		for _, kind in ipairs({
+			{ name = "light queue", opts = {} },
+			{ name = "group queue", opts = { rate_per_sec = 1, burst = 3, label = "grouped_light" } },
+		}) do
+			describe(kind.name, function()
+				local period -- ms the bucket takes to earn one token
+
+				before_each(function()
+					local opts = { send = fake_send }
+					for k, v in pairs(kind.opts) do opts[k] = v end
+					q = commands.new(opts)
+					period = math.ceil(1000 / q.rate)
+				end)
+
+				local function complete_all()
+					for _, s in ipairs(sends) do
+						if not s.completed then
+							s.completed = true
+							s.done(OK)
+						end
+					end
+				end
+
+				-- One level on each of `burst` rids, all answered: the bucket is
+				-- empty and nothing is armed.
+				local function empty_bucket()
+					for i = 1, q.burst do
+						q:set("d" .. i, { brightness = 10 * i })
+					end
+					c4.fire_timers()
+					complete_all()
+					assert.equal(q.burst, #sends)
+					assert.equal(0, q.tokens)
+					assert.same({}, timer_delays())
+				end
+
+				describe("idle()", function()
+					it("is true for a rid the queue has never seen, and once its PUT has returned", function()
+						assert.is_true(q:idle("never"))
+						set_now("a", { brightness = 50 })
+						sends[1].done(OK)
+						assert.is_true(q:idle("a"))
+					end)
+
+					it("is false while a state waits for its debounce or a token, and while its PUT is in flight", function()
+						q:set("a", { brightness = 50 })
+						assert.is_false(q:idle("a"), "pending, debounce armed")
+						c4.fire_timers()
+						assert.is_nil(q:pending("a"))
+						assert.is_false(q:idle("a"), "in flight")
+						sends[1].done(OK)
+						assert.is_true(q:idle("a"))
+
+						sends = {}
+						q = commands.new({ send = fake_send, rate_per_sec = q.rate, burst = q.burst })
+						empty_bucket()
+						q:set("w", { brightness = 40 })
+						c4.fire_timers()
+						assert.same({ period }, timer_delays(), "waiting for a token")
+						assert.is_false(q:idle("w"))
+						assert.is_true(q:idle("d1"), "a rid whose PUT returned is idle meanwhile")
+						c4.advance(period)
+						assert.is_false(q:idle("w"), "sent, in flight")
+						complete_all()
+						assert.is_true(q:idle("w"))
+					end)
+
+					it("is false while a change waits behind a PUT in flight, until that change's PUT returns", function()
+						set_now("a", { brightness = 50 })
+						q:set("a", { brightness = 60 })
+						c4.fire_timers()
+						assert.same({}, timer_delays(), "the debounce fired; the change waits for the PUT")
+						assert.is_false(q:idle("a"))
+						sends[1].done(OK)
+						assert.equal(2, #sends)
+						assert.is_false(q:idle("a"), "the change is in flight now")
+						sends[2].done(OK)
+						assert.is_true(q:idle("a"))
+					end)
+
+					it("is false while a retry's backoff is armed, and true once the retry lands", function()
+						set_now("a", { brightness = 50 })
+						sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+						assert.same({ commands.BACKOFF_MS }, timer_delays())
+						assert.is_false(q:idle("a"))
+						c4.advance(commands.BACKOFF_MS)
+						assert.equal(2, #sends)
+						assert.is_false(q:idle("a"))
+						sends[2].done(OK)
+						assert.is_true(q:idle("a"))
+					end)
+
+					it("is true after stop(), after a final refusal drops the state, and after a flush that sends nothing",
+						function()
+							q:set("e", { rate = 400 })
+							c4.fire_timers()
+							assert.equal(0, #sends)
+							assert.is_true(q:idle("e"), "a lone rate is nothing to send")
+
+							set_now("c", { on = true })
+							q:set("c", { brightness = 30 })
+							sends[#sends].done({ ok = false, err = "key rejected", code = 403 })
+							assert.is_true(q:idle("c"), "the change that arrived meanwhile went too")
+
+							q:set("a", { brightness = 50 })
+							set_now("b", { on = true })
+							q:stop()
+							assert.is_true(q:idle("a"))
+							assert.is_true(q:idle("b"))
+						end)
+
+					it("looks at one rid only", function()
+						set_now("a", { brightness = 50 })
+						q:set("b", { brightness = 20 })
+						assert.is_false(q:idle("a"))
+						assert.is_false(q:idle("b"))
+						assert.is_true(q:idle("c"))
+					end)
+				end)
+
+				describe("token_ready()", function()
+					it("is true on a full bucket and takes no token", function()
+						for _ = 1, 5 do
+							assert.is_true(q:token_ready())
+						end
+						assert.equal(q.burst, q.tokens)
+						for i = 1, q.burst do
+							q:set("g" .. i, { on = true })
+						end
+						c4.fire_timers()
+						assert.equal(q.burst, #sends, "the whole burst still goes at once")
+						assert.is_false(q:token_ready())
+					end)
+
+					it("is false on an empty bucket until a whole token has refilled, and refills without taking it",
+						function()
+							empty_bucket()
+							assert.is_false(q:token_ready())
+							c4.now_ms = c4.now_ms + period / 2
+							assert.is_false(q:token_ready())
+							assert.equal(0.5, q.tokens, "half a token credited")
+							c4.now_ms = c4.now_ms + period / 2
+							assert.is_true(q:token_ready())
+							assert.is_true(q:token_ready())
+							assert.equal(1, q.tokens, "asking twice took nothing")
+							q:set("x", { brightness = 5 })
+							c4.fire_timers()
+							assert.equal(q.burst + 1, #sends, "the token it saw is there for the next level")
+							assert.equal(0, q.tokens)
+							assert.is_false(q:token_ready())
+						end)
+
+					it("does not count urgent requests, which take no token", function()
+						empty_bucket()
+						q:set("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+						q:set("h", { dim = "up", rate = 3000 })
+						c4.fire_timers()
+						assert.equal(q.burst + 2, #sends, "the tap and the hold went at once")
+						assert.is_false(q:token_ready())
+						assert.equal(0, q.tokens)
+					end)
+
+					it("leaves a token wait as it was", function()
+						empty_bucket()
+						q:set("w", { brightness = 40 })
+						c4.fire_timers()
+						assert.same({ period }, timer_delays())
+						assert.is_false(q:token_ready())
+						assert.same({ period }, timer_delays())
+						c4.advance(period)
+						assert.equal(q.burst + 1, #sends, "the level went out at the refill")
+					end)
+				end)
+
+				describe("paced", function()
+					it("sends a paced dim past an empty bucket only when a token is free, and takes it (D9)", function()
+						empty_bucket()
+						q:set("p", { dim = "up", rate = 3000, paced = true })
+						assert.is_true(q:pending("p").paced)
+						c4.fire_timers()
+						assert.equal(q.burst, #sends, "a paced hold waits like a drag")
+						assert.same({ period }, timer_delays())
+						c4.advance(period - 1)
+						assert.equal(q.burst, #sends)
+						c4.advance(1)
+						assert.equal(q.burst + 1, #sends)
+						assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 3000 } },
+							sends[#sends].body, "no paced in the PUT")
+						assert.equal(0, q.tokens, "it took the token")
+
+						complete_all()
+						q:set("p", { dim = "stop", level = 30, paced = true })
+						c4.fire_timers()
+						assert.equal(q.burst + 1, #sends, "a paced stop waits its turn too")
+						c4.advance(period)
+						assert.same({ dimming_delta = { action = "stop" } }, sends[#sends].body)
+					end)
+
+					it("goes at once while the bucket has a token, as any request then does", function()
+						set_now("p", { dim = "down", rate = 2000, paced = true })
+						assert.equal(1, #sends)
+						assert.equal(q.burst - 1, q.tokens, "but it took a token")
+					end)
+
+					it("keeps a token wait when a paced hold replaces the waiting state (D9)", function()
+						empty_bucket()
+						q:set("g", { brightness = 40 })
+						c4.fire_timers()
+						assert.same({ period }, timer_delays())
+						q:set("g", { dim = "down", rate = 2500, paced = true })
+						assert.same({ period }, timer_delays(), "not the debounce an unpaced hold would arm")
+						c4.advance(period)
+						assert.equal(q.burst + 1, #sends)
+						assert.same({ dimming_delta = { action = "down", brightness_delta = 100 }, dynamics = { duration = 2500 } },
+							sends[#sends].body, "the hold superseded the waiting level")
+					end)
+
+					it("is cleared by fields with urgent, also when they carry both, and the state goes at once", function()
+						empty_bucket()
+						q:set("p", { dim = "up", rate = 3000, paced = true })
+						c4.fire_timers()
+						assert.same({ period }, timer_delays())
+						q:set("p", { on = true, brightness = 100, rate = 3000, urgent = true })
+						assert.is_nil(q:pending("p").paced)
+						assert.same({ commands.DEBOUNCE_MS }, timer_delays(), "the token wait gave way to the debounce")
+						c4.fire_timers()
+						assert.equal(q.burst + 1, #sends)
+						assert.same({ on = { on = true }, dimming = { brightness = 100 }, dynamics = { duration = 3000 } },
+							sends[#sends].body)
+
+						q:set("b", { dim = "up", rate = 3000, paced = true, urgent = true })
+						assert.is_nil(q:pending("b").paced, "urgent wins over paced in the same fields")
+						c4.fire_timers()
+						assert.equal(q.burst + 2, #sends)
+						assert.equal(0, q.tokens)
+					end)
+
+					it("follows the newest fields: unpaced ones clear it, paced ones set it over an urgent state", function()
+						empty_bucket()
+						q:set("p", { dim = "up", rate = 3000, paced = true })
+						q:set("p", { dim = "stop", level = 20 })
+						assert.is_nil(q:pending("p").paced)
+						c4.fire_timers()
+						assert.equal(q.burst + 1, #sends, "an unpaced stop is urgent again")
+
+						q:set("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+						q:set("t", { dim = "up", rate = 3000, paced = true })
+						assert.same({ dim = "up", rate = 3000, urgent = true, paced = true }, q:pending("t"))
+						assert.is_false(commands.urgent(q:pending("t")), "paced beats the urgent the replaced tap left")
+						c4.fire_timers()
+						assert.equal(q.burst + 1, #sends)
+						assert.same({ period }, timer_delays())
+					end)
+
+					it("accepts the string form", function()
+						q:set("p", { dim = "up", rate = "3000", paced = "true" })
+						assert.same({ dim = "up", rate = 3000, paced = true }, q:pending("p"))
+						q:set("p", { dim = "up", paced = "false" })
+						assert.is_nil(q:pending("p").paced)
+					end)
+
+					it("keeps a paced stop that replaced an unsent ramp paced: its level waits its turn (#421 D13)", function()
+						empty_bucket()
+						q:set("r", { on = true, brightness = 80, rate = 4000 })
+						c4.fire_timers()
+						assert.same({ period }, timer_delays())
+						q:set("r", { dim = "stop", level = 55, paced = true })
+						assert.same({ on = true, brightness = 55, rate = 0, urgent = true, paced = true }, q:pending("r"))
+						assert.same({ period }, timer_delays(), "still waiting")
+						c4.advance(period)
+						assert.equal(q.burst + 1, #sends)
+						assert.same({ on = { on = true }, dimming = { brightness = 55 } }, sends[#sends].body)
+					end)
+
+					it("retries a failed paced state paced, unless a newer unpaced request came meanwhile", function()
+						-- Each rid's start goes out on its own debounce, and each
+						-- fails while the next request for it waits behind it.
+						local function fail_with(rid, start, newer)
+							q:set(rid, start)
+							c4.fire_timers_of(commands.DEBOUNCE_MS)
+							local put = sends[#sends]
+							assert.equal(rid, put.rid)
+							if newer then
+								q:set(rid, newer)
+								c4.fire_timers_of(commands.DEBOUNCE_MS)
+							end
+							put.done({ ok = false, code = 503, err = "HTTP 503" })
+							return q:pending(rid)
+						end
+
+						assert.same({ dim = "up", rate = 3000, paced = true }, fail_with("p", { dim = "up", rate = 3000, paced = true }),
+							"the failed state is the newest: still paced")
+						assert.same({ commands.BACKOFF_MS }, timer_delays())
+
+						local n = fail_with("n", { dim = "up", rate = 3000, paced = true }, { dim = "stop", level = 25 })
+						assert.same({ dim = "stop", level = 25, rate = 3000 }, n, "the unpaced stop that came during the PUT decides")
+						assert.is_true(commands.urgent(n))
+
+						local m = fail_with("m", { dim = "up", rate = 3000 }, { dim = "stop", level = 35, paced = true })
+						assert.same({ dim = "stop", level = 35, rate = 3000, paced = true }, m, "and a paced one that came meanwhile too")
+					end)
+				end)
+			end)
+		end
+	end)
 end)

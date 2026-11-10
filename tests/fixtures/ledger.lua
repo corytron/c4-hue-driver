@@ -449,6 +449,40 @@ ledger.rows = {
 			{ command = "Restore Saved Level", params = { "Ramp (ms)" }, driver = "hue_light" },
 		},
 	},
+	{
+		-- 1.5 (#435, docs/load-groups-design.md): the bridge's side. The light
+		-- device's group commands (JOIN_GROUP, GROUP_SET_LEVEL, ...) arrive
+		-- through its light_v2 proxy.
+		id = "L11",
+		capability = "Hue lights in Control4 load groups: the members' requests sent together, lamps that make up a "
+			.. "whole Hue room or zone as one request, a hold lamp by lamp",
+		gate = { "proxy", "auto" },
+		paths = {
+			{ proxy = "light_v2", driver = "hue_light" },
+			-- The light device's side (§6.2): its memberships, the Load Groups
+			-- row, and the group commands through its own paths.
+			{ proxy_command = "JOIN_GROUP", driver = "hue_light" },
+			{ proxy_command = "LEAVE_GROUP", driver = "hue_light" },
+			{ proxy_command = "SET_GROUP_SYNC", driver = "hue_light" },
+			{ proxy_command = "GROUP_SET_LEVEL", driver = "hue_light" },
+			{ proxy_command = "SET_GROUP_LEVEL", driver = "hue_light" },
+			{ proxy_command = "GROUP_RAMP_TO_LEVEL", driver = "hue_light" },
+			{ proxy_command = "GROUP_START_RAMP", driver = "hue_light" },
+			{ proxy_command = "GROUP_STOP_RAMP", driver = "hue_light" },
+			{ property = "Load Groups", type = "STRING", driver = "hue_light" },
+			{ message = "HUE_LOAD_GROUPS" },
+			{ message = "HUE_SET" },
+			{ message = "HUE_DIM" },
+			{ auto = "a load group's commands reaching its Hue Light devices",
+				proof = { spec = "tests/spec/load_group_roundtrip_spec.lua",
+					test = "moves a load group that is a whole Hue zone with one grouped_light PUT, and others lamp by lamp" } },
+			{ auto = "a load group command reaching several Hue lights (HUE_SET or HUE_DIM with group)",
+				proof = { spec = "tests/spec/load_group_bridge_spec.lua",
+					test = "sends the lamps of a whole Hue room as one grouped_light PUT, as soon as every member has sent" } },
+			{ auto = "a load group's hold past its tenth lamp", proof = { spec = "tests/spec/load_group_bridge_spec.lua",
+				test = "paces a load group's hold past the tenth lamp, its stops in the order of its starts" } },
+		},
+	},
 
 	-- Zone lights ----------------------------------------------------------------
 	{
