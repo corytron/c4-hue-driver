@@ -3764,4 +3764,377 @@ describe("Hue Light driver", function()
 			end)
 		end)
 	end)
+
+	-- #428, docs/offline-design.md: the bridge's link offline as one more
+	-- blocker (D5, D6), and its answer to a command that did not land (D8,
+	-- D9, §6.2 "undelivered").
+	describe("the bridge's link and commands that do not land (#428)", function()
+		local link = require("common.link")
+		local SINCE = os.time() - 120 -- two minutes ago, in epoch seconds as the bridge sends it
+		local NOT_ANSWERING = "Hue Bridge not answering since " .. link.clock(SINCE)
+		local ZONE_RID = "b90ea7b4-aaaa-4bbb-8ccc-ddddeeeeffff"
+		local ZONE = { rid = ZONE_RID, kind = "group", group_type = "zone", name = "Bedside Lights", light_count = "2",
+			model = "Hue zone", has_color = "true", has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "1" }
+
+		after_each(function() log.set_debug(false) end)
+
+		local function offline(env, reason, since)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = reason or "not_answering",
+				since = tostring(since or SINCE) })
+		end
+
+		local function online(env)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "online" })
+		end
+
+		-- lights:undelivered's HUE_STATE: the bridge's model of the lit light
+		-- (on at 40 %, 2700 K), with `extra` over it.
+		local function undelivered(env, extra)
+			local params = { rid = "l1", on = "true", brightness = "40", mirek = "370", color_mode = "ct", online = "true",
+				reason = "undelivered" }
+			for k, v in pairs(extra or {}) do params[k] = v end
+			env.ExecuteCommand("HUE_STATE", params)
+		end
+
+		local function proxy(env, command, params)
+			env.ReceivedFromProxy(5001, command, params or {})
+		end
+
+		-- A keypad tap on a Button Link (200 top, 201 bottom): push, release, click.
+		local function link_tap(env, binding)
+			env.ReceivedFromProxy(binding, "DO_PUSH", {})
+			env.ReceivedFromProxy(binding, "DO_RELEASE", {})
+			env.ReceivedFromProxy(binding, "DO_CLICK", {})
+		end
+
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		local function changing(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")) do
+				out[#out + 1] = { p.LIGHT_BRIGHTNESS_CURRENT, p.LIGHT_BRIGHTNESS_TARGET, p.RATE }
+			end
+			return out
+		end
+
+		local function online_states(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "ONLINE_CHANGED")) do out[#out + 1] = p.STATE end
+			return out
+		end
+
+		local function led_states(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do
+				if args[1] == 200 and args[2] == "MATCH_LED_STATE" then out[#out + 1] = args[3].STATE end
+			end
+			return out
+		end
+
+		local function sets(c4)
+			local out = {}
+			for _, m in ipairs(messages(c4, "HUE_SET")) do out[#out + 1] = m.params end
+			return out
+		end
+
+		describe("offline (D5, D6)", function()
+			it("goes offline at HUE_BRIDGE_LINK offline, Status naming the bridge, and back at online", function()
+				local env, c4 = lit_light()
+				offline(env)
+				assert.same({ false }, online_states(c4))
+				assert.equal(NOT_ANSWERING, env.Properties["Status"])
+				assert.equal("Offline", env.Properties["Online"])
+				assert.same({}, levels(c4), "nothing was moving: nothing to report")
+				c4.calls = {}
+				online(env)
+				assert.same({ true }, online_states(c4))
+				assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+				assert.equal("Online", env.Properties["Online"])
+			end)
+
+			it("drops every command before any CHANGING, from any source, and keeps the LEDs (E25)", function()
+				local env, c4 = lit_light()
+				offline(env)
+				c4.calls, c4.sent = {}, {}
+				log.set_debug(true)
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = line end
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
+				proxy(env, "ON")
+				proxy(env, "TOGGLE")
+				proxy(env, "SET_LEVEL", { LEVEL = "10" })
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.3", LIGHT_COLOR_TARGET_Y = "0.3",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				link_tap(env, 200)
+				c4.advance(1000)
+				link_tap(env, 201)
+				c4.advance(1000)
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				c4.advance(500) -- held: a hold down
+				env.ReceivedFromProxy(201, "DO_RELEASE", {})
+				env.ExecuteCommand("Raise Level By", { Points = "30" })
+				assert.same({}, c4.sent, "nothing to the bridge")
+				assert.same({}, changing(c4))
+				assert.same({}, notifies(c4, "LIGHT_COLOR_CHANGING"))
+				assert.same({}, levels(c4))
+				assert.same({}, led_states(c4), "the LEDs keep the last known state")
+				assert.equal("Not raised: " .. NOT_ANSWERING, fake.last_action(env))
+				assert.equal(NOT_ANSWERING, env.Properties["Status"])
+				local dropped = 0
+				for _, line in ipairs(lines) do
+					if line:find("dropped: " .. NOT_ANSWERING, 1, true) then dropped = dropped + 1 end
+				end
+				assert.equal(8, dropped, "five proxy commands, two taps and a hold, each with its log line")
+			end)
+
+			it("is online only while both the link and Zigbee say so (D6)", function()
+				local env, c4 = lit_light()
+				offline(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", online = "false" })
+				assert.equal(NOT_ANSWERING, env.Properties["Status"], "Zigbee's word is not current while offline")
+				assert.equal("Offline", env.Properties["Online"])
+				c4.calls = {}
+				online(env)
+				assert.same({ false }, online_states(c4), "the link is back, Zigbee still says unreachable")
+				assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+				assert.equal("Offline", env.Properties["Online"])
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", online = "true" })
+				assert.same({ false, true }, online_states(c4))
+				assert.equal("Online", env.Properties["Online"])
+			end)
+
+			it("changes nothing for an unchanged link; a new reason while offline shows (D3)", function()
+				local env, c4 = lit_light()
+				online(env)
+				assert.same({}, online_states(c4), "online after nothing (the first broadcast)")
+				offline(env)
+				c4.calls = {}
+				offline(env)
+				assert.same({}, online_states(c4), "the same offline again (a hello answer)")
+				offline(env, "key_rejected")
+				assert.same({ false }, online_states(c4))
+				assert.equal("Hue Bridge refuses the pairing since " .. link.clock(SINCE), env.Properties["Status"])
+			end)
+
+			it("never shows online between a hello answer's link and its configure (D4)", function()
+				local env, c4 = load_light({ rid = "l1" })
+				c4.calls = {}
+				offline(env)
+				configure(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40", mirek = "370",
+					color_mode = "ct", online = "true", reason = "hello" })
+				local states = online_states(c4)
+				assert.is_true(#states > 0)
+				for i, s in ipairs(states) do assert.is_false(s, "ONLINE_CHANGED " .. i) end
+				assert.equal(NOT_ANSWERING, env.Properties["Status"])
+				assert.equal("Offline", env.Properties["Online"])
+			end)
+
+			it("takes a link sent before late init first, then greets and reports offline (E17)", function()
+				local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+				c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+				c4.persist.hue_rid, c4.persist.hue_name, c4.persist.hue_model = "l1", "Desk", "Hue color lamp"
+				offline(env)
+				env.OnDriverLateInit("DIT_STARTUP")
+				local states = online_states(c4)
+				assert.is_true(#states > 0)
+				for i, s in ipairs(states) do assert.is_false(s, "ONLINE_CHANGED " .. i) end
+				assert.equal(NOT_ANSWERING, env.Properties["Status"])
+				assert.equal("HUE_HELLO", c4.sent[1].command)
+			end)
+
+			it("forgets the link with its bridge binding: another bridge's answer says its own", function()
+				local env, c4 = lit_light()
+				offline(env)
+				c4.bindings = {}
+				env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+				assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
+				c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+				env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+				assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
+				assert.equal("Online", env.Properties["Online"])
+			end)
+
+			it("settles a target pending as it goes offline with the cached level; no fallback follows", function()
+				local env, c4 = lit_light()
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.3", LIGHT_COLOR_TARGET_Y = "0.3",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				c4.calls = {}
+				offline(env)
+				assert.same({ 40 }, levels(c4), "the cached level, not the target")
+				local colors = notifies(c4, "LIGHT_COLOR_CHANGED")
+				assert.equal(1, #colors)
+				assert.equal(1, colors[1].LIGHT_COLOR_CURRENT_COLOR_MODE, "the cached white, not the colour asked for")
+				c4.advance(5000)
+				assert.same({ 40 }, levels(c4), "no fallback assumes the target afterwards")
+				assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"))
+			end)
+
+			it("ends a tap ramp as it goes offline, with what the bridge reported meanwhile (#421 D10)", function()
+				local env, c4 = lit_light()
+				link_tap(env, 200) -- 40 -> 100 over 1800 ms
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" }) -- held back
+				c4.advance(600)
+				c4.calls = {}
+				offline(env)
+				assert.same({ 100 }, levels(c4), "the bridge's word, at once")
+				c4.advance(5000)
+				assert.same({ 100 }, levels(c4))
+				c4.sent = {}
+				link_tap(env, 201)
+				assert.same({}, c4.sent, "no ramp left to stop, and the tap is dropped")
+			end)
+		end)
+
+		describe("undelivered (D8, D9)", function()
+			it("ends a tap ramp at once and reports the bridge's level; nothing follows at its end", function()
+				local env, c4 = lit_light()
+				link_tap(env, 200) -- 40 -> 100 over 1800 ms
+				c4.advance(600)
+				c4.calls = {}
+				undelivered(env) -- the bridge still knows 40: the start never landed
+				assert.same({ 40 }, levels(c4))
+				assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"), "and the colour it knows")
+				c4.advance(5000)
+				assert.same({ 40 }, levels(c4), "nothing at the ramp's end nor at the fallback time")
+				c4.sent = {}
+				link_tap(env, 200)
+				assert.same({ { rid = "l1", on = "true", brightness = "100", rate = "1800", urgent = "true" } }, sets(c4),
+					"the ramp is over: the next press is a fresh tap, not a stop")
+			end)
+
+			it("after a tap stop that did not land, shows the level the bridge knows (#421 D10, §7)", function()
+				local env, c4 = lit_light()
+				link_tap(env, 200) -- 40 -> 100 over 1800 ms
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" }) -- held back
+				c4.advance(600)
+				c4.calls, c4.sent = {}, {}
+				link_tap(env, 201) -- stops at the estimate
+				assert.same({ stop_at("60") }, stops(c4))
+				assert.same({ 60 }, levels(c4))
+				undelivered(env, { brightness = "100" }) -- Hue goes on to the fade's target
+				assert.same({ 60, 100 }, levels(c4))
+			end)
+
+			it("settles a target given at once: the fallback never assumes it", function()
+				local env, c4 = lit_light()
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
+				c4.calls = {}
+				undelivered(env)
+				assert.same({ 40 }, levels(c4))
+				c4.advance(5000)
+				assert.same({ 40 }, levels(c4))
+			end)
+
+			it("reports the level the CHANGING started from when the bridge knows none (L4)", function()
+				local env, c4 = load_light({ rid = "l1" })
+				configure(env)
+				c4.calls = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "2000" })
+				c4.advance(1000)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "20", RATE = "0" })
+				assert.same({ { 0, 80, 2000 }, { 40, 20, 0 } }, changing(c4))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", reason = "undelivered" }) -- no model at the bridge
+				assert.same({ 40 }, levels(c4))
+				c4.advance(5000)
+				assert.same({ 40 }, levels(c4))
+			end)
+
+			it("names the brightness preset the light was at again (#429 D7)", function()
+				local env, c4 = lit_light()
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = "5" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40" })
+				c4.calls = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "0",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = "1" })
+				assert.equal(5, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].LIGHT_BRIGHTNESS_CURRENT_PRESET_ID)
+				undelivered(env)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = 5 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			end)
+
+			it("closes a colour target with the colour the bridge knows", function()
+				local env, c4 = lit_light()
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.3", LIGHT_COLOR_TARGET_Y = "0.3",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				c4.calls = {}
+				undelivered(env)
+				local colors = notifies(c4, "LIGHT_COLOR_CHANGED")
+				assert.equal(1, #colors)
+				assert.equal(1, colors[1].LIGHT_COLOR_CURRENT_COLOR_MODE, "the white, not the colour asked for")
+				c4.advance(5000)
+				assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"), "the colour is never assumed")
+			end)
+
+			it("closes a turn-on's colour CHANGING too, and ends the blend it started (#427 D14)", function()
+				local env, c4 = load_light({ rid = "l1" })
+				configure(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "70", mirek = "250",
+					color_mode = "ct", online = "true", reason = "hello" })
+				local x, y = c4:ColorCCTtoXY(2700)
+				for _, preset in ipairs({ { "On", 11 }, { "Dim", 12 } }) do
+					proxy(env, "UPDATE_COLOR_PRESET", { COMMAND = "MODIFIED", ID = tostring(preset[2]), NAME = preset[1],
+						COLOR_X = tostring(x), COLOR_Y = tostring(y), COLOR_MODE = "1" })
+				end
+				c4.calls, c4.sent = {}, {}
+				proxy(env, "ON")
+				assert.is_not_nil(sets(c4)[1].mirek, "the turn-on carries the On colour")
+				assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGING"))
+				c4.calls = {}
+				undelivered(env, { on = "false", brightness = "70", mirek = "250" })
+				assert.same({ 0 }, levels(c4), "still off")
+				local colors = notifies(c4, "LIGHT_COLOR_CHANGED")
+				assert.equal(1, #colors)
+				assert.is_nil(colors[1].LIGHT_COLOR_CURRENT_PRESET_ID, "4000 K is not the On preset")
+				c4.advance(5000)
+				assert.same({ 0 }, levels(c4))
+				assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"))
+				-- The Hue app turns it on; a slider move then carries no blend.
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "50", mirek = "250", color_mode = "ct" })
+				c4.sent = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30", RATE = "0" })
+				assert.same({ { rid = "l1", on = "true", brightness = "30", rate = "0" } }, sets(c4))
+			end)
+
+			it("leaves a hold in progress alone: its release still sends the stop", function()
+				local env, c4 = lit_light()
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				c4.advance(400) -- the hold starts: HUE_DIM up
+				c4.advance(1000) -- ten ticks: 60 %
+				c4.calls = {}
+				undelivered(env) -- the dim did not land
+				assert.same({ 40 }, levels(c4))
+				env.ReceivedFromProxy(200, "DO_RELEASE", {})
+				assert.same({ { rid = "l1", direction = "up", duration = "5000" },
+					{ rid = "l1", direction = "stop", level = "60" } }, dims(c4))
+			end)
+
+			it("works the same for a zone light; offline drops its commands too", function()
+				local env, c4 = load_light({ rid = ZONE_RID })
+				env.ExecuteCommand("HUE_CONFIGURE", ZONE)
+				env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "40", x = "0.4", y = "0.35",
+					color_mode = "xy", online = "true", reason = "hello" })
+				c4.calls, c4.sent = {}, {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
+				env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "40", x = "0.4", y = "0.35",
+					online = "true", reason = "undelivered" })
+				assert.same({ 40 }, levels(c4))
+				c4.advance(5000)
+				assert.same({ 40 }, levels(c4))
+				offline(env)
+				assert.same({ false }, online_states(c4))
+				assert.equal(NOT_ANSWERING, env.Properties["Status"])
+				assert.equal("Offline", env.Properties["Online"])
+				c4.sent = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
+				assert.same({}, c4.sent)
+			end)
+		end)
+	end)
 end)

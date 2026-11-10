@@ -24,6 +24,18 @@ listed.
   off, such as a MotionAware area's, get the Hue app steps instead (#280).
 
 ### Changed
+- When the Hue bridge has not answered, or has refused the pairing, for 5
+  minutes, every Hue Light, zone light, room light and Hue Scene goes
+  offline: Navigators disable its tile and keypad buttons do nothing until
+  the bridge answers again, when they come back by themselves. The Hue
+  Bridge's Attention says why. Shorter outages, such as a bridge restart,
+  change nothing (#428).
+- A Hue Motion Sensor's Online turns No after the same 5 minutes, and its
+  Offline event fires; its motion state stays as it was. Programming that
+  uses Online or the Offline event now also sees a long bridge outage
+  (#428).
+- A command that does not reach the Hue bridge no longer shows as done: the
+  tile and keypad LEDs go back to what the light last reported (#428).
 - Hue Light devices (single lights, zone lights and room lights) follow
   Control4's brightness On Mode. Preset, the default, turns the light on at
   its Default On Brightness as before; Previous turns it on at the level it

@@ -31,6 +31,7 @@ local group_hold_mod = require("bridge.group_hold")
 local rows_mod = require("bridge.rows")
 local bridges_found_mod = require("bridge.bridges_found")
 local away_mod = require("bridge.away")
+local link_mod = require("bridge.link")
 local identity_mod = require("bridge.identity")
 local tasks_mod = require("bridge.tasks")
 local netgate_mod = require("bridge.netgate")
@@ -161,6 +162,11 @@ local function refresh_status()
 	-- Every change of what the background tasks' guards read passes here.
 	if state.hk then
 		state.hk:wake()
+	end
+	-- The bridge cannot be used (unpaired, key rejected, TLS, identity): the
+	-- link counts it as trouble (#428 D2 d).
+	if state.link then
+		state.link:evaluate()
 	end
 end
 
@@ -412,6 +418,16 @@ local function bridge_request(req, callback)
 		if type(r) == "table" and (r.code == 401 or r.code == 403) then
 			confirm_key_rejected(r.code)
 		end
+		-- The link to the bridge (#428 D2 c, f): a 2xx is contact; a transfer
+		-- that failed without an HTTP status is trouble, except the local
+		-- invalid request path. 429, 5xx and other 4xx are neither.
+		if type(r) == "table" and state.link then
+			if r.ok then
+				state.link:contact()
+			elseif r.code == nil and r.err ~= http.INVALID_PATH then
+				state.link:trouble()
+			end
+		end
 		callback(r)
 	end)
 end
@@ -593,6 +609,9 @@ local function attention_text()
 	for _, item in ipairs(state.away:attention_items()) do
 		items[#items + 1] = item
 	end
+	for _, item in ipairs(state.link and state.link:attention_items() or {}) do
+		items[#items + 1] = item
+	end
 	local text = state.lights:attention()
 	if text and text ~= "" and text ~= "None" then
 		items[#items + 1] = text
@@ -681,6 +700,12 @@ local function new_queue()
 		send = function(rid, body, done)
 			bridge_request({ method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }, done)
 		end,
+		-- A PUT that failed answers the device with the bridge's last word (#428 D8).
+		on_undelivered = function(rid)
+			if state.lights then
+				state.lights:undelivered(rid)
+			end
+		end,
 	})
 end
 
@@ -700,6 +725,16 @@ local function new_group_queue()
 		-- Where a refused dim stop's fallback estimate starts.
 		level_of = function(rid)
 			return state.scenes and state.scenes.group_level and state.scenes.group_level[rid] or nil
+		end,
+		-- A grouped_light PUT that failed answers the zone lights and the
+		-- scenes on that group with the bridge's last word (#428 D8, D9).
+		on_undelivered = function(rid)
+			if state.zone_lights then
+				state.zone_lights:undelivered(rid)
+			end
+			if state.scenes then
+				state.scenes:undelivered_group(rid)
+			end
 		end,
 	})
 end
@@ -809,6 +844,37 @@ state.away = away_mod.new({
 	log = log,
 	now_ms = now_ms,
 })
+
+-- The link to the bridge (#428, docs/offline-design.md §3): every Hue device
+-- goes offline after OFFLINE_AFTER_S of trouble and back at the first contact.
+-- The devices of all four modules, as one set of device ids.
+local function link_device_ids()
+	local ids = {}
+	local function add(registry)
+		for _, entry in pairs(registry or {}) do
+			if entry.device_id then
+				ids[tonumber(entry.device_id) or entry.device_id] = true
+			end
+		end
+	end
+	add(state.lights and state.lights.registry)
+	add(state.scenes and state.scenes.registry)
+	add(state.zone_lights and state.zone_lights.registry)
+	add(state.motion and state.motion.registry)
+	return ids
+end
+state.link = link_mod.new({
+	state = state,
+	paired = paired,
+	keyed_refusal = keyed_refusal,
+	now_ms = now_ms,
+	device_ids = link_device_ids,
+	send = device_send,
+	refresh = refresh_lights_props,
+	log = log,
+	clock = function(ms) return state.away:clock(ms) end,
+})
+state.away.ctx.link = state.link
 
 local function new_stream()
 	return (use_netstream() and netstream or stream).new({
@@ -983,6 +1049,9 @@ local function choose_stream_address(callback)
 		return state.identity:verify("stream", function(ok)
 			if ok then
 				choose_stream_address(callback)
+			elseif state.link then
+				-- An unsupported model fails without a Status refresh: count it (#428 E11).
+				state.link:evaluate()
 			end
 		end)
 	end
@@ -1668,6 +1737,8 @@ end
 
 dispatch.commands["HUE_MOTION_HELLO"] = function(params)
 	params = params or {}
+	-- The link first, so the device knows before its state (#428 D4).
+	state.link:tell(tonumber(params.device_id))
 	if not state.motion:hello(params) then
 		log.debug("HUE_MOTION_HELLO from unregistered motion device %q (device %s)", tostring(params.rid),
 			tostring(params.device_id))
@@ -1753,6 +1824,8 @@ end
 -- Messages from scene devices (docs/scenes-design.md §2).
 dispatch.commands["HUE_SCENE_HELLO"] = function(params)
 	params = params or {}
+	-- The link first, so the device knows before its state (#428 D4).
+	state.link:tell(tonumber(params.device_id))
 	-- hello(rid, params): the rid is a separate argument, as for lights.
 	if not state.scenes:hello(params.rid or "", params) then
 		log.debug("HUE_SCENE_HELLO not answered for %q (device %s)", tostring(params.rid), tostring(params.device_id))
@@ -1862,6 +1935,8 @@ end
 -- and state.
 dispatch.commands["HUE_HELLO"] = function(params)
 	params = params or {}
+	-- The link first, so the device knows before its state (#428 D4).
+	state.link:tell(tonumber(params.device_id))
 	local rid = params.rid or ""
 	if params.kind == "group" then
 		if not state.zone_lights:hello(params) then
@@ -1960,6 +2035,11 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 	if log.enabled("debug") then
 		log.debug("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
 			tostring(otherDeviceID), tostring(otherBindingID))
+	end
+	-- A device bound during an outage hears the link before the state its
+	-- binding brings (#428 E21, D4): no online-then-offline flicker.
+	if state.link and tonumber(idBinding) == 1 and (bIsBound == true or bIsBound == "true") then
+		state.link:tell(tonumber(otherDeviceID))
 	end
 	if state.scenes then
 		state.scenes:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
@@ -2397,6 +2477,7 @@ function OnDriverLateInit(dit)
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
 	state.away:load() -- the last good address and the last move, from the store
+	state.link:load() -- an outage that outlived the last run (#428 D12)
 	state.lights = new_lights()
 	state.lights:load()
 	-- Configure every known light from the persisted registry before any
@@ -2557,6 +2638,7 @@ function OnDriverDestroyed()
 	state.destroyed = true
 	pair_window:close()
 	state.away:cancel_outage_check()
+	state.link:cancel()
 	attention_rows:cancel()
 	last_action_rows:cancel()
 	if state.hk then

@@ -277,6 +277,130 @@ describe("common.device", function()
 		end)
 	end)
 
+	-- #428, docs/offline-design.md §6.1, §6.3 and §6.6: the bridge's
+	-- HUE_BRIDGE_LINK, kept in dev.link and handed to the driver's hook.
+	describe("the bridge's link (#428)", function()
+		local link = require("common.link")
+		local SINCE = os.time() - 120 -- two minutes ago, in epoch seconds as the bridge sends it
+
+		local function offline(dispatch, reason, since)
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "offline", reason = reason or "not_answering",
+				since = tostring(since or SINCE) })
+		end
+
+		local function online(dispatch)
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "online" })
+		end
+
+		-- A device past late init whose hook records every call as { offline, reason, changed }.
+		local function linked_device()
+			local dev, _, _, dispatch = new_device()
+			local calls = {}
+			dev.on_link = function(l, changed)
+				calls[#calls + 1] = { l.offline, l.reason, changed }
+			end
+			dev.late_init()
+			return dev, calls, dispatch
+		end
+
+		it("registers HUE_BRIDGE_LINK; dev.link is nil until told, and reads as online", function()
+			local dev, _, _, dispatch = new_device()
+			assert.is_function(dispatch.commands["HUE_BRIDGE_LINK"])
+			assert.is_nil(dev.link)
+			assert.is_false(dev.link_offline())
+			assert.is_nil(dev.link_text())
+			assert.has_no.errors(function() dev.on_link({ offline = false }, false) end, "the default hook does nothing")
+		end)
+
+		it("buffers a link that arrives before late init, and applies it in order with the rest", function()
+			local dev, _, _, dispatch = new_device()
+			local seen = {}
+			dev.on_link = function(l, changed) seen[#seen + 1] = { "link", l.offline, changed } end
+			local configure = dev.after_late_init("HUE_CONFIGURE", function()
+				seen[#seen + 1] = { "configure", dev.link_offline() }
+			end)
+			offline(dispatch)
+			configure({})
+			assert.same({}, seen)
+			assert.is_nil(dev.link, "nothing taken before late init")
+			dev.late_init()
+			assert.same({ { "link", true, true }, { "configure", true } }, seen,
+				"the link first, so the configure after it in a hello answer already sees it (D4)")
+		end)
+
+		it("keeps the link, says offline and its text, and calls the hook with changed", function()
+			local dev, calls, dispatch = linked_device()
+			offline(dispatch)
+			assert.same({ offline = true, reason = "not_answering", since = SINCE }, dev.link)
+			assert.is_true(dev.link_offline())
+			assert.equal("Hue Bridge not answering since " .. link.clock(SINCE), dev.link_text())
+			assert.same({ { true, "not_answering", true } }, calls)
+			online(dispatch)
+			assert.same({ offline = false }, dev.link)
+			assert.is_false(dev.link_offline())
+			assert.is_nil(dev.link_text())
+			assert.equal(2, #calls)
+			assert.same({ false, nil, true }, calls[2])
+		end)
+
+		it("changed is true only when what the device shows moves", function()
+			local _, calls, dispatch = linked_device()
+			online(dispatch) -- online after nothing: the first broadcast or a hello answer
+			online(dispatch) -- online after online
+			offline(dispatch) -- offline: changed
+			offline(dispatch) -- the same again (a hello answer): not changed
+			offline(dispatch, "key_rejected") -- another reason while offline (D3): changed
+			offline(dispatch, "key_rejected", SINCE - 60) -- another since: changed
+			online(dispatch) -- back: changed
+			local changed = {}
+			for i, call in ipairs(calls) do changed[i] = call[3] end
+			assert.same({ false, false, true, false, true, true, true }, changed)
+		end)
+
+		it("computes the text from since at each call, with the day for another day (§6.3)", function()
+			local dev, _, dispatch = linked_device()
+			local yesterday = os.time() - 26 * 3600
+			offline(dispatch, "blocked", yesterday)
+			assert.equal("Hue Bridge not usable since " .. os.date("%m-%d %H:%M", yesterday) .. " (see its Status)",
+				dev.link_text())
+			offline(dispatch, "other_bridge", "")
+			assert.equal("Hue Bridge not at its address", dev.link_text(), "no since: no time")
+		end)
+
+		it("logs going offline and coming back at info, an unchanged link at debug only", function()
+			local _, _, dispatch = linked_device()
+			log.set_debug(true)
+			local lines = capture_log()
+			offline(dispatch)
+			offline(dispatch)
+			online(dispatch)
+			assert.same({
+				"[INFO] Hue Test: offline: Hue Bridge not answering since " .. link.clock(SINCE),
+				"[DEBUG] Hue Test: HUE_BRIDGE_LINK offline, as already known",
+				"[INFO] Hue Test: online: the Hue Bridge answers again",
+			}, lines)
+		end)
+
+		it("ignores a state it does not know, logging it once, and keeps what it knew (§6.1)", function()
+			local dev, calls, dispatch = linked_device()
+			offline(dispatch)
+			local lines = capture_log()
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "sideways", reason = "blocked", since = "12" })
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "sideways" })
+			dispatch.commands["HUE_BRIDGE_LINK"]({})
+			assert.same({ "[WARN] Hue Test: HUE_BRIDGE_LINK with state \"sideways\" ignored" }, lines)
+			assert.is_true(dev.link_offline())
+			assert.equal(1, #calls, "the hook heard nothing of them")
+		end)
+
+		it("takes an unknown reason as not answering (a later bridge's)", function()
+			local dev, _, dispatch = linked_device()
+			offline(dispatch, "from_a_later_bridge")
+			assert.equal("not_answering", dev.link.reason)
+			assert.equal("Hue Bridge not answering since " .. link.clock(SINCE), dev.link_text())
+		end)
+	end)
+
 	-- docs/review-leftovers-design.md #49: OnBindingChanged acts only after
 	-- late init; an earlier call waits and is replayed once late init has run.
 	describe("binding changes before late init", function()

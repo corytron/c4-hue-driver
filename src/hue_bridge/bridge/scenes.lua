@@ -41,9 +41,10 @@
 --
 -- Callback rules inherited from lights.lua: the GETs run serially, chained
 -- from http.request callbacks; on_container runs inside OnBodyChunk and only
--- sends messages; every callback body is pcall-wrapped. The one timer is a
--- recall's coalescing window (RECALL_WINDOW_MS, ctx.set_timer); its callback
--- is pcall-wrapped too.
+-- sends messages; every callback body is pcall-wrapped. The timers are a
+-- recall's coalescing window (RECALL_WINDOW_MS, ctx.set_timer) and the 1 ms
+-- deferral of a failed recall's answer (undelivered_recall, #428 D8); their
+-- callbacks are pcall-wrapped too.
 --
 -- Persistence: the registry's mutators change memory only; this module marks
 -- itself dirty and saves once per batch, except during device creation, where
@@ -208,6 +209,8 @@ function scenes.new(ctx)
 		smart_fresh = false,       -- the last resync's /smart_scene GET succeeded (its states are current)
 		group_on = {},             -- grouped_light rid → on (boolean) from the last GET and the stream; absent = unknown
 		group_level = {},          -- grouped_light rid → dimming.brightness (average of the lights on), when reported
+		level_before = {},         -- grouped_light rid → { level = group_level before a slider move assumed its
+		                           -- target }, until the bridge reports a level again (#428 D9)
 		level_sent = {},           -- grouped_light rid → the HUE_SCENE_GROUP level text last sent to its scenes
 		last_configure = {},       -- rid → signature of the last HUE_SCENE_CONFIGURE sent
 		recall_gen = {},           -- rid → generation of the latest recall or off (still_current)
@@ -669,6 +672,7 @@ function scenes:absorb(res)
 	end
 	self.group_on = group_on
 	self.group_level = group_level
+	self.level_before = {}
 	self.ctx.log.debug("scenes: %d scenes and %d time-based scenes cached%s", self:bridge_count(), self:smart_count(),
 		self.smart_fresh and "" or " (time-based ones from before)")
 	self:refresh_registry()
@@ -1047,6 +1051,36 @@ function scenes:send_group_all()
 	return sent
 end
 
+-- #428 D8 (docs/offline-design.md §6.2): a PUT on grouped_light
+-- `grouped_rid` failed (the group queue's on_undelivered, after each failed
+-- attempt): a scene's OFF, a level move, a hold's step or stop. A level a
+-- slider move assumed goes back to the bridge's (level_before), so the next
+-- move is measured from where the lamps are; then every linked scene on that
+-- group hears HUE_SCENE_GROUP with the cached on and level, each when known,
+-- and reason "undelivered", so it settles its target with them (D9; with
+-- neither known it still settles). Returns the number of scenes told.
+function scenes:undelivered_group(grouped_rid)
+	if type(grouped_rid) ~= "string" or grouped_rid == "" then
+		return 0
+	end
+	local before = self.level_before[grouped_rid]
+	if before then
+		self.group_level[grouped_rid] = before.level
+		self.level_before[grouped_rid] = nil
+	end
+	local rids = self:linked_scenes_on(grouped_rid)
+	if #rids == 0 then
+		return 0
+	end
+	local fields = self:group_fields(grouped_rid) or {}
+	fields.reason = "undelivered"
+	local sent = self:send_group_for(grouped_rid, fields, rids)
+	if sent > 0 and fields.level then
+		self.level_sent[grouped_rid] = fields.level
+	end
+	return sent
+end
+
 -- A grouped_light item from the stream: the scenes of its group hear what
 -- changed, in one HUE_SCENE_GROUP each: `on` when the on/off changed,
 -- `level` when it differs from the last level sent to the group. The group's
@@ -1061,6 +1095,7 @@ function scenes:on_grouped_light(item)
 	end
 	if level ~= nil then
 		self.group_level[grouped] = level
+		self.level_before[grouped] = nil
 	end
 	local fields = {}
 	if type(item.on) == "table" and type(item.on.on) == "boolean" and self.group_on[grouped] ~= item.on.on then
@@ -1576,6 +1611,7 @@ function scenes:on_container(container)
 				if kind == "delete" then
 					self.group_on[item.id] = nil
 					self.group_level[item.id] = nil
+					self.level_before[item.id] = nil
 					self.level_sent[item.id] = nil
 				else
 					sent = sent + self:on_grouped_light(item)
@@ -1640,11 +1676,31 @@ local function failure_text(r, hint)
 	return tostring(r.err)
 end
 
+-- #428 D8 (docs/offline-design.md §6.2): a recall or activation that did not
+-- land is answered with the scene's current status, reason "undelivered",
+-- from a 1 ms timer. A refusal without a request (identity not verified,
+-- not paired) calls back inside the device's own HUE_SCENE_RECALL, and
+-- whether C4:SendToDevice runs the receiver before it returns is not
+-- documented [assumed: unknown, offline-design C5]: an answer the device
+-- handles before it has armed its fallback would be overwritten by that
+-- fallback. A later recall or OFF of the scene, or a re-link or forget,
+-- before the timer fires makes the answer stale: nothing is sent then.
+function scenes:undelivered_recall(rid, entry, gen)
+	self.ctx.set_timer(1, function()
+		self:protect("undelivered recall", function()
+			if self:still_current(rid, entry, gen) then
+				self:send_state(rid, "undelivered")
+			end
+		end)
+	end)
+end
+
 -- HUE_SCENE_RECALL for a time-based scene (docs/smart-scenes-design.md
 -- Decision 3): PUT {"recall":{"action":"activate"}} on /smart_scene/<rid>
 -- whatever the action, without duration or brightness (a smart recall has
 -- neither; a debug line names what was ignored); on success STATE active
--- (reason "recall"), on failure a warning and STATE with the cached state.
+-- (reason "recall"), on failure a warning and STATE with the cached state
+-- (reason "undelivered", from a timer: undelivered_recall, #428 D8).
 -- Returns true (a PUT was started).
 function scenes:activate(rid, entry, params)
 	local ignored = {}
@@ -1680,7 +1736,7 @@ function scenes:activate(rid, entry, params)
 			end
 			self.ctx.log.warn("scenes: %s (device %d): Recall failed: %s", self:entry_label(rid, entry), entry.device_id,
 				failure_text(r, "time-based scene gone?"))
-			self:send_state(rid, "recall")
+			self:undelivered_recall(rid, entry, gen)  -- #428 D8
 		end)
 	end)
 	return true
@@ -1793,7 +1849,8 @@ end
 -- duration in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with
 -- the state the action produces (reason "recall") so the device settles even
 -- if the stream item is missed; on failure a warning and STATE with the
--- cached status. A recall within RECALL_WINDOW_MS of the scene's last recall
+-- cached status (reason "undelivered", from a timer: undelivered_recall,
+-- #428 D8). A recall within RECALL_WINDOW_MS of the scene's last recall
 -- PUT waits for the window to end (open_recall_window), unless it is a
 -- keypad tap's (urgent = "true", #421 S-D1: skip_recall_window). A
 -- time-based scene is activated instead (scenes:activate). Returns true when
@@ -1882,7 +1939,7 @@ function scenes:send_recall(rid, entry, params)
 			end
 			self.ctx.log.warn("scenes: %s (device %d): Recall failed: %s", self:entry_label(rid, entry), entry.device_id,
 				failure_text(r, "scene gone?"))
-			self:send_state(rid, "recall")
+			self:undelivered_recall(rid, entry, gen)  -- #428 D8
 		end)
 	end)
 	return true
@@ -2175,7 +2232,12 @@ function scenes:level(params)
 		return false
 	end
 	-- Assume the target until Hue reports, so a second slider move made
-	-- before that report is measured from where the first one goes.
+	-- before that report is measured from where the first one goes. The
+	-- bridge's own level is kept aside until then: a move that fails puts it
+	-- back (undelivered_group, #428 D9).
+	if self.level_before[grouped] == nil then
+		self.level_before[grouped] = { level = current }
+	end
 	self.group_level[grouped] = level
 	return true
 end

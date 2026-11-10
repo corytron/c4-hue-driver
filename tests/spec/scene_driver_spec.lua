@@ -3555,4 +3555,227 @@ describe("Hue Scene driver", function()
 			}, firsts)
 		end)
 	end)
+
+	-- #428, docs/offline-design.md: the bridge's link offline as one more
+	-- blocker (D5), and its answers to a recall or a group command that did
+	-- not land (D8, D9, §6.2 "undelivered").
+	describe("the bridge's link and commands that do not land (#428)", function()
+		local link = require("common.link")
+		local SINCE = os.time() - 120 -- two minutes ago, in epoch seconds as the bridge sends it
+		local NOT_ANSWERING = "Hue Bridge not answering since " .. link.clock(SINCE)
+
+		local function offline(env, reason)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = reason or "not_answering",
+				since = tostring(SINCE) })
+		end
+
+		local function online(env)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "online" })
+		end
+
+		-- scenes:undelivered_group's HUE_SCENE_GROUP: the group as the bridge last knew it.
+		local function group_undelivered(env, on, level)
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = on, level = level, reason = "undelivered" })
+		end
+
+		local function proxy(env, command, params)
+			env.ReceivedFromProxy(5001, command, params or {})
+		end
+
+		-- A keypad tap on a Button Link (200 top, 201 bottom): push, release, click.
+		local function link_tap(env, binding)
+			env.ReceivedFromProxy(binding, "DO_PUSH", {})
+			env.ReceivedFromProxy(binding, "DO_RELEASE", {})
+			env.ReceivedFromProxy(binding, "DO_CLICK", {})
+		end
+
+		-- An ordinary scene Hue reports `active`, its group lit at `level`
+		-- (none for nil); every timer run out and the recording cleared.
+		local function scene(active, level)
+			local env, c4 = known_scene(active)
+			if level then
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = tostring(level) })
+			end
+			c4.advance(5000)
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		local function online_states(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "ONLINE_CHANGED")) do out[#out + 1] = p.STATE end
+			return out
+		end
+
+		describe("offline (D5)", function()
+			it("goes offline with Status naming the bridge, drops every command before any CHANGING, and comes back",
+				function()
+					local env, c4 = scene("static", 60)
+					offline(env)
+					assert.same({ false }, online_states(c4))
+					assert.equal(NOT_ANSWERING, env.Properties["Status"])
+					assert.equal("Offline", env.Properties["Online"])
+					c4.calls, c4.sent = {}, {}
+					proxy(env, "ON")
+					proxy(env, "OFF")
+					proxy(env, "TOGGLE")
+					proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+					link_tap(env, 200)
+					c4.advance(1000)
+					link_tap(env, 201)
+					c4.advance(1000)
+					env.ReceivedFromProxy(200, "DO_PUSH", {})
+					c4.advance(500) -- held: a hold
+					env.ReceivedFromProxy(200, "DO_RELEASE", {})
+					assert.same({}, c4.sent, "nothing to the bridge")
+					assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+					assert.same({}, levels(c4))
+					assert.equal(NOT_ANSWERING, env.Properties["Status"])
+					c4.calls = {}
+					online(env)
+					assert.same({ true }, online_states(c4))
+					assert.equal(LINKED_STATUS, env.Properties["Status"])
+					assert.equal("Online", env.Properties["Online"])
+				end)
+
+			it("names a new reason while offline; an unchanged link changes nothing", function()
+				local env, c4 = scene("static", 60)
+				online(env)
+				assert.same({}, online_states(c4))
+				offline(env)
+				offline(env)
+				assert.same({ false }, online_states(c4))
+				offline(env, "not_paired")
+				assert.equal("Hue Bridge not paired since " .. link.clock(SINCE), env.Properties["Status"])
+			end)
+
+			it("ends a tap fade as it goes offline with the scene as it was; nothing follows", function()
+				local env, c4 = scene("inactive")
+				link_tap(env, 200) -- a recall over 3000 ms
+				c4.advance(1000)
+				c4.calls = {}
+				offline(env)
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "no fallback assumes the recall")
+			end)
+
+			it("forgets the link with its bridge binding", function()
+				local env, c4 = scene("static", 60)
+				offline(env)
+				c4.bindings = {}
+				env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+				assert.equal(LINKED_STATUS, env.Properties["Status"])
+				assert.equal("Online", env.Properties["Online"])
+			end)
+		end)
+
+		describe("undelivered (D8, D9)", function()
+			it("a recall during a tap fade ends it at once with the scene as it was", function()
+				local env, c4 = scene("inactive")
+				link_tap(env, 200) -- a recall over 3000 ms
+				c4.advance(1000)
+				c4.calls = {}
+				state(env, "inactive", { reason = "undelivered" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "nothing at the fade's end or the fallback time")
+				c4.sent = {}
+				link_tap(env, 200)
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"), "the fade is over: the next press is a fresh tap")
+			end)
+
+			it("a recall the bridge knows no status for closes at the level its CHANGING started from (L4)", function()
+				local env, c4 = load_scene({ rid = "s1" })
+				configure(env)
+				c4.calls, c4.sent = {}, {}
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_SCENE_STATE", { rid = "s1", reason = "undelivered" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "the recall is never assumed")
+			end)
+
+			it("a time-based scene's start: nothing follows it", function()
+				local env, c4 = smart_scene("inactive")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				c4.calls = {}
+				state(env, "inactive", { reason = "undelivered" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(5000)
+				assert.same({}, messages(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 0 }, levels(c4))
+			end)
+
+			it("the group's answer settles a level move at once with the level the bridge knows", function()
+				local env, c4 = scene("static", 80)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "500" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
+				c4.calls = {}
+				group_undelivered(env, "true", "80")
+				assert.same({ 80 }, levels(c4), "at once, not held back for the ramp's end (#421 D10)")
+				c4.advance(5000)
+				assert.same({ 80 }, levels(c4), "no fallback assumes 40")
+			end)
+
+			it("the group's answer settles a tap's fade-out: the scene stays lit at the bridge's level", function()
+				local env, c4 = scene("static", 60)
+				link_tap(env, 201) -- the group off over 1800 ms
+				assert.same({ { rid = "s1", duration = "1800", urgent = "true" } },
+					(function()
+						local out = {}
+						for _, m in ipairs(messages(c4, "HUE_SCENE_OFF")) do out[#out + 1] = m.params end
+						return out
+					end)())
+				state(env, "inactive", { reason = "recall" }) -- the bridge's at-once inactive, held back
+				c4.advance(300)
+				c4.calls = {}
+				group_undelivered(env, "true", "60")
+				assert.same({ 60 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 60 }, levels(c4), "the off is never assumed, nor the held state ended")
+			end)
+
+			it("an instant OFF that did not land puts the held state back while the group is on", function()
+				local env, c4 = scene("static", 60)
+				proxy(env, "OFF")
+				state(env, "inactive", { reason = "recall" }) -- the bridge's at-once inactive settles it
+				assert.same({ 0 }, levels(c4))
+				group_undelivered(env, "true", "60")
+				assert.same({ 0, 60 }, levels(c4), "This scene: still on, as its lamps are")
+				c4.advance(10000)
+				assert.same({ 0, 60 }, levels(c4))
+			end)
+
+			it("an OFF that landed is not undone by a later answer: any group report ends the wait", function()
+				local env, c4 = scene("static", 60)
+				proxy(env, "OFF")
+				state(env, "inactive", { reason = "recall" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "30" }) -- the Hue app
+				c4.calls = {}
+				group_undelivered(env, "true", "30") -- another device's command on the group
+				assert.same({ 0 }, levels(c4), "This scene: still off")
+			end)
+
+			it("an answer for a scene that asked nothing reports what it shows", function()
+				local env, c4 = scene("static", 60)
+				state(env, "inactive") -- Hue calls a dimmed scene inactive; the on rule keeps it on
+				c4.calls = {}
+				group_undelivered(env, "true", "60")
+				assert.same({ 60 }, levels(c4))
+				group_undelivered(env, "false")
+				assert.same({ 60, 0 }, levels(c4), "the bridge says the group is off: the held state ends")
+			end)
+		end)
+	end)
 end)

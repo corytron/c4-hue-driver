@@ -35,16 +35,24 @@
 --   dev.ramp_active()        optional: true while a brightness ramp a tap can stop runs
 --                            (#421 D6); the default, false, leaves only the double-tap window
 --   dev.on_ramp_stop(button) optional: stop that ramp now (#421 D5); the default does nothing
+--   dev.on_link(l, changed)  optional: a HUE_BRIDGE_LINK was taken into dev.link (#428 D5,
+--                            docs/offline-design.md §6.6); `changed` says whether what the
+--                            device shows moves: offline, back online, or another reason or
+--                            since while offline. The default does nothing
 --
 -- The instance: devloop (the module; nil in release builds), flush_log(),
 -- prop(), notify(), device_id(), result(), bound_bridge(), proxy_id(),
--- send(), after_late_init(), late_init(), binding_changed(),
+-- send(), after_late_init(), late_init(), link (the bridge's link as
+-- common/link.lua parsed it, nil until told), link_offline(), link_text(),
+-- binding_changed(),
 -- replay_bindings(), show_driver_version(), load_colors(), update_leds(),
 -- setting(), take_setting(), load_settings(), rate_default(), rate_caps(),
 -- first_arrival(), button_action(), holding(), dim_after_on(),
 -- link_button(), schedule_recheck(), cancel_recheck(), cancel_timers() and
 -- goodbye(). It registers the Driver_Version and Debug_Mode property
--- handlers, the proxy's BUTTON_ACTION, DO_PUSH, DO_RELEASE, DO_CLICK,
+-- handlers, the bridge's HUE_BRIDGE_LINK (#428; the Hue Motion driver puts
+-- its own in place after device.new), the proxy's BUTTON_ACTION, DO_PUSH,
+-- DO_RELEASE, DO_CLICK,
 -- REQUEST_BUTTON_COLORS and SET_BUTTON_COLOR, the SET_* command of each
 -- keypad setting it takes, UPDATE_BRIGHTNESS_RATE_DEFAULT and
 -- UPDATE_COLOR_RATE_DEFAULT (#430 D8), and DEV_RELOAD in dev builds.
@@ -57,6 +65,7 @@
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
+local link = require("common.link")
 
 local device = {}
 
@@ -418,6 +427,74 @@ function device.new(opts)
 			end
 		end
 	end
+
+	-- The bridge's link (#428) -----------------------------------------------
+	-- The bridge sends HUE_BRIDGE_LINK to every Hue device once it has been
+	-- unreachable, or has refused the pairing, for 5 minutes (offline, D1), at
+	-- the first contact after it (online, D7), at a reason change while
+	-- offline (D3), at its first evaluation of a run, and first in every hello
+	-- answer, before the configure (D4; docs/offline-design.md §6.1). Each
+	-- driver treats offline as one more reason it cannot be reached (D5, D6):
+	-- its blocker() names link_text() and dev.on_link reports the change.
+	-- dev.link is common/link.lua's parse, nil until the bridge said anything
+	-- (a device of a bridge that predates #428 never hears one, and reads as
+	-- online). It lives in memory only: the bridge tells a restarted device
+	-- in its hello answer (E14 to E17). A driver forgets it when its bridge
+	-- binding goes (dev.link = nil): another bridge's word does not carry
+	-- over. The Hue Motion driver keeps and persists its own (D14) and
+	-- registers its own handler after device.new, which replaces this one.
+
+	dev.link = nil
+
+	function dev.on_link() end
+
+	-- True while the bridge says it is offline.
+	function dev.link_offline()
+		return dev.link ~= nil and dev.link.offline == true
+	end
+
+	-- §6.3's Status text ("Hue Bridge not answering since 14:02"), computed
+	-- from the link's since at each call, so a refresh after midnight names
+	-- the day; nil while the link is not offline.
+	function dev.link_text()
+		return link.text(dev.link, os.time())
+	end
+
+	-- What the device shows moves when the link goes offline, comes back, or
+	-- names another reason or time while offline; an online after nothing
+	-- (the first broadcast, a hello answer) or after online changes nothing.
+	local function link_changed(was, told)
+		if not told.offline then
+			return was ~= nil and was.offline == true
+		end
+		return not (was and was.offline and was.reason == told.reason and was.since == told.since)
+	end
+
+	-- A state this build does not know is ignored and logged once (§6.1).
+	local link_unknown_logged = false
+
+	dispatch.commands["HUE_BRIDGE_LINK"] = dev.after_late_init("HUE_BRIDGE_LINK", function(params)
+		local told = link.parse(params)
+		if not told then
+			if not link_unknown_logged then
+				link_unknown_logged = true
+				log.warn("HUE_BRIDGE_LINK with state %q ignored", tostring(type(params) == "table" and params.state))
+			end
+			return
+		end
+		local changed = link_changed(dev.link, told)
+		dev.link = told
+		if changed then
+			if told.offline then
+				log.info("offline: %s", dev.link_text())
+			else
+				log.info("online: the Hue Bridge answers again")
+			end
+		else
+			log.debug("HUE_BRIDGE_LINK %s, as already known", told.offline and "offline" or "online")
+		end
+		dev.on_link(told, changed)
+	end)
 
 	-- OnBindingChanged before late init: the bridge's import binds a device it
 	-- has just created, so Director can call it while the driver is still

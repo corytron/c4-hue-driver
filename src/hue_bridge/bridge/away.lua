@@ -49,6 +49,16 @@
 --   now_ms()              ms since the epoch; default C4:GetTime [verified:
 --                         SDK 34_timer/_2-GetTime, OS 3.2.3 on], so the
 --                         specs' fake clock (c4.advance) moves the measures
+--   link                  optional: bridge/link.lua instance (#428,
+--                         docs/offline-design.md §6.6), looked up at every
+--                         call, since the driver creates it after this module
+--                         and may set ctx.link afterwards; nil-safe
+--
+-- The link's inputs from here (#428 D2, D12): a drop of a running, connected
+-- stream is trouble (a), "Connected since" is contact (e); the identity check
+-- that finds nothing or another bridge is trouble (b), one that passes is
+-- contact while keyed_refusal() is nil (g); every identity answer, pass or
+-- failure, is the link's first look.
 --
 -- The Attention items (§4 finding 6; the texts of the discovery research
 -- §2.5 where they fit): the paired bridge away an hour ("missing" once the
@@ -79,6 +89,20 @@ away.CHECK_S = 60
 -- A connect's resync is full at the first connect of the run, after an
 -- error and after an outage of RESYNC_FULL_OUTAGE_S or more.
 away.RESYNC_FULL_OUTAGE_S = 600
+
+-- One call into the link (#428 §6.6), when there is one. A raise is logged,
+-- never passed on: the identity check and the stream's status callback,
+-- which call this module, must go on whatever the link does.
+local function tell_link(self, method)
+	local l = self.ctx.link
+	if type(l) ~= "table" or type(l[method]) ~= "function" then
+		return
+	end
+	local ok, err = pcall(l[method], l)
+	if not ok and self.ctx.log then
+		self.ctx.log.error("bridge link: %s failed: %s", method, tostring(err))
+	end
+end
 
 function away.new(ctx)
 	return setmetatable({
@@ -169,6 +193,12 @@ function away:answered(ip)
 		state.last_good_ip = ip
 		C4:PersistSetValue(away.LAST_GOOD_IP_KEY, ip)
 	end
+	-- #428 D2 (g): contact, unless nothing keyed may go out (a rejected key:
+	-- its own re-check or Pair Bridge brings contact); the first look in any case (D12).
+	if self.ctx.keyed_refusal() == nil then
+		tell_link(self, "contact")
+	end
+	tell_link(self, "first_look")
 	if was_away then
 		self.ctx.refresh() -- Attention's "away" or "typed" item goes at once
 	end
@@ -182,6 +212,9 @@ function away:other_bridge(reported)
 		state.away_other = reported
 		ctx.refresh() -- Attention's "away" item names the other bridge at once
 	end
+	-- #428 D2 (b): trouble, and the first look (D12).
+	tell_link(self, "trouble")
+	tell_link(self, "first_look")
 	-- Another bridge where ours answered (a DHCP swap, research T3);
 	-- at a typed address, where ours may answer instead (Bridges Found's offer).
 	self:want_find()
@@ -197,6 +230,9 @@ function away:unreachable()
 		state.away_other = nil -- nothing answers now
 		ctx.refresh()
 	end
+	-- #428 D2 (b): trouble, and the first look (D12).
+	tell_link(self, "trouble")
+	tell_link(self, "first_look")
 	if self.now() - state.unreachable_ms >= away.FIND_AFTER_S * 1000 then
 		self:want_find()
 	end
@@ -219,14 +255,18 @@ function away:stream_status(text)
 	state.stream_connected = up
 	if up then
 		self:cancel_outage_check()
+		tell_link(self, "contact") -- #428 D2 (e)
 	else
 		state.stream_down_ms = state.stream_down_ms or self.now()
 		if state.stream_down_reason == nil and tostring(text):find("^Disconnected") then
 			state.stream_down_reason = tostring(text)
 		end
-		-- A drop, not a stop (Diagnostics, a rejected key, a rebuild).
+		-- A drop, not a stop (Diagnostics, a rejected key, a rebuild). Also
+		-- the link's trouble (#428 D2 a); a stop, or an attempt that fails
+		-- before it ever connected, is not.
 		if was_up and state.stream and state.stream:running() then
 			self:arm_outage_check()
+			tell_link(self, "trouble")
 		end
 		-- Only while the bridge itself does not answer: a stream that
 		-- fails on its own is no reason to look elsewhere.

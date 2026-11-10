@@ -34,6 +34,12 @@
 -- answers no retry can mend, "not paired" and "key rejected": the driver
 -- gives them at once, without a request, until the owner pairs again.
 --
+-- Every PUT that does not land is reported through opts.on_undelivered(rid,
+-- err): each failure that is retried, the drop at the age limit, the final
+-- refusals, another 4xx, and a raising send (#428 D8). The owner answers the
+-- device with the bridge's last known state then, so the tile does not keep
+-- showing a target the bridge never took (docs/offline-design.md §6.2).
+--
 -- The owner supplies `send(rid, body, done)` (an http.request PUT) and may
 -- supply `now()` (a millisecond clock) for tests. Everything that runs later,
 -- in a timer or in done(), is pcall-wrapped and checked against a generation
@@ -106,6 +112,10 @@ end
 --                          dim stop's fallback estimate
 --   label                  what a rid is, for log lines (default "light"; the
 --                          grouped_light queue passes "grouped_light")
+--   on_undelivered(rid, err)  called after every PUT of `rid` that failed, with
+--                          the failure's text, once the queue has decided
+--                          what to do with it (retry or drop); never for an
+--                          ok answer. pcall-wrapped (#428 D8, §6.6)
 function commands.new(opts)
 	local rate = tonumber(opts.rate_per_sec) or commands.RATE_PER_SEC
 	local burst = tonumber(opts.burst) or commands.BURST
@@ -115,6 +125,7 @@ function commands.new(opts)
 		send = assert(opts.send, "commands.new needs opts.send"),
 		now = opts.now or default_now,
 		level_of = opts.level_of,  -- rid -> current brightness or nil (start of a dim's fallback estimate)
+		on_undelivered = opts.on_undelivered,  -- (rid, err) after each failed PUT (#428 D8)
 		label = opts.label or "light",
 		rate = rate,                -- tokens per second
 		burst = burst,              -- token bucket capacity
@@ -393,6 +404,21 @@ function commands:take_token(urgent)
 	return false, math.ceil((1 - self.tokens) * 1000 / self.rate)
 end
 
+-- #428 D8: tell the owner that a PUT of `rid` did not land, so the device
+-- hears the bridge's last known state with reason "undelivered". Called
+-- after the queue has settled its own state for the failure (folded back for
+-- a retry, or dropped), so a set() the callback causes lands on that state.
+-- A callback that raises is logged and changes nothing in the queue.
+function commands:undelivered(rid, err)
+	if type(self.on_undelivered) ~= "function" then
+		return
+	end
+	local ok, cb_err = pcall(self.on_undelivered, rid, err)
+	if not ok then
+		log.error("command queue: on_undelivered for %s failed: %s", tostring(rid), tostring(cb_err))
+	end
+end
+
 -- Send the pending state now if nothing stands in the way: an in-flight PUT
 -- (done() flushes again when it returns) or an empty bucket (a timer does).
 function commands:flush(rid)
@@ -439,8 +465,13 @@ function commands:flush(rid)
 		-- A raising send is a bug in the glue, not a bridge condition: retrying
 		-- would only repeat it. Drop this state and carry on with the next.
 		log.error("command queue: send for %s raised: %s", tostring(rid), tostring(err))
+		-- Answered already when the send called done() before it raised.
+		local unanswered = light.inflight == fields
 		light.inflight = nil
 		self.counters.dropped = self.counters.dropped + 1
+		if unanswered then
+			self:undelivered(rid, "send raised: " .. tostring(err))  -- #428 D8, §6.6
+		end
 	end
 end
 
@@ -492,6 +523,7 @@ function commands:on_done(rid, light, result)
 		else
 			log.debug("%s %s: %s, dropping the command (no retry)", self.label, tostring(rid), tostring(result.err))
 		end
+		self:undelivered(rid, result.err)  -- #428 D8
 		return
 	elseif retriable(result) then
 		light.failures = light.failures + 1
@@ -504,6 +536,7 @@ function commands:on_done(rid, light, result)
 			self:drop(light)
 			log.warn("%s %s: %s; dropping the command, last changed %d s ago (retries stop after %d s)",
 				self.label, tostring(rid), tostring(result.err), math.floor(age / 1000 + 0.5), commands.MAX_AGE_S)
+			self:undelivered(rid, result.err)  -- #428 D8
 			return
 		end
 		-- Newer fields win over the ones that failed. A stop that waited behind
@@ -514,6 +547,10 @@ function commands:on_done(rid, light, result)
 		log.warn("%s %s: %s, retrying in %d ms (attempt %d)", self.label, tostring(rid), tostring(result.err), delay,
 			light.failures)
 		self:arm(rid, light, delay, "retry")
+		-- #428 D8: every failed attempt is answered, not only the last: the
+		-- device shows the bridge's level while the retry waits, and a retry
+		-- that lands later is reported by its event like any change.
+		self:undelivered(rid, result.err)
 		return
 	else
 		light.failures = 0
@@ -527,6 +564,7 @@ function commands:on_done(rid, light, result)
 				light.pending = merge(light.pending or {}, { brightness = level })
 			end
 		end
+		self:undelivered(rid, result.err)  -- #428 D8
 	end
 	if light.pending then
 		self:flush(rid) -- changes made while this PUT was in flight

@@ -19,7 +19,7 @@ sensors. The owner owns none. The house has a Hue Bridge Pro and no sensors.
 | --- | --- | --- |
 | D1 | How the device appears | A new driver `hue_motion.c4z` **is** the sensor: its only proxy is `contactsingle_motionsensor` (C4R §1.3, choice A). Motion is `OPENED`, no motion is `CLOSED`. No `<capabilities>`. The proxy can never change for this file name. |
 | D2 | One driver or two (C4R Q5) | **One** driver with two kinds, `sensor` and `area`, as `hue_light` has lights and groups. |
-| D3 | A failure while motion shows (C4R Q7, EC Q1) | Keep the contact as it is. Set Online false and say in Status that the motion is not current. Only a deliberate end sends `CLOSED`, once (EC §6). |
+| D3 | A failure while motion shows (C4R Q7, EC Q1) | Keep the contact as it is. Set Online false and say in Status that the motion is not current. Only a deliberate end sends `CLOSED`, once (EC §6). Current (2026-11-09, #428 D14): a bridge outage of 5 minutes now counts as such a failure. EC R1's rule that a bridge away leaves Online alone, because Online is about the sensor and not the bridge, is reversed after those 5 minutes: while the bridge's link is offline (no answer, key rejected or not paired for 300 s), Online is false and the Offline event fires; the contact still stays as it is. The 60 s "Bridge not answering since 14:02; motion not current" covers the first 5 minutes as before ([`offline-design.md`](offline-design.md) D1, D14). |
 | D4 | Re-link across kinds (EC Q2) | **No** in beta 1: a sensor device re-links to a sensor, an area device to an area. |
 | D5 | Attention for an unreachable sensor or degraded area (EC Q3) | After 1 hour. A battery at "low" or "critical" is listed at once. |
 | D6 | Switched off or paused in the Hue app (EC Q4) | Listed in Attention. |
@@ -53,7 +53,7 @@ sensors. The owner owns none. The house has a Hue Bridge Pro and no sensors.
 | --- | --- | --- |
 | Driver Version | read-only | as the other drivers |
 | Status | read-only | EC §6 texts |
-| Online | read-only | "Yes" / "No" |
+| Online | read-only | "Yes" / "No"; Current (2026-11-09, #428 D14): "No" also while the bridge's link is offline |
 | Enabled | read-only | "Yes" / "Switched off in the Hue app" / "Paused in the Hue app" |
 | Kind | read-only | "Motion sensor" / "MotionAware area" |
 | Hue Name | read-only | |
@@ -98,6 +98,13 @@ A variable is never set to an invented value. It keeps its last value when the r
 
 Each `<description>` carries `NAME`. Motion events are the proxy's own.
 
+Current (2026-11-09, #428 D14): Online in events 5 and 6, the variable and
+the row is the effective value, false while the bridge's link is offline
+whatever the sensor last said. Offline fires when the link goes offline
+while Online was true, and Online when the link comes back while the
+sensor's own Online is true; a sensor that went unreachable during the
+outage fires nothing more ([`offline-design.md`](offline-design.md) §6.6).
+
 ### 2.5 Conditionals
 
 BOOL Online, BOOL Enabled, BOOL Battery Low, NUMBER Light Level (0–100000), NUMBER Temperature C (−40 to 60), NUMBER Battery Level (0–100).
@@ -126,6 +133,12 @@ BOOL Online, BOOL Enabled, BOOL Battery Low, NUMBER Light Level (0–100000), NU
   - Answer `GET_SENSOR_VALUE` with the last value.
   - Only messages C4R verified, with the parameter names it cites.
 - **Binding.** `OnBindingChanged` on binding 1 sends `HUE_MOTION_HELLO` when bound. When unbound it is a deliberate end ("Not bound to a Hue Bridge").
+- **The bridge's link** (Current, 2026-11-09, #428 D14; [`offline-design.md`](offline-design.md) §6.1, §6.6):
+  - `HUE_BRIDGE_LINK` { `state`, with offline `reason` and `since` } arrives at the link's changes and first in every hello answer, parsed by `common/link.lua`.
+  - Effective Online = the sensor's own Online and not the link offline; true only when the sensor said so. The events, the variable, the row, the old-value mark (the link's `since` when the link took Online) and the temperature output (`VALUE_UNAVAILABLE` once) follow the effective value.
+  - Status: the link's text plus "; motion not current" ("Hue Bridge not answering since 14:02; motion not current"), after the deliberate ends (gone, forgotten, unbound).
+  - The contact is never touched.
+  - Persisted: the device's saved values (`motion_values`) gain three fields, `link_offline`, `link_reason` and `link_since`, the link as last told while it says offline (all absent while online). `online` keeps the sensor's own word. A restart during a long outage therefore keeps Online false without a second Offline event, and still fires Online at its end.
 - **Reuse.** Shared code may be reused from `src/common/` (`dispatch`, `log`, and from `device.lua` whatever applies, such as the binding re-check), read-only. If a change to a common module is needed, the hand-back says so.
 
 ## 3. Messages between the bridge and a motion device
@@ -146,6 +159,15 @@ These go through `C4:SendToDevice`, with string values, `rid` in every message, 
 | --- | --- |
 | `HUE_MOTION_HELLO` | `rid` ("" if unknown), `device_id`, `name`, `kind`, `model` |
 | `HUE_MOTION_GOODBYE` | as `HUE_SCENE_GOODBYE` |
+
+Current (2026-11-09, #428): the bridge also sends every motion device
+`HUE_BRIDGE_LINK` { `state` ("online"/"offline"), with "offline" `reason`
+(`not_answering`/`other_bridge`/`key_rejected`/`blocked`/`not_paired`) and
+`since` (epoch seconds as a decimal string) }: at the change to offline
+after 300 s of bridge trouble, at the change back, at a reason change
+while offline, at the first evaluation of a run, and first in every answer
+to `HUE_MOTION_HELLO`, before the configure and state
+([`offline-design.md`](offline-design.md) D4, §6.1).
 
 The bridge decides `status` and `ended`, and the device shows them. Each
 `HUE_MOTION_STATE` that carries `motion` also carries `motion_changed`, and

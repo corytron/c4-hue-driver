@@ -20,6 +20,11 @@ Current (2026-11-09, #429, #427, #430): turn-ons follow Control4's
 brightness On Mode and colour on modes, and the driver declares the rate
 ranges Control4 enforces; [the turn-on contract](turn-on-design.md) has
 the rules, and dated notes below say where it changed this file.
+Current (2026-11-09, #428): a light, zone or room light goes offline
+after 5 minutes of bridge trouble and back at the first contact, and a
+command the bridge fails to deliver is answered with the bridge's state;
+[the offline contract](offline-design.md) has the rules, and dated notes
+below say where it changed this file.
 
 ## Roles
 
@@ -65,6 +70,20 @@ Current (2026-10-25, build 316): `name` and `model` in `HUE_CONFIGURE` (and
 `bridge/lights.lua:configure_params`, #217), and a dev build's `DEV_RELOAD`
 carries `tree`, `version`, `bundle` (the signed payload) and `mac`
 (`common/devloop.lua`, `docs/dev-loop.md`).
+
+Current (2026-11-09, #428, [the offline contract](offline-design.md) §6.1,
+§6.2): a new bridge → light message, `HUE_BRIDGE_LINK` { `state`
+("online"/"offline"), with "offline" `reason` (`not_answering`,
+`other_bridge`, `key_rejected`, `blocked`, `not_paired`) and `since`
+(epoch seconds as a decimal string) }, goes to every Hue device at the
+change to offline after 300 s of bridge trouble, at the change back, at a
+reason change while offline, at the first evaluation of a run, and first
+in every answer to `HUE_HELLO`, before `HUE_CONFIGURE`. `HUE_STATE`'s
+`reason` gains `undelivered`: after every failed PUT on a light's rid
+(each retry, the final drop, a final refusal, another 4xx), the bridge
+sends the cached state with it (`lights:undelivered`; a bare
+`{ rid, reason }` when it has no model), and for a zone or room light
+after a failed grouped_light PUT (`zone_lights:undelivered`).
 
 `ExecuteCommand` does not tell the receiver who sent a message, so `rid` is
 in every message and the bridge maps rid → deviceId through its registry.
@@ -201,6 +220,13 @@ with the scenes and the zone lights (#56).
   runs at one PUT a second with a burst of 3, not the same constants, and in
   both queues a hold's start and stop skip the bucket (`new_group_queue`,
   `commands.urgent`; `docs/zone-light-design.md` Decision 9).
+- Current (2026-11-09, #428 D8): a new option, `on_undelivered(rid, err)`,
+  pcall-wrapped, is called after every PUT that did not land (each
+  retriable failure before its retry or drop, the final refusals, another
+  4xx, a raising `send`) and never for an ok; the retry and drop rule is
+  unchanged. The light queue passes `lights:undelivered`, the
+  grouped_light queue `zone_lights:undelivered` and
+  `scenes:undelivered_group`.
 - The light's limits (`min_dim`, `mirek_min/max`) come from the registry's
   cached model; `q:limits(rid, {...})` sets them.
 
@@ -228,6 +254,14 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   `LIGHT_BRIGHTNESS_TARGET`, `RATE` } [verified], then
   `LIGHT_BRIGHTNESS_CHANGED` when the matching `HUE_STATE` arrives, or
   after `rate + 1000 ms` if it never does (so the UI never sticks).
+  Current (2026-11-09, #428 D9, D10): a `HUE_STATE` with reason
+  `undelivered` ends the ramp (not held back by #421 D10), settles every
+  pending brightness and colour target with the bridge's fields and reports
+  them as `CHANGED`, or, with no level in it, `LIGHT_BRIGHTNESS_CHANGED` at
+  the level the CHANGING started from; the fallback stays for a bridge that
+  accepts the PUT and sends no event. While the bridge's link is offline
+  the device is offline (a blocker after forgotten, unbound, unlinked and
+  gone) and drops every command before any CHANGING.
   Since 1.3 (#308), while a turn-on from off waits for its target, a
   report that shows the light on at another level (the lamp's previous
   brightness, seen for about 16 ms on the house) is held back until the
@@ -315,6 +349,11 @@ Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
   mirek)` and `LIGHT_COLOR_CHANGED` { `LIGHT_COLOR_CURRENT_X`,
   `LIGHT_COLOR_CURRENT_Y`, `LIGHT_COLOR_CURRENT_COLOR_MODE = 1` }; mode "xy"
   → the xy with mode 0. `online` → `ONLINE_CHANGED` { `STATE` }.
+  Current (2026-11-09, #428 D5, D6): `ONLINE_CHANGED` is true only while
+  the bridge's link is not offline, the device's own blockers are clear
+  and Hue does not report the light unreachable; while the link is
+  offline, Status reads the link's text, for example "Hue Bridge not
+  answering since 14:02" ([`offline-design.md`](offline-design.md) §6.3).
 - Notify parameter names use underscores (`LIGHT_BRIGHTNESS_CURRENT` is
   verified in the sample driver; the colour ones follow the same pattern
   [assumed]).
