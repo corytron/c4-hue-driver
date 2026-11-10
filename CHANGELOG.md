@@ -13,6 +13,8 @@ listed.
 
 ## Unreleased
 
+## 1.5 "Kenari", build 609 (2026-11-10)
+
 ### Added
 - Hue Light devices (single lights, zone lights and room lights) can join
   Control4 load groups and follow the group's on, off, level, ramp and hold
