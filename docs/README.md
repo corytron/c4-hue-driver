@@ -94,6 +94,10 @@ of it is live.
   security review of 2026-10-25 (#217): the gate on keyed requests, the TLS
   verdict, the limit on open stream transfers, cleaned names, the
   development handlers, the two-job Release workflow and its pinned inputs.
+- [`light-events-design.md`](light-events-design.md): the light's own button
+  events (single, double and triple tap) firing as on a Control4 dimmer,
+  `SET_ALL_LED`, and Hue-side level reports throttled to one a second
+  (#432, #433, 2026-11-09).
 - [`raw-stream-design.md`](raw-stream-design.md): historical, never built: the
   event stream on a raw SSL network connection instead of `C4:url`. Kept as
   the documented alternative to the padded-address design in `design.md`.
