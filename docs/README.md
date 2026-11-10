@@ -142,6 +142,11 @@ are dated research; what was built from them is in the contracts and
   a Hue automation audit on both sides, with a decision per case: detection
   automatic and read-only, remedies only on a click and reversible
   (2026-10-26, #280).
+- [`hue-automation-audit-design.md`](hue-automation-audit-design.md): the
+  contract for the Hue automation audit: what counts as a conflict, the
+  Attention items and the "Hue Automations" row, the one-click Disable and
+  Restore with their record, and the Hue app steps for what the API refuses
+  (2026-11-09, #280).
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
