@@ -598,6 +598,8 @@ the sibling features without adding a reboot of its own.
 
 ## 10. Open questions for the owner
 
+All three answered by the owner on 2026-11-09: as recommended (a tenth action; no automatic rewrite in 1.5; switches on the row only).
+
 | # | Question | Recommendation |
 | --- | --- | --- |
 | Q1 | A tenth bridge action, **Hue Automations** (D20), or fold the remedy into an existing action? | **A tenth action.** Nothing existing fits, and one picker keeps it to one click. |
