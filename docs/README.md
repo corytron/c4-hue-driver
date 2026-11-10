@@ -166,6 +166,9 @@ are dated research; what was built from them is in the contracts and
   actions and the background tasks), its quoted texts checked against the
   code; section N holds the house checks of the Hue automation audit
   (#280).
+- [`house-checks-plan.md`](house-checks-plan.md): one house round around the
+  1.5 install and its reboot for #238, #65, #431 and #40: what is checked,
+  by which tool or person, and the owner's few moments (2026-11-09).
 - [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
   2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the
