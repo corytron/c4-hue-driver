@@ -2238,7 +2238,16 @@ local function new_automations()
 		end,
 		last_action = function(text) last_action(text) end,
 		changed = function() refresh_lights_props() end,
-		busy = function() return nil end,
+		-- A resync or an import running refuses a click with its busy text (R9).
+		busy = function()
+			for _, module in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+				local text = module and module.busy_text and module:busy_text()
+				if text then
+					return text
+				end
+			end
+			return nil
+		end,
 		wrote = function() state.last_write_ms = C4:GetTime() end,
 		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end, -- [verified: API 34/_1]
 	}))

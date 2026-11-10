@@ -777,13 +777,13 @@ describe("motion round trip", function()
 			bc4.sent = {}
 			local first = #logged + 1
 			bc4.advance(2500) -- the on_connected deferral, then the background resync's 2 s debounce
-			local order, motion_done = {}, false
+			local order, motion_read = {}, false
 			for kind in answer_next, BODIES do
 				order[#order + 1] = kind
 				-- The motion resync's last GET is security_area_motion; the Hue
 				-- automation audit's reads follow it (#280 D18).
-				motion_done = motion_done or kind == "security_area_motion"
-				if not motion_done then
+				motion_read = motion_read or kind == "security_area_motion"
+				if not motion_read then
 					assert.same({}, messages_to(SENSOR_ID), "a message to the device after GET " .. kind)
 				end
 			end
