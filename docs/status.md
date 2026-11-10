@@ -1,6 +1,51 @@
-# Status of the Hue driver (2026-11-09)
+# Status of the Hue driver (2026-11-10)
 
-**Now (2026-11-09).** **1.4 "Maarva", build 565, is released** (Latest;
+**Now (2026-11-10).** **1.5 "Kenari", build 609, is released**
+([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.5),
+#457) and goes onto the house (`deploy/house.yaml`). What 1.5 changes:
+- **Hue automation audit** (#280, `docs/hue-automation-audit-design.md`): a
+  Hue Automations row and Attention items for Hue automations that act on
+  Control4 lights, and a tenth bridge action that disables, restores or
+  keeps one. On the house: 1 automation, the Stairwell MotionAware set-up,
+  read as "Does nothing: Control4 decides".
+- **Turn-on behaviour** (#429, #427, #430, `docs/turn-on-design.md`):
+  Control4's brightness On Mode, On and Dim colours and colour on modes,
+  the default rate and the rate ranges on Hue Lights; click rates in
+  Composer on Hue Scenes.
+- **Offline** (#428, `docs/offline-design.md`): every Hue device goes
+  offline after 5 minutes without the bridge and back at the first answer;
+  a command that did not reach the bridge never shows as done.
+- **Load groups** (#435, `docs/load-groups-design.md`): Hue Lights join
+  Control4 load groups; whole Hue rooms and zones move as one request.
+- **The light's own button events, Set All LEDs, and Hue-side level reports
+  once a second** (#432, #433, `docs/light-events-design.md`).
+- **Composer tooltips and motion event order** (#434).
+- **Capabilities changed:** the owner rebooted the controller from System
+  Manager on 2026-11-10 at about 01:38, with dev build 604 (the same code)
+  installed; the release goes over it with no second reboot.
+- **Checked on the house on 2026-11-10 (dev build 604, no hands):** #238
+  holds (no device marked unbound after the reboot, no `[ERROR]`); #65's
+  rate is 82 reconnects in 24 h on 1.4 (watchdog ceiling 144 a day); the
+  offline round trip with the offline time at 30 s (all 7 devices offline at
+  30 s and back 3 s after the bridge answered, the motion Offline and
+  Online events once each, the Attention item shown and cleared); the
+  zone light's timed ramp (one grouped_light request with a duration); the
+  button events through the proxy route (Top Push, Top Release); Composer
+  offers the four Hue Lights to a Dimmer Load Group and not the scenes;
+  Programming lists the light's 15 button events; the Hue Automations row
+  and the tenth action; the new On Mode and colour fields.
+- **Not checked, skipped by the owner ("assume they pass, ship it"):** the
+  owner's bedroom visit: #431's Advanced Lighting Scenes holds and tracking
+  (B1), the tile taps (B2), #40's keypad on Golden hours (B3), the keypad
+  taps of checklist sections O, Q and R (tap counting, `BUTTON_EVENTS_MODE`
+  stays "count"), and a Shine timed ramp that may jump (the bridge
+  reported 19.76 % about a second into a 10 s ramp). They stay open in
+  #431, #40 and the checklist.
+- **House settings set the same night:** Shine and Golden hours click rates
+  3.000 / 3.000 s; Color On Mode Preset on the four Hue Lights (Composer's
+  default was Dim-To-Warm); Debug Mode Off.
+
+**Before (2026-11-09).** **1.4 "Maarva", build 565, is released** (Latest;
 [release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.4);
 build reports, the house measurement and the keypad test in
 [Discussion #439](https://github.com/corytron/c4-hue-driver/discussions/439))
