@@ -1734,6 +1734,92 @@ lights alone`.
      together.
      - **Done:** open.
 
+## R. The light's own button events, Set All LEDs, Hue-side reports (#432, #433)
+
+Written on 2026-11-10 from the contract (`docs/light-events-design.md`,
+decisions D1 to D17 and the checks of its §8.2), before the build; check
+every quoted text against the first build that brings it and paste what
+differs. The owner's manual says the same in prose: the Hue Light's own
+Documentation tab ("Button events and Set All LEDs", "Changes made in
+Hue") and the Hue Scene's ("Button events and Set All LEDs"). The build
+changes the capabilities of `hue_light.c4z` and `hue_scene.c4z`
+(`has_button_events`, `multi_click`), so run these steps on the 1.5 dev
+build with its capabilities live, after the owner's reboot of the
+controller from System Manager (`docs/turn-on-design.md` D27: one reboot
+for all of 1.5). Steps 134 and 135 need the dev loop (`docs/dev-loop.md`):
+its signed `Watch Events` command logs each button event the device's
+proxy fires, with the controller's clock, which a release build cannot
+do. The Windows session reads Composer, sets fields and `Debug Mode` and
+pastes the Lua output; the coordinator runs `tools/devctl.py` and pastes
+the bridge's `event …` lines (standing approval: no need to ask). The
+owner presses keypad buttons and drags sliders in the Hue app where a step
+says so. Each step takes under a minute.
+
+Setup: `Debug Mode` On on the devices a step names, Off on all of them at
+the end. A device's Lua tab then shows each command from the proxy as
+`ReceivedFromProxy <binding> <command>` and each notice to it as
+`-> proxy <command> <parameters>`. Step 134 picks
+`BUTTON_EVENTS_MODE` (`src/common/device.lua`, `"count"` or `"action"`,
+contract D7) before the release is built (contract §8.3).
+
+133. **The events are listed** (#432 D2). In Programming, select a Hue
+     Light, a zone light and a Hue Scene device. Each lists Top, Bottom
+     and Toggle with Press, Release, Single Tap, Double Tap and Triple Tap
+     (paste the list for one device, in Composer's own words). Before the
+     reboot they are absent.
+     - **Done:** open.
+134. **Proxy route, no hands** (D5, D7). `tools/devctl.py run "Watch
+     Events" Light=<zone light> Events=5001-5015`. Then, through
+     `tools/devctl.py run "Proxy Command" Light=<zone light>
+     Command=BUTTON_ACTION`: Top press (`BUTTON_ID=0 ACTION=1`), then
+     click (`ACTION=2`). Then the same twice within 0.3 s. Then a press, a
+     1.5 s wait, and a release (`ACTION=0`). Paste the `event …` lines.
+     Expected in mode `"count"`: the tap gives Top Push and Top Single
+     (Single about 0.6 s after the press), and perhaps Top Release. The
+     double gives two Pushes and one Top Double, no Single. The hold gives
+     Push and Release, no tap event. If Single fires at the click, or
+     twice, or with the Double, or if no tap event fires at all, the
+     coordinator sets `BUTTON_EVENTS_MODE = "action"` (Lua only), reloads
+     through the dev loop and repeats. Record which mode passed in #432.
+     - **Done:** open.
+135. **Link route, the owner's hands, under a minute** (D4, D6). With
+     Watch Events on the device a keypad is bound to (the bedroom switch
+     and Golden hours, or a zone light bound to a switch for the test as
+     in step 94): tap top once, double tap top, triple tap top, hold top
+     about 2 s. Same expectations as step 134 (Triple instead of Double
+     for the triple). The light: the first tap ramps; the second and third
+     taps of a multi-tap change nothing (tap-stop D4). No
+     `ReceivedFromProxy 5001 BUTTON_ACTION` appears after a link press, so
+     the proxy sends nothing back (paste the Lua lines). The keypad's own
+     double-tap programming, if any, still fires.
+     - **Done:** open.
+136. **A tap that stops still counts** (D8). Tap top from off, and about
+     1.5 s later tap top again: the ramp stops as in 1.4, and the events
+     show two separate Single taps.
+     - **Done:** open.
+137. **Set All LEDs** (#432 D11). Read and paste the device's six LED
+     colours first. `tools/devctl.py run "Proxy Command" Light=<device>
+     Command=SET_ALL_LED COLOR=ff0000` on the device bound to the keypad,
+     with `Debug Mode` On on it. Composer's LED colour rows read
+     ff0000 for all six, and the keypad's bound buttons show red lit and
+     unlit (owner glance, optional). Then set the six colours back as
+     read, in Composer.
+     - **Done:** open.
+138. **Hue-side reports, once a second** (#433 D12). On a single Hue
+     Light: drag its slider in the Hue app slowly for about 5 s, then let
+     go. The Lua tab shows at most one `LIGHT_BRIGHTNESS_CHANGED` per
+     second during the drag, and the last one equals the Hue app's final
+     level within a point, at most about 1 s after letting go. Turn it off
+     in the Hue app: the tile and LEDs go off within about a second. Paste
+     the timestamps.
+     - **Done:** open.
+139. **A Control4 ramp after a Hue drag** (#433 D13). Drag in the Hue app,
+     and within a second start a timed level from the Navigator (or
+     `tools/devctl.py run "Proxy Command" Light=<light>
+     Command=SET_BRIGHTNESS_TARGET LIGHT_BRIGHTNESS_TARGET=80 RATE=3000`).
+     The tile animates to 80 without jumping back to the Hue level partway.
+     - **Done:** open.
+
 ## What to paste back
 
 For each step: the property texts as shown, what the Navigator, keypad or

@@ -94,6 +94,10 @@ of it is live.
   security review of 2026-10-25 (#217): the gate on keyed requests, the TLS
   verdict, the limit on open stream transfers, cleaned names, the
   development handlers, the two-job Release workflow and its pinned inputs.
+- [`light-events-design.md`](light-events-design.md): the light's own button
+  events (single, double and triple tap) firing as on a Control4 dimmer,
+  `SET_ALL_LED`, and Hue-side level reports throttled to one a second
+  (#432, #433, 2026-11-09).
 - [`load-groups-design.md`](load-groups-design.md): Hue lights in Control4
   load groups (#435): the group commands on each member, and the bridge
   sending one request per whole Hue room or zone so those lamps move
