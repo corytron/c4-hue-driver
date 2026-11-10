@@ -40,6 +40,15 @@
 -- device with the bridge's last known state then, so the tile does not keep
 -- showing a target the bridge never took (docs/offline-design.md §6.2).
 --
+-- Load groups (#435, docs/load-groups-design.md §6.8) add what the batching
+-- in bridge/load_groups.lua reads and sets: idle(rid), true when that rid has
+-- nothing waiting, in flight or on a timer (a whole-room request goes out
+-- only while its grouped_light and its lamps are idle, D8); token_ready(),
+-- true when a request that is not urgent would leave now, taking no token
+-- (D8); and the `paced` field, which makes a lamp past the tenth of a load
+-- group's hold wait its turn in the bucket instead of jumping it (D9, D10).
+-- Like `urgent`, `paced` never goes into a PUT.
+--
 -- The owner supplies `send(rid, body, done)` (an http.request PUT) and may
 -- supply `now()` (a millisecond clock) for tests. Everything that runs later,
 -- in a timer or in done(), is pcall-wrapped and checked against a generation
@@ -142,9 +151,14 @@ end
 -- marked `urgent` (a keypad tap's start, a tap stop sent as a level, or an
 -- unsent start a stop replaced; #421 D12, D13). A scene slider's relative
 -- move (a smaller `delta`) is a drag like any other and waits its turn, as
--- absolute levels and colours do.
+-- absolute levels and colours do. A state marked `paced` is never urgent, a
+-- hold's start or stop and an `urgent` state included: it is a load group's
+-- hold past its tenth lamp, which takes the bucket's tokens (#435 D9).
 function commands.urgent(pending)
 	if type(pending) ~= "table" then
+		return false
+	end
+	if pending.paced == true then
 		return false
 	end
 	if pending.urgent == true then
@@ -197,8 +211,9 @@ end
 -- implication. Turning on after a "to zero" forgets the zero so the light
 -- comes back at its remembered level. `urgent` (#421 D12) stays true once
 -- any merged part had it, until the state is sent; body() never puts it in a
--- PUT. Returns the pending table and true when a stop replaced an unsent
--- ramp (D13).
+-- PUT. `paced` (#435 D9) is not merged here: the newest request decides it
+-- (paced_by, in set(); the retry's fold-back in on_done). Returns the
+-- pending table and true when a stop replaced an unsent ramp (D13).
 local function merge(pending, fields)
 	local f = {}
 	for _, name in ipairs(NUMERIC_FIELDS) do
@@ -259,13 +274,30 @@ local function merge(pending, fields)
 	return pending
 end
 
+-- #435 D9, D10 (docs/load-groups-design.md §6.8): whether the state a set()
+-- leaves is paced. The newest request decides: the state stays paced only
+-- while the latest fields carry `paced`, and fields with `urgent` clear it,
+-- also fields that carry both (a request that must not wait is never held
+-- to the bucket). bridge/load_groups.lua marks the light dims past a batch's
+-- tenth lamp, and HUE_DIM maps no `urgent`, so its paced dims keep it.
+-- true or nil, never false, so pending() shows no key for an unpaced state.
+local function paced_by(fields)
+	if fields.urgent == true or fields.urgent == "true" then
+		return nil
+	end
+	if fields.paced == true or fields.paced == "true" then
+		return true
+	end
+	return nil
+end
+
 -- The PUT body for a pending state. Pure, so it can be tested on its own.
 -- Brightness 0 is `on:false` with no dimming; dimming is clamped to
 -- [min_dim, 100] and rounded to 2 decimals; mirek is an integer inside the
 -- light's range; xy is clamped to [0, 1] and rounded to 4 decimals and needs
 -- both coordinates. dynamics.duration goes along only when there is
--- something for it to apply to. The queue's own fields (`urgent`, `level`,
--- `delta`) never go into a body as such (#421 D12).
+-- something for it to apply to. The queue's own fields (`urgent`, `paced`,
+-- `level`, `delta`) never go into a body as such (#421 D12, #435 D9).
 function commands.body(pending, limits)
 	limits = limits or commands.DEFAULT_LIMITS
 	local body = {}
@@ -361,15 +393,18 @@ end
 -- A retry already armed is left alone, and so is a token wait unless the
 -- merged state became urgent (a hold's or a tap's start or stop must not sit
 -- behind a drag's wait, #421 D12): the new state simply replaces what will
--- be sent when the timer fires.
+-- be sent when the timer fires. A paced state (#435 D9) is not urgent, so
+-- it keeps a token wait like a drag.
 function commands:set(rid, fields)
+	fields = fields or {}
 	local light = self:light(rid)
 	if light.pending then
 		self.counters.coalesced = self.counters.coalesced + 1
 	else
 		light.pending = {}
 	end
-	local _, stopped_unsent = merge(light.pending, fields or {})
+	local _, stopped_unsent = merge(light.pending, fields)
+	light.pending.paced = paced_by(fields)
 	if stopped_unsent then
 		log.info("%s %s: a stop replaced a start not yet sent; setting %s at once (#421 D13)", self.label,
 			tostring(rid), light.pending.brightness and (tostring(light.pending.brightness) .. " %") or "nothing")
@@ -381,19 +416,24 @@ function commands:set(rid, fields)
 	self:arm(rid, light, commands.DEBOUNCE_MS, "debounce")
 end
 
--- Token bucket (self.rate tokens per second, self.burst at most). Returns
--- true and takes a token, or false and the ms to wait. An urgent request
--- (commands.urgent) neither waits nor takes a token: a hold is two requests
--- paced by a thumb, and counting them would make the tap that often follows
--- a hold wait behind the drag that emptied the bucket a moment before. A
--- tap's start and stop are the same (#421 D12).
-function commands:take_token(urgent)
+-- Token bucket (self.rate tokens per second, self.burst at most): credit
+-- the time since the last refill.
+function commands:refill()
 	local now = self.now()
 	if self.refilled_at then
 		local elapsed = math.max(0, now - self.refilled_at)
 		self.tokens = math.min(self.burst, self.tokens + elapsed * self.rate / 1000)
 	end
 	self.refilled_at = now
+end
+
+-- Returns true and takes a token, or false and the ms to wait. An urgent
+-- request (commands.urgent) neither waits nor takes a token: a hold is two
+-- requests paced by a thumb, and counting them would make the tap that often
+-- follows a hold wait behind the drag that emptied the bucket a moment
+-- before. A tap's start and stop are the same (#421 D12).
+function commands:take_token(urgent)
+	self:refill()
 	if urgent then
 		return true
 	end
@@ -402,6 +442,32 @@ function commands:take_token(urgent)
 		return true
 	end
 	return false, math.ceil((1 - self.tokens) * 1000 / self.rate)
+end
+
+-- #435 D8 (docs/load-groups-design.md §6.8): true when a request that is not
+-- urgent would leave now, that is when the bucket holds a whole token once
+-- refilled. It refills the bucket and takes no token. It is the bucket at
+-- this moment: it does not count the tokens that states already waiting in
+-- this queue will take when their debounce fires, and says nothing about a
+-- rid (idle does). bridge/load_groups.lua asks the grouped_light queue
+-- before it sends a whole Hue room or zone as one request.
+function commands:token_ready()
+	self:refill()
+	return self.tokens >= 1
+end
+
+-- #435 D8 (§6.8): true when `rid` has nothing pending, nothing in flight and
+-- no timer armed (a debounce, a token wait or a retry's backoff); true for a
+-- rid the queue has never seen. bridge/load_groups.lua sends a cover's one
+-- grouped_light request only while that grouped_light and every lamp of it
+-- are idle in their queues, so an older request in one queue never lands
+-- after a newer one in the other (the two queues have separate buckets).
+function commands:idle(rid)
+	local light = self.lights[rid]
+	if not light then
+		return true
+	end
+	return light.pending == nil and light.inflight == nil and light.timer == nil
 end
 
 -- #428 D8: tell the owner that a PUT of `rid` did not land, so the device
@@ -541,8 +607,14 @@ function commands:on_done(rid, light, result)
 		end
 		-- Newer fields win over the ones that failed. A stop that waited behind
 		-- a failed ramp's start finds it unsent again and becomes its level
-		-- (#421 D13); the failed state keeps its `urgent` (D12).
-		light.pending = merge(copy(sent), light.pending or {})
+		-- (#421 D13); the failed state keeps its `urgent` (D12). Pacing follows
+		-- the newest request (#435 D9): the one that arrived during the PUT
+		-- when there is one, else the failed one, whose `paced` the copy kept.
+		local newer = light.pending
+		light.pending = merge(copy(sent), newer or {})
+		if newer then
+			light.pending.paced = newer.paced
+		end
 		self.counters.retried = self.counters.retried + 1
 		log.warn("%s %s: %s, retrying in %d ms (attempt %d)", self.label, tostring(rid), tostring(result.err), delay,
 			light.failures)
@@ -581,7 +653,8 @@ function commands:stop()
 	end
 end
 
--- A copy of the pending fields for a light, or nil when nothing is pending.
+-- A copy of the pending fields for a light, or nil when nothing is pending
+-- (with the queue's own `urgent` and `paced` when set).
 function commands:pending(rid)
 	local light = self.lights[rid]
 	return light and light.pending and copy(light.pending) or nil

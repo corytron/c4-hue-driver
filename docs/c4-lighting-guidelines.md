@@ -201,7 +201,7 @@ double-tap window more precisely than about half a second (C4-LIGHTING).
 | L64 | A scene's on state and LEDs track like an Advanced Lighting scene's: either "any load on" or "this scene active". | C4-ALS "Tracking" | scene | Meets | [verified: hardware 2026-10-24, LEDs follow the scene; On State Follows since build 400, `docs/scene-led-design.md`] | |
 | L65 | Holding a scene's button ramps the scene at its hold rates. | C4-ALS "Hold Rates" | scene | Partial | [verified: code since 1.3, #249; the lamp tests are pending, `docs/status.md` "Now"] | D1. |
 | L66 | A scene's toggle activates its toggle scene; by default that turns it off. | C4-ALS "Toggle scene"; LV2 als `_4.5-TOGGLEESCENE` | scene | Meets | [verified: `src/hue_scene/driver.lua:1174`] | It always turns the room off. |
-| L67 | Load groups: `load_group_support`, with `JOIN_GROUP`, `LEAVE_GROUP` and the `GROUP_*` commands handled. | LV2 caps `_23-LOADGROUPSUPPORT`; LV2 cmds `_14-JOIN_GROUP` to `_20-GROUP_STOP_RAMP` | light | Gap | [verified: declared False, `src/hue_light/driver.xml:166`] | Zone and room lights are the Hue-native group (one request at about 1/s instead of one per lamp). Question 4. |
+| L67 | Load groups: `load_group_support`, with `JOIN_GROUP`, `LEAVE_GROUP` and the `GROUP_*` commands handled. | LV2 caps `_23-LOADGROUPSUPPORT`; LV2 cmds `_14-JOIN_GROUP` to `_20-GROUP_STOP_RAMP` | light, zone | Partial | [verified: `src/hue_light/driver.xml` declares `load_group_support` True; `src/hue_light/light/load_group.lua` parses `JOIN_GROUP`, `LEAVE_GROUP`, `SET_GROUP_SYNC` and the four `GROUP_*` commands and keeps the memberships, shown in the read-only Load Groups row; `src/hue_bridge/bridge/load_groups.lua` batches a group's requests and sends one grouped_light request per whole Hue room or zone; specs `tests/spec/light_load_group_spec.lua`, `tests/spec/load_groups_spec.lua`, `tests/spec/light_load_group_driver_spec.lua` and `tests/spec/load_group_roundtrip_spec.lua`] [assumed until `docs/composer-checklist.md` steps 99 to 107 (H0 to H8): how Control4's Load Group delivers its commands, `docs/load-groups-design.md` A1 to A10] | #435, `docs/load-groups-design.md` D1 to D18; question 4 answered. Static: one controller reboot, shared with #429 and #427 in 1.5. Hue Scene devices cannot join (contract D2). Brightness only: no group command carries a colour. Lamps move as one only when they make up whole Hue rooms or zones (section 5, D17). Keep loads in sync is recorded, never acted on (contract D13). Meets after H1 to H6. |
 
 ### 3.8 Programming events, conditionals and commands
 
@@ -249,11 +249,16 @@ double-tap window more precisely than about half a second (C4-LIGHTING).
 
 | Status | Rows |
 |---|---|
-| Meets | 57 |
-| Partial | 19 |
-| Gap | 10 |
+| Meets | 59 |
+| Partial | 18 |
+| Gap | 9 |
 | Hue cannot | 1 |
 | Not applicable | 2 |
+
+Current (2026-11-09): recounted after the load groups contract
+(`docs/load-groups-design.md`, #435) moved L67 from Gap to Partial. The
+audit's own counts were Meets 57, Partial 19, Gap 10; the rows changed
+since (L71 and L74 by #434) count as they now stand.
 
 ## 4. Gaps and partials, ranked
 
@@ -349,7 +354,9 @@ Partials and gaps with no new issue proposed:
 - L59: no documented route puts a driver's scene in the Scenes view.
 - L65 and L14 (group holds): these lamp checks are already listed in
   `docs/status.md` "Now".
-- L67 (load groups): question 4, #435.
+- L67 (load groups): question 4 answered (Hue lights join load groups);
+  built under #435, `docs/load-groups-design.md`, and Partial until the
+  house checks H1 to H6.
 
 ## 5. Departures forced by Hue
 
@@ -370,6 +377,7 @@ Partials and gaps with no new issue proposed:
 | D13 | No Min On, Max On or cold start. | CLIP v2 has no trim or warm-up settings, and the lamps are LED. | L26 |
 | D14 | A Hue-side ramp (a Hue dimmer switch held) appears in Control4 as steps. | The bridge sends at most about two event containers a second (#65). | L7 |
 | D15 | The light device's own buttons are virtual; button events belong to the keypad that is pressed. | Hue lamps have no buttons. | L46 |
+| D17 | A Control4 load group moves its loads as one. Hue lamps in a load group move as one only where they make up whole Hue rooms or zones (a zone or room light in the group always moves its lamps as one). Other lamps get one request each, one after another: a ramp hides most of it, and an instant change shows up to about 0.4 s across 10 lamps and about 1.3 s across 20. Holds go lamp by lamp, as in D1. | Director sends one request at a time to the bridge, and CLIP v2 has no request for an arbitrary set of lamps: only a room's or zone's grouped_light moves several lamps in one request (#435, `docs/load-groups-design.md` D8, D9 and §2.4). | L67 |
 
 ## 6. Where the written docs and the controller disagree
 
@@ -418,3 +426,9 @@ reference in these places. A contract that cites the rows above should not
 4. **Load groups (L67, #435).** Should Hue lights join Control4 load groups? The
    alternative is pointing dealers to zone and room lights, which drive a
    Hue group with one request. Recommended: zone and room lights only.
+   Answered (owner, 2026-11-09, #435): yes, "hue lights should join c4 load
+   groups, so they can be used in lighting automation c4". Single lights,
+   zone lights and room lights join; Hue Scene devices do not. Built under
+   `docs/load-groups-design.md`: one grouped_light request per whole Hue
+   room or zone is on by default, and the bridge never passes "keep loads
+   in sync" on (its §10); departure D17 joins section 5.
