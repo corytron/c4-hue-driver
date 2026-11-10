@@ -95,7 +95,7 @@ two device drivers share `common/device.lua` (their plumbing since
   through `bridge_request` in `src/hue_bridge/driver.lua`. It answers at
   once with one refusal while one holds (`keyed_refusal`: `not paired`,
   `TLS check failed`, `key rejected`), sends nothing until the unkeyed
-  identity check (`verify_identity`: `GET /api/0/config` must report the
+  identity check (`bridge/identity.lua` since #373: `GET /api/0/config` must report the
   paired bridge id) and the TLS self-check below have passed for the
   current start and address, and drops any TLS table the caller passed. A
   keyed request refuses redirects: a 3xx answer ends it as `redirect
@@ -180,8 +180,8 @@ blocking rule, `docs/security-fixes-design.md`):
   - Anything against an active attacker. The decoy request is easy to
     recognise on the wire (the first TLS handshake after the identity GET),
     so whoever can drop it makes the check `inconclusive` at will.
-- **Verdicts and what the driver does** (`tls_gate` in
-  `src/hue_bridge/driver.lua`):
+- **Verdicts and what the driver does** (the TLS gate in
+  `src/hue_bridge/bridge/identity.lua` since #373):
   - `pinned` (the request fails certificate verification): the expected
     answer. The driver records the running Director version,
     `C4:GetVersionInfo().version` **[verified: API
@@ -756,7 +756,12 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   kept, stopping on release: Hue accepts `dimming_delta` up/down with
   `brightness_delta` and `dynamics.duration`, and the bare
   `{"dimming_delta":{"action":"stop"}}`, on a **grouped_light**
-  **[verified]**.
+  **[verified]**. Corrected 2026-10-25 (#249): Hue accepts those bodies, but
+  on a grouped_light it ignores `dynamics.duration` and covers the whole
+  delta in about a second, so a hold ran to the end; "stopping on release"
+  was an observation, not a measured ramp. A single light honours the
+  duration and the stop. 1.3 ramps group holds lamp by lamp or in steps
+  (`docs/group-hold-design.md`).
 - **Scene dimmer, build 160 (2026-10-24).** Installed with "Add or Update
   Driver or Agent…"; "Restart Director?" did not load the new capabilities,
   the owner's reboot from System Manager did (Director lost 23:55:14, back
@@ -896,6 +901,12 @@ loop on OS 3.4.2:
   exist only in dev builds (`docs/code-analysis-2026-10-22.md`, item 10),
   and the house runs release builds: binding there is the owner's drag in
   Connections, or a dev build installed for the purpose.
+  Superseded (2026-10-27, #312): the Windows session's synthesized drag
+  binds too, once it starts on the consumer's own row in the upper pane
+  of Connections (verified with a keypad's Button Link; from a light's
+  `Hue Bridge` input **[assumed]**), so a binding on a release build need
+  not wait for the owner (`docs/composer-remote.md`, "Learned 2026-10-27:
+  Connections and Programming by synthetic drag (#312)").
 - Hue side: 16 rooms (9.9 KB), 7 zones (6.6 KB), 1 bridge_home (1.3 KB),
   125 scenes (351 KB). The single `GET /clip/v2/resource` returns 497
   items, 588 KB, in 1 s. Room `children` are devices, zone `children`
@@ -1171,6 +1182,13 @@ project:
   (Project APIs section).
   Superseded (2026-10-22): release builds have no `Probe Call`; the keypad
   bindings on the house were made by hand in Connections.
+  Superseded (2026-10-27, #312): a synthesized drag does bind when it
+  starts on the selected device's own row in the upper pane and drops on
+  the matching row of the lower list (verified with a keypad's Button
+  Link); a drag from the lower list, where both attempts above started,
+  never begins. Method and the day's other Connections and Programming
+  findings: `docs/composer-remote.md`, "Learned 2026-10-27: Connections
+  and Programming by synthetic drag (#312)".
 - **The "Action Parameter List" dialog remembers the last values per
   action** (seen 2026-10-21 21:30: a later `Add Scene` opened pre-filled
   with the previous Scene and Room). An empty `Room` therefore cannot be
@@ -1330,7 +1348,8 @@ and the pairing survives it.
   exist; recall body to be confirmed from the API reference]**.
   Superseded (2026-10-21/23): the recall body `{"recall":{"action":…}}`
   (also with `duration`) and the grouped_light `dimming_delta` with
-  `dynamics` and `stop` are verified on hardware; a recall at a level
+  `dynamics` and `stop` are verified on hardware (accepted; the duration is
+  ignored on a grouped_light, #249); a recall at a level
   (`recall.dimming.brightness`) is **[assumed]**. Verified 2026-10-25 (#41):
   a recall at 1 % set both lamps of Shine to 1.19 % in the scene's own
   colours ("Hardware pass of 2026-10-25 night").

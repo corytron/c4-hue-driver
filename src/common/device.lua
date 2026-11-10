@@ -32,6 +32,9 @@
 --   dev.on_hold(h, up, on)   a keypad hold began ("Keypad press, click and release" below)
 --   dev.on_finish(h)         the release of a hold that began
 --   dev.on_end_hold(h)       optional: a press ended, whatever ended it
+--   dev.ramp_active()        optional: true while a brightness ramp a tap can stop runs
+--                            (#421 D6); the default, false, leaves only the double-tap window
+--   dev.on_ramp_stop(button) optional: stop that ramp now (#421 D5); the default does nothing
 --
 -- The instance: devloop (the module; nil in release builds), flush_log(),
 -- prop(), notify(), device_id(), result(), bound_bridge(), proxy_id(),
@@ -90,6 +93,26 @@ local HOLD_AFTER_MS = 400
 local DIM_AFTER_ON_MS = 600
 local CLICK_GUARD_MS = 1000
 
+-- #421 D4: a press within DOUBLE_TAP_MS of the previous press on the same
+-- button is part of a double or triple tap, which is the keypad's event
+-- (its programming), not a second command. Composer puts that window at
+-- about half a second [verified: Composer Pro help, configuring lighting;
+-- docs/tap-stop-research-c4.md §1.4]; the keypad's real one is to be
+-- measured on the house (that note's §9). Fixed here, no property.
+device.DOUBLE_TAP_MS = 600
+local DOUBLE_TAP_MS = device.DOUBLE_TAP_MS
+
+-- Milliseconds since the epoch on the controller's clock [verified: API
+-- 34/_2, C4:GetTime, OS 3.2.3; the drivers declare 3.3.0], else os.time(),
+-- as hue_motion's now_ms does. C4 is looked up at the call: the runtime's.
+local function now_ms()
+	local ok, ms = pcall(C4.GetTime, C4)
+	if ok and type(ms) == "number" then
+		return ms
+	end
+	return os.time() * 1000
+end
+
 -- The keypad settings the light_v2 proxy sends when the dealer edits them in
 -- Composer [verified: proxy-protocol reference, light_v2 SET_PRESET_LEVEL
 -- {LEVEL}, SET_CLICK_RATE_* and SET_HOLD_RATE_* {RATE ms}]: the persisted key,
@@ -103,13 +126,17 @@ local CLICK_GUARD_MS = 1000
 -- (Default On Brightness 0, click rates 0, hold rates clamped to its 1 s
 -- minimum), while "5000" or 5000 is stored as sent [verified: hardware,
 -- Composer rounds 41 and 42]. A driver takes the ones its driver.xml
--- declares (opts.settings).
+-- declares (opts.settings). The click rates are the time of the whole range,
+-- as the hold rates are [verified: proxy reference, CLICK_RATE_UP/DOWN], and
+-- default to 3000 ms so a tap's ramp is slow enough to catch with a second
+-- tap after the double-tap window (#421 D3; 250 ms until then). A device
+-- with a stored rate keeps it.
 local SETTINGS = {
 	preset = { key = "preset_level", default = 100, command = "SET_PRESET_LEVEL", param = "LEVEL",
 		notify = "PRESET_LEVEL", min = 1, max = 100 },
-	click_up = { key = "click_rate_up", default = 250, command = "SET_CLICK_RATE_UP", param = "RATE",
+	click_up = { key = "click_rate_up", default = 3000, command = "SET_CLICK_RATE_UP", param = "RATE",
 		notify = "CLICK_RATE_UP", min = 0, max = 86400000 },
-	click_down = { key = "click_rate_down", default = 250, command = "SET_CLICK_RATE_DOWN", param = "RATE",
+	click_down = { key = "click_rate_down", default = 3000, command = "SET_CLICK_RATE_DOWN", param = "RATE",
 		notify = "CLICK_RATE_DOWN", min = 0, max = 86400000 },
 	hold_up = { key = "hold_rate_up", default = 5000, command = "SET_HOLD_RATE_UP", param = "RATE",
 		notify = "HOLD_RATE_UP", min = 0, max = 86400000 },
@@ -516,7 +543,10 @@ function device.new(opts)
 	-- reason to edit the field and overwrite it).
 	function dev.load_settings()
 		for _, name in ipairs(setting_names) do
-			local value = tonumber(C4:PersistGetValue(SETTINGS[name].key))
+			-- The extra parentheses keep one value: Director's PersistGetValue
+			-- returns none at all for a key never written, and tonumber() with no
+			-- argument raises (a new device failed its late init on the house, #298).
+			local value = tonumber((C4:PersistGetValue(SETTINGS[name].key)))
 			if value ~= nil and not in_range(name, value) then
 				log.warn("%s %s is out of range; using %s", SETTINGS[name].key, tostring(value),
 					tostring(SETTINGS[name].default))
@@ -563,6 +593,33 @@ function device.new(opts)
 	-- release-as-click, of a hold calls dev.on_finish and ignores a click on
 	-- that button for CLICK_GUARD_MS (some keypads send one).
 	--
+	-- Each press is judged as it arrives, and its click follows the verdict
+	-- (#421, docs/tap-stop-design.md §3 and §4.1):
+	--   * The double-tap window (#421 D4). A press within DOUBLE_TAP_MS of the
+	--     previous press on the same button, by the controller's clock, is
+	--     part of a double or triple tap: the keypad's own event, for its
+	--     programming. Its record is marked multi: it starts and stops nothing
+	--     (a running ramp goes on) and its click is swallowed. The window is
+	--     per button and runs press to press, so a third tap is measured from
+	--     the second. A press that became a hold opens no window: a hold is no
+	--     tap.
+	--   * The stop (#421 D5). Otherwise, while dev.ramp_active(), the press
+	--     calls dev.on_ramp_stop(button) at once, on the push as the keypad
+	--     link page advises where hold versus click does not matter
+	--     [verified: keypad proxy reference, Button Link bindings, DO_PUSH],
+	--     and is marked stopped: its click is swallowed. Any button stops,
+	--     the other one and the toggle too; the light does not reverse. A stop
+	--     is no hold release, so it arms no guard.
+	--   * Either way the hold timer then starts as before: a multi or stopped
+	--     press held past HOLD_AFTER_MS becomes a hold, and a stopped one
+	--     holds from the level the stop applied.
+	-- A click finds its press as the live record, or as the one a release
+	-- ended before its hold time (PUSH, RELEASE, CLICK). A click with neither
+	-- (a route that sends only the click) is judged at the click by the same
+	-- two rules, and counts as that button's press for the window. The hold's
+	-- release-as-click and the guard come first, as before. On the proxy
+	-- route every action is echoed before it gets here, a swallowed one too.
+	--
 	-- The drivers' own copies (until #57) also differed in the settings
 	-- (opts.settings), one debug line's word (opts.noun), and the guard, armed
 	-- before the light's stop but after the scene's. That order is observable
@@ -572,10 +629,16 @@ function device.new(opts)
 	-- hold starts from (st.on == true, effective_on()) is dev.is_on() == true.
 
 	local noun = opts.noun or "device"
-	local hold = nil  -- { button, timer, held, ... } while a button is down; the hooks add their own fields
+	local hold = nil  -- { button, timer, held, multi, stopped, ... } while a button is down; hooks add fields
 	local guard = nil -- { button, timer } for CLICK_GUARD_MS after a hold's release
+	local released = nil  -- the press a release ended before its hold time, while its click may follow
+	local last_press = {} -- button -> controller ms of its last press that opens a window (#421 D4)
 
 	function dev.on_end_hold() end
+
+	-- Hue Scene devices keep these: no ramp to stop, only the window (#421 D1).
+	function dev.ramp_active() return false end
+	function dev.on_ramp_stop() end
 
 	-- True while `h` is the press in progress: no release, click or new press since.
 	function dev.holding(h)
@@ -610,9 +673,29 @@ function device.new(opts)
 		guard = g
 	end
 
-	-- The hold timer fired with the button still down.
+	-- #421 D4 and D5 for a press, or for a click with no press on record:
+	-- within the window of the button's previous press it is multi; else,
+	-- while a ramp runs, it stops the ramp and is stopped. Its time is the
+	-- button's last press either way.
+	local function judge(h)
+		local now = now_ms()
+		local prev = last_press[h.button]
+		last_press[h.button] = now
+		if prev and now >= prev and now - prev < DOUBLE_TAP_MS then
+			h.multi = true
+			log.debug("button %d %d ms after its last press: part of a double tap", h.button, now - prev)
+		elseif dev.ramp_active() then
+			h.stopped = true
+			log.debug("button %d stops the ramp", h.button)
+			dev.on_ramp_stop(h.button)
+		end
+	end
+
+	-- The hold timer fired with the button still down. A hold is no tap: the
+	-- next press on the button opens a window of its own (#421 D4).
 	local function start_hold(h)
 		h.held = true
+		last_press[h.button] = nil
 		local on = dev.is_on() == true
 		local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
 		if not up and not on then
@@ -647,30 +730,50 @@ function device.new(opts)
 	function dev.button_action(button, action)
 		if action == ACT_PRESS then
 			end_hold()
+			released = nil
+			-- The record is the press in progress before the stop runs, so a
+			-- stop that fails (logged by dispatch) still swallows the click.
 			local h = { button = button }
+			hold = h
+			judge(h)
 			h.timer = C4:SetTimer(HOLD_AFTER_MS, function()
 				if hold == h then
 					h.timer = nil
 					start_hold(h)
 				end
 			end)
-			hold = h
 		elseif action == ACT_CLICK then
 			if hold and hold.held then
 				finish_hold()
 			elseif guard and guard.button == button then
 				end_hold()
+				released = nil
 				log.debug("click on button %d right after a hold ignored", button)
 			else
+				local h = (hold and hold.button == button and hold)
+					or (released and released.button == button and released) or nil
 				end_hold()
-				dev.on_click(button)
+				released = nil
+				if not h then
+					h = { button = button }
+					judge(h)
+				end
+				if h.multi then
+					log.debug("click on button %d is part of a double tap: ignored", button)
+				elseif h.stopped then
+					log.debug("click on button %d stopped the ramp: swallowed", button)
+				else
+					dev.on_click(button)
+				end
 			end
 		elseif action == ACT_RELEASE then
 			-- Release after a hold: finish it; a release that follows a click
-			-- has nothing left to do.
+			-- has nothing left to do; one before the hold time ends the press,
+			-- whose click may still follow (PUSH, RELEASE, CLICK).
 			if hold and hold.held then
 				finish_hold()
 			else
+				released = hold
 				end_hold()
 			end
 		end

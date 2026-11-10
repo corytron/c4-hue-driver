@@ -133,7 +133,9 @@ motion_diag.FIELDS_MAX = 60          -- fields shown per item
 motion_diag.ARRAY_MAX = 12           -- elements shown per array (and fields per object inside one)
 motion_diag.DEPTH_MAX = 10           -- nesting levels shown (an automation's configuration nests deep)
 motion_diag.PREFIX = "diag: "
-motion_diag.CONTINUED = "diag: + "
+-- Continuation lines are numbered ("diag: +2 ", "diag: +3 "): Composer's Lua
+-- pane has shown two of them in swapped order (#288).
+motion_diag.CONTINUED = "diag: +%d "
 motion_diag.RESOURCE_PATH = "/clip/v2/resource/"
 
 -- The pass, in order (HR §6.1). Modes:
@@ -776,7 +778,7 @@ end
 
 function motion_diag:write(pieces)
 	for i, piece in ipairs(pieces) do
-		self.ctx.log.always("%s", (i == 1 and motion_diag.PREFIX or motion_diag.CONTINUED) .. piece)
+		self.ctx.log.always("%s", (i == 1 and motion_diag.PREFIX or motion_diag.CONTINUED:format(i)) .. piece)
 	end
 	return #pieces
 end

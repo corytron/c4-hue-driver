@@ -491,8 +491,12 @@ function motion_model.areas(configs, services_by_type)
 	return out
 end
 
--- An area's motion (EC rule 7 and A9, HR §2.5): the reading of whichever of
--- its two services is enabled, carries a motion value and changed last;
+-- An area's motion (EC rule 7 and A9, HR §2.5): motion while any of its two
+-- services that is enabled and carries a motion value reports motion, and
+-- no motion only when all of them report none (#288: on the house both
+-- services report a walk, at different times, and following whichever
+-- changed last flapped the contact Closed in the middle of it). The reading
+-- returned is the newest of those reporting motion, else the newest of all;
 -- convenience before security on a tie or when neither has a time (Home
 -- Assistant's order). Nothing while the configuration is paused or not
 -- running: the services' values are frozen then (A6, A7). `motion_valid` is
@@ -504,18 +508,25 @@ function motion_model.area_motion(record, readings)
 	if record.enabled == false or motion_model.NOT_RUNNING[record.health] then
 		return nil
 	end
-	local best, best_rid, best_time
-	for _, key in ipairs({ "convenience", "security" }) do
-		local rid = record[key]
-		local r = rid and readings[rid] or nil
-		if type(r) == "table" and r.enabled ~= false and r.motion ~= nil then
-			local t = motion_model.time_of(r.changed)
-			if best == nil or (t ~= nil and (best_time == nil or t > best_time)) then
-				best, best_rid, best_time = r, rid, t
+	local function newest(only_motion)
+		local best, best_rid, best_time
+		for _, key in ipairs({ "convenience", "security" }) do
+			local rid = record[key]
+			local r = rid and readings[rid] or nil
+			if type(r) == "table" and r.enabled ~= false and r.motion ~= nil and (not only_motion or r.motion == true) then
+				local t = motion_model.time_of(r.changed)
+				if best == nil or (t ~= nil and (best_time == nil or t > best_time)) then
+					best, best_rid, best_time = r, rid, t
+				end
 			end
 		end
+		return best, best_rid
 	end
-	return best, best_rid
+	local best, best_rid = newest(true)
+	if best then
+		return best, best_rid
+	end
+	return newest(false)
 end
 
 -- Labels ------------------------------------------------------------------------------

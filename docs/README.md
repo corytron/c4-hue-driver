@@ -14,7 +14,7 @@ the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
 
 ## Start here
 
-- [`status.md`](status.md): what runs on the author's house, what the three
+- [`status.md`](status.md): what runs on the author's house, what the four
   drivers do today, what was verified on hardware, and what is open.
 - [`design.md`](design.md): the engineering notebook. Targets (OS versions,
   Lua 5.1), the three-driver structure, networking and the certificate
@@ -24,10 +24,16 @@ the AI sessions that build the drivers are in [`CLAUDE.md`](../CLAUDE.md).
   verification rounds, discovery (not built), commands and rate limiting,
   colour mapping and storage. Dated sections; each API claim is marked
   verified or assumed.
+- [`c4-lighting-guidelines.md`](c4-lighting-guidelines.md): Control4's lighting
+  guidelines for function and UI as one checklist (89 rows, from the light_v2
+  best practices, the proxy protocols and Control4's dealer documentation),
+  each with the drivers' status and its evidence; the gaps ranked with their
+  issues, and the departures Hue forces. Every lighting feature contract cites
+  its rows in a "Control4 guidelines" section (#422).
 - [`release-checklist.md`](release-checklist.md): what a build must pass on
   the development machine, on the dev loop, in Composer and on the owner's
   phone and keypads before it is called good, and what to check after a
-  controller OS upgrade; the naming of the releases (1.x is "Cassian"), how a
+  controller OS upgrade; the naming of the releases, how a
   release is cut (the Release workflow) and how it reaches the house
   (`tools/deploy.py`).
 
@@ -49,6 +55,9 @@ of it is live.
   scene, created only by the owner; the on rule and the room or zone OFF.
 - [`scene-dimmer-design.md`](scene-dimmer-design.md): the Hue Scene as a
   dimmer whose level is the room or zone's brightness, kept in sync with Hue.
+- [`scene-led-design.md`](scene-led-design.md): On State Follows: a scene
+  device's tile and keypad LEDs follow its room or zone's lights, or the
+  scene alone (#310).
 - [`smart-scenes-design.md`](smart-scenes-design.md): Hue's time-of-day
   ("smart") scenes as Hue Scene devices: start, stop, dim while running,
   listing and naming.
@@ -59,6 +68,15 @@ of it is live.
   Scene devices: taps, hold-to-dim through Hue's relative dimming, keypad
   LEDs, decoupled Control4 switches, and the keypad settings shown in
   Composer since 2026-10-25 (#59).
+- [`driver-locals-design.md`](driver-locals-design.md): the bridge driver's
+  local-variable budget (#373): Lua 5.1 compiles at most 200 locals in a
+  function, so whole groups moved into `bridge/` modules, and the
+  `lua-limits` check fails above 180 locals or 50 upvalues.
+- [`group-hold-design.md`](group-hold-design.md): holds on Hue Scene
+  devices, zone lights and room lights (#249): Hue ignores the ramp time on
+  a whole-group dim, so from 1.3 a hold dims each lit lamp (up to 10) or
+  steps the group once a second (more, or while a time-of-day or dynamic
+  scene runs there).
 - [`bridge-compat-design.md`](bridge-compat-design.md): bridge generations
   and software: what pairing refuses (the round BSB001, a device that is not
   a Hue bridge, software older than 1948086000), the same model check at
@@ -127,12 +145,20 @@ are dated research; what was built from them is in the contracts and
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
+- [`tls-probe-bindings-research.md`](tls-probe-bindings-research.md): the
+  bindings the network connection's TLS check leaves in Director: the one
+  documented call that can delete them (`C4:RemoveDynamicBinding`, assumed
+  for network bindings until the house shows it), why nothing documented
+  makes Director retry them, why two probes per Director version is the
+  floor, the fix and the checks for the house (2026-11-08, #329).
 
 ## Checklists and process
 
 - [`composer-checklist.md`](composer-checklist.md): the steps only Composer,
   a Navigator, a keypad or the Hue app can show, as the owner runs them, with
-  a "Done" line per step.
+  a "Done" line per step; section L is release 1.2's (#334: the nine bridge
+  actions and the background tasks), its quoted texts checked against the
+  code.
 - [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
   2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the
@@ -164,6 +190,38 @@ are dated research; what was built from them is in the contracts and
   areas as Control4 motion sensors (2026-10-26, #268): `hue_motion.c4z` as a
   stock `contactsingle_motionsensor`, the decisions D1–D16, the messages
   between the bridge and the device, the diagnostics for testers.
+- [`motion-hold-restart-design.md`](motion-hold-restart-design.md): the
+  motion devices' Occupancy Hold Time across a restart (2026-11-07, #371): a
+  hold the device saw begin resumes for the time it has left, timed on the
+  controller's clock alone, while the bridge reports the same end of motion;
+  why the controller's and the bridge's clocks are never compared, the
+  decisions R1–R12 and the corner cases L1–L27.
+- [`relative-level-design.md`](relative-level-design.md): the Hue Light's
+  Raise Level By and Restore Saved Level programming commands (2026-10-26,
+  #297), for motion programming that raises lamps and puts them back.
+- [`list-rows-design.md`](list-rows-design.md): one wording for the bridge's
+  bulk actions (Import All New …) and one format for its four list rows
+  (2026-10-28, #325).
+- [`simplify-actions-design.md`](simplify-actions-design.md): fewer actions
+  and more background tasks (2026-11-04, #334): the contract of the research
+  phase, the inventory of the 39 actions, the verdict vocabulary, the
+  merged proposal with the owner's decisions (39 actions become 10), what
+  the dev build of 2026-11-05 showed, and the build contracts of release
+  1.2. Its research: [import](simplify-research-import.md),
+  [maintenance](simplify-research-maintenance.md),
+  [composer](simplify-research-composer.md),
+  [journeys](simplify-research-journeys.md),
+  [compat](simplify-research-compat.md),
+  [scheduler](simplify-research-scheduler.md) and
+  [comparables](simplify-research-comparables.md); then, for the owner's
+  answers D5 and D6, the follow-up research
+  [`simplify-research-names-sync.md`](simplify-research-names-sync.md)
+  (two-way names for lights, scenes and motion sensors: what the name is
+  on each side, the edge cases, the agreed pair per device, pacing and the
+  texts) and
+  [`simplify-research-discovery.md`](simplify-research-discovery.md)
+  (finding the bridge on the local network only: mDNS, a bounded subnet
+  probe, the Bridges Found row at first load and the address follow-up).
 - [`prerelease-design.md`](prerelease-design.md): prereleases for testers
   (2026-10-26, #269): versions `X.Y-beta.N` with tags that never move, built
   from `main` like every release, their notes, the one list of packages, the

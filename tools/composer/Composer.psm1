@@ -257,7 +257,7 @@ function Get-ComposerProperties {
         $r = $c.BoundingRectangle
         $rows += [pscustomobject]@{ Name = $c.Name; X = [int]$r.X; Y = [int]$r.Y; Class = $c.ClassName }
     }
-    $split = [int]($page.Current.BoundingRectangle.X + 180)
+    $split = [int]($page.Current.BoundingRectangle.X + 120)  # the value column starts at +143 at 1280 px wide (#294); +180 also worked at 1512 px
     $labels = $rows | Where-Object { $_.X -lt $split } | Sort-Object Y
     $result = [ordered]@{}
     foreach ($l in $labels) {
@@ -688,7 +688,7 @@ function Set-ComposerProperty {
     if (-not $lbl) { throw "Property '$Label' not found" }
     $ly = [int]$lbl.Current.BoundingRectangle.Y
     $cls = if ($List) { 'COMBOBOX' } else { 'EDIT' }
-    $ctl = Find-ComposerElements -Class $cls -Root $pg | Where-Object { [int]$_.Current.BoundingRectangle.X -gt ([int]$pg.Current.BoundingRectangle.X + 180) -and [math]::Abs([int]$_.Current.BoundingRectangle.Y - $ly) -le 8 } | Select-Object -First 1
+    $ctl = Find-ComposerElements -Class $cls -Root $pg | Where-Object { [int]$_.Current.BoundingRectangle.X -gt ([int]$pg.Current.BoundingRectangle.X + 120) -and [math]::Abs([int]$_.Current.BoundingRectangle.Y - $ly) -le 8 } | Select-Object -First 1
     if (-not $ctl) { throw "Value control for '$Label' not found" }
     $h = [IntPtr]$ctl.Current.NativeWindowHandle; $r = $ctl.Current.BoundingRectangle
     $before = [C4.ListView]::GetWindowText($h)

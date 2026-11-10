@@ -2,7 +2,8 @@ local fake = require("helpers.fake_c4")
 
 -- Globals a bundle's driver.lua or a test defines; cleared after each test.
 local DRIVER_GLOBALS = { "OnDriverInit", "OnDriverLateInit", "OnDriverDestroyed", "ExecuteCommand",
-	"OnPropertyChanged", "DEVLOOP_TEST_MARK", "DEVLOOP_TEST_CALLS" }
+	"OnPropertyChanged", "DEVLOOP_TEST_MARK", "DEVLOOP_TEST_CALLS", "DEVLOOP_TEST_TIMERS", "DEVLOOP_TEST_ONCE",
+	"DEVLOOP_TEST_SEEN" }
 
 -- A driver.lua that records its entry points in DEVLOOP_TEST_CALLS.
 local DRIVER_SRC = [[
@@ -308,14 +309,16 @@ describe("common.devloop", function()
 		return out
 	end
 
-	-- A fresh module instance (a Director restart), the old one stopped and
-	-- its bundle loader removed.
+	-- A fresh module instance (a Director restart: a new Lua state, whose C4
+	-- is the runtime's own again), the old one stopped and its bundle loader
+	-- removed.
 	local function reload_module(key)
 		local S = state()
 		devloop.stop()
 		for i = #package.loaders, 1, -1 do
 			if S and package.loaders[i] == S.loader then table.remove(package.loaders, i) end
 		end
+		rawset(_G, "C4", c4)
 		devloop = load_devloop(key)
 	end
 
@@ -366,6 +369,7 @@ describe("common.devloop", function()
 			if package.loaders[i] == S.loader then table.remove(package.loaders, i) end
 		end
 		rawset(_G, "print", real_print)
+		rawset(_G, "C4", c4) -- the runtime's own, not the timer guard's proxy
 		for _, name in ipairs(DRIVER_GLOBALS) do rawset(_G, name, nil) end
 		for name in pairs(package.loaded) do
 			if is_driver_module(name) then package.loaded[name] = nil end
@@ -397,6 +401,7 @@ describe("common.devloop", function()
 			assert.equal("nil", r.sandbox.jit)
 			assert.equal("nil", r.sandbox.bit)
 			assert.equal("Lua (no C4:HMAC)", r.sandbox.hmac, "the fake runtime has no C4:HMAC")
+			assert.equal("on", r.sandbox.timer_guard)
 			assert.equal(TEST_FINGERPRINT, r.key_fingerprint)
 		end)
 
@@ -603,6 +608,154 @@ describe("common.devloop", function()
 			server.version, server.key = "v3", OTHER_KEY
 			tick()
 			assert.equal("v2", devloop.version(), "a bundle signed with the other key is still refused")
+		end)
+	end)
+
+	-- The timer guard: a reload cancels the timers the old code armed (#247,
+	-- #376). The spec's own C4:SetTimer calls through the global C4 stand
+	-- for the packaged code's, the code that runs before the first reload.
+	describe("the timer guard", function()
+		it("stands a proxy in for the global C4 that passes every call and field through to the runtime's", function()
+			local proxy = rawget(_G, "C4")
+			assert.is_not.equal(c4, proxy)
+			assert.equal("on", devloop.timer_guard())
+			c4.Echo = function(...) return ... end
+			assert.same({ c4, 1, 2 }, { proxy:Echo(1, 2) }, "C4:Foo() gets the runtime's C4 as self")
+			assert.same({ "x", 3 }, { proxy.Echo("x", 3) }, "C4.Foo(x) gets what it was given")
+			assert.equal(c4.config_info, proxy.config_info, "fields are read through")
+			proxy.extra = 5
+			assert.equal(5, c4.extra, "and written through")
+			assert.is_nil(rawget(proxy, "extra"))
+			proxy:UpdateProperty("Status", "Busy")
+			assert.equal("Busy", rawget(_G, "Properties").Status)
+			local timer = proxy:SetTimer(250, function() end)
+			assert.equal(c4.timers[#c4.timers], timer, "the runtime's own timer object")
+			assert.same({ { 250, false } }, c4.calls_to("SetTimer"))
+		end)
+
+		it("passes the caller's SetTimer arguments exactly: no explicit nil repeat flag (#411)", function()
+			local proxy = rawget(_G, "C4")
+			local runtime = c4.SetTimer
+			-- As the controller does: a third argument that is given must be a boolean.
+			c4.SetTimer = function(self, delay, fn, ...)
+				if select("#", ...) > 0 and type((...)) ~= "boolean" then
+					error("repeat should be a boolean")
+				end
+				return runtime(self, delay, fn, ...)
+			end
+			assert.has_no.errors(function() proxy:SetTimer(250, function() end) end)
+			assert.has_no.errors(function() proxy:SetTimer(250, function() end, true) end)
+			assert.has_no.errors(function() proxy:SetTimer(250, function() end, false) end)
+			assert.has_error(function() proxy:SetTimer(250, function() end, nil) end, "repeat should be a boolean")
+			c4.SetTimer = runtime
+		end)
+
+		it("cancels every timer the running code armed, after its OnDriverDestroyed and before the new code", function()
+			local proxy = rawget(_G, "C4")
+			devloop.start(HOST)
+			serve()
+			local fired = {}
+			local once = proxy:SetTimer(60000, function() fired[#fired + 1] = "once" end)
+			local every = proxy:SetTimer(1000, function() fired[#fired + 1] = "every" end, true)
+			proxy:SetTimer(5, function() end)
+			assert.equal(1, c4.fire_timers_of(5), "a one-shot timer that fired is forgotten")
+			local stopped = proxy:SetTimer(7, function() end)
+			stopped:Cancel()
+			local late
+			rawset(_G, "DEVLOOP_TEST_ONCE", once)
+			rawset(_G, "OnDriverDestroyed", function()
+				table.insert(calls(), "destroyed, the timer " .. (once.active and "armed" or "cancelled"))
+				late = proxy:SetTimer(100, function() fired[#fired + 1] = "late" end)
+			end)
+			server.files["driver.lua"] = DRIVER_SRC .. "\nDEVLOOP_TEST_SEEN = DEVLOOP_TEST_ONCE.active"
+			-- The loop's tick alone (c4.fire_timers would fire the code's timers as well).
+			assert.equal(1, c4.fire_timers_of(devloop.INTERVAL_MS))
+			serve()
+			assert.equal("v1", devloop.version())
+			assert.same({ "destroyed, the timer armed", "chunk", "init:DIT_UPDATING", "late:DIT_UPDATING" }, calls())
+			assert.is_false(rawget(_G, "DEVLOOP_TEST_SEEN"), "cancelled before the new chunk ran")
+			assert.is_false(once.active)
+			assert.is_false(every.active)
+			assert.is_false(late.active, "a timer OnDriverDestroyed armed is cancelled too")
+			assert_said("cancelled 4 timer(s) of the old code")
+			assert.is_true(devloop.running())
+			assert.equal(1, #c4.active_timers(), "the loop's own timer alone")
+			tick()
+			assert.same({}, fired)
+		end)
+
+		it("cancels the reloaded code's timers at the next reload, and never the loop's own", function()
+			server.files["driver.lua"] = DRIVER_SRC .. [[
+
+function OnDriverLateInit(reason)
+	table.insert(DEVLOOP_TEST_CALLS, "late:" .. tostring(reason))
+	DEVLOOP_TEST_TIMERS = DEVLOOP_TEST_TIMERS or {}
+	table.insert(DEVLOOP_TEST_TIMERS, C4:SetTimer(300000, function() table.insert(DEVLOOP_TEST_CALLS, "fired") end, true))
+end
+]]
+			start_synced()
+			local timers = rawget(_G, "DEVLOOP_TEST_TIMERS")
+			assert.equal(1, #timers)
+			assert.is_true(timers[1].active)
+			assert.equal(2, #c4.active_timers())
+			server.version = "v2"
+			tick()
+			assert.equal("v2", devloop.version())
+			assert.equal(2, #timers)
+			assert.is_false(timers[1].active, "v1's timer is cancelled")
+			assert.is_true(timers[2].active, "v2's is armed")
+			assert.equal(2, #c4.active_timers(), "the loop's and v2's")
+			assert_said("cancelled 1 timer(s) of the old code")
+		end)
+
+		it("hands Director's arguments to a callback unchanged and ignores a Cancel() that raises", function()
+			local proxy = rawget(_G, "C4")
+			local got
+			local every = proxy:SetTimer(1000, function(timer, skips) got = { timer, skips } end, true)
+			c4.fire_timers()
+			assert.equal(every, got[1])
+			assert.equal(0, got[2])
+			every.Cancel = function() error("gone") end
+			start_synced()
+			assert.equal("v1", devloop.version())
+			assert.equal(0, printed_count("gone"))
+			assert.equal(0, printed_count("cancelled"), "no Cancel() went through")
+		end)
+
+		it("keeps the global C4 the runtime's own without a dev key", function()
+			reload_module(nil)
+			assert.equal(c4, rawget(_G, "C4"))
+			assert.equal("off (no dev key)", devloop.timer_guard())
+
+			-- A second load in one Lua state, now without a key, puts the runtime's back.
+			reload_module(TEST_KEY)
+			assert.is_not.equal(c4, rawget(_G, "C4"))
+			package.loaded["common.devloop"] = nil
+			forget_key()
+			devloop = require("common.devloop")
+			assert.equal(c4, rawget(_G, "C4"))
+			assert.equal("off (no dev key)", devloop.timer_guard())
+		end)
+	end)
+
+	describe("keep", function()
+		it("hands the first value kept to the code after a reload; a value of another type replaces it", function()
+			local first, second = {}, {}
+			assert.equal(first, devloop.keep("list", first))
+			assert.equal(first, devloop.keep("list", second))
+			start_synced()
+			assert.equal(first, devloop.keep("list", second), "across a reload")
+			assert.equal("text", devloop.keep("list", "text"))
+			assert.equal("text", devloop.keep("list", "other"))
+			reload_module(TEST_KEY) -- a Director restart keeps nothing
+			assert.equal(second, devloop.keep("list", second))
+		end)
+
+		it("keeps nothing without a dev key, where nothing ever reloads", function()
+			reload_module(nil)
+			local first, second = {}, {}
+			assert.equal(first, devloop.keep("list", first))
+			assert.equal(second, devloop.keep("list", second))
 		end)
 	end)
 
@@ -1161,6 +1314,16 @@ describe("common.devloop", function()
 
 		before_each(function()
 			c4.driver_file = "hue_light.c4z"   -- the receiver is a light unless a spec says otherwise
+		end)
+
+		it("cancels the timers the device's running code armed, and none for a refused bundle", function()
+			local timer = rawget(_G, "C4"):SetTimer(60000, function() end, true)
+			assert.same({ false, "refused", "signature mismatch" },
+				{ forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light", { key = OTHER_KEY }) })
+			assert.is_true(timer.active, "a refusal tears nothing down")
+			assert.is_true(forwarded("L1", { ["driver.lua"] = DRIVER_SRC }, "light"))
+			assert.is_false(timer.active)
+			assert.equal(0, #c4.active_timers())
 		end)
 
 		it("reloads from the forwarded bundle without start() ever being called", function()
@@ -2179,7 +2342,8 @@ describe("bridge/devtools.lua development requests", function()
 	-- bridge/devtools.lua is installed), paired, its identity checked unless
 	-- `answer` is false.
 	local function paired(answer)
-		env, c4 = fake.load_driver("hue_bridge", { ["Bridge IP Address"] = IP })
+		env, c4 = fake.load_driver("hue_bridge", { ["Event Stream Transport"] = "Web transfer",
+			["Bridge IP Address"] = IP })
 		c4.persist.hue_app_key = "abc123"
 		c4.persist.hue_bridge_id = "001788fffe123abc"
 		env.OnDriverLateInit("DIT_STARTUP")
@@ -2282,9 +2446,13 @@ describe("bridge/devtools.lua development requests", function()
 			if not release[name] then added[#added + 1] = name end
 		end
 		table.sort(added)
-		assert.same({ "Check CA Pinning", "Connection Test", "Reload Credentials" }, dev_only_commands())
+		-- Since 1.2 the dev entries live inside Diagnostics' list, so driver.xml
+		-- has no DEV-ONLY action left; their commands still answer in dev builds.
+		assert.same({}, dev_only_commands())
 		local expected = { "HUE_LOG" }
-		for _, command in ipairs(dev_only_commands()) do expected[#expected + 1] = (command:gsub("%s+", "_")) end
+		for _, command in ipairs({ "Check CA Pinning", "Connection Test", "Probe Picker Folders", "Reload Credentials" }) do
+			expected[#expected + 1] = (command:gsub("%s+", "_"))
+		end
 		table.sort(expected)
 		assert.same(expected, added)
 	end)

@@ -302,7 +302,12 @@ to 47c); everything else through the dev loop.
   directly: on a grouped_light, Hue ignores `dynamics.duration` for
   `dimming_delta` and the release's `stop` comes too late; on a single
   light it honours both (#249). The keypad LEDs still need the owner's own
-  pass.
+  pass. Addressed in 1.3 (#249, owner's choice of 2026-11-07,
+  `docs/group-hold-design.md`): a hold on 1 to 10 lit lamps dims each lamp
+  on its own, more than 10 in timed group steps. V11 above saw a change to
+  one light end a scene, so while a time-based scene runs (or a scene plays
+  dynamically) a hold always steps the whole room (G6a), which should keep
+  it `active` as V11's relative group dim did; to see on the house.
 - **(c) A dim before a slot boundary.** Not answerable with an API-made
   schedule (below): the probe dimmed to 15 % from the room's tile at
   10:12:42 kept 15 % while slot A stayed active, but slot B never came. The

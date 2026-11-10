@@ -415,7 +415,8 @@ describe("Hue Motion driver", function()
 			assert.same({ "OPENED", "CLOSED", "OPENED", "CLOSED" }, contact(c4))
 		end)
 
-		it("after a restart with motion shown, reports STATE_OPENED and holds the first no motion in full", function()
+		it("after a restart with motion shown, reports STATE_OPENED and holds the first no motion in full without a "
+			.. "record of the hold (#371 R6)", function()
 			local env, c4 = load_motion({ props = { [HOLD] = "30" }, persist = { motion_shown = "open" } })
 			configure(env)
 			state(env, { reason = "hello", motion = "false", motion_changed = iso(os.time()) })
@@ -456,17 +457,432 @@ describe("Hue Motion driver", function()
 		end)
 	end)
 
+	describe("Occupancy hold across a restart (#371)", function()
+		-- The contract is docs/motion-hold-restart-design.md; R1 to R12 are its
+		-- decisions and S1 to S24 its specs (§8). NOW is an invented 2026
+		-- controller time: the fake's default clock (1000000) is before the
+		-- 2025 floor of R5, which S13 uses.
+		local NOW = 1793000000000
+		local BEFORE = "2026-10-26T07:15:01.250Z" -- Hue's change time of the motion
+		local CHANGED = "2026-10-26T07:15:16.502Z" -- of the end of motion the hold holds
+		local NEWER = "2026-10-26T07:16:02.118Z" -- of another end of motion
+
+		after_each(function() log.set_debug(false) end)
+
+		-- The record as an earlier life persisted it: a hold of RID for CHANGED
+		-- that began 36 s before NOW, with `fields` over it.
+		local function record(fields)
+			local rec = { rid = RID, changed = CHANGED, since = NOW - 36000 }
+			for k, v in pairs(fields or {}) do rec[k] = v end
+			return rec
+		end
+
+		-- A restart: the earlier life showed opts.shown ("open") and held it
+		-- with opts.rec (record(); false for none), the hold is opts.hold s
+		-- (300) and the clock reads opts.now (NOW). Configured, nothing
+		-- reported yet, the recordings cleared.
+		local function restart(opts)
+			opts = opts or {}
+			local base = opts.base or SENSOR
+			local persist = { hue_rid = base.rid, hue_kind = base.kind, motion_shown = opts.shown or "open" }
+			if opts.rec ~= false then
+				persist.motion_hold = opts.rec or record({ rid = base.rid })
+			end
+			local env, c4 = load_motion({ props = { [HOLD] = tostring(opts.hold or 300) }, persist = persist })
+			c4.now_ms = opts.now or NOW
+			configure(env, base)
+			clear(c4)
+			return env, c4
+		end
+
+		-- Hue's no motion since `changed` (nil for none), as the resync after a
+		-- start reports it; `extra` over it.
+		local function no_motion(env, changed, extra)
+			local params = { reason = "resync", motion = "false", motion_changed = changed, online = "true",
+				enabled = "true" }
+			for k, v in pairs(extra or {}) do params[k] = v end
+			state(env, params)
+		end
+
+		-- A sensor with a 300 s hold running since NOW for CHANGED, in one
+		-- runtime, with the recordings cleared.
+		local function holding()
+			local env, c4 = known({ props = { [HOLD] = "300" } })
+			c4.now_ms = NOW
+			state(env, { motion = "true", motion_changed = BEFORE })
+			state(env, { motion = "false", motion_changed = CHANGED })
+			clear(c4)
+			return env, c4
+		end
+
+		-- The delays of the timers armed since the recordings were cleared.
+		local function armed(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SetTimer")) do out[#out + 1] = args[1] end
+			return out
+		end
+
+		-- The records written since the recordings were cleared.
+		local function writes(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("PersistSetValue")) do
+				if args[1] == "motion_hold" then out[#out + 1] = args[2] end
+			end
+			return out
+		end
+
+		-- The log lines, Debug Mode on, of what `fn` does.
+		local function logged(fn)
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			log.set_debug(true)
+			fn()
+			quiet()
+			log.set_debug(false)
+			return table.concat(lines, "\n")
+		end
+
+		it("writes { rid, changed, since } when a hold starts in full; nothing with a hold of 0 or no change time "
+			.. "(S1, R7)", function()
+			local env, c4 = known({ props = { [HOLD] = "300" } })
+			c4.now_ms = NOW
+			state(env, { motion = "true", motion_changed = BEFORE })
+			assert.is_nil(c4.persist.motion_hold, "no record while motion shows")
+			state(env, { motion = "false", motion_changed = CHANGED })
+			assert.same({ rid = RID, changed = CHANGED, since = NOW }, c4.persist.motion_hold)
+			assert.equal(1, count_timers(c4, 300000))
+
+			env, c4 = known()
+			c4.now_ms = NOW
+			state(env, { motion = "true", motion_changed = BEFORE })
+			state(env, { motion = "false", motion_changed = CHANGED })
+			assert.same({ "OPENED", "CLOSED" }, contact(c4))
+			assert.same({}, writes(c4), "a hold of 0")
+
+			env, c4 = known({ props = { [HOLD] = "300" } })
+			c4.now_ms = NOW
+			state(env, { motion = "true" })
+			state(env, { motion = "false" })
+			assert.equal(1, count_timers(c4, 300000), "held all the same")
+			assert.same({}, writes(c4), "no motion_changed")
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("follows a newer change time while the hold runs; since stays and the timer is untouched (S2, R7)", function()
+			local env, c4 = holding()
+			c4.now_ms = NOW + 5000
+			state(env, { reason = "check", motion = "false", motion_changed = NEWER })
+			assert.same({ rid = RID, changed = NEWER, since = NOW }, c4.persist.motion_hold)
+			assert.same({}, armed(c4))
+			assert.equal(1, count_timers(c4, 300000))
+			assert.same({}, contact(c4))
+
+			clear(c4)
+			state(env, { reason = "resync", motion = "false", motion_changed = "2026-10-26T07:16:02.118+00:00" })
+			state(env, { reason = "resync", motion = "false" })
+			assert.same({}, writes(c4), "the same instant again, or no change time, writes nothing")
+			assert.equal(NEWER, c4.persist.motion_hold.changed)
+		end)
+
+		it("deletes the record when the hold ends, on motion, a deliberate end, an unbind, a re-link and a no motion "
+			.. "the proxy shows as none (S3, R7, R10)", function()
+			local _, ended = holding()
+			assert.equal(1, fire(ended, 300000))
+			assert.same({ "CLOSED" }, contact(ended))
+			assert.is_nil(ended.persist.motion_hold, "the hold ended")
+
+			local env, c4 = holding()
+			state(env, { motion = "true", motion_changed = NEWER })
+			assert.is_nil(c4.persist.motion_hold, "motion")
+
+			env, c4 = holding()
+			state(env, { ended = "off", enabled = "false", status = "Switched off in the Hue app; no motion is reported" })
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.is_nil(c4.persist.motion_hold, "a deliberate end")
+
+			env, c4 = holding()
+			c4:Unbind(MOTION_ID, 1)
+			env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+			assert.is_nil(c4.persist.motion_hold, "an unbind")
+
+			env, c4 = holding()
+			configure(env, SENSOR, { rid = OTHER_RID, name = "Hallway sensor 2" })
+			assert.equal(0, count_timers(c4, 300000))
+			assert.is_nil(c4.persist.motion_hold, "a re-link")
+
+			env, c4 = restart({ shown = "closed" })
+			no_motion(env, CHANGED)
+			assert.is_nil(c4.persist.motion_hold, "a no motion while the proxy shows none")
+		end)
+
+		it("keeps the record at OnDriverDestroyed and stops only the timer (S4, R7, L25)", function()
+			local env, c4 = holding()
+			env.OnDriverDestroyed()
+			assert.equal(0, count_timers(c4, 300000))
+			assert.same({ rid = RID, changed = CHANGED, since = NOW }, c4.persist.motion_hold)
+			assert.same({}, c4.calls_to("PersistDeleteValue"))
+		end)
+
+		it("resumes a hold cut by a restart for the time it had left (S5, the issue; R1 to R4)", function()
+			local env, c4 = restart()
+			local said = logged(function() no_motion(env, CHANGED) end)
+			assert.same({ "STATE_OPENED" }, contact(c4), "no event at the restart")
+			assert.same({ 264000 }, armed(c4))
+			assert.same(record(), c4.persist.motion_hold, "left as it is")
+			assert.same({}, writes(c4))
+			assert.truthy(said:find("the hold resumes: 264 of 300 s left (it began before the restart)", 1, true), said)
+			assert.equal(1, fire(c4, 264000))
+			assert.same({ "STATE_OPENED", "CLOSED" }, contact(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("closes at once when the hold ran out while the driver was down (S6, R4, L2, L8)", function()
+			local env, c4 = restart({ rec = record({ since = NOW - 400000 }) })
+			local said = logged(function() no_motion(env, CHANGED) end)
+			assert.same({ "CLOSED" }, contact(c4), "the stock event fires once")
+			assert.same({}, armed(c4), "no hold timer")
+			assert.is_nil(c4.persist.motion_hold)
+			assert.truthy(said:find(": the 300 s hold ended 100 s ago", 1, true), said)
+			assert.equal("closed", c4.persist.motion_shown)
+		end)
+
+		it("closes at once when less than 1 s is left (S7, R4)", function()
+			local env, c4 = restart({ rec = record({ since = NOW - 299500 }) })
+			no_motion(env, CHANGED)
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.same({}, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("takes the same instant in another spelling as the same end of motion (S8, R3)", function()
+			for _, spelling in ipairs({ "2026-10-26T07:15:16.502+00:00", "2026-10-26T09:15:16.502+02:00",
+				"2026-10-26T07:15:16.503Z" }) do
+				local env, c4 = restart()
+				no_motion(env, spelling)
+				assert.same({ "STATE_OPENED" }, contact(c4), spelling)
+				assert.same({ 264000 }, armed(c4), spelling)
+			end
+			-- 2 ms apart is another instant.
+			local env, c4 = restart()
+			no_motion(env, "2026-10-26T07:15:16.504Z")
+			assert.same({ 300000 }, armed(c4))
+		end)
+
+		it("holds in full for another end of motion and rewrites the record (S9, R6, L7)", function()
+			local env, c4 = restart()
+			no_motion(env, NEWER)
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 300000 }, armed(c4))
+			assert.same({ rid = RID, changed = NEWER, since = NOW }, c4.persist.motion_hold)
+		end)
+
+		it("holds in full without motion_changed and deletes the record (S10, R6, R7, L20)", function()
+			local env, c4 = restart()
+			no_motion(env, nil)
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 300000 }, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("holds in full for a record of another rid (S11, R3, R6)", function()
+			local env, c4 = restart({ rec = record({ rid = OTHER_RID }) })
+			no_motion(env, CHANGED)
+			assert.same({ 300000 }, armed(c4))
+			assert.same({ rid = RID, changed = CHANGED, since = NOW }, c4.persist.motion_hold)
+		end)
+
+		it("holds in full when since is ahead of the clock, and since becomes now (S12, R5, L6)", function()
+			local env, c4 = restart({ rec = record({ since = NOW + 60000 }) })
+			no_motion(env, CHANGED)
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 300000 }, armed(c4))
+			assert.same({ rid = RID, changed = CHANGED, since = NOW }, c4.persist.motion_hold)
+		end)
+
+		it("holds in full with a clock before 2025 (S13, R5, L3)", function()
+			local env, c4 = restart({ now = 1000000 })
+			no_motion(env, CHANGED)
+			assert.same({ 300000 }, armed(c4), "the controller's clock is not set yet")
+			assert.equal(1000000, c4.persist.motion_hold.since)
+
+			env, c4 = restart({ rec = record({ since = 1735689599999 }) })
+			no_motion(env, CHANGED)
+			assert.same({ 300000 }, armed(c4), "the record was written by a clock not set yet")
+			assert.same({ rid = RID, changed = CHANGED, since = NOW }, c4.persist.motion_hold)
+		end)
+
+		it("counts what is left from the current Occupancy Hold Time (S14, R8, L14)", function()
+			local env, c4 = restart({ hold = 60 })
+			no_motion(env, CHANGED)
+			assert.same({ 24000 }, armed(c4))
+			assert.same({ "STATE_OPENED" }, contact(c4))
+
+			env, c4 = restart({ hold = 30 })
+			no_motion(env, CHANGED)
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.same({}, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("leaves a resumed hold's timer alone when the hold time changes (S15, R8, L15)", function()
+			local env, c4 = restart()
+			no_motion(env, CHANGED)
+			env.Properties[HOLD] = "10"
+			env.OnPropertyChanged(HOLD)
+			assert.equal(1, count_timers(c4, 264000))
+			assert.same({ 264000 }, armed(c4))
+			assert.same(record(), c4.persist.motion_hold, "kept")
+			fire(c4, 264000)
+			assert.same({ "STATE_OPENED", "CLOSED" }, contact(c4))
+		end)
+
+		it("resumes again from the first since after a second restart within the hold (S16, R7, L27)", function()
+			local env, c4 = restart()
+			no_motion(env, CHANGED)
+			assert.same({ 264000 }, armed(c4))
+			env.OnDriverDestroyed()
+			local persisted = c4.persist
+
+			env, c4 = restart({ rec = persisted.motion_hold, now = NOW + 100000 })
+			no_motion(env, CHANGED)
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 164000 }, armed(c4))
+			assert.same(record(), c4.persist.motion_hold)
+		end)
+
+		it("opens on motion at the restart and deletes the record; the next no motion holds in full (S17, R10, "
+			.. "L11)", function()
+			local env, c4 = restart()
+			no_motion(env, NEWER, { motion = "true" })
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.is_nil(c4.persist.motion_hold)
+			state(env, { motion = "false", motion_changed = "2026-10-26T07:17:40.000Z" })
+			assert.same({ 300000 }, armed(c4))
+			assert.same({ rid = RID, changed = "2026-10-26T07:17:40.000Z", since = NOW }, c4.persist.motion_hold)
+
+			env, c4 = restart({ shown = "closed" })
+			no_motion(env, NEWER, { motion = "true" })
+			assert.same({ "OPENED" }, contact(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("never reopens a contact the proxy last got as closed because of a record (S18, R6, L12)", function()
+			local env, c4 = restart({ shown = "closed" })
+			no_motion(env, CHANGED)
+			assert.same({ "STATE_CLOSED" }, contact(c4))
+			assert.same({}, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("keeps the record through a failure at the restart; the next reading decides (S19, R7, L9)", function()
+			local failure = { reason = "resync", online = "false", status = "Unreachable in Hue; the motion shown may "
+				.. "not be current" }
+			local env, c4 = restart()
+			state(env, failure)
+			assert.same({}, contact(c4))
+			assert.same(record(), c4.persist.motion_hold)
+			c4.now_ms = NOW + 20000
+			no_motion(env, CHANGED)
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 244000 }, armed(c4))
+
+			env, c4 = restart()
+			state(env, failure)
+			c4.now_ms = NOW + 300000
+			no_motion(env, CHANGED)
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.same({}, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("closes once on a deliberate end at the restart, never held, and deletes the record (S20, R10, L21)",
+			function()
+			local env, c4 = restart()
+			no_motion(env, CHANGED, { ended = "off", enabled = "false",
+				status = "Switched off in the Hue app; no motion is reported" })
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.same({}, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("closes with a hold of 0 at the restart and deletes the record (S21, R10, L16)", function()
+			local env, c4 = restart({ hold = 0 })
+			no_motion(env, CHANGED)
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.same({}, armed(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("resumes an area's hold the same way (S22, L19)", function()
+			local env, c4 = restart({ base = AREA })
+			no_motion(env, CHANGED, { rid = AREA_RID })
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 264000 }, armed(c4))
+			assert.same(record({ rid = AREA_RID }), c4.persist.motion_hold)
+			fire(c4, 264000)
+			assert.same({ "STATE_OPENED", "CLOSED" }, contact(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("leaves a running hold and its since alone on a resync with the same change time (S23, R9, L17)", function()
+			local env, c4 = restart()
+			no_motion(env, CHANGED)
+			clear(c4)
+			c4.now_ms = NOW + 10000
+			no_motion(env, CHANGED)
+			assert.same({}, armed(c4), "no second timer")
+			assert.same({}, writes(c4))
+			assert.same(record(), c4.persist.motion_hold)
+			assert.same({}, contact(c4))
+			assert.equal(1, count_timers(c4, 264000))
+		end)
+
+		it("carries a hold across OnDriverDestroyed into the next instance, end to end (S24)", function()
+			local env, c4 = known({ props = { [HOLD] = "300" } })
+			c4.now_ms = NOW
+			state(env, { motion = "true", motion_changed = BEFORE })
+			state(env, { motion = "false", motion_changed = CHANGED })
+			assert.same({ "OPENED" }, contact(c4))
+			env.OnDriverDestroyed()
+
+			local persisted = {}
+			for k, v in pairs(c4.persist) do persisted[k] = v end
+			env, c4 = load_motion({ props = { [HOLD] = "300" }, persist = persisted })
+			c4.now_ms = NOW + 36000
+			configure(env)
+			clear(c4)
+			state(env, { reason = "resync", motion = "false", motion_changed = CHANGED, online = "true",
+				enabled = "true" })
+			assert.same({ "STATE_OPENED" }, contact(c4))
+			assert.same({ 264000 }, armed(c4))
+			fire(c4, 264000)
+			assert.same({ "STATE_OPENED", "CLOSED" }, contact(c4))
+			assert.is_nil(c4.persist.motion_hold)
+		end)
+
+		it("reads only a well-formed record and deletes any other (§6.2)", function()
+			for _, junk in ipairs({ "open", 42, { rid = RID, changed = CHANGED }, { rid = "", changed = CHANGED,
+				since = NOW }, { rid = RID, changed = string.rep("9", 41), since = NOW },
+				{ rid = RID, changed = CHANGED, since = "1792999964000" } }) do
+				local env, c4 = restart({ rec = junk })
+				assert.is_nil(c4.persist.motion_hold, tostring(junk))
+				no_motion(env, CHANGED)
+				assert.same({ 300000 }, armed(c4), tostring(junk))
+			end
+		end)
+	end)
+
 	describe("deliberate ends and failures (§2.7, EC §6)", function()
 		it("closes once and at once when the sensor is deleted in Hue, and takes it offline", function()
 			local env, c4 = known({ motion = "true" })
 			state(env, { lux = "30", temperature = "20.5" })
-			state(env, { ended = "deleted", status = "Sensor deleted in Hue since 10-26; re-link or Forget" })
-			state(env, { ended = "deleted", status = "Sensor deleted in Hue since 10-26; re-link or Forget" })
+			state(env, { ended = "deleted", status = "Sensor deleted in Hue since 10-26; Link or Forget Device" })
+			state(env, { ended = "deleted", status = "Sensor deleted in Hue since 10-26; Link or Forget Device" })
 			assert.same({ "CLOSED" }, contact(c4))
 			assert.equal("No", env.Properties["Online"])
 			assert.equal("0", variable(c4, "Online"))
 			assert.same({ 5 }, c4.events_fired)
-			assert.equal("Sensor deleted in Hue since 10-26; re-link or Forget", env.Properties["Status"])
+			assert.equal("Sensor deleted in Hue since 10-26; Link or Forget Device", env.Properties["Status"])
 			assert.equal("Unknown", env.Properties["Hue Motion"])
 			local out = output(c4)
 			assert.equal("VALUE_UNAVAILABLE", out[#out][1])
@@ -569,7 +985,7 @@ describe("Hue Motion driver", function()
 			local env, c4 = known({ base = AREA })
 			state(env, { rid = AREA_RID, ended = "paused", enabled = "false",
 				status = "Paused in the Hue app; no motion is reported" })
-			action(env, "Test Motion")
+			action(env, "Test Motion Programming")
 			state(env, { rid = AREA_RID, ended = "paused", status = "Paused in the Hue app; no motion is reported" })
 			assert.equal(1, count_timers(c4, 30000))
 			fire(c4, 30000)
@@ -596,7 +1012,7 @@ describe("Hue Motion driver", function()
 			configure(env, SENSOR, { gone = "true" })
 			assert.same({ "CLOSED" }, contact(c4))
 			assert.equal("No", env.Properties["Online"])
-			assert.equal("Sensor deleted in Hue; re-link or Forget", env.Properties["Status"])
+			assert.equal("Sensor deleted in Hue; Link or Forget Device", env.Properties["Status"])
 			configure(env, SENSOR, { gone = "true" })
 			assert.same({ "CLOSED" }, contact(c4), "once")
 		end)
@@ -606,7 +1022,7 @@ describe("Hue Motion driver", function()
 			env.ExecuteCommand("HUE_MOTION_FORGOTTEN", { rid = RID, name = "Hallway sensor" })
 			assert.same({ "CLOSED" }, contact(c4))
 			assert.equal("Forgotten by the bridge (was Hue motion sensor Hallway sensor)", env.Properties["Status"])
-			assert.equal("Delete this device in Composer, or bind it again and use Link Devices",
+			assert.equal("Delete this device, or bind it again and use Link Device on the Hue Bridge",
 				env.Properties["Last Action"])
 			assert.equal("No", env.Properties["Online"])
 			-- Unbound by the bridge afterwards: still the forgotten text, nothing more to close.
@@ -949,7 +1365,12 @@ describe("Hue Motion driver", function()
 			env.Properties["Debug Mode"] = "On"
 			env.OnPropertyChanged("Debug Mode")
 			action(env, "Refresh From Bridge")
-			assert.is_true(sends[2].log_command)
+			local hellos = {}
+			for _, m in ipairs(sends) do
+				if m.command == "HUE_MOTION_HELLO" then hellos[#hellos + 1] = m end
+			end
+			assert.equal(2, #hellos)
+			assert.is_true(hellos[2].log_command)
 		end)
 
 		it("greets with rid \"\" while it has none (a device added by hand)", function()
@@ -1025,8 +1446,112 @@ describe("Hue Motion driver", function()
 		end)
 	end)
 
-	describe("actions (§2.6)", function()
-		it("Refresh From Bridge asks the bridge again", function()
+	describe("Test Motion Programming (§2.6, EC R12; the one action since 1.2, #334)", function()
+		local TOGGLE = "Test Motion Programming"
+
+		it("is the one action of driver.xml, and the three it replaced are hidden", function()
+			local xml = assert(io.open("src/hue_motion/driver.xml")):read("*a")
+			local commands = {}
+			for body in xml:match("<actions>(.-)</actions>"):gmatch("<action>(.-)</action>") do
+				commands[#commands + 1] = body:match("<name>(.-)</name>") .. " / " .. body:match("<command>(.-)</command>")
+			end
+			assert.same({ "Test Motion Programming / Test Motion Programming" }, commands)
+			for _, old in ipairs({ "Refresh From Bridge", "Test Motion", "Test No Motion", "Test: Motion" }) do
+				assert.is_nil(xml:find("<command>" .. old .. "</command>", 1, true), old)
+			end
+		end)
+
+		it("sends motion while the sensor shows none, and Hue's state after 30 s", function()
+			local env, c4 = known()
+			action(env, TOGGLE)
+			assert.same({ "OPENED" }, contact(c4))
+			assert.equal("Test: motion sent; Hue's state returns within 30 s", env.Properties["Last Action"])
+			assert.equal(1, fire(c4, 30000))
+			assert.same({ "OPENED", "CLOSED" }, contact(c4))
+			assert.equal(0, count_timers(c4, 30000))
+		end)
+
+		it("sends no motion while the sensor shows motion, and the next reading puts Hue's state back", function()
+			local env, c4 = known({ motion = "true" })
+			action(env, TOGGLE)
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.equal("Test: no motion sent; Hue's state returns within 30 s", env.Properties["Last Action"])
+			state(env, { motion = "true" })
+			assert.same({ "CLOSED", "OPENED" }, contact(c4))
+			assert.equal(0, count_timers(c4, 30000))
+			-- The test is over: the next press is a new one, from what the sensor shows.
+			action(env, TOGGLE)
+			assert.same({ "CLOSED", "OPENED", "CLOSED" }, contact(c4))
+			assert.equal(1, count_timers(c4, 30000))
+		end)
+
+		it("toggles back on a second press within the 30 s and ends the test there", function()
+			local env, c4 = known()
+			action(env, TOGGLE)
+			action(env, TOGGLE)
+			assert.same({ "OPENED", "CLOSED" }, contact(c4), "both stock events, one each")
+			assert.equal("Test: no motion sent; back to Hue's state, the test is over", env.Properties["Last Action"])
+			assert.equal(0, count_timers(c4, 30000), "nothing pending")
+			assert.equal("closed", c4.persist.motion_shown)
+			-- A third press starts a new test.
+			action(env, TOGGLE)
+			assert.same({ "OPENED", "CLOSED", "OPENED" }, contact(c4))
+			assert.equal(1, fire(c4, 30000))
+			assert.same({ "OPENED", "CLOSED", "OPENED", "CLOSED" }, contact(c4))
+		end)
+
+		it("starts the 30 s again when Hue's state moved during the test (the hold ran out)", function()
+			local env, c4 = known({ props = { [HOLD] = "10" }, motion = "true" })
+			state(env, { motion = "false" })
+			assert.same({}, contact(c4), "held open")
+			action(env, TOGGLE)
+			assert.same({ "CLOSED" }, contact(c4))
+			assert.equal(1, fire(c4, 10000), "the hold ends during the test, silently")
+			-- Hue's state is no motion now: motion is a new test, not the way back.
+			action(env, TOGGLE)
+			assert.same({ "CLOSED", "OPENED" }, contact(c4))
+			assert.equal("Test: motion sent; Hue's state returns within 30 s", env.Properties["Last Action"])
+			assert.equal(1, count_timers(c4, 30000))
+			assert.equal(1, fire(c4, 30000))
+			assert.same({ "CLOSED", "OPENED", "CLOSED" }, contact(c4))
+		end)
+
+		it("toggles back to Hue's held motion and ends the test while the hold still runs", function()
+			local env, c4 = known({ props = { [HOLD] = "10" }, motion = "true" })
+			state(env, { motion = "false" })
+			action(env, TOGGLE)
+			action(env, TOGGLE)
+			assert.same({ "CLOSED", "OPENED" }, contact(c4))
+			assert.equal("Test: motion sent; back to Hue's state, the test is over", env.Properties["Last Action"])
+			assert.equal(0, count_timers(c4, 30000))
+			-- The hold goes on as if there had been no test.
+			assert.equal(1, fire(c4, 10000))
+			assert.same({ "CLOSED", "OPENED", "CLOSED" }, contact(c4))
+		end)
+
+		it("works without any sensor or bridge: motion first, then what the proxy showed before", function()
+			local env, c4 = load_motion({ bind = false, dit = "DIT_ADDING" })
+			action(env, TOGGLE)
+			assert.same({ "OPENED" }, contact(c4))
+			assert.equal(1, fire(c4, 30000))
+			action(env, TOGGLE)
+			action(env, TOGGLE)
+			assert.same({ "OPENED", "CLOSED", "OPENED", "CLOSED" }, contact(c4))
+			env.ReceivedFromProxy(5001, "GET_STATE", {})
+			assert.same({ "OPENED", "CLOSED", "OPENED", "CLOSED", "STATE_CLOSED" }, contact(c4))
+		end)
+
+		it("is cancelled by a deliberate end, as the tests always were", function()
+			local env, c4 = known()
+			action(env, TOGGLE)
+			env.ExecuteCommand("HUE_MOTION_FORGOTTEN", { rid = RID, name = "Hallway sensor" })
+			assert.same({ "OPENED", "CLOSED" }, contact(c4))
+			assert.equal(0, count_timers(c4, 30000))
+		end)
+	end)
+
+	describe("hidden aliases until 2.0 (docs/simplify-actions-design.md §3.3)", function()
+		it("Refresh From Bridge still asks the bridge again", function()
 			local env, c4 = known()
 			action(env, "Refresh From Bridge")
 			local hello = messages(c4, "HUE_MOTION_HELLO")
@@ -1034,9 +1559,28 @@ describe("Hue Motion driver", function()
 			assert.equal(RID, hello[1].params.rid)
 			assert.equal("Asked the bridge for this device's state; its answer updates the rows",
 				env.Properties["Last Action"])
+			env.ExecuteCommand("Refresh From Bridge", {})
+			assert.equal(2, #messages(c4, "HUE_MOTION_HELLO"), "sent by name too")
 		end)
 
-		it("Test: Motion opens the sensor, and Hue's state comes back after 30 s", function()
+		it("says in the log, in Debug Mode, what does the job now", function()
+			local env = known()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			env.Properties["Debug Mode"] = "On"
+			env.OnPropertyChanged("Debug Mode")
+			action(env, "Test Motion")
+			quiet()
+			log.set_debug(false)
+			local said = false
+			for _, line in ipairs(lines) do
+				said = said or line:find("Test Motion is a hidden alias until 2.0; Test Motion Programming does this now",
+					1, true) ~= nil
+			end
+			assert.is_true(said)
+		end)
+
+		it("Test Motion opens the sensor, and Hue's state comes back after 30 s", function()
 			local env, c4 = known()
 			action(env, "Test Motion")
 			assert.same({ "OPENED" }, contact(c4))
@@ -1045,7 +1589,7 @@ describe("Hue Motion driver", function()
 			assert.same({ "OPENED", "CLOSED" }, contact(c4))
 		end)
 
-		it("Test: No Motion closes the sensor, and the next reading puts Hue's state back at once", function()
+		it("Test No Motion closes the sensor, and the next reading puts Hue's state back at once", function()
 			local env, c4 = known({ motion = "true" })
 			action(env, "Test No Motion")
 			assert.same({ "CLOSED" }, contact(c4))
@@ -1053,6 +1597,15 @@ describe("Hue Motion driver", function()
 			state(env, { motion = "true" })
 			assert.same({ "CLOSED", "OPENED" }, contact(c4))
 			assert.equal(0, count_timers(c4, 30000))
+		end)
+
+		it("Test Motion and Test No Motion send what they name, whatever the sensor shows", function()
+			local env, c4 = known({ motion = "true" })
+			action(env, "Test Motion")
+			action(env, "Test No Motion")
+			action(env, "Test No Motion")
+			assert.same({ "OPENED", "CLOSED", "CLOSED" }, contact(c4), "no toggle: each sends its own state")
+			assert.equal(1, count_timers(c4, 30000))
 		end)
 
 		it("works without any sensor: the state before the test comes back", function()

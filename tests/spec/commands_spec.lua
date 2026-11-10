@@ -418,6 +418,65 @@ describe("bridge.commands", function()
 		end)
 	end)
 
+	-- The background tasks' user gate (bridge/housekeeping.lua,
+	-- docs/simplify-research-scheduler.md §3.4): busy while any rid has work
+	-- for the bridge, waiting or in flight.
+	describe("busy()", function()
+		it("is busy from the first set() until the PUT's done()", function()
+			assert.is_false(q:busy(), "a new queue is idle")
+			q:set("a", { brightness = 40 })
+			assert.is_true(q:busy(), "waiting for the debounce")
+			c4.fire_timers()
+			assert.equal(1, #sends)
+			assert.is_nil(q:pending("a"))
+			assert.is_true(q:busy(), "the PUT is in flight")
+			sends[1].done({ ok = true, code = 200 })
+			assert.is_false(q:busy())
+		end)
+
+		it("is busy while a change waits behind a PUT in flight, and while a retry or a token wait is armed", function()
+			set_now("a", { brightness = 40 })
+			q:set("a", { brightness = 60 })
+			sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+			assert.same({ 500 }, timer_delays(), "a retry is armed")
+			assert.is_true(q:busy(), "the retry")
+			c4.fire_timers()
+			sends[2].done({ ok = true, code = 200 })
+			assert.is_false(q:busy())
+
+			q = commands.new({ send = fake_send, rate_per_sec = 1, burst = 1 })
+			set_now("b", { on = true })
+			sends[3].done({ ok = true, code = 200 })
+			set_now("c", { on = true })
+			assert.equal(3, #sends, "the bucket is empty")
+			assert.same({ 1000 }, timer_delays(), "a token wait is armed")
+			assert.is_true(q:busy(), "the token wait")
+		end)
+
+		it("is busy when any one rid has work", function()
+			set_now("a", { on = true })
+			sends[1].done({ ok = true, code = 200 })
+			q:set("b", { on = false })
+			assert.is_true(q:busy())
+		end)
+
+		it("is idle after stop(), after a final error drops the state, and after a set() that sends nothing", function()
+			set_now("a", { on = true })
+			q:set("b", { on = true })
+			assert.equal(1, #sends)
+			q:stop()
+			assert.is_false(q:busy(), "stop() forgets pending and in-flight state")
+
+			set_now("a", { on = true })
+			sends[2].done({ ok = false, err = "key rejected" })
+			assert.is_false(q:busy(), "a final error drops the state")
+
+			set_now("a", { rate = 500 }) -- a lone rate: no body, no PUT
+			assert.equal(2, #sends)
+			assert.is_false(q:busy())
+		end)
+	end)
+
 	describe("relative dim (keypad holds)", function()
 		it("sends dimming_delta up with the ramp as dynamics, and a bare stop", function()
 			set_now("a", { dim = "up", rate = 3000 })
@@ -820,6 +879,237 @@ describe("bridge.commands", function()
 					sends[3].done({ ok = false, code = 503, err = "HTTP 503" })
 					assert.same({ 2000 }, timer_delays())
 					assert.equal(0, q:stats().dropped)
+				end)
+			end)
+		end
+	end)
+
+	-- #421 (docs/tap-stop-design.md §4.3): a keypad tap's start and a tap stop
+	-- sent as a level arrive marked urgent (D12), and a stop that finds its
+	-- ramp's start still waiting in the queue turns both into the stop's level
+	-- (D13). The light queue and the grouped_light queue (driver.lua
+	-- new_group_queue) are the same code, and both are run.
+	describe("tap starts and stops (#421)", function()
+		local OK = { ok = true, code = 200 }
+
+		local function logged(text)
+			for _, line in ipairs(lines) do
+				if line:find(text, 1, true) then return true end
+			end
+			return false
+		end
+
+		before_each(function()
+			log.set_debug(true)
+		end)
+
+		after_each(function()
+			log.set_debug(false)
+		end)
+
+		it("urgent() names a state marked urgent", function()
+			assert.is_true(commands.urgent({ on = true, brightness = 100, rate = 3000, urgent = true }))
+			assert.is_false(commands.urgent({ on = true, brightness = 100, rate = 3000 }))
+		end)
+
+		it("never puts urgent in a body", function()
+			assert.same({ on = { on = true }, dimming = { brightness = 100 }, dynamics = { duration = 3000 } },
+				commands.body({ on = true, brightness = 100, rate = 3000, urgent = true }))
+			assert.same({ on = { on = true }, dimming = { brightness = 42 } },
+				commands.body({ on = true, brightness = 42, rate = 0, urgent = true }))
+		end)
+
+		for _, kind in ipairs({
+			{ name = "light queue", opts = {} },
+			{ name = "group queue", opts = { rate_per_sec = 1, burst = 3, label = "grouped_light" } },
+		}) do
+			describe(kind.name, function()
+				before_each(function()
+					local opts = { send = fake_send }
+					for k, v in pairs(kind.opts) do opts[k] = v end
+					q = commands.new(opts)
+				end)
+
+				local function complete_all()
+					for _, s in ipairs(sends) do
+						if not s.completed then
+							s.completed = true
+							s.done(OK)
+						end
+					end
+				end
+
+				local function last_to(rid)
+					for i = #sends, 1, -1 do
+						if sends[i].rid == rid then return sends[i] end
+					end
+				end
+
+				-- A drag empties the bucket: one level on each of `burst` rids,
+				-- then one more that waits for a token.
+				local function drain()
+					for i = 1, q.burst do
+						q:set("d" .. i, { brightness = 10 * i })
+					end
+					c4.fire_timers()
+					complete_all()
+					assert.equal(q.burst, #sends)
+					q:set("drag", { brightness = 40 })
+					c4.fire_timers()
+					assert.equal(q.burst, #sends, "the bucket is empty")
+					assert.same({ math.ceil(1000 / q.rate) }, timer_delays(), "the drag's level waits for a token")
+				end
+
+				it("sends an urgent start at once past an empty bucket and takes no token (D12)", function()
+					drain()
+					q:set("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+					c4.fire_timers()
+					assert.equal(q.burst + 1, #sends, "the tap's start did not wait")
+					assert.equal("t", sends[#sends].rid)
+					assert.same({ on = { on = true }, dimming = { brightness = 100 }, dynamics = { duration = 3000 } },
+						sends[#sends].body, "no urgent in the PUT")
+					assert.equal(0, q.tokens, "no token taken")
+					assert.same({ math.ceil(1000 / q.rate) }, timer_delays(), "the drag still waits for its token")
+				end)
+
+				it("lets an urgent set on a state waiting for a token send it at once (D12)", function()
+					drain()
+					q:set("drag", { on = true, brightness = 100, rate = 3000, urgent = true })
+					assert.same({ commands.DEBOUNCE_MS }, timer_delays(), "the token wait gave way to the debounce")
+					c4.fire_timers()
+					assert.equal(q.burst + 1, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 100 }, dynamics = { duration = 3000 } },
+						sends[#sends].body)
+					assert.same({}, timer_delays())
+				end)
+
+				it("keeps urgent through a merge until the PUT is sent (D12)", function()
+					q:set("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+					q:set("t", { x = 0.3, y = 0.4 })
+					assert.is_true(q:pending("t").urgent, "a later part without urgent keeps it")
+					q:set("u", { brightness = 50 })
+					q:set("u", { mirek = 300, urgent = "true" })
+					assert.is_true(q:pending("u").urgent, "a later urgent part makes the state urgent, string form too")
+					assert.is_true(commands.urgent(q:pending("u")))
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 100 }, color = { xy = { x = 0.3, y = 0.4 } },
+						dynamics = { duration = 3000 } }, last_to("t").body)
+					assert.same({ on = { on = true }, dimming = { brightness = 50 }, color_temperature = { mirek = 300 } },
+						last_to("u").body)
+					complete_all()
+					q:set("t", { brightness = 20 })
+					assert.is_nil(q:pending("t").urgent, "the next state starts without it")
+				end)
+
+				it("turns a stop with a level on an unsent ramp into that level, rate 0, urgent (D13)", function()
+					q:set("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+					q:set("t", { dim = "stop", level = 42 })
+					assert.same({ on = true, brightness = 42, rate = 0, urgent = true }, q:pending("t"))
+					c4.fire_timers()
+					assert.equal(1, #sends, "one PUT: the start never went out")
+					assert.same({ on = { on = true }, dimming = { brightness = 42 } }, sends[1].body,
+						"an absolute level, no duration, no dimming_delta")
+					assert.is_true(logged("a stop replaced a start not yet sent; setting 42 % at once (#421 D13)"))
+					complete_all()
+
+					q:set("o", { brightness = 0, rate = 2000, urgent = true })
+					q:set("o", { dim = "stop", level = 30 })
+					assert.same({ on = true, brightness = 30, rate = 0, urgent = true }, q:pending("o"),
+						"a ramp to off stopped above 0 stays on")
+					q:set("f", { on = true, rate = 1500 })
+					q:set("f", { dim = "stop", level = 0, rate = 700 })
+					assert.same({ on = false, brightness = 0, rate = 0, urgent = true }, q:pending("f"),
+						"a level of 0 is off, and the stop's own rate is ignored")
+				end)
+
+				it("sends at once a stop that replaced a start waiting for a token (D13)", function()
+					drain()
+					q:set("r", { on = true, brightness = 80, rate = 4000 }) -- a timed target from programming
+					c4.fire_timers()
+					assert.equal(q.burst, #sends, "the start waits for a token like any level")
+					q:set("r", { dim = "stop", level = 55 })
+					c4.fire_timers()
+					assert.equal(q.burst + 1, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 55 } }, last_to("r").body)
+					assert.is_nil(q:pending("r"))
+				end)
+
+				it("drops an unsent ramp for a stop without a level, and sends nothing for it (D13)", function()
+					q:set("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+					q:set("t", { dim = "stop" })
+					assert.same({ urgent = true }, q:pending("t"))
+					q:set("o", { on = false, rate = 2000 })
+					q:set("o", { dim = "stop" })
+					c4.fire_timers()
+					assert.equal(0, #sends)
+					assert.is_nil(q:pending("t"))
+					assert.is_false(q:busy())
+					assert.is_true(logged("a stop replaced a start not yet sent; setting nothing at once"))
+				end)
+
+				it("keeps a colour pending beside the unsent ramp (D13)", function()
+					q:set("c", { brightness = 80, x = 0.3, y = 0.4, rate = 3000, urgent = true })
+					q:set("c", { dim = "stop", level = 50 })
+					c4.fire_timers()
+					assert.same({ on = { on = true }, dimming = { brightness = 50 }, color = { xy = { x = 0.3, y = 0.4 } } },
+						sends[1].body)
+					complete_all()
+					q:set("m", { on = true, mirek = 300, rate = 3000, urgent = true })
+					q:set("m", { dim = "stop" })
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					assert.same({ color_temperature = { mirek = 300 } }, sends[2].body,
+						"without a level only the colour goes")
+				end)
+
+				it("keeps a stop that comes after the start went out a dimming_delta stop, with its level fallback",
+					function()
+						set_now("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+						assert.equal(1, #sends)
+						-- In flight: the stop waits behind the start's PUT.
+						q:set("t", { dim = "stop", level = 37 })
+						assert.same({ dim = "stop", level = 37 }, q:pending("t"))
+						c4.fire_timers()
+						assert.equal(1, #sends, "one PUT in flight per resource")
+						sends[1].done(OK)
+						assert.equal(2, #sends)
+						assert.same({ dimming_delta = { action = "stop" } }, sends[2].body)
+						-- Hue refuses the stop: its level goes instead.
+						sends[2].done({ ok = false, code = 400, err = "HTTP 400" })
+						assert.equal(3, #sends)
+						assert.same({ on = { on = true }, dimming = { brightness = 37 } }, sends[3].body)
+						sends[3].done(OK)
+
+						-- Done: the next tap's start has been answered when its stop comes.
+						set_now("t", { brightness = 0, rate = 2000, urgent = true })
+						sends[4].done(OK)
+						set_now("t", { dim = "stop", level = 12 })
+						assert.equal(5, #sends)
+						assert.same({ dimming_delta = { action = "stop" } }, sends[5].body)
+						assert.is_false(logged("#421 D13"))
+					end)
+
+				it("turns a stop that waited behind a start that failed into its level for the retry (D13)", function()
+					set_now("t", { on = true, brightness = 100, rate = 3000, urgent = true })
+					q:set("t", { dim = "stop", level = 64 })
+					c4.fire_timers()
+					sends[1].done({ ok = false, code = 503, err = "HTTP 503" })
+					assert.same({ on = true, brightness = 64, rate = 0, urgent = true }, q:pending("t"))
+					assert.same({ commands.BACKOFF_MS }, timer_delays(), "the retry's backoff is kept")
+					c4.fire_timers()
+					assert.equal(2, #sends)
+					assert.same({ on = { on = true }, dimming = { brightness = 64 } }, sends[2].body)
+				end)
+
+				it("leaves a stop on a pending hold start or an instant level as it was", function()
+					q:set("h", { dim = "up", rate = 5000 })
+					q:set("h", { dim = "stop", level = 20 })
+					q:set("i", { brightness = 60 })
+					q:set("i", { dim = "stop", level = 20 })
+					c4.fire_timers()
+					assert.same({ dimming_delta = { action = "stop" } }, last_to("h").body)
+					assert.same({ dimming_delta = { action = "stop" } }, last_to("i").body)
 				end)
 			end)
 		end

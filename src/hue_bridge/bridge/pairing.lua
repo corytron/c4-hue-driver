@@ -93,14 +93,20 @@ end
 -- `paired_id` is the stored bridge id, kept until Forget Pairing even when
 -- the key is gone; nil or "" when none is stored. The same bridge may always
 -- be paired again (a new key); another one only after Forget Pairing, since
--- the registries hold the resource ids of the stored one.
-function pairing.other_bridge(ip, info, paired_id)
+-- the registries hold the resource ids of the stored one. With `picked`,
+-- `paired_id` is instead the bridge picked in Bridges Found on a driver with
+-- no stored id: nothing to forget, so the text says how to pick again.
+function pairing.other_bridge(ip, info, paired_id, picked)
 	if paired_id == nil or paired_id == "" then
 		return nil
 	end
 	local expected = config.normalise_bridge_id(paired_id) or tostring(paired_id)
 	if info.bridge_id == expected then
 		return nil
+	end
+	if picked then
+		return string.format("Bridge at %s reports ID %s, expected %s (the bridge picked in Bridges Found); pick it "
+			.. "again or Search again", ip, tostring(info.bridge_id), expected)
 	end
 	return string.format("Bridge at %s reports ID %s, expected %s; run Forget Pairing first to pair with another "
 		.. "bridge", ip, tostring(info.bridge_id), expected)
@@ -130,8 +136,9 @@ end
 --   on_paired(creds)       key stored; creds = { key, bridge_id, ip, model }
 --   on_error(message)      the reason, without a "Pairing failed" of its own
 --                          (the driver adds that prefix)
--- `paired_id`: the stored bridge id, or nil (pairing.other_bridge).
-function pairing.pair(ip, handlers, paired_id)
+-- `paired_id`: the stored bridge id, or nil; `picked`: it is the bridge
+-- picked in Bridges Found instead (pairing.other_bridge).
+function pairing.pair(ip, handlers, paired_id, picked)
 	pairing.probe(ip, function(info, err)
 		if not info then
 			log.warn("pairing: config probe failed: %s", err)
@@ -139,7 +146,7 @@ function pairing.pair(ip, handlers, paired_id)
 		end
 		-- Another bridge than the paired one, before anything is shown or
 		-- asked for: no key is requested and nothing is stored (#236).
-		local other = pairing.other_bridge(ip, info, paired_id)
+		local other = pairing.other_bridge(ip, info, paired_id, picked)
 		if other then
 			log.warn("pairing refused: %s", other)
 			return handlers.on_error(other)

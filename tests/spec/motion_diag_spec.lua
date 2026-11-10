@@ -769,8 +769,8 @@ describe("bridge.motion_diag", function()
 		local first = line(start)
 		local parts
 		for _, l in ipairs(logged) do
-			if parts and l:sub(1, 8) == "diag: + " then
-				parts[#parts + 1] = l:sub(9)
+			if parts and l:match("^diag: %+%d+ ") then
+				parts[#parts + 1] = l:gsub("^diag: %+%d+ ", "", 1)
 			elseif parts then
 				break
 			elseif l == first then
@@ -822,7 +822,7 @@ describe("bridge.motion_diag", function()
 			assert.is_nil(l:find("%c"), "a control character in: " .. l)
 			assert.is_nil(l:find("%d%d:%d%d"), "a clock time in: " .. l)
 			assert.equal("diag: ", l:sub(1, 6))
-			assert.is_true(#l <= #motion_diag.CONTINUED + motion_diag.LINE_MAX, "too long: " .. l)
+			assert.is_true(#l <= #motion_diag.CONTINUED + 2 + motion_diag.LINE_MAX, "too long: " .. l)
 		end
 	end
 
@@ -1078,7 +1078,10 @@ describe("bridge.motion_diag", function()
 					i = n
 				end
 			end
-			assert.equal("diag: + ", logged[i + 1]:sub(1, 8))
+			assert.equal("diag: +2 ", logged[i + 1]:sub(1, 9))
+			if logged[i + 2] and logged[i + 2]:match("^diag: %+%d+ ") then
+				assert.equal("diag: +3 ", logged[i + 2]:sub(1, 9), "numbered in order")
+			end
 			assert.equal("diag: device " .. A("dev1") .. " id_v1=\"/sensors/12\" identify={} "
 				.. "metadata.archetype=\"unknown_archetype\" metadata.name=name#1 product_data.certified=true "
 				.. "product_data.hardware_platform_type=\"100b-11b\" product_data.manufacturer_name=\"Signify "
@@ -1087,7 +1090,7 @@ describe("bridge.motion_diag", function()
 				.. "product_data.software_version=\"2.85.1\" services=[zigbee_connectivity:" .. A("zig1") .. ",motion:"
 				.. A("motion1") .. ",device_power:" .. A("power1") .. ",light_level:" .. A("light1") .. ",temperature:"
 				.. A("temp1") .. ",device_software_update:" .. A("swu1") .. "] usertest.status=\"set\" "
-				.. "usertest.usertest=false", first .. " " .. logged[i + 1]:sub(9))
+				.. "usertest.usertest=false", first .. " " .. logged[i + 1]:sub(10))
 			assert.is_true(#first <= 6 + motion_diag.LINE_MAX)
 			assert.truthy(line("device " .. A("dev2")):find("metadata.name=name#2 ", 1, true))
 		end)
@@ -1461,7 +1464,7 @@ describe("bridge.motion_diag", function()
 			for i = 1, 120 do
 				feed('[{"creationtime":"2026-10-26T07:16:00Z","data":[' .. item .. '],"type":"update"}]', i * 1000)
 			end
-			assert.equal(2, #lines_with("+1.00s c#1 update device ") + #lines_with("diag: + product_data.software"),
+			assert.equal(2, #lines_with("+1.00s c#1 update device ") + #lines_with("diag: +2 product_data.software"),
 				"one item, two lines")
 			assert.equal(197, count_from(first), "98 items of two lines and the limit line")
 			assert.equal("diag: capture: line limit (200) reached at +99.00s; counting until the capture ends",

@@ -14,8 +14,10 @@
 -- it answers with HUE_MOTION_HELLO and HUE_MOTION_GOODBYE (§3). The bridge
 -- decides the Status text and whether an end is deliberate; this device
 -- shows them (docs/edge-cases-motion.md, "EC" below, §6), holds Hue's "no
--- motion" for the Occupancy Hold Time, and reports to the proxy only real
--- changes, with STATE_OPENED / STATE_CLOSED for the first state after a start.
+-- motion" for the Occupancy Hold Time, also across a restart
+-- (docs/motion-hold-restart-design.md, cited "#371 R1" to "#371 R12"), and
+-- reports to the proxy only real changes, with STATE_OPENED / STATE_CLOSED
+-- for the first state after a start.
 
 -- TestCondition is the entry point Director calls for the conditionals of
 -- driver.xml [verified: FUND 10/_4].
@@ -42,8 +44,9 @@ local KINDS = { [KIND_SENSOR] = true, [KIND_AREA] = true }
 -- Occupancy Hold Time (s): the property's range (D10, driver.xml).
 local HOLD_MAX_S = 3600
 
--- After Test: Motion or Test: No Motion, Hue's state comes back with the next
--- reading or after this long, whichever comes first (EC R12).
+-- After a test (Test Motion Programming, or the older Test Motion and Test No
+-- Motion), Hue's state comes back with the next reading or after this long,
+-- whichever comes first (EC R12).
 local TEST_MS = 30000
 
 -- A device that finds itself unbound at late init changes nothing while the
@@ -103,8 +106,10 @@ local BATTERY_STATES = { normal = true, low = true, critical = true }
 -- The deliberate ends a HUE_MOTION_STATE can name (§3).
 local ENDS = { deleted = true, off = true, paused = true, forgotten = true }
 
--- What a forgotten device's owner can do; Last Action says it (EC §6).
-local FORGOTTEN_INSTRUCTION = "Delete this device in Composer, or bind it again and use Link Devices"
+-- What a forgotten device's owner can do; Last Action says it (EC §6). Every
+-- remedy is an action of the Hue Bridge device (#334): the texts name it.
+local FORGOTTEN_INSTRUCTION = "Delete this device, or bind it again and use Link Device on the Hue Bridge"
+local GONE_REMEDY = "Link or Forget Device"
 
 -- The device's own copy of its identity (PersistSetValue key per field), so a
 -- bridge that lost its registry adopts it from its hello instead of
@@ -114,6 +119,17 @@ local PERSISTED = { rid = "hue_rid", name = "hue_name", kind = "hue_kind", model
 -- What the proxy last got, "open" or "closed": the first state after a start
 -- is compared with it (§2.7, EC R4).
 local SHOWN_KEY = "motion_shown"
+
+-- The record of a running hold, { rid, changed, since }, persisted so that a
+-- restart resumes the hold for the time it had left (#371 R7): `changed` is
+-- Hue's motion_changed of the end of motion it holds, `since` the
+-- controller's C4:GetTime() when the hold began (R2). OnDriverDestroyed keeps
+-- it; that is its point.
+local HOLD_KEY = "motion_hold"
+
+-- A controller clock before 2025-01-01T00:00:00Z is not set yet: a record
+-- read against it, or written by it, gives the full hold (#371 R5).
+local CLOCK_FLOOR_MS = 1735689600000
 
 -- The readings, the events' baselines, Online, Enabled and the old-value
 -- mark, persisted as one table (a table persists [verified: API 26.5/_4]),
@@ -154,6 +170,7 @@ local hue_changed = nil      -- the bridge's ISO 8601 time of that state's last 
 local shown = nil            -- what the proxy shows: true open, false closed, nil never told
 local sent_since_start = false -- a state went to the proxy since the start
 local hold = nil             -- { timer } while Hue's "no motion" is held
+local hold_record = nil      -- the in-memory copy of the persisted HOLD_KEY record, or nil (#371 R7)
 local hold_s = 0             -- Occupancy Hold Time (s)
 local test = nil             -- { timer, before } for TEST_MS after a test
 local temp_out = nil         -- the temperature output: nil nothing since the start, "available", "unavailable"
@@ -268,7 +285,7 @@ end
 -- Shown while the bridge has configured the device as deleted in Hue but
 -- has not sent its own text yet (the bridge's names the day).
 local function gone_status()
-	return (is_area() and "Area" or "Sensor") .. " deleted in Hue; re-link or Forget"
+	return (is_area() and "Area" or "Sensor") .. " deleted in Hue; " .. GONE_REMEDY
 end
 
 -- The Status, most important first: a forgotten device says so even once
@@ -463,6 +480,17 @@ local function load_identity()
 		shown = false
 	else
 		shown = nil
+	end
+	-- The hold record (#371 §6.2), read before the bridge's buffered messages
+	-- are applied; anything malformed is deleted [verified: API 26.5/_2].
+	local rec = C4:PersistGetValue(HOLD_KEY)
+	hold_record = nil
+	if type(rec) == "table" and type(rec.rid) == "string" and rec.rid ~= "" and type(rec.changed) == "string"
+		and rec.changed ~= "" and #rec.changed <= 40 and type(rec.since) == "number" then
+		hold_record = { rid = rec.rid, changed = rec.changed, since = rec.since }
+	elseif rec ~= nil then
+		log.debug("persisted hold record ignored: not one this build reads")
+		C4:PersistDeleteValue(HOLD_KEY)
 	end
 end
 
@@ -757,30 +785,148 @@ local function report(open, why)
 end
 
 -- Occupancy hold (D10, EC R11): Hue's "no motion" keeps the sensor open for
--- hold_s seconds, new motion cancels the wait, and a hold cut by a restart
--- starts again in full at the next "no motion".
+-- hold_s seconds, and new motion cancels the wait. A hold cut by a restart
+-- goes on for the time it had left, or closes at once when that ran out,
+-- provided the bridge still reports the same end of motion; the elapsed time
+-- comes from the controller's clock alone (#371 R1 to R4). Another or an
+-- unknown end of motion, or a clock not to trust, gives the full hold, as
+-- before (R5, R6).
 
-local function cancel_hold()
+-- Milliseconds since the epoch on the controller's clock [verified: API
+-- 34/_2, C4:GetTime, 3.2.3], else os.time(), as bridge/commands.lua does.
+local function now_ms()
+	local ok, ms = pcall(C4.GetTime, C4)
+	if ok and type(ms) == "number" then
+		return ms
+	end
+	return os.time() * 1000
+end
+
+-- A copy goes to the store: the record stays this driver's to change.
+local function save_record(rec)
+	hold_record = rec
+	C4:PersistSetValue(HOLD_KEY, { rid = rec.rid, changed = rec.changed, since = rec.since })
+end
+
+-- An empty value would not remove a stored one [verified: API 26.5/_4,
+-- 26.5/_2 PersistDeleteValue].
+local function drop_record()
+	if hold_record then
+		hold_record = nil
+		C4:PersistDeleteValue(HOLD_KEY)
+	end
+end
+
+-- The timer only, for OnDriverDestroyed: the record stays, so the next
+-- instance can resume the hold (#371 R7, L25).
+local function stop_hold_timer()
 	if hold then
 		hold.timer:Cancel()
 		hold = nil
 	end
 end
 
-local function start_hold()
+-- The hold ends for good (motion, a deliberate end, a re-link, a hold of 0,
+-- a no motion while the proxy shows none): its record goes too (#371 R7, R10).
+local function cancel_hold()
+	stop_hold_timer()
+	drop_record()
+end
+
+-- A hold of `ms`; at its end the record goes, then CLOSED.
+local function start_hold(ms)
 	local h = {}
-	h.timer = C4:SetTimer(hold_s * 1000, function() -- [verified: API 34/_1]
+	h.timer = C4:SetTimer(ms, function() -- [verified: API 34/_1]
 		if hold ~= h then
 			return -- cancelled already: only a timer firing despite its Cancel gets here
 		end
 		hold = nil
+		drop_record()
 		-- During a test the proxy shows the test state: its end puts Hue's back.
 		if hue_motion == false and not test then
 			report(false, "no motion; hold time over")
 		end
 	end)
 	hold = h
-	log.debug("no motion; holding for %d s", hold_s)
+	log.debug("no motion; holding for %s s", decimal(ms / 1000, 1))
+end
+
+-- Whether two of Hue's change times name the same instant: the same text, or
+-- the same UTC second with microseconds at most 1000 apart (#371 R3)
+-- [verified: API 22/_27, C4:ParseIso8601DateTime returns a table, the epoch
+-- second and the microseconds, nothing when it fails]. A bridge time is only
+-- ever matched with a bridge time, never with the controller's clock (R2).
+local function same_change(a, b)
+	if a == b then
+		return true
+	end
+	local ok_a, _, epoch_a, micro_a = pcall(C4.ParseIso8601DateTime, C4, a)
+	local ok_b, _, epoch_b, micro_b = pcall(C4.ParseIso8601DateTime, C4, b)
+	return ok_a and ok_b and type(epoch_a) == "number" and epoch_a == epoch_b and type(micro_a) == "number"
+		and type(micro_b) == "number" and math.abs(micro_a - micro_b) <= 1000
+end
+
+-- The ms left of the hold the record describes, against the current setting
+-- (#371 R4, R8): when it is this rid's, this end of motion's (R3), and the
+-- controller's clock can be trusted (R5: not behind `since`, neither value
+-- before CLOCK_FLOOR_MS). The elapsed time is now - since, both C4:GetTime()
+-- on this controller (R2). nil otherwise: today's full hold (R6).
+local function resumable(changed)
+	local rec = hold_record
+	if not rec then
+		return nil
+	end
+	local now = now_ms()
+	local why
+	if rec.rid ~= st.rid then
+		why = "another rid"
+	elseif not changed then
+		why = "no change time"
+	elseif not same_change(rec.changed, changed) then
+		why = "another end of motion"
+	elseif not (rec.since >= CLOCK_FLOOR_MS and now >= rec.since) then
+		why = "clock" -- stepped back, or not set yet after a boot; a NaN fails here too
+	else
+		return hold_s * 1000 - (now - rec.since)
+	end
+	log.debug("hold record not resumed (%s): the hold starts in full", why)
+	return nil
+end
+
+-- " since 14:05 (bridge time)" for the log lines of a resumed hold, "" when
+-- the change time cannot be read.
+local function since_text(changed)
+	local at = bridge_time(changed)
+	return at and (" since " .. at .. " (bridge time)") or ""
+end
+
+-- Hue says no motion while the proxy shows motion and no hold runs in this
+-- instance (#371 R9): a hold cut by a restart resumes for what it has left
+-- (R1, R4), closes at once when that ran out while the driver was down (R4),
+-- and anything else is today's full hold with a new record (R6, R7). The
+-- first state after a start goes out as STATE_OPENED or CLOSED (EC R4).
+local function begin_hold(changed)
+	local left = resumable(changed)
+	if not left then
+		start_hold(hold_s * 1000)
+		if changed and st.rid then
+			save_record({ rid = st.rid, changed = changed, since = now_ms() })
+		else
+			drop_record() -- nothing a restart could match (#371 R7)
+		end
+		report(true, "no motion, held")
+	elseif left >= 1000 then
+		-- The record stays as it is: a second restart resumes from the same `since` (#371 R7, L27).
+		start_hold(math.ceil(left))
+		log.info("no motion%s; the hold resumes: %d of %d s left (it began before the restart)", since_text(changed),
+			math.ceil(left / 1000), hold_s)
+		report(true, "no motion, hold resumed")
+	else
+		drop_record()
+		log.info("no motion%s: the %d s hold ended %d s ago", since_text(changed), hold_s,
+			math.max(0, whole(-left / 1000)))
+		report(false, "no motion; the hold ran out while the driver was not running")
+	end
 end
 
 local function cancel_test()
@@ -807,7 +953,13 @@ local function take_motion(open, changed)
 		report(true, "motion")
 	elseif hold_s > 0 and (hold or showing == true) then
 		if not hold then
-			start_hold()
+			return begin_hold(changed)
+		end
+		-- A hold runs and is left alone (#371 R9); its record follows a newer
+		-- change time, `since` staying, so a restart still matches (R7).
+		if changed and hold_record and not same_change(hold_record.changed, changed) then
+			hold_record.changed = changed
+			save_record(hold_record)
 		end
 		report(true, "no motion, held") -- STATE_OPENED as the first state after a start, else no change
 	else
@@ -829,11 +981,11 @@ local function deliberate_end(why)
 	end
 end
 
--- Test: Motion / Test: No Motion (§2.6, EC R12): the test state goes to the
--- proxy as a change, so the stock event fires; Hue's state, with the hold,
--- comes back as a change with the next reading or after TEST_MS. With Hue's
--- state unknown (no sensor at all), what the proxy showed before the first
--- test comes back, closed if it showed nothing.
+-- The tests (§2.6, EC R12): the test state goes to the proxy as a change, so
+-- the stock event fires; Hue's state, with the hold, comes back as a change
+-- with the next reading or after TEST_MS. With Hue's state unknown (no sensor
+-- at all), what the proxy showed before the first test comes back, closed if
+-- it showed nothing.
 local function held_state(before)
 	if hue_motion == true or hold then
 		return true
@@ -871,6 +1023,28 @@ local function run_test(open)
 	test = t
 	result(string.format("Test: %s sent; Hue's state returns within %d s", open and "motion" or "no motion",
 		TEST_MS / 1000))
+end
+
+-- Test Motion Programming (1.2, #334, docs/simplify-actions-design.md §1.2):
+-- one toggle for both stock events. A press sends the opposite of what the
+-- proxy shows (motion while it shows nothing yet), and Hue's state comes back
+-- as run_test brings it. A second press during the test toggles back: when
+-- that is the state the test would end on anyway (Hue's, with the hold), the
+-- test ends there and then, so two presses fire "senses motion" and "stops
+-- sensing motion" (or the other way round) and leave nothing pending; when
+-- Hue's state moved meanwhile (its hold ran out), the press is a new test and
+-- the 30 s start again.
+local function toggle_test()
+	local open = shown ~= true
+	if not (test and held_state(test.before) == open) then
+		return run_test(open)
+	end
+	cancel_test()
+	log.info("test ended early: %s", open and "OPENED" or "CLOSED")
+	proxy_notify(open and "OPENED" or "CLOSED")
+	sent_since_start = true
+	set_shown(open)
+	result(string.format("Test: %s sent; back to Hue's state, the test is over", open and "motion" or "no motion"))
 end
 
 -- The bridge ---------------------------------------------------------------------
@@ -933,7 +1107,8 @@ end
 -- Properties ----------------------------------------------------------------------
 
 -- 0 to 3600 s (driver.xml); a changed value applies from the next "no motion"
--- (EC R11): a hold already running keeps its length.
+-- (EC R11): a hold already running, resumed or not, keeps its length, and its
+-- record stays (#371 R7, R8).
 dispatch.properties["Occupancy_Hold_Time_(s)"] = function(value)
 	local n = tonumber(value)
 	if not n then
@@ -958,8 +1133,8 @@ end
 -- A configure carries the bridge's whole registry entry, so what it leaves
 -- out is taken as none. A new rid is a re-link: the readings of the old
 -- sensor stay until the new one reports, Hue's state is not known yet, and
--- a hold starts again. It also ends a forgotten state. One configured as
--- deleted in Hue is a deliberate end (EC §6).
+-- a hold starts again (its record goes, #371 R10). It also ends a forgotten
+-- state. One configured as deleted in Hue is a deliberate end (EC §6).
 dispatch.commands["HUE_MOTION_CONFIGURE"] = after_late_init("HUE_MOTION_CONFIGURE", function(params)
 	params = params or {}
 	local before_rid = st.rid
@@ -1074,7 +1249,7 @@ end)
 
 -- The bridge ran Forget for this device: a deliberate end; the device stays,
 -- the owner decides. The identity stays persisted too, so binding the device
--- again and Link Devices on the bridge can link it again.
+-- again and Link Device on the bridge can link it again.
 dispatch.commands["HUE_MOTION_FORGOTTEN"] = after_late_init("HUE_MOTION_FORGOTTEN", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
@@ -1089,9 +1264,27 @@ dispatch.commands["HUE_MOTION_FORGOTTEN"] = after_late_init("HUE_MOTION_FORGOTTE
 end)
 
 -- Composer actions (LUA_ACTION) ------------------------------------------------------
--- Every click ends in Last Action and a log line, whatever happened.
+-- Every click ends in Last Action and a log line, whatever happened. One
+-- action since 1.2 (#334); the three it replaced still answer by command as
+-- hidden aliases until 2.0 (docs/simplify-actions-design.md §3.3;
+-- tests/fixtures/ledger.lua lists them), for the dev loop, older briefs and
+-- any C4:SendToDevice caller.
 
-dispatch.commands["Refresh_From_Bridge"] = function()
+dispatch.commands["Test_Motion_Programming"] = function()
+	toggle_test()
+end
+
+-- `fn` under an old command, saying in the log (Debug Mode) what replaced it.
+local function alias(old, now, fn)
+	return function(...)
+		log.info("%s is a hidden alias until 2.0; %s does this now", old, now)
+		return fn(...)
+	end
+end
+
+-- The hello at every start and bind, and the bridge's own reads (its
+-- resyncs, Diagnostics), bring the state without a click (§1.2).
+dispatch.commands["Refresh_From_Bridge"] = alias("Refresh From Bridge", "Diagnostics on the Hue Bridge", function()
 	bridge = bound_bridge() or bridge
 	if not bridge then
 		refresh_status()
@@ -1099,15 +1292,15 @@ dispatch.commands["Refresh_From_Bridge"] = function()
 	end
 	to_bridge("HUE_MOTION_HELLO", hello_params())
 	result("Asked the bridge for this device's state; its answer updates the rows")
-end
+end)
 
-dispatch.commands["Test_Motion"] = function()
+dispatch.commands["Test_Motion"] = alias("Test Motion", "Test Motion Programming", function()
 	run_test(true)
-end
+end)
 
-dispatch.commands["Test_No_Motion"] = function()
+dispatch.commands["Test_No_Motion"] = alias("Test No Motion", "Test Motion Programming", function()
 	run_test(false)
-end
+end)
 
 -- From the proxies (ReceivedFromProxy) -------------------------------------------------
 -- Commands without a handler are logged at debug by common.dispatch.
@@ -1255,8 +1448,10 @@ function OnDriverRemovedFromProject()
 	end
 end
 
+-- The hold's timer stops, but its record stays: the next instance resumes
+-- the hold from it (#371 R7, L25).
 function OnDriverDestroyed()
-	cancel_hold()
+	stop_hold_timer()
 	cancel_test()
 	cancel_give_up()
 	dev.cancel_timers() -- the binding re-check and the Driver Version looks

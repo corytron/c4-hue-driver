@@ -364,6 +364,30 @@ describe("bridge.motion_model", function()
 			assert.is_nil(model.area_motion(area(), {}))
 		end)
 
+		it("#288: shows motion while either service does, as both services reported a walk on the house", function()
+			local function at(motion, t) return { enabled = true, motion = motion, changed = t } end
+			local t = { "2026-10-26T20:48:15Z", "2026-10-26T20:48:19Z", "2026-10-26T20:48:30Z",
+				"2026-10-26T20:48:40Z", "2026-10-26T20:48:42Z", "2026-10-26T20:48:50Z" }
+			-- The house's sequence: convenience on, security on, security off,
+			-- security on, convenience off, security off.
+			local steps = {
+				{ at(true, t[1]), nil, true },
+				{ at(true, t[1]), at(true, t[2]), true },
+				{ at(true, t[1]), at(false, t[3]), true },
+				{ at(true, t[1]), at(true, t[4]), true },
+				{ at(false, t[5]), at(true, t[4]), true },
+				{ at(false, t[5]), at(false, t[6]), false },
+			}
+			for i, step in ipairs(steps) do
+				local r = model.area_motion(area(), readings(step[1], step[2]))
+				assert.equal(step[3], r and r.motion, "step " .. i)
+			end
+			-- The motion reading is the newest of those reporting motion; the
+			-- end is the newest of all.
+			assert.equal(t[4], (model.area_motion(area(), readings(at(true, t[1]), at(true, t[4])))).changed)
+			assert.equal(t[6], (model.area_motion(area(), readings(at(false, t[5]), at(false, t[6])))).changed)
+		end)
+
 		it("is nothing while the area is paused or not running (A6, A7)", function()
 			local conv = model.reading(first(M.convenience_area_motion))
 			local record = area()
@@ -382,7 +406,9 @@ describe("bridge.motion_model", function()
 			assert.equal(M.convenience, select(2, model.area_motion(area(), readings(
 				{ motion = true, changed = M.changed.e1 }, { motion = false, changed = M.changed.e1 }))))
 			assert.equal(M.security, select(2, model.area_motion(area(), readings(
-				{ motion = true }, { motion = false, changed = M.changed.e1 }))), "a time beats none")
+				{ motion = false }, { motion = false, changed = M.changed.e1 }))), "a time beats none")
+			assert.equal(M.convenience, select(2, model.area_motion(area(), readings(
+				{ motion = true }, { motion = false, changed = M.changed.e1 }))), "motion beats a newer no motion")
 		end)
 	end)
 

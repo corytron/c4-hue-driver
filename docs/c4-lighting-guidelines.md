@@ -1,0 +1,420 @@
+# Control4 lighting guidelines: the checklist and the audit
+
+Owner, 2026-11-08 (#422): any work on lighting (lights, zone and room
+lights, scenes, keypads and their LEDs, tiles) should behave the way
+Control4's own dimmers and keypads do. It should also follow Control4's
+published guidance for function and UI. This file is the checklist that
+rule points to (`CLAUDE.md`, "Control4 lighting guidelines"). Every row
+paraphrases one guideline, cites where it comes from, and says how the
+four drivers stand against it today (audit of 2026-11-08, `main` at
+dd37b15: release 1.3, build 539, plus later tooling and docs).
+
+## Contents
+
+- [1. How to use this file](#1-how-to-use-this-file)
+- [2. Sources and short names](#2-sources-and-short-names)
+- [3. The checklist](#3-the-checklist)
+- [4. Gaps and partials, ranked](#4-gaps-and-partials-ranked)
+- [5. Departures forced by Hue](#5-departures-forced-by-hue)
+- [6. Where the written docs and the controller disagree](#6-where-the-written-docs-and-the-controller-disagree)
+- [7. Open questions for the owner](#7-open-questions-for-the-owner)
+
+## 1. How to use this file
+
+**In a feature contract.** Every lighting contract under `docs/` has a
+section headed "Control4 guidelines". It lists the row ids the feature
+touches, for example "L44, L15, L16: met as follows …". For each row it
+says one of three things:
+
+- how the feature meets the row;
+- that the feature leaves the row's status unchanged;
+- that the feature departs from the row. A departure is allowed only where
+  Hue cannot do what Control4 expects. It names the reason, which is a
+  section 5 entry or a new one added there.
+
+A brief for a lighting agent names the rows that apply and tells the agent
+to read this file and the sources in section 2.
+
+**Keeping it current.**
+
+- The PR that changes a row's status updates that row's status, evidence and
+  note in the same PR.
+- New rows take the next free number at the end of their area. Ids are
+  never reused or renumbered, so contracts that cite them stay valid. A row
+  that no longer applies stays, marked "Not applicable" with the reason.
+- When Snap One updates the SDK reference under `~/c4-tools/reference/`
+  (for example a new "What's New" entry), re-read the light_v2 sections and
+  add rows for new guidance.
+- Hardware findings move a row from [assumed] to [verified: …], with the
+  date and where they are recorded (`docs/status.md`, `docs/design.md` or
+  the issue).
+
+**Status values.**
+
+- **Meets**: the drivers do what the guideline asks.
+- **Partial**: they do some of it, or do it in code but it has never been
+  exercised on the house.
+- **Gap**: they do not do it, and Hue would allow it.
+- **Hue cannot**: Hue offers no way to do it; section 5 has the reason.
+- **Not applicable**: the guideline does not fit these devices.
+
+**Evidence tags.** [verified: …] means code (`file:line`), a spec, or a
+hardware record. [assumed] means neither has shown it yet.
+
+**Drivers column.**
+
+- `light`: `hue_light` on a single Hue light.
+- `zone`: `hue_light` on a Hue zone's or room's grouped_light.
+- `scene`: `hue_scene`.
+- `bridge`: `hue_bridge`.
+- `motion`: `hue_motion`.
+
+## 2. Sources and short names
+
+These are local copies of the Snap One DriverWorks SDK reference, cloned on
+2026-10-22. They are for reading only and are never copied into this
+repository. Snap One publishes the same pages at
+<https://snap-one.github.io/docs-driverworks-proxyprotocol-lightv2/>,
+<https://snap-one.github.io/docs-driverworks-fundamentals/> and their
+siblings.
+
+| Short name | Path or URL |
+|---|---|
+| BP | `~/c4-tools/reference/docs-driverworks-fundamentals/source/includes/27_proxy_specific_info/_50-LIGHTV2BESTPRACTICE.md` (cited with its section title) |
+| EX | `~/c4-tools/reference/docs-driverworks-fundamentals/source/includes/27_proxy_specific_info/_51-LIGHTV2EXTRAS.md` |
+| LV2 | `~/c4-tools/reference/docs-driverworks-proxyprotocol-lightv2/source/includes/`. Sub-folders: **caps** `5_light_v2_capabilities/`, **cmds** `10_light_v2_commands/`, **notif** `35_Light_v2_protocol_notifications.5_Light_v2_protocol_notifications/`, **vars** `30_Light_v2_variables/`, **events** `25_light_v2_events/`, **cond** `20_light_V2_conditionals.5_light_V2_conditionals/`, **als** `45_Light_V2_advanced_lighting_scene/`, **new** `3_whats_new/` |
+| KP | `~/c4-tools/reference/docs-driverworks-proxyprotocol-keypad/source/includes/` |
+| UIB | `~/c4-tools/reference/docs-driverworks-proxyprotocol-uibutton/source/includes/` |
+| FUND | `~/c4-tools/reference/docs-driverworks-fundamentals/source/includes/` |
+| XML | `~/c4-tools/reference/docs-driverworks-xml/source/includes/` |
+| C4-DIM | <https://docs.control4.com/help/c4/software/cpro/dealer-composer-help/content/composerhe_userguide/device_settings_for_dimmers.htm> (dimmer settings: click and hold rates, preset, range levels, LEDs, 2-button keypad) |
+| C4-LIGHTING | <https://docs.control4.com/help/c4/software/cpro/dealer-composer-help/content/composerpro_userguide/configuring_lighting.htm> (double- and triple-tap events) |
+| C4-KEYPAD | <https://docs.control4.com/help/c4/software/cpro/dealer-composer-help/content/composerpro_userguide/device_settings_for_configurable.htm> (keypad LED behaviour) |
+| C4-ALS | <https://docs.control4.com/help/c4/software/cpro/dealer-composer-help/content/composerpro_userguide/example_use_the_advanced_lighting.htm> (Advanced Lighting scenes: tracking, toggle scene, rates, hold rates) |
+| C4-COLOR | <https://docs.control4.com/help/c4/software/cpro/dealer-composer-help/content/composerpro_userguide/using_the_color_agent.htm> (colour presets) |
+| C4-USER-SW | <https://docs.control4.com/help/c4/user/userguide/content/topics/lighting/switches-keypads.htm> (how a homeowner uses dimmers: tap, hold, tap again to stop) |
+| C4-USER-MENU | <https://docs.control4.com/help/c4/user/userguide/content/topics/lighting/lighting_menu.htm> (Lighting menu: Lights and Scenes views) |
+
+The Control4 pages were read on 2026-11-08. None of them states default
+click or hold rates. Control4's documentation does not give the
+double-tap window more precisely than about half a second (C4-LIGHTING).
+
+## 3. The checklist
+
+### 3.1 Brightness and ramps
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L1 | Use the brightness target API: declare `supports_target` and take `SET_BRIGHTNESS_TARGET` with a target and a rate. Snap One requires it for certification from OS 3.3.0. | BP "Brightness Target API"; LV2 caps `_4-SUPPORTSTARGET`; LV2 cmds `_1.5-SETBRIGHTNESSTARGET` | light, zone, scene | Meets | [verified: `src/hue_light/driver.xml:155`, `src/hue_scene/driver.xml:128`, `src/hue_light/driver.lua:933`; hardware 2026-10-21, a Navigator slider move arrives as `SET_BRIGHTNESS_TARGET`, `docs/design.md` "Lights: verified on hardware"] | |
+| L2 | A dimmer reports a transition with `LIGHT_BRIGHTNESS_CHANGING` (current, target, rate) when it starts and `LIGHT_BRIGHTNESS_CHANGED` where it ends. It never sends `LIGHT_LEVEL` or a stream of in-between levels. | BP "Brightness Target API"; LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED`, `_10.3-LIGHTBRIGHTNESSCHANGING`, `_12-LIGHTLEVEL` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:444`; no `LIGHT_LEVEL` anywhere under `src/`] | |
+| L3 | When the end of a ramp is unknown (a held button), CHANGING names the end of the range as the target. When the ramp stops, CHANGED reports where it stopped. | BP "Brightness Target API"; LV2 notif `_10.3-LIGHTBRIGHTNESSCHANGING` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:1048`, `:1105`; `src/hue_scene/driver.lua:1252`, `:1340`; hardware 2026-10-25, a lamp held for about 3 s of a 10 s ramp stopped near 46 % (#249)] | The level after a tap's stop is part of #421. |
+| L4 | Every CHANGING is closed by a CHANGED, including when the command cannot be delivered. Otherwise a tile keeps animating. | BP "Brightness Target API" (UIs animate from CHANGING) | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:359` (fallback after the ramp plus 1 s), `:463-467` (send failure)] | The fallback reports the target as reached even when the bridge is away; see L87. |
+| L5 | Report the real brightness when the driver starts and whenever the device comes online. | LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:619` (configure: capabilities, colour, brightness, online); the bridge resyncs and sends full state after every stream connect, `docs/design.md` "Lights"] | |
+| L6 | Changes made outside Control4 (Hue app, Hue switches, Hue automations) reach the proxy promptly, so programming and tiles stay true. | LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED`; LV2 events `_0-HEADER` | light, zone, scene | Meets | [verified: hardware 2026-10-25, a change in Hue reached zone, room and scene devices within a second, `docs/status.md` "Verified on hardware"] | Hue reports no transition target, so only CHANGED (D3). |
+| L7 | Do not flood the proxy with intermediate levels during a ramp. Snap One lists the costs: slow UIs, wrong scene tracking, wrong LEDs, programming fired too often. | BP "Brightness Target API"; LV2 notif `_12-LIGHTLEVEL` usage note | light, zone | Partial | [verified: each Hue event becomes one CHANGED (`src/hue_light/driver.lua:626`); the bridge sends at most about 2 event containers a second (#65); the scene device throttles to 1/s (`src/hue_scene/driver.lua:36`), the light does not] | A Hue dimmer switch held in the Hue system reaches Control4 as steps (D14). |
+| L8 | Send brightness in the proxy's range and resolution. | LV2 cmds `_1.5-SETBRIGHTNESSTARGET` (resolution); LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/light/state.lua:217`; hardware 2026-10-21, a decimal level showed as 0 % on OS 3.4.2, so whole percents are sent] | Departs from the documented double type (section 6). |
+| L9 | A light that is on never reads as off: the Light State variable means "not at the Off preset". | LV2 vars `_0-HEADER` (Light State); LV2 cond `_0-HEADER` (`IS_ON`, `IS_OFF`) | light, zone, scene | Meets | [verified: `src/hue_light/light/state.lua:224`, at least 1 while on] | Hue's lowest level reads 1 (D5). |
+| L10 | Declare click and hold rate minimums and maximums correctly. Since OS 3.3.0, Composer, programming, Advanced Lighting Scenes and UIs enforce them, and programming takes its ramp range from them. | BP "Enforcing min/max Capabilities"; LV2 caps `_12-CLICKRATEMIN`, `_13-CLICKRATEMAX`, `_15-HOLDRATEMIN`, `_16-HOLDRATEMAX` | light, zone, scene | Partial | [verified: `src/hue_light/driver.xml:148-151` declares `click_rate_min` 0 and `hold_rate_min` 1000 only] | `click_rate_max` is undeclared. Its documented default is 1 ms, while the GET_SETUP and dynamic-capabilities samples show 86 400 000 ms [assumed which applies]. `hold_rate_max` defaults to 86 400 000 ms, but the drivers hold at most 6 000 000 ms. Both are static, so changing them needs a controller reboot. |
+| L11 | Declare `brightness_rate_min` and `brightness_rate_max`. Voice, Navigators and customer-made scenes use them; Snap One asks every colour light driver to set them. | LV2 caps `_1-BRIGHTNESSRATEMAX`, `_1.5-BRIGHTNESSRATEMIN` | light, zone | Gap | [verified: not in `src/hue_light/driver.xml` or `src/hue_light/light/caps.lua`] | Dynamic, so they can go in the configure notify without a reboot. Hue's ceiling for a light's `dynamics.duration` is taken as 6 000 000 ms [assumed; the repo clamps scene and group durations there]. |
+| L12 | `supports_brightness_stop` means a ramp can be stopped where it is (`SET_BRIGHTNESS_STOP`). This is for scene ramps, the Daylight Agent and the proxy's Brightness Stop link. | LV2 caps `_29-SUPPORTSBRIGHTNESSSTOP`; LV2 cmds `_21.5-SET_BRIGHTNESS_STOP`; LV2 als `_1.3-REDUCEDALSSUPPORT` | light, zone, scene | Partial | [verified: `src/hue_light/driver.lua:420`, `:962`; the proxy hears the cached level at once, but nothing goes to Hue] | An absolute Hue transition keeps running, and the next report corrects the tile (D4). #421 asks whether a `dimming_delta` stop ends it. |
+| L13 | Brightness and colour commands sent back to back both take effect. Neither overrides the other; debounce or queue them into one change. | BP "Handling Consecutive Brightness and Color commands" | light, zone | Meets | [verified: the bridge's 80 ms coalescer makes one PUT, `docs/design.md` "Lights"; hardware 2026-10-25, a colour set while off went out as one grouped_light PUT, `docs/status.md`] | |
+| L14 | A hold rate is the time for the whole range (off to full, or full to off), at that speed from any level. | LV2 notif `_9-HOLDRATEDOWN`, `_10-HOLDRATEUP`; C4-DIM "Hold Ramp Rates" | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:1048`; hardware on a single light, #249] | Zones and scenes: per lamp or in steps (D1). Lamp tests of 1.3 are pending (`docs/status.md` "Now"). |
+| L15 | A tap moves the light over the click rate. The dealer page says Ramp Up is the time to reach the Preset Level; the protocol says the full range. | C4-DIM "Click Rates"; LV2 notif `_4-CLICKRATEDOWN`, `_5-CLICKRATEUP` | light, zone | Partial | [verified: `src/hue_light/driver.lua:1013`, the click rate is the duration of whatever distance the tap moves] | The two sources disagree; #421 settles distance versus full range. |
+| L16 | Default rates feel like a Control4 dimmer: a tap's ramp is slow enough to catch with a second tap. | C4-USER-SW; C4-DIM | light, zone | Partial | [verified: defaults are 250 ms click and 5 s hold (`src/common/device.lua:107`)] | Control4's own defaults are not published [assumed]; #421 chooses the defaults. |
+
+### 3.2 On/off and presets
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L17 | The top tap, ON and turn-on from a tile go to the On preset (Default On Brightness), whatever the current level, even from a higher one. | LV2 vars `_0-HEADER` (Default On Preset Brightness); LV2 cmds `_6-SET_PRESET_LEVEL`, `_7-TOGGLE` | light, zone | Meets | [verified: `src/hue_light/driver.lua:987`, `:993`, `:1013`; 1.3, #233] | The tile's path is [assumed] (L22). |
+| L18 | The bottom tap turns the light off over Click Rate Down. The toggle button's tap goes the other way from the state shown. | C4-DIM "Click Rates"; C4-USER-SW | light, zone | Meets | [verified: `src/hue_light/driver.lua:1013`; hardware 2026-10-22, taps through a light's Button Links, `docs/status.md`] | The scene device has no click rates: its taps act at once. |
+| L19 | TOGGLE from off activates the On preset; from on it turns off. | LV2 cmds `_7-TOGGLE` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:987`; `src/hue_scene/driver.lua:1174` toggles from where a pending recall is heading] | |
+| L20 | Use the brightness On Mode capabilities (`brightness_on_mode_preset`, `brightness_on_mode_previous`) instead of the deprecated `supports_default_on`, never both. Handle `UPDATE_BRIGHTNESS_ON_MODE` and `UPDATE_BRIGHTNESS_PRESET`, so turn-ons the driver starts itself (keypad links) honour the mode. | LV2 caps `_32-SUPPORTSDEFAULTON`, `_6-brightnessonmodepreset`, `_7-brightnessonmodeprevious`; LV2 cmds `_20.1-UPDATEBRIGHTNESSONMODE`, `_20.3-UPDATEBRIGHTNESSPREST`; LV2 new `_10-WHATSNEWIN332` | light, zone | Partial | [verified: `src/hue_light/driver.xml:152` declares `supports_default_on`; no on-mode capability or handler] | Preset works. "Previous" (turn on at the last level) is not offered, although Hue does it natively. Static capabilities, so a reboot is needed. |
+| L21 | Name presets in CHANGING and CHANGED (`LIGHT_BRIGHTNESS_CURRENT_PRESET_ID`, `..._TARGET_PRESET_ID`), so the proxy can follow a light when a preset's level changes. The Daylight Agent needs this. | LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED`, `_10.3-LIGHTBRIGHTNESSCHANGING` | light, zone | Gap | [verified: no preset id is sent] | Comes with L20. |
+| L22 | From OS 3.3.2, Navigators turn lights on and off with `DYNAMIC_ON` / `DYNAMIC_OFF`. A driver without dynamic on gets the On brightness preset. | LV2 cmds `_1.3-DYNAMICON`, `_1.2-DYNAMICOFF` | light, zone, scene | Partial | [assumed: which command a tile's tap arrives as has not been seen on the house, `docs/lights-design.md` "Light driver"; `ON`, `TOGGLE` and `SET_BRIGHTNESS_TARGET` are all handled] | |
+| L23 | The proxy keeps a default brightness rate for generic on/off, Navigators and customer scenes, and tells the driver with `UPDATE_BRIGHTNESS_RATE_DEFAULT`. | LV2 cmds `_21.3-SETBRIGHTNESSRATEDEFAULT`, `_20.2-UPDATEBRIGHTNESSRATEDEFAULT` | light, zone | Partial | [verified: no handler; `ON` and `TOGGLE` go at rate 0 (`src/hue_light/driver.lua:987-993`)] | Whether the proxy already puts the default into `RATE` is [assumed]. |
+| L24 | After a `SET_PRESET_LEVEL` or a `SET_*_RATE_*`, the driver tells the proxy the value it accepted. Composer then shows the value in use. | LV2 cmds `_22-SETCLICKRATEUP`, `_23-SETCLICKRATEDOWN`; LV2 notif `_16-PRESETLEVEL`, `_4-CLICKRATEDOWN`, `_5-CLICKRATEUP`, `_9-HOLDRATEDOWN`, `_10-HOLDRATEUP` | light, zone, scene | Meets | [verified: `src/common/device.lua:499`; hardware 2026-10-25, Composer rounds 41 and 42, #59] | Sent as a bare value (section 6). |
+| L25 | A setting outside its range is refused, never stored: a preset of 0 would make "on" turn the light off. | BP "Enforcing min/max Capabilities" | light, zone, scene | Meets | [verified: `src/common/device.lua:537`, `:517`] | |
+| L26 | Control4 dimmers offer Min On and Max On trims and cold start. The proxy hears them from hardware that supports them. | C4-DIM "Range Levels"; LV2 notif `_13-MAXON`, `_14-MINON`; LV2 caps `_8-COLDSTART` | light, zone | Hue cannot | [verified: `cold_start` and `min_max` False, `src/hue_light/driver.xml:147`, `:153`] | No trim in CLIP v2; cold start means nothing for LED lamps (D13). Emulating Max On by scaling is possible but not planned. |
+
+### 3.3 Colour and colour temperature
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L27 | Switch `supports_color` and `supports_color_correlated_temperature` on per bulb. Send both in one `DYNAMIC_CAPABILITIES_CHANGED`, then report the current colour straight away. | LV2 caps `_30-SUPPORTSCOLOR`, `_31-SUPPORTSCOLORCORRELATEDTEMPERATURE` (usage notes) | light, zone | Meets | [verified: `src/hue_light/light/caps.lua:24`, `src/hue_light/driver.lua:619-620`] | |
+| L28 | The colour temperature range is in Kelvin, in multiples of 10, within 500 to 20 000. A fixed white has min equal to max. | LV2 notif `_8-DYNAMICCAPABILITIESCHANGED` | light, zone | Meets | [verified: `src/hue_light/light/caps.lua:14-39`; a zone uses its lamps' common range (#58)] | |
+| L29 | Take `SET_COLOR_TARGET` (xy and a mode; a temperature arrives as its xy with mode 1). Answer with `LIGHT_COLOR_CHANGING`, then `LIGHT_COLOR_CHANGED`. | LV2 cmds `_9.6-SET_COLOR_TARGET`; LV2 notif `_10.5-LIGHTCOLORCHANGED`, `_10.7-LIGHTCOLORCHANGING` | light, zone | Meets | [verified: `src/hue_light/driver.lua:479`; hardware 2026-10-22, Navigator colour and temperature picks, `docs/composer-checklist.md` D.10] | |
+| L30 | Report the colour at start and when the device comes online, with mode 1 while the lamp is in colour temperature. | LV2 notif `_10.5-LIGHTCOLORCHANGED` | light, zone | Meets | [verified: `src/hue_light/light/state.lua:237`; `src/hue_light/driver.lua:619`] | |
+| L31 | A colour set while the light is off does not turn it on. The driver keeps it and applies it at the next turn-on from Control4. | BP "Setting Color while the Light is Off" | light, zone | Meets | [verified: `src/hue_light/light/state.lua:298`; hardware 2026-10-25 on a zone light, `docs/status.md`] | |
+| L32 | Every colour light has a Default On Colour, applied whenever the light turns on (a target from off, a tap, a hold). Customers then get the same turn-on colour across brands. | BP "Default On and Dim Colors"; LV2 cmds `_21-UPDATECOLORPRESET` | light, zone | Gap | [verified: no `UPDATE_COLOR_PRESET` handler; a light turns on in its last colour, as the light's manual says] | Hue can set colour with the turn-on in one request. |
+| L33 | The Default Dim Colour is used while turning off, but not during an open-ended hold down. Until a colour is chosen after turn-on, the colour blends from Dim at 1 % to On at the Default On Brightness and above. | BP "Default On and Dim Colors"; LV2 cmds `_21-UPDATECOLORPRESET` | light, zone | Gap | [verified: no colour is sent with a turn-off or a level change] | |
+| L34 | Colour On Modes (preset, previous, fade) come with `color_on_mode_*` and `UPDATE_COLOR_ON_MODE`. Composer shows the setting on every colour light. | LV2 caps `_7.2-coloronmodefade`, `_7.3-coloronmodepreset`, `_7.4-coloronmode previous`; LV2 cmds `_20.4-UPDATECOLORONMODE`, `_9.1-SET_COLOR_ON_MODE` | light, zone | Gap | [verified: none declared; `docs/status.md` "Keypad settings": the page shows a colour on mode the driver ignores; the light's manual explains it] | A dealer sees a setting that does nothing. Static capabilities, so a reboot is needed. |
+| L35 | Warm dim: colour temperature follows brightness in a straight line, from a warm value at 1 % to a cool one at 100 %, and only on brightness changes. Any explicit colour ends it until the next off and on. | BP "Warm Dim" (described for a Philips Hue driver); LV2 caps `_7.2-coloronmodefade` | light, zone (colour temperature bulbs) | Gap | [verified: not implemented] | A hold's `dimming_delta` cannot carry a colour curve (D12). |
+| L36 | Declare `color_rate_behavior`, `color_rate_min` and `color_rate_max`. Snap One asks every colour light driver to set them. | LV2 caps `_8.6-COLORRATEBEHAVIOR`, `_8.7-COLORRATEMAX`, `_8.8-COLORRATEMIN` | light, zone | Gap | [verified: not declared; the default behaviour is 0, "unchangeable"] | Hue applies one duration per request, so 1 (one rate for both) is honest (D9). Dynamic, so no reboot is needed. |
+| L37 | Set `color_trace_tolerance` to absorb the device's rounding, so `IS_COLOR` and scene tracking match. | LV2 caps `_13.5-COLORTRACETOLERANCE` | light, zone | Partial | [verified: not declared, `docs/design.md` "Color mapping"] | Hue rounds temperature to whole mirek and moves xy into the bulb's gamut (D8). Whether the default tolerance absorbs that is [assumed]. |
+| L38 | `SET_COLOR_STOP` stops a colour ramp where it is. | LV2 cmds `_9.2-SET_COLOR_STOP`, `_9.4-SET_COLOR_STOP` | light, zone | Partial | [verified: `src/hue_light/driver.lua:966` answers with the cached colour; nothing goes to Hue] | Hue keeps transitioning (D4). |
+| L39 | Users are offered only the colour presets the device can show; the Color agent filters by capabilities. | C4-COLOR | light, zone | Meets | [assumed: UI behaviour follows the declared capabilities, L27] | |
+
+### 3.4 Keypad taps, holds and multi-taps
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L40 | Keypad buttons reach the light through Top, Bottom and Toggle Button Links (`DO_PUSH`, `DO_CLICK`, `DO_RELEASE`) and through the proxy's `BUTTON_ACTION`. The proxy route is echoed back. | LV2 cmds `_1-BUTTONACTION`; LV2 notif `_1-BUTTONACTION`; KP `62_keypad_button_link_bindings/_1-KEYPADBUTTONLINKBINDINGS.md` | light, zone, scene | Meets | [verified: `src/common/device.lua:700-722`; hardware 2026-10-22, `docs/keypad-design.md` "Hardware findings"] | The driver declares the links itself (section 6). |
+| L41 | Every push the proxy hears is followed by a release; otherwise later presses stop working. | LV2 notif `_1-BUTTONACTION` | light, zone, scene | Meets | [verified: `src/common/device.lua:705` echoes each action as received] | |
+| L42 | A hold ramps up (top) or down (bottom) at the hold rate and stops where it is released. | C4-USER-SW; C4-DIM "Hold Ramp Rates" | light, zone, scene | Meets | [verified: a single light, #249; zones and scenes in code, `docs/group-hold-design.md`] | Group holds go per lamp or in steps (D1). |
+| L43 | Holding top while off ramps up from off. Holding bottom while off does nothing. | C4-DIM "Hold Ramp Rates"; C4-USER-SW | light, zone, scene | Meets | [verified: `src/common/device.lua:617`; hardware 2026-10-25, a hold from off on a zone light, `docs/status.md`] | Starts at 1 % and dims up 600 ms later. |
+| L44 | A tap while the light is ramping stops it at the level it has reached. | C4-USER-SW (stopping a ramp) | light, zone (scene to decide) | Gap | [verified: a second tap starts the same ramp again, `src/hue_light/driver.lua:1013`] | #421. |
+| L45 | Double and triple taps are their own events: taps in quick succession, about half a second in all. Press and Release fire during them too. | C4-LIGHTING | light, zone, scene | Partial | [verified: no click counting and no `CLICK_COUNT`; each Button Link click is a tap] | A double tap on a bound button reaches the light as two taps [assumed]. The keypad's own double-tap events stay on the keypad. #421 settles the window. |
+| L46 | The light's own button events (press, release, single, double and triple tap on Top, Bottom and Toggle) appear in programming only if they fire. They depend on `has_button_events`, `multi_click` (OS 3.4.2+) and `CLICK_COUNT`. | LV2 caps `_26-HASBUTTONEVENTS`, `_28.5-multiclick`; LV2 notif `_3-CLICKCOUNT`; LV2 events `_0-HEADER` | light, zone, scene | Partial | [verified: `has_button_events` and `multi_click` undeclared; `BUTTON_ACTION` is echoed only on the proxy route, never for Button Link presses] | Whether Composer lists events that never fire is [assumed]. |
+| L47 | A release can arrive late or not at all, which risks a runaway ramp; act so a lost release does no harm. | KP `62_keypad_button_link_bindings/_1-KEYPADBUTTONLINKBINDINGS.md` (`DO_RELEASE`) | light, zone, scene | Meets | [verified: a hold asks Hue for at most the rest of the range at the hold rate, `src/hue_light/driver.lua:1048`] | |
+| L48 | The toggle button: a tap toggles; a hold ramps toward the other state (up while off, down while on). | LV2 cmds `_1-BUTTONACTION` (button 2, toggle) | light, zone, scene | Meets | [verified: `src/common/device.lua:617`] [assumed: matches a Control4 dimmer's toggle] | |
+
+### 3.5 Keypad LEDs and button colours
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L49 | LEDs of bound buttons follow the device: `MATCH_LED_STATE` on each link and `BUTTON_INFO` with the current colour to the proxy. A newly bound keypad gets the state at once, and `REQUEST_BUTTON_COLORS` is answered. | KP `62_keypad_button_link_bindings/_1-KEYPADBUTTONLINKBINDINGS.md`; LV2 notif `_2-BUTTONINFO`; C4-KEYPAD and C4-DIM "Follow Bound Device" | light, zone, scene | Meets | [verified: `src/common/device.lua:464`, `:476`, `:725`; hardware 2026-10-24 on a scene; binding a link sets the button's LED behaviour to follow the connection (#312)] | On a single light the same code is [assumed]. |
+| L50 | Default colours are Control4's: top and toggle lit blue while on, bottom lit while off. | LV2 cmds `_16.5-GETSETUP` (sample) | light, zone, scene | Meets | [verified: `src/common/device.lua:79`] | |
+| L51 | Declare `has_leds`, so Composer offers LED colours. `SET_BUTTON_COLOR` is stored per button, persisted, and echoed back. | LV2 caps `_28-HASLEDS`; LV2 cmds `_12-SET_BUTTON_COLOR` | light, zone, scene | Meets | [verified: `src/common/device.lua:736`; hardware 2026-10-25, the settings page after the reboot, #59] | |
+| L52 | `SET_ALL_LED` sets every button, on and off, to one colour. | LV2 cmds `_13-SET_ALL_LED` | light, zone, scene | Gap | [verified: no handler] | |
+| L53 | LEDs show the real state, including changes made in the Hue app. | C4-DIM "LEDs Follow Load" | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:286` updates the LEDs with every report] | |
+| L54 | Keypad backlight and ambient light profiles. | C4-DIM "Advanced Properties"; C4-KEYPAD | (keypad) | Not applicable | | The keypad's own driver handles these. |
+
+### 3.6 Tiles and Navigator UI
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L55 | A tile's slider animates from CHANGING and settles on CHANGED. Slider moves stick at the level chosen. | BP "Brightness Target API" | light, zone, scene | Meets | [verified: hardware 2026-10-21, once whole percents were sent, slider moves to 25, 60, 100 and off stuck; hardware 2026-10-24, a scene tile's slider in the iPhone app, `docs/design.md`] | |
+| L56 | An offline device's tile is disabled. The proxy assumes online at start, so the driver must report. | LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:241`, `:309`] | A bridge outage is L87. |
+| L57 | The colour wheel and the temperature control match what the bulb can do. | LV2 caps `_30-SUPPORTSCOLOR`, `_31-SUPPORTSCOLORCORRELATEDTEMPERATURE` | light, zone | Meets | [verified: hardware 2026-10-24/25, zone light picks, `docs/status.md`] | A zone shows the union of its lamps. |
+| L58 | Lighting lives in the Lighting menu as light_v2 devices. The UI Button proxy is for experience menus (Listen, Watch, Security, Comfort). | UIB `103_ui_button_proxy_overview/_1-UIBUTTONPROXYOVERVIEW.md`; C4-USER-MENU | light, zone, scene | Meets | [verified: every lighting driver uses light_v2, `src/hue_scene/driver.xml:107`] | |
+| L59 | Scenes belong in the Lighting menu's Scenes view, which lists Advanced Lighting scenes. | C4-USER-MENU | scene | Partial | [verified: a Hue Scene device is a light_v2 dimmer, so it is listed among Lights with a slider] | No documented DriverWorks API adds a driver's scene to that list [assumed]; no issue is proposed. |
+| L60 | Device features that the proxy does not know go on the Extras tab (`has_extras`, `EXTRAS_SETUP_CHANGED`, `EXTRAS_STATE_CHANGED`). Hide items rather than removing them. | EX | light, zone, scene | Not applicable | | Nothing to show today. A warm-dim switch would go here (L35). Snap One's Extras library cannot be vendored, so this would be our own code. |
+| L61 | Device icons are 16 and 32 px at 96 DPI. A light_v2 List View tile is Control4's own. | FUND `19_driver_icon_management/_1-DRIVERICONMANAGEMENT.md` | all | Meets | [verified: the light and scene PNGs are 16/32 px at 96 DPI (checked 2026-11-08); the List View tile is Composer's own, #60] | |
+
+### 3.7 Scenes
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L62 | Join Advanced Lighting Scenes with `reduced_als_support`, not full ALS. Scenes then drive the device with targets and end ramps with the stops. | LV2 caps `22-REDUCEDALSSUPPORT`; LV2 als `_1.3-REDUCEDALSSUPPORT` | light, zone, scene | Meets | [verified: `src/hue_light/driver.xml:164`, `src/hue_scene/driver.xml:137`; handlers at `src/hue_light/driver.lua:933-973`] | |
+| L63 | Check that a held scene ramp button works with the device, and that the stops behave. | LV2 caps `22-REDUCEDALSSUPPORT` | light, zone, scene | Partial | [assumed: Advanced Lighting Scenes have never been exercised on the house; no record in `docs/status.md` or `docs/design.md`] | |
+| L64 | A scene's on state and LEDs track like an Advanced Lighting scene's: either "any load on" or "this scene active". | C4-ALS "Tracking" | scene | Meets | [verified: hardware 2026-10-24, LEDs follow the scene; On State Follows since build 400, `docs/scene-led-design.md`] | |
+| L65 | Holding a scene's button ramps the scene at its hold rates. | C4-ALS "Hold Rates" | scene | Partial | [verified: code since 1.3, #249; the lamp tests are pending, `docs/status.md` "Now"] | D1. |
+| L66 | A scene's toggle activates its toggle scene; by default that turns it off. | C4-ALS "Toggle scene"; LV2 als `_4.5-TOGGLEESCENE` | scene | Meets | [verified: `src/hue_scene/driver.lua:1174`] | It always turns the room off. |
+| L67 | Load groups: `load_group_support`, with `JOIN_GROUP`, `LEAVE_GROUP` and the `GROUP_*` commands handled. | LV2 caps `_23-LOADGROUPSUPPORT`; LV2 cmds `_14-JOIN_GROUP` to `_20-GROUP_STOP_RAMP` | light | Gap | [verified: declared False, `src/hue_light/driver.xml:166`] | Zone and room lights are the Hue-native group (one request at about 1/s instead of one per lamp). Question 4. |
+
+### 3.8 Programming events, conditionals and commands
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L68 | The proxy's events (Light On, Light Off, Brightness Changed and Changing, Colour Changed and Changing) are shown and fire for every change, Hue-side changes included. | LV2 events `_0-HEADER`; LV2 caps `_25-HIDEPROXYEVENTS` | light, zone, scene | Meets | [verified: `hide_proxy_events` False, `src/hue_light/driver.xml:163`; Hue-side changes reach the devices, L6] | |
+| L69 | "Begins to ramp" events and the `IS_BRIGHTNESS_TARGET` and `IS_COLOR_TARGET` conditionals need CHANGING notifies. | BP "Brightness and Color Changing API"; LV2 cond `_0-HEADER` | light, zone, scene | Meets | [verified: every Control4-initiated change sends CHANGING, L2, L29] | Hue-side changes only get CHANGED (D3). |
+| L70 | Device-specific commands keep stable names and parameters. They use ranged types and a sort order, and describe themselves with NAME and PARAM placeholders. | FUND `15_composerpro_interface_into_the_sdk/_7-PROGRAMMING.md`; XML `35_commands_xml/` | light, zone | Meets | [verified: `src/hue_light/driver.xml:94-130`] | |
+| L71 | Events are sorted with `sort_order` (OS 3.3.0+), and a driver stays well under 1000 events. | FUND `12.5_Events/_10-SORTINGEVENTSINCOMPOSERPRO.md`; FUND `15_composerpro_interface_into_the_sdk/_7-PROGRAMMING.md` | motion | Meets | [verified: the motion driver's 8 events carry `sort_order` since #434, `src/hue_motion/driver.xml`] | The light and scene drivers have no events of their own. |
+
+### 3.9 Composer properties and dealer UX
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L72 | Show the proxy's own settings (preset, rates, LED colours) as a Control4 dimmer does: `hide_proxy_properties` False. | LV2 caps `_38-HIDEPROXYPROPERTIES`; C4-DIM | light, zone, scene | Meets | [verified: hardware 2026-10-25, #59] | |
+| L73 | Information rows are read-only, with Driver Version first. Status texts fit Composer's column. | XML `20_properties/_25-readonly.md`, `_10-property.md` | all | Meets | [verified: every `driver.xml`; texts kept under about 75 characters, `docs/status.md` "Composer properties fit the column"] | |
+| L74 | Editable properties carry a tooltip. | XML `20_properties/_30-tooltip.md` | scene, motion, light | Meets | [verified: since #434 Recall As, On State Follows, Occupancy Hold Time and every Debug Mode carry a `<tooltip>`] | |
+| L75 | Every driver has a Documentation tab, with a changelog in it. | FUND `26_markdown_driver_documentation/_0-Header.md`; FUND `14_updating_released_drivers/_2-DRIVERUPDATECONSIDERATIONS.md` | all | Meets | [verified: `<documentation file=…>` in each `driver.xml`; `tools/build.sh:75-139` renders `CHANGELOG.md`; the tab was seen on the house, `docs/status.md`] | |
+| L76 | Actions are for installation and setup, not everyday use. | FUND `15_composerpro_interface_into_the_sdk/_6-ACTIONS.md` | all | Meets | [verified: no actions on light and scene devices since 1.2; 9 on the bridge, `CHANGELOG.md` 1.2] | |
+
+### 3.10 Driver updates and persistence
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L77 | Never add, remove or change a proxy in an update; that needs a new driver. | FUND `14_updating_released_drivers/_2-DRIVERUPDATECONSIDERATIONS.md` | all | Meets | [verified: one proxy per driver since its first release] | |
+| L78 | Connections may only be added, never removed or retyped. | FUND `14_updating_released_drivers/_2-DRIVERUPDATECONSIDERATIONS.md` | all | Meets | [verified: hardware 2026-10-22, build 146 added the Button Links in place, `docs/keypad-design.md`] | |
+| L79 | Never remove or renumber events, commands or variables. Retype properties with care. | FUND `14_updating_released_drivers/_2-DRIVERUPDATECONSIDERATIONS.md` | all | Meets | [verified: fixed motion ids, `docs/motion-design.md` §2.3–2.4; removed device actions answer as hidden aliases until 2.0, `CHANGELOG.md` 1.2] | |
+| L80 | Raise `<version>` and the modified date with every build, and keep a changelog. | FUND `14_updating_released_drivers/_2-DRIVERUPDATECONSIDERATIONS.md` | all | Meets | [verified: `tools/build.sh:151-171`] | |
+| L81 | Keep the Lua engine the same across updates: a change between PUC Lua and LuaJIT loses state for a moment. | FUND `14_updating_released_drivers/_2-DRIVERUPDATECONSIDERATIONS.md` | all | Meets | [verified: `jit="1"` in all four `driver.xml`] | |
+| L82 | Prefer dynamic capabilities. On OS 3.4.2 a static capability change needs a controller reboot before existing devices take it. | LV2 notif `_8-DYNAMICCAPABILITIESCHANGED`; LV2 new `_6-WhatsNewin421` | light, zone, scene | Meets | [verified: hardware 2026-10-23/24, `docs/keypad-design.md` "Install findings"; colour capabilities are dynamic, `src/hue_light/light/caps.lua`] | Plan each static change and say it needs a reboot. |
+| L83 | Per-device settings persist and survive updates and restarts. A bad persisted value is dropped. | FUND `24_persisting_driver_data/_1-PERSISTINGDRIVERDATA.md` | light, zone, scene | Meets | [verified: `src/common/device.lua:517`] | |
+| L84 | Declare an explicit minimum OS, and know which capabilities are newer than it. | FUND `14_updating_released_drivers/_1-UPDATINGRELEASEDDRIVERS.md` | all | Meets | [verified: 3.3.0 in every `driver.xml`] | `supports_brightness_stop` and the on modes are from 3.3.2, `multi_click` from 3.4.2. Older OS versions ignore them [assumed]. |
+| L85 | Drop deprecated capabilities: `num_buttons`, `ramp_level`, `min_max`, `on_off`, `buttons_are_virtual`, `fixed_ramp_rate`. | LV2 new `_10-WHATSNEWIN332` | light, scene | Partial | [verified: `ramp_level`, `on_off`, `min_max` and `buttons_are_virtual` are still declared, `src/hue_light/driver.xml:145-167`] | Harmless [assumed]. Removing them is a static change, so bundle it with L20. |
+
+### 3.11 Errors and offline
+
+| Id | Guideline | Source | Drivers | Status | Evidence | Note |
+|---|---|---|---|---|---|---|
+| L86 | `ONLINE_CHANGED` is reported at start and on every change of the device's reachability. | LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:241`, `:309`; unbound, gone, forgotten and Zigbee-unreachable all read Offline] | |
+| L87 | While the bridge is unreachable or rejects the key, commands must not look delivered, and devices should show offline after a while. | FUND `23_command_handling_and_dropped_connections/_1-COMMANDHANDLINGANDDROPPEDCONNECTIONS.md`; LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Partial | [verified: lights stay online during a bridge outage; the tile shows the requested level a second after the ramp (`src/hue_light/driver.lua:359`); the light's manual says so; `docs/edge-cases-hue.md` keeps the last known state through a bridge reboot] | The owner sees a tile that claims success. |
+| L88 | Status rows say what is wrong and what to do. | XML `20_properties/_25-readonly.md` | all | Meets | [verified: Status, Online and Last Action on devices; Attention on the bridge, `docs/status.md`] | |
+| L89 | A command sent while the device cannot be reached is retried for a bounded time, then dropped, not queued forever. | FUND `23_command_handling_and_dropped_connections/_1-COMMANDHANDLINGANDDROPPEDCONNECTIONS.md` | light, zone, scene | Meets | [verified: 30 s retry cap, #43, `docs/design.md` "Lights"] | |
+
+**Totals (89 rows):**
+
+| Status | Rows |
+|---|---|
+| Meets | 57 |
+| Partial | 19 |
+| Gap | 10 |
+| Hue cannot | 1 |
+| Not applicable | 2 |
+
+## 4. Gaps and partials, ranked
+
+These are ranked by how much an owner or dealer would notice. Each has its
+own issue, filed with this file (2026-11-08); #421 was filed before it.
+
+1. **#421 (filed): "Keypad taps on Hue lights: a second tap stops the
+   ramp, as on a Control4 dimmer".** Rows: L44 (tap again stops), L15
+   (click rate: distance or full range), L16 (default rates), L45
+   (double-tap window), L46 (the light's own button events), L12 and L38
+   (stopping a transition), L3 and L4 (the level reported after a stop).
+   Hue limits:
+   - a `dimming_delta` stop is verified on a light (#249), but stopping a
+     `dimming.brightness` transition with a duration is not;
+   - a grouped_light ignores the duration (D1), so a zone needs the per-lamp
+     path;
+   - group requests run at about 1/s (D2).
+2. **#427: "Colour lights: Control4's Default On and Dim colours, colour on modes
+   and warm dim".** Rows: L32, L33, L34, L35 (and L60 if warm dim gets a
+   Navigator switch). This is the biggest visible difference for a dealer:
+   Composer shows On and Dim colours and a colour on mode, but the light
+   ignores them and turns on in its last colour.
+   - Declare `color_on_mode_preset`, `color_on_mode_previous` and
+     `color_on_mode_fade`.
+   - Handle `UPDATE_COLOR_PRESET` and `UPDATE_COLOR_ON_MODE`, and learn the
+     current presets at start [assumed: through `GET_SETUP`].
+   - Send the On colour with every turn-on, and the Dim colour with a
+     turn-off that is not a hold.
+   - Apply the blend formula on brightness targets until an explicit colour
+     arrives.
+   Hue limits: none for targets, since colour and level go in one PUT. A
+   hold cannot carry a colour curve (D12), so the colour follows at release.
+   This is a static capability change, so it needs a reboot. See question 1.
+3. **#428: "Bridge unreachable: show Hue devices offline instead of assuming
+   commands landed".** Rows: L87, and L56 for a bridge outage. Today the
+   tile shows a command as done a second after its ramp, even with the
+   bridge gone, and nothing turns the tiles grey.
+   - When the bridge has been unreachable, or has rejected the key, for a
+     set time, the bridge tells every device it is offline.
+   - While a command cannot be delivered, the device reports the level it
+     knows, not the target.
+   Hue limits: none. A bridge reboot takes minutes, so the threshold must
+   ride it out (question 2).
+4. **#429: "Turn-on behaviour: Control4's brightness On Mode (Preset and
+   Previous) with preset ids".** Rows: L20, L21, L23, and L85 (drop the
+   deprecated capabilities in the same reboot).
+   - Replace `supports_default_on` with `brightness_on_mode_preset` and
+     `brightness_on_mode_previous`.
+   - Handle `UPDATE_BRIGHTNESS_ON_MODE`, `UPDATE_BRIGHTNESS_PRESET` and
+     `UPDATE_BRIGHTNESS_RATE_DEFAULT`.
+   - Send preset ids in CHANGING and CHANGED, for the Daylight Agent.
+   - Have keypad turn-ons honour the mode.
+   Hue limits: none; Hue turns on at its previous level natively. This is a
+   static capability change, so it needs a reboot. See question 3.
+5. **#430: "Declare the ramp and rate ranges Control4 enforces".** Rows: L10, L11,
+   L36.
+   - Add `brightness_rate_min/max`, `color_rate_behavior` 1 and
+     `color_rate_min/max` to the configure notify. They are dynamic, so no
+     reboot.
+   - Declare `click_rate_max` and `hold_rate_max` explicitly, matched to
+     what the driver does (holds are capped at 6 000 000 ms). These are
+     static.
+   - Check on the house which click rates Composer accepts today, since the
+     documented `click_rate_max` default is 1 ms.
+   Hue limits: one duration per request (D9), with a ceiling assumed at
+   6 000 000 ms.
+6. **#431: "House check: Advanced Lighting Scenes, the tile's turn-on and colour
+   tracking".** Rows: L63, L22, L37. This is verification, not code:
+   - put a light, a zone light and a scene device in an Advanced Lighting
+     scene;
+   - ramp it with a held scene button and stop it;
+   - check that the scene's tracking holds after a colour scene;
+   - log which command a tile tap arrives as.
+   Hue limits: gamut and mirek rounding (D8).
+7. **#432: "Keypad LEDs: SET_ALL_LED, and the light's own button events".** Rows:
+   L52, L46.
+   - Handle `SET_ALL_LED`.
+   - Either fire the light's button events (echo `BUTTON_ACTION` for
+     Button Link presses and send `CLICK_COUNT`) or hide them with
+     `multi_click` False on OS 3.4.2+. Decide after #421 settles multi-taps.
+   Hue limits: none; the buttons are virtual (D15).
+8. **#433: "Throttle Hue-side level reports on light devices as on scene
+   devices".** Row: L7. Coalesce `HUE_STATE` level reports to at most one
+   a second while Hue ramps, as `src/hue_scene/driver.lua` does. Hue limits:
+   no transition target (D3).
+9. **#434: "Composer polish: tooltips on editable rows and motion event order".**
+   Rows: L74, L71. Add `<tooltip>` to Recall As, On State Follows,
+   Occupancy Hold Time and Debug Mode. Give the motion events `sort_order`
+   values; this is an XML-only change and their ids stay. Hue limits: none.
+
+Partials and gaps with no new issue proposed:
+
+- L59: no documented route puts a driver's scene in the Scenes view.
+- L65 and L14 (group holds): these lamp checks are already listed in
+  `docs/status.md` "Now".
+- L67 (load groups): question 4, #435.
+
+## 5. Departures forced by Hue
+
+| Id | Departure | Reason (Hue) | Rows |
+|---|---|---|---|
+| D1 | Holds on zones, rooms and scenes ramp lamp by lamp (up to 10 lit) or in one-second steps, not as one group ramp. | A grouped_light ignores `dynamics.duration` on `dimming_delta` and covers the whole change in about a second (#249, `docs/group-hold-design.md`). | L14, L42, L65 |
+| D2 | Zone and room commands are paced at about one a second, after a burst of three; a fast slider drag goes out as one request a second. | Hue's guidance for grouped_light is about one request a second; lights take about ten (`docs/design.md` "Commands and rate limiting"). | L13, L55 |
+| D3 | Changes made in Hue reach Control4 as CHANGED only, so "begins to ramp" events and the target conditionals never fire for them. | Hue's event stream reports where a light is, never where it is going. | L6, L7, L68, L69 |
+| D4 | `SET_BRIGHTNESS_STOP` and `SET_COLOR_STOP` answer with the cached value; the lamp finishes its transition. | CLIP v2 has no verified stop for an absolute transition. A `dimming_delta` stop is verified on a light only (#249); #421 is testing more. | L12, L38 |
+| D5 | Level 1 means the bulb's lowest level, and a lit lamp never reads 0. | Hue's `min_dim_level` is fixed per bulb, and some bulbs report less than 0.5 %. | L9 |
+| D6 | Levels are reported as whole percents. | Hue reports its Zigbee level as a decimal (20 comes back as 20.16), which the OS 3.4.2 proxy showed as off (section 6). | L8 |
+| D7 | A zone light's colour on the tile is its first lit lamp's, and its level is the average of the lit lamps. | Hue reports no colour for a grouped_light. | L57 |
+| D8 | The colour reported can differ slightly from the colour asked for. | Hue moves xy into the bulb's gamut and stores colour temperature in whole mirek. | L37, L63 |
+| D9 | Colour and brightness share one transition time. | A CLIP v2 request has one `dynamics.duration`. | L36 |
+| D10 | A bulb without Zigbee connectivity (Matter or Wi-Fi) shows Online as blank, never Offline. | Its reachability is not reported in `zigbee_connectivity` (`docs/edge-cases-hue.md`). | L86 |
+| D11 | A Hue scene is recalled whole, optionally at a level. There are no per-step paths, no flash, and an on state of its own. | Hue scenes are recalled as a unit. Their "active" status ends when any member light changes, so the device follows its on rule and On State Follows (`docs/scene-dimmer-design.md`, `docs/scene-led-design.md`). | L59, L64 |
+| D12 | If warm dim is added, colour can follow brightness on targets only; during a hold it would follow at the release. | A `dimming_delta` changes brightness only and carries no colour curve. | L35, L33 |
+| D13 | No Min On, Max On or cold start. | CLIP v2 has no trim or warm-up settings, and the lamps are LED. | L26 |
+| D14 | A Hue-side ramp (a Hue dimmer switch held) appears in Control4 as steps. | The bridge sends at most about two event containers a second (#65). | L7 |
+| D15 | The light device's own buttons are virtual; button events belong to the keypad that is pressed. | Hue lamps have no buttons. | L46 |
+
+## 6. Where the written docs and the controller disagree
+
+On the house (OS 3.4.2), the controller's behaviour won over the written
+reference in these places. A contract that cites the rows above should not
+"fix" them back.
+
+- **Button Links.** The reference has the proxy create the Top, Bottom and
+  Toggle links. In practice the driver declares them (ids 200 to 202) and
+  receives `DO_PUSH`, `DO_CLICK` and `DO_RELEASE` on them [verified:
+  2026-10-22, `docs/keypad-design.md` "Hardware findings"].
+- **Setting confirmations.** `PRESET_LEVEL`, `CLICK_RATE_*` and
+  `HOLD_RATE_*` are documented with table parameters. The proxy reads a
+  table as 0, and takes the bare value [verified: #59, Composer rounds 41
+  and 42].
+- **Brightness type.** `LIGHT_BRIGHTNESS_CURRENT` is documented as a
+  double, but a decimal showed as 0 % [verified: 2026-10-21, `docs/design.md`
+  "Lights: verified on hardware"].
+- **Colour parameter names.** `SET_COLOR_TARGET` arrives as
+  `LIGHT_COLOR_TARGET_X`, `_Y`, `_MODE` and `RATE` [verified: 2026-10-22,
+  `docs/composer-checklist.md` D.10].
+- **Capability changes.** "Restart Director?" answered Yes does not load
+  changed capabilities; a controller reboot does [verified: 2026-10-23/24,
+  `docs/keypad-design.md` "Install findings"].
+
+## 7. Open questions for the owner
+
+1. **Default On colour for existing lights (item 2, #427).** Today a light turns
+   on in its last colour. Control4's way turns every light on in its
+   Default On Colour, which also overrides a colour last set in the Hue
+   app. That fits "Control4 is the source of truth". Is that wanted, and
+   what should happen to lights whose On colour nobody has set in Composer?
+   Recommended: follow Control4 from that release, and say in the changelog
+   that dealers should set the On and Dim colours.
+2. **When the bridge is unreachable (item 3, #428), after how long should Hue
+   devices go offline?** Offline greys their tiles and stops keypad
+   control. Options:
+   - at once when the event stream drops;
+   - after 5 minutes, when the bridge already starts looking for a moved
+     bridge (recommended, because a bridge reboot takes minutes);
+   - only after an hour, when Attention reports the bridge missing.
+3. **On Mode Previous (item 4, #429).** Offer Control4's "Previous" (turn on at
+   the last level) next to Preset? It needs a controller reboot and
+   replaces the deprecated capability. Existing devices would stay on
+   Preset, today's behaviour, unless changed.
+4. **Load groups (L67, #435).** Should Hue lights join Control4 load groups? The
+   alternative is pointing dealers to zone and room lights, which drive a
+   Hue group with one request. Recommended: zone and room lights only.

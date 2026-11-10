@@ -1,13 +1,15 @@
 -- Development handlers of the Hue Bridge driver, dev builds only. tools/build.sh
--- ships this module with common/devloop.lua, bridge/conntest.lua and
--- bridge/pinning.lua in `--dev` builds and leaves all four out of release
--- builds (with the DEV-ONLY blocks of driver.xml), so a release driver
--- carries none of this code. Here live the dev loop's `Dev Server` property,
--- the arbitrary request and the project probes reached through
--- `tools/devctl.py run`, the light path's Proxy Command and Lights Report,
--- the device drivers' forwarded log lines (HUE_LOG), the Reload Credentials,
--- Check CA Pinning and Connection Test actions, and Test Connection's Host
--- override. See docs/dev-loop.md.
+-- ships this module with common/devloop.lua, bridge/conntest.lua,
+-- bridge/pinning.lua and bridge/probe12.lua in `--dev` builds and leaves all
+-- five out of release builds (with the DEV-ONLY blocks of driver.xml), so a
+-- release driver carries none of this code. Here live the dev loop's `Dev
+-- Server` property, the arbitrary request and the project probes reached
+-- through `tools/devctl.py run`, the light path's Proxy Command and Lights
+-- Report, the device drivers' forwarded log lines (HUE_LOG), the Reload
+-- Credentials, Check CA Pinning and Connection Test actions, Test
+-- Connection's Host override, and the registration of the 1.2 probe's
+-- commands (bridge/probe12.lua: Probe Discovery, Probe Names, Probe Names
+-- Restore, Probe Picker, Probe Picker Folders). See docs/dev-loop.md.
 --
 -- driver.lua loads this module only when common/devloop.lua is present and
 -- hands over what the handlers need in devtools.install(ctx); nothing here
@@ -30,6 +32,7 @@ local lights_mod = require("bridge.lights")
 local devloop = require("common.devloop")
 local conntest = require("bridge.conntest")
 local pinning = require("bridge.pinning")
+local probe12 = require("bridge.probe12")
 
 local devtools = {}
 
@@ -647,10 +650,27 @@ end
 -- loop. See the top of this file.
 function devtools.install(given)
 	ctx = given
+	-- The event stream's abandoned transfers outlive a dev loop reload (#247):
+	-- Cancel() does not end them (bridge/stream.lua, rule 2), and Director
+	-- runs at most four C4:url transfers at once. The list the driver hands
+	-- every stream it builds (state.stream_abandoned, until now one per load
+	-- of driver.lua) becomes the one the loop keeps, so the reloaded code
+	-- counts the old code's open transfers against the stream's cap and waits
+	-- as after any restart. Here, before late init builds the first stream. A
+	-- running common/devloop.lua without keep (a dev install from before it)
+	-- leaves the list per load, as before.
+	if type(devloop.keep) == "function" and type(given.state) == "table"
+		and type(given.state.stream_abandoned) == "table" then
+		given.state.stream_abandoned = devloop.keep("stream_abandoned", given.state.stream_abandoned)
+	end
+	-- The 1.2 probe gets the same context; it defines the global list
+	-- functions of its picker test (Probe12PickerList, Probe12RoomList).
+	probe12.install(given)
 	dispatch.properties["Dev_Server"] = dev_server_changed
 	dispatch.commands["Connection_Test"] = connection_test
 	dispatch.commands["Reload_Credentials"] = reload_credentials
 	dispatch.commands["Check_CA_Pinning"] = check_ca_pinning
+	dispatch.commands["Probe_Picker_Folders"] = probe12.picker_action
 	dispatch.commands["HUE_LOG"] = hue_log
 	-- common/devloop.lua is the one module a reload never replaces: code
 	-- pushed to a bridge whose loop predates signed commands leaves these
@@ -669,6 +689,12 @@ function devtools.install(given)
 		Proxy_Command = proxy_command,
 		Lights_Report = lights_report,
 		Test_Connection = test_connection,
+		-- The 1.2 probe (bridge/probe12.lua, docs/simplify-actions-design.md §2.2).
+		Probe_Discovery = probe12.discovery,
+		Probe_Names = probe12.names,
+		Probe_Names_Restore = probe12.names_restore,
+		Probe_Picker = probe12.picker_dump,
+		Probe_Picker_Folders = probe12.picker_action,
 	})
 	devloop.set_redactor(redact_key)
 end

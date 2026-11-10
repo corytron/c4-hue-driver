@@ -85,6 +85,8 @@ scenes.LEVEL_MIN_DELTA = 0.5
 -- one PUT carrying the latest parameters (docs/review-leftovers-design.md,
 -- #47 F9). The first recall of a quiet scene goes at once: no tap is slowed,
 -- and a keypad hold's recall at 1 % keeps its lead over the dim that follows.
+-- A keypad tap's recall (urgent) never waits in a window (#421 S-D1,
+-- scenes:skip_recall_window).
 scenes.RECALL_WINDOW_MS = 300
 
 -- recall.action values [community: openhue/aiohue; `active` verified on hardware].
@@ -110,14 +112,14 @@ scenes.TAG = "scenes"
 scenes.WORDS = {
 	held = "scene",                       -- "its registered scene is <rid>"
 	stranger = "an unregistered device",  -- a HUE_SCENE_GOODBYE the module does not hold
-	goodbye_tail = "Add Scene lists it as deleted, Add All Scenes Of Room skips it",
-	add_action = "Add Scene",
+	goodbye_tail = "Add From Hue lists it as deleted; adding all scenes of its room skips it",
+	add_action = "Add From Hue",
 	busy_job = "adding scenes",
 	busy_resync = "resyncing scenes",
 	kind = "scene",
 	unbound_kind = "unbound scene device",
-	relink_or_forget = "Re-link Scene or Forget Scene",
-	forget_action = "Forget Scene",
+	relink_or_forget = "Link or Forget Device",
+	forget_action = "Forget Device",
 	name_kind = "Hue scene name",
 	hue_names = "Hue scene names",
 	device_noun = "scene device",
@@ -129,13 +131,14 @@ scenes.WORDS = {
 	registered = "scene",                 -- "device 2061 is not a registered scene"
 	relink_target = "a scene",            -- "pick a device and a scene"
 	requester = "scene device",           -- "the scene device named no device"
-	forget_tail = "; the Hue scene is listed under Add Scene again",
+	forget_tail = "; the Hue scene is listed under Add From Hue again",
 	link_noun = "scene devices",          -- "No scene devices are bound to this bridge"
 	link_many = "Hue scenes",
 	link_one = "Hue scene's",
 	link_none = "Hue scene",
 }
 scenes.DEVICE_DRIVER = scenes.SCENE_DRIVER
+scenes.NAMES_KIND = "scene"  -- bridge/names.lua syncs the scenes' names (D6)
 scenes.BUSY_FLAGS = { "adding", "resyncing" }  -- Add Scene's flag first
 scenes.MESSAGES = { configure = "HUE_SCENE_CONFIGURE", hello = "HUE_SCENE_HELLO", goodbye = "HUE_SCENE_GOODBYE",
 	forgotten = "HUE_SCENE_FORGOTTEN" }
@@ -160,9 +163,12 @@ scenes.REFRESH_CLEARS = { "id_v1" }
 --   project                  the project calls of docs/import-design.md §13 (defaults: bridge.project)
 --   lights                   the bridge.lights instance: its live `groups` cache, `reg:room_mapping()`,
 --                            `groups_loaded`
---   group_off(grouped_light_rid)   the coalesced grouped_light off of driver.lua (§5)
---   group_dim(grouped_light_rid, body)   the coalesced grouped_light dimming_delta PUT of driver.lua
---                            (docs/keypad-design.md "Scene hold-to-dim"); true when queued
+--   group_off(grouped_light_rid, opts?)   the coalesced grouped_light off of driver.lua (§5); opts, given
+--                            only for a timed or urgent off, is { rate = ms?, urgent = true? }: the
+--                            fade-out time (dynamics.duration) and a keypad tap's urgency (#421 S-D6)
+--   group_dim(grouped_light_rid, body, level?)   the coalesced grouped_light dimming_delta PUT of
+--                            driver.lua (docs/keypad-design.md "Scene hold-to-dim"); true when queued;
+--                            a tap stop's level, written only if Hue refuses the stop (#421 S-D3)
 --   group_set(grouped_light_rid, fields)  the coalesced absolute grouped_light PUT of driver.lua,
 --                            fields { brightness, rate } (docs/scene-dimmer-design.md); true when queued
 --   set_timer(delay_ms, fn)  C4:SetTimer(delay_ms, fn), an object with Cancel() [verified: API 34/_1]
@@ -668,7 +674,8 @@ function scenes:absorb(res)
 	self:refresh_registry()
 end
 
--- The entry's cached name follows Hue's; the Composer device keeps its own.
+-- The entry's cached name follows Hue's; the Composer device keeps its own
+-- here, and the names sync (bridge/names.lua) hears of it and decides.
 function scenes:take_name(entry, scene)
 	if entry.name == scene.name then
 		return false
@@ -676,7 +683,72 @@ function scenes:take_name(entry, scene)
 	self.ctx.log.info("scenes: %s was renamed to %s in Hue (Composer name unchanged)", tostring(entry.name),
 		tostring(scene.name))
 	entry.name = scene.name
+	self:hue_named(scene.rid)
 	return true
+end
+
+-- Names (bridge/names.lua, D6; names-sync §5.2) ----------------------------------
+
+-- A scene's Composer form: a zone scene carries the zone in front, a
+-- time-based scene its base name ("Golden hours 4" → "Golden hours").
+function scenes:name_form(_rid, entry)
+	local name, gtype = self:group_info(entry.group_rid, entry)
+	local form = { smart = is_smart(entry) }
+	if gtype == "zone" and name ~= nil and name ~= "" then
+		form.prefix = tostring(name) .. " "
+	end
+	return form
+end
+
+-- The PUT that names a scene, or a time-based scene (V, E11), on the bridge.
+-- Hue takes a name another scene of the room has [verified: house 2026-11-05].
+function scenes:name_requests(rid, name)
+	local entry = self.registry[rid]
+	if not entry then
+		return nil
+	end
+	local path = (is_smart(entry) and scenes.SMART_SCENE_PATH or scenes.SCENE_PATH) .. "/" .. rid
+	return { { method = "PUT", path = path, body = { metadata = { name = name } } } }
+end
+
+-- Whether a gone entry's group and a record's are the same room or zone:
+-- the same rid or, failing that, the same group name and type
+-- (owner.same_group: a bridge reset gives every group a new rid, §4
+-- finding 9).
+function scenes:in_same_group(entry, record)
+	local entry_name, entry_type = self:group_info(entry.group_rid, entry)
+	local name, gtype = self:group_info(record.group_rid, record)
+	return owner.same_group(entry.group_rid, hue_model.group_label(entry_name, entry_type), record.group_rid,
+		hue_model.group_label(name, gtype))
+end
+
+-- M9 / S4: a gone scene and an unimported one of the same kind with its name
+-- in the same group (Hue deleted and re-made it): suggested only, never
+-- automatic (scenes have no radio).
+function scenes:name_suggestions(seen)
+	local out = {}
+	local gone = self.reg:rids("gone")
+	if #gone == 0 then
+		return out
+	end
+	local tombs = self.reg:tombstones()
+	for _, record in ipairs(self:unimported_scenes()) do
+		if not tombs[record.rid] then
+			local matches = {}
+			for _, rid in ipairs(gone) do
+				local entry = self.registry[rid]
+				if not seen[rid] and self:record_of(rid) == nil and is_smart(entry) == is_smart(record)
+					and name_of(entry) == name_of(record) and self:in_same_group(entry, record) then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = record.rid, why = "same name in the same group",
+					ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
 end
 
 -- The identity fields of one entry from its catalogue record (of either
@@ -834,6 +906,11 @@ end
 
 -- Group on/off and other scenes (docs/keypad-design.md "Scene hold-to-dim") -----
 
+-- (owner hook) A scene's room mark follows the mapping of its room or zone.
+function scenes:mark_group(rid)
+	return self:group_rid_of(rid)
+end
+
 -- The group a scene of either kind belongs to: the catalogue's, else the entry's.
 function scenes:group_rid_of(rid)
 	local scene, entry = self:record_of(rid), self.registry[rid]
@@ -848,6 +925,32 @@ function scenes:grouped_light_of(group_rid)
 	end
 	local group = self:groups():group(group_rid)
 	return group and group.grouped_light_rid or nil
+end
+
+-- Whether a Hue scene is running on the room or zone whose grouped_light is
+-- `grouped_light_rid`, as the catalogues last heard: a time-based scene
+-- `active`, or a scene playing its dynamic palette (status.active
+-- "dynamic_palette"). A keypad hold there then stays on the grouped_light
+-- (stepped; bridge/group_hold.lua, docs/group-hold-design.md G6a): a relative
+-- or absolute group dim left a time-based scene active and a dynamic palette
+-- playing, while a change to one light ended a scene [verified: V11,
+-- docs/smart-scenes-research.md]. Read only, for any scene on the bridge,
+-- registered or not; false for an unknown or missing rid.
+function scenes:scene_running_on(grouped_light_rid)
+	if type(grouped_light_rid) ~= "string" or grouped_light_rid == "" then
+		return false
+	end
+	for _, record in pairs(self.smart_catalogue) do
+		if record.state == "active" and self:grouped_light_of(record.group_rid) == grouped_light_rid then
+			return true
+		end
+	end
+	for _, record in pairs(self.catalogue) do
+		if record.active == "dynamic_palette" and self:grouped_light_of(record.group_rid) == grouped_light_rid then
+			return true
+		end
+	end
+	return false
 end
 
 -- HUE_SCENE_GROUP { rid, on?, level? } to one registered scene's device;
@@ -1205,7 +1308,7 @@ function scenes:reconcile_scenes()
 				self:entry_label(rid, entry), entry.device_id)
 		elseif entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
-			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Re-link Scene or Forget Scene)",
+			self.ctx.log.warn("scenes: %s (device %d) is no longer on the bridge; marked gone (Link or Forget Device)",
 				self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
@@ -1293,7 +1396,7 @@ function scenes:scene_deleted(rid, entry)
 		if self.reg:set_state(rid, "gone") then
 			self:mark()
 		end
-		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Re-link Scene or Forget Scene)",
+		self.ctx.log.warn("scenes: %s (device %d) was deleted on the bridge; marked gone (Link or Forget Device)",
 			self:entry_label(rid, entry), entry.device_id)
 		return self:announce_gone(rid, "event") and 1 or 0
 	end
@@ -1520,6 +1623,12 @@ function scenes:still_current(rid, entry, gen)
 	return self.recall_gen[rid] == gen
 end
 
+-- A keypad tap's recall or off: `urgent = "true"` (#421 S-D6, as D12 for
+-- the lights).
+local function is_urgent(params)
+	return params.urgent == true or params.urgent == "true"
+end
+
 -- Why a PUT failed, for a warning: "HTTP 404 (<hint>)", "HTTP <code>", or
 -- the transfer error.
 local function failure_text(r, hint)
@@ -1588,7 +1697,7 @@ end
 -- waiting recall must not overtake it: an OFF of the scene drops it (the OFF
 -- is the latest word), and any other command of the scenes (a dim, a level,
 -- another scene's recall or off) sends it first. So at most one recall waits
--- at a time.
+-- at a time. A keypad tap's recall does not wait (skip_recall_window).
 
 function scenes:open_recall_window(rid)
 	local window = {}
@@ -1650,6 +1759,25 @@ function scenes:release_recalls(keep)
 	end
 end
 
+-- #421 S-D1: a keypad tap's recall (urgent) goes at once even inside its
+-- scene's window. The tap starts a fade the device times from the press, and
+-- the owner's next press stops it there; a recall held back up to
+-- RECALL_WINDOW_MS would fade in late and the stop would catch it short of
+-- the device's estimate. The recall waiting in the window, if any, is
+-- dropped (the tap is the latest word, as the latest parameters win in a
+-- window anyway), the window closes, and the tap's PUT opens the next one, so
+-- recalls after it are paced as before. Recalls go straight to the bridge
+-- (ctx.http), not through a command queue, so there is no bucket to pass.
+function scenes:skip_recall_window(rid, window)
+	if window.timer then
+		window.timer:Cancel()
+	end
+	self.recall_windows[rid] = nil
+	if window.params then
+		self.ctx.log.debug("scenes: a waiting recall of %s dropped: a tap's recall replaces it (#421 S-D1)", rid)
+	end
+end
+
 -- An OFF of scene `rid`: the recall waiting in its window is dropped (the
 -- window stays, so recalls after the OFF are still paced).
 function scenes:drop_waiting_recall(rid)
@@ -1660,15 +1788,16 @@ function scenes:drop_waiting_recall(rid)
 	end
 end
 
--- HUE_SCENE_RECALL { rid, action?, duration?, brightness? }: PUT the recall
--- (a brightness 1-100 overrides the scene's as recall.dimming, a duration
--- in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with the state
--- the action produces (reason "recall") so the device settles even if the
--- stream item is missed; on failure a warning and STATE with the cached
--- status. A recall within RECALL_WINDOW_MS of the scene's last recall PUT
--- waits for the window to end (open_recall_window). A time-based scene is
--- activated instead (scenes:activate). Returns true when a PUT was started
--- or waits to be.
+-- HUE_SCENE_RECALL { rid, action?, duration?, brightness?, urgent? }: PUT
+-- the recall (a brightness 1-100 overrides the scene's as recall.dimming, a
+-- duration in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with
+-- the state the action produces (reason "recall") so the device settles even
+-- if the stream item is missed; on failure a warning and STATE with the
+-- cached status. A recall within RECALL_WINDOW_MS of the scene's last recall
+-- PUT waits for the window to end (open_recall_window), unless it is a
+-- keypad tap's (urgent = "true", #421 S-D1: skip_recall_window). A
+-- time-based scene is activated instead (scenes:activate). Returns true when
+-- a PUT was started or waits to be.
 function scenes:recall(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_RECALL")
@@ -1683,6 +1812,10 @@ function scenes:recall(params)
 	end
 	self:release_recalls(rid)
 	local window = self.recall_windows[rid]
+	if window and is_urgent(params) then
+		self:skip_recall_window(rid, window)  -- #421 S-D1
+		window = nil
+	end
 	if window then
 		window.params, window.device_id = params, entry.device_id
 		self:next_recall_gen(rid)  -- the answer of the PUT before it no longer reports
@@ -1711,9 +1844,10 @@ function scenes:send_recall(rid, entry, params)
 	local body = { recall = { action = action } }
 	local duration = util.positive(params.duration)
 	if duration then
-		-- [assumed: recall.duration in ms; confirm once on hardware] Clamped as
-		-- the dim and level durations are: "1e400" is inf, which no JSON body
-		-- can carry (code analysis 2026-10-22, F12).
+		-- recall.duration in ms fades the scene in over it [verified: house
+		-- 2026-11-09, #421 S1; a keypad tap's ramp, S-D1]. Clamped as the dim
+		-- and level durations are: "1e400" is inf, which no JSON body can carry
+		-- (code analysis 2026-10-22, F12).
 		body.recall.duration = math.floor(math.min(scenes.DIM_MAX_DURATION, duration))
 	end
 	local brightness = tonumber(params.brightness)
@@ -1804,12 +1938,46 @@ function scenes:deactivate(rid, entry)
 	return true
 end
 
--- HUE_SCENE_OFF { rid }: the scene's group grouped_light off through
--- ctx.group_off (coalesced per group by the driver), then STATE inactive. A
--- group without a grouped_light (an empty zone), an unknown group or a gone
--- scene report inactive without a call. A time-based scene is deactivated
--- first (scenes:deactivate). Returns true when group_off was called (for a
--- time-based scene: when the deactivate PUT was started).
+-- The group off's options for a HUE_SCENE_OFF (#421 S-D2, S-D6): `rate`,
+-- the duration in ms clamped as a recall's (send_recall), and `urgent`, each
+-- only when given; nil for neither, so a plain off stays group_off(grouped).
+local function off_options(params)
+	local opts = {}
+	local duration = util.positive(params.duration)
+	if duration then
+		opts.rate = math.floor(math.min(scenes.DIM_MAX_DURATION, duration))
+	end
+	if is_urgent(params) then
+		opts.urgent = true
+	end
+	if next(opts) == nil then
+		return nil
+	end
+	return opts
+end
+
+-- " over <n> ms (urgent)", or the part of it the options carry, for the log.
+local function off_text(opts)
+	if not opts then
+		return ""
+	end
+	return (opts.rate and string.format(" over %d ms", opts.rate) or "") .. (opts.urgent and " (urgent)" or "")
+end
+
+-- HUE_SCENE_OFF { rid, duration?, urgent? }: the scene's group grouped_light
+-- off through ctx.group_off (coalesced per group by the driver), then STATE
+-- inactive. A group without a grouped_light (an empty zone), an unknown
+-- group or a gone scene report inactive without a call. A time-based scene
+-- is deactivated first (scenes:deactivate). Returns true when group_off was
+-- called (for a time-based scene: when the deactivate PUT was started).
+--
+-- A keypad tap's off (#421 S-D2, S-D6) carries `duration` (ms) and
+-- `urgent = "true"`: the call becomes ctx.group_off(grouped, { rate, urgent
+-- }), and the group queue sends `on: false` with dynamics.duration, past its
+-- bucket. The lamps fade out over it, and a dimming_delta stop during the
+-- fade leaves them lit [verified: house 2026-11-09, #421 S4]. A time-based
+-- scene's off is unchanged (S-D5): its deactivate has no duration at Hue, so
+-- the options are ignored and its group goes off at once, as before.
 function scenes:off(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_OFF")
@@ -1818,7 +1986,12 @@ function scenes:off(params)
 	end
 	self:drop_waiting_recall(rid)
 	self:release_recalls(rid)
+	local opts = off_options(params)
 	if is_smart(entry) then
+		if opts and opts.rate then
+			self.ctx.log.debug("scenes: off of time-based %s (device %d): no fade for a time-based scene; ignored "
+				.. "duration %d (#421 S-D5)", self:entry_label(rid, entry), entry.device_id, opts.rate)
+		end
 		return self:deactivate(rid, entry)
 	end
 	self:next_recall_gen(rid)
@@ -1831,9 +2004,9 @@ function scenes:off(params)
 		local group = self:groups():group(scene.group_rid)
 		local grouped = group and group.grouped_light_rid or nil
 		if grouped then
-			self.ctx.log.info("scenes: off for %s (device %d): grouped_light %s off", self:entry_label(rid, entry),
-				entry.device_id, tostring(grouped):sub(1, 8))
-			if not self.ctx.group_off(grouped) then
+			self.ctx.log.info("scenes: off for %s (device %d): grouped_light %s off%s", self:entry_label(rid, entry),
+				entry.device_id, tostring(grouped):sub(1, 8), off_text(opts))
+			if not self.ctx.group_off(grouped, opts) then
 				-- Nothing queued (not paired): the scene stays as it is and the
 				-- device hears the truth [code analysis 2026-10-22, F4].
 				self.ctx.log.warn("scenes: off for %s (device %d): nothing queued; state unchanged",
@@ -1852,15 +2025,36 @@ function scenes:off(params)
 	return called
 end
 
--- HUE_SCENE_DIM { rid, device_id, direction = up | down | stop, duration? }:
--- one relative dimming_delta on the scene's group grouped_light through
--- ctx.group_dim (coalesced per group by the driver), so the scene's colours
--- and per-light differences are kept. up/down run 0 -> 100 % over `duration`
--- ms (clamped to 0..DIM_MAX_DURATION, default DIM_DEFAULT_DURATION), stop
--- ends it [verified on hardware 2026-10-23: Hue accepts `dimming_delta` with
--- `dynamics` and the `stop` action on a grouped_light]. No STATE is sent. The
--- same for a time-based scene: a whole-room dim leaves it running (V11,
--- docs/smart-scenes-design.md Decision 6). Returns true when queued.
+-- A tap stop's `level` (#421 S-D3): a number clamped to 0..100, else nil.
+local function stop_level(value)
+	local level = tonumber(value)
+	if not level or level ~= level then
+		return nil
+	end
+	return math.max(0, math.min(100, level))
+end
+
+-- HUE_SCENE_DIM { rid, device_id, direction = up | down | stop, duration?,
+-- level? }: one relative dimming_delta on the scene's group grouped_light
+-- through ctx.group_dim (coalesced per group by the driver), so the scene's
+-- colours and per-light differences are kept. up/down run 0 -> 100 % over
+-- `duration` ms (clamped to 0..DIM_MAX_DURATION, default
+-- DIM_DEFAULT_DURATION), stop ends it [verified on hardware 2026-10-23: Hue
+-- accepts `dimming_delta` with `dynamics` and the `stop` action on a
+-- grouped_light]. No STATE is sent. The same for a time-based scene: a
+-- whole-room dim leaves it running (V11, docs/smart-scenes-design.md
+-- Decision 6). Returns true when queued.
+--
+-- #421 S-D3: a keypad tap's stop is this stop with the device's estimate as
+-- `level`. It halts a tap's fade-in (a recall with a duration) or fade-out
+-- (an off with one) with each lamp where it is [verified: house 2026-11-09,
+-- S2, S4]. The level goes to ctx.group_dim as its third argument; with no
+-- hold running on the group, group_hold passes the stop to the group queue
+-- unchanged with it (G7), and the queue writes it only if Hue refuses the
+-- stop: a level write would bring every lamp to one level and lose the
+-- scene's look. group_level is left alone: after a stop the bridge keeps the
+-- fade's target as the group's level until it reads the lamps again (L2),
+-- and a slider move measured from that is what Hue applies it to.
 function scenes:dim(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_DIM")
@@ -1885,9 +2079,10 @@ function scenes:dim(params)
 			self:entry_label(rid, entry), entry.device_id)
 		return false
 	end
-	local body
+	local body, level
 	if direction == "stop" then
 		body = { dimming_delta = { action = "stop" } }
+		level = stop_level(params.level)
 	else
 		local duration = tonumber(params.duration)
 		if not duration or duration ~= duration then
@@ -1896,10 +2091,10 @@ function scenes:dim(params)
 		duration = math.floor(math.max(0, math.min(scenes.DIM_MAX_DURATION, duration)))
 		body = { dimming_delta = { action = direction, brightness_delta = 100 }, dynamics = { duration = duration } }
 	end
-	self.ctx.log.info("scenes: dim %s %s (device %d): grouped_light %s", self:entry_label(rid, entry), direction,
-		entry.device_id, tostring(grouped):sub(1, 8))
+	self.ctx.log.info("scenes: dim %s %s (device %d): grouped_light %s%s", self:entry_label(rid, entry), direction,
+		entry.device_id, tostring(grouped):sub(1, 8), level and (", " .. level_text(level) .. " % if refused") or "")
 	self:release_recalls()  -- a recall still waiting goes before the dim
-	if self.ctx.group_dim(grouped, body) ~= true then
+	if self.ctx.group_dim(grouped, body, level) ~= true then
 		self.ctx.log.warn("scenes: dim of %s (device %d): nothing queued", self:entry_label(rid, entry), entry.device_id)
 		return false
 	end
@@ -2021,7 +2216,8 @@ function scenes:add_scene(rid, room_id, done)
 	end
 	local scene = self:record_of(rid)
 	if not scene then
-		done(false, string.format("Not added: scene %s is not on the bridge (Refresh Scenes and try again)", tostring(rid)))
+		done(false, string.format("Not added: scene %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)", tostring(rid)))
 		return false
 	end
 	local room_name
@@ -2071,7 +2267,8 @@ function scenes:add_all_of_group(group_rid, done)
 	end
 	local group = self:groups():group(group_rid)
 	if not group then
-		done(false, string.format("Not added: Hue room %s is not on the bridge (connect the event stream and try again)",
+		done(false, string.format("Not added: Hue room %s is not on the bridge (Diagnostics ▸ Read everything "
+			.. "from the bridge now, then try again)",
 			tostring(group_rid)))
 		return false
 	end
@@ -2133,7 +2330,7 @@ function scenes:add_all_of_group(group_rid, done)
 			parts[#parts + 1] = "stopped early: " .. err
 		end
 		if #deleted > 0 then
-			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add Scene re-creates one): %s", #deleted,
+			parts[#parts + 1] = string.format("skipped %d deleted in Composer (Add From Hue re-creates one): %s", #deleted,
 				table.concat(deleted, ", "))
 		end
 		return table.concat(parts, "; ")
@@ -2162,7 +2359,8 @@ function scenes:relink_fields(fields)
 end
 
 function scenes.relink_refusal(_self, _device_id, new_rid)
-	return string.format("Not re-linked: scene %s is not on the bridge (Refresh Scenes and try again)",
+	return string.format("Not re-linked: scene %s is not on the bridge (Diagnostics ▸ Read everything "
+		.. "from the bridge now, then try again)",
 		tostring(new_rid))
 end
 
@@ -2235,31 +2433,32 @@ end
 
 -- Texts ---------------------------------------------------------------------------
 
--- The Scenes property: "125 scenes and 15 time-based on bridge, 3 imported,
--- 0 missing, 0 unbound, 0 deleted", the devices of both kinds counted
--- together (docs/smart-scenes-design.md Decision 14); "?" time-based until a
+-- Scenes of both kinds on the bridge with no device and not deleted in
+-- Composer: the Scenes row's "new" (docs/list-rows-design.md), counted
+-- without building or sorting unimported_scenes().
+function scenes:new_count()
+	local tombs, n = self.reg:tombstones(), 0
+	for _, catalogue in ipairs({ self.catalogue, self.smart_catalogue }) do
+		for rid in pairs(catalogue) do
+			if not self.registry[rid] and tombs[rid] == nil then
+				n = n + 1
+			end
+		end
+	end
+	return n
+end
+
+-- The Scenes row (owner:row_summary, docs/list-rows-design.md): "129 scenes
+-- + 15 time-based on bridge, 3 imported, 141 new" (missing, unbound and
+-- deleted only when not 0), the scenes of both kinds counted together in
+-- every count (docs/smart-scenes-design.md Decision 14); "? time-based" until a
 -- /smart_scene GET has succeeded; "<n> imported" before the first GET.
 function scenes:summary()
 	if not self.synced then
-		return string.format("%d imported", self:count())
+		return self:row_summary()
 	end
-	local c = self.reg:counts()
-	-- Short enough for Composer's value column (about 75 characters, no
-	-- wrapping): missing and unbound appear only when not zero; Attention
-	-- lists them then.
-	local parts = {
-		string.format("%d + %s time-based on bridge", self:bridge_count(),
-			self.smart_synced and tostring(self:smart_count()) or "?"),
-		string.format("%d imported", self:count()),
-	}
-	if c.gone > 0 then
-		parts[#parts + 1] = string.format("%d missing", c.gone)
-	end
-	if c.unbound > 0 then
-		parts[#parts + 1] = string.format("%d unbound", c.unbound)
-	end
-	parts[#parts + 1] = string.format("%d deleted", c.tombstones)
-	return table.concat(parts, ", ")
+	return self:row_summary(string.format("%s + %s time-based", util.plural(self:bridge_count(), "scene"),
+		self.smart_synced and tostring(self:smart_count()) or "?"), self:new_count())
 end
 
 -- The Attention items (driver.lua joins them after the lights') are
@@ -2318,7 +2517,7 @@ end
 -- last.
 function scenes:picker_scenes()
 	if not self.synced then
-		return util.empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local owners = self:slot_owners()
 	local plain, deleted = {}, {}
@@ -2351,7 +2550,7 @@ end
 -- Decision 8; imported counts both kinds).
 function scenes:picker_groups()
 	if not self.synced then
-		return util.empty_list("(no scenes fetched yet; connect the event stream)")
+		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
 	end
 	local rooms = self.project:rooms()
 	local counts, smart, imported, records = {}, {}, {}, {}
@@ -2449,11 +2648,17 @@ end
 -- about seven per room). The registered scenes the bridge lacks follow
 -- under the group they remember as "(missing; device N)". Commas become "‚"
 -- (U+201A): the list is comma-delimited (driver.lua's
--- refresh_room_mappings). Before the first GET, the registry alone: what is
+-- refresh_room_mappings). A linked scene whose device sits in another
+-- Control4 room than its room or zone maps to carries the room mark
+-- (owner:room_marks). Before the first GET, the registry alone: what is
 -- known. Empty when nothing is.
 function scenes:list_items()
 	local owners = self:slot_owners()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	local rows = {}
 	local function row(x, rid, suffix)
 		local label, name, smart = self:group_label(x.group_rid, x), name_of(x), is_smart(x)
@@ -2471,7 +2676,7 @@ function scenes:list_items()
 			local entry, tomb = self.registry[rid], tombs[rid]
 			local suffix = ""
 			if entry then
-				suffix = entry_suffix(entry)
+				suffix = state_of(entry)
 			elseif tomb then
 				suffix = string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
@@ -2480,7 +2685,7 @@ function scenes:list_items()
 	end
 	for rid, entry in pairs(self.registry) do
 		if not self:record_of(rid) then
-			row(entry, rid, entry_suffix(entry))
+			row(entry, rid, state_of(entry))
 		end
 	end
 	table.sort(rows, function(a, b)

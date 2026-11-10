@@ -12,15 +12,28 @@ local http = require("bridge.http")
 local credentials = require("bridge.credentials")
 local pairing = require("bridge.pairing")
 local stream = require("bridge.stream")
+local netstream = require("bridge.netstream")
 local lights_mod = require("bridge.lights")
 local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
 local motion_mod = require("bridge.motion")
 local motion_diag_mod = require("bridge.motion_diag")
 local commands = require("bridge.commands")
-local tlscheck = require("bridge.tlscheck")
+local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
 local util = require("bridge.util")
+local housekeeping = require("bridge.housekeeping")
+local discovery_mod = require("bridge.discovery")
+local actions_mod = require("bridge.actions")
+local names_mod = require("bridge.names")
+local group_hold_mod = require("bridge.group_hold")
+local rows_mod = require("bridge.rows")
+local bridges_found_mod = require("bridge.bridges_found")
+local away_mod = require("bridge.away")
+local identity_mod = require("bridge.identity")
+local tasks_mod = require("bridge.tasks")
+local netgate_mod = require("bridge.netgate")
+local pair_window_mod = require("bridge.pair_window")
 
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
@@ -58,21 +71,38 @@ local state = {
 	motion_diag = nil,   -- bridge.motion_diag, Log Motion Diagnostics
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
+	group_hold = nil,    -- bridge.group_hold (docs/group-hold-design.md, #249), created in OnDriverLateInit
 	late_init_done = false,
+	destroyed = false,   -- OnDriverDestroyed ran: what this code still has in flight starts nothing
 	address_gen = 0,     -- bumped at every Bridge IP Address change; late results of an older one are ignored
 	key_rejected = nil,  -- HTTP code (401/403) once the bridge refused the key; cleared by Pair Bridge or a new address
 	tls_verdict = nil,   -- the TLS self-check's answer for this start and address (bridge/tlscheck.lua)
-	identity_ok = nil,   -- true once the identity check (with the TLS check) passed for this address; false when it failed
+	net_check = nil,     -- the network connection's TLS check for this run (net_gate): pinned, accepted, not_pinned
+	identity_ok = nil,  -- true once the identity check (with the TLS check) passed for this address; false when it failed
 	identity_text = nil, -- the Status text of the identity check's failure, kept for refresh_status (#236)
 	attention_sent = nil, -- the Attention text last written, so an unchanged one is not written again
 	limits_sent = {},    -- light rid -> the limits last given to the command queue
 	stream_started_at = nil, -- "MM-DD HH:MM" of the stream's first connect since the driver started
 	stream_abandoned = {}, -- abandoned stream transfers that may still be open, across stream rebuilds (stream.lua)
+	-- The outage and "away" measures (bridge/away.lua; ms since the epoch, nil when the condition does not hold):
+	stream_down_ms = nil, -- since when the event stream is not connected
+	unreachable_ms = nil, -- since when the identity check finds nothing answering at this address
+	away_ms = nil,        -- since when the identity check fails at this address (nothing, or another bridge)
+	away_other = nil,     -- the id another bridge answered with at this address, when that was the last answer
+	find_missed_ms = nil, -- when the follow-up search (D5, D12) last ended without the paired bridge
+	moved = nil,          -- { from, to, text, at }: the last address change the follow-up made (away.MOVED_KEY)
+	-- Created as the chunk loads (below), so they exist whatever runs first:
+	bridges_found = nil,  -- bridge/bridges_found.lua, the Bridges Found row
+	away = nil,           -- bridge/away.lua, the measures above and what they lead to
+	identity = nil,       -- bridge/identity.lua, the identity check (with the TLS self-check)
 }
 
--- The Attention text of a failed TLS self-check (issue #53, tls_gate below).
-local TLS_ATTENTION = "TLS check failed: the controller accepted the bridge without its Signify roots; "
-	.. "keyed requests stopped (see the manual)"
+-- Milliseconds since the epoch [verified: SDK 34_timer/_2-GetTime, OS 3.2.3 on]: the clock of
+-- the outage and "away" measures (bridge/away.lua, bridge/tasks.lua), so the specs' fake clock
+-- (c4.advance) moves them too.
+local function now_ms()
+	return C4:GetTime()
+end
 
 -- Stream timeout in single-queue mode: commands wait for the stream to
 -- end, so it must end often.
@@ -82,57 +112,21 @@ local SINGLE_QUEUE_TIMEOUT = 60
 -- not reuse the one its predecessor's abandoned transfer still holds.
 local STREAM_SPELLING_KEY = "hue_stream_spelling"
 
--- The rows the stream rewrites per event (`Events Received`, `Last Event`,
--- `Event Stream`) are written at most once a second each: a row's first
--- value of a burst at once, its latest when the one-shot timer fires a
--- second later (so the final value always lands), and the timer stays armed
--- while values keep coming. A direct prop() of the same row ("Stopped",
--- Forget Pairing's 0) wins over a value still waiting.
-local PROP_SOON_MS = 1000
-local prop_soon_pending = {}   -- name -> the latest value, waiting for the timer
-local prop_soon_written = {}   -- name -> true once written in the current second
-local prop_soon_timer = nil
+-- The owner-facing rows (bridge/rows.lua): plain rows, the rows the stream
+-- rewrites per event, list rows, and texts word-wrapped onto continuation
+-- rows (Attention, Last Action).
+local rows = rows_mod.new()
 
 local function prop(name, value)
-	prop_soon_pending[name] = nil
-	C4:UpdateProperty(name, tostring(value == nil and "" or value))
+	rows:prop(name, value)
 end
 
-local function flush_prop_soon()
-	prop_soon_timer = nil
-	local pending = prop_soon_pending
-	prop_soon_pending, prop_soon_written = {}, {}
-	if next(pending) == nil then
-		return
-	end
-	for name, value in pairs(pending) do
-		prop_soon_written[name] = true
-		prop(name, value)
-	end
-	prop_soon_timer = C4:SetTimer(PROP_SOON_MS, flush_prop_soon)
-end
-
+-- The rows the stream rewrites per event (`Events Received`, `Last Event`,
+-- `Event Stream`) are written at most once a second each (bridge/rows.lua).
+-- A direct prop() of the same row ("Stopped", Forget Pairing's 0) wins over
+-- a value still waiting.
 local function prop_soon(name, value)
-	if prop_soon_written[name] then
-		prop_soon_pending[name] = value
-	else
-		prop_soon_written[name] = true
-		prop(name, value)
-	end
-	if not prop_soon_timer then
-		prop_soon_timer = C4:SetTimer(PROP_SOON_MS, flush_prop_soon)
-	end
-end
-
--- A list property (driver.xml DYNAMIC_LIST): the drop-down holds `items`,
--- `value` (default the first item) is what the row shows. Comma-delimited
--- (SDK 24_properties/_6-UpdatePropertyList); the list's default alone did
--- not move the row after a pick in Composer (build 184), so the value is
--- set as well.
-local function prop_list(name, items, value)
-	value = value or items[1]
-	C4:UpdatePropertyList(name, table.concat(items, ","), value)
-	C4:UpdateProperty(name, value)
+	rows:prop_soon(name, value)
 end
 
 local function paired()
@@ -142,16 +136,17 @@ end
 -- The Status row from the driver's state. "Paired" is the normal state, and
 -- it means that keyed requests go out: never while the identity check (with
 -- the TLS check it waits for) has failed or has not passed yet for this
--- address (#236). A failure keeps the check's own text (identity_status
--- below); a check still running reads "Checking the bridge at <ip> before
--- anything is sent".
+-- address (#236). A failure keeps the check's own text (state.identity_text,
+-- bridge/identity.lua); a check still running reads "Checking the bridge at
+-- <ip> before anything is sent".
 local function refresh_status()
 	if not state.ip then
 		prop("Status", "Enter the bridge IP address")
 	elseif not paired() then
 		prop("Status", "Not paired: press the link button, then run Pair Bridge")
 	elseif state.key_rejected then
-		prop("Status", string.format("Key rejected by the bridge (HTTP %d): re-pair with Pair Bridge", state.key_rejected))
+		prop("Status", string.format("Key rejected by the bridge (HTTP %d): checked again by itself; re-pair with "
+			.. "Pair Bridge if it stays", state.key_rejected))
 	elseif state.tls_verdict == "not_pinned" then
 		prop("Status", "TLS check failed: nothing is sent (see Attention)")
 	elseif state.identity_ok ~= true then
@@ -161,14 +156,10 @@ local function refresh_status()
 		prop("Status", "Paired")
 	end
 	prop("Bridge ID", paired() and state.creds.bridge_id or "")
-end
-
--- A Status text of the identity check or of the TLS check it waits for: shown
--- now and kept while the check has not passed, so that refresh_status (a
--- Bridge IP Address set again, say) shows it instead of "Paired" (#236).
-local function identity_status(text)
-	state.identity_text = text
-	prop("Status", text)
+	-- Every change of what the background tasks' guards read passes here.
+	if state.hk then
+		state.hk:wake()
+	end
 end
 
 -- What the stream needs to connect, or nil when it can't.
@@ -279,16 +270,41 @@ end
 -- so each connection gets the next spelling. Every path that starts the
 -- stream checks first; this is the last guard for a path added later (diff
 -- review 2026-10-25 row 6): nothing keyed to an unverified bridge, after a
--- failed TLS check, or with a rejected key. The second value is the stream's
+-- failed TLS check, with a rejected key, or on a network connection whose
+-- own TLS check has not passed (net_gate). The second value is the stream's
 -- status text.
+-- The stream's transport (docs/raw-stream-design.md §0, #317): a network
+-- connection unless the owner chose Web transfer, the C4:url stream of 1.0,
+-- or the network connection's TLS check failed in this run (net_gate; the
+-- property is left as the owner set it).
+local NETSTREAM_TEXT = "%s (network connection, binding " .. tostring(netstream.BINDING or 6001) .. ")"
+
+local function use_netstream()
+	return state.net_check ~= "not_pinned"
+		and not (Properties and Properties["Event Stream Transport"] == "Web transfer")
+end
+
+-- True once the network connection's TLS check lets the key go out on it in this run (net_gate).
+local function net_cleared()
+	return state.net_check == "pinned" or state.net_check == "accepted"
+end
+
 local function stream_connection()
 	local refusal = stream_refusal()
+	if refusal == nil and use_netstream() and not net_cleared() then
+		refusal = "network connection TLS check pending"
+	end
 	if refusal and refusal ~= "not paired" then
 		log.warn("event stream not connected: %s", refusal)
 		return nil, "Not connected: " .. refusal
 	end
 	local conn = connection()
-	if conn then
+	if conn and use_netstream() then
+		-- Off C4:url the address spelling buys nothing: the dotted one.
+		state.stream_ip = conn.ip
+		conn.stream_ip = conn.ip
+		prop("Stream Address", string.format(NETSTREAM_TEXT, conn.ip))
+	elseif conn then
 		state.stream_ip = next_stream_address(true)
 		conn.stream_ip = state.stream_ip
 		if dual_queue() then
@@ -333,6 +349,11 @@ local function key_rejected(code)
 	end
 	C4:UpdateProperty("Event Stream", string.format("Stopped: key rejected (HTTP %d)", code))
 	refresh_status()
+	-- The background re-check (owner's answer D8): 5 min, 15 min, 1 h, then
+	-- hourly, until the bridge accepts the key again or the driver re-pairs.
+	if state.hk then
+		state.hk:poke("key_recheck", "error")
+	end
 end
 
 -- A 401/403 to a keyed module request is not proof that the key is gone:
@@ -371,9 +392,20 @@ local function bridge_request(req, callback)
 	if state.identity_ok ~= true then
 		return callback({ ok = false, err = "bridge identity not verified yet" })
 	end
+	-- The GETs sent while a background read runs (an optional task's resync
+	-- chain) count against the hourly budget of optional requests
+	-- (bridge/housekeeping.lua job.charge; §4 finding 7); nothing is refused.
+	if state.charge and (req.method == nil or req.method == "GET") then
+		state.charge()
+	end
 	req.ip = state.ip
 	req.key = state.creds.key
 	req.tls = nil
+	-- Every write here is a person's (commands, recalls, renames): the
+	-- background tasks keep 1.5 s clear of the last one (§1.3).
+	if req.method ~= nil and req.method ~= "GET" then
+		state.last_write_ms = C4:GetTime()
+	end
 	return http.request(req, function(r)
 		if type(r) == "table" and (r.code == 401 or r.code == 403) then
 			confirm_key_rejected(r.code)
@@ -443,30 +475,23 @@ end
 -- grouped_light PUT goes through the group queue (one coalescing entry per
 -- group, so a "room off" reaching several devices sends one PUT).
 local group_hooks = {
-	-- Scene OFF / zone light OFF.
-	group_off = function(grouped_light_rid)
+	-- Scene OFF / zone light OFF. A scene's keypad tap fades the group out
+	-- over `opts.rate` ms, past the request bucket (#421 S-D2, S-D6).
+	group_off = function(grouped_light_rid, opts)
 		if state.group_queue then
-			state.group_queue:set(grouped_light_rid, { on = false })
+			local fields = { on = false }
+			if type(opts) == "table" then
+				fields.rate, fields.urgent = opts.rate, opts.urgent
+			end
+			state.group_queue:set(grouped_light_rid, fields)
 			return true
 		end
 		return false
 	end,
-	-- Hold-to-dim on a keypad: dimming_delta start/stop on the grouped_light
-	-- (docs/keypad-design.md). The queue builds the PUT from a "dim" field.
+	-- Hold-to-dim on a keypad and a scene slider's relative move: bridge/group_hold.lua
+	-- decides how each reaches Hue (docs/group-hold-design.md, #249).
 	group_dim = function(grouped_light_rid, body, level)
-		local delta = type(body) == "table" and body.dimming_delta or nil
-		if not state.group_queue or type(delta) ~= "table" then
-			return false
-		end
-		state.group_queue:set(grouped_light_rid, {
-			dim = delta.action,
-			delta = delta.brightness_delta,
-			rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
-			-- A zone light's stop carries the level it ended at, written
-			-- only if the bridge refuses the stop (as the light queue does).
-			level = tonumber(level),
-		})
-		return true
+		return state.group_hold ~= nil and state.group_hold:dim(grouped_light_rid, body, level) == true
 	end,
 	-- Absolute fields on the grouped_light: a scene slider while the group's
 	-- level is unknown (docs/scene-dimmer-design.md), every zone light
@@ -553,11 +578,18 @@ local function is_zone_light_rid(rid)
 end
 
 -- The owner-facing counts and lists (docs/import-design.md §6).
--- The lights' Attention text followed by the scenes' and the zone lights' items.
+-- The TLS checks' items, the bridge's own, then the lights' Attention text followed by the
+-- scenes', the zone lights', the motion devices' and the names' items.
 local function attention_text()
 	local items = {}
 	if state.tls_verdict == "not_pinned" then
-		items[1] = TLS_ATTENTION
+		items[1] = identity_mod.TLS_ATTENTION
+	end
+	if state.net_check == "not_pinned" then
+		items[#items + 1] = netgate_mod.ATTENTION
+	end
+	for _, item in ipairs(state.away:attention_items()) do
+		items[#items + 1] = item
 	end
 	local text = state.lights:attention()
 	if text and text ~= "" and text ~= "None" then
@@ -574,53 +606,42 @@ local function attention_text()
 			items[#items + 1] = item
 		end
 	end
+	-- Names that wait for the bridge, that Hue refused, or that changed in
+	-- bulk (bridge/names.lua; each ends in "(Resolve Names)").
+	if state.names then
+		for _, item in ipairs(state.names:attention() or {}) do
+			items[#items + 1] = item
+		end
+	end
 	return #items > 0 and table.concat(items, "; ") or "None"
 end
 
--- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`; `Last
--- Action` is word-wrapped onto its own rows instead, #68): Composer clips a
--- value at about 75 characters, so the row shows
--- a summary and the drop-down every item on a line of its own. The list is
--- comma-delimited, so a comma in any text becomes "‚". A pick in Composer
--- changes nothing: the row snaps back to the summary (list_rows remembers
--- it, and only a value that left it is reset, so this cannot loop).
-local list_rows = {}
-
-local function commaless(text)
-	return (tostring(text == nil and "" or text):gsub("%c", ""):gsub(",", "‚"))
-end
-
-local list_rows_sent = {}
-
-local function show_list(name, summary, items)
-	summary = commaless(summary)
-	local list = { summary }
-	for _, item in ipairs(items or {}) do
-		list[#list + 1] = commaless(item)
-	end
-	list_rows[name] = summary
-	-- Director and Composer are told only when the list changed (the lists
-	-- are rebuilt at every refresh); a pick clears the memory first.
-	local joined = table.concat(list, ",")
-	if list_rows_sent[name] ~= joined then
-		list_rows_sent[name] = joined
-		prop_list(name, list, summary)
-	end
-end
-
+-- List rows (`Room Mappings`, `Lights`, `Scenes`, `Zone Lights`, `Motion
+-- Sensors`; bridge/rows.lua): the summary on the row, every item on a line
+-- of the drop-down, and a pick in Composer snaps back to the summary.
 local function refresh_room_mappings()
 	local items, unmapped = state.lights:room_mapping_items()
 	if #items == 0 then
-		return show_list("Room Mappings", "None; use Map Rooms By Name")
+		return rows:list("Room Mappings", "None yet (Set Room Mapping makes one)")
 	end
-	show_list("Room Mappings", string.format("%d Hue rooms and zones; %d unmapped (open the list to read)",
+	rows:list("Room Mappings", string.format("%d Hue rooms and zones; %d unmapped (open the list to read)",
 		#items, unmapped), items)
 end
 
 -- A module's summary as the row and its list_items() as the drop-down.
 local function show_module_list(name, module)
-	show_list(name, module:summary(), module:list_items())
+	rows:list(name, module:summary(), module:list_items())
 end
+
+-- Attention, word-wrapped onto its continuation rows like Last Action
+-- (#68, contract §1.3: the action hint at the end is never cut; bridge/rows.lua).
+local attention_rows = rows:wrapped("Attention", {
+	empty = "None",
+	on_overflow = function(text)
+		-- In full in the Lua output whatever Debug Mode says, as Last Action's overflow (§4 finding 1).
+		log.always("Attention: %s", text)
+	end,
+})
 
 local function refresh_lights_props()
 	if not state.zone_lights then
@@ -630,7 +651,7 @@ local function refresh_lights_props()
 	local attention = attention_text()
 	if attention ~= state.attention_sent then
 		state.attention_sent = attention
-		prop("Attention", attention)
+		attention_rows:show(attention)
 	end
 	refresh_room_mappings()
 	show_module_list("Scenes", state.scenes)
@@ -668,9 +689,109 @@ local function new_group_queue()
 	})
 end
 
+-- Every module's resync, one GET at a time: at every stream connect, and
+-- from Refresh All (#324), which needs no stream. Runs from a timer or an
+-- action, never inside a transfer's callbacks. The scenes follow the lights
+-- (their catalogue GET is the large one, 351 KB on the house bridge, and
+-- their groups and room mappings come from the lights' resync), the zone
+-- lights the scenes (their grouped_light GET is small, and the scenes hand
+-- theirs on), the motion devices last (their sensors come from the lights'
+-- device cache, docs/motion-design.md §4.2); the owner-facing rows are
+-- refreshed after the lights and once more after the chain. done(failures)
+-- gets the list of "<part>: <error>" texts, empty when every part worked.
+local function resync_all(done, tier)
+	local failures = {}
+	local function note(part, ok, err, sent)
+		if ok then
+			log.info("%s resync done: %d state messages", part, tonumber(sent) or 0)
+		else
+			log.warn("%s resync failed: %s", part, tostring(err))
+			failures[#failures + 1] = part .. ": " .. tostring(err)
+		end
+	end
+	-- A quick resync (after a silence reconnect, contract §3.1) leaves out the
+	-- scene catalogue; the zone lights then read /grouped_light themselves.
+	local function scenes_step(cb)
+		if tier == "quick" then
+			log.info("scene resync skipped (quick resync)")
+			return cb(true, nil, 0, nil)
+		end
+		state.scenes:resync(cb)
+	end
+	state.lights:resync(function(ok, err, sent)
+		note("light", ok, err, sent)
+		refresh_lights_props()
+		scenes_step(function(sok, serr, ssent, grouped)
+			if tier ~= "quick" then
+				note("scene", sok, serr, ssent)
+			end
+			state.zone_lights:resync(function(zok, zerr, zsent)
+				note("zone light", zok, zerr, zsent)
+				state.motion:resync(function(mok, merr, msent)
+					note("motion", mok, merr, msent)
+					refresh_lights_props()
+					if done then
+						done(failures)
+					end
+				end)
+			end, grouped)
+		end)
+	end)
+end
+
+-- Background tasks (docs/simplify-actions-design.md §1.3, §3.1; the engine
+-- is bridge/housekeeping.lua, the tasks are bridge/tasks.lua's, started in
+-- start_housekeeping below). The resync chain's GETs go through
+-- bridge_request as before, not through the engine's job.http; an optional
+-- task's chain charges each GET to its job (state.charge, job.charge), so
+-- the hourly budget of optional requests counts it (§4 finding 7).
+
+-- True while a command queue holds work or a person's write went out in the
+-- last quiet_ms (the engine's gate, research §3.4).
+local function user_active(quiet_ms)
+	if (state.queue and state.queue:busy()) or (state.group_queue and state.group_queue:busy()) then
+		return true
+	end
+	return state.last_write_ms ~= nil
+		and C4:GetTime() - state.last_write_ms < (quiet_ms or housekeeping.USER_QUIET_MS)
+end
+
+-- Ask for a resync; a full one wins over a quick one still waiting.
+-- done(ok, text) once, by the run that serves it.
+local function want_resync(tier, why, done)
+	if state.resync_tier ~= "full" then
+		state.resync_tier = tier
+	end
+	if not state.hk then
+		-- Not started yet (cannot happen after late init): as beta 8 did.
+		return resync_all(function(failures)
+			if done then done(#failures == 0, table.concat(failures, "; ")) end
+		end, tier)
+	end
+	state.hk:poke("resync", why, done)
+end
+
+-- The paired bridge away and the event stream down (bridge/away.lua): the
+-- measures, the identity check after an outage, the follow-up search for the
+-- bridge at a new address (owner's answers D5, D12) and Attention's items.
+state.away = away_mod.new({
+	state = state,
+	paired = paired,
+	keyed_refusal = keyed_refusal,
+	use_netstream = use_netstream,
+	heard_elsewhere = function() return state.bridges_found:heard_elsewhere() end,
+	offer = function() state.bridges_found:offer() end,
+	refresh = refresh_lights_props,
+	refresh_status = refresh_status,
+	verify_identity = function(purpose, callback) state.identity:verify(purpose, callback) end,
+	log = log,
+	now_ms = now_ms,
+})
+
 local function new_stream()
-	return stream.new({
+	return (use_netstream() and netstream or stream).new({
 		connection = stream_connection,
+		tls_checked = net_cleared, -- netstream's own guard (#317); stream.lua ignores it
 		abandoned = state.stream_abandoned,
 		timeout = stream_timeout(),
 		watchdog = math.max(WATCHDOG_MIN, number_property("Stream Watchdog (s)", stream.DEFAULT_WATCHDOG)),
@@ -683,6 +804,11 @@ local function new_stream()
 			-- is down (docs/edge-cases-motion.md §6).
 			if not per_event and state.motion and not tostring(text):find("^Connected since") then
 				state.motion:on_stream_state(false)
+			end
+			-- The outage measures (when it began, the reason it began with) and
+			-- the identity check after an outage (bridge/away.lua).
+			if not per_event then
+				state.away:stream_status(text)
 			end
 			if not per_event and tostring(text):find("^Connected since") then
 				state.stream_connects = (state.stream_connects or 0) + 1
@@ -713,42 +839,7 @@ local function new_stream()
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
 			state.motion:on_stream_state(true)
-			state.lights:resync(function(ok, err, sent)
-				if ok then
-					log.info("resync done: %d state messages", tonumber(sent) or 0)
-				else
-					log.warn("resync failed: %s", tostring(err))
-				end
-				-- The lights' rows at once (the scene catalogue GET that
-				-- follows is the slow one), then once more after the chain.
-				refresh_lights_props()
-				-- The scenes hand their grouped_light items on, so the zone
-				-- lights skip their own GET of the same resource.
-				state.scenes:resync(function(sok, serr, ssent, grouped)
-					if sok then
-						log.info("scene resync done: %d state messages", tonumber(ssent) or 0)
-					else
-						log.warn("scene resync failed: %s", tostring(serr))
-					end
-					state.zone_lights:resync(function(zok, zerr, zsent)
-						if zok then
-							log.info("zone light resync done: %d state messages", tonumber(zsent) or 0)
-						else
-							log.warn("zone light resync failed: %s", tostring(zerr))
-						end
-						-- The motion devices last (docs/motion-design.md §4.2):
-						-- their sensors come from the lights' device cache.
-						state.motion:resync(function(mok, merr, msent)
-							if mok then
-								log.info("motion resync done: %d state messages", tonumber(msent) or 0)
-							else
-								log.warn("motion resync failed: %s", tostring(merr))
-							end
-							refresh_lights_props()
-						end)
-					end, grouped)
-				end)
-			end)
+			want_resync(state.away:connect_tier(), "connect")
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
@@ -779,72 +870,27 @@ end
 -- Rebuild the stream with the current properties. It is started again if it
 -- was running, or if `force` is set and the driver is paired with an IP.
 local function restart_stream(force)
-	if not state.stream then
+	if not state.stream or state.destroyed then
 		return
 	end
 	local was_running = state.stream:running()
-	state.stream:stop()
+	-- A rejected key keeps key_rejected's text, not a bare "Stopped": the address
+	-- self-check's 401/403 rebuilds the stream right after writing it (#246).
+	state.stream:stop(state.key_rejected and string.format("Stopped: key rejected (HTTP %d)", state.key_rejected))
 	state.stream = new_stream()
 	if (was_running or force) and keyed_refusal() == nil and state.identity_ok == true then
 		state.stream:start()
 	end
 end
 
--- Decide which spellings of the bridge address the stream uses (docs/design.md,
--- "Two ways to keep commands flowing" and "Stream address rotation"). Director
--- queues C4:url transfers per host text, so zero-padded spellings give the
--- stream its own queues, one per connection, rotating so a reconnect never
--- waits for the transfer it replaced. The self-check uses a spelling no
--- stream ever takes, so it can never queue behind a stream or an abandoned
--- one. Calls back when done; until then the stream must not be started.
--- The bridge's identity, checked without the key before any request
--- carries it (docs/reviews/security-2026-10-24.md): GET /api/0/config is
--- public and answers the bridge id. Until it matches the paired id nothing
--- is sent; an unreachable bridge is asked again every 30 s, a different
--- bridge never (it does not become ours by waiting).
-local IDENTITY_RETRY_MS = 30000
-local identity_timer = nil
-
-local function cancel_identity_retry()
-	if identity_timer then
-		identity_timer:Cancel()
-		identity_timer = nil
-	end
-end
-
--- Who waits for the identity check, by purpose ("stream", "test"): one check
--- answers them all, so Test Connection never drops the stream's pending start
--- and two stream starts never queue twice (the later callback of a purpose
--- replaces the earlier). Kept across the 30 s retries; dropped at an address
--- change or Forget Pairing. identity_running is the address generation whose
--- check is in flight (its GET or its TLS check). During a 30 s wait it is
--- nil, so a new waiter (a Test Connection click) starts the check at once
--- instead of waiting for the timer.
-local IDENTITY_PURPOSES = { "stream", "test" }
-local identity_waiters = {}
-local identity_running = nil
-
-local function answer_identity(ok)
-	identity_running = nil
-	local waiters = identity_waiters
-	identity_waiters = {}
-	for _, purpose in ipairs(IDENTITY_PURPOSES) do
-		if waiters[purpose] then
-			waiters[purpose](ok)
-		end
-	end
-end
-
-local function reset_identity_check()
-	cancel_identity_retry()
-	identity_waiters = {}
-	identity_running = nil
-end
-
 -- The bridge's model, name and firmware rows (docs/bridge-compat-design.md
--- Decision 3), from a /api/0/config answer or a pairing probe.
+-- Decision 3), from a /api/0/config answer or a pairing probe. The model is
+-- kept for Bridges Found too: a pairing made before 1.1 stored none, so the
+-- stored credentials alone left its summary "Paired with  at ..." (dev 467).
 local function show_bridge_info(info)
+	state.bridge_model = info.model
 	prop("Bridge Model", config.model_label(info.model))
+	state.bridges_found:show() -- its summary names the model
 	prop("Bridge Name", util.display_name(info.name))
 	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
 	if config.firmware_check(info.sw_version) == "old" then
@@ -853,129 +899,43 @@ local function show_bridge_info(info)
 	end
 end
 
--- The TLS self-check (issue #53, bridge/tlscheck.lua): before the key goes
--- anywhere, a request with a decoy CA bundle must fail certificate
--- verification. If the controller accepts it, its OS is not using the
--- configured bundle and nothing keyed is sent. Once per start and address.
--- `done(trusted, again)`: `again` asks the identity check to run again in
--- 30 s, keeping its waiters.
--- - not_pinned sticks until the next start or address change: a later
---   inconclusive answer must not lift it (security review 2026-10-25
---   finding 2).
--- - inconclusive passes only on a Director version that has answered pinned
---   before: pinning is a property of the OS, and an active attacker can
---   always make the decoy request fail some other way (finding 3).
-local function tls_gate(gen, ip, done)
-	if state.tls_verdict == "pinned" then
-		return done(true)
-	end
-	if state.tls_verdict == "not_pinned" then
-		return done(false)
-	end
-	tlscheck.run(ip, function(verdict, detail)
-		if gen ~= state.address_gen then
-			return -- the address changed meanwhile; its own check runs
-		end
-		if verdict == "not_pinned" then
-			state.tls_verdict = verdict
-			log.warn("TLS check: the bridge at %s was accepted with a decoy CA bundle (%s); nothing keyed is sent",
-				ip, tostring(detail))
-			refresh_status()
-			show_stream_waiting() -- "Not connected: TLS check failed", as Connect Event Stream would say
-			C4:UpdateProperty("Attention", TLS_ATTENTION)
-			state.attention_sent = TLS_ATTENTION
-			return done(false)
-		end
-		if verdict == "pinned" then
-			state.tls_verdict = verdict
-			tlscheck.remember_pinned()
-			log.debug("TLS check: the decoy bundle was refused (%s); trust is pinned", tostring(detail))
-			return done(true)
-		end
-		if tlscheck.pinned_before() then
-			log.warn("TLS check inconclusive (%s); this Director version answered pinned before, so it passes",
-				tostring(detail))
-			return done(true)
-		end
-		identity_status(string.format("TLS check inconclusive (%s): nothing is sent; checking again in %d s",
-			tostring(detail), IDENTITY_RETRY_MS / 1000))
-		log.warn("TLS check inconclusive (%s) on a Director version that has not answered pinned: nothing keyed is "
-			.. "sent; again in %d s", tostring(detail), IDENTITY_RETRY_MS / 1000)
-		done(false, true)
-	end)
-end
+-- The bridge's identity, checked without the key before any request carries
+-- it, with the TLS self-check inside (bridge/identity.lua): until it passes
+-- for this address nothing keyed is sent.
+state.identity = identity_mod.new({
+	state = state,
+	paired = paired,
+	prop = prop,
+	show_bridge_info = show_bridge_info,
+	refresh_status = refresh_status,
+	show_stream_waiting = show_stream_waiting,
+	show_attention = function(text) attention_rows:show(text) end,
+	away = state.away,
+	log = log,
+})
 
--- Runs the identity check, or joins the one in flight; `purpose` and
--- `callback(ok)` as for identity_waiters above (a retry passes neither).
-local function verify_identity(purpose, callback)
-	if purpose then
-		identity_waiters[purpose] = callback
-	end
-	local ip, gen = state.ip, state.address_gen
-	if identity_running == gen then
-		return -- the check in flight answers this waiter too
-	end
-	cancel_identity_retry()
-	identity_running = gen
-	local function again()
-		identity_running = nil
-		identity_timer = C4:SetTimer(IDENTITY_RETRY_MS, function()
-			identity_timer = nil
-			verify_identity()
-		end)
-	end
-	http.request({ ip = ip, path = "/api/0/config", timeout = 10 }, function(r)
-		if ip ~= state.ip or gen ~= state.address_gen then
-			return -- the address changed meanwhile; its own check runs
-		end
-		if not paired() then
-			return -- Forget Pairing overtook the check (#236: the step before pairing another bridge)
-		end
-		local cfg = r.ok and type(r.json) == "table" and r.json or nil
-		local reported = cfg and config.normalise_bridge_id(cfg.bridgeid) or nil
-		if cfg and reported then
-			show_bridge_info({ model = cfg.modelid, name = cfg.name, sw_version = cfg.swversion,
-				api_version = cfg.apiversion })
-			-- A model id this driver cannot use (none at all is let through).
-			if cfg.modelid and not config.model_supported(cfg.modelid) then
-				state.identity_ok = false
-				identity_status(string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip,
-					config.model_label(cfg.modelid)))
-				log.warn("bridge at %s is %s: no request is sent", ip, config.model_label(cfg.modelid))
-				return answer_identity(false)
-			end
-		end
-		if reported and reported == state.creds.bridge_id then
-			return tls_gate(gen, ip, function(trusted, retry)
-				if gen ~= state.address_gen then
-					return
-				end
-				state.identity_ok = trusted
-				if retry then
-					return again() -- Status already says why
-				end
-				if trusted then
-					state.identity_text = nil
-				end
-				refresh_status()
-				answer_identity(trusted)
-			end)
-		end
-		state.identity_ok = false
-		if reported then
-			identity_status(string.format("Bridge at %s reports ID %s, expected %s; nothing is sent until the address "
-				.. "is corrected", ip, reported, state.creds.bridge_id))
-			log.warn("bridge at %s reports id %s, expected %s: no request is sent", ip, reported, state.creds.bridge_id)
-			return answer_identity(false)
-		end
-		identity_status(string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
-			tostring(r.ok and "no bridge id in the answer" or r.err), IDENTITY_RETRY_MS / 1000))
-		log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err), IDENTITY_RETRY_MS / 1000)
-		again()
-	end)
-end
+-- The TLS check of the network connection (#317, bridge/netgate.lua over
+-- bridge/netcheck.lua): before the event stream's first keyed connect on a
+-- network connection in a run; its answer holds for the run
+-- (state.net_check), and not_pinned moves the stream to Web transfer.
+local net_gate = netgate_mod.new({
+	state = state,
+	prop = prop,
+	refresh = refresh_lights_props,
+	log = log,
+})
 
+-- Decide which spellings of the bridge address the stream uses (docs/design.md,
+-- "Two ways to keep commands flowing" and "Stream address rotation"). Director
+-- queues C4:url transfers per host text, so zero-padded spellings give the
+-- stream its own queues, one per connection, rotating so a reconnect never
+-- waits for the transfer it replaced. The self-check uses a spelling no
+-- stream ever takes, so it can never queue behind a stream or an abandoned
+-- one. Calls back when done; until then the stream must not be started.
 local function choose_stream_address(callback)
+	if state.destroyed then
+		return -- a callback of unloaded code (see OnDriverDestroyed)
+	end
 	local gen = state.address_gen
 	local check_ip = altaddr.for_check(state.ip)
 	local family = altaddr.stream_family(state.ip)
@@ -995,11 +955,22 @@ local function choose_stream_address(callback)
 		return log.info("stream address not chosen: %s", refusal) -- Status says why
 	end
 	if state.identity_ok ~= true then
-		return verify_identity("stream", function(ok)
+		return state.identity:verify("stream", function(ok)
 			if ok then
 				choose_stream_address(callback)
 			end
 		end)
+	end
+	if use_netstream() then
+		if not net_cleared() then
+			-- The network connection's own TLS check first (#317, bridge/netgate.lua).
+			return net_gate:run(function() choose_stream_address(callback) end)
+		end
+		-- No queue to share off C4:url (#317): no spelling, no self-check.
+		state.stream_family = nil
+		state.stream_ip = state.ip
+		prop("Stream Address", string.format(NETSTREAM_TEXT, state.ip))
+		return callback()
 	end
 	if not family or not check_ip then
 		return single("no octet below 8 to pad")
@@ -1085,6 +1056,10 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 		-- Everything learnt about the old address goes; the checks run afresh,
 		-- and until they pass Status does not read "Paired" (#236).
 		state.address_gen = state.address_gen + 1
+		if state.hk then
+			state.hk:reset(state.address_gen)
+		end
+		state.away:reset() -- the new address gets its own identity check below
 		state.key_rejected = nil
 		state.tls_verdict = nil
 		state.identity_ok = nil
@@ -1094,7 +1069,8 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 	if changed and state.late_init_done then
 		state.stream_ip = nil
 		state.stream_family = nil
-		reset_identity_check()
+		state.identity:reset()
+		net_gate:reset() -- a probe of the old address; the run's verdict stays
 		if ip and paired() then
 			credentials.save_ip(ip)
 			state.creds.ip = ip
@@ -1110,11 +1086,26 @@ dispatch.properties["Bridge_IP_Address"] = function(value)
 			state.stream_paused_by_address = (state.stream and state.stream:running()) or nil
 			restart_stream()
 		end
+		-- A driver that was never paired opens the pairing window as soon as
+		-- an address is entered (contract §1.2, action 1).
+		if ip and not paired() and not (state.creds and state.creds.bridge_id) and not state.pair_until then
+			dispatch.commands["Pair_Bridge"]()
+		end
+		-- Bridges Found names the address: the paired summary, and the
+		-- networks of the offered search (§4 finding 12).
+		state.bridges_found:show()
 	end
 end
 
 dispatch.properties["Stream_Timeout_(s)"] = function()
 	if state.late_init_done then restart_stream() end
+end
+
+dispatch.properties["Event_Stream_Transport"] = function()
+	if state.late_init_done then
+		net_gate:reset() -- a probe in flight served the previous choice; its answer would restart the stream twice
+		choose_stream_address(function() restart_stream(true) end)
+	end
 end
 
 dispatch.properties["Stream_Watchdog_(s)"] = function()
@@ -1124,60 +1115,41 @@ end
 
 -- Actions ------------------------------------------------------------------
 
-dispatch.commands["Pair_Bridge"] = function()
-	if not state.ip then
-		prop("Status", "Enter the bridge IP address first")
-		return
-	end
-	prop("Status", "Pairing: contacting bridge")
-	local gen = state.address_gen
-	local function stale()
-		if gen ~= state.address_gen then
-			log.info("pairing result for an earlier bridge address ignored")
-			return true
+-- Pair Bridge waits up to two minutes for the link button (contract §1.2,
+-- action 1; bridge/pair_window.lua), asking for the key again every 3 s
+-- while Status counts down.
+local pair_window = pair_window_mod.new({
+	state = state,
+	prop = prop,
+	show_bridge_info = show_bridge_info,
+	log = log,
+	on_paired = function(creds)
+		local previous_id = state.creds and state.creds.bridge_id
+		-- Use the in-memory result: the store writes on its own thread
+		-- and may not return the value yet.
+		state.creds = creds
+		state.key_rejected = nil
+		-- The identity check runs afresh (choose_stream_address below) unless it
+		-- passed for this very bridge: a failure text (an unreachable bridge,
+		-- say) is stale now that the bridge answered, and a check of the bridge
+		-- paired before (a late answer after Forget Pairing) proves nothing for
+		-- this one. Status reads "Checking the bridge ..." meanwhile.
+		if state.identity_ok ~= true or previous_id ~= creds.bridge_id then
+			state.identity_ok = nil
+			state.identity_text = nil
 		end
-	end
-	-- The stored bridge id: another bridge is refused until Forget Pairing
-	-- (docs/bridge-compat-design.md, "Pairing another bridge (#236)"). It is
-	-- kept when the key is not, so it counts while Status reads "Not paired".
-	local paired_id = state.creds and state.creds.bridge_id
-	pairing.pair(state.ip, {
-		on_probed = function(info)
-			if stale() then return end
-			show_bridge_info(info)
-			prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
-				info.bridge_id))
-		end,
-		on_link_button = function()
-			if stale() then return end
-			prop("Status", "Press the link button on the bridge, then run Pair Bridge again")
-		end,
-		on_paired = function(creds)
-			if stale() then return end
-			local previous_id = state.creds and state.creds.bridge_id
-			-- Use the in-memory result: the store writes on its own thread
-			-- and may not return the value yet.
-			state.creds = creds
-			state.key_rejected = nil
-			-- The identity check runs afresh (choose_stream_address below) unless it
-			-- passed for this very bridge: a failure text (an unreachable bridge,
-			-- say) is stale now that the bridge answered, and a check of the bridge
-			-- paired before (a late answer after Forget Pairing) proves nothing for
-			-- this one. Status reads "Checking the bridge ..." meanwhile.
-			if state.identity_ok ~= true or previous_id ~= creds.bridge_id then
-				state.identity_ok = nil
-				state.identity_text = nil
-			end
-			prop("Bridge Model", config.model_label(creds.model))
-			refresh_status()
-			show_stream_waiting() -- not "Not paired" while the new pairing's checks run
-			choose_stream_address(function() restart_stream(true) end)
-		end,
-		on_error = function(message)
-			if stale() then return end
-			prop("Status", "Pairing failed: " .. message)
-		end,
-	}, paired_id)
+		prop("Bridge Model", config.model_label(creds.model))
+		refresh_status()
+		-- Bridges Found reads "Paired with ..." at once, and the first-load
+		-- searches end (§4 finding 2).
+		state.bridges_found:paired()
+		show_stream_waiting() -- not "Not paired" while the new pairing's checks run
+		choose_stream_address(function() restart_stream(true) end)
+	end,
+})
+
+dispatch.commands["Pair_Bridge"] = function()
+	pair_window:open()
 end
 
 -- GET /clip/v2/resource/bridge with the key via `host` (the dotted address;
@@ -1189,6 +1161,51 @@ end
 -- /api/0/config without the key. A rejected key does not stop it: a 200 with
 -- the paired bridge id is how the key is shown to work again, which clears
 -- the lock and starts the stream (finding 4).
+-- The bridge accepts the key again (Test Connection, or the background
+-- re-check of D8): the lock goes and the stream starts again.
+local function key_accepted_again()
+	state.key_rejected = nil
+	refresh_status()
+	if state.stream_ip then
+		restart_stream(true)
+	else
+		choose_stream_address(function() restart_stream(true) end)
+	end
+end
+
+-- The background key re-check (owner's answer D8): one keyed GET of the
+-- bridge resource, which any valid key may read, sent although the key is
+-- locked (the lock is what it tests), only after the identity check passed
+-- (the task's guards). done(ok, text, cleared): cleared when this check
+-- lifted the lock.
+local function recheck_key(done)
+	if not state.key_rejected then
+		return done(true, "the key is not rejected")
+	end
+	local gen, creds = state.address_gen, state.creds
+	http.request({ ip = state.ip, key = creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+		if gen ~= state.address_gen or creds ~= state.creds then
+			return done(false, "cancelled: the address or the pairing changed")
+		end
+		if r.code == 401 or r.code == 403 then
+			return done(false, string.format("the bridge still refuses the key (HTTP %d)", r.code))
+		elseif not r.ok then
+			return done(false, "no answer: " .. tostring(r.err))
+		end
+		local item = r.json and r.json.data and r.json.data[1] or {}
+		local reported = config.normalise_bridge_id(item.bridge_id)
+		if reported and reported ~= creds.bridge_id then
+			return done(false, string.format("the bridge reports ID %s, expected %s", reported, creds.bridge_id))
+		end
+		if state.key_rejected then
+			log.warn("key re-check: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
+			key_accepted_again()
+			return done(true, "the bridge accepts the key again", true)
+		end
+		done(true, "the bridge accepts the key")
+	end)
+end
+
 local function test_connection(host)
 	local refusal = keyed_refusal(true)
 	if refusal == "not paired" then
@@ -1201,7 +1218,7 @@ local function test_connection(host)
 	end
 	if state.identity_ok ~= true then
 		prop("Status", "Testing: checking the bridge identity first")
-		return verify_identity("test", function(ok)
+		return state.identity:verify("test", function(ok)
 			if ok then
 				test_connection(host)
 			end
@@ -1232,12 +1249,7 @@ local function test_connection(host)
 		end
 		if state.key_rejected then
 			log.warn("Test Connection: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
-			state.key_rejected = nil
-			if state.stream_ip then
-				restart_stream(true)
-			else
-				choose_stream_address(function() restart_stream(true) end)
-			end
+			key_accepted_again()
 		end
 		prop("Status", string.format("Test OK: HTTP 200 via %s in %d s, bridge %s", host, secs,
 			tostring(reported or state.creds.bridge_id)))
@@ -1252,107 +1264,23 @@ end
 -- Last Action and refreshes the counts. The pickers are CUSTOM_SELECT lists
 -- built on demand by the global functions below [verified: FUND 12.3].
 
--- Composer's value column holds about 75 characters and does not wrap, so
--- a long result is word-wrapped onto `Last Action` and the rows `Last
--- Action (2)` … `(6)`; rows not in use are hidden (SetPropertyAttribs 1).
+-- A long result is word-wrapped onto `Last Action` and the rows `Last
+-- Action (2)` … `(6)` (bridge/rows.lua); rows not in use are hidden.
 -- Nothing to click, nothing editable (issue #68).
-local LAST_ACTION_ROWS, LAST_ACTION_WIDTH = 6, 72
-local last_action_shown = {}   -- row index → true while the row holds text
-local last_action_timer = nil
-
-local function wrap_text(text, width)
-	local lines, line = {}, ""
-	for word in text:gmatch("%S+") do
-		while #word > width do
-			if line ~= "" then
-				lines[#lines + 1] = line
-				line = ""
-			end
-			lines[#lines + 1] = word:sub(1, width)
-			word = word:sub(width + 1)
-		end
-		if line == "" then
-			line = word
-		elseif #line + 1 + #word <= width then
-			line = line .. " " .. word
-		else
-			lines[#lines + 1] = line
-			line = word
-		end
-	end
-	if line ~= "" then
-		lines[#lines + 1] = line
-	end
-	return lines
-end
-
-local function row_visible(name, visible)
-	if C4.SetPropertyAttribs then
-		pcall(C4.SetPropertyAttribs, C4, name, visible and 0 or 1)
-	end
-end
-
-local function last_action_row(i)
-	return string.format("Last Action (%d)", i)
-end
-
--- Every continuation row's visibility, asserted in full and only after the
--- texts have landed: Composer dropped a show (build 243) and a hide (build
--- 245) that arrived in the same burst as the rows' text updates [hardware
--- 2026-10-24], so the visibility goes out as one batch 400 ms later and
--- once more at 1.5 s; nothing depends on what was shown before.
-local function assert_last_action_rows()
-	for i = 2, LAST_ACTION_ROWS do
-		row_visible(last_action_row(i), last_action_shown[i] == true)
-	end
-end
-
-local function assert_last_action_rows_soon()
-	if last_action_timer then
-		last_action_timer:Cancel()
-	end
-	last_action_timer = C4:SetTimer(400, function()
-		assert_last_action_rows()
-		last_action_timer = C4:SetTimer(1500, function()
-			last_action_timer = nil
-			assert_last_action_rows()
-		end)
-	end)
-end
+local last_action_rows = rows:wrapped("Last Action")
 
 local function last_action(text)
 	text = tostring(text == nil and "" or text)
 	log.always("%s", text)
-	local lines = wrap_text(text, LAST_ACTION_WIDTH)
-	if #lines > LAST_ACTION_ROWS then
-		lines[LAST_ACTION_ROWS] = lines[LAST_ACTION_ROWS]:sub(1, LAST_ACTION_WIDTH - 16) .. " … (Lua output)"
-	end
-	prop("Last Action", lines[1] or "")
-	for i = 2, LAST_ACTION_ROWS do
-		prop(last_action_row(i), lines[i] or "")
-		last_action_shown[i] = lines[i] ~= nil
-	end
-	assert_last_action_rows_soon()
+	last_action_rows:show(text)
 	refresh_lights_props()
-end
-
--- At late init: continuation rows that still hold text from before the
--- restart stay shown, the empty ones are hidden.
-local function settle_last_action_rows()
-	for i = 2, LAST_ACTION_ROWS do
-		local value = Properties and Properties[last_action_row(i)] or ""
-		last_action_shown[i] = value ~= ""
-	end
-	assert_last_action_rows()
-	assert_last_action_rows_soon()
 end
 
 -- The lists are read-only in Composer; should a pick still arrive, the row
 -- goes back to its summary (only when it left it, so this cannot loop).
 local function list_pick(name)
 	return function(value)
-		if state.late_init_done and list_rows[name] ~= nil and value ~= list_rows[name] then
-			list_rows_sent[name] = nil
+		if state.late_init_done and rows:list_moved(name, value) then
 			refresh_lights_props()
 		end
 	end
@@ -1396,7 +1324,7 @@ local function picker(module, method, ...)
 end
 
 function HueLightList() return picker(state.lights, "picker_lights") end
-function RoomList() return picker(state.lights, "picker_rooms", "add") end
+-- RoomList (Add From Hue's Room) is defined with the 1.2 actions below.
 function RelinkDeviceList() return picker(state.lights, "picker_relink_devices") end
 -- ForgetDeviceList is defined with the zone lights' pickers below: it joins
 -- the lights' and the zone lights' devices.
@@ -1449,10 +1377,7 @@ function RelinkZoneLightList()
 	end
 	return list
 end
-function ForgetDeviceList()
-	return join_pickers(picker(state.lights, "picker_forget_devices"),
-		picker(state.zone_lights, "picker_forget_devices"))
-end
+-- ForgetDeviceList (Forget Device's Device) is defined with the 1.2 actions below.
 
 dispatch.commands["Add_Light"] = function(params)
 	if not can() then return end
@@ -1672,6 +1597,14 @@ dispatch.commands["Add_Motion_Sensor"] = function(params)
 	state.motion:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
 end
 
+-- Every new sensor into the room its Hue room maps to; the rest listed (#319;
+-- Add All New Motion Sensors until #325).
+dispatch.commands["Import_All_New_Motion_Sensors"] = function()
+	if can() then
+		state.motion:import_new(function(_, text) last_action(text) end)
+	end
+end
+
 dispatch.commands["Add_Motion_Area"] = function(params)
 	if not can() then return end
 	local rid = selection(params, "Area")
@@ -1766,6 +1699,20 @@ dispatch.commands["Forget_Scene"] = function(params)
 	last_action(text)
 end
 
+-- Refresh All (#324): every list read from the bridge now, stream or not.
+dispatch.commands["Refresh_All"] = function()
+	if not can() then return end
+	want_resync("full", "click", function(ok, text)
+		if ok then
+			last_action(string.format("Refreshed from the bridge: Lights: %s | Scenes: %s | Zone lights: %s | Motion: %s",
+				tostring(state.lights:summary()), tostring(state.scenes:summary()),
+				tostring(state.zone_lights:summary()), tostring(state.motion:summary())))
+		else
+			last_action("Read everything from the bridge: " .. tostring(text))
+		end
+	end)
+end
+
 dispatch.commands["Refresh_Scenes"] = function()
 	if not can() then return end
 	state.scenes:resync(function(ok, err)
@@ -1845,12 +1792,15 @@ dispatch.commands["HUE_SET"] = function(params)
 		y = tonumber(params.y),
 		mirek = tonumber(params.mirek),
 		rate = tonumber(params.rate),
+		-- A keypad tap's start, or a tap stop sent as a level, goes out at once,
+		-- past the request bucket (#421 D12, commands.urgent).
+		urgent = (params.urgent == "true" or params.urgent == true) or nil,
 	}
 	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
 	if log.enabled("info") then
-		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s", rid:sub(1, 8), tostring(fields.on),
+		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s%s", rid:sub(1, 8), tostring(fields.on),
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
-			tostring(fields.rate))
+			tostring(fields.rate), fields.urgent and " urgent" or "")
 	end
 	set_light_limits(rid)
 	state.queue:set(rid, fields)
@@ -1915,16 +1865,25 @@ dispatch.commands["Connect_Event_Stream"] = function()
 end
 
 dispatch.commands["Disconnect_Event_Stream"] = function()
+	state.outage_restart = nil -- an outage check in flight does not start it again
 	state.stream:stop()
 end
 
 dispatch.commands["Forget_Pairing"] = function()
+	pair_window:close()
+	if state.hk then
+		state.hk:reset(state.address_gen, true)
+	end
 	state.identity_ok = nil
 	state.identity_text = nil
-	reset_identity_check()
+	state.identity:reset()
+	net_gate:reset()
 	state.stream:stop()
+	-- No stale bridge address left on the stream's network binding (#317).
+	netstream.clear_address()
 	credentials.clear()
 	state.creds = nil
+	state.bridge_model = nil
 	state.stream_ip = nil
 	state.stream_family = nil
 	prop("Stream Address", "")
@@ -1933,7 +1892,13 @@ dispatch.commands["Forget_Pairing"] = function()
 	prop("Bridge Firmware", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
+	-- Nothing is paired: no outage, nothing away or moved (bridge/away.lua).
+	state.away:forget()
 	refresh_status()
+	-- Bridges Found reads the unpaired summary at once, and the first-load
+	-- searches start again (§4 finding 2).
+	state.bridges_found:show()
+	state.bridges_found:restart()
 end
 
 -- Bindings and system events --------------------------------------------------
@@ -2037,6 +2002,14 @@ function OnSystemEvent(data)
 	-- A rename in Composer changes what Attention compares; without this it
 	-- stayed stale until the next action or resync [hardware 2026-10-22].
 	if state.late_init_done and type(data) == "string" and data:find("OnItemNameChanged", 1, true) then
+		-- Two-way names (owner's answer D6): a light, scene or motion device
+		-- renamed in Composer is renamed on the bridge (bridge/names.lua reads
+		-- the new name itself; other items' ids are ignored there).
+		local id = tonumber(data:match('name="iditem"[^>]*>%s*(%d+)') or data:match('iditem="?(%d+)')
+			or data:match("<iditem>%s*(%d+)%s*</iditem>"))
+		if state.names and id then
+			state.names:on_composer_rename(id)
+		end
 		refresh_lights_props()
 	end
 end
@@ -2092,15 +2065,171 @@ if devtools then
 		bridge_request = bridge_request,
 		restart_stream = restart_stream,
 		test_connection = test_connection,
+		last_action = last_action,
 	})
+end
+
+-- The merged actions of 1.2 (bridge/actions.lua, docs/simplify-actions-design.md §3.3, §3.4) ----------
+
+-- The beta 8 handlers the new actions run (Diagnostics' entries, Import All
+-- New), taken before the aliases below take their keys over.
+local beta8 = {}
+for _, key in ipairs({ "Test_Connection", "Refresh_All", "Connect_Event_Stream", "Disconnect_Event_Stream",
+	"Log_Motion_Diagnostics" }) do
+	beta8[key] = dispatch.commands[key]
+end
+
+local D = actions_mod.DIAGNOSTICS
+-- Diagnostics' entries; the dev ones run bridge/devtools.lua's handlers,
+-- which exist in dev builds only (looked up when run).
+local function dev_command(key, params)
+	return function()
+		local fn = dispatch.commands[key]
+		if fn then fn(params or {}) end
+	end
+end
+local diagnostics = {
+	[D.TEST] = { order = 1, text = "Check the connection now", shows = "Status",
+		run = function() beta8.Test_Connection() end },
+	[D.REFRESH] = { order = 2, text = "Read everything from the bridge now", run = function() beta8.Refresh_All() end },
+	[D.CONNECT] = { order = 3, text = "Reconnect the event stream", shows = "Event Stream",
+		run = function() beta8.Connect_Event_Stream() end },
+	[D.DISCONNECT] = { order = 4, text = "Stop the event stream until the next start", shows = "Event Stream",
+		run = function() beta8.Disconnect_Event_Stream() end },
+	[D.MOTION_LOG] = { order = 5, text = "Log motion diagnostics (10 minutes)",
+		run = function() beta8.Log_Motion_Diagnostics() end },
+	[D.CONNECTION_TEST_BRIDGE] = { order = 6, dev = true, text = "(dev) Connection experiment: the bridge",
+		run = dev_command("Connection_Test", { Target = "Bridge" }) },
+	[D.CONNECTION_TEST_SERVER] = { order = 7, dev = true, text = "(dev) Connection experiment: the diagnostic server",
+		run = dev_command("Connection_Test", { Target = "Diagnostic Server" }) },
+	[D.RELOAD_CREDENTIALS] = { order = 8, dev = true, text = "(dev) Reload credentials",
+		run = dev_command("Reload_Credentials") },
+	[D.CHECK_PINNING] = { order = 9, dev = true, text = "(dev) Check CA pinning", run = dev_command("Check_CA_Pinning") },
+}
+
+local function new_actions()
+	return actions_mod.new({
+		lights = state.lights, scenes = state.scenes, zone_lights = state.zone_lights, motion = state.motion,
+		names = state.names, last_action = last_action, can = can, diagnostics = diagnostics, dev = devtools ~= nil,
+		log = log, before_names = fill_proxy_ids,
+	})
+end
+
+local function actions_list(method, folder)
+	if not state.actions then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	return state.actions[method](state.actions, folder)
+end
+
+function AddFromHueList(folder) return actions_list("add_list", folder) end
+function RoomList() return actions_list("room_list") end
+function LinkDeviceList(folder) return actions_list("link_list", folder) end
+function LinkTargetList(folder) return actions_list("link_target_list", folder) end
+function ForgetDeviceList(folder) return actions_list("forget_list", folder) end
+function ResolveNamesList() return actions_list("names_list") end
+function DiagnosticsList() return actions_list("diagnostics_list") end
+
+dispatch.commands["Add_From_Hue"] = function(params) state.actions:run_add(params) end
+dispatch.commands["Link_Device"] = function(params) state.actions:run_link(params) end
+dispatch.commands["Forget_Device"] = function(params) state.actions:run_forget(params) end
+dispatch.commands["Resolve_Names"] = function(params) state.actions:run_names(params) end
+dispatch.commands["Diagnostics"] = function(params) state.actions:run_diagnostics(params) end
+
+-- Import All New: the lights, then the motion sensors, each into the room
+-- its Hue room maps to (§1.2 action 2).
+dispatch.commands["Import_All_New"] = function()
+	if not can() then return end
+	state.lights:import_new(function(_, lights_text)
+		state.motion:import_new(function(_, motion_text)
+			last_action(tostring(lights_text) .. " | Motion: " .. tostring(motion_text))
+		end)
+	end)
+end
+
+-- Forget Pairing asks for confirmation (§3.3).
+local forget_pairing = dispatch.commands["Forget_Pairing"]
+dispatch.commands["Forget_Pairing"] = function(params)
+	if (params or {}).Confirm ~= actions_mod.CONFIRM_YES then
+		return last_action(actions_mod.NOT_CONFIRMED)
+	end
+	forget_pairing(params)
+	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept")
+end
+
+-- Set Room Mapping's second picker is "Control4 Room" in 1.2; "Room" still
+-- arrives from the dev loop and older briefs.
+local set_room_mapping = dispatch.commands["Set_Room_Mapping"]
+dispatch.commands["Set_Room_Mapping"] = function(params)
+	params = params or {}
+	if params["Control4 Room"] ~= nil and params.Room == nil then
+		params.Room = params["Control4 Room"]
+	end
+	return set_room_mapping(params)
+end
+
+-- Every beta 8 command merged into bridge/actions.lua answers until 2.0.
+for old in pairs(actions_mod.ALIASES) do
+	dispatch.commands[(old:gsub("%s+", "_"))] = function(params) state.actions:run_alias(old, params) end
+end
+
+-- Bridges Found (owner's answer D5; discovery research §2.4): the bridges
+-- that answered on the local network, never the internet, as a list row
+-- (bridge/bridges_found.lua). A pick sets Bridge IP Address and runs Pair
+-- Bridge, which then pairs the picked bridge only.
+
+-- The driver's own UpdateProperty fires no OnPropertyChanged, so the
+-- property's handler runs here (discovery research finding 7).
+local function set_bridge_address(ip)
+	C4:UpdateProperty("Bridge IP Address", ip)
+	dispatch.properties["Bridge_IP_Address"](ip)
+end
+
+state.bridges_found = bridges_found_mod.new({
+	state = state,
+	paired = paired,
+	rows = rows,
+	last_action = last_action,
+	refresh = refresh_lights_props,
+	set_address = set_bridge_address,
+	pair = function() dispatch.commands["Pair_Bridge"]() end,
+	log = log,
+})
+
+dispatch.properties["Bridges_Found"] = function(value)
+	state.bridges_found:on_pick(value)
+end
+
+-- The background tasks (contract §1.3, §3.1; scheduler research §5): defined
+-- in bridge/tasks.lua on the engine of bridge/housekeeping.lua.
+local function start_housekeeping(dit)
+	local hk = tasks_mod.new({
+		state = state,
+		http = bridge_request,
+		log = log,
+		user_active = user_active,
+		connection = connection,
+		keyed_refusal = keyed_refusal,
+		resync_all = resync_all,
+		recheck_key = recheck_key,
+		last_action = last_action,
+		set_address = set_bridge_address,
+		now_ms = now_ms,
+	})
+	state.hk = hk
+	hk:start(dit)
+	if state.key_rejected then
+		hk:poke("key_recheck", "error")
+	end
 end
 
 function OnDriverInit()
 end
 
-function OnDriverLateInit()
+function OnDriverLateInit(dit)
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
+	state.away:load() -- the last good address and the last move, from the store
 	state.lights = new_lights()
 	state.lights:load()
 	-- Configure every known light from the persisted registry before any
@@ -2108,6 +2237,39 @@ function OnDriverLateInit()
 	state.lights:configure_all()
 	state.queue = new_queue()
 	state.group_queue = new_group_queue()
+	-- Keypad holds on scenes, zone lights and room lights (#249): per-light
+	-- dims through the light queue for up to 10 lamps, stepped group dims above
+	-- that or while a scene runs, the group queue as before otherwise. Read
+	-- live: the zone lights and scenes are created below, and the lights'
+	-- models change at resyncs.
+	state.group_hold = group_hold_mod.new({
+		members = function(grouped_light_rid)
+			return state.zone_lights and state.zone_lights:lights_of_grouped_light(grouped_light_rid) or {}
+		end,
+		is_on = function(light_rid)
+			local model = state.lights and state.lights:record_of(light_rid)
+			return model ~= nil and model.on == true
+		end,
+		light_set = function(light_rid, fields)
+			if not state.queue then
+				return false
+			end
+			state.queue:set(light_rid, fields)
+			return true
+		end,
+		group_set = function(grouped_light_rid, fields)
+			if not state.group_queue then
+				return false
+			end
+			state.group_queue:set(grouped_light_rid, fields)
+			return true
+		end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end, -- [verified: API 34/_1]
+		keep_group = function(grouped_light_rid)
+			return state.scenes ~= nil and state.scenes:scene_running_on(grouped_light_rid) == true
+		end,
+		log = log,
+	})
 	state.scenes = scenes_mod.new(module_ctx())
 	state.scenes:load()
 	state.scenes:configure_all()
@@ -2134,6 +2296,39 @@ function OnDriverLateInit()
 		end,
 		on_done = function(text) last_action(text) end,
 	}))
+	-- Two-way names (D6, D11; bridge/names.lua). Its writes go through
+	-- bridge_request like a person's, so the background tasks give way.
+	local registries = { light = state.lights, scene = state.scenes, motion = state.motion,
+		zone_light = state.zone_lights }
+	state.names = names_mod.new({
+		persist_get = function(key) return C4:PersistGetValue(key) end,
+		persist_set = function(key, value) C4:PersistSetValue(key, value) end,
+		registries = registries,
+		put_name = names_mod.put_via(registries, bridge_request, log),
+		rename_device = function(id, name) C4:RenameDevice(id, name) end,
+		display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+		proxy_of = function(device_id)
+			local consumers = C4:GetBoundConsumerDevices(device_id, 5001)
+			return type(consumers) == "table" and next(consumers) or nil
+		end,
+		user_active = user_active,
+		bridge_ready = function()
+			return connection() ~= nil and state.identity_ok == true and keyed_refusal() == nil
+		end,
+		last_action = function(text) last_action(text) end,
+		attention_changed = function() refresh_lights_props() end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end,
+		now_ms = function() return C4:GetTime() end,
+		wall = os.time,
+		log = log,
+	})
+	for _, m in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+		m:set_names(state.names)
+		-- The re-link by radio (D7) says what it did in Last Action.
+		m.ctx.last_action = last_action
+	end
+	state.names:migrate(driver_version())
+	state.actions = new_actions()
 	-- Bindings are complete at late init [verified: FUND 28/_3]: settle which
 	-- registered devices are still bound and present (docs/import-design.md §5).
 	local r = state.lights:reconcile()
@@ -2144,9 +2339,18 @@ function OnDriverLateInit()
 	refresh_lights_props()
 	dispatch.replay_properties(Properties)
 	show_driver_version(1)
-	settle_last_action_rows()
+	-- Last Action's continuation rows that still hold text from before the
+	-- restart stay shown, the empty ones are hidden.
+	last_action_rows:settle(Properties)
+	if state.stream then
+		state.stream:stop() -- never two objects on the binding (netstream.lua)
+	end
 	state.stream = new_stream()
 	state.late_init_done = true
+	state.discovery = discovery_mod.new({ identify = pairing.probe, log = log })
+	start_housekeeping(dit)
+	state.bridges_found:show()
+	state.bridges_found:schedule()
 	replay_early_commands()
 	register_probe_events()
 	refresh_status()
@@ -2164,11 +2368,27 @@ function OnDriverLateInit()
 	end
 end
 
+-- Director ends the old code with its Lua state and kills its timers
+-- (API 22_miscellaneous/_24-OnDriverDestroyed.md); a dev loop reload keeps
+-- both (src/common/devloop.lua). So everything in flight here, an identity
+-- or TLS check above all, must start nothing once it answers: a stream
+-- started by unloaded code holds binding 6001 beside the new code's, never
+-- sees a report, and ends the new code's connection with its own connect
+-- timeout and retries (the flapping of 2026-11-05).
 function OnDriverDestroyed()
-	if prop_soon_timer then
-		prop_soon_timer:Cancel()
-		prop_soon_timer = nil
+	state.destroyed = true
+	pair_window:close()
+	state.away:cancel_outage_check()
+	attention_rows:cancel()
+	last_action_rows:cancel()
+	if state.hk then
+		state.hk:stop()
 	end
+	if state.discovery then
+		state.discovery:stop()
+	end
+	state.bridges_found:stop()
+	rows:stop()
 	if state.binding_reconcile_timer then
 		state.binding_reconcile_timer:Cancel()
 		state.binding_reconcile_timer = nil
@@ -2177,7 +2397,8 @@ function OnDriverDestroyed()
 		state.unbound_confirm_timer:Cancel()
 		state.unbound_confirm_timer = nil
 	end
-	cancel_identity_retry()
+	state.identity:cancel_retry()
+	net_gate:reset() -- closes, clears and removes the probe binding of a check in flight (#329)
 	if version_timer then
 		version_timer:Cancel()
 		version_timer = nil
@@ -2185,10 +2406,47 @@ function OnDriverDestroyed()
 	if state.stream then
 		state.stream:stop()
 	end
+	netstream.retire() -- and no object of this code's netstream connects again
+	if state.group_hold then
+		state.group_hold:stop_all() -- before the queues: no step lands in a stopped queue
+	end
 	if state.queue then
 		state.queue:stop()
 	end
 	if state.group_queue then
 		state.group_queue:stop()
+	end
+end
+
+-- The network-connection stream's callbacks (docs/raw-stream-design.md §0,
+-- #317): Director calls these globals for binding 6001; a Web transfer
+-- stream has no such entry points and ignores them. Bindings 6100 to 6999
+-- are the network connection's TLS check (bridge/netcheck.lua), never the stream.
+function OnConnectionStatusChanged(idBinding, nPort, strStatus)
+	if netcheck.on_status_changed(idBinding, nPort, strStatus) then
+		return
+	end
+	-- Binding 6008: the mDNS search of bridge/discovery.lua.
+	if state.discovery and state.discovery:status_changed(idBinding, nPort, strStatus) then
+		return
+	end
+	local s = state.stream
+	if s and s.on_status_changed then
+		s:on_status_changed(idBinding, nPort, strStatus)
+	end
+end
+
+-- `from` (the sender) is passed from OS 4.0.0 on only [verified: SDK
+-- 32_serial_network_device/_15-ReceivedFromNetwork].
+function ReceivedFromNetwork(idBinding, nPort, strData, from)
+	if netcheck.on_data(idBinding, strData) then
+		return
+	end
+	if state.discovery and state.discovery:received(idBinding, nPort, strData, from) then
+		return
+	end
+	local s = state.stream
+	if s and s.on_data then
+		s:on_data(idBinding, strData)
 	end
 end

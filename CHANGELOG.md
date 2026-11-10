@@ -3,8 +3,8 @@
 Every published release of the Hue Bridge, Hue Light, Hue Scene and (from
 1.1) Hue Motion drivers,
 newest first, with what changed since the release before it. A version X.Y
-is the GitHub release of the tag `vX.Y` and carries its major version's
-codename from Star Wars: Andor (every 1.x release is "Cassian"). A version
+is the GitHub release of the tag `vX.Y` and carries its own codename
+(`.github/codenames.json`). A version
 can be released as several builds: the build number is the commit count of
 the released commit and the Driver Version that Composer shows for every
 driver, and each newer build of a version replaces the files of its
@@ -13,17 +13,182 @@ listed.
 
 ## Unreleased
 
+### Changed
+- Composer shows a tooltip on Recall As, On State Follows, Occupancy Hold
+  Time and Debug Mode, and lists the Hue Motion Sensor's events in
+  Programming in pairs: Hue on/off, online/offline, readings, battery (#434).
+
+## 1.4 "Maarva", build 565 (2026-11-09)
+
+### Changed
+- Keypad taps on a Hue Light, zone light or room light now work as on a
+  Control4 dimmer: a tap ramps the light to its Default On Brightness or to
+  off, over 3 seconds for the whole range by default (was 250 ms), and a tap
+  on any of its buttons while it ramps stops it where it is. A second tap
+  within about 0.6 s is part of a double tap and changes nothing. Ramps from
+  programming, Navigator and lighting scenes stop the same way, and
+  Control4's stop command and the Brightness Stop link now stop the lamp
+  (#421).
+- Keypad taps on a Hue Scene fade the scene in, or its room or zone out, over
+  3 seconds for the whole range, and a tap while it fades stops it with every
+  lamp at its own level, so the scene keeps its look; a time-of-day scene's
+  taps stay instant (#421).
+
+## 1.3 "Kerri", build 539 (2026-11-08)
+
+### Changed
+- ON and Toggle (a tile tap, Turn On in programming) now turn a Hue Light,
+  zone light or room light on at its Default On Brightness, like a keypad
+  tap; at the default 100 nothing changes (#233).
+- Keypad holds on a Hue Scene, a zone light or a room light now ramp instead
+  of jumping to full or off in about a second: smoothly, lamp by lamp, with
+  up to 10 lamps on, and in steps of a second with more lamps on or while a
+  time-of-day or moving scene plays there. Lamps that are off stay off, and
+  a hold from off starts at 1 % as before (#249).
+- Motion sensors and MotionAware areas: a hold interrupted by a driver update,
+  a Director restart or a controller reboot now goes on only for the rest of
+  its Occupancy Hold Time instead of starting again in full. One that ran out
+  meanwhile closes as soon as the bridge answers, and "stops sensing motion"
+  still fires once (#371).
+- The project's GitHub page names all four drivers: the Download list links
+  Hue Motion too, motion sensors are no longer called a beta feature, and the
+  security policy, contributing guide and checklists count four packages and
+  eight release files (#389).
+
+### Fixed
+- The network connection's TLS check now removes the test connections it
+  opened once it has answered, and once clears away those that earlier
+  versions left behind (#329).
+- A light's Hue Name row shows the lamp's name as the Hue app shows it (its
+  Hue device's name for a single-light lamp), and Event Stream reads
+  `Stopped: key rejected (HTTP 403)`, not `Stopped`, when the bridge refuses
+  the key at the stream address check (#246).
+- Hue Scene: a keypad hold started part-way up or down now moves the
+  scene's slider on Navigators at the same speed as the lights, instead of
+  more slowly (#243).
+- Hue Light: turning a light on from off no longer shows its old level for an
+  instant before the level asked for; a change made elsewhere at that moment
+  shows up at most a second after the ramp (#308).
+
+## 1.2 "Taramyn", build 488 (2026-11-05)
+
 ### Added
+- The Hue Bridge finds Hue bridges on the local network: a new Bridges
+  Found row lists them (a driver that is not paired searches by itself a
+  few seconds after it starts or after Forget Pairing, and then every 15
+  minutes; Search again searches at once, and only the searches you pick
+  report in Last Action), and picking one sets the address and opens the
+  pairing window for that bridge only. When the paired bridge stops
+  answering for 5 minutes at the address where it last answered, the
+  driver looks for it by its bridge id, updates Bridge IP Address by
+  itself and says so in Last Action, and in Attention for a day; an
+  address typed by hand that never answered is never overwritten, but
+  Attention says where the paired bridge answers instead. Local network
+  only (mDNS, then a search of at most two blocks of nearby addresses,
+  which the offered search names, at most once an hour), never the
+  internet (#334).
+- The Hue Bridge's Attention says when the paired bridge has been missing
+  or not answering for an hour, and when the event stream has been down
+  for an hour while the bridge answers, with what to do; each item goes by
+  itself when the bridge is back. Before the key goes out again after the
+  event stream has been down for a minute, the driver checks the bridge's
+  id again (#334).
+- Names follow each other both ways for lights, scenes and motion sensors:
+  a rename in Composer renames the light, scene or sensor in the Hue app,
+  and a rename in the Hue app renames the Control4 device; when both
+  changed, the Composer name wins. Hue rooms, zones and zone lights are
+  not synced, a name Hue refuses (longer than 32 bytes) waits for Resolve
+  Names, and names that already differ when 1.2 is installed are listed in
+  Attention and settled in Resolve Names instead of being changed (#334).
+- A bulb or motion sensor that comes back to the bridge with new Hue ids
+  but the same radio (deleted and added again in the Hue app, or after a
+  reset of the bridge) is re-linked to its old device by itself, keeping
+  the device's programming; Last Action says so, or Import All New's
+  result when the import found it (#334).
+- The Hue Bridge looks after itself in the background: it reads the
+  bridge again when its last read is 6 or 24 hours old, after a failed
+  read, and every 10 minutes while the event stream is down; checks a
+  rejected key again after 5 minutes, 15 minutes, an hour and then every
+  hour; maps a Hue room or zone that appears later to the one Control4
+  room of the same name (the update to 1.2 maps nothing by itself); and
+  marks on the Lights, Scenes, Zone Lights and Motion Sensors lists a
+  device that sits in another Control4 room than its Hue room maps to.
+  Its reads ask the bridge for at most 100 requests an hour (#334).
+
+### Changed
+- The Hue Bridge has 9 actions instead of 29: Pair Bridge, Import All New,
+  Add From Hue, Link Device, Forget Device, Resolve Names, Set Room
+  Mapping, Diagnostics and Forget Pairing. Every job of the old actions is
+  still there, and the manual's chapter 13 says where each one went.
+  Programming does not refer to actions, so no project needs changing
+  (#334).
+- Pair Bridge waits up to 2 minutes for the link button, so the button can
+  be pressed before or after the click; entering the address on a driver
+  that is not paired, or picking a bridge in Bridges Found, opens the same
+  wait (#334).
+- Import All New adds every new light and motion sensor in one click and
+  names the devices it re-linked by their radio, and Add From Hue adds one
+  light, zone or room, scene, all scenes of a room, motion sensor or
+  MotionAware area from one list with folders. Every folder starts with a
+  line back, Back to all folders or Back to Scenes, easier to hit than
+  Composer's own Back (#334).
+- Link Device points a device of any kind at its replacement, with the
+  driver's suggestion and its reason shown after the device, also for zone
+  and room lights and after a reset of the bridge (a room or zone made
+  again under its old name counts as the same), and its first line links
+  every suggested match and every connected device the bridge does not
+  know yet at once; Forget Device releases a device of any kind. Forget
+  Device and Forget Pairing ask for confirmation (#334).
+- A new light or motion sensor that looks like the replacement of a
+  missing device is listed in Attention on its own, ending in Link Device,
+  since Import All New leaves it out; new motion sensors end in Import All
+  New or Add From Hue, as new lights do (#334).
+- Diagnostics gathers the support steps in one action: check the
+  connection now, read everything from the bridge now, reconnect or stop
+  the event stream, and log the motion diagnostics (#334).
+- The Hue Light and Hue Scene devices have no actions any more (everything
+  is on the bridge), and the Hue Motion Sensor has one, Test Motion
+  Programming, in place of Test: Motion and Test: No Motion (#334).
+- A long Attention continues on extra rows as Last Action does, so the
+  action named at the end of an item is never cut off, and one too long
+  for those rows is written in full to the Lua output (#334).
+- Room Mappings says how each mapping was made (by name, by hand, or
+  before 1.2), and Set Room Mapping's "(no mapping)" keeps a Hue room
+  unmapped: the automatic mapping by name leaves it alone (#334).
+
+## 1.1 "Brasso", build 447 (2026-11-05)
+
+### Added
+- Refresh All, on the Hue Bridge: reads the lights, scenes, zone lights
+  and motion sensors from the bridge now, without needing the event stream
+  (#324).
 - Hue motion sensors and MotionAware areas (Hue Bridge Pro) as Control4
   motion sensors: a fourth driver, Hue Motion, with the stock motion
   programming, light level, temperature, battery and an occupancy hold time,
   added from the bridge's Add Motion Sensor and Add Motion Area actions, and
   a Log Motion Diagnostics action for testers (#268).
+- Import All New Motion Sensors: one click adds every Hue motion sensor not
+  added yet to the Control4 room its Hue room maps to, and lists the ones it
+  skips (#319).
+- Two programming commands on every Hue Light device: Raise Level By
+  (points over the current level, remembering it) and Restore Saved Level
+  (back to it, unless someone changed the light since), for motion
+  programming that raises lamps and puts them back (#297).
 - Prereleases for testers: versions such as 1.1-beta.1 appear on the
   Releases page marked Pre-release, with their own notes and a Beta feedback
   form; the stable release stays the one marked Latest (#269).
+- A setting on every Hue Scene device, On State Follows: by default its
+  tile and keypad LEDs now show on while any light of the scene's room or
+  zone is on, whatever turned it on (another scene, the Hue app, a Hue
+  switch, a Hue Light in Control4), and off once they are all off. Choose
+  This scene for the earlier behaviour, on only while that scene is the one
+  played. This changes existing scene keypads after the update (#310).
 
 ### Changed
+- One wording on the Hue Bridge's Lights, Scenes, Zone Lights and Motion
+  Sensors rows: "… on bridge, N imported, N new", then the missing, unbound
+  and deleted counts when there are any; the bulk add of motion sensors is
+  named like the lights' one (#325).
 - The manual says what to do when a device's Documentation tab still shows
   the page of the build before right after an update: select the device
   again (#260).
@@ -33,6 +198,33 @@ listed.
   documents is checked on each change (#263).
 - The top of the project's GitHub page has a download link for each of
   the three drivers of the latest release (#266).
+
+### Fixed
+- Import All New Lights no longer adds a light that looks like the
+  replacement of a gone or unbound Hue Light device (the same radio
+  hardware or the same name) as a second device: it leaves it out and lists
+  it for Re-link Device To Light, as Import All New Motion Sensors already
+  did (#344).
+- The Hue Bridge manual no longer asks for a bridge address with a number
+  below 8: since 1.1 beta 6 the event stream has its own network
+  connection and any address works; the advice now applies only to the
+  Web transfer fallback. Its action counts now match a release build: 29
+  on the Hue Bridge (#344).
+- On a controller where other drivers keep web transfers open, every Hue
+  command and read timed out while the event feed was connected. The feed
+  now uses a network connection of its own (a new Event Stream Transport
+  setting; Web transfer, the old way, stays as a fallback) (#317).
+- A Hue Bridge v2 now shows "MotionAware not supported by this bridge":
+  it answers the MotionAware requests with "Service Unavailable", which was
+  taken for a failed request (#318).
+- A Hue Light or Hue Scene device newly added no longer fails its start
+  with a Lua error and shows no state: a keypad setting never saved was
+  read as an error (#298).
+- A MotionAware area's device no longer flips to "no motion" in the middle
+  of a walk: it shows motion while either of the area's two Hue motion
+  reports does, and the manual says how to make the area's Hue automation
+  do nothing so that Control4 alone decides what the lights do (#288).
+
 
 ## 1.0 "Cassian", build 359 (2026-10-25)
 

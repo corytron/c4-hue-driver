@@ -669,7 +669,7 @@ describe("common.device", function()
 			assert.same({ { "end", 0 } }, st.calls, "a new tap within the second is the keypad's too")
 			dev.button_action(1, CLICK)
 			assert.same({ "click", 1 }, st.calls[2], "another button is not guarded")
-			c4.fire_timers() -- 1 s later
+			c4.advance(1000) -- 1 s later: the guard runs out, and the guarded tap's double-tap window long before
 			dev.button_action(0, CLICK)
 			assert.same({ "click", 0 }, st.calls[3])
 		end)
@@ -737,6 +737,16 @@ describe("common.device", function()
 			end
 		end)
 
+		it("#298: loads on a new device, where Director's PersistGetValue returns no value at all", function()
+			local dev, c4 = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up", "hold_down" } })
+			-- Director answers a key never written with nothing (not nil);
+			-- tonumber() without an argument raises.
+			c4.PersistGetValue = function() end
+			assert.has_no.errors(function() dev.load_settings() end)
+			assert.same({ 100, 3000, 3000, 5000, 5000 }, { dev.setting("preset"), dev.setting("click_up"),
+				dev.setting("click_down"), dev.setting("hold_up"), dev.setting("hold_down") })
+		end)
+
 		it("takes the declared settings: defaults, persisted values, and the proxy's commands that set them", function()
 			local dev, c4, _, dispatch = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up",
 				"hold_down" } })
@@ -744,11 +754,11 @@ describe("common.device", function()
 				return { dev.setting("preset"), dev.setting("click_up"), dev.setting("click_down"),
 					dev.setting("hold_up"), dev.setting("hold_down") }
 			end
-			assert.same({ 100, 250, 250, 5000, 5000 }, all())
+			assert.same({ 100, 3000, 3000, 5000, 5000 }, all())
 			c4.persist.preset_level = 40
 			c4.persist.hold_rate_down = "2000"
 			dev.load_settings()
-			assert.same({ 40, 250, 250, 5000, 2000 }, all())
+			assert.same({ 40, 3000, 3000, 5000, 2000 }, all())
 			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
 			dispatch.received_from_proxy(5001, "SET_CLICK_RATE_UP", { RATE = "1500" })
 			dispatch.received_from_proxy(5001, "SET_CLICK_RATE_DOWN", { RATE = "500" })
@@ -774,8 +784,8 @@ describe("common.device", function()
 			c4.persist.hold_rate_down = "2000"
 			dev.load_settings()
 			assert.same({ { 5001, "100" } }, proxied(c4, "PRESET_LEVEL"))
-			assert.same({ { 5001, "250" } }, proxied(c4, "CLICK_RATE_UP"))
-			assert.same({ { 5001, "250" } }, proxied(c4, "CLICK_RATE_DOWN"))
+			assert.same({ { 5001, "3000" } }, proxied(c4, "CLICK_RATE_UP"))
+			assert.same({ { 5001, "3000" } }, proxied(c4, "CLICK_RATE_DOWN"))
 			assert.same({ { 5001, "5000" } }, proxied(c4, "HOLD_RATE_UP"))
 			assert.same({ { 5001, "2000" } }, proxied(c4, "HOLD_RATE_DOWN"),
 				"the persisted value, bare (the proxy reads a table as 0)")
@@ -879,6 +889,270 @@ describe("common.device", function()
 			assert.same({}, delays(c4))
 			dev.button_action(1, CLICK)
 			assert.same({ "click", 1 }, st.calls[#st.calls], "the guard went with it")
+		end)
+
+		-- #421 (docs/tap-stop-design.md §3, §4.1): the double-tap window (D4)
+		-- and the tap stop (D5), on the fake clock (c4.advance moves
+		-- C4:GetTime and fires what falls due on the way).
+		describe("double-tap window and tap stop (#421)", function()
+			local COMMANDS = { [PRESS] = "DO_PUSH", [CLICK] = "DO_CLICK", [RELEASE] = "DO_RELEASE" }
+			local ROUTES = {
+				{ name = "the proxy's BUTTON_ACTION", echoes = true, act = function(dispatch, button, action)
+					dispatch.received_from_proxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button),
+						ACTION = tostring(action) })
+				end },
+				{ name = "the Button Links", echoes = false, act = function(dispatch, button, action)
+					dispatch.received_from_proxy(200 + button, COMMANDS[action], {})
+				end },
+			}
+
+			-- The light's side as the machine sees it (Agent B's ramp): ramp_active
+			-- answers st.ramping, the stop records itself and ends the ramp, and
+			-- with st.tap_ramps a tap starts one. Without opts.ramp the hooks keep
+			-- the module's defaults, as on a Hue Scene device.
+			local function on_route(route, opts)
+				opts = opts or {}
+				local dev, c4, _, dispatch, st = new_keypad(opts)
+				if opts.ramp ~= false then
+					st.ramping = false
+					dev.ramp_active = function() return st.ramping end
+					dev.on_ramp_stop = function(button)
+						st.calls[#st.calls + 1] = { "stop", button }
+						st.ramping = false
+					end
+					dev.on_click = function(button)
+						st.calls[#st.calls + 1] = { "click", button }
+						if st.tap_ramps then st.ramping = true end
+					end
+				end
+				local k = {}
+				for name, action in pairs({ press = PRESS, click = CLICK, release = RELEASE }) do
+					k[name] = function(button) route.act(dispatch, button, action) end
+				end
+				function k.tap(button)
+					k.press(button)
+					k.click(button)
+				end
+				return k, dev, c4, st
+			end
+
+			it("exports DOUBLE_TAP_MS = 600; both click rates default to 3000 ms, nothing else changed (D3, D4)", function()
+				local dev, c4 = new_keypad({ settings = { "preset", "click_up", "click_down", "hold_up", "hold_down" } })
+				assert.equal(600, require("common.device").DOUBLE_TAP_MS)
+				dev.load_settings()
+				assert.same({ 100, 3000, 3000, 5000, 5000 }, { dev.setting("preset"), dev.setting("click_up"),
+					dev.setting("click_down"), dev.setting("hold_up"), dev.setting("hold_down") })
+				assert.same({ { 5001, "3000" } }, proxied(c4, "CLICK_RATE_UP"))
+				assert.same({ { 5001, "3000" } }, proxied(c4, "CLICK_RATE_DOWN"))
+				c4.persist.click_rate_up = 250
+				dev.load_settings()
+				assert.equal(250, dev.setting("click_up"), "a stored rate is kept (D15 changes it in Composer)")
+			end)
+
+			it("falls back to os.time() when C4:GetTime fails: the window then holds to the second", function()
+				local dev, c4, _, _, st = new_keypad()
+				c4.GetTime = function() error("no clock") end
+				local now = 1000
+				local clock = stub(os, "time", function() return now end)
+				local ok, err = pcall(function()
+					dev.button_action(0, PRESS)
+					dev.button_action(0, CLICK)
+					dev.button_action(0, PRESS) -- the same second
+					dev.button_action(0, CLICK)
+					now = 1001
+					dev.button_action(0, PRESS) -- 1000 ms on
+					dev.button_action(0, CLICK)
+				end)
+				clock:revert()
+				assert(ok, err)
+				assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 }, { "end", 0 }, { "click", 0 } }, st.calls)
+			end)
+
+			it("a stop that fails (logged by dispatch) still swallows its click", function()
+				local k, dev, _, st = on_route(ROUTES[2])
+				dev.on_ramp_stop = function() error("boom") end
+				st.ramping = true
+				local lines = capture_log()
+				k.tap(0)
+				assert.equal(1, #lines)
+				assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: proxy handler DO_PUSH failed: .*boom"))
+				assert.same({ { "end", 0 } }, st.calls, "no tap")
+			end)
+
+			for _, route in ipairs(ROUTES) do
+				describe("through " .. route.name, function()
+					it("a single tap reaches on_click", function()
+						local k, _, c4, st = on_route(route)
+						k.tap(0)
+						assert.same({ { "end", 0 }, { "click", 0 } }, st.calls)
+						assert.same({}, delays(c4), "no hold timer, no guard")
+					end)
+
+					it("a second press within 600 ms on the same button is swallowed, a third too, all echoed", function()
+						local k, _, c4, st = on_route(route)
+						k.tap(2)
+						c4.advance(599)
+						k.tap(2)
+						c4.advance(599) -- measured from the second press, not the first
+						k.tap(2)
+						assert.same({ { "end", 2 }, { "click", 2 }, { "end", 2 }, { "end", 2 } }, st.calls)
+						assert.equal(route.echoes and 6 or 0, #proxied(c4, "BUTTON_ACTION"),
+							"the proxy route echoes every action, the swallowed ones too")
+					end)
+
+					it("a press 600 ms or more after the last is a fresh tap; so is one after the clock went back", function()
+						local k, _, c4, st = on_route(route)
+						k.tap(0)
+						c4.advance(600)
+						k.tap(0)
+						c4.now_ms = c4.now_ms - 5000
+						k.tap(0)
+						assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 }, { "click", 0 }, { "end", 0 },
+							{ "click", 0 } }, st.calls)
+					end)
+
+					it("the window is per button: another button within 600 ms is a tap of its own", function()
+						local k, _, c4, st = on_route(route)
+						k.tap(0)
+						c4.advance(100)
+						k.tap(1)
+						c4.advance(100)
+						k.tap(2)
+						assert.same({ { "end", 0 }, { "click", 0 }, { "end", 1 }, { "click", 1 }, { "end", 2 },
+							{ "click", 2 } }, st.calls)
+					end)
+
+					it("while a ramp runs, the press of any button stops it once at the push; its click is swallowed", function()
+						for button = 0, 2 do
+							local k, _, c4, st = on_route(route)
+							st.ramping = true
+							k.press(button)
+							assert.same({ { "stop", button } }, st.calls, "on the push, before any click")
+							assert.same({ 400 }, delays(c4), "the hold timer starts as before")
+							k.click(button)
+							assert.same({ { "stop", button }, { "end", button } }, st.calls, "no tap, no second stop")
+							assert.same({}, delays(c4), "a stop arms no guard")
+							c4.advance(600)
+							k.tap(button)
+							assert.same({ "click", button }, st.calls[4], "the next tap acts from the stopped level")
+						end
+					end)
+
+					it("a tap ramps, a tap after the window stops it, on either button: the light does not reverse", function()
+						for _, second in ipairs({ 0, 1, 2 }) do
+							local k, _, c4, st = on_route(route)
+							st.tap_ramps = true
+							k.tap(0)
+							c4.advance(second == 0 and 1000 or 100) -- the other buttons are outside the top's window at once
+							k.tap(second)
+							assert.same({ { "end", 0 }, { "click", 0 }, { "stop", second }, { "end", second } }, st.calls)
+							assert.is_false(st.ramping)
+						end
+					end)
+
+					it("a press held past HOLD_AFTER_MS while ramping stops, then holds from the stopped level", function()
+						local k, dev, c4, st = on_route(route)
+						dev.on_hold = function(h, up, on)
+							st.calls[#st.calls + 1] = { "hold", h.button, up, on, h.stopped == true, st.ramping }
+						end
+						st.ramping = true
+						k.press(1)
+						c4.advance(400)
+						assert.same({ { "stop", 1 }, { "hold", 1, false, true, true, false } }, st.calls,
+							"the stop ran first: the hold reads its level, with the record marked stopped")
+						k.release(1)
+						assert.same({ "finish", 1 }, st.calls[4])
+						assert.same({ 1000 }, delays(c4), "the hold's release arms the guard as before")
+					end)
+
+					it("a press within the window while ramping does not stop: the ramp goes on; held, it holds", function()
+						local k, dev, c4, st = on_route(route)
+						dev.on_hold = function(h, up, on)
+							st.calls[#st.calls + 1] = { "hold", h.button, up, on, h.multi == true }
+						end
+						st.tap_ramps = true
+						k.tap(0)
+						c4.advance(300)
+						k.tap(0)
+						assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 } }, st.calls)
+						assert.is_true(st.ramping, "the first tap's ramp goes on")
+						c4.advance(300) -- 300 ms after the second press: still the window
+						k.press(0)
+						c4.advance(400)
+						assert.same({ "hold", 0, true, true, true }, st.calls[4], "held, it becomes a hold, with no stop")
+						k.release(0)
+						assert.same({ { "end", 0 }, { "finish", 0 } }, { st.calls[5], st.calls[6] })
+					end)
+
+					it("a click with no press on record follows the same rules, judged at the click", function()
+						local k, _, c4, st = on_route(route)
+						st.tap_ramps = true
+						k.click(0)               -- a tap: the ramp starts
+						c4.advance(300)
+						k.click(0)               -- within the window: ignored, the ramp goes on
+						assert.is_true(st.ramping)
+						c4.advance(600)
+						k.click(0)               -- 600 ms after the last click: stops
+						c4.advance(600)
+						k.click(1)               -- idle again: a tap
+						c4.advance(100)
+						k.click(0)               -- another button's window does not count: stops
+						assert.same({ { "click", 0 }, { "stop", 0 }, { "click", 1 }, { "stop", 0 } }, st.calls)
+						assert.same({}, delays(c4))
+					end)
+
+					it("push, release, click: the click follows its press's verdict and judges nothing again", function()
+						local k, _, c4, st = on_route(route)
+						st.tap_ramps = true
+						local function tap(button)
+							k.press(button)
+							k.release(button)
+							k.click(button)
+						end
+						tap(0)
+						c4.advance(300)
+						tap(0) -- multi
+						c4.advance(1000)
+						tap(0) -- stops the first tap's ramp
+						c4.advance(1000)
+						tap(0) -- idle: a tap
+						assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 }, { "stop", 0 }, { "end", 0 }, { "end", 0 },
+							{ "click", 0 } }, st.calls)
+					end)
+
+					it("the guard after a hold still ignores a click, before any stop; a hold opens no window", function()
+						local k, _, c4, st = on_route(route)
+						k.press(0)
+						c4.advance(400)
+						k.release(0)
+						assert.same({ { "hold", 0, true, true }, { "end", 0 }, { "finish", 0 } }, st.calls)
+						st.ramping = true
+						k.click(0)
+						assert.equal(3, #st.calls, "the keypad's click after the hold: no tap, no stop")
+						st.ramping = false
+						c4.fire_timers() -- the guard runs out; the clock stays 400 ms after the hold's press
+						k.click(0)
+						assert.same({ "click", 0 }, st.calls[4], "a hold is no tap: the click is not part of a double tap")
+					end)
+
+					it("with the default hooks (a Hue Scene device) only the window changes", function()
+						local k, dev, c4, st = on_route(route, { ramp = false })
+						assert.is_false(dev.ramp_active())
+						assert.has_no.errors(function() dev.on_ramp_stop(0) end)
+						k.tap(0)
+						c4.advance(300)
+						k.tap(0) -- the second tap of a double tap: nothing
+						c4.advance(600)
+						k.tap(0) -- nothing is ramping: a tap, never a stop
+						k.press(1)
+						c4.advance(400)
+						k.release(1)
+						k.click(1)
+						assert.same({ { "end", 0 }, { "click", 0 }, { "end", 0 }, { "end", 0 }, { "click", 0 },
+							{ "hold", 1, false, true }, { "end", 1 }, { "finish", 1 } }, st.calls)
+					end)
+				end)
+			end
 		end)
 	end)
 

@@ -1008,12 +1008,18 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     )
     add("2. Never delete and re-add a device: the bridge's pairing would be lost, and the devices' bindings with it.")
     add(
-        '3. If Composer asks "Restart Director?", answer Yes and say so in the report: the build changed a driver\'s '
+        '3. If Composer asks "Overwrite Driver or Agent?" with the reason "Current version is newer", once per '
+        "package, answer Yes for exactly these package names and say so in the report: the house runs a newer build "
+        "(a dev or feature-branch build), and this install goes back to the release (#365). Any other dialog ends "
+        "the round."
+    )
+    add(
+        '4. If Composer asks "Restart Director?", answer Yes and say so in the report: the build changed a driver\'s '
         "<capabilities>, and the devices run the new code only after the owner reboots the controller from System "
         "Manager (the Windows session cannot)."
     )
     add(
-        "4. Re-orient after the update (Composer reloads the project view): re-select each device and open its "
+        "5. Re-orient after the update (Composer reloads the project view): re-select each device and open its "
         "Properties tab before reading."
     )
     add("")
@@ -1029,8 +1035,9 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
         % (house["stream_timeout_s"], house["stream_watchdog_s"], house["debug_mode"])
     )
     add(
-        "- The bridge's `Status` and `Attention` texts, and any dialog or `[ERROR]` line in a Lua tab during the "
-        "install."
+        "- The bridge's `Status` and `Attention` texts, with every `Attention (2)` to `Attention (6)` row that is "
+        "shown (1.2 and later wrap a long Attention onto them), and any dialog or `[ERROR]` line in a Lua tab "
+        "during the install."
     )
     add("- Exact texts as UIA reports them; screenshots under C:\\c4-hue\\shots\\.")
     add("")

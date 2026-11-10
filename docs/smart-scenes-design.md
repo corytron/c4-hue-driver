@@ -45,6 +45,13 @@ Scenes Of Room, playable from tiles, keypads, programming and the slider.
    schedule advanced to its 16:00 slot and the device showed it within
    two minutes; whether the room had been dimmed before is not known, so
    a dim before a boundary stays open (#40).
+   Current (1.3, #249): a hold's `HUE_SCENE_DIM` reaches the room or
+   zone's lit lamps one by one when 1 to 10 are lit, and as timed group
+   steps when more are (`docs/group-hold-design.md` G4, G5). While a smart
+   scene runs on the group, a hold always uses the steps (G6a), because a
+   change to one light could end it and this device follows Hue's state
+   (Decision 2), while a whole-room dim keeps it active (V11). That the
+   schedule survives a stepped hold is to check on the house with 1.3.
 7. **Names drop the app's number** (owner's answer 4): base name =
    `metadata.name` without a trailing " <digits>" ("Golden hours 4" →
    "Golden hours"). Device name at creation: room → base name; zone →

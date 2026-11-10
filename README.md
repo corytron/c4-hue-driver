@@ -23,11 +23,12 @@ by or supported by Snap One (Control4) or Signify (Philips Hue); see
 
 ## Download
 
-The three drivers of the latest release; install all three, from the same
+The four drivers of the latest release; install all four, from the same
 release:
 
 - [**hue_bridge.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_bridge.c4z): Hue Bridge
 - [**hue_light.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_light.c4z): Hue Light
+- [**hue_motion.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_motion.c4z): Hue Motion (motion sensors and MotionAware areas)
 - [**hue_scene.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_scene.c4z): Hue Scene
 
 Their checksums are in [`SHA256SUMS.txt`](https://github.com/corytron/c4-hue-driver/releases/latest/download/SHA256SUMS.txt); the
@@ -46,10 +47,10 @@ has the release notes and the provenance attestations. How to install them:
   switches and dimmers or by Hue automations show up in Control4 within a
   second or two and Control4 programming reacts to them. Changes arrive as
   events, not by polling: the driver reads the whole bridge when the stream
-  connects, which it does again after ten quiet minutes and at least once an
-  hour (**Stream Watchdog (s)**, **Stream Timeout (s)**), and when an action
-  you click needs fresh data. No cloud account is involved and nothing
-  leaves the house.
+  connects (it reopens a stream that has been quiet for ten minutes,
+  **Stream Watchdog (s)**) and, from 1.2, by itself every few hours as a
+  check behind the stream. No cloud account is involved and nothing leaves
+  the house.
 - **Rooms and zones as lights.** A Hue zone or room can be added as one Hue
   Light device whose tile, slider and colour controls move every lamp in it
   with a single request to the bridge.
@@ -58,12 +59,13 @@ has the release notes and the provenance attestations. How to install them:
   turns its room or zone off, and the slider brightens or dims the room or
   zone while keeping the scene's look. On a time-of-day scene, on starts the
   schedule.
-- **Motion sensors (1.1 beta).** A fourth driver, **Hue Motion**, makes each
+- **Motion sensors (since 1.1).** A fourth driver, **Hue Motion**, makes each
   Hue motion sensor, and each MotionAware area of a Hue Bridge Pro, a stock
   Control4 motion sensor: its icon, "senses motion" programming and history,
   plus light level, temperature (also as an output for a thermostat or a
-  temperature display), battery and an occupancy hold time. In the 1.1
-  prereleases only, for testers; it never changes anything on the Hue side.
+  temperature display), battery and an occupancy hold time. It changes
+  nothing on the Hue side except, from 1.2, a sensor's name when you rename
+  its device in Composer.
 - **Keypads.** Hue Light and Hue Scene devices offer Top, Bottom and Toggle
   Button Links: tap for on and off, hold for Hue's own smooth dimming, and the
   keypad LEDs follow the device, including changes made on the Hue side. The
@@ -71,24 +73,36 @@ has the release notes and the provenance attestations. How to install them:
   preset and the click rates on a Hue Light, the hold rates and the LED
   colours on both. A Control4 switch can run as a decoupled two-button
   keypad for a Hue bulb.
-- **Pairing from Composer.** Enter the bridge's address, press the link
-  button, click Pair Bridge. The application key is stored encrypted on the
+- **Pairing from Composer.** Pick the bridge from **Bridges Found** (from
+  1.2 the driver looks for Hue bridges on the local network by itself) or
+  type its address, then click Pair Bridge and press the link button within
+  two minutes. The application key is stored encrypted on the
   controller and never shown. HTTPS only: the bridge's certificate is
   verified against Signify's root certificates, which ship with the driver,
   and at every start and after an address change the driver checks, before
   anything carries the key, that the bridge at the address is the paired one
   (by its bridge id) and that the controller really applies those roots (a
-  TLS self-check).
-- **Lifecycle handling.** Renames on either side, lights replaced or deleted in
-  Hue, devices deleted in Composer, a bridge reset or replaced, a project
-  restored from a backup: each is reported in a readable `Attention` line and
-  resolved with a click (Adopt Hue Names, Re-link Device To Light, Forget
-  Light, Link Devices, ...). The driver never creates, renames, moves or
-  deletes a Control4 device on its own.
+  TLS self-check); the bridge id is checked again once the event stream has
+  been down for a minute.
+- **Nine actions, and the rest by itself (from 1.2).** The bridge has nine
+  actions (Pair Bridge, Import All New, Add From Hue, Link Device, Forget
+  Device, Resolve Names, Set Room Mapping, Diagnostics, Forget Pairing); the
+  lights and scenes have none. Reading the bridge again, re-checking a
+  rejected key, following the bridge to a new address on the local network
+  and mapping new Hue rooms by name happen without a click, and Attention
+  says when the bridge has been away for an hour.
+- **Lifecycle handling.** A name changed on either side follows on the other
+  (from 1.2; Composer's name wins when both changed). A bulb or sensor that
+  comes back with the same radio is re-linked by itself. Lights replaced or
+  deleted in Hue, devices deleted in Composer, a bridge reset or replaced, a
+  project restored from a backup: each is reported in a readable `Attention`
+  line and resolved with a click (Link Device, Forget Device, Resolve
+  Names). The driver never creates, moves or deletes a Control4 device on
+  its own.
 - **Readable Composer properties.** Status, Event Stream, Lights, Scenes, Zone
   Lights, Room Mappings and Last Action say in plain words what the driver is
   doing and what it did; long lists open as drop-downs, and a long Last Action
-  continues on up to five more rows.
+  or Attention continues on up to five more rows.
 - **Polite to the bridge.** Commands are coalesced per light (a fast slider
   drag sends only the latest value) and paced at Hue's limits: about ten light
   commands a second, one grouped command a second.
@@ -96,7 +110,9 @@ has the release notes and the provenance attestations. How to install them:
 ### What it looks like in Composer Pro
 
 The bridge's actions, adding a Hue zone as one light, and a scene device
-(example names; the pictures are the manual's, `src/hue_bridge/www/img/`):
+(example names; the pictures are the manual's, `src/hue_bridge/www/img/`, and
+the first two still show release 1.1, before the actions were merged into
+nine):
 
 <img src="src/hue_bridge/www/img/bridge-actions.png" width="380" alt="The Hue Bridge driver's Actions tab"> <img src="src/hue_bridge/www/img/add-zone-light.png" width="380" alt="Add Zone Light with the Group list open">
 
@@ -105,7 +121,7 @@ The bridge's actions, adding a Hue zone as one light, and a scene device
 ## What you need
 
 - A Control4 controller on **OS 3.3.0 or newer** (the `minimum_os_version` of
-  the three drivers) and Composer Pro. Written and tested on **OS 3.4.2 with
+  the four drivers) and Composer Pro. Written and tested on **OS 3.4.2 with
   Composer Pro 3.4.2**; OS 4 has not been tried. Where the drivers rely on
   behaviour measured on OS 3.4.2 (the event stream's own connection queue,
   the controller applying the driver's CA bundle), they check it at every
@@ -114,10 +130,12 @@ The bridge's actions, adding a Hue zone as one light, and a scene device
   roots, but it has not been tried.
 - A **Philips Hue Bridge** (the square version 2 bridge, BSB002) or a **Hue
   Bridge Pro** (BSB003) on the same network as the controller, with a fixed
-  IPv4 address (a DHCP reservation in your router). The driver finds the
-  bridge by its address only. An address with a number below 8 in it
-  (`10.0.2.143`, not `198.51.100.50`) gives the event stream a connection
-  queue of its own; the manual's chapter 3 explains why.
+  IPv4 address, preferably (a DHCP reservation in your router). From 1.2 the
+  driver finds the bridge on the local network by itself (mDNS, then a
+  search of at most two private networks, around its last address and the
+  controller's own; never through the internet) and follows it to a new
+  address; a bridge on another VLAN is entered by its address. Any IPv4
+  address works.
 - Not supported: the round first-generation bridge (BSB001), which has no CLIP v2
   API, and devices that are not Hue bridges; both are refused at pairing. The
   bridge's software must be 1948086000 or newer, or pairing is refused too
@@ -127,9 +145,10 @@ The bridge's actions, adding a Hue zone as one light, and a scene device
 
 ## What it is not
 
-- No Hue motion sensors, buttons, dimmer switches or entertainment areas as
-  Control4 devices (a Hue dimmer's effect on the lights still shows up).
-- No Hue automations or MotionAware; what they do to the lights shows up.
+- No Hue buttons, dimmer switches or entertainment areas as Control4 devices
+  (a Hue dimmer's effect on the lights still shows up); motion sensors and
+  MotionAware areas are, through Hue Motion.
+- No Hue automations; what they do to the lights shows up.
 - One bridge per project; a second Hue Bridge device is not supported.
 - Hue's whole-home group ("all lights") is not offered as a light; zones and
   rooms are, one at a time.
@@ -144,28 +163,27 @@ The bridge's actions, adding a Hue zone as one light, and a scene device
 Take the release marked **Latest** on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases)
 (<https://github.com/corytron/c4-hue-driver/releases/latest> always points at
-it). Releases are numbered `X.Y` and tagged `vX.Y`; a major version carries a
-codename from Star Wars: Andor, so 1.0 and every 1.x release is **"Cassian"**.
+it). Releases are numbered `X.Y` and tagged `vX.Y`.
 Prereleases for testers (`X.Y-beta.N`) are on the same page, marked
 **Pre-release**; they are never **Latest**, and the Download links above
-never serve them. The 1.1 prereleases carry a fourth driver,
-`hue_motion.c4z`; install all four of a prerelease together. What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
+never serve them. Install all four drivers of a release, or of a
+prerelease, together. What each release changed is in [`CHANGELOG.md`](CHANGELOG.md), which each
 release's notes on GitHub and the end of each driver's Documentation tab
 repeat. Every release is built and attached by the repository's Release workflow,
-never by hand, and carries seven files:
+never by hand, and carries eight files:
 
-- `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`: the three drivers.
-  Download all three; they must come from the same release.
+- `hue_bridge.c4z`, `hue_light.c4z`, `hue_motion.c4z`, `hue_scene.c4z`: the
+  four drivers. Download all four; they must come from the same release.
 - `SHA256SUMS.txt`: the checksum of each package.
 - `manifest.json`: what was built: `tag` and `version`, `build` (the **build
-  number**, the integer the three drivers show as **Driver Version** in
+  number**, the integer the four drivers show as **Driver Version** in
   Composer once installed; Control4 needs an integer there, so the files
-  carry the build number while the release is called 1.0), `commit`,
+  carry the build number while the release is called X.Y), `commit`,
   `built_at`, `dev` (`false` in a release), and each package's `sha256` and
   size. The release notes name the build number too.
 - `attestations.sigstore.json`: the Sigstore bundle of the build provenance
   the Release workflow signed for the packages (one attestation naming all
-  three).
+  four).
 - `hue-drivers.intoto.jsonl`: the same provenance as in-toto JSON lines.
 
 A later release of the same version moves the tag and replaces the attached
@@ -173,7 +191,7 @@ files with a newer build; Driver Version tells the builds apart. To check
 what you downloaded:
 
 ```sh
-sha256sum -c SHA256SUMS.txt                                          # the three packages
+sha256sum -c SHA256SUMS.txt                                          # the four packages
 gh attestation verify hue_bridge.c4z --repo corytron/c4-hue-driver \
   --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml   # GitHub CLI 2.102.0 or newer; repeat per package
 ```
@@ -187,7 +205,7 @@ instead of the copy on GitHub. Older GitHub CLI versions match
 
 ### Build from source
 
-`tools/build.sh` packages the three drivers with Snap One's public driver
+`tools/build.sh` packages the four drivers with Snap One's public driver
 packager, which you clone yourself (nothing of Snap One's is vendored here):
 
 ```sh
@@ -225,42 +243,52 @@ checks.
 ## Install in Composer Pro
 
 The **Documentation** tab of the **Hue Bridge** device holds the full owner's
-manual (`src/hue_bridge/www/documentation.html`); a Hue Light or Hue Scene
-device's Documentation tab is a one-page summary of that device. The manual's
+manual (`src/hue_bridge/www/documentation.html`); a Hue Light, Hue Scene or
+Hue Motion device's Documentation tab is a one-page summary of that device. The manual's
 chapters 3 to 7 and 9 are the long version of this list.
 
-1. Copy the three `.c4z` files to the computer that runs Composer Pro.
-2. **Driver > Add or Update Driver or Agent...**, select all three files at
+1. Copy the four `.c4z` files to the computer that runs Composer Pro.
+2. **Driver > Add or Update Driver or Agent...**, select all four files at
    once (hold Ctrl) and open them. Composer answers *Update Succeeded*.
 3. In System Design, select the room for the bridge, open the Items pane's
    **Search** tab and type `Hue Bridge`. Pick the **Hue Bridge** by
    manufacturer *Philips Hue* with the model text *Hue Bridge (CLIP v2)* (the
    search also finds Control4's own Hue drivers) and double-click it. Do not
    add a Hue Light or Hue Scene from the Items pane: the bridge creates them.
-4. On the bridge's **Properties** tab, type the bridge's address into **Bridge
-   IP Address** (the Hue app shows it under Settings > My Hue system) and
-   click the row's **Set** button. Status reads *Not paired: press the link
-   button, then run Pair Bridge*.
-5. Press the round **link button** on the bridge, then right away click
-   **Pair Bridge** on the **Actions** tab (Hue accepts a pairing for about 30
-   seconds after the press). Status goes *Pairing: contacting
-   bridge*, *Pairing: found Hue Bridge Pro (BSB003) ..., requesting key*,
-   *Checking the bridge at ... before anything is sent*, **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware fill
-   in, Event Stream reads *Connected since ...*, Lights reads for example *47
-   on bridge, 0 imported, 47 new, ...*, Attention lists the new lights, and
-   Room Mappings is filled by a one-time automatic **Map Rooms By Name**.
+4. On the bridge's **Properties** tab, open **Bridges Found**, pick your
+   bridge and click the row's **Set** button; or type the bridge's address
+   into **Bridge IP Address** (the Hue app shows it under Settings > My Hue
+   system) and click that row's **Set**. On a driver that is not paired
+   either one opens the pairing window: Status reads *Pairing: found Hue
+   Bridge Pro (BSB003) ..., requesting key*, then *Press the link button on
+   the Hue bridge (waiting 1:57)* and counts down (**Pair Bridge** on the
+   **Actions** tab opens it again).
+5. Press the round **link button** on the bridge within those two minutes.
+   Status goes on to *Checking the bridge at ... before anything is sent*,
+   then **Paired**; Bridge ID, Bridge Model, Bridge Name and Bridge Firmware
+   fill in, Event Stream reads *Connected since ...*, Lights reads for
+   example *47 lights on bridge, 0 imported, 47 new*, Attention lists the
+   new lights, and Room Mappings maps every Hue room whose name exactly one
+   Control4 room has (on a new installation; an update from an earlier
+   release keeps its mappings and maps nothing by itself).
 6. **Rooms.** Open the Room Mappings drop-down; map what is still
-   *(unmapped)* with **Set Room Mapping** (zones too), or click **Map Rooms By
-   Name** again after creating rooms. A mapping decides only where new devices
-   land; it never moves anything.
-7. **Lights.** **Add Light** creates one Hue Light in a room you pick;
-   **Import All New Lights** creates every new light whose Hue room is mapped;
-   **Add Zone Light** makes a Hue zone or room into one light.
-8. **Scenes.** **Add Scene** creates one Hue Scene (time-of-day scenes are
-   listed as *(time-based)*); **Add All Scenes Of Room** creates every scene of
-   one Hue room or zone.
+   *(unmapped)* with **Set Room Mapping** (zones too). A Hue room that
+   appears later is mapped by name by itself, and Last Action says so. A
+   mapping decides only where
+   new devices land; it never moves anything.
+7. **Lights.** **Import All New** creates every new light whose Hue room is
+   mapped. **Add From Hue** creates one light, or a Hue zone or room as one
+   light, in a room you pick: its list opens in folders (double-click a
+   folder to open it).
+8. **Scenes.** **Add From Hue** has a folder of scenes for each Hue room or
+   zone: open it and pick one scene, or pick the folder itself for all the
+   scenes of that room or zone.
 9. **File > Refresh Navigators**, so the touch screens and the app show the
    new tiles.
+
+These steps are for release 1.2 and later. Release 1.1 and earlier had other
+actions (Add Light, Add Scene, Test Connection, ...); the manual on the
+bridge's Documentation tab always matches the build installed.
 
 <!-- Screenshots. Only add-driver-menu.png is used here: the licensing research
      (docs/licensing-research.md, section 4 and section 6 step 4) rates it
@@ -271,8 +299,8 @@ chapters 3 to 7 and 9 are the long version of this list.
      bridge-properties.png here (the house bridge's id, P3; the device
      inventory picture of P4 has left the repository);
      light-properties.png and scene-properties.png carry the owner's light and
-     scene identifiers (P6); bridge-actions.png is clean but predates Add Zone
-     Light and Re-link Zone Light and shows three development-only actions. -->
+     scene identifiers (P6); bridge-actions.png is clean but shows the 1.1
+     actions and three development-only ones (1.2 has nine; retake it). -->
 
 ![Composer's Driver menu with Add or Update Driver or Agent highlighted](src/hue_bridge/www/img/add-driver-menu.png)
 
@@ -320,15 +348,17 @@ again.
   shows Status, Hue Scene, Hue Room, Hue Scene ID, Online and Last Action;
   both show Driver Version. Yours to set: **Recall As** on a scene (how ON
   plays the scene), the keypad settings, and **Debug Mode** (diagnostics
-  only); click the row's Set button after changing one. Each device has two
-  actions, **Adopt Hue Name** and **Forget This Light** / **Forget This
-  Scene**.
+  only); click the row's Set button after changing one. From 1.2 a Hue
+  Light or Hue Scene has no actions of its own: its name and its Hue name
+  follow each other by themselves, and the bridge's **Forget Device**
+  releases it.
 
 ## Troubleshooting
 
-Click **Test Connection** on the bridge first: *Test OK* means the controller
-reaches the bridge, the bridge is the paired one and it accepts the key. Then
-the manual:
+Run the bridge's **Diagnostics** action with *Check the connection now* first
+(release 1.1: **Test Connection**): *Test OK* means the controller reaches
+the bridge, the bridge is the paired one and it accepts the key. Then the
+manual:
 
 - chapter 4: pairing failures, the bridge offline, the bridge's address
   changed;
@@ -337,7 +367,8 @@ the manual:
 - chapter 9: scenes deleted, renamed or edited in Hue, time-of-day scenes;
 - chapter 12: every text the properties can show and what to do about it, and
   "things that look wrong but are not";
-- chapter 13: limits and a quick reference of all actions.
+- chapter 13: limits, a quick reference of the nine actions and where each
+  action of 1.1 went.
 
 The design notes behind the driver are in [`docs/`](docs/README.md): the
 architecture (`docs/design.md`), the feature contracts, and the edge-case
@@ -347,8 +378,9 @@ never done without a click.
 ### Reporting a problem
 
 Open a GitHub issue with the **Driver Version**, the Control4 OS version, the
-bridge model, the texts of **Status**, **Event Stream**, **Attention** and
-**Last Action** (with **Last Action (2)** to **(6)** when shown), and the
+bridge model, the texts of **Status**, **Event Stream**, **Attention** (with
+**Attention (2)** to **(6)** when shown) and **Last Action** (with **Last
+Action (2)** to **(6)** when shown), and the
 relevant lines of the Lua output (the device's Lua tab in Composer; **Debug
 Mode** On if asked, and Off again afterwards). Replace your LAN addresses and
 the bridge id with placeholders. The driver never shows the application key;
@@ -358,7 +390,7 @@ never paste one. Pull requests are welcome; see
 ## Repository layout
 
 ```
-src/common/        shared modules: dispatch and log (all three drivers), device (what the
+src/common/        shared modules: dispatch and log (all four drivers), device (what the
                    light and scene drivers share: proxy, keypad machine and settings, LEDs,
                    binding re-check), devloop (development builds only); build.sh adds
                    build_version.lua, and the dev key to a development build
@@ -407,7 +439,7 @@ The author's house is the one installation, and it is run from the repository
 ([`docs/cicd-gitops-design.md`](docs/cicd-gitops-design.md)):
 
 1. A change is a pull request. Four checks must pass before it can merge:
-   *Lint and test (Lua 5.1)*, *Build the three .c4z packages*, *Tooling
+   *Lint and test (Lua 5.1)*, *Build the .c4z packages*, *Tooling
    checks (shell, Python, XML, workflows)* and *Secrets and private data*;
    the branch must be up to date with `main` and every review conversation
    resolved. `main` takes nothing else, and the rule binds the maintainer
@@ -424,7 +456,7 @@ The author's house is the one installation, and it is run from the repository
    one issue labelled `deploy` open while they differ.
 5. `python3 tools/deploy.py start` downloads the release, verifies the
    checksums, the manifest and the attestations, records the deployment and
-   writes a brief; the author's Windows Composer session installs the three
+   writes a brief; the author's Windows Composer session installs the four
    files from the GitHub release URLs through *Add or Update Driver or
    Agent...* (the controller has no install API, so this click is never
    automatic); `python3 tools/deploy.py done` records the result, which
@@ -436,7 +468,7 @@ this file.
 ## Status
 
 [`docs/status.md`](docs/status.md) is the one-page current state: what the
-three drivers do today, what was verified on hardware (pairing, the event
+four drivers do today, what was verified on hardware (pairing, the event
 stream and resync, import and the whole light lifecycle, scenes, keypad taps
 and holds with LEDs, the keypad settings, time-of-day scenes, zone lights
 from the phone and the keypad, a light staying bound through a controller

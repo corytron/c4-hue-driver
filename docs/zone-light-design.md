@@ -27,7 +27,7 @@ LEDs, two-way state, and the same lifecycle handling as a light.
 | Fact | Status |
 | --- | --- |
 | A grouped_light GET item and its events carry `on.on` (true if any member is lit) and `dimming.brightness` (the average of the lit members), plus `alert`, `signaling`, `owner {rid, rtype}`, `id_v1 "/groups/N"`; a new one also announces `dimming_delta` and `dynamics`. No colour or colour-temperature state has ever appeared in one. | verified on the house for on/brightness (`docs/smart-scenes-research.md` §7 V4, V12; `src/hue_bridge/bridge/scenes.lua` `absorb`, `on_grouped_light`; fixtures `F.events.zone_add`, `F.events.scene_recalled`); "no colour" verified only on every item logged so far, assumed in general [community: openhue `GroupedLightGet`; Home Assistant derives a group's colour from its member lights] |
-| A grouped_light PUT accepts `on`, `dimming.brightness`, `dimming_delta` (up/down/stop with `brightness_delta`), `dynamics.duration`. | verified (`docs/design.md` "Keypad and scene dimmer: verified on hardware"; research §7 V11 absolute brightness) |
+| A grouped_light PUT accepts `on`, `dimming.brightness`, `dimming_delta` (up/down/stop with `brightness_delta`), `dynamics.duration`. | verified (`docs/design.md` "Keypad and scene dimmer: verified on hardware"; research §7 V11 absolute brightness). Corrected 2026-10-25 (#249): accepted (HTTP 200), but Hue **ignores `dynamics.duration`** on a grouped_light `dimming_delta` and covers the whole delta in about a second; on a light it honours it (`docs/group-hold-design.md` §1) |
 | A grouped_light PUT accepts `color.xy`, `color_temperature.mirek` and `color_temperature_delta`; members that cannot follow ignore the part they cannot do. | verified for `color.xy` and `color_temperature.mirek` on the house (2026-10-24, build 199: the owner's colour picks on the Bedside Lights tile reached both lamps); `color_temperature_delta` still assumed [community: openhue `GroupedLightPut`, aiohue] |
 | `on=true` on a grouped_light lights every member at its own last brightness and colour (a Zigbee group on). | assumed; check H2 |
 | `on=false` on a grouped_light deactivates the scenes of that group (ordinary and time-based); a whole-group `dimming_delta` or absolute `dimming.brightness` keeps them active. | verified (research §7 V9, V11) |
@@ -85,6 +85,17 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    on the grouped_light: parity with the Hue Light device (ON is 100 %; the
    proxy's On preset is hidden and 100). Hue's "restore each lamp's last
    state" stays with the Hue app (open question 1).
+   Superseded (2026-11-08, #233, owner's Option 1): the parity stays, its
+   level moved. The Hue Light driver, which a zone or room light runs, sends
+   ON, TOGGLE from off and the top tap as `HUE_SET on=true
+   brightness=<the device's Default On Brightness>` (the On preset, shown
+   in Composer since #59, 100 unless the dealer changed it), ON and TOGGLE
+   at once, the tap over the click rate up; ON on a lit group sets every
+   lamp to it too, from above or below [verified: proxy reference, light_v2
+   `_7-TOGGLE.md` and the variable Default On Preset Brightness in
+   `30_Light_v2_variables/_0-HEADER.md`]. The bridge passes the level
+   through unchanged (`zone_lights:set`), so nothing changed there; with
+   the preset at 100 the PUT is the one above.
 5. **Slider and targets are absolute** (`dimming.brightness` on the group),
    not relative as the scene devices move: a light device's level is a
    promise (40 % means every lamp at 40 %) and the tile's average then
@@ -96,6 +107,20 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    verified on a grouped_light; a hold keeps per-lamp differences, as it does
    on a light. Taps, toggle, the 1 % start from off, the 1 s click guard,
    `MATCH_LED_STATE`/`BUTTON_INFO` and button colours: identical, on = Decision 3.
+   Corrected (2026-10-25, #249): "verified on a grouped_light" meant only
+   that Hue accepts the bodies (HTTP 200); it ignores `dynamics.duration`
+   there and covers the whole delta in about a second, so a zone light's
+   hold ran to full or off (from 50 % to 0 % in a 1.5 s keypad hold).
+   Current (1.3, #249, owner's choice "the mix", 2026-11-07): the device is
+   unchanged, and the bridge sends a zone or room light's hold to each lit
+   member light (1 to 10 lit: smooth at the hold rate, each lamp from its
+   own level) or as group `dimming_delta` steps without a duration, one a
+   second, sized so the range takes the hold rate (more than 10 lit, or
+   while a smart scene runs or a scene plays dynamically on the zone, so
+   that it keeps running); lamps that are off are left alone; a hold up
+   with none lit (from off, after the 1 % start) takes every member, and
+   only a hold down with none lit, or unknown members, keeps the old group
+   dim (`docs/group-hold-design.md` G3 with A1, G4 to G6a).
 7. **Colour and CT** go to the grouped_light (`color.xy` or
    `color_temperature.mirek`, one of the two, with `dynamics` when a rate is
    given; a colour sent while the group is off is stored for the next turn-on
@@ -131,7 +156,10 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
    in `docs/status.md`. Verified 2026-10-25 (`docs/design.md`, "Hardware pass
    of 2026-10-25 night"): 50 slider targets in 5 s on the zone made 9
    grouped_light PUTs (a burst of 3, then one a second, the latest value
-   winning), and no 429.
+   winning), and no 429. Current (1.3, #249): a per-light hold's start and
+   stop go through the light queue (10/s, urgent there too), and a stepped
+   hold's steps, whose `delta` is under 100 and so not urgent, take the
+   group queue's tokens, one a second (`docs/group-hold-design.md` G4, G5).
 10. **Scenes of the same group** need no new message: both device kinds read
     the same grouped_light events on the bridge. What the owner sees: group
     slider or hold while a scene plays → both tiles show the same level, the
@@ -140,7 +168,8 @@ exactly as `hue_scene` does for time-based scenes (smart-scenes Decision 1).
     `HUE_SCENE_GROUP on=false` and goes off, the group tile goes off; group
     ON afterwards → group tile on at 100 %, scene tile stays off; a scene
     recalled anywhere → group tile on at the scene's average brightness and
-    the first lit lamp's colour.
+    the first lit lamp's colour. Superseded (2026-11-08, #233): group ON is
+    at the device's Default On Brightness (Decision 4).
 11. **No lights in the group** (empty zone, sensor-only room): the device is
     told `no_lights=true`: `ONLINE_CHANGED false`, tile off, commands dropped
     with the reason in Status; refilled → online again, nothing to click.
@@ -179,7 +208,7 @@ the project is the owner's; nothing is lost by waiting (import-design §1).
 | Driver updated | Lua only; `hue_kind` persisted; no reboot; a device created under this build keeps the light icon | — | — |
 | Two devices for one group | Prevented: `Add Light` answers "Not added: Bedside Lights (zone) is already imported (device N)"; a second claimant via hello is a conflict in Attention | `Forget Light` on one | Adopting the second |
 | The same group also has Hue Scene devices | Allowed and expected (Decision 10) | — | — |
-| Bridge driver deleted and re-added | Devices read "Not bound to a Hue Bridge", keep `hue_rid`/`hue_kind`; after pairing, a bound device's hello adopts it | Bind in Connections (owner's drag), `Link Devices` | — |
+| Bridge driver deleted and re-added | Devices read "Not bound to a Hue Bridge", keep `hue_rid`/`hue_kind`; after pairing, a bound device's hello adopts it | Bind in Connections (a drag, by the owner or since 2026-10-27 the Windows session, #312), `Link Devices` | — |
 | Control4 room of the mapping deleted | `Add Light` refuses as lights do ("mapped to a Control4 room that no longer exists") | `Set Room Mapping` | A silent fallback room |
 
 ### Rooms as group lights (recommendation: yes, in v1)
@@ -203,7 +232,7 @@ usually mapped by `Map Rooms By Name`).
 | `HUE_CONFIGURE` | bridge → device | + `kind` "group", `group_type` ("zone"/"room"), `light_count`, `no_lights` ("true" only while the group has no grouped_light), `model` ("Hue zone"/"Hue room"), `hue_room` (the group's own label: "Bedside Lights (zone)" / "Master Bedroom"), `id_v1` ("/groups/2"), `has_color`, `has_cct`, `mirek_min`, `mirek_max`, `min_dim` "1", `state` "gone" + `gone_since` while gone. Sent at creation, hello, startup (from the registry, before any GET), and whenever name, caps, count, no_lights or state change |
 | `HUE_STATE` | bridge → device | `rid` (group rid), `on`, `brightness` (group average), `x`+`y` or `mirek` with `color_mode` (Decision 8), `online` ("false" while no grouped_light or gone), `reason` (event/resync/hello) |
 | `HUE_SET` | device → bridge | unchanged; the bridge checks `zone_lights:is_group(rid)` first (the `device_for` accessors were removed 2026-10-24) and queues on the group queue (absolute body, Decision 5) |
-| `HUE_DIM` | device → bridge | unchanged; group queue (`dim`, `rate`, `level`), Decision 6 |
+| `HUE_DIM` | device → bridge | unchanged; group queue (`dim`, `rate`, `level`), Decision 6. Current (1.3, #249): through `bridge/group_hold.lua`, to the lit member lights or as timed group steps (`docs/group-hold-design.md`) |
 | `HUE_GOODBYE`, `HUE_FORGET` | device → bridge | unchanged; routed by `device_id` (zone-light registry first, then lights) |
 | `HUE_FORGOTTEN` | bridge → device | unchanged; `name` = the group's name |
 
@@ -389,7 +418,9 @@ and both scene devices.
 ## 7. Open questions (recommended answer first)
 
 1. **ON = 100 % or Hue's "last state"?** 100 % (Decision 4), parity with the
-   Hue Light; the Hue app keeps its own semantics.
+   Hue Light; the Hue app keeps its own semantics. Superseded (2026-11-08,
+   #233): ON is the device's Default On Brightness, still in parity with
+   the Hue Light and still never Hue's "last state".
 2. **Absolute slider vs relative moves?** Absolute (Decision 5).
 3. **"Add All Zones"?** No: 23 devices in one click is the flood the scenes
    contract avoided; one click per zone is deliberate.
@@ -427,7 +458,8 @@ section, this section wins.
    flags, intersection of CT ranges** (Q5), **colour of the first lit member**
    (Q6), **group queue 1/s with burst 3** (Q8), **no bridge_home device** (Q9),
    **cross-kind re-link refused** (Q10), **mixed install order accepted**
-   (Q11): as recommended.
+   (Q11): as recommended. Superseded for Q1 (2026-11-08, #233): ON is the
+   device's Default On Brightness (Decision 4).
 2. **A separate bridge action `Add Zone Light`** (Q7, changed). Parameters:
    `Group`, a picker from `zone_lights:picker_groups()` (zones first, then
    rooms, "<Name> (zone, 2 lights)" / "<Name> (room, 9 lights)", tombstoned
@@ -450,7 +482,9 @@ section, this section wins.
    hardware plan: a colour and a CT pick from the tile reaching both lamps. If
    the bridge refuses, the fallback (one PUT per capable member through the
    light queue) is a follow-up. H2 does not affect the driver (ON always
-   sends brightness 100).
+   sends brightness 100). Current (2026-11-08, #233): ON sends the device's
+   Default On Brightness; it still always sends a brightness, so H2 still
+   does not affect it.
 4. **Split** as §6, with `hue_model.lua`, `hue_model_spec.lua` and the
    fixtures folded into the bridge-module agent so that no agent waits on
    another; `tests/spec/zone_light_roundtrip_spec.lua` and the `drivers_spec`

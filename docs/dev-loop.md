@@ -133,6 +133,15 @@ and `LUA_ACTION` is unwrapped to its `ACTION`), else the driver's
 reload sequence on the current bridge version (it does not re-forward the
 light tree; touch a file under `src/hue_light` or `src/common` for that).
 
+**Pin, don't pin-and-reload.** A pin that changes the bridge's version already makes the bridge
+reload at its next poll. Queuing `reload` right after it reloads a second time while the
+first reload's checks are still in flight, and before #334's netstream fix that could leave
+a stream of the unloaded code holding the network binding, flapping the event stream until
+the driver was updated in Composer (house round of 2026-11-05). Use `reload` only to re-run
+the same version. What a reload now cleans up ("Driver-side behaviour", #247, #376) does not
+change this: the second reload still lands while the first one's checks are in flight, and
+each reload that restarts the event stream leaves one more transfer to drain.
+
 `POST /log` body `{"version": "<running version>", "lines": [{"t": <ms since epoch>, "line": "..."}]}` → 204.
 The server appends `HH:MM:SS.mmm <line>` to `driver.log` and echoes to stdout.
 
@@ -142,9 +151,11 @@ The server appends `HH:MM:SS.mmm <line>` to `driver.log` and echoes to stdout.
 fetched and forwarded (recorded even when no device of that kind was bound
 to receive them); absent until the first forward. Events: `startup` (loop started; includes `sandbox`
 facts: `_VERSION`, `jit.version` if any, and the `type()` of `jit`,
-`loadstring`, `load`, `setfenv`, `package`, `package.loaders`, `C4` and
+`loadstring`, `load`, `setfenv`, `package`, `package.loaders`, `C4` (the
+runtime's own, not the timer guard's proxy) and
 `bit`, the HMAC in use
-(`hmac`: `C4:HMAC` or `Lua (<why>)`), plus the driver version from
+(`hmac`: `C4:HMAC` or `Lua (<why>)`), the timer guard's state
+(`timer_guard`: `on` or `off (<why>)`, "Driver-side behaviour"), plus the driver version from
 `C4:GetDriverConfigInfo("version")`), `reload` (new code running; its
 `error` carries the text of an `OnDriverDestroyed` that failed),
 `reload_failed` (error text; old code may be half torn down), `refused`
@@ -195,7 +206,13 @@ Without the token, or with a wrong one: 401.
   the fix only with a dev `.c4z` install ("Gotchas" below).
 - State lives in a global (`_G.__DEVLOOP`) so a reload cannot lose the loop,
   and `package.loaded["common.devloop"]` is never cleared by a reload. The
-  dev key is not in that global: it lives in a local of the module.
+  dev key is not in that global: it lives in a local of the module. The
+  same state carries what one load of the driver's code hands to the next
+  (`devloop.keep(name, value)`: the first call keeps `value` and returns
+  it, every later call, a reloaded code's, gets the kept one back; a value
+  of another type replaces it). Without a dev key nothing is kept, since
+  nothing ever reloads; a Director restart or a `.c4z` install starts a new
+  Lua state, which keeps nothing either.
 - A repeating `C4:SetTimer` (3000 ms) drives everything. Each tick: at most
   one chain in flight; `GET /manifest` and, if the version differs from the
   running one, `GET /bundle`, verify, and reload; then
@@ -255,12 +272,67 @@ Without the token, or with a wrong one: 401.
   `package.loaders[1]` that serves modules from the bundle (`a.b` →
   `a/b.lua`); run `loadstring(bundle["driver.lua"], "=driver.lua")`; then
   `OnDriverInit("DIT_UPDATING")` and `OnDriverLateInit("DIT_UPDATING")`.
+  Between the `OnDriverDestroyed` and the clearing of the modules, every
+  timer the old code armed is cancelled, those `OnDriverDestroyed` armed
+  included (the timer guard, next point; `devloop: cancelled N timer(s) of
+  the old code` when there were any).
   Every step is `pcall`ed. An `OnDriverDestroyed` that fails is said and the
   reload goes on (the `reload` report carries its text); any later failure
   posts `reload_failed` and the loop keeps polling. The version is recorded
   before anything can fail, so a failed version is not loaded again: the
   next pushed version, or a `reload` command, retries. Only a verified
   bundle ever reaches this sequence.
+- What a reload cleans up (issues #247, #376). A reload runs the new code in
+  the same Lua state, so whatever the old code left running goes on
+  calling into the old code's state: Director kills a driver's timers only
+  when it unloads the driver (API `22_miscellaneous/_24-OnDriverDestroyed`),
+  and a reload is no unload. Two things now see to that, in dev packages
+  that carry a key (without one no bundle loads, so nothing reloads):
+  - **Timers (the timer guard).** `C4` is userdata on the controller and
+    its methods cannot be replaced (`docs/design.md`, "Hardware pass of
+    2026-10-25 night"), so `C4.SetTimer` cannot be wrapped in place.
+    Instead, when `common/devloop.lua` loads (at the top of the bridge's
+    `driver.lua`, in a device's `common/device.lua`), the global `C4` is
+    replaced by a proxy table: `C4:SetTimer` through it arms the timer with
+    the runtime's own `SetTimer` and notes the returned `C4LuaTimer` (API
+    `34_timer/_1-SetTimer`) in the running code's set; every other method
+    is the runtime's own, called with the runtime's `C4` as `self` for
+    `C4:Foo()` and with what it was given for `C4.Foo(x)`, and every other
+    field reads and writes through. The code reads the global `C4` at each
+    call, so the packaged code is covered from its own start, and the first
+    reload of every dev install, from it to the server's code, cancels its
+    timers too. At a reload the whole set is cancelled with `Cancel()`, one
+    call each under `pcall` (a timer that fired or was cancelled already is
+    harmless; a `Cancel()` that raises is ignored); repeating timers stop
+    there. A one-shot timer leaves the set when it fires, and the set has
+    weak keys, so a timer nothing holds any more is forgotten by itself.
+    The loop's own 3 s timer is armed on the runtime's `C4` and never
+    noted. What it cannot tell apart: a timer the old code arms after the
+    reload (an answer still in flight calls back into it) is noted with the
+    new code's and lives until the next reload; the old code's
+    `state.destroyed` (`OnDriverDestroyed`) keeps it from starting things.
+    The cases found: motion's 60 s away timer (`AWAY_GRACE_S`) leaving
+    "Bridge not answering" stuck on a motion device or warning a minute
+    after the stream connected (hardware, #247 and #376), and Last Action's
+    row timer calling `SetPropertyAttribs` once more (review, #376), which
+    `OnDriverDestroyed` now also cancels itself, as it did Attention's. The
+    guard covers the rest alike, such as the bridge's 5-minute row refresh
+    (`state.rows_timer`), which `OnDriverDestroyed` leaves armed.
+  - **Stream transfers.** `C4:url` transfers cannot be cancelled (a
+    streaming one lives on after `Cancel()`, `bridge/stream.lua` rule 2),
+    so the bridge keeps its event stream's list of abandoned transfers
+    across a reload: `bridge/devtools.lua` swaps the list the driver hands
+    every stream it builds (`state.stream_abandoned`) for
+    `devloop.keep("stream_abandoned", ...)` before late init builds the
+    first stream. The reloaded code then counts the old code's open
+    transfers against the stream's cap (`stream.MAX_ABANDONED + 1`, two)
+    and waits, as after any restart (`Waiting for an earlier stream transfer
+    to close`); two reloads in a row in a quiet house open no more than two
+    stream transfers (`tests/spec/drivers_spec.lua`, "dev loop reloads").
+    The network-connection stream needs none of this: a reload's
+    `netstream.retire()` and `state.destroyed` end the old code's (#376,
+    since 1.2). A bridge whose running `common/devloop.lua` predates
+    `devloop.keep` keeps one list per load until a dev `.c4z` install.
 - Signed commands: the bridge's development commands (`Hue Request`, `Probe
   Call`, `Probe Project`, `Probe Errors`, `Probe Scenes`, `Proxy Command`,
   `Lights Report`, and `Test Connection` with a `Host`) are not in its
@@ -296,8 +368,9 @@ Without the token, or with a wrong one: 401.
   is kept across a reload until the new code installs its own. Composer's
   own output (the original print) is not redacted. `devloop.redacted(line)`
   gives the verdict, for the specs.
-- Properties snapshot: a copy of the `Properties` table. If `C4` is a Lua
-  table, also wrap `C4.UpdateProperty` once to shadow values the driver sets
+- Properties snapshot: a copy of the `Properties` table. If the runtime's
+  `C4` is a Lua table (the specs' fake; never the timer guard's proxy),
+  also wrap `C4.UpdateProperty` once to shadow values the driver sets
   itself; report `type(C4)` in the sandbox facts either way.
 - Nothing in the loop ever prints or reports the Hue application key, the
   dev key or a MAC it computed to check one it received; the redactor
@@ -314,7 +387,8 @@ Without the token, or with a wrong one: 401.
   (no bundle, no or a wrong MAC, the old `files` form), then decodes the
   payload with `C4:JsonDecode` and loads it only when the signed `tree` is
   the device's own (`light` or `scene`, never `bridge`); then the same
-  reload sequence as above runs, with the same `pcall` discipline, at the
+  reload sequence as above runs, the timer guard's cancelling of the old
+  code's timers included, with the same `pcall` discipline, at the
   signed version. It needs no `devloop.start()`: the shared state is created
   when the module loads.
 - The outcome goes through the device's original `print`, which lands in
@@ -359,12 +433,12 @@ URL` overrides it.
 
 `tools/regress.sh [--server URL]` runs the scripted part of
 `docs/release-checklist.md` §1 through `devctl.py`: `Test Connection`,
-`Refresh Scenes`, `Room Audit`, `Link Devices`, `Adopt Hue Names`, `Accept
-Names As They Are` and `Lights Report`, then a scan of the shipped log for
-errors, and exits with the number of failed checks. It creates and deletes
-nothing, but `Adopt Hue Names` renames a device whose Composer name differs
-and `Link Devices` registers a bound device the bridge lacks, as those
-actions always do.
+`Refresh Scenes`, `Room Audit`, `Link Devices` and `Lights Report`, then a
+scan of the shipped log for errors, and exits with the number of failed
+checks. `Adopt Hue Names` and `Accept Names As They Are` run only with
+`--with-renames` (#344), since the first renames every device whose Composer
+name differs. It creates and deletes nothing, but `Link Devices` registers a
+bound device the bridge lacks, as that action always does.
 
 Pin while several agents edit `src/` at once: the controller then only
 reloads to states the coordinator has checked (`tools/check.sh --only
@@ -701,13 +775,19 @@ Never install a dev build as the production driver.
   stream no longer waits behind them, `docs/design.md`, "Stream address
   rotation".) Within one load the stream keeps at most two transfers open
   (`stream.MAX_ABANDONED + 1`, `Waiting for an earlier stream transfer to
-  close` meanwhile), but a reload cannot see its predecessor's, and
-  Director runs at most four `C4:url` transfers at once across all hosts:
-  three reloads within fifteen minutes on a quiet night left three zombies
-  plus the live stream, and every other request, the dev loop's own
-  included, timed out until the bridge's next event (verified 2026-10-25,
-  `docs/design.md`, "Concurrent transfers"). Space reloads out on a quiet
-  house. While a transfer is still free, `devctl.py run "Hue Request"
+  close` meanwhile), and Director runs at most four `C4:url` transfers at
+  once across all hosts: three reloads within fifteen minutes on a quiet
+  night left three zombies plus the live stream, and every other request,
+  the dev loop's own included, timed out until the bridge's next event
+  (verified 2026-10-25, `docs/design.md`, "Concurrent transfers"). Until
+  #247 a reload could not see its predecessor's transfers; since then the
+  loop keeps the stream's list across reloads ("What a reload cleans up"
+  above), so the reloaded code waits instead of opening a third, and the
+  event stream reads `Waiting for an earlier stream transfer to close`
+  until a bridge event or the Stream Timeout ends one (a bridge still
+  running an older `common/devloop.lua` needs a dev `.c4z` install for
+  that). Space reloads out on a quiet house all the same, or the stream
+  stays waiting. While a transfer is still free, `devctl.py run "Hue Request"
   Method=PUT Path=/clip/v2/resource/light/<id>
   Body='{"metadata":{"name":"X"}}' Host=<a padded spelling of the bridge
   address that nothing else uses>` generates one event per call without

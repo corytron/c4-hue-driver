@@ -69,6 +69,16 @@
 --   devloop.execute(command, params)  one signed `execute` command -> nil or the error text
 --   devloop.set_redactor(fn)  fn(line) -> what of a log line may leave the controller
 --   devloop.redacted(line)    -> that verdict, as the loop applies it (never raises)
+--   devloop.keep(name, value) -> the value of `name` the code before a reload kept, else
+--                                `value` (kept from now on); `value` as it is without a dev key
+--   devloop.timer_guard()     -> "on", or "off (<why>)": whether a reload cancels the old
+--                                code's C4:SetTimer timers (see "The timer guard" below)
+--
+-- What a reload cleans up (issues #247, #376): the old code's timers (the
+-- timer guard), and nothing of its C4:url transfers, which Cancel() does not
+-- end (bridge/stream.lua, rule 2); the bridge keeps its stream's list of
+-- abandoned transfers across a reload with devloop.keep (bridge/devtools.lua),
+-- so the new code counts the old code's against the cap of open transfers.
 
 local devloop = {}
 
@@ -125,8 +135,21 @@ S.no_tree = S.no_tree or {}                   -- tree name -> true once "server 
 S.refused = S.refused or {}                   -- tree name -> { version, at } of the last refused bundle
 S.nonce_count = S.nonce_count or 0            -- command requests made, for the nonces
 S.commands_refused = S.commands_refused or false -- a refused command list was said; cleared by a good one
+S.kept = S.kept or {}                         -- name -> what devloop.keep hands from one load of the code to the next
+S.guard = S.guard or "off (not installed)"    -- the timer guard's state, devloop.timer_guard()
+-- Also, while the timer guard is on: S.c4_real (the runtime's own C4), S.c4_proxy
+-- (the global C4 in its place) and S.timer_set (the running code's timers).
 
 local compile = rawget(_G, "loadstring") or rawget(_G, "load")
+
+-- The runtime's own C4: behind the timer guard's proxy while it is on.
+local function runtime_c4()
+	local c4 = rawget(_G, "C4")
+	if c4 ~= nil and c4 == S.c4_proxy then
+		return S.c4_real
+	end
+	return c4
+end
 
 -- Milliseconds since the epoch, as the server expects for log lines.
 local function now_ms()
@@ -475,10 +498,11 @@ local function unwrap_update_property()
 	S.wrapped_c4, S.original_update = nil, nil
 end
 
--- Only possible when C4 is a Lua table (userdata on the controller, as far
--- as we know; the startup report says which).
+-- Only possible when the runtime's C4 is a Lua table (userdata on the
+-- controller [hardware 2026-10-25]; the startup report says which). The
+-- timer guard's proxy is not it: a write there goes through to the runtime's.
 local function wrap_update_property()
-	local c4 = rawget(_G, "C4")
+	local c4 = runtime_c4()
 	if type(c4) ~= "table" or S.wrapped_c4 == c4 then return end
 	unwrap_update_property()
 	S.wrapped_c4, S.original_update = c4, c4.UpdateProperty
@@ -512,9 +536,10 @@ local function sandbox_facts()
 		setfenv = type(rawget(_G, "setfenv")),
 		package = type(package),
 		["package.loaders"] = type(package) == "table" and type(package.loaders) or "nil",
-		C4 = type(rawget(_G, "C4")),
+		C4 = type(runtime_c4()),
 		bit = type(rawget(_G, "bit")),
 		hmac = devloop.hmac_backend(),
+		timer_guard = S.guard,
 		driver_version = ok and tostring(driver_version) or nil,
 	}
 end
@@ -580,6 +605,169 @@ local function report(event, extra, callback)
 	end)
 end
 
+-- The timer guard ---------------------------------------------------------------
+
+-- A reload runs the new code in the same Lua state, and every timer the old
+-- code armed with C4:SetTimer stays armed: Director kills a driver's timers
+-- when it unloads the driver [verified: API 22_miscellaneous/_24-
+-- OnDriverDestroyed], and a reload is no unload. An old callback then runs
+-- against the old code's state: a 60 s motion "bridge away" timer left
+-- "Bridge not answering" stuck (#247), the old rows' timers wrote rows
+-- (#376). So the loop notes the timers of the code running now and, once
+-- that code's OnDriverDestroyed has run and before the new code loads,
+-- cancels them with the C4LuaTimer's Cancel() [verified: API
+-- 34_timer/_1-SetTimer].
+--
+-- C4 is userdata on the controller and its methods cannot be replaced
+-- [verified: hardware 2026-10-25, docs/design.md "Hardware pass of
+-- 2026-10-25 night"], so C4.SetTimer cannot be wrapped in place. Instead
+-- the global C4 itself is replaced by a proxy table, from this module's
+-- load on (the top of the bridge's driver.lua, a device's common/device.lua):
+-- SetTimer through it arms the timer with the runtime's own SetTimer and
+-- notes it; every other method is the runtime's own, called with the
+-- runtime's C4 as self when called with the proxy (C4:Foo()), else with
+-- what it was given (C4.Foo(x)); every other field is read from and written
+-- to the runtime's C4. The code reads the global C4 at each call, so the
+-- packaged code is covered from its own start: the first reload of a dev
+-- install, from it to the server's code, cancels its timers too. The loop's
+-- own timer is armed on the runtime's C4 (runtime_c4) and never noted.
+--
+-- Only in a package that carries a dev key: without one no bundle is ever
+-- loaded, so nothing reloads, and the global C4 stays the runtime's own.
+-- What it cannot tell apart: a timer the old code arms after the reload (an
+-- answer still in flight calls back into it) is noted with the new code's
+-- and lives until the next reload; OnDriverDestroyed's state.destroyed is
+-- what keeps the old code from starting things then.
+
+-- Weak keys: a timer that fired or was cancelled and that nothing holds any
+-- more is forgotten by itself. A live one stays reachable through its
+-- callback, which Director holds (guarded_set_timer).
+local function new_timer_set()
+	return setmetatable({}, { __mode = "k" })
+end
+
+-- C4:SetTimer through the proxy: the runtime's own SetTimer, with the timer
+-- noted in the running code's set. A one-shot timer leaves the set when it
+-- fires. The callback is wrapped only for that; Director's arguments (the
+-- timer, and the skips of a repeating one) reach it unchanged, and so does
+-- whatever it raises.
+-- The caller's arguments reach the runtime exactly as given: an explicit nil
+-- in place of a missing repeat flag is refused on the controller ("repeat
+-- should be a boolean", dev build 537, #411).
+local function guarded_set_timer(self, delay, callback, ...)
+	local extra = select("#", ...)
+	local repeating = (...)
+	local real = S.c4_real
+	if self == S.c4_proxy then self = real end
+	local set = S.timer_set
+	local timer
+	local fn = callback
+	if type(callback) == "function" then
+		fn = function(fired, ...)
+			if not repeating then
+				if timer ~= nil then set[timer] = nil end
+				if fired ~= nil then set[fired] = nil end
+			end
+			return callback(fired, ...)
+		end
+	end
+	if extra == 0 then
+		timer = real.SetTimer(self, delay, fn)
+	else
+		timer = real.SetTimer(self, delay, fn, ...)
+	end
+	if timer ~= nil and set then set[timer] = true end
+	return timer
+end
+
+local function new_c4_proxy()
+	local proxy = {}
+	local wrappers = {} -- key -> { fn = the runtime's function, call = its stand-in }
+	return setmetatable(proxy, {
+		__index = function(_, key)
+			if key == "SetTimer" then return guarded_set_timer end
+			local value = S.c4_real[key]
+			if type(value) ~= "function" then return value end
+			local w = wrappers[key]
+			if not w or w.fn ~= value then
+				w = { fn = value, call = function(self, ...)
+					if self == proxy then self = S.c4_real end
+					return value(self, ...)
+				end }
+				wrappers[key] = w
+			end
+			return w.call
+		end,
+		__newindex = function(_, key, value)
+			S.c4_real[key] = value
+		end,
+	})
+end
+
+-- At this module's load. Off without a dev key, or when the runtime's C4
+-- has no SetTimer to stand in for; S.guard says which.
+local function install_timer_guard()
+	local current = rawget(_G, "C4")
+	if current ~= nil and current == S.c4_proxy then
+		if KEY then return end -- a second load of this module in one Lua state
+		rawset(_G, "C4", S.c4_real)
+		current = S.c4_real
+	end
+	if not KEY then
+		S.guard = "off (no dev key)"
+		return
+	end
+	local ok, set_timer = pcall(function() return current.SetTimer end)
+	if not ok or type(set_timer) ~= "function" then
+		S.guard = "off (C4.SetTimer is " .. (ok and type(set_timer) or "unreadable") .. ")"
+		return
+	end
+	S.c4_real, S.timer_set = current, new_timer_set()
+	S.c4_proxy = S.c4_proxy or new_c4_proxy()
+	rawset(_G, "C4", S.c4_proxy)
+	S.guard = "on"
+end
+install_timer_guard()
+
+-- Cancel every timer the running code armed, and start a new set for the
+-- code that comes next. A timer that fired or was cancelled already is
+-- cancelled once more, harmlessly: a Cancel() that raises is ignored.
+-- Returns how many Cancel() calls went through.
+local function cancel_timers()
+	local set = S.timer_set
+	if not set then return 0 end
+	S.timer_set = new_timer_set()
+	local n = 0
+	for timer in pairs(set) do
+		set[timer] = nil
+		if pcall(function() timer:Cancel() end) then n = n + 1 end
+	end
+	return n
+end
+
+function devloop.timer_guard()
+	return S.guard
+end
+
+-- Values a reload hands on -------------------------------------------------------
+
+-- The code running now keeps `value` under `name` and gets it back; the
+-- code a reload brings up then gets that same value instead of its own (a
+-- value of another type replaces it). The bridge keeps its stream's list of
+-- abandoned transfers this way (bridge/devtools.lua, #247). Without a dev
+-- key no reload ever happens: `value` comes back and nothing is kept. A
+-- Director restart or a .c4z install starts a new Lua state, which keeps
+-- nothing.
+function devloop.keep(name, value)
+	if not KEY then return value end
+	local kept = S.kept[name]
+	if kept == nil or type(kept) ~= type(value) then
+		S.kept[name] = value
+		return value
+	end
+	return kept
+end
+
 -- Reload ----------------------------------------------------------------------
 
 -- A package.loaders entry serving `a.b` from the bundle's "a/b.lua". Modules
@@ -615,7 +803,9 @@ end
 -- nil on success or the error text; the second value is a warning when
 -- OnDriverDestroyed failed but the new code is running anyway (stopping
 -- there would leave the old code in place, with every retry hitting the
--- same teardown bug). `files` must come from a verified bundle.
+-- same teardown bug). `files` must come from a verified bundle. The old
+-- code's timers are cancelled after its OnDriverDestroyed (whatever that
+-- armed too) and before anything of the new code runs (the timer guard).
 local function reload(files, version)
 	local warning
 	local destroy = rawget(_G, "OnDriverDestroyed")
@@ -626,6 +816,8 @@ local function reload(files, version)
 			say("%s", warning)
 		end
 	end
+	local cancelled = cancel_timers()
+	if cancelled > 0 then say("cancelled %d timer(s) of the old code", cancelled) end
 	for name in pairs(package.loaded) do
 		if is_driver_module(name) then package.loaded[name] = nil end
 	end
@@ -1123,7 +1315,8 @@ function devloop.start(host_port)
 	S.busy, S.busy_ticks, S.unreachable = false, 0, false
 	wrap_print()
 	wrap_update_property()
-	S.timer = C4:SetTimer(devloop.INTERVAL_MS, function() guarded(tick) end, true)
+	-- On the runtime's own C4: the timer guard leaves the loop's timer alone.
+	S.timer = runtime_c4():SetTimer(devloop.INTERVAL_MS, function() guarded(tick) end, true)
 	say("started against http://%s", host_port)
 	if not KEY then say("%s: every bundle and command will be refused", KEY_PROBLEM) end
 	-- The startup report is the first chain, so the first tick waits for it.

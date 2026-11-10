@@ -13,7 +13,7 @@ findings as comments), and `docs/status.md` sums them up.
 
 ## 0. On this VM
 
-- `tools/check.sh --strict --only lua-lint lua-test shell python-lint
+- `tools/check.sh --strict --only lua-lint lua-test lua-limits shell python-lint
   python-test xml workflows secrets house` passes (every check but
   `powershell`, which needs `pwsh`; CI runs that one): `luacheck src tests
   tools` clean, `busted tests` green, the shell and Python tooling clean,
@@ -25,18 +25,25 @@ findings as comments), and `docs/status.md` sums them up.
   `deploy/house.yaml` valid. `tools/setup-checks.sh` first if a tool is
   missing.
 - `tools/build.sh` (release) and `tools/build.sh --dev`: the release
-  `hue_bridge.c4z` has 22 actions (`unzip -p build/hue_bridge.c4z
-  driver.xml | grep -c '<action>'`) and no `Dev Server`, `Diagnostic
-  Server`, `Connection Test`, `Reload Credentials`, `Check CA Pinning`; no
+  `hue_bridge.c4z` has 9 actions since 1.2 (#334; 29 before) (`unzip -p
+  build/hue_bridge.c4z driver.xml | grep -c '<action>'`), `hue_light.c4z`
+  and `hue_scene.c4z` 0, and `hue_motion.c4z` 1 (Test Motion Programming);
+  the bridge has no `Dev Server` or `Diagnostic Server` property (the
+  `DEV-ONLY` blocks of `src/hue_bridge/driver.xml`, which `tools/build.sh`
+  strips) and its Diagnostics list no "(dev) …" entry (two connection
+  experiments, reload credentials, check CA pinning: they come from
+  `bridge/devtools.lua`, which a release does not carry); no
   package holds `common/devloop.lua` or `common/devkey.lua`, and the bridge
   no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua`
   (`tools/build.sh` refuses to package a release stage that still has one).
-  The dev build has all of them (25 actions; each package carries the dev
+  The dev build has all of them (the same 9 actions, with the four
+  development entries inside the Diagnostics list; 32 actions before 1.2,
+  the three diagnostics before `Forget Pairing`); each package carries the dev
   key as `common/devkey.lua` and is written 0600). `build/manifest.json`
-  names the build, the commit, `"dev": false` or `true`, and the three
+  names the build, the commit, `"dev": false` or `true`, and the four
   packages' checksums and sizes.
 - `unzip -l build/<driver>.c4z` lists `LICENSE` and `NOTICE` in each of the
-  three packages (Apache 2.0 §4).
+  four packages (Apache 2.0 §4).
 - No LAN address, Hue application key or private certificate in `src/`,
   `docs/`, `tools/`, `tests/`: the `secrets` check (gitleaks with
   `.gitleaks.toml`) covers the tree and the history; the placeholders
@@ -45,7 +52,7 @@ findings as comments), and `docs/status.md` sums them up.
 
 ## 1. Dev loop on the house (dev build of the bridge)
 
-Build the three `--dev` files with `tools/build.sh --dev` from the commit
+Build the four `--dev` files with `tools/build.sh --dev` from the commit
 under test and install them through the Windows session the way `CLAUDE.md`
 (Deploy) describes for a dev build: served from `build/release/` on port
 8090, briefed with their sha256, recorded afterwards with `python3
@@ -54,23 +61,42 @@ state"). `tools/devserver.py` running, the bridge's `Dev Server` set to the
 `host:port` it prints, `tools/devctl.py status` shows the bridge polling.
 Then, through `tools/devctl.py run`, with the shipped log
 (`build/dev/driver.log`) as the evidence (`docs/dev-loop.md`); steps 2 to
-4 and the log scan of step 9 are scripted as `tools/regress.sh`:
+4 and the log scan of step 9 are scripted as `tools/regress.sh`. Since 1.2
+(#334) the steps name the 1.2 actions; every removed action's command
+string (`Test Connection`, `Refresh Scenes`, `Room Audit`, `Link Devices`,
+`Add Light`, …) still answers as a hidden alias until 2.0, so a script that
+calls the old names keeps working, and step 11 checks that it does:
 
 1. Startup: the log shows the resync (`event stream connected; resyncing
    <n> lights`, then `resync done`, `scene resync done` and `zone light
    resync done`; with the bridge's `Debug Mode` On also each GET: light,
    device, zigbee_connectivity, room, zone and bridge_home, then scene,
-   smart_scene and one grouped_light), the stream on its padded spelling
-   (`stream will use <spelling>, rotating over <k> spelling(s); self-check
-   via <spelling> OK`), and `Lights`, `Scenes`, `Zone Lights`, `Room
+   smart_scene and one grouped_light), the stream on its network connection
+   (`event stream: connecting to <address> (network connection, binding
+   6001)`; only on Web transfer the padded spelling, `stream will use
+   <spelling>, rotating over <k> spelling(s); self-check via <spelling>
+   OK`), and `Lights`, `Scenes`, `Zone Lights`, `Room
    Mappings` summaries matching the house (47 lights; 126 + 15 scenes; 7
    zones, 16 rooms; 23 mappings).
-2. `Test Connection` → `Status` "Test OK: HTTP 200 via … bridge …".
-3. `Refresh Scenes` → `Last Action` "Scenes refreshed: 126 + 15 time-based on
-   bridge, 2 imported, 2 deleted" (counts as on the house).
-4. `Room Audit`, `Link Devices`, `Adopt Hue Names`, `Accept Names As They
-   Are` → their texts, nothing changed (no new devices, no renames unless a
-   name differs).
+2. `Diagnostics` with "Check the connection now" → `Status` "Test OK: HTTP
+   200 via … bridge …".
+3. `Diagnostics` with "Read everything from the bridge now" → `Last Action`
+   "Read everything from the bridge now: started", then "Refreshed from the bridge: Lights: … | Scenes: …
+   | Zone lights: … | Motion: …" with the four list summaries, the scenes'
+   "126 scenes + 15 time-based on bridge, 2 imported, 2 deleted" (counts as
+   on the house).
+4. The background tasks of 1.2 in the log (with `Debug Mode` On): one line
+   per run, "housekeeping: <task> (<trigger>): OK: <what it did>; <n>
+   requests, <s> s" (for example "housekeeping: stream_down_read (timer):
+   OK: quick resync; 15 requests, 2.1 s"; "failed: …" for a failed run,
+   logged whatever Debug Mode says), the reads behind the stream, the
+   mapping of rooms by name, the room marks on the list rows;
+   nothing created, renamed, bound or moved by them. The pickers of `Add
+   From Hue`, `Link Device`, `Forget Device` and `Resolve Names` answer
+   their folders (`tools/devctl.py` can call each list function); nothing
+   changed. `Resolve Names` changes the owner's project (it renames), so
+   `tools/regress.sh` runs it only with `--with-renames`; run it when a name
+   difference is what is being tested.
 5. Zone light round trip on the Bedside Lights zone light (device 1166):
    `tools/devctl.py run "Proxy Command" Light=1166 Command=ON` (and the
    other light_v2 commands the same way) or the owner's tile: ON → one PUT
@@ -80,28 +106,49 @@ Then, through `tools/devctl.py run`, with the shipped log
    a drag a burst of three grouped_light PUTs, then at most one a second.
 6. Scene round trip on Shine (1162): ON → one scene recall PUT; OFF → one
    grouped_light off; the keypad hold (owner) → `dimming_delta` up/down and
-   `stop`.
+   `stop`. From 1.3 (#249, `docs/group-hold-design.md`): with 1 to 10
+   lamps of the room on, that start and stop go to each lit lamp's light
+   resource (the bridge logs `group hold <rid> up: per-light, <n> lights,
+   <ms> ms`) and the lamps ramp at the hold rate and stop at the release;
+   with more lit, group steps without a duration, one a second
+   (`stepped, <n> lights, <step> % a step`); from off, every lamp of the
+   room counts; with Shine recalled dynamically, or a time-based scene of
+   the room running, stepped whatever the count (`(scene running)` in the
+   line).
 7. Time-of-day scene: Golden hours (1164) ON → `smart_scene` activate; OFF →
    deactivate and the room off.
-8. Light lifecycle: `Add Light` of one light (Left Bedside Light) into the
-   Master Bedroom → `Last Action` "Added Left Bedside Light #<n> to Master
-   Bedroom (device <id>)", a device with `Status` "Left Bedside Light
-   (<model>)" and `Driver Version` at once; a Composer delete of that
-   device → `Lights` "…, <d> deleted" with `<d>` one higher, and `Add
-   Light` lists it "Left Bedside Light [<Hue room>] #<n> (deleted from
-   Composer <date>)".
-   (`Forget Light` before a delete leaves no tombstone: the device is
-   unbound, so its delete reaches no bridge, and the light is listed under
-   Add Light again without the mark.)
+8. Light lifecycle: `Add From Hue` of one light (Left Bedside Light) into
+   the Master Bedroom → `Last Action` "Added Left Bedside Light #<n> to
+   Master Bedroom (device <id>)", a device with `Status` "Left Bedside Light
+   (<model>)" and `Driver Version` at once; within seconds the device's
+   name and the Hue light's agree (no rename either way); a Composer delete
+   of that device → `Lights` "…, <d> deleted" with `<d>` one higher, and
+   `Add From Hue` lists it "Left Bedside Light [<Hue room>] #<n> (deleted
+   from Composer <date>)".
+   (`Forget Device` with Confirm "Yes, forget" before a delete leaves no
+   tombstone: the device is unbound, so its delete reaches no bridge, and
+   the light is listed under Add From Hue again without the mark; with
+   Confirm "No" it refuses with "Not forgotten: choose Yes, forget".)
 9. Events: a Hue-app change of a lamp → one `HUE_STATE` only to the devices
    that show it; `Events Received` rises; no error line in the log.
 10. Thirty minutes idle: no reconnect storms (the `Event Stream` row counts
-    the reconnects since start), no timer errors. Memory is not measured:
-    nothing in the drivers or the dev loop reports the Lua memory.
+    the reconnects since start), no timer errors, and the background tasks
+    quiet: no safety read in the first five minutes after a start (plus up
+    to a minute of jitter; a minute after a driver update), and none while
+    the stream is up and the last read is younger than 6 hours. (The
+    engine's hourly budget of 100 optional requests counts the safety
+    reads and the reads every 10 minutes while the stream is down, a quick
+    read being 15 requests on the Bridge Pro; the resync at every connect
+    is essential and not counted.) Memory is not measured: nothing in
+    the drivers or the dev loop reports the Lua memory.
+11. The old command strings (1.2, #334): `tools/devctl.py run "Test
+    Connection"`, `"Refresh Scenes"` and `"Room Audit"` answer as before
+    (the ledger spec, `tests/spec/ledger_spec.lua`, checks every alias on
+    the VM); none of them shows on the Actions tab.
 
 ## 2. Release build on the house (Windows session, Composer)
 
-Install the three release files from the GitHub release through
+Install the four release files from the GitHub release through
 `tools/deploy.py start` and the brief it writes ("Deploy to the house"
 below); no "Restart Director?" unless a capability changed (then the owner
 reboots the controller). Read:
@@ -115,13 +162,20 @@ reboots the controller). Read:
    row shows the summary and the list one line per item (47 lights; 141
    scenes; 23 zones and rooms; 23 mappings), and a pick snaps back to the
    summary and changes nothing. `Last Action` is a read-only text that
-   continues on `Last Action (2)` to `(6)`, rows shown only while they hold
-   text.
-3. The Actions tab: 22 actions, none of the three diagnostics.
-4. `Add Zone Light` for a throwaway zone, Driver Version at once, `Forget
-   Light`, delete: as in round 25 (`docs/composer-remote.md`).
+   continues on `Last Action (2)` to `(6)`, and `Attention` the same on
+   `Attention (2)` to `(6)`, rows shown only while they hold text.
+3. The Actions tab: 9 actions (Pair Bridge, Import All New, Add From Hue,
+   Link Device, Forget Device, Resolve Names, Set Room Mapping, Diagnostics,
+   Forget Pairing; 29 before 1.2), and the Diagnostics list without the
+   four "(dev) …" entries; a Hue Light's and a Hue Scene's Actions tab
+   empty, a Hue Motion Sensor's with Test Motion Programming alone.
+   `Bridges Found` below `Bridge IP Address`, reading "Paired with Hue
+   Bridge Pro (BSB003) at …".
+4. `Add From Hue` of a throwaway zone (its zones and rooms folder), Driver
+   Version at once, `Forget Device` with Confirm "Yes, forget", delete: as
+   in round 25 (`docs/composer-remote.md`), with the 1.2 actions.
 5. The Documentation tab opens and shows the manual's title and the
-   chapter list (and the three device pages).
+   chapter list (and the three device pages: light, scene and motion).
 6. The Lua tab of a device during the install: no `[ERROR]` line.
 7. The bridge's `Attention` does not read `TLS check failed: …` and
    `Status` reads `Paired`. What the TLS self-check proves (#53; the
@@ -151,8 +205,10 @@ reboots the controller). Read:
 
 Once per new controller OS version, before a build is called good on it:
 
-1. Install the three `--dev` files as in section 1 and run the bridge's
-   `Check CA Pinning` action once (`Status` reads `Checking CA pinning
+1. Install the four `--dev` files as in section 1 and run the bridge's
+   CA pinning check once: since 1.2 (#334) an entry of the dev build's
+   Diagnostics list, before that the `Check CA Pinning` action; `tools/devctl.py
+   run "Check CA Pinning"` reaches it either way (`Status` reads `Checking CA pinning
    against example.com` meanwhile). `Status` must read `Pinning check
    passed: only Signify-signed certificates are trusted`: a public-CA site
    (example.com) was refused with the driver's bundle, so the bundle
@@ -186,10 +242,12 @@ The release of this spike is **1.0 "Cassian"** (owner, 2026-10-24): git tag
 `v1.0`, a GitHub release titled `1.0 "Cassian"` with the Release workflow's
 seven assets attached (the three `.c4z` files, `SHA256SUMS.txt`,
 `manifest.json` and the provenance in two forms; "How a release is cut"
-below). Major versions are codenamed after Star Wars: Andor and every
-1.x release keeps "Cassian"; before a new major version the coordinator
-proposes a widely recognised character, place or object from the show and
-the owner approves it (used so far: Cassian). The driver files carry the
+below). Since 2026-10-26 (#304) every X.Y has its own codename, kept by
+all its builds and betas. Before the first build of a new X.Y the
+coordinator picks one and reports it, without waiting for approval
+(#396); it goes into `.github/codenames.json`, which `tools/changelog.py`
+reads. How the names are chosen stays out of public text (#416). The
+driver files carry the
 build number, the commit count, as `Driver Version` (Control4 needs an
 integer there); it is named in the release's `manifest.json`, in the
 release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the
@@ -224,7 +282,8 @@ development here is finished.
    (`docs/changelog-design.md`): before dispatching, make sure its
    `## Unreleased` entry lists what this build changes (a run with an empty
    entry fails), and for the first release of a new major version that the
-   codename is agreed (Andor rule). Check the release page: seven assets,
+   codename is in `.github/codenames.json` (#396). Check the release page: eight assets
+   (four since 1.1 added `hue_motion.c4z`),
    the title `<version> "<codename>"`, the notes' first heading with this
    build. After the release, the desired-state PR also runs
    `python3 tools/changelog.py stamp --version X.Y --build N --date
@@ -260,7 +319,7 @@ automatic, since the controller has no install API. After the release exists:
    controller from System Manager after the install"` when the build changes
    a `driver.xml` `<capabilities>` block, and `--supersede` when an earlier
    deployment is still in progress. It downloads `manifest.json`,
-   `SHA256SUMS.txt` and the three packages from the release into
+   `SHA256SUMS.txt` and the four packages from the release into
    `build/release/<tag>/`, verifies every sha256 against both files, that
    the manifest's build is the file's and its commit the tag's, and that
    each package's provenance attestation verifies with `gh attestation
@@ -280,7 +339,7 @@ automatic, since the controller has no install API. After the release exists:
    attestation that fails. `--tag` names another release than
    `deploy/house.yaml`'s.
 4. **Send the brief.** `BRIEF.md` goes to the Windows Composer session as it
-   is (`docs/composer-remote.md`): the three GitHub download URLs, each
+   is (`docs/composer-remote.md`): the four GitHub download URLs, each
    file's sha256, the PowerShell that fetches them into
    `C:\c4-hue\drivers\<tag>\` and checks them with `Get-FileHash`, the
    Composer steps (Driver ▸ Add or Update Driver or Agent…, all three at
@@ -334,8 +393,9 @@ only. What differs:
    number for every build a tester gets. Start the Release workflow with that
    version (Release ▸ Run workflow ▸ `1.1-beta.1`): it tags `main`'s head
    `v1.1-beta.1`. The tag never moves, so a version whose tag exists fails
-   before anything is built; take the next `N`. A prerelease keeps its major
-   version's codename (1.1-beta.1 is "Cassian").
+   before anything is built; take the next `N`. A prerelease carries its X.Y's
+   codename from `.github/codenames.json` (1.1-beta.1 is "Brasso"); a new
+   X.Y needs its name there first.
 2. **Changelog.** Nothing changes in `CHANGELOG.md`: the notes come from the
    same `## Unreleased` entry, which holds everything since the last release,
    and a prerelease is never stamped (`changelog.py stamp` refuses one); the
@@ -343,7 +403,7 @@ only. What differs:
    release.
 3. **What GitHub shows.** The release is marked Pre-release and never Latest,
    so `releases/latest` and the README's download links keep serving the
-   release. Check the title, `1.1 beta 1 "Cassian" (build N)`, the
+   release. Check the title, `1.1 beta 1 "Brasso" (build N)`, the
    Pre-release mark, and the assets: every package, `SHA256SUMS.txt`,
    `manifest.json` and the two provenance files. The notes come from
    `.github/prerelease-notes.md`: what it is, the release it follows, the

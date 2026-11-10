@@ -109,6 +109,7 @@
 				<maximum>3600</maximum>
 				<default>0</default>
 				<readonly>false</readonly>
+				<tooltip>Seconds to wait after motion ends before reporting no motion; new motion restarts the wait (0 = report at once)</tooltip>
 			</property>
 			<property>
 				<name>Last Action</name>
@@ -125,26 +126,18 @@
 				</items>
 				<default>Off</default>
 				<readonly>false</readonly>
+				<tooltip>Off in normal use; On writes a detailed log to the Lua tab for troubleshooting</tooltip>
 			</property>
 		</properties>
+		<!-- One action since 1.2 (#334, docs/simplify-actions-design.md §1.2): a
+		     toggle that checks programming without a sensor, kept in release
+		     builds. Refresh From Bridge, Test Motion and Test No Motion still
+		     answer by command, as hidden aliases until 2.0 (§3.3). -->
 		<actions>
 			<action>
-				<name>Refresh From Bridge</name>
-				<command>Refresh From Bridge</command>
+				<name>Test Motion Programming</name>
+				<command>Test Motion Programming</command>
 				<sort_order>1</sort_order>
-				<params/>
-			</action>
-			<!-- Kept in release builds: they check programming without a sensor. -->
-			<action>
-				<name>Test: Motion</name>
-				<command>Test Motion</command>
-				<sort_order>2</sort_order>
-				<params/>
-			</action>
-			<action>
-				<name>Test: No Motion</name>
-				<command>Test No Motion</command>
-				<sort_order>3</sort_order>
 				<params/>
 			</action>
 		</actions>
@@ -172,47 +165,56 @@
 	</states>
 	<!-- Ids are fixed forever: programming refers to them, so an event is never
 	     renumbered or removed [verified: FUND 14/_2]. Motion events are the
-	     proxy's own. -->
+	     proxy's own. sort_order (OS 3.3.0+, FUND 12.5_Events/_10) lists them in
+	     Programming in pairs: Hue on/off, online/offline, readings, battery (#434). -->
 	<events>
 		<event>
 			<id>1</id>
 			<name>Light Level Changed</name>
 			<description>When the light level at NAME changes</description>
+			<sort_order>4</sort_order>
 		</event>
 		<event>
 			<id>2</id>
 			<name>Temperature Changed</name>
 			<description>When the temperature at NAME changes</description>
+			<sort_order>5</sort_order>
 		</event>
 		<event>
 			<id>3</id>
 			<name>Battery Low</name>
 			<description>When the battery of NAME becomes low</description>
+			<sort_order>6</sort_order>
 		</event>
 		<event>
 			<id>4</id>
 			<name>Battery Normal</name>
 			<description>When the battery of NAME is normal again</description>
+			<sort_order>7</sort_order>
 		</event>
 		<event>
 			<id>5</id>
 			<name>Offline</name>
 			<description>When NAME goes offline</description>
+			<sort_order>3</sort_order>
 		</event>
 		<event>
 			<id>6</id>
 			<name>Online</name>
 			<description>When NAME comes online</description>
+			<sort_order>2</sort_order>
 		</event>
 		<event>
 			<id>7</id>
 			<name>Switched Off In Hue</name>
 			<description>When NAME is switched off or paused in the Hue app</description>
+			<sort_order>1</sort_order>
 		</event>
 		<event>
 			<id>8</id>
 			<name>Switched On In Hue</name>
 			<description>When NAME is switched on or resumed in the Hue app</description>
+			<sort_order>0</sort_order>
 		</event>
 	</events>
 	<!-- TestCondition in driver.lua answers these by name; ids and names are

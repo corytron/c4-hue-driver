@@ -18,6 +18,7 @@ local DEVICE_ID = 2001 -- the first id the fake's AddDevice hands out
 local BRIDGE_ID = 15
 local T0 = 1761000000
 local GROUPED = "https://192.0.2.10/clip/v2/resource/grouped_light/"
+local LIGHT = "https://192.0.2.10/clip/v2/resource/light/"
 
 local function proxy_calls(env, command)
 	local out = {}
@@ -42,7 +43,7 @@ local function sent_params(c4, command)
 end
 
 describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-link, deleted in Composer", function()
-	local bridge, light, bc4, L, Z, Q, now, last_hello
+	local bridge, light, bc4, L, Z, Q, LQ, GH, now, last_hello
 
 	local function http_ctx(req, cb)
 		req.ip = "192.0.2.10"
@@ -95,12 +96,13 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		log.set_prefix("Hue Bridge")
 
 		for _, m in ipairs({ "bridge.http", "bridge.hue_model", "bridge.registry", "bridge.groups", "bridge.lights",
-			"bridge.commands", "bridge.zone_lights" }) do
+			"bridge.commands", "bridge.zone_lights", "bridge.group_hold" }) do
 			package.loaded[m] = nil
 		end
 		local lights = require("bridge.lights")
 		local commands = require("bridge.commands")
 		local zone_lights = require("bridge.zone_lights")
+		local group_hold = require("bridge.group_hold")
 		L = lights.new({ http = http_ctx, now = function() return now end })
 		L:absorb({ light = decode_data(F.light), device = decode_data(F.device), room = decode_data(F.room),
 			zone = decode_data(F.zone), bridge_home = decode_data(F.bridge_home) })
@@ -130,17 +132,30 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 				Q:set(rid, fields)
 				return true
 			end,
+			-- As driver.lua's group_dim hook: bridge/group_hold.lua decides (#249).
 			group_dim = function(rid, body, level)
-				Q:set(rid, {
-					dim = body.dimming_delta.action,
-					delta = body.dimming_delta.brightness_delta,
-					rate = type(body.dynamics) == "table" and body.dynamics.duration or nil,
-					level = tonumber(level),
-				})
-				return true
+				return GH:dim(rid, body, level) == true
 			end,
 		})
 		Z:load()
+		-- The light queue and the hold module as driver.lua creates them.
+		LQ = commands.new({
+			send = function(rid, body, done)
+				http_ctx({ method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }, done)
+			end,
+		})
+		GH = group_hold.new({
+			members = function(rid) return Z:lights_of_grouped_light(rid) end,
+			is_on = function(rid)
+				local model = L:record_of(rid)
+				return model ~= nil and model.on == true
+			end,
+			light_set = function(rid, fields) LQ:set(rid, fields) return true end,
+			group_set = function(rid, fields) Q:set(rid, fields) return true end,
+			set_timer = function(ms, fn) return bridge.C4:SetTimer(ms, fn) end,
+			keep_group = function() return false end,
+			log = log,
+		})
 
 		-- What driver.lua does with a zone light's messages.
 		bridge.ExecuteCommand = function(command, params)
@@ -166,7 +181,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		-- The resync reads the groups' on/off and levels; nothing is created.
 		Z:resync()
 		answer_grouped_light_get()
-		assert.equal("2 zones, 2 rooms on bridge; 0 imported", Z:summary())
+		assert.equal("2 zones + 2 rooms on bridge, 0 imported, 3 new", Z:summary())
 		assert.equal(0, #bc4.added)
 
 		-- Add Zone Light for Downstairs with "(mapped room)": one AddDevice
@@ -188,7 +203,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		local st = sent_params(bc4, "HUE_STATE")
 		assert.equal("true", st.on)
 		assert.equal("73.52", st.brightness)
-		assert.equal("2 zones, 2 rooms on bridge; 1 imported", Z:summary())
+		assert.equal("2 zones + 2 rooms on bridge, 1 imported, 2 new", Z:summary())
 		assert.equal(GARAGE_ROOM, fake.project.devices[DEVICE_ID].room_id)
 
 		-- A second Add for the same zone is refused.
@@ -223,7 +238,8 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal("group", last_hello.kind)
 
 		-- ON from the proxy: HUE_SET to the bridge, one absolute PUT on the
-		-- zone's grouped_light (Decision 4: on at 100 %).
+		-- zone's grouped_light (Decision 4: on at the Default On Brightness,
+		-- 100 % while it was never changed; #233).
 		light.C4.calls = {}
 		bc4.sent = {}
 		local before = #bc4.transfers
@@ -249,22 +265,32 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.is_true(#br >= 1)
 		assert.equal(math.floor(tonumber(state.brightness) + 0.5), br[#br].LIGHT_BRIGHTNESS_CURRENT)
 
-		-- A keypad hold (HUE_DIM as the light driver sends it): the start is
-		-- dimming_delta up over the whole range with the ramp, the stop is a
-		-- stop; both go out at once (urgent, Decision 9).
+		-- A keypad hold (HUE_DIM as the light driver sends it) on a zone with
+		-- one lamp on (#249, docs/group-hold-design.md G4): the start is that
+		-- lamp's dimming_delta up over the whole range with the ramp, the stop
+		-- is a stop to the same lamp; both go out at once (urgent).
+		local lit = {}
+		for _, rid in ipairs(Z:lights_of_grouped_light(F.grouped_light_rids.downstairs)) do
+			local model = L:record_of(rid)
+			if model and model.on == true then
+				lit[#lit + 1] = rid
+			end
+		end
+		assert.equal(1, #lit, "the fixtures have one lamp of the zone on")
 		bc4.sent = {}
 		before = #bc4.transfers
 		bridge.ExecuteCommand("HUE_DIM", { rid = F.group_rids.downstairs, device_id = tostring(DEVICE_ID),
 			direction = "up", duration = "5000" })
 		put, body = flush_put()
 		assert.equal(before + 1, #bc4.transfers)
-		assert.equal(GROUPED .. F.grouped_light_rids.downstairs, put.url)
+		assert.equal(LIGHT .. lit[1], put.url)
 		assert.same({ dimming_delta = { action = "up", brightness_delta = 100 }, dynamics = { duration = 5000 } }, body)
 		answer_put(put)
 		bridge.ExecuteCommand("HUE_DIM", { rid = F.group_rids.downstairs, device_id = tostring(DEVICE_ID),
 			direction = "stop", level = "60" })
 		put, body = flush_put()
 		assert.equal(before + 2, #bc4.transfers)
+		assert.equal(LIGHT .. lit[1], put.url)
 		assert.same({ dimming_delta = { action = "stop" } }, body)
 		answer_put(put)
 
@@ -292,12 +318,12 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		event(F.events.zone_deleted)
 		assert.equal("gone", sent_params(bc4, "HUE_CONFIGURE").state)
 		fake.pump()
-		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; re-link or Forget",
+		assert.equal("Zone deleted in Hue since " .. os.date("%Y-%m-%d", now) .. "; Link or Forget Device",
 			light.Properties["Status"])
 		assert.equal("Offline", light.Properties["Online"])
-		assert.equal("1 zone, 2 rooms on bridge; 1 imported, 1 missing", Z:summary())
+		assert.equal("1 zone + 2 rooms on bridge, 1 imported, 2 new, 1 missing", Z:summary())
 		assert.equal("1 zone light missing from the bridge: Downstairs (device 2001, since " .. os.date("%Y-%m-%d", now)
-			.. ") (Re-link Zone Light or Forget Light)", Z:attention())
+			.. ") (Link or Forget Device)", Z:attention())
 		bc4.sent = {}
 		before = #bc4.transfers
 		fake.as(light, light.ReceivedFromProxy, 5001, "ON", {})
@@ -316,7 +342,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal(F.group_rids.garage, light.C4.persist.hue_rid)
 		assert.equal("Downstairs", fake.project.devices[DEVICE_ID].name, "the Composer name is the owner's")
 		assert.equal("1 zone light name differs from the Composer names: Downstairs is Garage Lights in Hue "
-			.. "(Adopt Hue Names or Accept Names As They Are)", Z:attention())
+			.. "(Resolve Names)", Z:attention())
 		assert.truthy(Z:accept_names():find("^Accepted 1 zone light name difference"))
 		assert.equal("None", Z:attention())
 
@@ -325,7 +351,7 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		fake.delete_device(DEVICE_ID)
 		assert.is_nil(bc4.persist.hue_zone_lights[F.group_rids.garage])
 		assert.equal("Garage", bc4.persist.hue_zone_light_tombstones[F.group_rids.garage].name)
-		assert.equal("1 zone, 2 rooms on bridge; 0 imported, 1 deleted", Z:summary())
+		assert.equal("1 zone + 2 rooms on bridge, 0 imported, 1 new, 1 deleted", Z:summary())
 		local list = Z:picker_groups()
 		assert.truthy(list[#list].text:find("^Garage %(room, 1 light%) %(deleted from Composer "))
 		results = {}
@@ -334,6 +360,36 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.is_nil(bc4.persist.hue_zone_light_tombstones[F.group_rids.garage])
 		assert.equal(2002, bc4.persist.hue_zone_lights[F.group_rids.garage].device_id)
 		assert.equal("Garage Lights", bc4.added[2].name, "a room light is named <Room> Lights")
+	end)
+
+	-- #233: the zone light's own Default On Brightness reaches every lamp
+	-- for ON and for TOGGLE from off, as on a single light; TOGGLE from on
+	-- is one group off.
+	it("turns the zone on at the zone light's Default On Brightness for ON and TOGGLE", function()
+		Z:resync()
+		answer_grouped_light_get()
+		Z:add(F.group_rids.downstairs, nil, function() end)
+		fake.pair(bridge, light, { light_id = DEVICE_ID, bind = false })
+		fake.as(light, light.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		fake.as(light, light.ReceivedFromProxy, 5001, "SET_PRESET_LEVEL", { LEVEL = "60" })
+		assert.equal(60, light.C4.persist.preset_level)
+
+		local function command(name)
+			fake.as(light, light.ReceivedFromProxy, 5001, name, {})
+			assert.is_true(fake.pump() >= 1, "HUE_SET reached the bridge")
+			local put, body = flush_put()
+			assert.equal(GROUPED .. F.grouped_light_rids.downstairs, put.url)
+			answer_put(put)
+			return body
+		end
+
+		-- The zone is on (the fixtures have one lamp lit): ON sets every lamp to 60.
+		assert.same({ on = { on = true }, dimming = { brightness = 60 } }, command("ON"))
+		assert.same({ on = { on = false } }, command("TOGGLE"))
+		event(F.events.zone_off)
+		fake.pump()
+		assert.same({ on = { on = true }, dimming = { brightness = 60 } }, command("TOGGLE"))
 	end)
 
 	-- Issue #58: the bridge clamps a zone light's colour temperature to the

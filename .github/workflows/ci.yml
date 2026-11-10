@@ -60,16 +60,20 @@ jobs:
           rock mediator_lua 1.1.2-0
           rock busted 2.3.0-1
           lua5.1 -v
+          luac5.1 -v
           luacheck --version
           busted --version
 
-      - name: Lint and test (luacheck, busted)
-        run: tools/check.sh --strict --only lua-lint lua-test
+      # lua-limits compiles every src/ Lua file with luac5.1 (the lua5.1 package
+      # installs it) and fails when a function nears Lua 5.1's limits of 200
+      # locals or 60 upvalues (docs/driver-locals-design.md).
+      - name: Lint, test and check the Lua limits (luacheck, busted, luac5.1)
+        run: tools/check.sh --strict --only lua-lint lua-test lua-limits
 
   # The name is a required status check on main, so it keeps its words; the
   # job builds and checks one package per src/<driver>/driver.xml, however many.
   build:
-    name: Build the three .c4z packages
+    name: Build the .c4z packages
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -203,6 +207,14 @@ jobs:
         run: |
           tools/setup-checks.sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # luac5.1, so the lua-limits tests that compile real files run here too
+      # (#373); without it python-test skips those seven.
+      - name: Install Lua 5.1 (luac5.1)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1
+          luac5.1 -v
 
       - name: Shell, Python, XML, PowerShell, workflow, desired-state, changelog and link checks
         run: tools/check.sh --strict --only shell python-lint python-test xml powershell workflows house changelog links

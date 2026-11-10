@@ -8,7 +8,7 @@ in good faith, on a best-effort basis.
 
 Only the **latest release** on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases) is
-supported: the three `.c4z` files attached to it, identified by the build
+supported: the four `.c4z` files attached to it, identified by the build
 number they show as **Driver Version** in Composer. Older builds get no
 fixes; update in place through Composer's *Add or Update Driver or Agent...*
 (see the README). Development builds (`tools/build.sh --dev`) are for the
@@ -100,7 +100,7 @@ directly is the Hue API's own threat model, not this driver's.
   <https://scorecard.dev/viewer/?uri=github.com/corytron/c4-hue-driver>.
 - **Build provenance.** The Release workflow builds the packages in one job,
   with read-only access, and in a second job that runs no third-party code
-  signs one build-provenance attestation naming the three packages; the
+  signs one build-provenance attestation naming the four packages; the
   bundle is also attached to the release as `attestations.sigstore.json`,
   and its in-toto envelope as `hue-drivers.intoto.jsonl`. Verify a download,
   once per package, with

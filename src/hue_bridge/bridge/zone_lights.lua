@@ -76,14 +76,14 @@ zone_lights.TAG = "zone_lights"
 zone_lights.WORDS = {
 	held = "group",                                  -- "its registered group is <rid>"
 	stranger = "a device that is not a zone light",  -- a HUE_GOODBYE the module does not hold
-	goodbye_tail = "Add Zone Light lists it as deleted",
-	add_action = "Add Zone Light",
+	goodbye_tail = "Add From Hue lists it as deleted",
+	add_action = "Add From Hue",
 	busy_job = "adding a zone light",
 	busy_resync = "resyncing zone lights",
 	kind = "zone light",
 	unbound_kind = "unbound zone light device",
-	relink_or_forget = "Re-link Zone Light or Forget Light",
-	forget_action = "Forget Light",
+	relink_or_forget = "Link or Forget Device",
+	forget_action = "Forget Device",
 	name_kind = "zone light name",
 	hue_names = "Hue zone and room names",
 	device_noun = "zone light device",
@@ -369,6 +369,26 @@ function zone_lights:grouped_light_of(group_rid)
 		end
 	end
 	return grouped
+end
+
+-- The member light rids of the zone or room whose grouped_light is
+-- `grouped_light_rid`, in the group's order (member_lights): what a keypad
+-- hold on a scene, a zone light or a room light fans out over
+-- (bridge/group_hold.lua, docs/group-hold-design.md G3). Read only, and for
+-- any zone or room in the lights' cache, registered here or not (a scene's
+-- group need not have a zone light). {} for an unknown or deleted
+-- grouped_light, the bridge_home's, or a group whose members are not cached.
+-- A fresh table each call.
+function zone_lights:lights_of_grouped_light(grouped_light_rid)
+	if type(grouped_light_rid) ~= "string" or grouped_light_rid == "" then
+		return {}
+	end
+	for _, group in ipairs(self:groups():groups()) do  -- rooms, then zones; never the bridge_home
+		if self:grouped_light_of(group.rid) == grouped_light_rid then
+			return self:member_lights(group)
+		end
+	end
+	return {}
 end
 
 -- Labels ---------------------------------------------------------------------
@@ -694,7 +714,7 @@ function zone_lights:reconcile_groups()
 		elseif self:groups_loaded() and entry.state == "linked" and self.reg:set_state(rid, "gone") then
 			self:mark()
 			self.ctx.log.warn("zone_lights: %s (device %d) is no longer on the bridge; marked gone "
-				.. "(Re-link Zone Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+				.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 			self:announce_gone(rid, "resync")
 		end
 	end
@@ -860,7 +880,7 @@ function zone_lights:refresh_all(carried, touched)
 				if entry.state == "linked" and self:groups_loaded() and self.reg:set_state(rid, "gone") then
 					self:mark()
 					self.ctx.log.warn("zone_lights: %s (device %d) was deleted on the bridge; marked gone "
-						.. "(Re-link Zone Light or Forget Light)", self:entry_label(rid, entry), entry.device_id)
+						.. "(Link or Forget Device)", self:entry_label(rid, entry), entry.device_id)
 					if self:announce_gone(rid, "event") then
 						sent = sent + 1
 					end
@@ -1066,8 +1086,8 @@ function zone_lights:entry_for_command(params, what)
 		return nil
 	end
 	if entry.state == "gone" then
-		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Re-link Zone Light "
-			.. "or Forget Light)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
+		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Link or Forget "
+			.. "Device)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
 			util.date_of(entry.gone_since))
 		return nil
 	end
@@ -1080,13 +1100,18 @@ function zone_lights:entry_for_command(params, what)
 	return rid, entry, grouped
 end
 
--- HUE_SET { rid, on?, brightness?, x?, y?, mirek?, rate? } (strings): the
--- absolute body of Decision 5 on the group's grouped_light through
+-- HUE_SET { rid, on?, brightness?, x?, y?, mirek?, rate?, urgent? } (strings):
+-- the absolute body of Decision 5 on the group's grouped_light through
 -- ctx.group_set (coalesced per group by the driver's group queue, which
 -- builds the PUT: on, dimming.brightness, color.xy or
 -- color_temperature.mirek, dynamics). ON from the device arrives as on=true
--- brightness=100 (Decision 4); a colour while off is kept by the device for
--- the next turn-on (Decision 7), so nothing is held here. Returns true when queued.
+-- with the device's Default On Brightness as brightness, 100 unless the
+-- dealer changed it (Decision 4, #233); a colour while off is kept by the
+-- device for the next turn-on (Decision 7), so nothing is held here.
+-- urgent = "true" (a keypad tap's start, or a tap stop sent as a level)
+-- becomes `urgent = true` in the fields, so the group queue sends it past
+-- its one-a-second bucket (#421 D12, bridge/commands.lua); it is not
+-- something to set on its own. Returns true when queued.
 function zone_lights:set(params)
 	params = params or {}
 	local rid, entry, grouped = self:entry_for_command(params, "HUE_SET")
@@ -1105,6 +1130,9 @@ function zone_lights:set(params)
 	elseif params.on == "false" or params.on == false then
 		fields.on = false
 	end
+	if params.urgent == "true" or params.urgent == true then
+		fields.urgent = true
+	end
 	if fields.on == nil and fields.brightness == nil and fields.mirek == nil and not (fields.x and fields.y) then
 		self.ctx.log.warn("zone_lights: HUE_SET for %s (device %d) carries nothing to set", self:entry_label(rid, entry),
 			entry.device_id)
@@ -1112,9 +1140,9 @@ function zone_lights:set(params)
 	end
 	if self.ctx.log.enabled("info") then   -- a slider drag sends several of these a second
 		self.ctx.log.info("zone_lights: HUE_SET %s (device %d): grouped_light %s on=%s brightness=%s x=%s y=%s mirek=%s "
-			.. "rate=%s", self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), tostring(fields.on),
+			.. "rate=%s%s", self:entry_label(rid, entry), entry.device_id, tostring(grouped):sub(1, 8), tostring(fields.on),
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
-			tostring(fields.rate))
+			tostring(fields.rate), fields.urgent and " urgent" or "")
 	end
 	if self.ctx.group_set(grouped, fields) ~= true then
 		self.ctx.log.warn("zone_lights: HUE_SET for %s (device %d): nothing queued", self:entry_label(rid, entry),
@@ -1129,7 +1157,11 @@ end
 -- (Decision 6; verified on a grouped_light 2026-10-23): up/down run the
 -- whole range over `duration` ms (clamped to 0..DIM_MAX_DURATION, default
 -- DIM_DEFAULT_DURATION), stop ends it; the device's level estimate goes with
--- a stop, for the queue's fallback. No STATE is sent. Returns true when queued.
+-- a stop, for the queue's fallback. A tap's stop takes the same path (#421
+-- D14): with no hold running, group_hold passes it to the group queue
+-- unchanged (its G7), which turns it into that level at once if the tap's
+-- start is still waiting there (D13). No STATE is sent. Returns true when
+-- queued.
 function zone_lights:dim(params)
 	params = params or {}
 	local rid, entry, grouped = self:entry_for_command(params, "HUE_DIM")
@@ -1207,6 +1239,12 @@ function zone_lights:room_group_of(group)
 	return group.rid, self:group_label(group)
 end
 
+-- (owner hook) A zone light's room mark follows the mapping of the zone or
+-- room it stands for.
+function zone_lights.mark_group(_self, rid)
+	return rid
+end
+
 function zone_lights:add_label(group)
 	return self:group_label(group)
 end
@@ -1252,8 +1290,8 @@ function zone_lights:add(a, b, c)
 		if any and any.type == "bridge_home" then
 			done(false, "Not added: the whole bridge cannot be a zone light")
 		else
-			done(false, string.format("Not added: zone or room %s is not on the bridge (connect the event stream and try again)",
-				tostring(rid)))
+			done(false, string.format("Not added: zone or room %s is not on the bridge (Diagnostics ▸ Read everything "
+				.. "from the bridge now, then try again)", tostring(rid)))
 		end
 		return false
 	end
@@ -1299,8 +1337,41 @@ function zone_lights:relink_refusal(device_id, new_rid)
 	if self:models()[new_rid] then
 		return string.format("Not re-linked: device %d is a zone light; pick a zone or room", device_id)
 	end
-	return string.format("Not re-linked: zone or room %s is not on the bridge (connect the event stream and try "
-		.. "again)", tostring(new_rid))
+	return string.format("Not re-linked: zone or room %s is not on the bridge (Diagnostics ▸ Read everything from "
+		.. "the bridge now, then try again)", tostring(new_rid))
+end
+
+-- (owner hook) R4, B1: a gone zone light and a zone or room with no device,
+-- of its type and with its name (owner.same_group: the group is the room
+-- itself, so after a bridge reset or a room deleted and made again only its
+-- name can tell; §4 finding 9). Suggested only, never automatic (groups have
+-- no radio); Link Device lists it with the others.
+function zone_lights:name_suggestions(seen)
+	local out, sources = {}, {}
+	for _, rid in ipairs(self.reg:rids("gone")) do
+		if not seen[rid] and self:record_of(rid) == nil then
+			sources[#sources + 1] = rid
+		end
+	end
+	if #sources == 0 then
+		return out
+	end
+	local tombs = self.reg:tombstones()
+	for _, group in ipairs(self:groups():groups()) do
+		if self.GROUP_TYPES[group.type] and not self.registry[group.rid] and tombs[group.rid] == nil then
+			local label, matches = hue_model.group_label(group.name, group.type), {}
+			for _, rid in ipairs(sources) do
+				local entry = self.registry[rid]
+				if owner.same_group(rid, hue_model.group_label(entry.name, entry.group_type), group.rid, label) then
+					matches[#matches + 1] = rid
+				end
+			end
+			for _, rid in ipairs(matches) do
+				out[#out + 1] = { entry_rid = rid, rid = group.rid, why = "same name", ambiguous = #matches > 1 }
+			end
+		end
+	end
+	return out
 end
 
 -- "Re-linked device 1180 (was Bedside Lights) to zone Reading Nook".
@@ -1392,28 +1463,30 @@ end
 
 -- Texts ---------------------------------------------------------------------------
 
--- The Zone Lights property: "7 zones, 16 rooms on bridge; 1 imported" with
--- ", n missing" / ", n unbound" / ", n deleted" appended only when not zero
--- (under 60 characters for the usual counts); "<n> imported" before the
--- groups are fetched.
+-- The zones and rooms Add Zone Light would accept: on the bridge with
+-- lights (a grouped_light), no device, not deleted in Composer. The Zone
+-- Lights row's "new" (docs/list-rows-design.md); an empty zone is not new.
+function zone_lights:new_count()
+	local tombs, n = self.reg:tombstones(), 0
+	for _, group in ipairs(self:groups():groups()) do
+		if not self.registry[group.rid] and tombs[group.rid] == nil and self:grouped_light_of(group.rid) ~= nil then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+-- The Zone Lights row (owner:row_summary, docs/list-rows-design.md): "7
+-- zones + 16 rooms on bridge, 1 imported, 22 new", then ", n missing", ", n
+-- unbound", ", n deleted" when not 0; "<n> imported" before the groups are
+-- fetched.
 function zone_lights:summary()
 	if not self:groups_loaded() then
-		return string.format("%d imported", self:count())
+		return self:row_summary()
 	end
-	local cache = self:groups()
-	local c = self.reg:counts()
-	local text = string.format("%s, %s on bridge; %d imported", util.plural(#cache:groups("zone"), "zone"),
-		util.plural(#cache:groups("room"), "room"), self:count())
-	if c.gone > 0 then
-		text = text .. string.format(", %d missing", c.gone)
-	end
-	if c.unbound > 0 then
-		text = text .. string.format(", %d unbound", c.unbound)
-	end
-	if c.tombstones > 0 then
-		text = text .. string.format(", %d deleted", c.tombstones)
-	end
-	return text
+	local on_bridge = self:groups():counts()
+	return self:row_summary(string.format("%s + %s", util.plural(on_bridge.zone or 0, "zone"),
+		util.plural(on_bridge.room or 0, "room")), self:new_count())
 end
 
 -- The Attention items (driver.lua joins them after the lights' and the
@@ -1531,10 +1604,16 @@ end
 -- and " (deleted in Hue; device N)" when gone. Commas become "‚" (U+201A):
 -- the list is comma-delimited (driver.lua's refresh_room_mappings). Before
 -- the groups are fetched, the registry alone: what is known. Empty when
--- nothing is.
+-- nothing is. A linked zone light whose device sits in another Control4
+-- room than its zone or room maps to carries the room mark
+-- (owner:room_marks).
 function zone_lights:list_items()
 	local cache = self:groups()
 	local tombs = self.reg:tombstones()
+	local marks = self:room_marks()
+	local function state_of(entry)
+		return entry_suffix(entry) .. (entry.state == "linked" and marks[entry.device_id] or "")
+	end
 	local out, listed = {}, {}
 	for _, gtype in ipairs({ "zone", "room" }) do
 		for _, group in ipairs(cache:groups(gtype)) do
@@ -1548,7 +1627,7 @@ function zone_lights:list_items()
 			local text = list_label(group.name, gtype, count)
 			local entry, tomb = self.registry[group.rid], tombs[group.rid]
 			if entry then
-				text = text .. entry_suffix(entry)
+				text = text .. state_of(entry)
 			elseif tomb then
 				text = text .. string.format(" (deleted from Composer %s)", util.date_of(tomb.deleted_at))
 			end
@@ -1564,7 +1643,7 @@ function zone_lights:list_items()
 			elseif entry.light_count then
 				count = util.plural(entry.light_count, "light")
 			end
-			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. entry_suffix(entry)
+			out[#out + 1] = list_label(entry.name, type_word(entry.group_type), count) .. state_of(entry)
 		end
 	end
 	for i, text in ipairs(out) do

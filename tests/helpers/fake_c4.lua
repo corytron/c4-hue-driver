@@ -366,9 +366,12 @@ local function new_c4(env)
 		return new_transfer(c4)
 	end
 
+	-- A timer remembers when it was armed and when it falls due on the fake
+	-- clock (c4.now_ms), for c4.advance; fire_timers ignores both.
 	function c4:SetTimer(delay_ms, callback, repeating)
 		assert(delay_ms > 0, "timer delay must be > 0")
-		local timer = { delay = delay_ms, callback = callback, repeating = repeating or false, active = true }
+		local timer = { delay = delay_ms, callback = callback, repeating = repeating or false, active = true,
+			armed_at = c4.now_ms, due = c4.now_ms + delay_ms }
 		function timer:Cancel()
 			self.active = false
 		end
@@ -854,6 +857,124 @@ local function new_c4(env)
 		return t, epoch, micro
 	end
 
+	-- Dynamic network connections [verified: API 32/_1 CreateNetworkConnection,
+	-- 32/_25 NetPortOptions, 32/_23 NetConnect, 32/_24 NetDisconnect, 32/_20
+	-- SendToNetwork, 32/_16 SetBindingAddress, 32/_2 GetBindingAddress; 22/_31
+	-- RemoveDynamicBinding]:
+	--   c4.network[binding] = { address, type, ports = { [port] = port } }
+	--   port = { ip_type, options, state, connects, sent }
+	-- NetPortOptions keeps a copy of its table as options; NetConnect makes
+	-- the port "connecting" (connects counts them), NetDisconnect "closed";
+	-- SendToNetwork appends its data to sent. NetPortOptions, NetConnect and
+	-- SendToNetwork on a binding never created raise; NetDisconnect and
+	-- SetBindingAddress there only record the call [assumed: Director ignores
+	-- them]. Creating a binding again changes its address and type and keeps
+	-- its ports [assumed]. RemoveDynamicBinding forgets the binding (below).
+	--
+	-- Director's side is the spec's: c4.net_status(binding, port,
+	-- "ONLINE"|"OFFLINE") makes the port "online" or "closed" and calls the
+	-- driver's OnConnectionStatusChanged; c4.net_receive(binding, port, data)
+	-- calls its ReceivedFromNetwork. A module spec routes them by setting
+	-- env.OnConnectionStatusChanged and env.ReceivedFromNetwork on the env
+	-- fake.install_c4 returns, as a driver's globals do. Nothing is delivered
+	-- on its own: whether Director reports OFFLINE after a driver's own
+	-- NetDisconnect is not documented [assumed: it does,
+	-- docs/raw-stream-design.md §3], so a spec delivers it when it wants it.
+	c4.network = {}
+
+	local function net_port(binding, port, what)
+		local conn = c4.network[binding]
+		assert(conn, "C4:" .. what .. ": network binding " .. tostring(binding)
+			.. " was never created (C4:CreateNetworkConnection)")
+		local p = conn.ports[port]
+		if not p then
+			p = { connects = 0, sent = {} }
+			conn.ports[port] = p
+		end
+		return p
+	end
+
+	function c4:CreateNetworkConnection(binding, address, conn_type)
+		record("CreateNetworkConnection", binding, address, conn_type)
+		assert(type(binding) == "number" and binding >= 6000 and binding <= 6999,
+			"C4:CreateNetworkConnection: network bindings are 6000-6999 [API 32/_1]")
+		local conn = c4.network[binding] or { ports = {} }
+		conn.address, conn.type = address, conn_type
+		c4.network[binding] = conn
+	end
+
+	function c4:NetPortOptions(binding, port, ip_type, options)
+		record("NetPortOptions", binding, port, ip_type, options)
+		local p = net_port(binding, port, "NetPortOptions")
+		p.ip_type, p.options = ip_type, {}
+		for k, v in pairs(options or {}) do
+			p.options[k] = v
+		end
+	end
+
+	function c4:NetConnect(binding, port, ip_type, suppress)
+		record("NetConnect", binding, port, ip_type, suppress)
+		local p = net_port(binding, port, "NetConnect")
+		p.state = "connecting"
+		p.connects = p.connects + 1
+	end
+
+	function c4:NetDisconnect(binding, port)
+		record("NetDisconnect", binding, port)
+		local conn = c4.network[binding]
+		if conn and conn.ports[port] then
+			conn.ports[port].state = "closed"
+		end
+	end
+
+	-- C4:RemoveDynamicBinding(binding) [verified: API 22/_31, from 1.6.0; that
+	-- it removes a binding made by CreateNetworkConnection is assumed, #329]:
+	-- the binding is forgotten, so NetPortOptions, NetConnect and SendToNetwork
+	-- on it raise as on one never created, and a later CreateNetworkConnection
+	-- starts it afresh. On a binding that does not exist it only records the
+	-- call [assumed]. c4.net_status and c4.net_receive still deliver reports
+	-- for a removed id, as a late report from Director would look.
+	function c4:RemoveDynamicBinding(binding)
+		record("RemoveDynamicBinding", binding)
+		c4.network[binding] = nil
+	end
+
+	function c4:SendToNetwork(binding, port, data)
+		record("SendToNetwork", binding, port, data)
+		table.insert(net_port(binding, port, "SendToNetwork").sent, data)
+	end
+
+	function c4:SetBindingAddress(binding, address)
+		record("SetBindingAddress", binding, address)
+		if c4.network[binding] then
+			c4.network[binding].address = address
+		end
+	end
+
+	-- nil for a binding never created [assumed].
+	function c4:GetBindingAddress(binding)
+		record("GetBindingAddress", binding)
+		return c4.network[binding] and c4.network[binding].address or nil
+	end
+
+	-- Director reports a connection's status (see above).
+	function c4.net_status(binding, port, status)
+		local conn = c4.network[binding]
+		if conn and conn.ports[port] then
+			conn.ports[port].state = status == "ONLINE" and "online" or "closed"
+		end
+		if type(env.OnConnectionStatusChanged) == "function" then
+			as(env, env.OnConnectionStatusChanged, binding, port, status)
+		end
+	end
+
+	-- Director hands over data received on a connection (see above).
+	function c4.net_receive(binding, port, data)
+		if type(env.ReceivedFromNetwork) == "function" then
+			as(env, env.ReceivedFromNetwork, binding, port, data)
+		end
+	end
+
 	-- Every recorded call with the given name, in order.
 	function c4.calls_to(name)
 		local out = {}
@@ -890,6 +1011,62 @@ local function new_c4(env)
 			if timer.active then table.insert(out, timer) end
 		end
 		return out
+	end
+
+	-- Fire, as fire_timers does, only the active timers armed for exactly
+	-- `delay_ms` (the 1 ms deferrals, say), leaving every other one armed.
+	-- Returns how many fired.
+	function c4.fire_timers_of(delay_ms)
+		local due = {}
+		for _, timer in ipairs(c4.timers) do
+			if timer.active and timer.delay == delay_ms then table.insert(due, timer) end
+		end
+		for _, timer in ipairs(due) do
+			if not timer.repeating then timer.active = false end
+			timer.callback(timer, 0)
+		end
+		return #due
+	end
+
+	-- The fake clock (#334, docs/simplify-research-scheduler.md §6): move
+	-- c4.now_ms forward by `ms`, firing on the way every active timer that
+	-- falls due by then, one at a time in due order (ties in the order they
+	-- were armed), with c4.now_ms at the timer's due time while its callback
+	-- runs. A one-shot timer is retired before its callback; a repeating one
+	-- is re-armed one period on (skips 0). A timer armed by a callback fires
+	-- in the same call when it falls due by the end. Ends at start + ms (or
+	-- later, if a callback moved the clock on). Returns how many fired, and
+	-- fails after 200000 in one call (a timer that re-arms itself without
+	-- end). fire_timers, active_timers and fire_timers_of are unchanged by it.
+	-- A timer once inactive never fires again, so the search starts at the
+	-- first active one (c4.advance_from).
+	function c4.advance(ms)
+		local target = c4.now_ms + (tonumber(ms) or 0)
+		local fired = 0
+		while true do
+			local first = c4.advance_from or 1
+			while c4.timers[first] and not c4.timers[first].active do first = first + 1 end
+			c4.advance_from = first
+			local next_timer
+			for i = first, #c4.timers do
+				local timer = c4.timers[i]
+				if timer.active and timer.due <= target and (next_timer == nil or timer.due < next_timer.due) then
+					next_timer = timer
+				end
+			end
+			if not next_timer then break end
+			fired = fired + 1
+			assert(fired <= 200000, "c4.advance: 200000 timers fired in one call; does a timer re-arm itself without end?")
+			if next_timer.due > c4.now_ms then c4.now_ms = next_timer.due end
+			if next_timer.repeating then
+				next_timer.due = next_timer.due + next_timer.delay
+			else
+				next_timer.active = false
+			end
+			next_timer.callback(next_timer, 0)
+		end
+		if target > c4.now_ms then c4.now_ms = target end
+		return fired
 	end
 
 	return c4
@@ -1019,7 +1196,8 @@ end
 as = fake.as
 
 -- Make two loaded drivers see each other: shared bindings, routed
--- SendToDevice, and c4.fire_timers that runs with the right globals. With
+-- SendToDevice, and c4.fire_timers and c4.advance that run with the right
+-- globals (each runtime keeps its own clock, c4.now_ms). With
 -- opts.bind (default true) the light's binding 1 is bound to the bridge's
 -- binding 1, class HUE_BRIDGE, as Composer or C4:Bind would. Both drivers'
 -- devices are registered in the project (an entry AddDevice made is kept).
@@ -1042,6 +1220,11 @@ function fake.pair(bridge_env, light_env, opts)
 			local orig = env.C4.fire_timers
 			env.C4.fire_timers = function() return fake.as(env, orig) end
 			env.C4.fire_timers_wrapped = true
+		end
+		if not env.C4.advance_wrapped then
+			local orig = env.C4.advance
+			env.C4.advance = function(ms) return fake.as(env, orig, ms) end
+			env.C4.advance_wrapped = true
 		end
 	end
 	return l.device_id
@@ -1201,6 +1384,19 @@ function fake.custom_select(env, fn_name, ...)
 	local fn = env[fn_name]
 	assert(type(fn) == "function", "fake.custom_select: " .. tostring(fn_name) .. " is not a function of that driver")
 	return fake.as(env, fn, ...)
+end
+
+-- The bridge's Attention as one text: the row and its continuation rows
+-- "Attention (2)" to "Attention (6)", word-wrapped as Last Action's (#334).
+function fake.attention(env)
+	local parts = { env.Properties["Attention"] or "" }
+	for i = 2, 6 do
+		local row = env.Properties[string.format("Attention (%d)", i)]
+		if row ~= nil and row ~= "" then
+			parts[#parts + 1] = row
+		end
+	end
+	return table.concat(parts, " ")
 end
 
 return fake

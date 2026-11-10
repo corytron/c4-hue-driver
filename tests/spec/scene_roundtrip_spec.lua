@@ -71,8 +71,10 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		now = T0
 
 		-- The scene driver first, then the bridge runtime (its globals stay in
-		-- place), then the project.
-		scene = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+		-- place), then the project. On State Follows "This scene": the loop pins
+		-- the on rule, and the fixture's room is lit (the lights mode is pinned
+		-- in scene_driver_spec.lua, docs/scene-led-design.md).
+		scene = fake.load_driver("hue_scene", { ["On State Follows"] = "This scene" }, { device_id = SCENE_ID })
 		local env
 		bc4, env = fake.install_c4()
 		bridge = env
@@ -122,7 +124,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		-- The bridge's resync brings the catalogue; nothing is created from it.
 		S:resync()
 		answer_scene_gets()
-		assert.equal("5 + 1 time-based on bridge, 0 imported, 0 deleted", S:summary())
+		assert.equal("5 scenes + 1 time-based on bridge, 0 imported, 6 new", S:summary())
 		assert.equal(0, #bc4.added)
 
 		-- Add Scene for Relax: one AddDevice into the mapped Living Room, bound,
@@ -133,7 +135,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.same({ { id = SCENE_ID, driver = "hue_scene.c4z", room = LIVING_ROOM, name = "Relax" } }, bc4.added)
 		assert.equal(1, #bc4.bindings)
 		assert.same({ "HUE_SCENE_CONFIGURE", "HUE_SCENE_STATE" }, messages_to(bc4, SCENE_ID))
-		assert.equal("5 + 1 time-based on bridge, 1 imported, 0 deleted", S:summary())
+		assert.equal("5 scenes + 1 time-based on bridge, 1 imported, 5 new", S:summary())
 		assert.equal(LIVING_ROOM, fake.project.devices[SCENE_ID].room_id)
 		assert.equal("Relax", fake.project.devices[SCENE_ID].name)
 
@@ -258,11 +260,11 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("gone", bc4.sent[1].params.state)
 		assert.equal(2, fake.pump())
 		assert.equal("Scene deleted in Hue since " .. os.date("%Y-%m-%d %H:%M", now)
-			.. "; ON does nothing; re-link or Forget", scene.Properties["Status"])
+			.. "; ON does nothing; Link or Forget Device", scene.Properties["Status"])
 		assert.equal("Offline", scene.Properties["Online"])
-		assert.equal("4 + 1 time-based on bridge, 1 imported, 1 missing, 0 deleted", S:summary())
+		assert.equal("4 scenes + 1 time-based on bridge, 1 imported, 5 new, 1 missing", S:summary())
 		assert.equal("1 scene missing from the bridge: Relax (device 2001, since " .. os.date("%Y-%m-%d", now)
-			.. ") (Re-link Scene or Forget Scene)", S:attention())
+			.. ") (Link or Forget Device)", S:attention())
 		bc4.sent = {}
 		before = #bc4.transfers
 		fake.as(scene, scene.ReceivedFromProxy, 5001, "ON", {})
@@ -280,7 +282,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal(F.scene_rids.savanna, scene.C4.persist.hue_rid)
 		assert.equal("Relax", fake.project.devices[SCENE_ID].name, "the Composer name is the owner's")
 		assert.equal("1 Hue scene name differs from the Composer names: Relax is Savanna sunset in Hue "
-			.. "(Adopt Hue Names or Accept Names As They Are)", S:attention())
+			.. "(Resolve Names)", S:attention())
 		assert.equal("Accepted 1 scene name difference: Relax (Hue: Savanna sunset)", S:accept_names())
 		assert.equal("None", S:attention())
 
@@ -290,18 +292,31 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		fake.delete_device(SCENE_ID)
 		assert.is_nil(bc4.persist.hue_scenes[F.scene_rids.savanna])
 		assert.equal("Savanna sunset", bc4.persist.hue_scene_tombstones[F.scene_rids.savanna].name)
-		assert.equal("4 + 1 time-based on bridge, 0 imported, 1 deleted", S:summary())
+		assert.equal("4 scenes + 1 time-based on bridge, 0 imported, 4 new, 1 deleted", S:summary())
 		local list = S:picker_scenes()
 		assert.truthy(list[#list].text:find("^Living Room: Savanna sunset %(dynamic%) %(deleted from Composer "))
 		results = {}
 		S:add_all_of_group(F.group_rids.living_room, function(_, t) results[#results + 1] = t end)
-		assert.equal("Added no scenes; skipped 1 deleted in Composer (Add Scene re-creates one): Savanna sunset (deleted "
+		assert.equal("Added no scenes; skipped 1 deleted in Composer (Add From Hue re-creates one): Savanna sunset (deleted "
 			.. os.date("%Y-%m-%d", now) .. ")", results[1])
 		S:add_scene(F.scene_rids.savanna, nil, function(_, t) results[#results + 1] = t end)
 		assert.equal("Added Savanna sunset to Living Room (device 2002)", results[2])
 		assert.is_nil(bc4.persist.hue_scene_tombstones[F.scene_rids.savanna])
 		assert.equal(2002, bc4.persist.hue_scenes[F.scene_rids.savanna].device_id)
-		assert.equal("4 + 1 time-based on bridge, 1 imported, 0 deleted", S:summary())
+		assert.equal("4 scenes + 1 time-based on bridge, 1 imported, 4 new", S:summary())
+	end)
+
+	it("with On State Follows on the room's lights, the hello's group report shows the inactive scene on", function()
+		S:resync()
+		answer_scene_gets()
+		S:add_scene(F.scene_rids.relax, nil, function() end)
+		fake.pair(bridge, scene, { light_id = SCENE_ID, bind = false })
+		scene.Properties["On State Follows"] = "Room/zone lights"
+		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		assert.equal("inactive", S:scene(F.scene_rids.relax).active)
+		local br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
+		assert.is_true(br[#br].LIGHT_BRIGHTNESS_CURRENT > 0, "the fixture's room is lit, so the device reads on")
 	end)
 
 	it("a dynamic scene recalled from the proxy ends up dynamic_palette, and Recall As Static makes it static", function()
@@ -324,6 +339,7 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 			put:respond(200, '{"data":[{"rid":"' .. F.scene_rids.savanna .. '","rtype":"scene"}],"errors":[]}')
 		end)
 		fake.pump()
+		scene.C4.advance(400) -- the 400 ms recall is a ramp: its report waits for its end (#421 S-D4)
 		local br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
 		assert.equal(100, br[#br].LIGHT_BRIGHTNESS_CURRENT)
 		assert.equal("dynamic_palette", S:scene(F.scene_rids.savanna).active)
@@ -341,11 +357,11 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		fake.as(scene, scene.ExecuteCommand, "LUA_ACTION", { ACTION = "Forget This Scene" })
 		fake.pump()
 		assert.equal("Forgot Savanna sunset (device 2001): unbound and left in the project for you to delete; "
-			.. "the Hue scene is listed under Add Scene again", last_action)
+			.. "the Hue scene is listed under Add From Hue again", last_action)
 		assert.equal(0, S:count())
 		assert.equal(0, #bc4.bindings)
-		assert.equal("Forgotten by the bridge (was Hue scene Savanna sunset). Delete this device in Composer, "
-			.. "or bind it again and use Link Devices", scene.Properties["Status"])
-		assert.equal(F.scene_rids.savanna, S:picker_scenes()[#S:picker_scenes()].value, "listed under Add Scene again")
+		assert.equal("Forgotten by the bridge (was Hue scene Savanna sunset). Delete this device, "
+			.. "or bind it again and use Link Device on the Hue Bridge", scene.Properties["Status"])
+		assert.equal(F.scene_rids.savanna, S:picker_scenes()[#S:picker_scenes()].value, "listed under Add From Hue again")
 	end)
 end)

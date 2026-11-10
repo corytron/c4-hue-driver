@@ -1,4 +1,108 @@
-# Status of the Hue driver (2026-10-25)
+# Status of the Hue driver (2026-11-09)
+
+**Now (2026-11-09).** **1.4 "Maarva", build 565, is released** (Latest;
+[release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.4);
+build reports, the house measurement and the keypad test in
+[Discussion #439](https://github.com/corytron/c4-hue-driver/discussions/439))
+and goes onto the house (`deploy/house.yaml`, #441). What 1.4 changes
+(#421, contract `docs/tap-stop-design.md`):
+- **Hue Lights** (single, zone and room): a keypad tap ramps to the Default
+  On Brightness or to off over 3 s for the whole range (was 250 ms), and a
+  tap while it ramps stops it, written as the device's estimate with a 1 s
+  glide.
+- **Hue Scenes:** a tap fades the scene in or its group out over a fixed
+  3 s, and a stop keeps every lamp at its own level. Time-of-day scenes
+  stay instant.
+- **Double taps:** a second tap within 0.6 s changes nothing.
+- **Real stops:** `SET_BRIGHTNESS_STOP` and the Brightness Stop link now
+  stop the lamp.
+- **Measured on the house** on 2026-11-09 with the owner watching (§10 of
+  the contract). A keypad test on a zone light passed: "All looks good and
+  right". Scene taps on a keypad were not tried: the owner shipped first.
+- **House settings changed the same night:**
+  - the four Hue Light devices' Click Rates are 3.000 / 3.000 s (were
+    0.250 / 0.750);
+  - the stairwell motion device's hold time is 60 s (was 300);
+  - the bedroom switches' ambient LED profile never turns the LEDs off.
+- **Process:** the Control4 lighting guidelines rule and checklist
+  (`docs/c4-lighting-guidelines.md`, #422). Its gaps are filed as #427 to
+  #435.
+
+Before 1.4: **1.3 "Kerri", build 539**, was released on 2026-11-08
+([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.3);
+agent reports and the hardware round in
+[Discussion #401](https://github.com/corytron/c4-hue-driver/discussions/401)).
+What 1.3 changed is in `CHANGELOG.md`:
+- **Holds:** a hold on a scene, zone light or room light ramps instead of
+  jumping (#249).
+- **Motion:** a motion hold resumes after a restart (#371).
+- **ON and TOGGLE:** they follow Default On Brightness (#233).
+- **Fixes:** #243, #246, #308 and #329.
+- **Under the hood:** the bridge driver's main chunk is down from 199
+  locals to 137 (#373), and dev-loop reloads clean up after themselves
+  (#247, #376).
+
+The dev build 538 checks passed on the house. The owner chose to ship
+without the lamp tests (2026-11-08), so these still need checking in
+normal use:
+- the group holds, including a time-based scene that keeps running through
+  a stepped hold;
+- the turn-on guard;
+- ON at Default On Brightness;
+- the resumed motion hold.
+
+Before 1.3: **1.2 "Taramyn", build 488,** was released on 2026-11-05
+([Discussion #387](https://github.com/corytron/c4-hue-driver/discussions/387)),
+and 1.1 "Brasso", build 447, the same day
+([Discussion #382](https://github.com/corytron/c4-hue-driver/discussions/382)).
+1.2 (#334, PR #353, contract `docs/simplify-actions-design.md`) was checked on
+the house in two dev rounds:
+- dev 467 ([Discussion #369](https://github.com/corytron/c4-hue-driver/discussions/369));
+- dev 477, wave 3 ([Discussion #378](https://github.com/corytron/c4-hue-driver/discussions/378)).
+
+What 1.2 does:
+- **Bridge actions:** 39 become 9 (Pair Bridge, Import All New, Add From Hue,
+  Link Device, Forget Device, Resolve Names, Set Room Mapping, Diagnostics,
+  Forget Pairing). The light and scene devices have no actions; the old
+  commands answer as hidden aliases until 2.0.
+- **By itself:** it reads the bridge in tiers, re-checks a rejected key,
+  finds the bridge on the LAN (mDNS, then a bounded sweep, never the
+  internet), maps rooms by exact name, and re-links a returned bulb by its
+  radio.
+- **Names:** they sync both ways.
+- **Attention:** it wraps onto continuation rows and says when the bridge
+  is away, missing, moved or answering elsewhere.
+
+Not yet exercised on the house:
+- the write paths of the new actions, which dispatch to 1.1's operations;
+- the automatic re-link by radio;
+- the bridge-away Attention items, which are covered by specs.
+
+Follow-ups filed:
+- #371, the occupancy hold after a restart;
+- #373, driver.lua near Lua 5.1's limit of 200 locals;
+- #376, dev-loop reload leftovers, also on 1.1.
+
+The sections below are the 1.1-era record, last brought up to date on
+2026-10-27.
+
+**1.1 betas since 2026-10-26** (prereleases, never Latest; `docs/prerelease-design.md`, #269):
+`v1.1-beta.1` (build 376) and `v1.1-beta.2` (build 381) add a fourth driver,
+`hue_motion.c4z`: Hue motion sensors and MotionAware areas (Hue Bridge Pro) as
+stock Control4 motion sensors (#268, `docs/motion-design.md`), built for an
+outside tester who owns sensors (the house has none). Beta 2 fixes a
+MotionAware area flapping between motion and no motion (#288).
+`v1.1-beta.3` (build 394, 2026-10-26; the tester's round is #305) adds the
+Hue Light's Raise Level By and Restore Saved Level programming commands
+(#297, `docs/relative-level-design.md`) and fixes a newly added light or
+scene device that failed its start (#298). `v1.1-beta.4` (build 400, cut
+2026-10-27 from `main` at 508452d) adds On State Follows to every Hue Scene
+device: by default its tile and keypad LEDs follow the lights of its Hue
+room or zone, not only its own scene (#310, PR #311,
+`docs/scene-led-design.md`). The stable release, and the README's download
+links, stay 1.0 build 359. Design north star (owner, 2026-10-26): Control4,
+not the Hue app, is the source of truth for automations; the Hue automation
+audit (#280) follows.
 
 **Release 1.0 "Cassian", build 359, tag `v1.0`** (cut 2026-10-25 by the
 two-job Release workflow from `main` at ad0ad7c; build 349 plus the changelog
@@ -22,9 +126,8 @@ work, and the open items below are issues (one hardware check still waits
 for its own). The milestone `1.0 "Cassian"` holds the project's history: 37
 pull requests (36 merged, #7 closed unmerged) and 98 closed issues
 (#71–#187) describing every problem found and fixed, each naming its fix;
-the project board holds them all. Major
-versions are codenamed after Star Wars: Andor; every 1.x release keeps
-"Cassian". **Since 2026-10-25 the project is run as CI/CD and GitOps**
+the project board holds them all. Every X.Y release has its own codename
+(`.github/codenames.json`, #304). **Since 2026-10-25 the project is run as CI/CD and GitOps**
 (`docs/cicd-gitops-design.md`, PR #205): one script, `tools/check.sh`, runs
 every check on the VM and in CI; releases are cut by the Release workflow
 and carry `manifest.json` and provenance attestations; `deploy/house.yaml`
@@ -44,15 +147,33 @@ this page disagree about the present, this page and the code win.
 
 ## What runs on the house
 
-- **Dev build 309 since 2026-10-25 03:24** (Composer round 43): `main` at
-  d13e287 built with `tools/build.sh --dev`, installed in place on all five
-  devices (no reboot: no capability change) so the signed dev loop (#52,
-  with the fixes of #217) serves the hardware checks of #40. It carries the
-  dev key; the release install replaces it. Recorded on the environment
-  `house` as deployment 7310056842; `python3 tools/deploy.py status` reports
-  drift (desired 329, observed 309) until then, and issue #228 stays open.
-  Its three `driver.xml` files are build 329's, so the release install
-  needs no reboot.
+- **Prerelease v1.1-beta.4, build 400, installed (2026-10-27)**: the
+  desired-state PR #313 sets `deploy/house.yaml` to it; the Windows session
+  installed all four drivers in place (the flow below), no Restart Director
+  prompt, Driver Version 400 on eight devices, deployment 7370529823
+  recorded as success (17:14 local), and both scene devices read On State
+  Follows `Room/zone lights`. Since beta 3
+  only the Hue Scene driver's code changed (On State Follows, #310, PR #311;
+  the manual too), not its capabilities, so no reboot is needed. Going back
+  to 1.0 is a desired-state PR.
+- **Prerelease v1.1-beta.3, build 394, before that** (PR #301; deployment
+  recorded 2026-10-26 21:05, closing #302; the Composer round is
+  Discussions #307): all four drivers, Driver Version 394 on eight devices
+  (the bridge, two scenes, two zone lights, two single lights and the motion
+  device), no reboot (no capability change since 1.0). Its walk test ran the
+  first Control4 motion programming, built in Composer by the Windows
+  session (two walks, both correct): two lamps raised by 30 points when the
+  MotionAware area senses motion and restored to their saved level when it
+  stops (#297); the motion device's hold time was 300 s from then, and is 60 s since 2026-11-09. A light
+  that had failed its start on build 381 came up by itself (#298). Beta 2
+  (build 381) ran from 20:05 that day, beta 1 (build 376) from 16:17. The
+  motion device stands for the house's one MotionAware area (the bridge has
+  no motion sensors); its Hue automation is set to do nothing on motion and
+  on no motion, so Control4 alone decides what the lights do, and beta 2's
+  walk test showed motion reaching Control4 within about a second (#288,
+  Discussions #290).
+- **Controller OS:** the diagnostics of 2026-10-26 report OS
+  3.4.3.727848-res (earlier notes say 3.4.2).
 - **The proxy's settings on the devices since 2026-10-25** (#59): the owner
   rebooted the controller from System Manager during the night's hardware
   pass (dev build 284), which loaded the capability change of #59
@@ -89,15 +210,21 @@ this page disagree about the present, this page and the code win.
   room's time-of-day scene, created 2026-10-24 12:06); two zone lights
   in the Master Bedroom, created with Add Zone Light on 2026-10-24: "Bedside
   Lights" (device 1166, the Hue zone of the two bedside lamps) and "Master
-  Bedroom Lights" (device 1168, the whole Hue room). No single-light Hue
-  Light devices: all 47 lights were deleted in Composer on 2026-10-22 and are
-  remembered as deleted (Add Light brings any of them back). 126 + 15
-  time-based scenes on the bridge, 2 imported (the two Hue Scene devices
-  above).
+  Bedroom Lights" (device 1168, the whole Hue room). Since 2026-10-26 a Hue
+  Motion device stands for the MotionAware area, and two single-light Hue
+  Light devices, made with Add Light that day under build 381 (the first
+  one hit #298), are the two lamps of the motion programming. The other
+  lights have no device: all 47 were deleted in Composer on 2026-10-22, and
+  a deleted light stays remembered as deleted until Add Light brings it
+  back. 126 + 15 time-based scenes on the bridge, 2 imported (the two Hue
+  Scene devices above).
 - **Keypads.** The "Bedside Lights Switch" (a Control4 switch run as a
   2-button keypad, Buttons Control Load off) has its top and bottom buttons
-  bound to Shine's Top and Bottom Button Links. The "Floor Lamp Switch" is
-  not bound to anything.
+  bound to Golden hours' Top and Bottom Button Links (read in Composer on
+  2026-10-27); since build 400 its LEDs follow the lights of that scene's
+  room (On State Follows at its default, #310), the owner's check pending.
+  The "Floor Lamp Switch" rocker is bound to a Control4 dimmer, not to a
+  Hue device.
 - **Composer project** has been left unsaved through the test rounds; the
   owner saves and backs it up (#38).
 
@@ -186,11 +313,13 @@ this page disagree about the present, this page and the code win.
   current slot, OFF stops it and turns the room off, slider and holds dim
   the room while it runs (a whole-room dim keeps it running, verified);
   from off a level or a held top button starts it and then moves or
-  brightens; on exactly while Hue's state is active (ends on room off,
-  another scene of the room, another schedule on its lights, or its own
-  OFF); Recall As hidden; Status "Hue time-based scene Golden hours in
-  Master Bedroom; now Arise (from 07:00)" / "…; not running". Contract
-  `docs/smart-scenes-design.md`, checks `docs/smart-scenes-research.md` §7.
+  brightens; on while Hue's state is active (ends on room off, another
+  scene of the room, another schedule on its lights, or its own OFF):
+  exactly then with On State Follows `This scene`, by default also while
+  the room's or zone's lights are on (below); Recall As hidden; Status
+  "Hue time-based scene Golden hours in Master Bedroom; now Arise (from
+  07:00)" / "…; not running". Contract `docs/smart-scenes-design.md`,
+  checks `docs/smart-scenes-research.md` §7.
 - **Hue Scene** (light_v2 proxy, **dimmer** since build 160): ON plays the
   scene (Recall As: As set in Hue / Static / Dynamic), OFF turns its room or
   zone off (a zone with no lights, which has no group light, only reports
@@ -198,15 +327,30 @@ this page disagree about the present, this page and the code win.
   the room relative to it (keeping the scene's colours and per-light
   differences; while the room's level is not yet known it sets one absolute
   level for all its lights instead), 0 % = off, a level from off plays the
-  scene at that level, 100 % from off plays it as designed. **On rule**: on
-  from any activation (Control4, keypad, Hue app) until the room/zone turns
-  off, another scene of it is played, or the device itself is turned off;
+  scene at that level, 100 % from off plays it as designed. **On rule** (the
+  whole on state with On State Follows `This scene`, below): on from any
+  activation (Control4, keypad, Hue app) until the room/zone turns off,
+  another scene of it is played, or the device itself is turned off;
   persisted across restarts. ON is one request (dropped back if it fails);
   OFF and slider moves go through the group queue and are retried like
   light commands. Keypad: tap top plays, tap bottom turns off (taps are
   immediate: the scene declares no click rates), hold dims the room
   (relative), hold top while off plays at 1 % and brightens; LEDs follow
   the on state.
+- **On State Follows** (Hue Scene, since build 400; #310, PR #311, contract
+  `docs/scene-led-design.md`): a property on every Hue Scene device.
+  `Room/zone lights`, the default (also for existing devices after the
+  update), shows the device on while the on rule holds **or** any light of
+  its Hue room or zone is on (the group's on/off, which the bridge already
+  sends; not persisted, it comes again with the answer to the device's
+  hello): another scene of the room, or a light of it turned on from the
+  Hue app, a Hue switch or a Hue Light device, keeps it on, and it shows
+  off once they are all off. `This scene` is the on rule alone, as before.
+  That one on state drives the tile and slider, the keypad LEDs, the on and
+  off events, TOGGLE, whether the slider moves the room or plays the scene,
+  and which way a hold goes; what ON, OFF and the taps do is unchanged. A
+  whole-home scene or an empty zone gets no group state, so its on rule
+  alone decides.
 - **Keypad settings** (since build 296, #59; on the house since the
   owner's reboot of 2026-10-25): both device drivers declare
   `hide_proxy_properties` False, so the proxy's own settings show in
@@ -226,7 +370,7 @@ this page disagree about the present, this page and the code win.
   ("7 zones, 16 rooms on bridge; 2 imported"). The device: Status "Hue zone
   Bedside Lights (2 lights)", Model "Hue zone (2 lights)", Hue Light ID
   "zone #9 (b90ea7b4…)"; on while any lamp is lit, level = the group's
-  average; ON = every lamp to 100 %, slider absolute on the group, keypad
+  average; ON = every lamp to 100 % (Default On Brightness since 1.3, #233), slider absolute on the group, keypad
   holds relative (`dimming_delta`), colour and colour temperature to the
   group, capabilities the union of the members' (the colour temperature
   range their common one, to which the bridge also clamps, #58); the tile's
@@ -262,8 +406,8 @@ The house runs a GitHub release, never a VM build
 1. The Release workflow (Actions ▸ Release ▸ Run workflow with the version,
    or a pushed tag; every 1.x release moves the tag `v1.0`) lints, tests and
    builds from `main` in a job without write access, then attests and
-   publishes in a second job: the three `.c4z`, `SHA256SUMS.txt`,
-   `manifest.json`, `attestations.sigstore.json` and
+   publishes in a second job: the `.c4z` of every driver (four since 1.1),
+   `SHA256SUMS.txt`, `manifest.json`, `attestations.sigstore.json` and
    `hue-drivers.intoto.jsonl`.
 2. A pull request sets `deploy/house.yaml` (the desired state) to that
    build; on merge the drift workflow opens one issue labelled `deploy`.
@@ -275,7 +419,7 @@ The house runs a GitHub release, never a VM build
    `build/release/<tag>/BRIEF.md`.
 4. The Windows Composer session follows the brief: it fetches the files
    from the release URLs into `C:\c4-hue\drivers\<tag>\`, checks the hashes,
-   installs all three at once with Driver ▸ "Add or Update Driver or Agent…"
+   installs them all at once with Driver ▸ "Add or Update Driver or Agent…"
    (every existing device is updated in place; never delete and re-add, the
    pairing would be lost) and reads back every device's `Driver Version`
    and the bridge's `Stream Timeout (s)`, `Stream Watchdog (s)` and `Debug
@@ -377,45 +521,33 @@ What was left is under "Open" (#38, #61, #62).
 ## Open
 
 Every open item is an issue (`gh issue list --state open`); this list says
-where each stands on 2026-10-25.
+where each stands on 2026-11-07.
 
-- **#228** Install release 1.0 build 329 on the house after the #40
-  checks (`deploy.py start`, the Windows session, `deploy.py done`; no
-  reboot); then Debug Mode Off and the dev loop ends.
-- **#40** Time-of-day scenes, parked for the next major release
-  (milestone 2.0) on 2026-10-25: the keypad works on a time-based scene
-  (taps, holds from off, the short hold), see `docs/smart-scenes-research.md`
-  §7b; whether API-made schedules advance, a dim before an app-made slot
-  boundary, Recall As after a cross-kind re-link and V8 stay open.
-- **#249** Holds on scenes, zone and room lights jump to the end of the
-  range: Hue ignores `dynamics.duration` on grouped_light dims (measured
-  2026-10-25); the fix is a design choice for the owner.
-- **#61** Retake the manual's pictures with `tools/composer/Shots.ps1`
-  (`docs/screenshots-plan.md`) after the release install.
-- **#65** Read the Event Stream reconnect count after a day on the release.
+- **1.3 "Kerri"** (#398) is released (build 539). Its lamp behaviour has not
+  been tested on the house; see "Now".
+- **Not yet exercised on the house from 1.2:** the write paths of the new
+  actions, the re-link by radio and the bridge-away Attention items (see
+  "Now").
+- **#280** The Hue automation audit (Control4 is the source of truth): the
+  research is done (`docs/hue-automations-research.md`,
+  `docs/edge-cases-automations.md`, draft PR #285); the contract and the
+  owner's decisions come next.
+- **#65** Read the Event Stream reconnect count and the event rate after a
+  day on a build.
 - **#38** The owner's pass on the phone and keypads, and saving and backing
-  up the Composer project (still unsaved through the test rounds).
-- **#62** The owner deletes the old edit revisions on PRs #6 and #2;
+  up the Composer project.
+- **#62** The owner deletes the old edit revisions on PRs #6 and #2; the
   GitHub Support ticket for the purge is pending.
-- **#224** Decision: the OpenSSF Best Practices badge, or Scorecard's CII
-  check stays at 0.
-- **#238** After the next reboot from System Manager: the bridge's log
-  right after it shows no "is not bound to this bridge" lines and Attention
-  no unbound devices (diff review 2026-10-25 row 2).
-- **#232, #234, #236** Code bugs found by the documentation pass: a light or
-  zone light hold from mid-range ramps faster than its tile; device-driver
-  persistence and setting edge cases; pairing and Status edge cases.
-- **#237, #239** Tooling: `deploy.py`'s watchdog range and the tag ruleset;
-  `devctl`, `Composer.psm1` and release-note leftovers.
-- **#233** Decision: ON and TOGGLE at 100 % or at Default On Brightness.
+- **#238** After the next reboot from System Manager: no device marked
+  unbound at startup.
+- **#237** Tooling: deploy.py accepts a watchdog below driver.xml's minimum,
+  and the tag ruleset blocks deletion only.
+- **#308** A Hue Light turned on from off reports its old level for an
+  instant (about 16 ms; no flash on the lamps); low priority.
+- **#329** The TLS check's probe bindings stay registered in Director after
+  the check.
+- **#243, #246** Smaller bugs: a scene hold from mid-range, two texts.
+- **#247, #376** Dev loop only: reloads forget the old instance's stream
+  transfers, and an overlapping reload can orphan an event stream.
+- **#40** Time-of-day scenes, parked for 2.0.
 
-Decided, not open:
-
-- **Accepted** (security review and fixes of 2026-10-25, #217;
-  `docs/dev-loop.md`, "What is left"): names the device drivers build from
-  cleaned Hue names ("<Room> Lights", "<Zone> <Scene>") are bounded but not
-  cut; hostname verification stays off for the bridge (no C4:url option); a
-  Hue Request `POST /api` in a dev build logs the newly minted key.
-- **Code scanning** after every merge (CLAUDE.md): on 2026-10-25 every
-  alert is fixed or dismissed with its reason; the triage workflow keeps one
-  issue open only while alerts are.

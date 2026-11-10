@@ -126,6 +126,15 @@ describe("bridge.pairing", function()
 			assert.equal(0, #c4.calls_to("PersistSetValue"), "nothing stored")
 		end)
 
+		it("says how to pick again when the bridge picked in Bridges Found is not the one answering", function()
+			pairing.pair("10.0.2.143", handlers(), PAIRED, true)
+			c4.transfers[1]:respond(200, config_of(OTHER))
+			assert.same({ { "error", "Bridge at 10.0.2.143 reports ID 001788fffe456def, expected 001788fffe123abc "
+				.. "(the bridge picked in Bridges Found); pick it again or Search again" } }, events)
+			assert.equal(1, #c4.transfers, "no key requested")
+			assert.equal(0, #c4.calls_to("PersistSetValue"), "nothing stored")
+		end)
+
 		it("pairs the same bridge again with a new key, whatever the case of the stored id", function()
 			for _, stored in ipairs({ PAIRED, PAIRED:upper() }) do
 				events = {}

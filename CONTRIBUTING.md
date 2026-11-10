@@ -67,7 +67,7 @@ optional.
   a new documented API, mirroring the real colon-call signature) and the
   invented Hue resources in `tests/fixtures/hue_resources.lua`. Every change
   of behaviour comes with a spec; `busted tests` stays green.
-- **Three drivers, one build.** `tools/build.sh` stages `src/common/` into
+- **Four drivers, one build.** `tools/build.sh` stages `src/common/` into
   each driver (the bridge without `device.lua`; release builds without
   `devloop.lua` and the bridge's development modules) and stamps all three
   with the same build number (the commit count), so a change to a shared
@@ -132,7 +132,7 @@ PSScriptAnalyzer for the `powershell` check.
 names. A check whose tool is not installed is reported as `skip` and does
 not fail the run; CI runs the same script with `--strict`, where a skip is a
 failure, in four jobs whose names are the required checks on `main`: *Lint
-and test (Lua 5.1)* (`lua-lint`, `lua-test`), *Build the three .c4z
+and test (Lua 5.1)* (`lua-lint`, `lua-test`), *Build the .c4z
 packages* (after the Lua job: `tools/build.sh`, then a check that every
 package carries `LICENSE` and `NOTICE` and that `build/manifest.json`
 describes them), *Tooling
@@ -150,7 +150,7 @@ pip enforces (`--require-hashes`).
 - For anything bigger than a typo, an issue comes first; the pull request
   says `Closes #N`.
 - `tools/check.sh` passes (CI runs the same checks with `--strict`) and
-  `tools/build.sh` builds the three `.c4z` files.
+  `tools/build.sh` builds the four `.c4z` files.
 - The manual, the Hue Light and Hue Scene pages and `docs/status.md` are
   updated if behaviour or a text changed.
 - A new document: if visitors of the project page would find it useful, the

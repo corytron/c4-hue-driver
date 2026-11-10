@@ -92,7 +92,9 @@ sha256 of every file PyPI has for it; they are installed one at a time with
 `python3 -m pip install --require-hashes --no-deps --only-binary=:all:
 --user --break-system-packages`, so pip refuses an unlisted hash, any
 dependency and any source build. `actionlint` and `gitleaks` are pinned
-release binaries whose sha256 the script carries and verifies. Today:
+release binaries whose sha256 the script carries and verifies; when a
+release URL fails, the script fetches the same asset by its pinned id from
+the REST API (#419). Today:
 ruff 0.17.2, zizmor 1.31.1, shellcheck-py 0.10.0.1, actionlint 1.7.12,
 gitleaks 8.30.1. CI runs the same script (ubuntu-latest has `shellcheck`
 and `pwsh` already; the script skips what is present). It prints each
@@ -111,10 +113,11 @@ Four jobs; **their `name:` strings are the required status checks on
 
 1. `Lint and test (Lua 5.1)`: as today (apt Lua 5.1, luarocks, luacheck,
    busted, dkjson, every rock at an exact version since 2026-10-25, §5.5),
-   then `tools/check.sh --strict --only lua-lint lua-test`.
+   then `tools/check.sh --strict --only lua-lint lua-test lua-limits` (the
+   last since #373: no Lua function over 180 locals or 50 upvalues).
    Cache `~/.luarocks` and `/usr/local/lib/luarocks` keyed on the workflow
    file if it saves time; otherwise leave it.
-2. `Build the three .c4z packages`: as today (`needs: test`, full-depth
+2. `Build the .c4z packages` (named `Build the three .c4z packages` until #391): as today (`needs: test`, full-depth
    checkout, packager fetched at build time at its pinned commit, §5.5,
    LICENSE and NOTICE in each package, artifact upload), plus
    `tools/build.sh` output `build/manifest.json`
@@ -330,8 +333,8 @@ The contract is `docs/prerelease-design.md`; the Release workflow does this:
 - **Versions and tags**: `X.Y-beta.N`, N from 1, tagged `vX.Y-beta.N`, one
   pattern everywhere (`^[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$`, with a leading
   `v` for tags). A prerelease is built from `main` by the same two jobs, with
-  the same checks, attestation and assets as a release, and keeps its major
-  version's codename.
+  the same checks, attestation and assets as a release, and carries its X.Y's
+  codename from `.github/codenames.json` (#304).
 - **The tag never moves**: a dispatch for a prerelease tag that exists fails in
   the build job before anything is built (`git ls-remote --exit-code`); the
   publish job pushes the new tag without `--force`, and leaves alone a tag that
@@ -341,8 +344,8 @@ The contract is `docs/prerelease-design.md`; the Release workflow does this:
 - **Notes and title**: the build job writes the notes with `tools/changelog.py
   notes --template .github/prerelease-notes.md` from the same `## Unreleased`
   entry (an empty one fails, as for a release), and the Documentation tabs show
-  that entry as `1.1 beta 1 "Cassian" (prerelease), build N (date)`. The
-  title is the notes' first heading as it is: `1.1 beta 1 "Cassian" (build
+  that entry as `1.1 beta 1 "Brasso" (prerelease), build N (date)`. The
+  title is the notes' first heading as it is: `1.1 beta 1 "Brasso" (build
   412)`.
 - **On GitHub**: `gh release create --prerelease --latest=false` (a release
   that exists is edited with `--prerelease`), so `releases/latest` and the

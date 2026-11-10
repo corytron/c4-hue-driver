@@ -14,7 +14,9 @@
 --    never wait for a token (docs/zone-light-design.md Decision 9): they are
 --    one request each, paced by the owner's thumb, and a late stop overshoots
 --    the ramp; a slider drag is what the bucket is for, and it settles to the
---    latest level at the sustained rate.
+--    latest level at the sustained rate. A keypad tap's start and a tap stop
+--    sent as a level go the same way: they arrive with `urgent = true`
+--    (#421 D12, docs/tap-stop-design.md).
 -- 3. The light_v2 best-practice doc wants back-to-back brightness and colour
 --    commands merged into one request. A short debounce (DEBOUNCE_MS) after
 --    the last change does that.
@@ -124,12 +126,20 @@ function commands.new(opts)
 	}, commands)
 end
 
--- True for a pending state the bucket must not hold back: a dim stop, or a
--- hold's start (a whole-range dimming_delta: no `delta`, or 100). A scene
--- slider's relative move (a smaller `delta`) is a drag like any other and
--- waits its turn, as absolute levels and colours do.
+-- True for a pending state the bucket must not hold back: a dim stop, a
+-- hold's start (a whole-range dimming_delta: no `delta`, or 100), or a state
+-- marked `urgent` (a keypad tap's start, a tap stop sent as a level, or an
+-- unsent start a stop replaced; #421 D12, D13). A scene slider's relative
+-- move (a smaller `delta`) is a drag like any other and waits its turn, as
+-- absolute levels and colours do.
 function commands.urgent(pending)
-	if type(pending) ~= "table" or pending.dim == nil then
+	if type(pending) ~= "table" then
+		return false
+	end
+	if pending.urgent == true then
+		return true
+	end
+	if pending.dim == nil then
 		return false
 	end
 	if pending.dim == "stop" then
@@ -138,11 +148,46 @@ function commands.urgent(pending)
 	return pending.delta == nil or pending.delta >= 100
 end
 
+-- #421 D13: true while `pending` holds an absolute brightness or on/off with
+-- a ramp time above 0. A pending state has not reached Hue (it is still
+-- waiting, or its PUT failed and it was folded back for a retry), so nothing
+-- is ramping there yet.
+local function unsent_ramp(pending)
+	return pending.dim == nil and (pending.brightness ~= nil or pending.on ~= nil)
+		and (tonumber(pending.rate) or 0) > 0
+end
+
+-- #421 D13: a stop merged onto an unsent ramp. A dimming_delta stop would
+-- find nothing ramping and leave the lamp where it was, while the device has
+-- already published the stop's level, so the start and the stop become that
+-- level at once: brightness = level (on when above 0), rate 0, urgent, no
+-- dimming_delta. A stop without a level drops the brightness change, and
+-- nothing is sent for it. Colour fields pending beside it stay as they are;
+-- they lose the ramp's time with it.
+local function stop_unsent_ramp(pending, level)
+	if level ~= level then
+		level = nil -- NaN
+	end
+	pending.dim, pending.level, pending.delta = nil, nil, nil
+	pending.urgent = true
+	if level == nil then
+		pending.brightness, pending.on, pending.rate = nil, nil, nil
+	elseif level > 0 then
+		pending.brightness, pending.on, pending.rate = level, true, 0
+	else
+		pending.brightness, pending.on, pending.rate = 0, false, 0
+	end
+	return pending
+end
+
 -- Merge one set() call's fields into a pending table, in place. Order inside
 -- a call: colour (mirek, then xy so xy wins when both are given), brightness
 -- (0 means off; > 0 implies on), then an explicit `on`, which beats the
 -- implication. Turning on after a "to zero" forgets the zero so the light
--- comes back at its remembered level.
+-- comes back at its remembered level. `urgent` (#421 D12) stays true once
+-- any merged part had it, until the state is sent; body() never puts it in a
+-- PUT. Returns the pending table and true when a stop replaced an unsent
+-- ramp (D13).
 local function merge(pending, fields)
 	local f = {}
 	for _, name in ipairs(NUMERIC_FIELDS) do
@@ -153,10 +198,19 @@ local function merge(pending, fields)
 	elseif fields.on == false or fields.on == "false" then
 		f.on = false
 	end
+	if fields.urgent == true or fields.urgent == "true" then
+		pending.urgent = true
+	end
+
+	if fields.dim == "stop" and unsent_ramp(pending) then
+		return stop_unsent_ramp(pending, tonumber(fields.level)), true
+	end
 
 	-- A relative dim (Hue's dimming_delta) is an action, not a state: it
 	-- replaces a pending brightness or on/off, and either of those replaces
 	-- a pending dim. `level` travels with a stop as the fallback brightness.
+	-- A stop that arrives once the start has gone out (in flight or done)
+	-- lands on an empty pending state and stays a dimming_delta stop.
 	if fields.dim == "up" or fields.dim == "down" or fields.dim == "stop" then
 		pending.dim = fields.dim
 		pending.level = tonumber(fields.level)
@@ -199,14 +253,21 @@ end
 -- [min_dim, 100] and rounded to 2 decimals; mirek is an integer inside the
 -- light's range; xy is clamped to [0, 1] and rounded to 4 decimals and needs
 -- both coordinates. dynamics.duration goes along only when there is
--- something for it to apply to.
+-- something for it to apply to. The queue's own fields (`urgent`, `level`,
+-- `delta`) never go into a body as such (#421 D12).
 function commands.body(pending, limits)
 	limits = limits or commands.DEFAULT_LIMITS
 	local body = {}
 	if pending.dim then
 		-- Hue ramps the whole range over `rate` and keeps the lights' relative
-		-- levels; "stop" ends a ramp where it is [verified on a grouped_light
-		-- 2026-10-23; assumed for a single light; docs/keypad-design.md].
+		-- levels; "stop" ends a ramp where it is [verified on a single light
+		-- 2026-10-25, #249]. On a grouped_light Hue accepts the body but ignores
+		-- the duration and covers the delta in about a second, so group holds go
+		-- through bridge/group_hold.lua (docs/group-hold-design.md). A tap's
+		-- stop is the same stop sent after an absolute target with a duration
+		-- (#421 D8); that it halts an absolute transition as it halts a
+		-- dimming_delta is [assumed] (measured on the house before the release,
+		-- docs/tap-stop-design.md §7), and a refused stop writes its `level`.
 		if pending.dim == "stop" then
 			body.dimming_delta = { action = "stop" }
 		else
@@ -287,9 +348,9 @@ end
 
 -- Merge `fields` into the light's pending state and (re)start its debounce.
 -- A retry already armed is left alone, and so is a token wait unless the
--- merged state became urgent (a hold's start or stop must not sit behind a
--- drag's wait): the new state simply replaces what will be sent when the
--- timer fires.
+-- merged state became urgent (a hold's or a tap's start or stop must not sit
+-- behind a drag's wait, #421 D12): the new state simply replaces what will
+-- be sent when the timer fires.
 function commands:set(rid, fields)
 	local light = self:light(rid)
 	if light.pending then
@@ -297,7 +358,11 @@ function commands:set(rid, fields)
 	else
 		light.pending = {}
 	end
-	merge(light.pending, fields or {})
+	local _, stopped_unsent = merge(light.pending, fields or {})
+	if stopped_unsent then
+		log.info("%s %s: a stop replaced a start not yet sent; setting %s at once (#421 D13)", self.label,
+			tostring(rid), light.pending.brightness and (tostring(light.pending.brightness) .. " %") or "nothing")
+	end
 	light.updated_at = self.now() -- the retries' age counts from here
 	if light.timer_kind == "retry" or (light.timer_kind == "wait" and not commands.urgent(light.pending)) then
 		return
@@ -309,7 +374,8 @@ end
 -- true and takes a token, or false and the ms to wait. An urgent request
 -- (commands.urgent) neither waits nor takes a token: a hold is two requests
 -- paced by a thumb, and counting them would make the tap that often follows
--- a hold wait behind the drag that emptied the bucket a moment before.
+-- a hold wait behind the drag that emptied the bucket a moment before. A
+-- tap's start and stop are the same (#421 D12).
 function commands:take_token(urgent)
 	local now = self.now()
 	if self.refilled_at then
@@ -440,7 +506,9 @@ function commands:on_done(rid, light, result)
 				self.label, tostring(rid), tostring(result.err), math.floor(age / 1000 + 0.5), commands.MAX_AGE_S)
 			return
 		end
-		-- Newer fields win over the ones that failed.
+		-- Newer fields win over the ones that failed. A stop that waited behind
+		-- a failed ramp's start finds it unsent again and becomes its level
+		-- (#421 D13); the failed state keeps its `urgent` (D12).
 		light.pending = merge(copy(sent), light.pending or {})
 		self.counters.retried = self.counters.retried + 1
 		log.warn("%s %s: %s, retrying in %d ms (attempt %d)", self.label, tostring(rid), tostring(result.err), delay,
@@ -479,6 +547,20 @@ end
 function commands:pending(rid)
 	local light = self.lights[rid]
 	return light and light.pending and copy(light.pending) or nil
+end
+
+-- True while the queue holds work for the bridge: a state waiting (for its
+-- debounce, a token or a retry) or a PUT in flight. The background tasks
+-- (bridge/housekeeping.lua) wait while either queue is busy, so a person's
+-- command never queues behind one of their GETs in Director's one transfer
+-- per host (docs/simplify-research-scheduler.md §3.4).
+function commands:busy()
+	for _, light in pairs(self.lights) do
+		if light.pending or light.inflight then
+			return true
+		end
+	end
+	return false
 end
 
 function commands:stats()

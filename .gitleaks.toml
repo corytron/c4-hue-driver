@@ -60,6 +60,9 @@ keywords = ["001788"]
 description = "The documented placeholder ids: CONTRIBUTING.md's, Signify's documentation examples and the ids of the invented test fixtures"
 regexes = [
     '''(?i)^001788(?:fffe123abc|fffe25b8f8|fffe100491|0000abcdef|fffe000000|fffe456def)$''',
+    # An invented "other bridge" of tests/spec/drivers_spec.lua's key re-check
+    # spec (#334, commit b8bd87d): no real bridge.
+    '''(?i)^001788fffe999999$''',
 ]
 
 # Any IPv4 literal that is not a documented placeholder or a textbook example.
@@ -94,6 +97,10 @@ regexes = [
     # 172.16.0.9 and 10.10.0.5, plain and zero-padded.
     '''^172\.16\.0{1,3}\.9$''',
     '''^10\.10\.0{1,3}\.0{0,2}5$''',
+    # Well-known multicast groups of local discovery, never a host: mDNS
+    # (RFC 6762) and SSDP, for the bridge discovery of #334.
+    '''^224\.0\.0\.251$''',
+    '''^239\.255\.255\.250$''',
 ]
 
 # The house subnet, 10.0.1.x, in every spelling the driver's address research
