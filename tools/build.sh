@@ -20,6 +20,12 @@
 # as common/, so `require("common.log")` resolves inside the .c4z the same way
 # it does in the tests. The driver.xml <version> is set to the git commit
 # count so every build from a newer commit is seen by Composer as an update.
+#
+# The drivers are staged and packed at the same time, each in its own stage
+# and its own dp3 run (issue #456); each driver's lines are printed in the
+# order above once it is packed, so the output and the packages are those of
+# a serial build. JOBS (environment) caps how many drivers build at once
+# (default: nproc); JOBS=1 builds one after the other.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +47,16 @@ for arg in "$@"; do
 		*) echo "unknown argument: $arg" >&2; exit 2 ;;
 	esac
 done
+
+if [[ -n "${JOBS:-}" ]]; then
+	if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+		echo "build.sh: JOBS must be a whole number from 1 (JOBS=1 builds serially), not '$JOBS'" >&2
+		exit 2
+	fi
+	max_jobs="$JOBS"
+else
+	max_jobs="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+fi
 
 if [[ ! -f "$DP3" ]]; then
 	echo "dp3 packager not found at $DP3 (set DP3=...)" >&2
@@ -86,18 +102,41 @@ elif [[ -n "$release_tag" ]]; then
 fi
 changelog_html="$ROOT/build/changelog.html"
 mkdir -p "$ROOT/build"
-python3 -I "$ROOT/tools/changelog.py" check --file "$ROOT/CHANGELOG.md" >/dev/null
-python3 -I "$ROOT/tools/changelog.py" html --file "$ROOT/CHANGELOG.md" "${changelog_args[@]}" > "$changelog_html"
-
 stage_root="$ROOT/build/stage"
-rm -rf "$stage_root"
-mkdir -p "$stage_root"
-if [[ "$dev_build" == yes ]]; then
-	# Even a build that fails half-way leaves no key in the stage.
-	trap 'rm -f "$stage_root"/*/common/devkey.lua' EXIT
+logs="$(mktemp -d)"
+cleanup() {
+	rm -rf "$logs"
+	if [[ "$dev_build" == yes ]]; then
+		# Even a build that fails half-way leaves no key in the stage.
+		rm -f "$stage_root"/*/common/devkey.lua
+	fi
+}
+trap cleanup EXIT
+# The check and the rendering at the same time. As in a serial build, a
+# failed check stops the build first, with its messages and its status, then
+# a failed rendering.
+python3 -I "$ROOT/tools/changelog.py" check --file "$ROOT/CHANGELOG.md" >/dev/null 2>"$logs/changelog-check.err" &
+changelog_check=$!
+html_status=0
+python3 -I "$ROOT/tools/changelog.py" html --file "$ROOT/CHANGELOG.md" "${changelog_args[@]}" \
+	>"$changelog_html" 2>"$logs/changelog-html.err" || html_status=$?
+check_status=0
+wait "$changelog_check" || check_status=$?
+cat "$logs/changelog-check.err" >&2
+if [[ $check_status -ne 0 ]]; then
+	exit "$check_status"
+fi
+cat "$logs/changelog-html.err" >&2
+if [[ $html_status -ne 0 ]]; then
+	exit "$html_status"
 fi
 
-for driver in "${DRIVERS[@]}"; do
+rm -rf "$stage_root"
+mkdir -p "$stage_root"
+
+# Stage and pack one driver; run in the background, its output into its own log.
+build_driver() {
+	local driver="$1" stage doc manifest name entry
 	stage="$stage_root/$driver"
 	cp -R "$ROOT/src/$driver" "$stage"
 	cp -R "$ROOT/src/common" "$stage/common"
@@ -183,7 +222,64 @@ PY
 	else
 		echo "built build/$driver.c4z (version $version)"
 	fi
+}
+
+# One background build a driver, at most max_jobs at once. Each writes its
+# output to $logs/<driver>.log and, when it ends, its exit status to
+# $logs/<driver>.rc; the logs are printed in the order of DRIVERS. A
+# background job ignores Ctrl-C unless told otherwise; these stop with the
+# build. Once a driver has failed no other one starts (with JOBS=1 the build
+# stops at the first failure, as a serial build did); the build then exits
+# with the status of the first failed driver, after printing the output of
+# every driver that ran.
+pids=()
+running() {
+	local count=0 index
+	for index in "${!pids[@]}"; do
+		[[ -e "$logs/${DRIVERS[$index]}.rc" ]] || count=$((count + 1))
+	done
+	echo "$count"
+}
+any_failed() {
+	local rc_file rc
+	for rc_file in "$logs"/*.rc; do
+		[[ -e "$rc_file" ]] || continue
+		read -r rc <"$rc_file"
+		[[ "$rc" == 0 ]] || return 0
+	done
+	return 1
+}
+for index in "${!DRIVERS[@]}"; do
+	while [[ "$(running)" -ge "$max_jobs" ]]; do
+		wait -n 2>/dev/null || true
+	done
+	if any_failed; then
+		break
+	fi
+	driver="${DRIVERS[$index]}"
+	(
+		trap - INT
+		trap 'echo "$?" >"$logs/$driver.rc.tmp" && mv "$logs/$driver.rc.tmp" "$logs/$driver.rc"' EXIT
+		build_driver "$driver"
+	) >"$logs/$driver.log" 2>&1 &
+	pids[index]=$!
 done
+first_failure=0
+for index in "${!pids[@]}"; do
+	driver="${DRIVERS[$index]}"
+	wait "${pids[$index]}" 2>/dev/null || true
+	cat "$logs/$driver.log"
+	rc=1
+	if [[ -e "$logs/$driver.rc" ]]; then
+		read -r rc <"$logs/$driver.rc"
+	fi
+	if [[ "$rc" != 0 && "$first_failure" == 0 ]]; then
+		first_failure="$rc"
+	fi
+done
+if [[ "$first_failure" != 0 ]]; then
+	exit "$first_failure"
+fi
 
 # build/manifest.json: what this build is, for the release assets and for
 # tools/deploy.py (docs/cicd-gitops-design.md, section 5.2). The tag is the

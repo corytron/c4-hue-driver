@@ -6,33 +6,45 @@
 #   --strict          a check whose tool is not installed fails instead of
 #                     being skipped (CI runs with it, so nothing is silently
 #                     skipped on the runner)
-#   --only <name>...  run only the named checks; they still run in the order
+#   --only <name>...  run only the named checks; they still report in the order
 #                     below, whatever the order given
 #
 # Checks, in order:
-#   lua-lint     luacheck src tests tools
-#   lua-test     busted tests
+#   lua-lint     luacheck src tests tools (tools/parallel.py luacheck: shards of files
+#                on every core, the output of one luacheck run)
+#   lua-test     busted tests (tools/parallel.py busted: one busted a spec file on every
+#                core, then busted's total)
 #   lua-limits   python3 tools/lua_limits.py: no function of a Lua file under src/ has more
 #                than 180 locals or 50 upvalues (luac5.1 -p -l -l; Lua 5.1 stops at 200 and 60;
 #                docs/driver-locals-design.md)
 #   shell        shellcheck -S style tools/*.sh (and setup-vm.sh if present)
 #   python-lint  ruff check tools; ruff format --check tools
-#   python-test  python3 -B -m unittest discover -s tools/tests (-B: no __pycache__,
-#                whose constant-folded test vectors the secrets tree scan would flag)
+#   python-test  python3 -B -m unittest discover -s tools/tests, one process a test module
+#                (tools/parallel.py unittest; -B: no __pycache__, whose constant-folded
+#                test vectors the secrets tree scan would flag)
 #   xml          every src/*/driver.xml is well-formed (xml.etree, no xmllint)
 #   powershell   Invoke-ScriptAnalyzer over tools/composer (skipped without pwsh)
 #   workflows    actionlint; zizmor --min-severity medium .github/workflows
-#   secrets      gitleaks over the working tree, then over the history of every
-#                local ref (git log --all) or, in GitHub Actions, of HEAD only
+#   secrets      gitleaks over the working tree and, at the same time, over the history
+#                of every local ref (git log --all) or, in GitHub Actions, of HEAD only
 #   house        python3 tools/deploy.py validate (deploy/house.yaml, offline)
 #   changelog    python3 tools/changelog.py check (CHANGELOG.md, docs/changelog-design.md)
 #   links        python3 tools/check_links.py: every link in every tracked Markdown
 #                file and Documentation tab resolves (files and heading anchors)
 #
+# The checks run at the same time (issue #456): each one's output is kept apart
+# and reported in the order above as soon as it and every check before it are
+# done, so the output is that of a serial run. secrets starts once python-lint
+# is done, since ruff may write .ruff_cache while gitleaks reads the tree.
+# JOBS (environment) caps how many checks run at once and how many processes
+# each of lua-lint, lua-test and python-test starts (default: nproc); JOBS=1
+# runs everything one at a time, as before #456, for debugging.
+#
 # One line per check: "ok <name>", "FAIL <name>" followed by the output of the
 # failing command(s), or "skip <name> (<tool> not installed)". Exit 1 when a
-# check failed, 2 on a usage error, else 0. Tools are looked up on PATH with
-# ~/.local/bin first, where tools/setup-checks.sh installs them.
+# check failed, 2 on a usage error (JOBS not a whole number from 1 included),
+# else 0. Tools are looked up on PATH with ~/.local/bin first, where
+# tools/setup-checks.sh installs them.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,8 +62,8 @@ usage() {
 # (or a failure with --strict).
 tools_for() {
 	case "$1" in
-		lua-lint) echo luacheck ;;
-		lua-test) echo busted ;;
+		lua-lint) echo luacheck python3 ;;
+		lua-test) echo busted python3 ;;
 		lua-limits) echo luac5.1 python3 ;;
 		shell) echo shellcheck ;;
 		python-lint) echo ruff ;;
@@ -71,11 +83,11 @@ run() {
 }
 
 check_lua_lint() {
-	run luacheck src tests tools
+	run python3 -I tools/parallel.py luacheck src tests tools
 }
 
 check_lua_test() {
-	run busted tests
+	run python3 -I tools/parallel.py busted tests
 }
 
 check_lua_limits() {
@@ -102,7 +114,7 @@ check_python_test() {
 		echo "tools/tests/ does not exist: there are no Python unit tests to run"
 		return 1
 	fi
-	run python3 -B -m unittest discover -s tools/tests
+	run python3 -I tools/parallel.py unittest tools/tests
 }
 
 check_xml() {
@@ -156,8 +168,28 @@ check_secrets() {
 		echo ".gitleaks.toml is missing: the secrets check needs the repository's gitleaks rules"
 		return 1
 	fi
-	run gitleaks dir . --config .gitleaks.toml --no-banner --redact || rc=1
-	run gitleaks git . --config .gitleaks.toml --no-banner --redact "--log-opts=$(secrets_log_opts)" || rc=1
+	# The tree and the history at the same time (one after the other when
+	# JOBS=1), each into its own log, printed in this order.
+	local tree_log="$results/secrets-tree.log" history_log="$results/secrets-history.log" tree_pid history_pid
+	(
+		trap - INT
+		run gitleaks dir . --config .gitleaks.toml --no-banner --redact
+	) >"$tree_log" 2>&1 &
+	tree_pid=$!
+	if [[ "$max_jobs" -eq 1 ]]; then
+		wait "$tree_pid" || rc=1
+		tree_pid=""
+	fi
+	(
+		trap - INT
+		run gitleaks git . --config .gitleaks.toml --no-banner --redact "--log-opts=$(secrets_log_opts)"
+	) >"$history_log" 2>&1 &
+	history_pid=$!
+	if [[ -n "$tree_pid" ]]; then
+		wait "$tree_pid" || rc=1
+	fi
+	wait "$history_pid" || rc=1
+	cat "$tree_log" "$history_log"
 	return "$rc"
 }
 
@@ -235,11 +267,114 @@ for name in "${ALL_CHECKS[@]}"; do
 	done
 done
 
-failed=()
-log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+# How many checks run at once (and, through the environment, how many
+# processes each parallel check starts): JOBS, else every core.
+if [[ -n "${JOBS:-}" ]]; then
+	if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+		echo "check.sh: JOBS must be a whole number from 1 (JOBS=1 runs serially), not '$JOBS'" >&2
+		exit 2
+	fi
+	max_jobs="$JOBS"
+else
+	max_jobs="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+fi
 
-for name in "${to_run[@]}"; do
+# The checks a check starts after: secrets reads the whole tree, where ruff
+# (python-lint) may be writing .ruff_cache.
+after_of() {
+	case "$1" in
+		secrets) echo python-lint ;;
+	esac
+}
+
+# Check number N (an index into to_run) keeps its output in $results/N.log and
+# its result in $results/N.status, written last: "ok", "fail", "skip <tool>"
+# or "missing <tool>". A .status file means the check is done.
+results="$(mktemp -d)"
+trap 'rm -rf "$results"' EXIT
+pids=()
+printed=0
+failed=()
+
+set_status() {
+	echo "$2" >"$results/$1.status.tmp"
+	mv "$results/$1.status.tmp" "$results/$1.status"
+}
+
+# Start check N in the background. A background job ignores Ctrl-C unless
+# told otherwise; this one stops with check.sh.
+start_check() {
+	local index="$1"
+	(
+		trap - INT
+		status=fail
+		if "check_${to_run[$index]//-/_}" >"$results/$index.log" 2>&1; then
+			status=ok
+		fi
+		set_status "$index" "$status"
+	) &
+	pids[index]=$!
+}
+
+# How many started checks are not done.
+running() {
+	local count=0 index
+	for index in "${!pids[@]}"; do
+		[[ -e "$results/$index.status" ]] || count=$((count + 1))
+	done
+	echo "$count"
+}
+
+# Whether every check that check N starts after is done (or not selected).
+after_done() {
+	local before index
+	for before in $(after_of "${to_run[$1]}"); do
+		for index in "${!to_run[@]}"; do
+			if [[ "${to_run[$index]}" == "$before" && ! -e "$results/$index.status" ]]; then
+				return 1
+			fi
+		done
+	done
+}
+
+# Wait until a check is done. A check whose shell ended without a result
+# (killed) is a failure.
+wait_one() {
+	local index
+	wait -n 2>/dev/null || true
+	for index in "${!pids[@]}"; do
+		if [[ ! -e "$results/$index.status" ]] && ! kill -0 "${pids[$index]}" 2>/dev/null; then
+			echo "check.sh: the check ended without a result" >>"$results/$index.log"
+			set_status "$index" fail
+		fi
+	done
+}
+
+# Print every result that is done, in order, up to the first that is not.
+report_ready() {
+	local name status tool
+	while [[ $printed -lt ${#to_run[@]} && -e "$results/$printed.status" ]]; do
+		name="${to_run[$printed]}"
+		read -r status tool <"$results/$printed.status"
+		case "$status" in
+			ok) echo "ok $name" ;;
+			skip) echo "skip $name ($tool not installed)" ;;
+			missing)
+				echo "FAIL $name ($tool not installed)"
+				failed+=("$name")
+				;;
+			*)
+				echo "FAIL $name"
+				sed 's/^/  /' "$results/$printed.log"
+				failed+=("$name")
+				;;
+		esac
+		printed=$((printed + 1))
+	done
+}
+
+for index in "${!to_run[@]}"; do
+	name="${to_run[$index]}"
 	missing=""
 	read -r -a tools <<< "$(tools_for "$name")"
 	for tool in "${tools[@]}"; do
@@ -250,21 +385,22 @@ for name in "${to_run[@]}"; do
 	done
 	if [[ -n "$missing" ]]; then
 		if [[ "$strict" == yes ]]; then
-			echo "FAIL $name ($missing not installed)"
-			failed+=("$name")
+			set_status "$index" "missing $missing"
 		else
-			echo "skip $name ($missing not installed)"
+			set_status "$index" "skip $missing"
 		fi
+		report_ready
 		continue
 	fi
-	fn="check_${name//-/_}"
-	if "$fn" >"$log" 2>&1; then
-		echo "ok $name"
-	else
-		echo "FAIL $name"
-		sed 's/^/  /' "$log"
-		failed+=("$name")
-	fi
+	while [[ "$(running)" -ge "$max_jobs" ]] || ! after_done "$index"; do
+		wait_one
+		report_ready
+	done
+	start_check "$index"
+done
+while [[ $printed -lt ${#to_run[@]} ]]; do
+	wait_one
+	report_ready
 done
 
 if [[ ${#failed[@]} -gt 0 ]]; then

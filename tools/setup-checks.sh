@@ -23,6 +23,13 @@
 # skipped whenever any shellcheck is on PATH. Prints one line per tool, then
 # every version. In GitHub Actions ($GITHUB_PATH set) ~/.local/bin is appended
 # to the job's PATH.
+#
+# The installs run in three lanes at the same time (issue #456): the pip
+# packages one after another (they share pip and ~/.local), actionlint, and
+# gitleaks. Each lane's output is kept apart and printed in the order of the
+# tools above, then the script exits with the status of the first lane that
+# failed. JOBS=1 (environment) runs the lanes one after another and stops at
+# the first failure, as before #456.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -159,28 +166,88 @@ install_release_binary() {
 	echo "$cmd $want: installed ($BIN/$cmd, sha256 verified)"
 }
 
-install_pip_tool ruff ruff "$RUFF_VERSION" "$RUFF_VERSION"
-install_pip_tool zizmor zizmor "$ZIZMOR_VERSION" "$ZIZMOR_VERSION"
-if command -v shellcheck >/dev/null 2>&1; then
-	echo "shellcheck $(version_of shellcheck): already on PATH ($(command -v shellcheck)); shellcheck-py not installed"
-else
-	install_pip_tool shellcheck shellcheck-py "$SHELLCHECK_PY_VERSION" "$SHELLCHECK_VERSION"
+lane_pip() {
+	install_pip_tool ruff ruff "$RUFF_VERSION" "$RUFF_VERSION"
+	install_pip_tool zizmor zizmor "$ZIZMOR_VERSION" "$ZIZMOR_VERSION"
+	if command -v shellcheck >/dev/null 2>&1; then
+		echo "shellcheck $(version_of shellcheck): already on PATH ($(command -v shellcheck)); shellcheck-py not installed"
+	else
+		install_pip_tool shellcheck shellcheck-py "$SHELLCHECK_PY_VERSION" "$SHELLCHECK_VERSION"
+	fi
+}
+
+lane_actionlint() {
+	install_release_binary actionlint "$ACTIONLINT_VERSION" "$ACTIONLINT_URL" "$ACTIONLINT_ASSET" "$ACTIONLINT_SHA256" \
+		"$ACTIONLINT_API_URL"
+}
+
+lane_gitleaks() {
+	install_release_binary gitleaks "$GITLEAKS_VERSION" "$GITLEAKS_URL" "$GITLEAKS_ASSET" "$GITLEAKS_SHA256" \
+		"$GITLEAKS_API_URL"
+}
+
+if [[ -n "${JOBS:-}" && ! "${JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+	echo "setup-checks.sh: JOBS must be a whole number from 1 (JOBS=1 installs serially), not '$JOBS'" >&2
+	exit 2
 fi
-install_release_binary actionlint "$ACTIONLINT_VERSION" "$ACTIONLINT_URL" "$ACTIONLINT_ASSET" "$ACTIONLINT_SHA256" \
-	"$ACTIONLINT_API_URL"
-install_release_binary gitleaks "$GITLEAKS_VERSION" "$GITLEAKS_URL" "$GITLEAKS_ASSET" "$GITLEAKS_SHA256" \
-	"$GITLEAKS_API_URL"
+# Each lane in the background (a background job ignores Ctrl-C unless told
+# otherwise; these stop with the script), its output into $WORK/<lane>.out
+# and .err. With JOBS=1 each lane is waited for before the next starts.
+lanes=(lane_pip lane_actionlint lane_gitleaks)
+pids=()
+statuses=()
+for index in "${!lanes[@]}"; do
+	(
+		trap - INT
+		"${lanes[$index]}"
+	) >"$WORK/${lanes[$index]}.out" 2>"$WORK/${lanes[$index]}.err" &
+	pids[index]=$!
+	if [[ "${JOBS:-}" == 1 ]]; then
+		statuses[index]=0
+		wait "${pids[$index]}" || statuses[index]=$?
+		if [[ "${statuses[$index]}" -ne 0 ]]; then
+			break
+		fi
+	fi
+done
+first_failure=0
+for index in "${!pids[@]}"; do
+	if [[ -z "${statuses[$index]:-}" ]]; then
+		statuses[index]=0
+		wait "${pids[$index]}" || statuses[index]=$?
+	fi
+	cat "$WORK/${lanes[$index]}.out"
+	cat "$WORK/${lanes[$index]}.err" >&2
+	if [[ "${statuses[$index]}" -ne 0 && "$first_failure" -eq 0 ]]; then
+		first_failure="${statuses[$index]}"
+	fi
+done
+if [[ "$first_failure" -ne 0 ]]; then
+	exit "$first_failure"
+fi
 
 if [[ -n "${GITHUB_PATH:-}" ]]; then
 	echo "$BIN" >> "$GITHUB_PATH"
 	echo "GitHub Actions: $BIN appended to GITHUB_PATH"
 fi
 
+# Every tool's version line at the same time, printed in this order.
 echo "versions:"
-for tool in ruff zizmor shellcheck actionlint gitleaks luacheck busted pwsh; do
-	if command -v "$tool" >/dev/null 2>&1; then
-		echo "  $tool $(version_of "$tool") ($(command -v "$tool"))"
-	else
-		echo "  $tool (not installed)"
+version_tools=(ruff zizmor shellcheck actionlint gitleaks luacheck busted pwsh)
+for tool in "${version_tools[@]}"; do
+	(
+		trap - INT
+		if command -v "$tool" >/dev/null 2>&1; then
+			echo "  $tool $(version_of "$tool") ($(command -v "$tool"))"
+		else
+			echo "  $tool (not installed)"
+		fi
+	) >"$WORK/version-$tool" &
+	if [[ "${JOBS:-}" == 1 ]]; then
+		wait "$!"
 	fi
+done
+wait
+for tool in "${version_tools[@]}"; do
+	cat "$WORK/version-$tool"
 done

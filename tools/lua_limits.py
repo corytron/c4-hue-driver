@@ -12,7 +12,8 @@ has more than MAX_LOCALS (180) locals or more than MAX_UPVALUES (50) upvalues, s
 visibly, and on every pull request, long before the compiler refuses.
 
 How: every *.lua file under src/ (walked on disk, tracked or not, as luacheck does) is compiled with
-`luac5.1 -p -l -l FILE` (parse only: nothing is written), one file a run, and the listing is read. Each
+`luac5.1 -p -l -l FILE` (parse only: nothing is written), one file a run, as many runs at once as JOBS
+(environment; default nproc, JOBS=1 one at a time; issue #456), and the listing is read. Each
 "main <FILE:0,0>" or "function <FILE:L,M>" header starts a function, and its "locals (N) for ADDRESS:"
 and "upvalues (N) for ADDRESS:" lines give its counts.
 
@@ -35,10 +36,12 @@ Output: one line per problem, of the forms
 --verbose first prints each file's highest counts.
 
 Standard library only. Exit codes: 0 every function within the limits, 1 a function over a limit or a
-file luac5.1 cannot compile or list, 2 usage (argparse, luac5.1 not installed, no *.lua under src/).
+file luac5.1 cannot compile or list, 2 usage (argparse, luac5.1 not installed, no *.lua under src/, JOBS
+not a whole number from 1).
 """
 
 import argparse
+import concurrent.futures
 import dataclasses
 import os
 import re
@@ -169,6 +172,30 @@ def run_luac(luac, root, path):
     return done.returncode, done.stdout.decode("utf-8", "replace"), done.stderr.decode("utf-8", "replace")
 
 
+def job_count(environ=None):
+    """How many luac runs at once: JOBS when set (a whole number from 1), else the cores this process may use."""
+    environ = os.environ if environ is None else environ
+    text = environ.get("JOBS", "")
+    if text:
+        if not re.fullmatch(r"[1-9][0-9]*", text):
+            raise UsageError("JOBS must be a whole number from 1 (JOBS=1 runs serially), not %r" % text)
+        return int(text)
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # not Linux
+        return max(1, os.cpu_count() or 1)
+
+
+def compile_all(luac, root, paths):
+    """run_luac of every path, up to job_count() at once (luac runs in its own process, so threads
+    suffice); the results in the order of paths."""
+    jobs = min(job_count(), len(paths))
+    if jobs <= 1:
+        return [run_luac(luac, root, path) for path in paths]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        return list(pool.map(lambda path: run_luac(luac, root, path), paths))
+
+
 def over_limit(path, function, noun, count, limit, hard_limit, hard_noun):
     """The problem line of a function with more than limit of something."""
     return "%s: %s: %d %s, more than the limit of %d (Lua 5.1 compiles at most %d %s in a function); see %s" % (
@@ -199,8 +226,7 @@ def check(root, luac=LUAC):
     limits."""
     paths = lua_files(root)
     report = Report(files=len(paths))
-    for path in paths:
-        status, listing, errors = run_luac(luac, root, path)
+    for path, (status, listing, errors) in zip(paths, compile_all(luac, root, paths), strict=True):
         if status != 0:
             report.problems.append(compile_failure(luac, path, errors))
             continue

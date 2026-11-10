@@ -626,6 +626,43 @@ class CommandLineTest(TreeCase):
             self.assertIn(piece, text)
 
 
+class PoolTest(TreeCase):
+    """Issue #456: reading the files in a pool of processes finds what reading them here finds."""
+
+    def test_the_pool_reports_what_one_process_reports(self):
+        count = check_links.POOL_MIN_FILES + 6
+        for number in range(count):
+            following = (number + 1) % count
+            self.write(
+                "docs/d%02d.md" % number,
+                "# Page %d\n\n## Part\n\n[next](d%02d.md#page-%d) [part](d%02d.md#part) [gone](gone%d.md) "
+                "[bad](d%02d.md#nowhere)\n" % (number, following, following, following, number, following),
+            )
+        self.write("README.md", "[docs](docs/d00.md)\n")
+        self.write("src/x/www/documentation.html", '<h2 id="a">A</h2><a href="#a">a</a> <a href="#b">b</a>\n')
+        pool = check_links.concurrent.futures.ProcessPoolExecutor
+        with mock.patch.object(check_links.concurrent.futures, "ProcessPoolExecutor", wraps=pool) as wrapped:
+            serial = check_links.check(self.root, sorted(self.tracked), jobs=1)
+            self.assertEqual(wrapped.call_count, 0)
+            pooled = check_links.check(self.root, sorted(self.tracked), jobs=4)
+            self.assertEqual(wrapped.call_count, 1)
+        self.assertEqual(serial, pooled)
+        self.assertEqual(len(serial.problems), 2 * count + 1)
+        self.assertEqual(serial.files, count + 2)
+
+    def test_a_bad_jobs_value_is_a_usage_error(self):
+        for value in ("0", "x", "-2", "1.5"):
+            with self.subTest(value=value):
+                with self.assertRaises(check_links.UsageError):
+                    check_links.job_count({"JOBS": value})
+        self.assertEqual(check_links.job_count({"JOBS": "3"}), 3)
+        self.assertGreaterEqual(check_links.job_count({}), 1)
+        with mock.patch.dict(os.environ, {"JOBS": "none"}):
+            code, out, err = self.run_main()
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("JOBS must be a whole number from 1", err)
+
+
 # ---------------------------------------------------------------------------
 # This repository, report only
 # ---------------------------------------------------------------------------

@@ -115,11 +115,11 @@ PSScriptAnalyzer for the `powershell` check.
 
 | Check | What it runs | What it covers |
 | --- | --- | --- |
-| `lua-lint` | `luacheck src tests tools` | the drivers and the specs |
-| `lua-test` | `busted tests` | the specs, against the fake DriverWorks runtime |
+| `lua-lint` | `luacheck src tests tools` (through `tools/parallel.py luacheck`) | the drivers and the specs |
+| `lua-test` | `busted tests` (through `tools/parallel.py busted`) | the specs, against the fake DriverWorks runtime |
 | `shell` | `shellcheck -S style tools/*.sh` | the shell scripts |
 | `python-lint` | `ruff check tools`, `ruff format --check tools` | the Python tooling |
-| `python-test` | `python3 -B -m unittest discover -s tools/tests` | the tooling's unit tests |
+| `python-test` | `python3 -B -m unittest discover -s tools/tests` (through `tools/parallel.py unittest`) | the tooling's unit tests |
 | `xml` | an `xml.etree` parse | every `src/*/driver.xml` is well-formed |
 | `powershell` | `Invoke-ScriptAnalyzer -Path tools/composer -Recurse -Severity Error` in `pwsh` | `tools/composer/`; skipped without `pwsh` |
 | `workflows` | `actionlint`, `zizmor --min-severity medium .github/workflows` | `.github/workflows/` |
@@ -128,6 +128,11 @@ PSScriptAnalyzer for the `powershell` check.
 | `changelog` | `python3 tools/changelog.py check` | `CHANGELOG.md`'s format |
 | `links` | `python3 tools/check_links.py` | every link in every Markdown file and Documentation tab resolves |
 
+The checks run at the same time and report in the order of the table;
+`tools/parallel.py` runs luacheck, busted and the Python tests as one
+process per file (luacheck in shards of files) on every core and prints what
+a serial run prints. `JOBS=N` caps how many processes run at once (default:
+the number of cores); `JOBS=1` runs everything one at a time.
 `tools/check.sh --only <name>...` runs a selection, `--help` lists the
 names. A check whose tool is not installed is reported as `skip` and does
 not fail the run; CI runs the same script with `--strict`, where a skip is a

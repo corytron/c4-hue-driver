@@ -68,19 +68,24 @@ Dates and build numbers in documents are absolute.
 Runs, in this order, printing one line per check (`ok`, `FAIL`, `skip
 (<tool> not installed)`), and exits 1 if any failed; `--strict` turns every
 skip into a failure (CI uses it, so nothing is silently skipped on the
-runner):
+runner). Since #456 the checks run at the same time, each one's output kept
+apart and reported in this order as soon as it and every check before it are
+done, so the output is that of a serial run; `secrets` starts once
+`python-lint` is done (ruff may write `.ruff_cache` while gitleaks reads the
+tree). `JOBS` caps how many checks run at once and how many processes each
+parallel tool starts (default `nproc`; `JOBS=1` runs everything serially):
 
 | Name | Command | Scope |
 | --- | --- | --- |
-| `lua-lint` | `luacheck src tests tools` | as today |
-| `lua-test` | `busted tests` | as today |
+| `lua-lint` | `luacheck src tests tools`, as shards of files on every core (`tools/parallel.py luacheck`, which prints what one luacheck run prints) | as today |
+| `lua-test` | `busted tests`, one busted a spec file on every core (`tools/parallel.py busted`: the output of every file that failed or printed more than its progress line, then busted's total) | as today |
 | `shell` | `shellcheck -S style` | `tools/*.sh`, `setup-vm.sh` if present in the repository (it is not today) |
 | `python-lint` | `ruff check tools` and `ruff format --check tools` | `tools/**/*.py` |
-| `python-test` | `python3 -B -m unittest discover -s tools/tests` (`-B`: no `__pycache__`, whose constant-folded test vectors the `secrets` tree scan would flag) | `tools/tests` |
+| `python-test` | `python3 -B -m unittest discover -s tools/tests`, one process a test module (`tools/parallel.py unittest`, then unittest's summary of the whole run; `-B`: no `__pycache__`, whose constant-folded test vectors the `secrets` tree scan would flag) | `tools/tests` |
 | `xml` | well-formedness of every `src/*/driver.xml` with `python3 -c` and `xml.etree` (no xmllint: it needs apt) | `src/*/driver.xml` |
 | `powershell` | `pwsh -c "Invoke-ScriptAnalyzer -Path tools/composer -Recurse -Severity Error -EnableExit"` | `tools/composer/*.psm1`; skip when `pwsh` is missing (the VM has none; GitHub's Ubuntu runners have it) |
 | `workflows` | `actionlint` then `zizmor --min-severity medium .github/workflows` | `.github/workflows/*.yml` |
-| `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` then `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=<refs>`: on the VM `--all`, the history of every local ref (branches, tags, stashes, remote-tracking refs), because a stale tag or branch can hold history that never reached GitHub and a `--tags` or `--mirror` push would publish it (security review 2026-10-25, finding 14); in CI (`GITHUB_ACTIONS=true`) `HEAD`, the history a pull request publishes (its `fetch-depth: 0` checkout also holds every other branch and tag, whose findings are not the pull request's) | tree and history |
+| `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` and, at the same time, `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=<refs>`: on the VM `--all`, the history of every local ref (branches, tags, stashes, remote-tracking refs), because a stale tag or branch can hold history that never reached GitHub and a `--tags` or `--mirror` push would publish it (security review 2026-10-25, finding 14); in CI (`GITHUB_ACTIONS=true`) `HEAD`, the history a pull request publishes (its `fetch-depth: 0` checkout also holds every other branch and tag, whose findings are not the pull request's) | tree and history |
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
 | `changelog` | `python3 tools/changelog.py check --file CHANGELOG.md` | `CHANGELOG.md` against `docs/changelog-design.md` |
 | `links` | `python3 tools/check_links.py` | every link in every tracked Markdown file and in the three Documentation tabs resolves (files and heading anchors); `--unlinked` lists the documents `README.md` does not reach, for the owner's decision on what the front page links (never a failure) |
@@ -97,7 +102,10 @@ release URL fails, the script fetches the same asset by its pinned id from
 the REST API (#419). Today:
 ruff 0.17.2, zizmor 1.31.1, shellcheck-py 0.10.0.1, actionlint 1.7.12,
 gitleaks 8.30.1. CI runs the same script (ubuntu-latest has `shellcheck`
-and `pwsh` already; the script skips what is present). It prints each
+and `pwsh` already; the script skips what is present). Since #456 it
+installs in three lanes at the same time (the pip packages one after
+another, actionlint, gitleaks) and prints their lines in the order above;
+`JOBS=1` runs the lanes one after another. It prints each
 tool's version at the end. Without `python3 -m pip` it fails with a clear
 line: the hash check is pip's, so there is no `pipx` or `uv` fallback.
 
