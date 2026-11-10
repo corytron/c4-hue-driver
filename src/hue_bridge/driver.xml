@@ -33,6 +33,7 @@
 				</items>
 				<default>Off</default>
 				<readonly>false</readonly>
+				<tooltip>Off in normal use; On writes a detailed log to the Lua tab for troubleshooting</tooltip>
 			</property>
 			<property>
 				<name>Status</name>

@@ -33,6 +33,7 @@
 				</items>
 				<default>Off</default>
 				<readonly>false</readonly>
+				<tooltip>Off in normal use; On writes a detailed log to the Lua tab for troubleshooting</tooltip>
 			</property>
 			<property>
 				<name>Status</name>
@@ -70,6 +71,7 @@
 				</items>
 				<default>As set in Hue</default>
 				<readonly>false</readonly>
+				<tooltip>How Hue recalls the scene: as set in the Hue app, always static, or always the dynamic palette</tooltip>
 			</property>
 			<!-- What the tile and the keypad LEDs follow: the scene's room or zone
 			     lights as well as the scene, or the scene alone
@@ -83,6 +85,7 @@
 				</items>
 				<default>Room/zone lights</default>
 				<readonly>false</readonly>
+				<tooltip>What the tile and keypad LEDs show as on: the scene's room or zone lights being on, or this scene being active</tooltip>
 			</property>
 			<property>
 				<name>Online</name>
