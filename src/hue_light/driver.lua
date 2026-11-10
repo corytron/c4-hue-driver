@@ -15,7 +15,8 @@
 -- cite as D<n>; the bridge's link offline and its answers to commands that
 -- did not land in docs/offline-design.md, cited as #428 D<n>; Control4 load
 -- groups (the GROUP_* commands, the Load Groups row) in
--- docs/load-groups-design.md, cited as #435 D<n>.
+-- docs/load-groups-design.md, cited as #435 D<n>; the throttle of Hue-side
+-- level reports in docs/light-events-design.md, cited as #433 D<n>.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -24,6 +25,7 @@ local state = require("light.state")
 local caps = require("light.caps")
 local turnon = require("light.turnon")
 local load_group = require("light.load_group")
+local throttle = require("light.throttle")
 
 -- Binding IDs, see driver.xml; common/device.lua holds the proxy's (5001).
 local BRIDGE_BINDING = device.BRIDGE_BINDING
@@ -31,6 +33,11 @@ local BRIDGE_BINDING = device.BRIDGE_BINDING
 -- Grace after the requested ramp before a target the bridge never confirmed
 -- is reported as reached, so the UI never sticks in "changing".
 local FALLBACK_MS = 1000
+
+-- #433 D12: a level Hue reports while it moves reaches the proxy at most
+-- once per this window, the last one exact (light.throttle), as the Hue
+-- Scene device's level reports do.
+local LEVEL_REPORT_MS = 1000
 
 -- Prefix of every line this driver logs.
 local LOG_PREFIX = "Hue Light"
@@ -374,6 +381,12 @@ end
 -- Proxy notifies -----------------------------------------------------------
 -- The report_* functions return true when they had something to report.
 
+-- #433 D12 to D14: the throttle of Hue-side level reports (light.throttle),
+-- made after report_brightness below. Every CHANGING closes its window
+-- (brightness_changing, D13) and every CHANGED records its level
+-- (brightness_changed, D14); HUE_STATE decides which reports wait (D12).
+local levels
+
 -- #429 D7: the brightness notifies name presets, so the proxy can move the
 -- light when a preset's level changes (the Daylight Agent) [verified: LV2
 -- notif _10.2-LIGHTBRIGHTNESSCHANGED.md, _10.3-LIGHTBRIGHTNESSCHANGING.md].
@@ -390,7 +403,13 @@ local function preset_at(level)
 end
 
 -- LIGHT_BRIGHTNESS_CHANGING; `preset_id` the preset the target is, or nil.
+-- The one helper every CHANGING goes through (#433 D13, the contract's
+-- changing()): a target's, a tap's, a hold's (keypad or load group, #435)
+-- and a turn-on's (#429). It closes the throttle's window, so a Hue-side
+-- level still waiting there never goes out as a stale CHANGED while the
+-- tile animates the Control4 ramp; the ramp's own CHANGED ends it.
 local function brightness_changing(current, target, rate, preset_id)
+	levels:close()
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
 		LIGHT_BRIGHTNESS_CURRENT = current,
 		LIGHT_BRIGHTNESS_TARGET = target,
@@ -404,7 +423,10 @@ end
 -- LIGHT_BRIGHTNESS_CHANGED with `level`. The last level above 0 is what a
 -- Previous turn-on goes back to (#429 D6), as the proxy remembers the last
 -- non-zero level reported before a 0 [verified: LV2 caps
--- _7-brightnessonmodeprevious.md].
+-- _7-brightnessonmodeprevious.md]. Every CHANGED goes through here and is
+-- recorded as the last level sent (#433 D14): the throttle's trailing report
+-- goes out only when the cache differs from it, so a stop's estimate or an
+-- unsent command's CHANGED is never repeated.
 local function brightness_changed(level)
 	local id = preset_at(level)
 	if not id then
@@ -414,6 +436,7 @@ local function brightness_changed(level)
 		mem.last_on = level
 	end
 	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = level, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = id })
+	levels:sent(level)
 end
 
 local function report_brightness()
@@ -425,6 +448,14 @@ local function report_brightness()
 	update_leds()
 	return true
 end
+
+-- #433 D12 (docs/light-events-design.md §6.4, §6.5): the window's trailing
+-- report is the cache's level, through report_brightness (which records it).
+levels = throttle.new({
+	ms = LEVEL_REPORT_MS,
+	current = function() return state.to_proxy_brightness(st) end,
+	send = function() report_brightness() end,
+})
 
 -- How close a reported colour must be to one Control4 sent to count as it
 -- (§7.4, §7.7): Hue rounds what it stores.
@@ -1309,6 +1340,31 @@ function dev.on_link(_, changed)
 	refresh_status()
 end
 
+-- #433 D12: a HUE_STATE that changed the level the proxy shows, already in
+-- the cache. It goes out at once, and the throttle's window starts again
+-- after it, when it settled a pending Control4 target (a ramp's foreign
+-- report included: the proxy heard CHANGING and waits for its CHANGED),
+-- when it turns the light on or off against the last level sent (the
+-- first report of all too; L53, L6), or when it is a full state (`reason`
+-- hello, resync or import, not "event"; L5). Anything else is a level Hue
+-- reports while it moves (the Hue app, a Hue switch, a Hue automation): at
+-- most one CHANGED per LEVEL_REPORT_MS, the first at once and the latest at
+-- the window's end (L7). Only the notification waits: the cache already
+-- holds the level, so Raise, Restore, the tap rule and the next CHANGING
+-- read it exactly, and the LEDs follow it now (they change only with an
+-- on or off, which never waits).
+local function report_level(reason, settled)
+	local full = reason ~= nil and reason ~= "" and reason ~= "event"
+	if settled or full or levels:edge(state.to_proxy_brightness(st)) then
+		if report_brightness() then
+			levels:open()
+		end
+		return
+	end
+	update_leds()
+	levels:report()
+end
+
 dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
@@ -1322,10 +1378,12 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	local changed = apply(params)
 	-- Any report of a pending field that got past hold_back settles the
 	-- target, whatever the value: the proxy heard CHANGING and must hear
-	-- CHANGED. One held back for a ramp settles it at the ramp's end.
+	-- CHANGED, at once (#433 D12). One held back for a ramp settles it at
+	-- the ramp's end.
+	local settled = false
 	if fallback.brightness and (params.on ~= nil or params.brightness ~= nil) then
 		settle("brightness")
-		changed.brightness = true
+		changed.brightness, settled = true, true
 	end
 	if colored then
 		noticed_color(confirming)
@@ -1334,7 +1392,8 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 		settle("color")
 		changed.color = true
 	end
-	if changed.brightness then report_brightness() end
+	-- Colour reports are not throttled (#433 D16, owner 2026-11-09).
+	if changed.brightness then report_level(params.reason, settled) end
 	if changed.color then report_color() end
 	if changed.online then
 		report_online()
@@ -1352,6 +1411,7 @@ dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(p
 	st.forgotten = { name = params.name or st.name }
 	settle("brightness")
 	settle("color")
+	levels:close() -- #433 §6.5: no Hue-side level of a forgotten light still to come
 	log.warn("forgotten by the bridge (was %s)", was_label())
 	-- A group's Status names the group, so the instruction goes here.
 	prop("Last Action", state.is_group(st) and FORGOTTEN_INSTRUCTION or "Forgotten by the bridge")
@@ -2170,8 +2230,8 @@ local function setup_from(source, read)
 		return 0
 	end
 	log.debug("%s: %s", source, text:sub(1, SETUP_LOG_MAX))
-	local colors, levels = turnon.take_setup(modes, text)
-	log.debug("%s: %d colour and %d brightness presets", source, colors, levels)
+	local colors, presets = turnon.take_setup(modes, text)
+	log.debug("%s: %d colour and %d brightness presets", source, colors, presets)
 	return colors
 end
 
@@ -2270,6 +2330,7 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 		dev.link = nil -- the next bridge's hello answer says its own (#428 D4)
 		settle("brightness")
 		settle("color")
+		levels:close() -- #433 §6.5: the window's level came from the bridge just unbound
 		cancel_hold_color()
 		groups:end_hold("unbound from the bridge") -- #435: nothing left to stop it through
 		refresh_status()
@@ -2287,6 +2348,7 @@ end
 function OnDriverDestroyed()
 	settle("brightness")
 	settle("color")
+	levels:close() -- #433 §6.5: the window's timer
 	cancel_hold_color()
 	groups:end_hold("driver destroyed") -- #435: its tick and end-of-range timers
 	cancel_setup_read()
