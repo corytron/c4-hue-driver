@@ -53,7 +53,7 @@
 -- handlers, the bridge's HUE_BRIDGE_LINK (#428; the Hue Motion driver puts
 -- its own in place after device.new), the proxy's BUTTON_ACTION, DO_PUSH,
 -- DO_RELEASE, DO_CLICK,
--- REQUEST_BUTTON_COLORS and SET_BUTTON_COLOR, the SET_* command of each
+-- REQUEST_BUTTON_COLORS, SET_BUTTON_COLOR and SET_ALL_LED (#432 D11), the SET_* command of each
 -- keypad setting it takes, UPDATE_BRIGHTNESS_RATE_DEFAULT and
 -- UPDATE_COLOR_RATE_DEFAULT (#430 D8), and DEV_RELOAD in dev builds.
 --
@@ -62,6 +62,13 @@
 -- the persisted identity, read the binding (bound_bridge), then late_init()
 -- (the buffered bridge messages), greet, and replay_bindings() last;
 -- OnDriverDestroyed calls cancel_timers().
+--
+-- The light's own button events (#432, docs/light-events-design.md §3.1):
+-- every press that reaches the device, by either route, tells the proxy
+-- what the button did (BUTTON_ACTION push and release, then the tap count
+-- when the double-tap window closes), so the proxy fires the device's Press,
+-- Release and Single, Double and Triple Tap events. device.BUTTON_EVENTS_MODE
+-- says how the count goes out.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -113,6 +120,22 @@ local CLICK_GUARD_MS = 1000
 -- measured on the house (that note's §9). Fixed here, no property.
 device.DOUBLE_TAP_MS = 600
 local DOUBLE_TAP_MS = device.DOUBLE_TAP_MS
+
+-- #432 D7: how a closed tap sequence reaches the proxy, read at each close
+-- (the specs set it per test). "count": CLICK_COUNT {BUTTON_ID, COUNT}, the
+-- keypad pattern [verified: LV2 notif _3-CLICKCOUNT.md; KP
+-- 61_keypad_protocol_notifications/_2-CLICKCOUNT.md]. "action": BUTTON_ACTION
+-- with ACTION 2, 3 or 4, single, double or triple tap [verified: LV2 notif
+-- _1-BUTTONACTION.md], and every Button Link release then notifies 0. Which
+-- of the two the proxy fires its tap events from is not documented
+-- [assumed: "count"]; house check P3 (docs/light-events-design.md §8.2,
+-- step 100) settles it before the release. Lua only: a change needs no
+-- reboot. No property.
+device.BUTTON_EVENTS_MODE = "count"
+
+-- #432 D6: a sequence counts at most a triple tap (the proxy's button events
+-- stop at Triple Click [verified: LV2 25_light_v2_events/_0-HEADER.md]).
+local MAX_TAPS = 3
 
 -- Milliseconds since the epoch on the controller's clock [verified: API
 -- 34/_2, C4:GetTime, OS 3.2.3; the drivers declare 3.3.0], else os.time(),
@@ -868,6 +891,99 @@ function device.new(opts)
 		return hold == h
 	end
 
+	-- The light's own button events (#432, docs/light-events-design.md §3.1).
+	-- They are sent beside the machine, never in place of a decision (D8):
+	-- every press that reaches the device fires its events, whatever the
+	-- device then does with it, a swallowed or dropped one too (D3). Two
+	-- records per button:
+	--   down[button] = { held }  from a push the proxy heard (notified on a
+	--                            Button Link, or echoed on its own route) to
+	--                            its release (D4, D5); held once the hold
+	--                            timer made that press a hold
+	--   taps[button] = { count, timer, press, added }  the open tap sequence
+	--                            (D6): the presses counted (at most MAX_TAPS),
+	--                            the timer that closes it DOUBLE_TAP_MS after
+	--                            its last press, that press's record, and
+	--                            whether that press added one
+	local down = {}
+	local taps = {}
+
+	-- D6, D7: the sequence on `button` ends; a count of 1 or more tells the
+	-- proxy, by the mode.
+	local function close_taps(button)
+		local seq = taps[button]
+		if not seq then
+			return
+		end
+		taps[button] = nil
+		if seq.timer then
+			seq.timer:Cancel()
+			seq.timer = nil
+		end
+		if seq.count < 1 then
+			return
+		end
+		if device.BUTTON_EVENTS_MODE == "action" then
+			notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = ACT_PRESS + seq.count })
+		else
+			notify("CLICK_COUNT", { BUTTON_ID = button, COUNT = seq.count })
+		end
+	end
+
+	-- D6: a press judge() saw, after its window verdict. Outside the window it
+	-- closes the button's open sequence and starts one at 1; inside, it adds
+	-- one, up to MAX_TAPS. Either way the window's end, DOUBLE_TAP_MS after
+	-- this press (the same window judge() measures), closes the sequence.
+	local function count_tap(h)
+		local button = h.button
+		local seq = taps[button]
+		if seq and not h.multi then
+			close_taps(button)
+			seq = nil
+		end
+		if not seq then
+			seq = { count = 0 }
+			taps[button] = seq
+		end
+		seq.press = h
+		seq.added = seq.count < MAX_TAPS
+		if seq.added then
+			seq.count = seq.count + 1
+		end
+		if seq.timer then
+			seq.timer:Cancel()
+		end
+		seq.timer = C4:SetTimer(DOUBLE_TAP_MS, function()
+			if taps[button] ~= seq then
+				return
+			end
+			seq.timer = nil
+			-- D6: a sequence never closes while its last press is undecided.
+			-- On the controller that cannot happen (the hold timer, armed at
+			-- the same press, is due HOLD_AFTER_MS < DOUBLE_TAP_MS after it),
+			-- only when timers run out of order (the specs' fire_timers): the
+			-- hold, when it comes, closes the sequence (uncount_tap).
+			if hold == seq.press and not seq.press.held then
+				return
+			end
+			close_taps(button)
+		end)
+	end
+
+	-- D6: the press `h` became a hold. It takes back its count (when it
+	-- added one) and the button's sequence closes at once with the taps
+	-- before it.
+	local function uncount_tap(h)
+		local seq = taps[h.button]
+		if not seq then
+			return
+		end
+		if seq.press == h and seq.added then
+			seq.count = seq.count - 1
+		end
+		close_taps(h.button)
+	end
+
 	local function end_hold()
 		if hold and hold.timer then
 			hold.timer:Cancel()
@@ -910,6 +1026,12 @@ function device.new(opts)
 		elseif dev.ramp_active() then
 			h.stopped = true
 			log.debug("button %d stops the ramp", h.button)
+		end
+		-- #432 D6, D8: the press counts beside the verdict, before the stop
+		-- runs, so a tap that stops a ramp is a tap and a stop that fails
+		-- still counts (D3).
+		count_tap(h)
+		if h.stopped then
 			dev.on_ramp_stop(h.button)
 		end
 	end
@@ -919,6 +1041,10 @@ function device.new(opts)
 	local function start_hold(h)
 		h.held = true
 		last_press[h.button] = nil
+		uncount_tap(h) -- #432 D6
+		if down[h.button] then
+			down[h.button].held = true -- #432 D4: its release notifies 0
+		end
 		local on = dev.is_on() == true
 		local up = h.button == BUTTON_TOP or (h.button ~= BUTTON_BOTTOM and not on)
 		if not up and not on then
@@ -1020,28 +1146,80 @@ function device.new(opts)
 	end
 	dev.link_button = link_button
 
+	-- #432 D4: a Button Link press tells the proxy what the proxy's own route
+	-- would echo, so the proxy hears one sequence from both routes and can
+	-- fire the device's Press and Release (F4, F10). A push on a button still
+	-- down first sends the release it never had (a lost DO_RELEASE, L47): after
+	-- a push the proxy wants a release, or later pushes fail [verified: LV2
+	-- notif _1-BUTTONACTION.md].
+	local function notify_press(button)
+		if down[button] then
+			notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = ACT_RELEASE })
+		end
+		down[button] = { held = false }
+		notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = ACT_PRESS })
+	end
+
+	-- #432 D4, D7: exactly one release per notified push: 2 when the press
+	-- ends as a click, 0 after a hold (in mode "action", 0 either way). A
+	-- button not down sends nothing: the keypad's click after a hold's
+	-- release (the guard ignores it), or the click after PUSH, RELEASE. The
+	-- held test is the down record's, which start_hold marks: §6.3's `hold and
+	-- hold.button == button and hold.held`, also for a hold that another
+	-- button's press ended before this release.
+	local function notify_release(button)
+		local d = down[button]
+		if not d then
+			return
+		end
+		down[button] = nil
+		local action = ACT_CLICK
+		if d.held or device.BUTTON_EVENTS_MODE == "action" then
+			action = ACT_RELEASE
+		end
+		notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+	end
+
 	dispatch.proxy["BUTTON_ACTION"] = function(_, params)
 		local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
 		if not button or not action then
 			return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
 		end
 		notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
+		-- #432 D5: the echo, unchanged, keeps the down mark, so a Button Link
+		-- press after it stays consistent.
+		if action == ACT_PRESS then
+			down[button] = { held = false }
+		elseif action == ACT_RELEASE or action == ACT_CLICK then
+			down[button] = nil
+		end
 		dev.button_action(button, action)
 	end
 
+	-- #432 §3.1: each link command notifies before the machine runs, so the
+	-- held test reads the press as it was.
 	dispatch.proxy["DO_PUSH"] = function(binding)
 		local button = link_button(binding, "DO_PUSH")
-		if button then dev.button_action(button, ACT_PRESS) end
+		if button then
+			notify_press(button)
+			dev.button_action(button, ACT_PRESS)
+		end
 	end
 
 	dispatch.proxy["DO_RELEASE"] = function(binding)
 		local button = link_button(binding, "DO_RELEASE")
-		if button then dev.button_action(button, ACT_RELEASE) end
+		if button then
+			notify_release(button)
+			dev.button_action(button, ACT_RELEASE)
+		end
 	end
 
 	dispatch.proxy["DO_CLICK"] = function(binding)
 		local button = link_button(binding, "DO_CLICK")
-		if button then dev.button_action(button, ACT_CLICK) end
+		if button then
+			notify_release(button)
+			dev.button_action(button, ACT_CLICK)
+		end
 	end
 
 	-- A keypad on a link asks for its button's colours and the LED state.
@@ -1075,6 +1253,52 @@ function device.new(opts)
 		end
 		send_button_colors(BUTTON_LINK[button], button)
 		send_button_info(button, dev.is_on() == true)
+	end
+
+	-- #432 D11: the proxy sets every button's LED colour, on and off, to one
+	-- colour: COLOR, a 6-digit hex RGB string [verified: LV2 cmds
+	-- _13-SET_ALL_LED.md]. The six colours are stored and persisted under
+	-- SET_BUTTON_COLOR's keys, so a Director restart keeps them and a later
+	-- SET_BUTTON_COLOR changes single ones again (L51). Then each link hears
+	-- its button's colours, the proxy each button's BUTTON_INFO, and, while
+	-- the on state is known, each link MATCH_LED_STATE. A COLOR that is
+	-- missing or not 6-digit hex changes nothing: a warning, and the colours
+	-- kept go to the proxy again, so Composer shows the truth. Whatever the
+	-- device's state (unbound, offline, forgotten).
+	dispatch.proxy["SET_ALL_LED"] = function(_, params)
+		dev.first_arrival("SET_ALL_LED", params)
+		local color = valid_color(params.COLOR)
+		local on = dev.is_on()
+		if not color then
+			if params.COLOR == nil then
+				log.warn("SET_ALL_LED without a COLOR; the LED colours are kept")
+			else
+				log.warn("SET_ALL_LED: COLOR %q is not a 6-digit hex colour; the LED colours are kept",
+					tostring(params.COLOR))
+			end
+			for button = 0, 2 do
+				send_button_info(button, on == true)
+			end
+			return
+		end
+		for button = 0, 2 do
+			for _, which in ipairs({ "on", "off" }) do
+				colors[button][which] = color
+				C4:PersistSetValue(color_key(button, which), color)
+			end
+		end
+		for button = 0, 2 do
+			send_button_colors(BUTTON_LINK[button], button)
+		end
+		for button = 0, 2 do
+			send_button_info(button, on == true)
+		end
+		if on ~= nil then
+			led_on = on == true
+			for _, binding in ipairs(LINK_BINDINGS) do
+				C4:SendToProxy(binding, "MATCH_LED_STATE", { STATE = led_on }, "COMMAND")
+			end
+		end
 	end
 
 	-- Binding re-check ------------------------------------------------------
@@ -1122,6 +1346,12 @@ function device.new(opts)
 	-- Lua state goes with the device, but after a dev-loop reload a stray look
 	-- would still write the row (docs/reviews/slim-device-drivers.md §4
 	-- question 5).
+	--
+	-- #432 D6, E9: open tap sequences go too, unsent, and each button still
+	-- down gets its release (0), so the proxy is not left refusing pushes
+	-- after a driver update in the middle of a press; the new code starts
+	-- with nothing down. That a notify sent from OnDriverDestroyed still
+	-- reaches the proxy is [assumed].
 	function dev.cancel_timers()
 		end_hold()
 		disarm_guard()
@@ -1130,6 +1360,21 @@ function device.new(opts)
 			version_timer = nil
 		end
 		dev.cancel_recheck()
+		for _, seq in pairs(taps) do
+			if seq.timer then
+				seq.timer:Cancel()
+			end
+		end
+		taps = {}
+		local buttons = {}
+		for button in pairs(down) do
+			buttons[#buttons + 1] = button
+		end
+		table.sort(buttons)
+		down = {}
+		for _, button in ipairs(buttons) do
+			notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = ACT_RELEASE })
+		end
 	end
 
 	-- Composer delete -------------------------------------------------------

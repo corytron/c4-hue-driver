@@ -40,13 +40,25 @@ mode asks for; the light declares the on mode capabilities instead of
 `supports_default_on`; click and hold rates go up to 6 000 000 ms on light
 and scene; and the Hue Scene lists its click rates. A static change: the
 install needs the owner's reboot from System Manager.
+Current (2026-11-10, #432, [the light-events contract](light-events-design.md)):
+Hue Light and Hue Scene devices fire their own button events (Press,
+Release, Single, Double and Triple Tap on Top, Bottom and Toggle). A Button
+Link press is now notified to the proxy as the proxy route's echo would
+be, taps are counted per button in the 600 ms window and closed with
+`CLICK_COUNT`, and `SET_ALL_LED` sets all six LED colours. Both drivers
+declare `has_button_events` and `multi_click` (static: the same 1.5
+reboot). What a press does to the light or scene is unchanged. See "The
+light's own button events and Set All LEDs (#432)" at the end.
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
 Superseded in part (2026-10-22, hardware): the Top, Bottom and Toggle
 links are connections the driver declares, and a bound keypad button
 delivers `DO_PUSH` / `DO_RELEASE` / `DO_CLICK` on them; see "Hardware
-findings".
+findings". Current (2026-11-10, #432 D4, D5): the notification back below
+now goes out for those link presses too, `BUTTON_ACTION` 1 at `DO_PUSH`
+and 2 or 0 when the press ends, as the proxy route's echo would be; the
+echo of the proxy route itself is unchanged.
 
 - The light_v2 proxy creates the Top, Bottom and Toggle Button Link consumer
   connections itself and forwards every `BUTTON_ACTION` it receives on them
@@ -143,6 +155,11 @@ the light driver keeps, to the preset (from below or from above) or to 0,
 over `click rate × distance / 100`; a press outside the double-tap window
 while it runs stops it, and a press inside the window does nothing. The
 rule table is in "Tap ramps and tap stops (#421)".
+Current (2026-11-10, #432 D4 to D8): "echo the notification" in the press
+row is the proxy route's (`BUTTON_ACTION`). A Button Link press (`DO_PUSH`,
+`DO_RELEASE`, `DO_CLICK`) is now notified as that echo would be, and every
+press is counted for the light's own tap events. What each input does to
+the light is unchanged.
 
 Settings persist per device (`preset_level`, `click_rate_up`,
 `click_rate_down`, `hold_rate_up`, `hold_rate_down`); defaults 100 %,
@@ -170,6 +187,8 @@ Hue Scene (`src/hue_scene/driver.lua`): echo every action; click or release
 of top = recall (ON), bottom = OFF, toggle = toggle; holds do nothing.
 Superseded (2026-10-23): holds dim the scene's room or zone, see "Scene
 hold-to-dim and keypad LEDs" below.
+Current (2026-11-10, #432 D1): link presses are notified and taps counted
+on the scene as on the light, by the shared machine.
 
 `driver.xml` (light): `click_rates`, `hold_rates`, `supports_default_on`
 true; `click_rate_min` 0, `hold_rate_min` 1000. Scene: unchanged.
@@ -194,6 +213,8 @@ the lights from Control4" describes the setup. Superseded (2026-10-27,
 #312): the Windows session can make the binding by a synthesized drag
 from the keypad's own row (`docs/composer-remote.md`, "Learned
 2026-10-27").
+Current (2026-11-10, #432): the house checks of the button events and
+`SET_ALL_LED` are `docs/composer-checklist.md` section R, steps 133 to 137.
 
 ## Hardware findings (2026-10-22, builds 144 and 146 installed)
 
@@ -210,6 +231,12 @@ public light_v2 drivers on GitHub; the SDK's jumpstart template calls the
 base id "ButtonLinkBindingIDBase"]. Both drivers now declare the three
 connections and route the binding commands into the same button logic;
 `BUTTON_ACTION` on the proxy binding stays as the proxy's own route.
+Current (2026-11-10, #432 F10, D4): until 1.5 the driver notified the
+proxy of nothing for these link presses, so the proxy had nothing to fire
+the light's own button events from. The link handlers now notify
+`BUTTON_ACTION` by the rule in "The light's own button events and Set All
+LEDs (#432)" at the end; `BUTTON_ACTION` from the proxy is echoed as
+before.
 
 Install behaviour seen on the house (build 141 → 144 → 146):
 
@@ -366,6 +393,11 @@ the same fields (`docs/group-hold-design.md` G1 to G6a).
   link, then `MATCH_LED_STATE`.
 - The light driver gets the same LED and colour handling (on = `st.on`) and
   the same 1 s click suppression after a hold.
+- Current (2026-11-10, #432 D11): `SET_ALL_LED {COLOR}` from the proxy sets
+  all six colours to one and persists them under the same keys, then sends
+  what `SET_BUTTON_COLOR` sends, for every button (`BUTTON_COLORS` on each
+  link, `BUTTON_INFO` per button), and `MATCH_LED_STATE` on each link; see
+  the section at the end.
 
 The switch's own "LED Behavior" may need its option that follows the bound
 device instead of "Push/Release" (owner checks on the switch). Answered
@@ -561,6 +593,10 @@ Decisions, in short (D numbers are the contract's):
   starts and stops nothing, a running ramp goes on, it is still echoed, and
   held past `HOLD_AFTER_MS` it is a hold. Fixed in the code, no property.
   The first tap acts at once; waiting out the window would delay every tap.
+  Current (2026-11-10, #432 D6, D8): "still echoed" is the proxy route; a
+  link press is now notified too, and a press inside the window counts
+  toward the light's own Double and Triple Tap events, which fire while the
+  first tap's ramp goes on.
 - **The stop (D5).** While a ramp runs, the **press** of any button outside
   the window stops it where it is, the other button and the toggle
   included: the light never turns round. The click after that press is
@@ -746,3 +782,140 @@ section M (steps 88 to 95). Current (2026-11-09): the measurement is done
 (contract section 10: `"level"` with a 1 s glide, Z1 and Z2 passed, and
 the scene steps S1 to S4); the switch checks and the release remain, and
 section M now runs to step 98, with the scene steps 96 to 98.
+
+## The light's own button events and Set All LEDs (#432)
+
+The owner decided on 2026-11-09 (comments on #432 and #433) that Hue Light
+devices (single, zone and room lights) and Hue Scene devices fire their
+own button events in Composer programming, as a Control4 dimmer does, and
+take the proxy's `SET_ALL_LED`. The contract is
+[`light-events-design.md`](light-events-design.md); it also throttles the
+light's Hue-side level reports (#433), which this file does not cover.
+Written 2026-11-10, before the house checks.
+
+Decisions, in short (D, E and F numbers are the contract's):
+
+- **Capabilities (D2).** Both `driver.xml` declare `has_button_events` and
+  `multi_click` True (`src/hue_light/driver.xml:167-168`,
+  `src/hue_scene/driver.xml:133-134`). Both are static, so the 1.5 reboot
+  from System Manager brings them. `multi_click` is the default and is from
+  OS 3.4.2; older OS versions ignore it [assumed]. No event, command,
+  property, variable, connection or persisted key is added.
+- **Which presses (D3).** Every press that reaches the device, by either
+  route, fires its events, whatever the device then does: a tap, a stop, a
+  press swallowed inside the double-tap window, or a press dropped because
+  the device is unbound, offline or forgotten. The events describe the
+  buttons, not the light.
+- **The link route (D4).** A Button Link press notifies the proxy as the
+  proxy route's echo would: `BUTTON_ACTION` 1 at `DO_PUSH`; 2 when the press
+  ends as a click (`DO_CLICK`, or `DO_RELEASE` before the hold time); 0
+  when it ends after a hold (`DO_RELEASE`, or `DO_CLICK` on a held press).
+  Exactly one release follows each notified push: a `DO_PUSH` on a button
+  still marked down first notifies the missing release (a lost
+  `DO_RELEASE`, guidelines row L47), and the click some keypads send after
+  a hold's release, which the 1 s click guard ignores, notifies nothing.
+- **The proxy route (D5).** The echo stays exactly as before: every action,
+  as received, before the machine runs. It also sets and clears the
+  button's down mark, so mixed sequences stay consistent.
+- **Counting taps (D6).** Per button, in the shipped 600 ms window. Each
+  press that `judge()` sees counts one, up to 3. A press outside the window
+  first closes any open sequence on that button, then starts a new one
+  with a count of 1. A press that becomes a hold takes its count back and
+  closes the sequence at once. The window's end (600 ms after the sequence's last
+  press) closes it. A sequence that closes with a count of 1 or more is
+  notified (D7). Because 400 < 600, a sequence never closes while its last
+  press is undecided.
+- **How the count reaches the proxy (D7).** `device.BUTTON_EVENTS_MODE` in
+  `src/common/device.lua`: `"count"` (the default) sends
+  `CLICK_COUNT {BUTTON_ID, COUNT}` at the close; `"action"` sends
+  `BUTTON_ACTION {BUTTON_ID, ACTION = 1 + COUNT}` (2, 3 or 4) at the close
+  instead, and notifies 0 for every link release. Which of the two the
+  proxy fires Single, Double and Triple Tap from is not documented (F8):
+  checklist step 134 picks the mode on the house, a Lua-only change.
+- **Tap-stop unchanged (D8).** The window, the stop on the press, the
+  swallowed clicks, the click guard and the holds act as in 1.4 ("Tap ramps
+  and tap stops (#421)" above). The notifications go beside the machine,
+  never in place of a decision: a double tap fires Double Tap while the
+  first tap's ramp keeps going, and a tap that stops a ramp counts as a
+  tap, so it fires Single Tap.
+- **Two devices, two sets of events (D9).** A keypad button bound to a
+  light's link fires the keypad's own events on the keypad and the light's
+  events on the light [assumed: as a Control4 keypad bound to a Control4
+  dimmer does]. The manuals tell dealers to program one of the two for a
+  given press, and warn that programming on a light's button event that
+  presses the same light's button repeats itself (E14).
+- **Shipped whatever the house shows (D10).** The capabilities ride the 1.5
+  reboot even if neither mode fires the tap events; the mode can be fixed
+  later without a reboot. Press and Release, which the `BUTTON_ACTION`
+  notification documents, are expected to work either way.
+- **`SET_ALL_LED` (D11).** `COLOR`, a 6-digit hex string read as
+  `SET_BUTTON_COLOR`'s colours are (lower-cased), sets all six colours (on
+  and off of buttons 0, 1 and 2) and persists them under the existing keys
+  `button_<n>_on_color` and `button_<n>_off_color`. Then it sends
+  `BUTTON_COLORS` on each link (200, 201, 202), `BUTTON_INFO` for each
+  button and, when the on state is known, `MATCH_LED_STATE` on each link. A
+  bad or missing `COLOR` changes nothing, logs a warning and resends
+  `BUTTON_INFO` with the colours kept, so Composer shows the truth. It works
+  in any device state (unbound, offline). A later `SET_BUTTON_COLOR`
+  changes single colours again. On a scene the LEDs still follow the on
+  state that On State Follows defines (`docs/scene-led-design.md`).
+
+The rule in mode `"count"` ("down" is a per-button mark, set by a notified
+push and cleared by a notified release):
+
+| Input on button b | Notified now | Counting (D6) |
+|---|---|---|
+| Proxy `BUTTON_ACTION` a | `BUTTON_ACTION {b, a}` (the echo, unchanged) | press: counts; release: nothing |
+| `DO_PUSH`, b not down | `BUTTON_ACTION {b, 1}` | counts |
+| `DO_PUSH`, b down (release lost) | `BUTTON_ACTION {b, 0}`, then `{b, 1}` | counts |
+| `DO_RELEASE` before the hold time, b down | `BUTTON_ACTION {b, 2}` | nothing |
+| `DO_RELEASE` after a hold, b down | `BUTTON_ACTION {b, 0}` | nothing (the hold closed the sequence) |
+| `DO_CLICK`, b down, not held | `BUTTON_ACTION {b, 2}` | nothing, or counts when no press is on record |
+| `DO_CLICK`, b down, held | `BUTTON_ACTION {b, 0}` | nothing |
+| `DO_CLICK` or `DO_RELEASE`, b not down (the guard's click; a click after PUSH, RELEASE) | nothing | nothing |
+| A hold starts on b | nothing | the press's count is taken back; the sequence closes |
+| The sequence closes with count n ≥ 1 | `CLICK_COUNT {b, n}` | ends |
+| `cancel_timers()` (`OnDriverDestroyed`) | `BUTTON_ACTION {b, 0}` for each b still down | open sequences dropped |
+
+Mode `"action"` differs in two places only: a link release notifies 0 in
+every case, and the close notifies `BUTTON_ACTION {b, 1 + n}` instead of
+`CLICK_COUNT`. Examples on Top in mode `"count"`: a tap notifies `{0,1}`
+`{0,2}` and, 600 ms after the press, `CLICK_COUNT {0,1}`; a double tap
+`{0,1}` `{0,2}` `{0,1}` `{0,2}` and then `CLICK_COUNT {0,2}`, while the
+first tap's ramp goes on; a hold `{0,1}` and at the release `{0,0}`, with
+no count; a tap and then a hold within 600 ms `{0,1}` `{0,2}` `{0,1}`,
+`CLICK_COUNT {0,1}` as the hold starts, and later `{0,0}`.
+
+Where it lives: `src/common/device.lua`, one machine for both drivers
+(`device.BUTTON_EVENTS_MODE`; per device the `down` and `taps` state;
+`close_taps`, `count_tap`, `uncount_tap`, `notify_press`,
+`notify_release`; `dispatch.proxy["SET_ALL_LED"]`). Its specs are in
+`tests/spec/device_spec.lua` (the contract's §8.1 names each test).
+
+Lifecycle (the contract's §4): a keypad bound to a link fires the light's
+events from its first press, and a new keypad gets the colours on its
+`REQUEST_BUTTON_COLORS` (E1, E2). A driver update installed before the
+reboot sends the notifications, but Composer lists no events until the
+reboot (E7). An update in the middle of a press notifies the release of
+each button still down at `OnDriverDestroyed` (E9). A Director restart or
+a reboot in the middle of a tap sequence loses that sequence's count
+(E10). Rolled back to 1.4, the device lists no events after the next
+reboot, and programming written on them stays in the project and never
+runs [assumed]; 1.4 reads the colours under the same keys (E11). Presses
+on Hue's own switches never fire these events, because the bridge reports
+what lamps do, not which switch moved them (E16; departure D19 of
+`docs/c4-lighting-guidelines.md`, which retires its D15).
+
+To verify on the house: `docs/composer-checklist.md` section R. Steps 133
+to 136 cover the events: listed in Programming; the proxy route through
+the dev loop's `Watch Events` and `Proxy Command` (step 134 settles
+`BUTTON_EVENTS_MODE`); the link route with the owner's hands; and a tap
+that stops still counting. Step 137 covers `SET_ALL_LED`. In
+`docs/c4-lighting-guidelines.md`, row L46 stays Partial until step 134
+shows the events fire, and L52 meets.
+
+This section supersedes, above: the link presses notifying nothing
+("Hardware findings") and the echo of the press row being the only
+notification ("Driver behaviour"). Holds, the click guard, the tap ramps
+and stops, the LEDs following the on state and `SET_BUTTON_COLOR` are
+unchanged.

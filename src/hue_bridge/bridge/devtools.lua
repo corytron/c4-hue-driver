@@ -9,8 +9,10 @@
 -- Credentials, Check CA Pinning and Connection Test actions, Test
 -- Connection's Host override, the registration of the 1.2 probe's
 -- commands (bridge/probe12.lua: Probe Discovery, Probe Names, Probe Names
--- Restore, Probe Picker, Probe Picker Folders), and Link Offline After, the
--- short outage time of a house check (#428 D15). See docs/dev-loop.md.
+-- Restore, Probe Picker, Probe Picker Folders), Link Offline After, the
+-- short outage time of a house check (#428 D15), and Watch Events, which
+-- logs the light_v2 events a device's proxy fires (#432 D17). See
+-- docs/dev-loop.md.
 --
 -- driver.lua loads this module only when common/devloop.lua is present and
 -- hands over what the handlers need in devtools.install(ctx); nothing here
@@ -424,37 +426,26 @@ local function find_group_device(key)
 	return nil
 end
 
--- Not in driver.xml, reachable only through signed dev loop commands: a
--- light_v2 proxy command to one light, zone light or scene device, the way
--- a Navigator or programming would send it, so the whole command path can
--- be exercised from the dev loop. Params: Light (rid, Hue name or protocol
--- device id), Command (e.g. SET_BRIGHTNESS_TARGET), and the command's own
--- params (e.g. LIGHT_BRIGHTNESS_TARGET=50 RATE=0).
-local function proxy_command(params)
-	params = params or {}
+-- The light_v2 proxy of the light, zone light or scene device `key` names
+-- (rid, Hue or Composer name, protocol device id), for Proxy Command and
+-- Watch Events: the proxy's device id and the device's name, or nil and
+-- why (a text that follows the caller's own label).
+local function find_proxy(key)
 	local lights = ctx.state.lights
-	local rid, entry = find_light(params.Light or "")
+	local rid, entry = find_light(key or "")
 	if not rid then
 		-- A zone light or a scene device: its light_v2 proxy is the consumer
 		-- of its binding 5001, as for a light.
-		local group = find_group_device(params.Light or "")
+		local group = find_group_device(key or "")
 		if not group then
-			return log.always("Proxy Command: no registered light, zone light or scene matches %q",
-				tostring(params.Light))
+			return nil, string.format("no registered light, zone light or scene matches %q", tostring(key))
 		end
 		local consumers = C4:GetBoundConsumerDevices(tonumber(group.device_id), 5001)
 		local gproxy = type(consumers) == "table" and next(consumers) or nil
 		if not gproxy then
-			return log.always("Proxy Command: no proxy found for %s (device %s)", group.name, tostring(group.device_id))
+			return nil, string.format("no proxy found for %s (device %s)", group.name, tostring(group.device_id))
 		end
-		local command = params.Command or "SET_BRIGHTNESS_TARGET"
-		local forwarded = {}
-		for k, v in pairs(params) do
-			if k ~= "Light" and k ~= "Command" then forwarded[k] = v end
-		end
-		C4:SendToDevice(gproxy, command, forwarded)
-		return log.always("Proxy Command: %s -> %s (proxy %s): %s", command, group.name, tostring(gproxy),
-			C4:JsonEncode(forwarded))
+		return gproxy, group.name
 	end
 	local proxy = lights:proxy_for(rid)
 	if not proxy then
@@ -469,7 +460,22 @@ local function proxy_command(params)
 		end
 	end
 	if not proxy then
-		return log.always("Proxy Command: no proxy found for %s (device %s)", entry.name, tostring(entry.device_id))
+		return nil, string.format("no proxy found for %s (device %s)", entry.name, tostring(entry.device_id))
+	end
+	return proxy, entry.name
+end
+
+-- Not in driver.xml, reachable only through signed dev loop commands: a
+-- light_v2 proxy command to one light, zone light or scene device, the way
+-- a Navigator or programming would send it, so the whole command path can
+-- be exercised from the dev loop. Params: Light (rid, Hue name or protocol
+-- device id), Command (e.g. SET_BRIGHTNESS_TARGET), and the command's own
+-- params (e.g. LIGHT_BRIGHTNESS_TARGET=50 RATE=0).
+local function proxy_command(params)
+	params = params or {}
+	local proxy, name = find_proxy(params.Light)
+	if not proxy then
+		return log.always("Proxy Command: %s", name)
 	end
 	local command = params.Command or "SET_BRIGHTNESS_TARGET"
 	local forwarded = {}
@@ -477,8 +483,195 @@ local function proxy_command(params)
 		if k ~= "Light" and k ~= "Command" then forwarded[k] = v end
 	end
 	C4:SendToDevice(proxy, command, forwarded)
-	log.always("Proxy Command: %s -> %s (proxy %s): %s", command, entry.name, tostring(proxy),
-		C4:JsonEncode(forwarded))
+	log.always("Proxy Command: %s -> %s (proxy %s): %s", command, name, tostring(proxy), C4:JsonEncode(forwarded))
+end
+
+-- Watch Events (signed dev loop commands only; #432 D17,
+-- docs/light-events-design.md §6.6 and house check P3): which of a light_v2
+-- proxy's events fire, logged with the controller's clock, so the house can
+-- see whether the drivers' button notifications (#432 D4 to D7) become the
+-- proxy's Press, Release and tap events. Params: Light (as Proxy Command:
+-- rid, Hue or Composer name, protocol device id), Events (default
+-- 5001-5015; a range, a comma list or both, e.g. "5003,5004" or
+-- "4001,5001-5005"; "none" unregisters every event this driver registered).
+-- A second call adds ids, on the same device or another one.
+--
+-- [verified: API 7_event/_5-RegisterDeviceEvent.md] C4:RegisterDeviceEvent
+-- (firing device id, event id), OS 2.9.0; [verified: API
+-- 7_event/_4.1-OnDeviceEvent.md] Director then calls the global
+-- OnDeviceEvent(firing device id, event id); [verified: API
+-- 7_event/_6-UnRegisterAllDeviceEvents.md] C4:UnregisterAllDeviceEvents()
+-- drops them all. That page's file name spells it UnRegister, its
+-- signature Unregister, the spelling of the other calls of this family
+-- (UnregisterDeviceEvent, UnregisterSystemEvent), so that spelling is
+-- called; on a controller without it, the documented per-event
+-- C4:UnregisterDeviceEvent [verified: API 7_event/_7-UnRegisterDeviceEvent.md]
+-- for each one registered here. That the proxy's own events reach
+-- OnDeviceEvent with the proxy as the firing device is [assumed]
+-- (light-events F12), so every call is logged while the hook is in,
+-- whichever device it names.
+
+-- The light_v2 proxy's events [verified: LV2 25_light_v2_events/_0-HEADER.md]:
+-- the keypad events, 5001 + action + 5 x button (button 0 Top, 1 Bottom,
+-- 2 Toggle; action 0 release, 1 push, 2 single, 3 double, 4 triple click;
+-- light-events F3), and the proxy's own.
+local EVENT_NAMES = {
+	[4000] = "Brightness Changing", [4001] = "Brightness Changed", [4002] = "Color Changing",
+	[4003] = "Color Changed", [5000] = "Old Light Level Changed", [5100] = "Light On", [5101] = "Light Off",
+}
+do
+	local buttons = { "Top", "Bottom", "Toggle" }
+	local actions = { "Release", "Push", "Single", "Double", "Triple" }
+	for b = 0, 2 do
+		for a = 0, 4 do
+			EVENT_NAMES[5001 + a + 5 * b] = buttons[b + 1] .. " " .. actions[a + 1]
+		end
+	end
+end
+devtools.EVENT_NAMES = EVENT_NAMES
+
+local WATCH_DEFAULT = "5001-5015"
+-- Ids one call may list: a slip such as "1-50000" registers nothing.
+local WATCH_MAX = 64
+
+-- Watch Events' state, kept across a dev loop reload (devloop.keep in
+-- devtools.install), since Director keeps the registrations and the global
+-- OnDeviceEvent through one: the reloaded code takes the hook over instead
+-- of chaining the old code's, which would log every event twice.
+--   watched  proxy id -> { [event id] = true }: what was registered here
+--   handler  the OnDeviceEvent installed here, while the hook is in
+--   inner    the OnDeviceEvent found before it, called after each line
+local watch = { watched = {} }
+
+-- The ids `text` lists, in order and once each, or nil and why.
+local function event_ids(text)
+	local ids, seen = {}, {}
+	for item in (text .. ","):gmatch("([^,]*),") do
+		item = trimmed(item)
+		local first, last = item:match("^(%d+)%s*%-%s*(%d+)$")
+		if not first then
+			first = item:match("^%d+$")
+			last = first
+		end
+		if not first then
+			return nil, string.format("%q is not an event id or a range of them", item)
+		end
+		first, last = tonumber(first), tonumber(last)
+		if first > last then
+			return nil, string.format("%q runs backwards", item)
+		end
+		if last - first >= WATCH_MAX then
+			return nil, string.format("%q lists more than %d ids", item, WATCH_MAX)
+		end
+		for id = first, last do
+			if not seen[id] then
+				seen[id] = true
+				ids[#ids + 1] = id
+			end
+		end
+		if #ids > WATCH_MAX then
+			return nil, string.format("more than %d ids", WATCH_MAX)
+		end
+	end
+	return ids
+end
+
+-- The ids of `set` ({ [id] = true }) as ranges: "5001-5015,5100".
+local function ranges(set)
+	local ids = {}
+	for id in pairs(set) do ids[#ids + 1] = id end
+	table.sort(ids)
+	local parts, i = {}, 1
+	while i <= #ids do
+		local j = i
+		while ids[j + 1] == ids[j] + 1 do j = j + 1 end
+		parts[#parts + 1] = (j > i) and (ids[i] .. "-" .. ids[j]) or tostring(ids[i])
+		i = j + 1
+	end
+	return table.concat(parts, ",")
+end
+
+-- How many events on how many devices are watched: "15 events on 1 device".
+local function watch_counts()
+	local events, devices = 0, 0
+	for _, ids in pairs(watch.watched) do
+		devices = devices + 1
+		for _ in pairs(ids) do events = events + 1 end
+	end
+	return string.format("%d event%s on %d device%s", events, events == 1 and "" or "s", devices,
+		devices == 1 and "" or "s")
+end
+
+-- Put this code's OnDeviceEvent in: one line per call, then the
+-- OnDeviceEvent that was there before (an earlier one of ours, from before
+-- a reload, is replaced, not chained). The global goes into _G, the
+-- driver's environment on the controller, as bridge/probe12.lua's do.
+local function hook()
+	local current = rawget(_G, "OnDeviceEvent")
+	if watch.handler == nil or current ~= watch.handler then
+		watch.inner = current
+	end
+	watch.handler = function(device, event, ...)
+		log.always("event %s (%s) from device %s at %s", tostring(event), EVENT_NAMES[tonumber(event)] or "?",
+			tostring(device), tostring(C4:GetTime()))
+		if type(watch.inner) == "function" then
+			return watch.inner(device, event, ...)
+		end
+	end
+	rawset(_G, "OnDeviceEvent", watch.handler)
+end
+
+-- Put back the OnDeviceEvent found before hook(), unless something else
+-- replaced ours meanwhile.
+local function unhook()
+	if watch.handler ~= nil and rawget(_G, "OnDeviceEvent") == watch.handler then
+		rawset(_G, "OnDeviceEvent", watch.inner)
+	end
+	watch.handler, watch.inner = nil, nil
+end
+
+local function watch_events(params)
+	params = params or {}
+	local events = trimmed(tostring(params.Events or ""))
+	if events:lower() == "none" then
+		local counts = watch_counts()
+		if type(C4.UnregisterAllDeviceEvents) == "function" then
+			C4:UnregisterAllDeviceEvents()
+		else
+			for device, ids in pairs(watch.watched) do
+				for id in pairs(ids) do C4:UnregisterDeviceEvent(device, id) end
+			end
+		end
+		watch.watched = {}
+		unhook()
+		return log.always("Watch Events: stopped; %s unregistered", counts)
+	end
+	local ids, why = event_ids(events ~= "" and events or WATCH_DEFAULT)
+	if not ids then
+		return log.always("Watch Events: Events %s; nothing registered", why)
+	end
+	local proxy, name = find_proxy(params.Light)
+	if not proxy then
+		return log.always("Watch Events: %s; nothing registered", name)
+	end
+	proxy = tonumber(proxy) or proxy
+	-- The hook first, so an event that fires at once is seen.
+	hook()
+	local mine = watch.watched[proxy] or {}
+	watch.watched[proxy] = mine
+	local added = {}
+	for _, id in ipairs(ids) do
+		-- Once per event and device: whether a second registration doubles
+		-- the calls is not documented, and a doubled line would read as an
+		-- event fired twice.
+		if not mine[id] then
+			C4:RegisterDeviceEvent(proxy, id)
+			mine[id] = true
+			added[id] = true
+		end
+	end
+	log.always("Watch Events: %s (proxy %s): registered %s; watching %s", name, tostring(proxy),
+		next(added) and ranges(added) or "nothing new", watch_counts())
 end
 
 -- A summary of the light registry (signed dev loop commands only: it lists
@@ -698,6 +891,16 @@ function devtools.install(given)
 		and type(given.state.stream_abandoned) == "table" then
 		given.state.stream_abandoned = devloop.keep("stream_abandoned", given.state.stream_abandoned)
 	end
+	-- Watch Events' registrations and hook outlive a reload the same way
+	-- (#432 D17): the code a reload brings up takes over the state and,
+	-- when the hook is in, puts its own OnDeviceEvent in place of the old
+	-- code's, so each event is still logged once.
+	if type(devloop.keep) == "function" then
+		watch = devloop.keep("watch_events", watch)
+		if watch.handler ~= nil and rawget(_G, "OnDeviceEvent") == watch.handler then
+			hook()
+		end
+	end
 	-- The 1.2 probe gets the same context; it defines the global list
 	-- functions of its picker test (Probe12PickerList, Probe12RoomList).
 	probe12.install(given)
@@ -726,6 +929,8 @@ function devtools.install(given)
 		Test_Connection = test_connection,
 		-- The short outage time of a house check (#428 D15).
 		Link_Offline_After = link_offline_after,
+		-- Which light_v2 proxy events fire, for house check P3 (#432 D17).
+		Watch_Events = watch_events,
 		-- The 1.2 probe (bridge/probe12.lua, docs/simplify-actions-design.md §2.2).
 		Probe_Discovery = probe12.discovery,
 		Probe_Names = probe12.names,

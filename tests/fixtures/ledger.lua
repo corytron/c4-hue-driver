@@ -415,6 +415,8 @@ ledger.rows = {
 			{ auto = "every stream event", proof = { spec = "tests/spec/roundtrip_spec.lua", test = "runs the whole loop" } },
 			{ auto = "colour and temperature from Hue", proof = { spec = "tests/spec/light_driver_spec.lua",
 				test = "maps xy colour to LIGHT_COLOR_CHANGED mode 0 and a CCT to mode 1" } },
+			{ auto = "Hue-side level reports throttled", proof = { spec = "tests/spec/light_driver_spec.lua",
+				test = "Hue-side level reports reach the proxy at most once a second, the last one exact" } },
 		},
 	},
 	{
@@ -431,8 +433,11 @@ ledger.rows = {
 			{ proxy_command = "DO_CLICK", binding = 202, driver = "hue_light" },
 			{ proxy_command = "REQUEST_BUTTON_COLORS", binding = 201, driver = "hue_light" },
 			{ proxy_command = "SET_BUTTON_COLOR", driver = "hue_light" },
+			{ proxy_command = "SET_ALL_LED", driver = "hue_light" },
 			{ auto = "LEDs follow the light", proof = { spec = "tests/spec/light_driver_spec.lua",
 				test = "MATCH_LED_STATE follows on/off on 200, 201 and 202, with BUTTON_INFO to the proxy" } },
+			{ auto = "the light's own button events", proof = { spec = "tests/spec/device_spec.lua",
+				test = "a double tap sends CLICK_COUNT 2 once, and the second tap still changes nothing" } },
 		},
 	},
 	{
@@ -609,6 +614,7 @@ ledger.rows = {
 			{ proxy_command = "SET_LEVEL", driver = "hue_scene" },
 			{ proxy_command = "SET_BRIGHTNESS_TARGET", driver = "hue_scene" },
 			{ proxy_command = "DO_CLICK", binding = 202, driver = "hue_scene" },
+			{ proxy_command = "SET_ALL_LED", driver = "hue_scene" },
 			{ message = "HUE_SCENE_CONFIGURE", driver = "hue_scene" },
 			{ message = "HUE_SCENE_STATE", driver = "hue_scene" },
 			{ message = "HUE_SCENE_GROUP", driver = "hue_scene" },
