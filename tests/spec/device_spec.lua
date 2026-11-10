@@ -33,6 +33,7 @@ local function new_device(opts)
 		tree = opts.tree or "light",
 		bridge = function() return st.bridge end,
 		rid = function() return st.rid end,
+		settings = opts.settings,
 	})
 	dev.is_on = function() return st.on end
 	dev.button_action = function(button, action) st.buttons[#st.buttons + 1] = { button, action } end
@@ -273,6 +274,130 @@ describe("common.device", function()
 			assert.same({ "good" }, seen)
 			assert.equal(1, #lines)
 			assert.truthy(lines[1]:find("^%[ERROR%] Hue Test: buffered BAD failed: .*boom"))
+		end)
+	end)
+
+	-- #428, docs/offline-design.md §6.1, §6.3 and §6.6: the bridge's
+	-- HUE_BRIDGE_LINK, kept in dev.link and handed to the driver's hook.
+	describe("the bridge's link (#428)", function()
+		local link = require("common.link")
+		local SINCE = os.time() - 120 -- two minutes ago, in epoch seconds as the bridge sends it
+
+		local function offline(dispatch, reason, since)
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "offline", reason = reason or "not_answering",
+				since = tostring(since or SINCE) })
+		end
+
+		local function online(dispatch)
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "online" })
+		end
+
+		-- A device past late init whose hook records every call as { offline, reason, changed }.
+		local function linked_device()
+			local dev, _, _, dispatch = new_device()
+			local calls = {}
+			dev.on_link = function(l, changed)
+				calls[#calls + 1] = { l.offline, l.reason, changed }
+			end
+			dev.late_init()
+			return dev, calls, dispatch
+		end
+
+		it("registers HUE_BRIDGE_LINK; dev.link is nil until told, and reads as online", function()
+			local dev, _, _, dispatch = new_device()
+			assert.is_function(dispatch.commands["HUE_BRIDGE_LINK"])
+			assert.is_nil(dev.link)
+			assert.is_false(dev.link_offline())
+			assert.is_nil(dev.link_text())
+			assert.has_no.errors(function() dev.on_link({ offline = false }, false) end, "the default hook does nothing")
+		end)
+
+		it("buffers a link that arrives before late init, and applies it in order with the rest", function()
+			local dev, _, _, dispatch = new_device()
+			local seen = {}
+			dev.on_link = function(l, changed) seen[#seen + 1] = { "link", l.offline, changed } end
+			local configure = dev.after_late_init("HUE_CONFIGURE", function()
+				seen[#seen + 1] = { "configure", dev.link_offline() }
+			end)
+			offline(dispatch)
+			configure({})
+			assert.same({}, seen)
+			assert.is_nil(dev.link, "nothing taken before late init")
+			dev.late_init()
+			assert.same({ { "link", true, true }, { "configure", true } }, seen,
+				"the link first, so the configure after it in a hello answer already sees it (D4)")
+		end)
+
+		it("keeps the link, says offline and its text, and calls the hook with changed", function()
+			local dev, calls, dispatch = linked_device()
+			offline(dispatch)
+			assert.same({ offline = true, reason = "not_answering", since = SINCE }, dev.link)
+			assert.is_true(dev.link_offline())
+			assert.equal("Hue Bridge not answering since " .. link.clock(SINCE), dev.link_text())
+			assert.same({ { true, "not_answering", true } }, calls)
+			online(dispatch)
+			assert.same({ offline = false }, dev.link)
+			assert.is_false(dev.link_offline())
+			assert.is_nil(dev.link_text())
+			assert.equal(2, #calls)
+			assert.same({ false, nil, true }, calls[2])
+		end)
+
+		it("changed is true only when what the device shows moves", function()
+			local _, calls, dispatch = linked_device()
+			online(dispatch) -- online after nothing: the first broadcast or a hello answer
+			online(dispatch) -- online after online
+			offline(dispatch) -- offline: changed
+			offline(dispatch) -- the same again (a hello answer): not changed
+			offline(dispatch, "key_rejected") -- another reason while offline (D3): changed
+			offline(dispatch, "key_rejected", SINCE - 60) -- another since: changed
+			online(dispatch) -- back: changed
+			local changed = {}
+			for i, call in ipairs(calls) do changed[i] = call[3] end
+			assert.same({ false, false, true, false, true, true, true }, changed)
+		end)
+
+		it("computes the text from since at each call, with the day for another day (§6.3)", function()
+			local dev, _, dispatch = linked_device()
+			local yesterday = os.time() - 26 * 3600
+			offline(dispatch, "blocked", yesterday)
+			assert.equal("Hue Bridge not usable since " .. os.date("%m-%d %H:%M", yesterday) .. " (see its Status)",
+				dev.link_text())
+			offline(dispatch, "other_bridge", "")
+			assert.equal("Hue Bridge not at its address", dev.link_text(), "no since: no time")
+		end)
+
+		it("logs going offline and coming back at info, an unchanged link at debug only", function()
+			local _, _, dispatch = linked_device()
+			log.set_debug(true)
+			local lines = capture_log()
+			offline(dispatch)
+			offline(dispatch)
+			online(dispatch)
+			assert.same({
+				"[INFO] Hue Test: offline: Hue Bridge not answering since " .. link.clock(SINCE),
+				"[DEBUG] Hue Test: HUE_BRIDGE_LINK offline, as already known",
+				"[INFO] Hue Test: online: the Hue Bridge answers again",
+			}, lines)
+		end)
+
+		it("ignores a state it does not know, logging it once, and keeps what it knew (§6.1)", function()
+			local dev, calls, dispatch = linked_device()
+			offline(dispatch)
+			local lines = capture_log()
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "sideways", reason = "blocked", since = "12" })
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "sideways" })
+			dispatch.commands["HUE_BRIDGE_LINK"]({})
+			assert.same({ "[WARN] Hue Test: HUE_BRIDGE_LINK with state \"sideways\" ignored" }, lines)
+			assert.is_true(dev.link_offline())
+			assert.equal(1, #calls, "the hook heard nothing of them")
+		end)
+
+		it("takes an unknown reason as not answering (a later bridge's)", function()
+			local dev, _, dispatch = linked_device()
+			offline(dispatch, "from_a_later_bridge")
+			assert.equal("not_answering", dev.link.reason)
+			assert.equal("Hue Bridge not answering since " .. link.clock(SINCE), dev.link_text())
 		end)
 	end)
 
@@ -848,7 +973,8 @@ describe("common.device", function()
 			dev.load_settings()
 			local keys = {}
 			for _, args in ipairs(c4.calls_to("PersistGetValue")) do keys[#keys + 1] = args[1] end
-			assert.same({ "hold_rate_up", "hold_rate_down" }, keys)
+			assert.same({ "hold_rate_up", "hold_rate_down", "brightness_rate_default", "color_rate_default" }, keys,
+				"the declared settings, then the default rates every driver keeps (#430 D8)")
 			local _, _, _, none = new_keypad()
 			assert.is_nil(none.proxy["SET_HOLD_RATE_UP"], "no settings declared, none handled")
 		end)
@@ -1153,6 +1279,186 @@ describe("common.device", function()
 					end)
 				end)
 			end
+		end)
+	end)
+
+	-- #430 D8, D20 and #429 D4 (docs/turn-on-design.md §7.5).
+	describe("rate ranges, default rates and take_setting (#430, #429)", function()
+		local ALL = { "preset", "click_up", "click_down", "hold_up", "hold_down" }
+
+		local function rates(dev)
+			return { dev.setting("click_up"), dev.setting("click_down"), dev.setting("hold_up"), dev.setting("hold_down") }
+		end
+
+		-- Every SendToProxy of any kind, as { binding, command }.
+		local function all_proxied(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do out[#out + 1] = { args[1], args[2] } end
+			return out
+		end
+
+		it("RATE_MAX is 6 000 000 ms and rate_caps a fresh brightness range each call (D20)", function()
+			local dev, _, _, _, _, device = new_device()
+			assert.equal(6000000, device.RATE_MAX)
+			local caps = dev.rate_caps()
+			assert.same({ brightness_rate_min = 0, brightness_rate_max = 6000000 }, caps)
+			caps.brightness_rate_max = 1
+			assert.same({ brightness_rate_min = 0, brightness_rate_max = 6000000 }, dev.rate_caps())
+		end)
+
+		it("click and hold rates above 6 000 000 are refused; a persisted 86 400 000 is dropped at load (D20)",
+			function()
+				local dev, c4, _, dispatch = new_device({ settings = ALL })
+				dispatch.received_from_proxy(5001, "SET_CLICK_RATE_UP", { RATE = "6000000" })
+				dispatch.received_from_proxy(5001, "SET_CLICK_RATE_DOWN", { RATE = "0" })
+				dispatch.received_from_proxy(5001, "SET_HOLD_RATE_UP", { RATE = "6000000" })
+				assert.same({ 6000000, 0, 6000000, 5000 }, rates(dev), "the bounds themselves are taken")
+				local lines = capture_log()
+				c4.calls = {}
+				dispatch.received_from_proxy(5001, "SET_CLICK_RATE_UP", { RATE = "6000001" })
+				dispatch.received_from_proxy(5001, "SET_HOLD_RATE_DOWN", { RATE = "86400000" })
+				assert.same({ 6000000, 0, 6000000, 5000 }, rates(dev), "unchanged")
+				assert.same({
+					"[WARN] Hue Test: click_rate_up 6000001 is out of range; kept 6000000",
+					"[WARN] Hue Test: hold_rate_down 86400000 is out of range; kept 5000",
+				}, lines)
+				assert.same({ { 5001, "6000000" } }, proxied(c4, "CLICK_RATE_UP"), "the proxy hears the value kept")
+				assert.same({ { 5001, "5000" } }, proxied(c4, "HOLD_RATE_DOWN"))
+				assert.equal(0, #c4.calls_to("PersistSetValue"))
+
+				-- A device that stored the old maximum before #430.
+				dev, c4 = new_device({ settings = ALL })
+				c4.persist.hold_rate_up = 86400000
+				c4.persist.click_rate_down = "6000000"
+				lines = capture_log()
+				dev.load_settings()
+				assert.same({ 3000, 6000000, 5000, 5000 }, rates(dev))
+				assert.same({ "[WARN] Hue Test: hold_rate_up 86400000 is out of range; using 5000" }, lines)
+				assert.is_nil(c4.persist.hold_rate_up, "deleted, so the next start does not warn again")
+				assert.same({ { 5001, "5000" } }, proxied(c4, "HOLD_RATE_UP"), "the default reported to the proxy")
+				dev.load_settings()
+				assert.equal(1, #lines, "warned once")
+			end)
+
+		it("take_setting stores and persists a value the proxy sent without a notify (#429 D4)", function()
+			local dev, c4, _, dispatch = new_device({ settings = ALL })
+			dev.load_settings()
+			c4.calls = {}
+			assert.is_true(dev.take_setting("preset", "60"))
+			assert.equal(60, dev.setting("preset"))
+			assert.equal(60, c4.persist.preset_level)
+			assert.is_true(dev.take_setting("click_up", 1500))
+			assert.equal(1500, dev.setting("click_up"))
+			assert.same({}, all_proxied(c4), "nothing echoed: the proxy told us")
+
+			local lines = capture_log()
+			c4.calls = {}
+			assert.is_false(dev.take_setting("preset", "0"))
+			assert.is_false(dev.take_setting("preset", "101"))
+			assert.is_false(dev.take_setting("preset", "bright"))
+			assert.is_false(dev.take_setting("preset", nil))
+			assert.is_false(dev.take_setting("hold_up", 6000001))
+			assert.is_false(dev.take_setting("volume", 5))
+			assert.same({
+				"[WARN] Hue Test: preset_level 0 is out of range; kept 60",
+				"[WARN] Hue Test: preset_level 101 is out of range; kept 60",
+				'[WARN] Hue Test: preset_level "bright" is not a number; kept 60',
+				"[WARN] Hue Test: preset_level without a value; kept 60",
+				"[WARN] Hue Test: hold_rate_up 6000001 is out of range; kept 5000",
+				"[WARN] Hue Test: no keypad setting volume to take",
+			}, lines)
+			assert.equal(60, dev.setting("preset"))
+			assert.same({}, all_proxied(c4), "a refused value sends nothing either")
+			assert.equal(0, #c4.calls_to("PersistSetValue"))
+
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "70" })
+			assert.same({ { 5001, "70" } }, proxied(c4, "PRESET_LEVEL"), "SET_PRESET_LEVEL keeps its echo")
+			dev, c4 = new_device({ settings = ALL })
+			c4.persist.preset_level = 60
+			dev.load_settings()
+			assert.equal(60, dev.setting("preset"), "what take_setting persisted comes back at the next start")
+		end)
+
+		it("rate defaults persist, refuse out of range, default 0, and notify nothing (D8)", function()
+			local dev, c4, _, dispatch = new_device()
+			assert.is_function(dispatch.proxy["UPDATE_BRIGHTNESS_RATE_DEFAULT"], "registered with no settings declared")
+			assert.is_function(dispatch.proxy["UPDATE_COLOR_RATE_DEFAULT"])
+			dev.load_settings()
+			assert.equal(0, dev.rate_default("brightness"), "0 while the proxy never sent one")
+			assert.equal(0, dev.rate_default("color"))
+			c4.calls = {}
+			dispatch.received_from_proxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "2000" })
+			dispatch.received_from_proxy(5001, "UPDATE_COLOR_RATE_DEFAULT", { RATE = "1500.4" })
+			assert.equal(2000, dev.rate_default("brightness"))
+			assert.equal(1500, dev.rate_default("color"), "whole ms")
+			assert.equal(2000, c4.persist.brightness_rate_default)
+			assert.equal(1500, c4.persist.color_rate_default)
+			assert.same({}, all_proxied(c4), "no notify back")
+
+			local lines = capture_log()
+			for _, rate in ipairs({ "6000001", "-1", "fast" }) do
+				dispatch.received_from_proxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = rate })
+			end
+			dispatch.received_from_proxy(5001, "UPDATE_COLOR_RATE_DEFAULT", {})
+			assert.same({
+				"[WARN] Hue Test: brightness_rate_default 6000001 is out of range; kept 2000",
+				"[WARN] Hue Test: brightness_rate_default -1 is out of range; kept 2000",
+				'[WARN] Hue Test: brightness_rate_default "fast" is not a number; kept 2000',
+				"[WARN] Hue Test: color_rate_default without a value; kept 1500",
+			}, lines)
+			assert.same({ 2000, 1500 }, { dev.rate_default("brightness"), dev.rate_default("color") })
+			dispatch.received_from_proxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "6000000" })
+			dispatch.received_from_proxy(5001, "UPDATE_COLOR_RATE_DEFAULT", { RATE = 0 })
+			assert.same({ 6000000, 0 }, { dev.rate_default("brightness"), dev.rate_default("color") }, "the bounds")
+			assert.same({}, all_proxied(c4))
+
+			-- The next start: the persisted copies come back; a bad one is
+			-- dropped once with a warning.
+			dev, c4 = new_device()
+			c4.persist.brightness_rate_default = 2500
+			c4.persist.color_rate_default = 86400000
+			lines = capture_log()
+			dev.load_settings()
+			assert.same({ 2500, 0 }, { dev.rate_default("brightness"), dev.rate_default("color") })
+			assert.same({ "[WARN] Hue Test: color_rate_default 86400000 is out of range; using 0" }, lines)
+			assert.is_nil(c4.persist.color_rate_default)
+			dev.load_settings()
+			assert.equal(1, #lines, "warned once")
+			c4.persist.brightness_rate_default = "soon"
+			dev.load_settings()
+			assert.equal(0, dev.rate_default("brightness"))
+			assert.equal('[WARN] Hue Test: brightness_rate_default "soon" is not a number; using 0', lines[2])
+			assert.same({}, all_proxied(c4), "loading reports nothing")
+		end)
+
+		it("#298: the default rates load where Director's PersistGetValue returns no value at all", function()
+			local dev, c4 = new_device({ settings = ALL })
+			c4.PersistGetValue = function() end
+			assert.has_no.errors(function() dev.load_settings() end)
+			assert.same({ 0, 0 }, { dev.rate_default("brightness"), dev.rate_default("color") })
+		end)
+
+		it("first_arrival logs each command's first arrival at debug with every parameter, once (§7.3)", function()
+			local dev, _, _, dispatch = new_device()
+			local lines = capture_log()
+			local function firsts()
+				local out = {}
+				for _, line in ipairs(lines) do
+					if line:find(": first ", 1, true) then out[#out + 1] = line end
+				end
+				return out
+			end
+			dispatch.received_from_proxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "1000" })
+			assert.same({}, firsts(), "nothing while Debug Mode is off, and the first is still to come")
+			log.set_debug(true)
+			dispatch.received_from_proxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "2000" })
+			dispatch.received_from_proxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "3000" })
+			dev.first_arrival("UPDATE_COLOR_PRESET", { ["COLOR X"] = 0.3, ID = 4, COMMAND = "MODIFIED" })
+			dev.first_arrival("UPDATE_COLOR_PRESET", { ID = 5 })
+			assert.same({
+				"[DEBUG] Hue Test: first UPDATE_BRIGHTNESS_RATE_DEFAULT from the proxy: RATE=2000",
+				"[DEBUG] Hue Test: first UPDATE_COLOR_PRESET from the proxy: COLOR X=0.3 COMMAND=MODIFIED ID=4",
+			}, firsts())
 		end)
 	end)
 

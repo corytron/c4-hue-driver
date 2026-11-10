@@ -9,11 +9,18 @@
 -- binding 1, class HUE_BRIDGE) with C4:SendToDevice, and the bridge pushes
 -- configuration and state back through ExecuteCommand. Keypad taps fade an
 -- ordinary scene in or its group out over the click rate, and a press while
--- it fades stops it where it is (#421, docs/tap-stop-design.md §10.1). The
+-- it fades stops it where it is (#421, docs/tap-stop-design.md §10.1).
+-- Since #430 ON, OFF, TOGGLE, DYNAMIC_ON, DYNAMIC_OFF and a rate-less target
+-- fade over the proxy's default brightness rate, the click rates show in
+-- Composer, and the rate range goes to the proxy as a dynamic capability
+-- (docs/turn-on-design.md D8, D20, D21, D25); a scene has no On Mode
+-- (D1: its "on level" is the scene's own set of lamp levels). The
 -- message contract is docs/scenes-design.md §2, this device §3, extended by
--- docs/keypad-design.md, docs/scene-dimmer-design.md and
--- docs/smart-scenes-design.md; the structure is the Hue Light driver's
--- (src/hue_light/driver.lua) with everything colour specific left out.
+-- docs/keypad-design.md, docs/scene-dimmer-design.md,
+-- docs/smart-scenes-design.md and docs/offline-design.md (#428: the bridge's
+-- link offline, and its answers to commands that did not land); the
+-- structure is the Hue Light driver's (src/hue_light/driver.lua) with
+-- everything colour specific left out.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -112,7 +119,11 @@ local level_seq = 0       -- counts lit level reports, to tell whether one arriv
 local last_reported = nil  -- the LIGHT_BRIGHTNESS_CURRENT last sent to the proxy
 local level_window = nil   -- { timer, dirty } for LEVEL_REPORT_MS after a level report went out
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
-local pending = nil          -- { timer, assume, on } while a recall/off awaits its STATE
+local pending = nil          -- { timer, assume, on, from } while a recall/off awaits its STATE
+-- An instant OFF from here ended the held state as it went out (turn_off):
+-- until the next command or group report, an undelivered answer that finds
+-- the group still on puts the held state back (#428 D9, group_undelivered).
+local off_unheld = false
 local follow = nil           -- what follows a time-based scene's start from off (arm_follow)
 -- The brightness ramp an ordinary scene is running (#421 S-D4, D6), nil
 -- while none is: { from, to, time, started, tap, recall, lo, hi, timer,
@@ -133,7 +144,8 @@ local dev = device.new({
 	bridge = function() return bridge end,
 	rid = function() return st.rid end,
 	noun = "scene",
-	settings = { "hold_up", "hold_down" }, -- driver.xml declares hold_rates
+	-- driver.xml declares click_rates (#430 D21) and hold_rates
+	settings = { "click_up", "click_down", "hold_up", "hold_down" },
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
 local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
@@ -199,7 +211,10 @@ end
 
 -- Why a command cannot reach the scene right now, or nil when it can. The
 -- order is the order Status explains things in: a forgotten scene is told
--- what to do even while its binding is already gone.
+-- what to do even while its binding is already gone. The bridge's link
+-- offline (#428 D5, docs/offline-design.md §6.3) comes after the device's
+-- own deliberate ends: "Hue Bridge not answering since 14:02", its first
+-- letter kept upper case, as "Hue" is a name.
 local function blocker()
 	if st.forgotten then
 		return "forgotten by the bridge; " .. FORGOTTEN_INSTRUCTION:gsub("^D", "d")
@@ -209,11 +224,14 @@ local function blocker()
 		return "waiting for the bridge to assign a Hue scene (" .. UNLINKED_REMEDY .. ")"
 	elseif st.gone then
 		return "scene deleted in Hue; " .. GONE_REMEDY
+	elseif dev.link_offline() then
+		return dev.link_text()
 	end
 	return nil
 end
 
--- What ONLINE_CHANGED carries: reachable through a bridge that knows us.
+-- What ONLINE_CHANGED carries: reachable through a bridge that knows us and
+-- whose link is not offline (#428 D5).
 local function is_online()
 	return blocker() == nil
 end
@@ -255,6 +273,8 @@ local function smart_status()
 	return string.format("%s; now %s%s", head, st.slot_name, from)
 end
 
+-- While the bridge's link is offline Status names it (#428 D5, §6.3); a
+-- scene the bridge has not linked yet keeps saying it waits.
 local function refresh_status()
 	if st.forgotten then
 		prop("Status", forgotten_status())
@@ -262,6 +282,8 @@ local function refresh_status()
 		prop("Status", "Not bound to a Hue Bridge")
 	elseif st.gone then
 		prop("Status", gone_status())
+	elseif st.rid and dev.link_offline() then
+		prop("Status", dev.link_text())
 	elseif st.configured and st.name and is_smart() then
 		prop("Status", smart_status())
 	elseif st.configured and st.name then
@@ -436,6 +458,22 @@ end
 
 local function report_online()
 	notify("ONLINE_CHANGED", { STATE = is_online() })
+end
+
+-- #430 D20: the brightness rate range the scene honours, 0 to 6 000 000 ms
+-- (common/device.lua's rate_caps, the bridge's bound on scene and group
+-- durations), in a DYNAMIC_CAPABILITIES_CHANGED of its own [verified: LV2
+-- caps _1-BRIGHTNESSRATEMAX.md, _1.5-BRIGHTNESSRATEMIN.md: dynamic]; sent at
+-- late init and with every configure. Nothing else goes with it: the scene
+-- declares its other capabilities, colour included, statically.
+local function report_rate_caps()
+	notify("DYNAMIC_CAPABILITIES_CHANGED", dev.rate_caps())
+end
+
+-- #430 D8: the proxy's default brightness rate (common/device.lua), 0 until
+-- it sends one.
+local function default_rate()
+	return dev.rate_default("brightness")
 end
 
 -- The status an ON is expected to end in, for the fallback and for a stop
@@ -831,7 +869,7 @@ local function send_level(level, rate, unconfirmed, current)
 		return false
 	end
 	local delay = rate + LEVEL_FALLBACK_MS
-	local p = { kind = "level", on = true, starting = unconfirmed == true }
+	local p = { kind = "level", on = true, starting = unconfirmed == true, from = current }
 	p.assume = function()
 		log.debug("level %d %% unconfirmed after %d ms; assuming it", level, delay)
 		if p.starting and not is_on() then
@@ -882,7 +920,7 @@ local function start_smart(rate, level, current)
 	if not send("HUE_SCENE_RECALL", { rid = st.rid, action = DEFAULT_RECALL }) then
 		return report_unchanged(current)
 	end
-	arm({ kind = "switch", on = true, assume = function()
+	arm({ kind = "switch", on = true, from = current, assume = function()
 		log.debug("start unconfirmed after %d ms; assuming the time-based scene runs", FALLBACK_MS)
 		st.active = "active"
 		refresh_status()
@@ -915,6 +953,7 @@ local function turn_on(rate, level, urgent)
 		return
 	end
 	cancel_follow()
+	off_unheld = false
 	local current = tile_level(0)
 	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
@@ -939,7 +978,7 @@ local function turn_on(rate, level, urgent)
 	if not send("HUE_SCENE_RECALL", params) then
 		return report_unchanged(current)
 	end
-	local p = { kind = "switch", on = true, level = level, seq = level_seq }
+	local p = { kind = "switch", on = true, level = level, seq = level_seq, from = current }
 	local delay = rate + FALLBACK_MS
 	p.assume = function()
 		log.debug("recall (%s) unconfirmed after %d ms; assuming the scene is on", action, delay)
@@ -994,7 +1033,7 @@ local function turn_off(rate, urgent)
 		return report_unchanged(current)
 	end
 	local delay = (timed and rate or 0) + FALLBACK_MS
-	arm({ kind = "switch", on = false, assume = function()
+	arm({ kind = "switch", on = false, from = current, assume = function()
 		log.debug("off unconfirmed after %d ms; assuming the scene is off", delay)
 		st.active = "inactive"
 		if is_smart() then
@@ -1002,6 +1041,9 @@ local function turn_off(rate, urgent)
 		end
 		report_brightness()
 	end }, delay)
+	-- #428 D9: the held state this instant off ended comes back should the
+	-- bridge answer that the off did not land (group_undelivered).
+	off_unheld = was_held and not timed and not is_smart()
 	if timed then
 		begin_ramp({ from = current, to = 0, time = rate, tap = urgent, lo = 0, hi = current })
 	end
@@ -1019,6 +1061,7 @@ local function move_level(level, rate)
 		return
 	end
 	cancel_follow()
+	off_unheld = false
 	local current = tile_level(100)
 	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
@@ -1247,6 +1290,7 @@ dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE"
 		end_ramp(false)
 		log.debug("configured as deleted in Hue%s", st.gone_since and (" since " .. st.gone_since) or "")
 	end
+	report_rate_caps() -- with every configure, as the light sends its capabilities (#430 D20)
 	report_brightness() -- the proxy hears the cached status again, if any
 	report_online()
 	refresh_status()
@@ -1261,6 +1305,121 @@ local function take_slot(params)
 	end
 end
 
+-- The bridge's link (#428, docs/offline-design.md) ----------------------------
+
+-- The proxy hears what the tile shows, or, while nothing is known, `from`:
+-- the level the CHANGING it closes started from (#428 D9, L4). Nothing
+-- without either.
+local function report_known(from)
+	if from then
+		report_unchanged(from)
+	else
+		report_brightness()
+	end
+end
+
+-- What a command in flight leaves to close: the level its CHANGING started
+-- from (a pending recall, off or level move, else the running ramp), and
+-- whether anything is in flight at all.
+local function in_flight()
+	local from = (pending and pending.from) or (ramp and ramp.from)
+	return from, pending ~= nil or ramp ~= nil or follow ~= nil
+end
+
+-- #428 D8, D9 (§6.2): a HUE_SCENE_STATE with reason "undelivered", the
+-- bridge's answer to a recall (or a time-based scene's activate) that did
+-- not land, with the scene's status as it last knew it (none when it knew
+-- none), sent from a timer, so never inside this device's own SendToDevice.
+-- Nothing of it is held back (#421 D10, hold_status, does not apply): the
+-- ramp ends, with what it held back taken into the cache; the pending
+-- recall settles with no fallback left to assume it; nothing follows a
+-- time-based scene's start any more; the status, when the answer has one,
+-- is the bridge's word (an active one holds the scene on, an inactive one
+-- leaves the held state as it was before the recall, which never set it);
+-- and the proxy hears what the tile shows: the scene as it was, not the
+-- recall.
+local function state_undelivered(params)
+	local from = in_flight()
+	cancel_follow()
+	end_ramp(true)
+	settle()
+	if ACTIVE_VALUES[params.active] then
+		take_status(params.active)
+		if is_smart() then
+			take_slot(params)
+		end
+	end
+	if is_smart() then
+		refresh_status()
+	end
+	log.debug("undelivered recall: the proxy hears the scene as the bridge last knew it (%s)",
+		tostring(params.active or "status unknown"))
+	report_known(from)
+end
+
+-- #428 D8, D9 (§6.2): a HUE_SCENE_GROUP with reason "undelivered", the
+-- bridge's answer to a PUT on the scene's grouped_light that did not land
+-- (an OFF, a level move, a hold's dim or stop, or another device's command
+-- on the same group), with the group's on and level as it last knew them
+-- (`lit` and `on`, each nil when it knew none). The ramp ends, with what it
+-- held back taken into the cache; a pending off, recall or level move
+-- settles with no fallback left to assume it; the on and level go into the
+-- cache (the group off ends the held state, as any report of it does); and
+-- the proxy hears what the tile shows: the level the bridge knows, not the
+-- target. An instant OFF from here ended the held state when it went out
+-- (turn_off): the group still on puts it back, so a scene shown alone (On
+-- State Follows "This scene") stays on with its lamps. What is to follow a
+-- time-based scene's start waits for its own report or timer, since the
+-- answer is about the group, not the start; a hold in progress goes on (D9).
+local function group_undelivered(lit, on)
+	local from = in_flight()
+	end_ramp(true)
+	settle()
+	if lit then
+		st.level = lit
+		level_seq = level_seq + 1
+	end
+	if on ~= nil then
+		group_on = on
+	end
+	if on == false then
+		set_held(false)
+	elseif on == true and off_unheld then
+		log.debug("the off did not reach Hue and the group is on: held on again")
+		set_held(true)
+	end
+	off_unheld = false
+	log.debug("undelivered: the proxy hears the group as the bridge last knew it (on=%s level=%s)", tostring(on),
+		tostring(lit))
+	report_known(from)
+end
+
+-- #428 D5 (common/device.lua calls it at every HUE_BRIDGE_LINK). Going
+-- offline, a ramp running, a recall, off or level move pending, or what was
+-- to follow a time-based scene's start ends with the cached state, what a
+-- ramp held back included, and the proxy hears it: nothing is assumed,
+-- since the command may not have landed. Either way ONLINE_CHANGED and
+-- Status follow (is_online, blocker); back online, the resync that every
+-- stream connect runs brings the state (D7). An unchanged link changes
+-- nothing.
+function dev.on_link(_, changed)
+	if not changed then
+		return
+	end
+	if dev.link_offline() then
+		local from, busy = in_flight()
+		cancel_follow()
+		end_ramp(true)
+		settle()
+		off_unheld = false
+		if busy then
+			report_known(from)
+		end
+	end
+	report_online()
+	refresh_status()
+end
+
 -- Every scene status the bridge learns. A report settles a pending recall or
 -- off whatever the value: the proxy heard CHANGING and must hear CHANGED.
 -- Otherwise only a change of what the tile shows reaches the proxy. An active
@@ -1271,11 +1430,16 @@ end
 -- proxy's transaction: active only confirms the start (the LEDs follow), and
 -- inactive ends it with nothing to follow (the start failed or was undone).
 -- While an ordinary scene's ramp runs, a status it explains waits for its
--- end, and one it cannot explain ends it first (#421 D10, hold_status).
+-- end, and one it cannot explain ends it first (#421 D10, hold_status). The
+-- answer to a recall that did not land (reason "undelivered", #428 D8)
+-- settles it at once, with or without a status (state_undelivered).
 dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_SCENE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
+	end
+	if params.reason == "undelivered" then
+		return state_undelivered(params)
 	end
 	if not ACTIVE_VALUES[params.active] then
 		return log.warn("HUE_SCENE_STATE without a known status (%s) ignored", tostring(params.active))
@@ -1327,7 +1491,10 @@ end)
 -- is lit, which says nothing about the scene's level: the last lit one stays.
 -- While an ordinary scene's ramp runs, what it explains waits for its end;
 -- what it cannot explain ends it and closes the proxy's ramp with the state
--- the report leaves (#421 D10, hold_group).
+-- the report leaves (#421 D10, hold_group). The answer to a group command
+-- that did not land (the optional reason "undelivered", #428 D8) settles
+-- at once (group_undelivered); any other report of the group means an
+-- instant off's held state has nothing more to wait for.
 dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", function(params)
 	params = params or {}
 	if st.rid and params.rid and params.rid ~= st.rid then
@@ -1336,7 +1503,13 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 	local level = tonumber(params.level)
 	local lit = level and level > 0 and math.min(level, 100) or nil
 	local on = to_bool(params.on)
+	if params.reason == "undelivered" then
+		return group_undelivered(lit, on)
+	end
 	local other = to_bool(params.other_active) == true
+	if lit or on ~= nil or other then
+		off_unheld = false
+	end
 	local foreign = false
 	if ramp and (lit or on ~= nil or other) then
 		if hold_group(lit, on, other) then
@@ -1482,9 +1655,17 @@ end
 
 -- With supports_target the proxy sends LIGHT_BRIGHTNESS_TARGET and RATE
 -- [verified: proxy ref, SET_BRIGHTNESS_TARGET]; the Navigator slider is this
--- (set_target above).
+-- (set_target above). One without a RATE (or with one that is no number)
+-- fades over the proxy's default brightness rate (#430 D8,
+-- common/device.lua). A LIGHT_BRIGHTNESS_TARGET_PRESET_ID is not read: a
+-- scene has no On Mode (#429 D1), so a target is the level it names.
 dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
-	set_target(params.LIGHT_BRIGHTNESS_TARGET, params.RATE)
+	dev.first_arrival("SET_BRIGHTNESS_TARGET", params)
+	local rate = tonumber(params.RATE)
+	if rate == nil then
+		rate = default_rate()
+	end
+	set_target(params.LIGHT_BRIGHTNESS_TARGET, rate)
 end
 
 -- Advanced Lighting Scenes with reduced_als_support drive the scene with
@@ -1507,8 +1688,10 @@ end
 dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
 
 -- Toggle relative to where the scene is heading: a pending recall counts as
--- on, so two quick presses end up off [verified: proxy ref, TOGGLE].
-dispatch.proxy["TOGGLE"] = function()
+-- on, so two quick presses end up off [verified: proxy ref, TOGGLE]. Over
+-- `rate`: the proxy's TOGGLE fades over the default brightness rate (#430
+-- D8), a time-based scene's toggle tap acts at once (S-D5).
+local function toggle(rate)
 	local on
 	if pending then
 		on = pending.on
@@ -1516,14 +1699,35 @@ dispatch.proxy["TOGGLE"] = function()
 		on = shown_on()
 	end
 	if on then
-		turn_off(0)
+		turn_off(rate)
 	else
-		turn_on(0)
+		turn_on(rate)
 	end
 end
 
-dispatch.proxy["ON"] = function() turn_on(0) end
-dispatch.proxy["OFF"] = function() turn_off(0) end
+-- #430 D8: ON, OFF and TOGGLE fade over the proxy's default brightness rate
+-- (UPDATE_BRIGHTNESS_RATE_DEFAULT, common/device.lua), 0 until the proxy
+-- sends one, so they stay instant as before. ON is the scene as designed: a
+-- scene has no On Mode (#429 D1). Keypad taps keep the click rates.
+dispatch.proxy["TOGGLE"] = function() toggle(default_rate()) end
+dispatch.proxy["ON"] = function() turn_on(default_rate()) end
+dispatch.proxy["OFF"] = function() turn_off(default_rate()) end
+
+-- #430 D25: Navigators from OS 3.3.2 on send DYNAMIC_ON and DYNAMIC_OFF; a
+-- driver without dynamic on gets the On brightness preset instead [verified:
+-- LV2 cmds _1.3-DYNAMICON.md, _1.2-DYNAMICOFF.md, no parameters]. Whether
+-- the proxy ever forwards them to a driver is [assumed]; if it does, they
+-- are ON and OFF over the default rate. First arrivals are logged at debug
+-- (docs/turn-on-design.md §7.3, check T3).
+dispatch.proxy["DYNAMIC_ON"] = function(_, params)
+	dev.first_arrival("DYNAMIC_ON", params)
+	turn_on(default_rate())
+end
+
+dispatch.proxy["DYNAMIC_OFF"] = function(_, params)
+	dev.first_arrival("DYNAMIC_OFF", params)
+	turn_off(default_rate())
+end
 
 -- Keypad buttons -------------------------------------------------------------
 -- What a tap and a hold do to a scene; the press / click / release machine
@@ -1540,10 +1744,12 @@ local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 local setting = dev.setting
 
 -- A tap's ramp time: a click rate is the time of the whole range (#421 D3),
--- so a tap takes its share of the distance, rounded to whole ms. The
--- scene's driver.xml declares no click rates, so Composer shows none, the
--- proxy sends none and none is loaded (opts.settings above): setting()
--- always gives common/device.lua's defaults, 3000 ms each.
+-- so a tap takes its share of the distance, rounded to whole ms. Since #430
+-- (D21) the scene's driver.xml declares click rates: Composer shows
+-- Click Rate Up and Down (0 to 6 000 000 ms), the proxy's SET_CLICK_RATE_*
+-- reach common/device.lua, which persists and confirms them, and setting()
+-- gives the rate the dealer set, else the 3000 ms default each that scene
+-- taps used before Composer could show them (#421 S-D1).
 local function share(rate, distance)
 	return math.floor(rate * distance / 100 + 0.5)
 end
@@ -1573,7 +1779,7 @@ function dev.on_click(button)
 		elseif button == BUTTON_BOTTOM then
 			turn_off(0)
 		else
-			dispatch.proxy["TOGGLE"]()
+			toggle(0)
 		end
 		return
 	end
@@ -1623,8 +1829,10 @@ end
 
 -- The bound the bridge holds a scene's hold rate to (scenes.DIM_MAX_DURATION,
 -- 100 minutes): a longer rate reaches Hue as this, so the tile's ramp is
--- worked out from it too (#243), as a Hue Light's is (#234).
-local HOLD_MAX_MS = 6000000
+-- worked out from it too (#243), as a Hue Light's is (#234). Since #430
+-- (D20) common/device.lua refuses a longer hold rate (RATE_MAX), so this
+-- bound only guards.
+local HOLD_MAX_MS = device.RATE_MAX
 
 -- The proxy hears a hold as a CHANGING toward the end of the range when it
 -- starts (docs/scene-dimmer-design.md, Keypad holds); the bridge's level
@@ -1691,6 +1899,7 @@ function dev.on_hold(h, up, on)
 		return
 	end
 	cancel_follow()
+	off_unheld = false
 	local estimate = ramp and (ramp_estimate(ramp))
 	end_ramp(true)
 	local duration = setting(up and "hold_up" or "hold_down")
@@ -1772,6 +1981,7 @@ function OnDriverLateInit()
 	recall_as_hidden = nil -- Recall As is shown or hidden again at every late init
 	load_identity()
 	dev.load_settings()
+	report_rate_caps()
 	dev.load_colors()
 	load_held()
 	dispatch.replay_properties(Properties)
@@ -1815,6 +2025,7 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 		hello(otherDevice)
 	else
 		bridge = nil
+		dev.link = nil -- the next bridge's hello answer says its own (#428 D4)
 		settle()
 		cancel_follow()
 		end_ramp(false)

@@ -101,6 +101,10 @@ of it is live.
 - [`offline-design.md`](offline-design.md): Hue devices go offline after the
   bridge has been unreachable for 5 minutes (#428), and a command that could
   not be delivered never shows as done (2026-11-09).
+- [`turn-on-design.md`](turn-on-design.md): Control4's turn-on behaviour for
+  Hue lights (#429, #427, #430): brightness On Mode Preset and Previous, the
+  On and Dim colours and colour on modes, the default rate, and the rate
+  ranges, all in one controller reboot (2026-11-09).
 - [`raw-stream-design.md`](raw-stream-design.md): historical, never built: the
   event stream on a raw SSL network connection instead of `C4:url`. Kept as
   the documented alternative to the padded-address design in `design.md`.
@@ -141,6 +145,20 @@ are dated research; what was built from them is in the contracts and
 - [`edge-cases-motion.md`](edge-cases-motion.md): the lifecycle cases of
   sensors and MotionAware areas on both sides, with a decision per case
   (2026-10-26, #268).
+- [`hue-automations-research.md`](hue-automations-research.md): Hue's
+  automations in CLIP v2 (`behavior_script`, `behavior_instance`), what a
+  client can read and switch off, MotionAware's own automation and the v1
+  blind spot, from public sources (2026-10-26, #280).
+- [`edge-cases-automations.md`](edge-cases-automations.md): the lifecycle of
+  a Hue automation audit on both sides, with a decision per case: detection
+  automatic and read-only, remedies only on a click and reversible
+  (2026-10-26, #280).
+- [`hue-automation-audit-design.md`](hue-automation-audit-design.md): the
+  contract for the Hue automation audit: what counts as a conflict, the
+  Attention items and the "Hue Automations" row, the tenth bridge action
+  with its one-click Disable, Restore and Keep on the Hue side, the record
+  that survives updates and reboots, and the Hue app steps for what the API
+  refuses (2026-11-09, #280; target release 1.5).
 - [`icons-research.md`](icons-research.md): why a light or scene device
   shows Control4's own light picture in a room's List View and the drivers'
   icon only in the project tree (2026-10-25, #60).
@@ -157,7 +175,11 @@ are dated research; what was built from them is in the contracts and
   a Navigator, a keypad or the Hue app can show, as the owner runs them, with
   a "Done" line per step; section L is release 1.2's (#334: the nine bridge
   actions and the background tasks), its quoted texts checked against the
-  code.
+  code; section N holds the house checks of the Hue automation audit
+  (#280).
+- [`house-checks-plan.md`](house-checks-plan.md): one house round around the
+  1.5 install and its reboot for #238, #65, #431 and #40: what is checked,
+  by which tool or person, and the owner's few moments (2026-11-09).
 - [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
   2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the

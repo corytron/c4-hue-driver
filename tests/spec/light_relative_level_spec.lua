@@ -27,7 +27,8 @@ end
 -- A light late-inited with its rid persisted (opts.rid, default "l1"; false
 -- for none) and bound to the bridge (unless opts.bind is false). `persist`
 -- is what the database holds before the start: for a restart, what the
--- last run left.
+-- last run left. The read of the proxy's presets 3000 ms after late init
+-- (#427 D19) runs at once and learns nothing, so no spec here sees its timer.
 local function load_light(persist, opts)
 	opts = opts or {}
 	local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
@@ -41,6 +42,7 @@ local function load_light(persist, opts)
 		c4.persist[k] = v
 	end
 	env.OnDriverLateInit("DIT_STARTUP")
+	assert(c4.fire_timers_of(3000) == 1, "late init arms the read of the proxy's presets")
 	return env, c4
 end
 

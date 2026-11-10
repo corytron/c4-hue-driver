@@ -362,6 +362,30 @@ local function new_c4(env)
 		record("SendToProxy", binding, command, params)
 	end
 
+	-- C4:SendUIRequest(id, request, params) returns the receiver's XML answer
+	-- [verified: API 22_miscellaneous/_36-SendUIRequest.md]. A spec scripts it
+	-- with c4.ui_answers[request] = "<xml>" (or a function(id, params) that
+	-- returns one, or raises); unscripted, nil (docs/turn-on-design.md D19).
+	c4.ui_answers = {}
+	function c4:SendUIRequest(id, request, params)
+		record("SendUIRequest", id, request, params)
+		local answer = c4.ui_answers[request]
+		if type(answer) == "function" then
+			return answer(id, params)
+		end
+		return answer
+	end
+
+	-- C4:GetDeviceVariable(id, variable) reads another device's variable
+	-- [verified: API 36_variable/_5-GetDeviceVariable.md]. A spec sets
+	-- c4.device_variables[id][variable] = value; unset, nil.
+	c4.device_variables = {}
+	function c4:GetDeviceVariable(id, variable)
+		record("GetDeviceVariable", id, variable)
+		local vars = c4.device_variables[id] or c4.device_variables[tonumber(id) or id]
+		return vars and vars[variable] or nil
+	end
+
 	function c4:url()
 		return new_transfer(c4)
 	end
