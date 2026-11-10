@@ -16,7 +16,13 @@ local function quiet()
 	log.sink = function() end
 end
 
--- opts.bind=false leaves the light unbound; opts.rid persists a rid first.
+-- The read of the proxy's presets SETUP_READ_MS after late init (#427 D19).
+local SETUP_READ_MS = 3000
+
+-- opts.bind=false leaves the light unbound; opts.rid persists a rid first;
+-- opts.persist holds more persisted values. The read of the proxy's presets
+-- after late init runs at once (nothing scripted: it learns nothing), so the
+-- specs see no timer of it; opts.setup = "wait" leaves it armed.
 local function load_light(opts)
 	opts = opts or {}
 	local env, c4 = fake.load_driver("hue_light", opts.props or {}, { device_id = LIGHT_ID })
@@ -26,7 +32,13 @@ local function load_light(opts)
 	if opts.rid then
 		c4.persist.hue_rid = opts.rid
 	end
+	for k, v in pairs(opts.persist or {}) do
+		c4.persist[k] = v
+	end
 	env.OnDriverLateInit("DIT_STARTUP")
+	if opts.setup ~= "wait" then
+		assert(c4.fire_timers_of(SETUP_READ_MS) == 1, "late init arms the read of the proxy's presets")
+	end
 	return env, c4
 end
 
@@ -314,7 +326,7 @@ describe("Hue Light driver", function()
 	end)
 
 	describe("HUE_CONFIGURE", function()
-		it("stores the rid, fills the properties and sends one capabilities notify with both supports_* keys", function()
+		it("stores the rid, fills the properties, sends both supports_* keys in one notify, rates in a second", function()
 			local env, c4 = load_light()
 			c4.calls = {}
 			configure(env)
@@ -326,13 +338,15 @@ describe("Hue Light driver", function()
 			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
 
 			local dyn = notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED")
-			assert.equal(1, #dyn)
+			assert.equal(2, #dyn)
 			assert.same({
 				supports_color = "true",
 				supports_color_correlated_temperature = "true",
 				color_correlated_temperature_min = 2000,
 				color_correlated_temperature_max = 6530,
 			}, dyn[1])
+			assert.same({ brightness_rate_min = 0, brightness_rate_max = 6000000, color_rate_behavior = 1,
+				color_rate_min = 0, color_rate_max = 6000000 }, dyn[2], "#430 D20, §7.2")
 			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "state not known yet")
 			assert.equal(0, #notifies(c4, "LIGHT_COLOR_CHANGED"))
 			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
@@ -357,7 +371,7 @@ describe("Hue Light driver", function()
 		it("re-reports known state after a re-configure", function()
 			local env, c4 = lit_light()
 			configure(env)
-			assert.equal(1, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			assert.equal(2, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "the colour flags, then the rate ranges")
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGED"))
 		end)
@@ -508,7 +522,7 @@ describe("Hue Light driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
 			assert.equal("l1", c4.persist.hue_rid)
-			assert.equal(1, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			assert.equal(2, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 }, { LIGHT_BRIGHTNESS_CURRENT = 55 } },
 				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "both states, in arrival order")
 			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO",
@@ -552,7 +566,10 @@ describe("Hue Light driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			assert.same({ { id = BRIDGE_ID, command = "HUE_HELLO", params = { rid = "l1", device_id = "2001" } } }, c4.sent)
 			assert.equal("Bound; waiting for the bridge", env.Properties["Status"])
-			assert.equal(0, #c4.active_timers(), "the binding ended the re-checks late init started")
+			local delays = {}
+			for _, timer in ipairs(c4.active_timers()) do delays[#delays + 1] = timer.delay end
+			assert.same({ SETUP_READ_MS }, delays,
+				"the binding ended the re-checks late init started; only the read of the presets waits (#427 D19)")
 		end)
 
 		it("greets once when late init already sees the binding that arrived before it", function()
@@ -624,9 +641,11 @@ describe("Hue Light driver", function()
 			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
 			c4.config_info.version = ""
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ 5000 }, { c4.active_timers()[1].delay }, "the second look")
+			local delays = {}
+			for _, timer in ipairs(c4.active_timers()) do delays[#delays + 1] = timer.delay end
+			assert.same({ SETUP_READ_MS, 5000 }, delays, "the read of the presets (#427 D19), the second look")
 			env.OnDriverDestroyed("DIT_LOADED")
-			assert.equal(0, #c4.active_timers())
+			assert.equal(0, #c4.active_timers(), "both stop")
 		end)
 	end)
 
@@ -673,9 +692,10 @@ describe("Hue Light driver", function()
 			c4.calls = {}
 			failing(c4)
 			env.ReceivedFromProxy(5001, "ON", {})
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 } },
-				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0,
+				LIGHT_BRIGHTNESS_TARGET_PRESET_ID = 1 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"),
+				"no preset named: the light is not at it")
 		end)
 
 		it("keeps a colour stored while off for the next turn-on when a turn-on fails", function()
@@ -1120,10 +1140,12 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "ON", {})
 			assert.same({ id = BRIDGE_ID, command = "HUE_SET",
 				params = { rid = "l1", on = "true", brightness = "40", rate = "0" } }, last_sent(c4))
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 0 } },
-				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 0,
+				LIGHT_BRIGHTNESS_TARGET_PRESET_ID = 1 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"),
+				"the On preset, id 1 (#429 D7)")
 			c4.advance(1000) -- nothing from the bridge: the fallback assumes the target
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = 1 } },
+				notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
 
 		it("TOGGLE from off goes to it too; TOGGLE from on turns the light off at once", function()
@@ -1197,7 +1219,10 @@ describe("Hue Light driver", function()
 				end
 				return out
 			end)(), "the level kept is reported back")
-			env.ReceivedFromProxy(5001, "TOGGLE", {}) -- the cache still says off: no report since the ON
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.equal("false", last_sent(c4).params.on, "the ON is under way, so TOGGLE turns the light off")
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
 			assert.equal("40", brightness_sent(c4))
 
 			env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
@@ -1747,7 +1772,7 @@ describe("Hue Light driver", function()
 			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "0" })
 			assert.same({ { rid = "l1", direction = "stop", level = "60" } }, dims(c4))
 			assert.equal(0, #messages(c4, "HUE_SET"), "no absolute target for a hold any more")
-			assert.equal(2, #c4.active_timers(), "the brightness fallback and the click guard")
+			assert.equal(2, #c4.active_timers(), "the brightness fallback and the click guard; no blend follows")
 			c4.fire_timers() -- no report from the bridge: the estimate is assumed
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 60 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
@@ -1810,17 +1835,28 @@ describe("Hue Light driver", function()
 		end)
 
 		-- Issue #234: a light's hold had no upper bound, while the bridge holds a
-		-- zone light's and a scene's to 6 000 000 ms.
-		it("takes a hold rate above 6 000 000 ms as 6 000 000, for Hue and the tile alike (#234)", function()
+		-- zone light's and a scene's to 6 000 000 ms. Since #430 D20 that is the
+		-- most the proxy can set (hold_rate_max), and common/device.lua refuses more.
+		it("holds over a hold rate of 6 000 000 ms, the bound, for Hue and the tile alike (#234, #430)", function()
 			local env, c4 = lit_light() -- on at 40 %
-			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_UP", { RATE = "86400000" })
-			assert.same({ "86400000" }, notifies(c4, "HOLD_RATE_UP"), "a valid setting, kept and shown as set")
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_UP", { RATE = "6000000" })
+			assert.same({ "6000000" }, notifies(c4, "HOLD_RATE_UP"), "a valid setting, kept and shown as set")
 			c4.calls, c4.sent = {}, {}
 			env.ReceivedFromProxy(200, "DO_PUSH", {})
 			c4.fire_timers() -- the hold time
 			assert.same({ { rid = "l1", direction = "up", duration = "6000000" } }, dims(c4))
 			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 3600000 } },
 				notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "60 % of the bound")
+		end)
+
+		it("refuses a hold rate above 6 000 000 ms and keeps the one in use (#430 D20)", function()
+			local env, c4 = lit_light() -- on at 40 %
+			env.ReceivedFromProxy(5001, "SET_HOLD_RATE_UP", { RATE = "86400000" })
+			assert.same({ "5000" }, notifies(c4, "HOLD_RATE_UP"), "the rate kept is shown again")
+			c4.calls, c4.sent = {}, {}
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			c4.fire_timers() -- the hold time
+			assert.same({ { rid = "l1", direction = "up", duration = "5000" } }, dims(c4))
 		end)
 
 		it("a release-as-click after a hold stops the dim instead of tapping", function()
@@ -2617,7 +2653,9 @@ describe("Hue Light driver", function()
 				supports_color_correlated_temperature = "true",
 				color_correlated_temperature_min = 2000,
 				color_correlated_temperature_max = 6530,
-			} }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "the union of the members, as for a bulb")
+			}, { brightness_rate_min = 0, brightness_rate_max = 6000000, color_rate_behavior = 1, color_rate_min = 0,
+				color_rate_max = 6000000 } }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"),
+				"the union of the members, as for a bulb; then the rate ranges (#430 D20)")
 			assert.same({ hue_rid = ZONE_RID, hue_name = "Bedside Lights", hue_model = "Hue zone", hue_kind = "group",
 				hue_group_type = "zone" }, c4.persist)
 		end)
@@ -2865,22 +2903,22 @@ describe("Hue Light driver", function()
 			local env, c4 = lit_zone()
 			configure_group(env, ZONE, { has_color = "false", has_cct = "true", mirek_min = "153", mirek_max = "454",
 				light_count = "3" })
-			assert.same({ {
+			assert.same({
 				supports_color = "false",
 				supports_color_correlated_temperature = "true",
 				color_correlated_temperature_min = 2210,
 				color_correlated_temperature_max = 6530,
-			} }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "both flags in one notify")
+			}, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED")[1], "both flags in one notify")
 			assert.equal("Hue zone Bedside Lights (3 lights)", env.Properties["Status"])
 
 			c4.calls = {}
 			configure_group(env, ZONE, { has_color = "false", has_cct = "false", light_count = "3" })
-			assert.same({ { supports_color = "false", supports_color_correlated_temperature = "false" } },
-				notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			assert.same({ supports_color = "false", supports_color_correlated_temperature = "false" },
+				notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED")[1])
 
 			c4.calls = {}
 			configure_group(env, ZONE, { light_count = "3" })
-			assert.equal(1, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "every configure announces them again")
+			assert.equal(2, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "every configure announces them again")
 			assert.equal("true", notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED")[1].supports_color)
 		end)
 
@@ -2946,8 +2984,8 @@ describe("Hue Light driver", function()
 				assert.same({ id = BRIDGE_ID, command = "HUE_SET",
 					params = { rid = base.rid, on = "true", brightness = "100", rate = "1800", urgent = "true" } },
 					last_sent(c4), base.group_type)
-				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 1800 } },
-					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 1800,
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = 1 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
 				env.ExecuteCommand("HUE_STATE", { rid = base.rid, brightness = "100", reason = "event" })
 				assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the group's level waits for the ramp's end")
 				c4.advance(900)
@@ -2984,6 +3022,746 @@ describe("Hue Light driver", function()
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
 			assert.equal("Not renamed: no Hue name known yet (the bridge has not configured this zone light)",
 				fake.last_action(env))
+		end)
+	end)
+
+	-- docs/turn-on-design.md (#429, #427, #430): the turn-on behaviour, built
+	-- on light.turnon. The proxy's messages carry the names with underscores
+	-- here, as the house's proxy spells SET_COLOR_TARGET's (§2.4); the
+	-- module's own spec covers the spaced spellings.
+	describe("turn-on behaviour (#429, #427, #430)", function()
+		local ON_COLOR, DIM_COLOR, RELAX = 11, 12, 17 -- colour preset ids the proxy might use
+		local OFF_PRESET, PREVIOUS_PRESET, DIM_PRESET = 2, 3, 5 -- brightness preset ids
+		local ZONE_RID = "b90ea7b4-aaaa-4bbb-8ccc-ddddeeeeffff"
+		local ZONE = { rid = ZONE_RID, kind = "group", group_type = "zone", name = "Bedside Lights", light_count = "2",
+			model = "Hue zone", has_color = "true", has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "1" }
+
+		after_each(function() log.set_debug(false) end)
+
+		-- The configured colour light, off; Hue keeps its level, 70 %, at 2700 K.
+		local function dark_light(opts)
+			opts = opts or {}
+			opts.rid = opts.rid or "l1"
+			local env, c4 = load_light(opts)
+			configure(env, opts.configure)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", brightness = "70", mirek = "370",
+				color_mode = "ct", online = "true", reason = "hello" })
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		-- A zone device, reported off, its lamps' average 20 % when it was on.
+		local function dark_zone()
+			local env, c4 = load_light({ rid = ZONE_RID })
+			env.ExecuteCommand("HUE_CONFIGURE", ZONE)
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "20", online = "true" })
+			env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "false" })
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function proxy(env, command, params)
+			env.ReceivedFromProxy(5001, command, params or {})
+		end
+
+		-- A colour preset as UPDATE_COLOR_PRESET carries it: a colour
+		-- temperature (mode 1) from Kelvin, or full colour from x and y.
+		local function color_preset(env, c4, name, id, k_or_x, y)
+			local x, mode = k_or_x, "0"
+			if y == nil then
+				x, y = c4:ColorCCTtoXY(k_or_x)
+				mode = "1"
+			end
+			proxy(env, "UPDATE_COLOR_PRESET", { COMMAND = "MODIFIED", ID = tostring(id), NAME = name,
+				COLOR_X = tostring(x), COLOR_Y = tostring(y), COLOR_MODE = mode })
+		end
+
+		-- The proxy's On and Dim colours (Dim = On when Composer's box is off).
+		local function on_and_dim(env, c4, on_k, dim_k)
+			color_preset(env, c4, "On", ON_COLOR, on_k)
+			color_preset(env, c4, "Dim", DIM_COLOR, dim_k or on_k)
+		end
+
+		local function brightness_preset(env, name, id, level)
+			proxy(env, "UPDATE_BRIGHTNESS_PRESET", { COMMAND = "ADDED", ID = tostring(id), NAME = name,
+				LEVEL = tostring(level) })
+		end
+
+		-- On Mode Previous, as the proxy says it (#429 D4).
+		local function previous_mode(env)
+			brightness_preset(env, "Previous", PREVIOUS_PRESET, 0)
+			proxy(env, "UPDATE_BRIGHTNESS_ON_MODE", { BRIGHTNESS_PRESET_ID = tostring(PREVIOUS_PRESET) })
+		end
+
+		local function hue_sets(c4)
+			local out = {}
+			for _, m in ipairs(messages(c4, "HUE_SET")) do out[#out + 1] = m.params end
+			return out
+		end
+
+		local function last_set(c4)
+			local sets = hue_sets(c4)
+			return sets[#sets]
+		end
+
+		-- The Kelvin a HUE_SET's mirek stands for, nil without one.
+		local function kelvin(params)
+			return params.mirek and 1000000 / tonumber(params.mirek) or nil
+		end
+
+		local function near(expected, got, tolerance, what)
+			assert.is_true(got ~= nil and math.abs(got - expected) <= tolerance,
+				string.format("%s: expected about %s, got %s", what or "value", tostring(expected), tostring(got)))
+		end
+
+		local function tap_top(env)
+			env.ReceivedFromProxy(200, "DO_PUSH", {})
+			env.ReceivedFromProxy(200, "DO_RELEASE", {})
+			env.ReceivedFromProxy(200, "DO_CLICK", {})
+		end
+
+		local function tap_bottom(env)
+			env.ReceivedFromProxy(201, "DO_PUSH", {})
+			env.ReceivedFromProxy(201, "DO_RELEASE", {})
+			env.ReceivedFromProxy(201, "DO_CLICK", {})
+		end
+
+		local function timer_delays(c4)
+			local out = {}
+			for _, timer in ipairs(c4.active_timers()) do out[#out + 1] = timer.delay end
+			table.sort(out)
+			return out
+		end
+
+		describe("On Mode (#429)", function()
+			it("ON, TOGGLE, OFF use the default rate after UPDATE_BRIGHTNESS_RATE_DEFAULT; 0 before", function()
+				local env, c4 = dark_light()
+				proxy(env, "ON")
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, last_set(c4), "0 before (D8)")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" })
+
+				proxy(env, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "2000" })
+				proxy(env, "OFF")
+				assert.same({ rid = "l1", on = "false", rate = "2000" }, last_set(c4))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				c4.advance(3000)
+				proxy(env, "TOGGLE")
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "2000" }, last_set(c4))
+				proxy(env, "TOGGLE")
+				assert.same({ rid = "l1", on = "false", rate = "2000" }, last_set(c4),
+					"the turn-on is under way: a second TOGGLE turns the light off again")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" })
+				c4.advance(3000)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "30" })
+				assert.same({ rid = "l1", on = "true", brightness = "30", rate = "2000" }, last_set(c4),
+					"a target without RATE fades over the default too")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				assert.equal("0", last_set(c4).rate, "one that names a rate keeps it")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40" })
+				c4.advance(3000)
+				tap_top(env)
+				assert.equal("1800", last_set(c4).rate, "taps keep the click rates: 3000 x 60 / 100")
+			end)
+
+			it("a top tap from off in Previous goes to the last reported level; while on, to the On preset", function()
+				local env, c4 = dark_light()
+				previous_mode(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "35" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				c4.calls, c4.sent = {}, {}
+				tap_top(env)
+				assert.same({ rid = "l1", on = "true", brightness = "35", rate = "1050", urgent = "true" }, last_set(c4),
+					"the click rate up's share of 35")
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 35, RATE = 1050,
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = PREVIOUS_PRESET } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "35" })
+				c4.advance(2100)
+				c4.calls, c4.sent = {}, {}
+				tap_top(env)
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "1950", urgent = "true" }, last_set(c4),
+					"while on Previous has nothing to restore: the On preset (D5)")
+				assert.equal(1, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].LIGHT_BRIGHTNESS_TARGET_PRESET_ID)
+			end)
+
+			it("Previous without a reported level falls back to the level Hue keeps, then the preset", function()
+				local env, c4 = dark_light() -- off; Hue keeps 70 %, nothing above 0 reported since the start
+				previous_mode(env)
+				proxy(env, "ON")
+				assert.same({ rid = "l1", on = "true", brightness = "70", rate = "0" }, last_set(c4))
+			end)
+
+			it("a zone light in Previous sends HUE_SET on without brightness, so every lamp keeps its own", function()
+				local env, c4 = dark_zone()
+				previous_mode(env)
+				tap_top(env)
+				assert.same({ rid = ZONE_RID, on = "true", rate = "600", urgent = "true" }, last_set(c4),
+					"on alone (D6), over the click rate's share of the last level")
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 20, RATE = 600,
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = PREVIOUS_PRESET } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "47" })
+				c4.advance(2000)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 47 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"),
+					"the group's own average, whatever it is: no #308 goal holds it back")
+
+				env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "false" })
+				c4.sent = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "47", RATE = "0",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = tostring(PREVIOUS_PRESET) })
+				assert.same({ rid = ZONE_RID, on = "true", rate = "0" }, last_set(c4), "the proxy's own Previous turn-on")
+				env.ExecuteCommand("HUE_STATE", { rid = ZONE_RID, on = "true", brightness = "47" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = tostring(PREVIOUS_PRESET) })
+				assert.equal("60", last_set(c4).brightness, "on already: the level")
+			end)
+
+			it("CHANGING and CHANGED carry preset ids; a slider level clears them", function()
+				local env, c4 = dark_light()
+				brightness_preset(env, "Off", OFF_PRESET, 0)
+				proxy(env, "ON")
+				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0,
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = 1 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1])
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "99.6" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = 1 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "at the On preset")
+
+				c4.calls = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 100, LIGHT_BRIGHTNESS_TARGET = 50, RATE = 0,
+					LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = 1 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"),
+					"it sits at the On preset as it leaves it")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "50" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 50 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "cleared")
+
+				c4.calls = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "25", RATE = "0",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = tostring(DIM_PRESET) })
+				assert.equal(DIM_PRESET, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].LIGHT_BRIGHTNESS_TARGET_PRESET_ID,
+					"the id a target carries is echoed")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "25" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 25, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = DIM_PRESET } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "40" }) -- someone moved it in Hue
+				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
+
+				c4.calls = {}
+				proxy(env, "OFF")
+				assert.equal(OFF_PRESET, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].LIGHT_BRIGHTNESS_TARGET_PRESET_ID,
+					"an off names the Off preset once its id is known")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = OFF_PRESET } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			end)
+
+			it("UPDATE_BRIGHTNESS_PRESET for the On preset changes the tap level and sends no PRESET_LEVEL", function()
+				local env, c4 = dark_light()
+				brightness_preset(env, "On", 1, 60)
+				assert.equal(0, #notifies(c4, "PRESET_LEVEL"), "no echo (D4)")
+				assert.equal(60, c4.persist.preset_level)
+				tap_top(env)
+				assert.equal("60", last_set(c4).brightness)
+				proxy(env, "SET_PRESET_LEVEL", { LEVEL = "70" })
+				assert.same({ "70" }, notifies(c4, "PRESET_LEVEL"), "SET_PRESET_LEVEL is answered as before")
+			end)
+
+			it("UPDATE_BRIGHTNESS_ON_MODE to another preset turns on at that preset's level, and moves nothing", function()
+				local env, c4 = dark_light()
+				brightness_preset(env, "Evening", DIM_PRESET, 30)
+				proxy(env, "UPDATE_BRIGHTNESS_ON_MODE", { BRIGHTNESS_PRESET_ID = tostring(DIM_PRESET),
+					BRIGHTNESS_PRESET_LEVEL = "30" })
+				assert.equal(0, #c4.sent, "an UPDATE never moves the light (D26)")
+				proxy(env, "TOGGLE")
+				assert.equal("30", last_set(c4).brightness)
+				assert.equal(DIM_PRESET, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].LIGHT_BRIGHTNESS_TARGET_PRESET_ID)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "80" })
+				proxy(env, "ON")
+				assert.equal("30", last_set(c4).brightness, "ON while on goes to the on mode preset (D5)")
+			end)
+
+			it("modes survive a restart (persisted)", function()
+				local env, c4 = dark_light()
+				previous_mode(env)
+				on_and_dim(env, c4, 2700)
+				local persisted = {}
+				for k, v in pairs(c4.persist) do persisted[k] = v end
+				env, c4 = dark_light({ persist = persisted })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "35" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				c4.sent = {}
+				proxy(env, "ON")
+				local sent = last_set(c4)
+				assert.equal("35", sent.brightness, "Previous, from the persisted mode")
+				near(2700, kelvin(sent), 40, "the On colour, from the persisted presets")
+			end)
+
+			it("DYNAMIC_ON and DYNAMIC_OFF", function()
+				local env, c4 = dark_light()
+				proxy(env, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "1500" })
+				proxy(env, "DYNAMIC_OFF")
+				assert.equal(0, #c4.sent, "off already: only a report")
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+				proxy(env, "DYNAMIC_ON")
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "1500" }, last_set(c4),
+					"as ON from off, at the default rate (D25)")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" })
+				c4.advance(2500)
+				c4.sent = {}
+				proxy(env, "DYNAMIC_ON")
+				assert.equal(0, #c4.sent, "on already: only a report")
+				proxy(env, "DYNAMIC_OFF")
+				assert.same({ rid = "l1", on = "false", rate = "1500" }, last_set(c4))
+			end)
+
+			it("OFF on a light that shows off only reports", function()
+				local env, c4 = dark_light()
+				proxy(env, "OFF")
+				assert.equal(0, #c4.sent)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			end)
+
+			it("logs the first arrival of each turn-on command at debug, with every parameter", function()
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = line end
+				local env = dark_light()
+				log.set_debug(true)
+				previous_mode(env)
+				previous_mode(env)
+				local firsts = {}
+				for _, line in ipairs(lines) do
+					if line:find("first UPDATE_BRIGHTNESS_ON_MODE", 1, true) then firsts[#firsts + 1] = line end
+				end
+				assert.equal(1, #firsts)
+				assert.truthy(firsts[1]:find("BRIGHTNESS_PRESET_ID=3", 1, true))
+			end)
+		end)
+
+		describe("Colour on modes (#427)", function()
+			it("a turn-on carries the On colour and sends LIGHT_COLOR_CHANGING; without an On colour none", function()
+				local env, c4 = dark_light()
+				proxy(env, "ON")
+				assert.is_nil(last_set(c4).mirek, "no On colour known: Hue's last colour (D10)")
+				assert.equal(0, #notifies(c4, "LIGHT_COLOR_CHANGING"))
+
+				env, c4 = dark_light()
+				on_and_dim(env, c4, 2700)
+				proxy(env, "ON")
+				local sent = last_set(c4)
+				assert.same({ "l1", "true", "100", "0" }, { sent.rid, sent.on, sent.brightness, sent.rate })
+				near(2700, kelvin(sent), 40, "the On colour")
+				local x, y = c4:ColorCCTtoXY(2700)
+				local changing = notifies(c4, "LIGHT_COLOR_CHANGING")
+				assert.equal(1, #changing)
+				near(x, changing[1].LIGHT_COLOR_TARGET_X, 0.0001, "target x")
+				near(y, changing[1].LIGHT_COLOR_TARGET_Y, 0.0001, "target y")
+				assert.equal(1, changing[1].LIGHT_COLOR_TARGET_COLOR_MODE)
+				assert.equal(ON_COLOR, changing[1].LIGHT_COLOR_TARGET_PRESET_ID, "it is the On preset itself (D16)")
+
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = sent.mirek,
+					color_mode = "ct" })
+				local changed = notifies(c4, "LIGHT_COLOR_CHANGED")
+				assert.equal(1, #changed)
+				assert.equal(ON_COLOR, changed[1].LIGHT_COLOR_CURRENT_PRESET_ID)
+				assert.equal(0, #c4.active_timers(), "the report settles both targets")
+			end)
+
+			it("turns on blended toward the Dim colour below the preset (D13, F14)", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "SET_PRESET_LEVEL", { LEVEL = "80" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				near(1000000 / 3000, tonumber(last_set(c4).mirek), 5, "3000 K at 40 % (the page's example)")
+				assert.is_nil(notifies(c4, "LIGHT_COLOR_CHANGING")[1].LIGHT_COLOR_TARGET_PRESET_ID,
+					"a mix is no preset")
+			end)
+
+			it("a slider move while blending carries the blend; after an explicit colour it does not", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "SET_PRESET_LEVEL", { LEVEL = "80" })
+				proxy(env, "ON")
+				assert.equal("250", last_set(c4).mirek, "4000 K at the preset")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "80", mirek = "250",
+					color_mode = "ct" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "1", RATE = "0" })
+				assert.equal("500", last_set(c4).mirek, "the Dim colour at 1 %, clamped to the bulb's warmest")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "1", mirek = "500", color_mode = "ct" })
+
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.64", LIGHT_COLOR_TARGET_Y = "0.33",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.same({ rid = "l1", x = "0.64", y = "0.33", rate = "0" }, last_set(c4))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", x = "0.64", y = "0.33", color_mode = "xy" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "70", RATE = "0" })
+				assert.same({ rid = "l1", on = "true", brightness = "70", rate = "0" }, last_set(c4), "red stays (D14)")
+
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				proxy(env, "ON")
+				assert.equal("250", last_set(c4).mirek, "the next off and on blends again")
+			end)
+
+			it("the on colour itself leaves the blend running (D16)", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "250",
+					color_mode = "ct" })
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_PRESET_ID = tostring(ON_COLOR),
+					LIGHT_COLOR_TARGET_PRESET_ORIGIN = "1", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.equal("250", last_set(c4).mirek, "the On preset by id")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+				assert.truthy(last_set(c4).mirek, "still blending")
+			end)
+
+			it("a colour changed in Hue ends a Preset blend, and nothing is pushed back (§7.4)", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "250",
+					color_mode = "ct" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", mirek = "252", color_mode = "ct" }) -- Hue's rounding
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+				assert.truthy(last_set(c4).mirek, "a few mirek is no change")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "60", mirek = last_set(c4).mirek,
+					color_mode = "ct" })
+				local sent = #c4.sent
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", x = "0.2", y = "0.1", color_mode = "xy" }) -- the Hue app
+				assert.equal(sent, #c4.sent, "nothing pushed back")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
+				assert.same({ rid = "l1", on = "true", brightness = "80", rate = "0" }, last_set(c4))
+			end)
+
+			it("a timed off carries the Dim colour; an instant off and a hold do not", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 2700, 2200)
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "370",
+					color_mode = "ct" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "3000" })
+				local sent = last_set(c4)
+				assert.same({ "false", "3000" }, { sent.on, sent.rate })
+				near(2200, kelvin(sent), 40, "the Dim colour (D12)")
+				local changing = notifies(c4, "LIGHT_COLOR_CHANGING")
+				assert.equal(DIM_COLOR, changing[#changing].LIGHT_COLOR_TARGET_PRESET_ID)
+
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "370",
+					color_mode = "ct" })
+				c4.advance(5000)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "0" })
+				assert.same({ rid = "l1", on = "false", rate = "0" }, last_set(c4), "an instant off: no colour")
+
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "370",
+					color_mode = "ct" })
+				c4.advance(5000)
+				c4.sent = {}
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				c4.advance(400) -- the hold
+				assert.same({ { rid = "l1", direction = "down", duration = "5000" } }, dims(c4))
+				assert.equal(0, #hue_sets(c4), "a hold down carries no colour")
+			end)
+
+			it("a hold from off turns on at 1 % in the colour for 1 %, then dims up without colour", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				c4.advance(400) -- the hold time
+				local first = hue_sets(c4)[1]
+				assert.same({ "true", "1", "0" }, { first.on, first.brightness, first.rate })
+				assert.equal("500", first.mirek, "C(1): the Dim colour, clamped to the bulb's warmest")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "1", mirek = "500",
+					color_mode = "ct" })
+				c4.advance(600) -- the dim up follows
+				assert.same({ { rid = "l1", direction = "up", duration = "5000" } }, dims(c4))
+				assert.equal(1, #hue_sets(c4))
+			end)
+
+			it("a tap to off fades to the Dim colour; a tap stop carries the blend for the estimate", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "250",
+					color_mode = "ct" })
+				c4.sent = {}
+				tap_bottom(env)
+				local start = last_set(c4)
+				assert.same({ "false", "3000", "500" }, { start.on, start.rate, start.mirek },
+					"off over click down with the Dim colour")
+				c4.advance(1500)
+				env.ReceivedFromProxy(200, "DO_PUSH", {})
+				local stop = stops(c4)[1]
+				assert.equal("50", stop.brightness)
+				near(1000000 / (1979 + (4006 - 1979) * 49 / 99), tonumber(stop.mirek), 6, "the blend at 50 % (D15)")
+			end)
+
+			it("a hold's release sends the blend 500 ms later; a press in between cancels it", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", mirek = "250",
+					color_mode = "ct" })
+				c4.advance(2000)
+				c4.sent = {}
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				c4.advance(400 + 2500) -- the hold, then half the range at 5000 ms per range
+				env.ReceivedFromProxy(201, "DO_RELEASE", {})
+				assert.same({ "stop", "50" }, { dims(c4)[2].direction, dims(c4)[2].level })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", brightness = "50" })
+				c4.advance(499)
+				assert.equal(0, #hue_sets(c4), "not before 500 ms")
+				c4.advance(1)
+				local glide = last_set(c4)
+				assert.same({ "l1", "1000" }, { glide.rid, glide.rate })
+				assert.is_nil(glide.brightness)
+				near(1000000 / (1979 + (4006 - 1979) * 49 / 99), tonumber(glide.mirek), 6,
+					"the blend for 50 % below a preset of 100 % over 1 s (D15)")
+
+				c4.advance(3000)
+				c4.sent = {}
+				env.ReceivedFromProxy(201, "DO_PUSH", {})
+				c4.advance(400 + 1000)
+				env.ReceivedFromProxy(201, "DO_RELEASE", {})
+				c4.advance(200)
+				env.ReceivedFromProxy(200, "DO_PUSH", {}) -- a press before the blend went
+				c4.advance(1000)
+				for _, params in ipairs(hue_sets(c4)) do
+					assert.is_nil(params.mirek, "the blend was cancelled")
+				end
+			end)
+
+			it("SET_COLOR_TARGET with only a preset id uses the learned colour, and the notifies name it", function()
+				local env, c4 = lit_light()
+				color_preset(env, c4, "Relax", RELAX, 0.5, 0.41)
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_PRESET_ID = tostring(RELAX),
+					LIGHT_COLOR_TARGET_PRESET_ORIGIN = "2", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.same({ rid = "l1", x = "0.5", y = "0.41", rate = "0" }, last_set(c4))
+				local changing = notifies(c4, "LIGHT_COLOR_CHANGING")[1]
+				assert.same({ RELAX, 2 }, { changing.LIGHT_COLOR_TARGET_PRESET_ID, changing.LIGHT_COLOR_TARGET_PRESET_ORIGIN })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", x = "0.5", y = "0.41", color_mode = "xy" })
+				local changed = notifies(c4, "LIGHT_COLOR_CHANGED")[1]
+				assert.same({ RELAX, 2 }, { changed.LIGHT_COLOR_CURRENT_PRESET_ID, changed.LIGHT_COLOR_CURRENT_PRESET_ORIGIN })
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.3", LIGHT_COLOR_TARGET_Y = "0.3",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				changing = notifies(c4, "LIGHT_COLOR_CHANGING")[2]
+				assert.equal(RELAX, changing.LIGHT_COLOR_CURRENT_PRESET_ID, "where it comes from")
+				assert.is_nil(changing.LIGHT_COLOR_TARGET_PRESET_ID)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", x = "0.3", y = "0.3", color_mode = "xy" })
+				assert.is_nil(notifies(c4, "LIGHT_COLOR_CHANGED")[2].LIGHT_COLOR_CURRENT_PRESET_ID)
+
+				c4.sent = {}
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_PRESET_ID = "99", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.equal(0, #hue_sets(c4), "an unknown preset without x and y is ignored")
+			end)
+
+			it("a colour right after a turn-on goes out, not stored and lost (D17)", function()
+				local env, c4 = dark_light()
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.64", LIGHT_COLOR_TARGET_Y = "0.33",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.same({ rid = "l1", x = "0.64", y = "0.33", rate = "0" }, last_set(c4),
+					"sent at once (the bridge folds it into the turn-on)")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "60" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", x = "0.64", y = "0.33", color_mode = "xy" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				proxy(env, "ON")
+				assert.is_nil(last_set(c4).x, "nothing was left stored for a later turn-on")
+
+				-- The same on a tap's ramp from off.
+				env, c4 = dark_light()
+				tap_top(env)
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.64", LIGHT_COLOR_TARGET_Y = "0.33",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.equal("0.64", last_set(c4).x)
+			end)
+
+			it("the On colour sent while off is not stored: the turn-on blends it for its level (D11, D16)", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "SET_PRESET_LEVEL", { LEVEL = "80" })
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_PRESET_ID = tostring(ON_COLOR),
+					LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.equal(0, #c4.sent)
+				assert.equal(ON_COLOR, notifies(c4, "LIGHT_COLOR_CHANGED")[1].LIGHT_COLOR_CURRENT_PRESET_ID)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				near(1000000 / 3000, tonumber(last_set(c4).mirek), 5, "blended, as without the colour")
+			end)
+
+			it("a colour set while off wins at the next turn-on, and no blend runs that time on (D11)", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 4000, 2000)
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.15", LIGHT_COLOR_TARGET_Y = "0.06",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				proxy(env, "ON")
+				local sent = last_set(c4)
+				assert.same({ "0.15", "0.06" }, { sent.x, sent.y })
+				assert.is_nil(sent.mirek)
+				assert.equal(1, #notifies(c4, "LIGHT_COLOR_CHANGING") - 1, "a CHANGING for it at the turn-on too")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100", x = "0.15", y = "0.06",
+					color_mode = "xy" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+				assert.is_nil(last_set(c4).mirek, "blue stays")
+			end)
+
+			it("Fade: the formula on every target; an explicit colour lasts until the next target", function()
+				local env, c4 = dark_light()
+				local x4, y4 = c4:ColorCCTtoXY(4000)
+				local x2, y2 = c4:ColorCCTtoXY(2000)
+				proxy(env, "UPDATE_COLOR_ON_MODE", { COLOR_PRESET_ID = tostring(ON_COLOR), COLOR_PRESET_ORIGIN = "1",
+					COLOR_PRESET_COLOR_X = tostring(x4), COLOR_PRESET_COLOR_Y = tostring(y4), COLOR_PRESET_COLOR_MODE = "1",
+					COLOR_FADE_PRESET_ID = tostring(DIM_COLOR), COLOR_FADE_PRESET_ORIGIN = "1",
+					COLOR_FADE_PRESET_COLOR_X = tostring(x2), COLOR_FADE_PRESET_COLOR_Y = tostring(y2),
+					COLOR_FADE_PRESET_COLOR_MODE = "1" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "1", RATE = "0" })
+				assert.equal("500", last_set(c4).mirek, "2000 K at 1 %, clamped to the bulb")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "1", mirek = "500",
+					color_mode = "ct" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+				near(1000000 / (1979 + (4006 - 1979) * 49 / 99), tonumber(last_set(c4).mirek), 6, "the mix at 50 %")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "100", RATE = "0" })
+				assert.equal("250", last_set(c4).mirek, "4000 K at 100 %")
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.64", LIGHT_COLOR_TARGET_Y = "0.33",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "0" })
+				assert.equal("0.64", last_set(c4).x, "red is obeyed")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+				assert.truthy(last_set(c4).mirek, "the next target applies the formula again (F12)")
+			end)
+
+			it("Previous: no colour at a turn-on, and no Dim colour at a timed off", function()
+				local env, c4 = dark_light()
+				on_and_dim(env, c4, 2700, 2200)
+				color_preset(env, c4, "Previous", 13, 0.4, 0.4)
+				proxy(env, "UPDATE_COLOR_ON_MODE", { COLOR_PRESET_ID = "13", COLOR_PRESET_ORIGIN = "1" })
+				proxy(env, "ON")
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, last_set(c4))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "3000" })
+				assert.same({ rid = "l1", on = "false", rate = "3000" }, last_set(c4))
+			end)
+
+			it("a white-only light never sends colour", function()
+				local env, c4 = dark_light({ configure = { has_color = "false", has_cct = "false" } })
+				on_and_dim(env, c4, 2700, 2200)
+				proxy(env, "ON")
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, last_set(c4))
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "100" })
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "3000" })
+				assert.same({ rid = "l1", on = "false", rate = "3000" }, last_set(c4))
+				assert.equal(0, #notifies(c4, "LIGHT_COLOR_CHANGING"))
+			end)
+
+			it("a zone light sends one colour to its grouped_light; Previous keeps each lamp's own", function()
+				local env, c4 = dark_zone()
+				on_and_dim(env, c4, 2700)
+				proxy(env, "ON")
+				near(2700, kelvin(last_set(c4)), 40, "the On colour to the group")
+				env, c4 = dark_zone()
+				on_and_dim(env, c4, 2700)
+				color_preset(env, c4, "Previous", 13, 0.4, 0.4)
+				proxy(env, "UPDATE_COLOR_ON_MODE", { COLOR_PRESET_ID = "13" })
+				proxy(env, "ON")
+				assert.is_nil(last_set(c4).mirek)
+			end)
+
+			it("GET_SETUP is asked 3 s after late init; what it gives is the On colour", function()
+				local env, c4 = load_light({ rid = "l1", setup = "wait" })
+				configure(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", online = "true" })
+				local x, y = c4:ColorCCTtoXY(2700)
+				c4.ui_answers.GET_SETUP = string.format('<setup><brightnesses><level name="On" level="100"/></brightnesses>'
+					.. '<colors><color name="On" category="1" color_x="%f" color_y="%f" color_mode="1"/>'
+					.. '<color name="Dim" category="1" color_x="%f" color_y="%f" color_mode="1"/></colors></setup>',
+					x, y, x, y)
+				c4.advance(2999)
+				assert.equal(0, #c4.calls_to("SendUIRequest"))
+				c4.advance(1)
+				local proxy_id = fake.project.devices[LIGHT_ID].proxy_id
+				assert.same({ { proxy_id, "GET_SETUP", {} } }, c4.calls_to("SendUIRequest"))
+				assert.equal(0, #c4.calls_to("GetDeviceVariable"), "colours found: the variable is not read")
+				assert.equal(0, #messages(c4, "HUE_SET"), "what it learns never moves the light (D26)")
+				proxy(env, "ON")
+				near(2700, kelvin(last_set(c4)), 40)
+			end)
+
+			it("a failing GET_SETUP is logged and ignored; variable 1300 is read instead", function()
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = line end
+				local env, c4 = load_light({ rid = "l1", setup = "wait" })
+				configure(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", online = "true" })
+				c4.ui_answers.GET_SETUP = function() error("no UIRequest here") end
+				local proxy_id = fake.project.devices[LIGHT_ID].proxy_id
+				local x, y = c4:ColorCCTtoXY(3000)
+				c4.device_variables[proxy_id] = { [1300] = string.format(
+					'<colors><color name="On" color_x="%f" color_y="%f" color_mode="1"/></colors>', x, y) }
+				c4.advance(3000)
+				local logged = false
+				for _, line in ipairs(lines) do
+					if line:find("GET_SETUP failed: .*no UIRequest here") then logged = true end
+				end
+				assert.is_true(logged)
+				assert.same({ { proxy_id, 1300 } }, c4.calls_to("GetDeviceVariable"))
+				proxy(env, "ON")
+				near(3000, kelvin(last_set(c4)), 40, "the variable's On colour")
+
+				-- Neither answers: nothing learned, nothing breaks.
+				env, c4 = load_light({ rid = "l1", setup = "wait" })
+				configure(env)
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false", online = "true" })
+				c4.ui_answers.GET_SETUP = function() error("no") end
+				proxy_id = fake.project.devices[LIGHT_ID].proxy_id
+				c4.device_variables[proxy_id] = nil
+				c4.GetDeviceVariable = function() error("not now") end
+				assert.has_no.errors(function() c4.advance(3000) end)
+				proxy(env, "ON")
+				assert.is_nil(last_set(c4).mirek)
+			end)
+
+			it("destroy cancels the read of the presets and a hold's waiting blend", function()
+				local env, c4 = load_light({ rid = "l1", setup = "wait" })
+				env.OnDriverDestroyed("DIT_LOADED")
+				assert.same({}, timer_delays(c4))
+			end)
+		end)
+
+		describe("Rate ranges (#430)", function()
+			it("rates above 6 000 000 are clamped in HUE_SET, and the proxy hears the time used", function()
+				local env, c4 = lit_light()
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "9000000" })
+				assert.equal("6000000", last_set(c4).rate)
+				assert.equal(6000000, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].RATE)
+				proxy(env, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "0.4", LIGHT_COLOR_TARGET_Y = "0.4",
+					LIGHT_COLOR_TARGET_COLOR_MODE = "0", LIGHT_COLOR_TARGET_RATE = "7000000" })
+				assert.equal("6000000", last_set(c4).rate)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "-5" })
+				assert.equal("0", last_set(c4).rate, "and none below 0")
+			end)
+
+			it("a second DYNAMIC_CAPABILITIES_CHANGED carries the rate ranges, right after the colour one", function()
+				local env, c4 = load_light({ rid = "l1" })
+				c4.calls = {}
+				configure(env)
+				local dyn = notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED")
+				assert.equal("true", dyn[1].supports_color)
+				assert.is_nil(dyn[1].brightness_rate_max, "not in the colour notify")
+				assert.same({ brightness_rate_min = 0, brightness_rate_max = 6000000, color_rate_behavior = 1,
+					color_rate_min = 0, color_rate_max = 6000000 }, dyn[2])
+			end)
+
+			it("driver.xml declares the five on mode capabilities and both maxima, and no deprecated flag", function()
+				local file = assert(io.open("src/hue_light/driver.xml"))
+				local xml = file:read("*a")
+				file:close()
+				local function capability(name)
+					return xml:match("<" .. name .. ">%s*(%w+)%s*</" .. name .. ">")
+				end
+				for _, name in ipairs({ "brightness_on_mode_preset", "brightness_on_mode_previous", "color_on_mode_preset",
+					"color_on_mode_previous", "color_on_mode_fade" }) do
+					assert.equal("True", capability(name), name)
+				end
+				assert.equal("6000000", capability("click_rate_max"))
+				assert.equal("6000000", capability("hold_rate_max"))
+				assert.equal("0", capability("click_rate_min"))
+				assert.equal("1000", capability("hold_rate_min"))
+				for _, name in ipairs({ "supports_default_on", "ramp_level", "on_off", "min_max", "buttons_are_virtual" }) do
+					assert.is_nil(xml:find("<" .. name .. ">", 1, true), name)
+				end
+			end)
 		end)
 	end)
 end)

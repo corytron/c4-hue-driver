@@ -1385,6 +1385,114 @@ scene's) and back to Off at the end: its Lua tab then shows each command from th
     nothing.
     - **Done:** open.
 
+## N. Turn-on behaviour, colour presets and rate ranges (#429, #427, #430)
+
+Written on 2026-11-09 from the contract (`docs/turn-on-design.md`,
+decisions D1 to D27, the rules of its §4 and the checks T0 to T12 of its
+§9.2), before the build; check every quoted text against the first build
+that brings it and paste what differs. The owner's manual says the same in
+prose: the Hue Light's own Documentation tab ("On Mode", "Colours"), the
+Hue Scene's ("Keypad settings") and the bridge's chapter 11. This build
+changes the capabilities of `hue_light.c4z` and `hue_scene.c4z`: answer
+Yes to "Restart Director?" for each, then the owner reboots the controller
+from System Manager. Contract D27 installs it first as a `--dev` build, so
+that the parsers can be fixed Lua-only through the dev loop and the
+release needs no second reboot. The Windows session reads Composer, sets
+fields and `Debug Mode` and pastes the Lua output (standing approval: no
+need to ask); the owner taps and watches lamps. Each step takes under a
+minute.
+
+Setup: one Hue Light device for a single lamp, bound to a switch run as a
+2-button keypad (steps 33, 34 and 39); one zone light of two lamps, bound
+to a switch for step 103 (step 34); one Hue Scene device, bound to a switch
+for step 111. `Debug Mode` On on the light, the zone light and the scene
+for steps 101 to 111, and on the Hue Bridge where a step asks for its PUT
+lines; Off on all of them at the end. A device's Lua tab then shows each
+command from the proxy as `ReceivedFromProxy <binding> <command>` and each
+notice to it as `-> proxy <command> <parameters>`; the bridge's shows each
+request to Hue as `PUT <resource> <id>: <body>`. The contract's checks
+speak of "the HUE_SET line": the light does not log what it sends the
+bridge, so the bridge's PUT line is where its `mirek` shows.
+
+99. **Before the build (read only)** (T0; contract §2.3 and D10). On the
+    light, the zone light and the scene, read the proxy's settings page
+    above "Advanced Properties" (step 35): every field name and value,
+    especially Default On Brightness, any On Mode, the colour on mode, the
+    On colour, the Dim colour and its checkbox, and any default rate.
+    Paste them.
+    - **Done:** open.
+100. **Install and reboot** (T1; contract §7.1, D20 to D22). Install all
+     four files in place (step 1 or the deploy brief); "Restart Director?"
+     for the light and the scene drivers: Yes; the owner reboots the
+     controller from System Manager. Every Hue device shows the new
+     `Driver Version`. The settings page now shows a brightness On Mode
+     (Preset, Previous) and a colour on mode with Preset, Previous and
+     Fade; the scene shows Click Rate Up and Down at `3.000`. Type `7000`
+     into a hold rate: refused or brought back to at most `6000`; type
+     `6000`: kept; then set it back to `5.000`. In Programming, the light
+     still offers "Ramp to level" with times up to 6000 s. Paste.
+     - **Done:** open.
+101. **Default On Brightness** (T2; contract D4 and D7). Set it to 60 on
+     the light (Enter). Paste the Lua lines (expect
+     `UPDATE_BRIGHTNESS_PRESET` and/or `SET_PRESET_LEVEL`). Light off, tap
+     top: 60 %; the CHANGING line shows
+     `LIGHT_BRIGHTNESS_TARGET_PRESET_ID=1`. Set it back to 100.
+     - **Done:** open.
+102. **Previous on a lamp** (T3; contract D5, D6 and D25). Set On Mode to
+     Previous (paste the `UPDATE_BRIGHTNESS_ON_MODE` line). Slider to
+     35 %, tap bottom, tap top: back at 35 %. Off again, tap the Navigator
+     tile: 35 %; paste which command arrived (`SET_BRIGHTNESS_TARGET` with
+     a preset id, or `DYNAMIC_ON`). Light at 35 %, tap top: it goes to the
+     Default On Brightness. Set On Mode back to Preset.
+     - **Done:** open.
+103. **Previous on a zone** (T4; contract D6). On Mode Previous on the zone
+     light. In the Hue app set its lamps to 20 % and 80 %. Turn the zone
+     off from its tile, then tap top on its switch: each lamp comes back
+     at its own level (owner watching). Set it back to Preset.
+     - **Done:** open.
+104. **On and Dim colours** (T5; contract D10, D11, D13 and D14). On the
+     light: On colour 2700 K, Dim colour 2200 K with its checkbox ticked,
+     colour on mode Preset (paste the `UPDATE_COLOR_*` lines). Pick red on
+     the Navigator, turn the light off, tap top: it comes on warm white
+     (2700 K) at 100 %. Slider to 50: a little warmer. Pick blue: blue;
+     slider to 70: stays blue. Off and on again: 2700 K.
+     - **Done:** open.
+105. **Dim on a fade-out** (T6; contract D12). Light at 100 %, tap bottom:
+     it fades warmer as it goes off over about 3 s; the bridge's PUT line
+     carries `mirek`. Paste.
+     - **Done:** open.
+106. **A hold** (T7; contract D15). Light at 100 %, hold bottom to about
+     40 % and let go: the colour stays during the hold, then within about
+     1.5 s glides warmer.
+     - **Done:** open.
+107. **Fade** (T8; contract D13 and D14). Colour on mode Fade with On
+     4000 K and Dim 2000 K. Slider to 1, 50 and 100: about 2000 K, 3000 K
+     and 4000 K (owner watching; paste the bridge's PUT lines). Pick red,
+     then slider to 60: back to the fade colour.
+     - **Done:** open.
+108. **Previous colour** (T9; contract D11). Colour on mode Previous. Pick
+     red, off, tap top: red. Then set the light to what the owner chose
+     (contract §11): On colour 2700 K, the Dim colour's checkbox unticked,
+     colour on mode Preset.
+     - **Done:** open.
+109. **What the driver learned** (T10; contract D19 and §7.3). After a
+     restart of the light's driver with `Debug Mode` On (a Director
+     restart, or a reload through the dev loop while the `--dev` build of
+     contract D27 is installed), paste the light's `GET_SETUP` debug line
+     and the first `UPDATE_COLOR_ON_MODE` line seen in step 104 or 107.
+     - **Done:** open.
+110. **Default rate** (T11; contract D8). If the page shows a brightness
+     default rate, set it to 2 s: the tile's turn-on, and "Turn On" in
+     programming, now fade in over 2 s (a program on a spare keypad
+     button's tap will do, as in step 93; remove it afterwards). Set the
+     rate back.
+     - **Done:** open.
+111. **The scene** (T12; contract D1 and D21). Its tile turns it on as
+     designed (lamps at their scene levels). Set its Click Rate Up to
+     `1.000`: a top tap from off fades it in over about 1 s. Set it back to
+     `3.000`. Then set `Debug Mode` Off on every device of this section.
+     - **Done:** open.
+
 ## What to paste back
 
 For each step: the property texts as shown, what the Navigator, keypad or
