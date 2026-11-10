@@ -151,6 +151,9 @@ are dated research; what was built from them is in the contracts and
   a "Done" line per step; section L is release 1.2's (#334: the nine bridge
   actions and the background tasks), its quoted texts checked against the
   code.
+- [`house-checks-plan.md`](house-checks-plan.md): one house round around the
+  1.5 install and its reboot for #238, #65, #431 and #40: what is checked,
+  by which tool or person, and the owner's few moments (2026-11-09).
 - [`spike-checklist.md`](spike-checklist.md): historical (2026-10-19 to
   2026-10-21): the first pairing and event-stream spike's checklist.
 - [`dev-loop.md`](dev-loop.md): the development loop: a `--dev` build of the
