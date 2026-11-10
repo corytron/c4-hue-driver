@@ -832,6 +832,25 @@ function lights:send_state(rid, reason)
 	return true
 end
 
+-- #428 D8 (docs/offline-design.md §6.2): a PUT on this light failed (the
+-- light queue's on_undelivered, after each failed attempt). The device hears
+-- the bridge's last known state with reason "undelivered", so it closes its
+-- target with that instead of the level it asked for; with no model, the
+-- bare { rid, reason } still lets it settle (it then reports the level its
+-- CHANGING started from, D9). Nothing for an unregistered rid or an unbound
+-- device (not this bridge's any more; the fan-out skips those too). Returns
+-- true when a message went out.
+function lights:undelivered(rid)
+	local entry = rid ~= nil and self.registry[rid] or nil
+	if not entry or entry.state == "unbound" then
+		return false
+	end
+	if self.models[rid] then
+		return self:send_state(rid, "undelivered")
+	end
+	return self:tell(entry.device_id, "HUE_STATE", { rid = tostring(rid), reason = "undelivered" })
+end
+
 -- push is bridge/owner.lua's: HUE_CONFIGURE (when asked for, or when it
 -- changed) then full HUE_STATE, nothing at all while the light has no model
 -- (OPTIONS.push_needs_state). The state is known once the light is modelled.

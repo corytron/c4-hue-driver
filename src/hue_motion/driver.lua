@@ -10,11 +10,12 @@
 --
 -- It never speaks to the Hue API and never changes anything in Hue (D7): the
 -- Hue Bridge driver it is bound to (consumer binding 1, class HUE_BRIDGE)
--- sends HUE_MOTION_CONFIGURE, HUE_MOTION_STATE and HUE_MOTION_FORGOTTEN, and
--- it answers with HUE_MOTION_HELLO and HUE_MOTION_GOODBYE (§3). The bridge
--- decides the Status text and whether an end is deliberate; this device
--- shows them (docs/edge-cases-motion.md, "EC" below, §6), holds Hue's "no
--- motion" for the Occupancy Hold Time, also across a restart
+-- sends HUE_MOTION_CONFIGURE, HUE_MOTION_STATE, HUE_MOTION_FORGOTTEN and,
+-- about the bridge itself, HUE_BRIDGE_LINK (#428, docs/offline-design.md,
+-- "OD" below), and it answers with HUE_MOTION_HELLO and HUE_MOTION_GOODBYE
+-- (§3). The bridge decides the Status text and whether an end is deliberate;
+-- this device shows them (docs/edge-cases-motion.md, "EC" below, §6), holds
+-- Hue's "no motion" for the Occupancy Hold Time, also across a restart
 -- (docs/motion-hold-restart-design.md, cited "#371 R1" to "#371 R12"), and
 -- reports to the proxy only real changes, with STATE_OPENED / STATE_CLOSED
 -- for the first state after a start.
@@ -26,6 +27,7 @@
 local log = require("common.log")
 local dispatch = require("common.dispatch")
 local device = require("common.device")
+local link = require("common.link")
 
 -- Binding IDs, see driver.xml: the contact proxy on 5001 and the bridge on 1
 -- (common/device.lua's), the temperature output on 2.
@@ -131,13 +133,15 @@ local HOLD_KEY = "motion_hold"
 -- read against it, or written by it, gives the full hold (#371 R5).
 local CLOCK_FLOOR_MS = 1735689600000
 
--- The readings, the events' baselines, Online, Enabled and the old-value
--- mark, persisted as one table (a table persists [verified: API 26.5/_4]),
--- so a restart keeps every variable at its last value (§2.3) and fires no
--- event for a value that did not change.
+-- The readings, the events' baselines, Online, Enabled, the old-value mark
+-- and the bridge's link while offline, persisted as one table (a table
+-- persists [verified: API 26.5/_4]), so a restart keeps every variable at its
+-- last value (§2.3) and fires no event for a value that did not change: a
+-- restart during a long bridge outage neither fires Offline a second time
+-- nor misses the Online at its end (#428 D14, OD E14 to E17).
 local VALUES_KEY = "motion_values"
-local NUMBER_VALUES = { "lux", "temp_c", "battery_level", "lux_fired", "temp_fired", "offline_since" }
-local BOOL_VALUES = { "online", "enabled" }
+local NUMBER_VALUES = { "lux", "temp_c", "battery_level", "lux_fired", "temp_fired", "offline_since", "link_since" }
+local BOOL_VALUES = { "online", "enabled", "link_offline" }
 
 local st = {
 	rid = nil,        -- Hue resource id (the sensor's device, the area's configuration); the key in every message
@@ -151,10 +155,14 @@ local st = {
 	has = {},         -- light_level / temperature / battery -> false when the sensor has none
 }
 
--- pv: the persisted values (VALUES_KEY). online, enabled: nil until reported;
--- lux, temp_c (°C), battery_level, battery_state: the last readings;
+-- pv: the persisted values (VALUES_KEY). online, enabled: nil until reported,
+-- online the sensor's own word (#428 D14: the bridge's link never changes
+-- it); lux, temp_c (°C), battery_level, battery_state: the last readings;
 -- lux_fired, temp_fired: what the Changed events last fired at;
--- offline_since: os.time() when Online last went false.
+-- offline_since: os.time() when Online as shown (online_shown below) last
+-- went false, or the link's since when the link took it; link_offline,
+-- link_reason, link_since: the bridge's HUE_BRIDGE_LINK while it says
+-- offline (common/link.lua's parse), all nil while online or never told.
 local pv = {}
 local vars = {}              -- variable name -> the value it was last set to (a string)
 local queued = {}            -- events to fire once the variables are set, { id, why }
@@ -288,9 +296,48 @@ local function gone_status()
 	return (is_area() and "Area" or "Sensor") .. " deleted in Hue; " .. GONE_REMEDY
 end
 
+-- The bridge's link (#428) ----------------------------------------------------
+-- The bridge says HUE_BRIDGE_LINK offline once it has been unreachable, or
+-- has refused the pairing, for 5 minutes (OD D1, D2), and online at the first
+-- contact after it (D7). The contact proxy has no online mechanism (OD C4),
+-- so the device's own Online is where it shows (D14): while the link is
+-- offline Online is No, whatever the sensor last said. This reverses, after
+-- those 5 minutes, the rule that a bridge away leaves Online alone because
+-- Online is about the sensor (EC R1 and §6 "Bridge away longer"); the
+-- bridge's "Bridge not answering since 14:02; motion not current" still
+-- covers the first 5 minutes. common/device.lua keeps the link for the Hue
+-- Light and the Hue Scene (OD §6.6); this driver keeps its own, persisted
+-- in pv, because its Online feeds events (see VALUES_KEY).
+
+-- Online as the device shows it (row, variable, events, old-value mark,
+-- temperature output): false while the link is offline, else the sensor's
+-- own word, nil until reported; true only when the sensor said so (OD §6.6).
+local function online_shown()
+	if pv.link_offline then
+		return false
+	end
+	return pv.online
+end
+
+-- A deliberate end the bridge named outranks the link in Status (OD §6.6:
+-- "after the deliberate ends"): the device is gone or forgotten whatever the
+-- bridge's reachability. Forgotten by HUE_MOTION_FORGOTTEN and unbound come
+-- earlier in status_text.
+local function deliberately_ended()
+	return st.gone or ended_now == "deleted" or ended_now == "forgotten"
+end
+
+-- OD §6.3: the link's text with "; motion not current", the time computed
+-- from the link's since at each refresh.
+local function link_status()
+	local l = { offline = true, reason = pv.link_reason, since = pv.link_since }
+	return link.text(l, os.time()) .. "; motion not current"
+end
+
 -- The Status, most important first: a forgotten device says so even once
--- unbound; the bridge's text (§3: absent means fine) stands for everything
--- the bridge knows (EC §6).
+-- unbound; the bridge's link while offline, after the deliberate ends; the
+-- bridge's text (§3: absent means fine) stands for everything the bridge
+-- knows about the sensor (EC §6).
 local function status_text()
 	if st.forgotten then
 		return forgotten_status()
@@ -298,6 +345,8 @@ local function status_text()
 		return "Not bound to a Hue Bridge"
 	elseif not st.rid then
 		return "Bound; waiting for the bridge"
+	elseif pv.link_offline and not deliberately_ended() then
+		return link_status()
 	elseif bridge_status then
 		return bridge_status
 	elseif st.gone then
@@ -325,12 +374,13 @@ local function refresh_status()
 end
 
 -- The mark after a reading kept while the sensor is offline (unreachable,
--- deleted or forgotten in Hue, or the device unbound): "(old, 14:02)", the
--- time Online went false (EC §6). A sensor switched off in the Hue app is
--- still online, and the bridge passes on the light level and temperature
+-- deleted or forgotten in Hue, the device unbound, or the bridge's link
+-- offline, #428 D14): "(old, 14:02)", the time Online went false (EC §6), for
+-- the link the time its trouble began. A sensor switched off in the Hue app
+-- is still online, and the bridge passes on the light level and temperature
 -- only while their own services report, so its rows get no mark.
 local function mark()
-	if pv.online ~= false or not pv.offline_since then
+	if online_shown() ~= false or not pv.offline_since then
 		return ""
 	end
 	return string.format(" (old, %s)", clock(pv.offline_since))
@@ -385,7 +435,8 @@ local function hue_motion_text()
 end
 
 local function refresh_rows()
-	row("Online", pv.online == nil and "" or (pv.online and "Yes" or "No"))
+	local online = online_shown()
+	row("Online", online == nil and "" or (online and "Yes" or "No"))
 	local enabled = ""
 	if pv.enabled == true then
 		enabled = "Yes"
@@ -453,6 +504,14 @@ local function load_values()
 	if BATTERY_STATES[stored.battery_state] then
 		pv.battery_state = stored.battery_state
 	end
+	-- The link only while offline, read through common/link.lua like a
+	-- message: an unknown reason reads as not_answering, a bad since as none.
+	if pv.link_offline then
+		local l = link.parse({ state = "offline", reason = stored.link_reason, since = pv.link_since })
+		pv.link_reason, pv.link_since = l.reason, l.since
+	else
+		pv.link_offline, pv.link_since = nil, nil
+	end
 end
 
 -- A copy goes to the store: the table stays this driver's to change.
@@ -518,7 +577,7 @@ end
 local function variable_values()
 	local c = pv.temp_c
 	return {
-		["Online"] = bool_value(pv.online == true),
+		["Online"] = bool_value(online_shown() == true),
 		["Enabled"] = bool_value(pv.enabled == true),
 		["Light Level"] = string.format("%d", pv.lux and whole(pv.lux) or 0),
 		["Temperature C"] = c and string.format("%.1f", c) or "0",
@@ -632,22 +691,80 @@ end
 -- Online and Enabled -----------------------------------------------------------
 -- The events fire on a change between two known values only. Going offline
 -- marks the readings kept as old and makes the temperature unavailable.
+-- Online is what online_shown() gives: the sensor's word, or false while the
+-- bridge's link is offline (#428 D14); the events, the variable, the row,
+-- offline_since and the temperature output all follow it.
 
-local function set_online(online)
-	local was = pv.online
-	if was == online then
+-- After a change of the sensor's word or of the link: `was` is what
+-- online_shown() gave before it, `since` (os.time() when nil) when it went
+-- false, the link's since when the link took it (D14).
+local function online_changed(was, since)
+	local now = online_shown()
+	if was == now then
 		return
 	end
-	pv.online = online
-	pv.offline_since = (online == false) and os.time() or nil
+	pv.offline_since = (now == false) and (since or os.time()) or nil
 	dirty = true
-	if online == false then
+	if now == false then
 		temperature_lost()
 	end
-	if was == true and online == false then
-		queue_event(EVENT.OFFLINE, "offline")
-	elseif was == false and online == true then
+	if was == true and now == false then
+		queue_event(EVENT.OFFLINE, pv.link_offline and "offline: the Hue Bridge's link is offline" or "offline")
+	elseif was == false and now == true then
 		queue_event(EVENT.ONLINE, "online again")
+	end
+end
+
+-- The sensor's own word (HUE_MOTION_STATE online), or the device's when it
+-- is deleted, forgotten or unbound; persisted as it is, whatever the link.
+local function set_online(online)
+	if pv.online == online then
+		return
+	end
+	local was = online_shown()
+	pv.online = online
+	dirty = true
+	online_changed(was)
+end
+
+-- HUE_BRIDGE_LINK as common/link.lua parsed it (OD §6.1). Offline: Online
+-- No, the Offline event when the sensor was online, the temperature output
+-- unavailable once, the readings marked old from the link's since, and the
+-- link's text in Status; the contact stays as it is (D14, motion Q1). A
+-- reason change while offline is shown, nothing else changes; the same link
+-- again (the first evaluation of the bridge's run, every hello answer, D4)
+-- changes nothing. Online: back to the sensor's own word, the Online event
+-- when that is true; the resync after the contact brings the readings, as
+-- after a sensor that comes back (D7, D14).
+local function set_link(told)
+	if not told.offline then
+		if not pv.link_offline then
+			return log.debug("link online")
+		end
+		local was = online_shown()
+		pv.link_offline, pv.link_reason, pv.link_since = nil, nil, nil
+		dirty = true
+		log.info("online: the Hue Bridge answers again")
+		return online_changed(was)
+	end
+	if pv.link_offline and pv.link_reason == told.reason and pv.link_since == told.since then
+		return log.debug("link offline, as already known")
+	end
+	local was = online_shown()
+	pv.link_offline, pv.link_reason, pv.link_since = true, told.reason, told.since
+	dirty = true
+	log.info("offline: %s", link.text(told, os.time()))
+	online_changed(was, told.since)
+end
+
+-- Unbound: what the bridge last said is forgotten, its link too; call it
+-- after set_online(false), so Online stays No throughout and fires nothing.
+local function forget_link()
+	if pv.link_offline then
+		local was = online_shown()
+		pv.link_offline, pv.link_reason, pv.link_since = nil, nil, nil
+		dirty = true
+		online_changed(was)
 	end
 end
 
@@ -705,7 +822,7 @@ local function take_temperature(raw)
 		queue_event(EVENT.TEMPERATURE_CHANGED, string.format("temperature %s -> %s °C", decimal(fired, 2),
 			decimal(c, 2)))
 	end
-	if pv.online ~= false then
+	if online_shown() ~= false then
 		temp_out, temp_at = "available", os.time()
 		send_value_changed()
 	end
@@ -1101,6 +1218,7 @@ local function unbound(why)
 	cancel_give_up()
 	deliberate_end(why)
 	set_online(false)
+	forget_link()
 	commit()
 end
 
@@ -1244,6 +1362,24 @@ dispatch.commands["HUE_MOTION_STATE"] = after_late_init("HUE_MOTION_STATE", func
 	if params.battery_level ~= nil or params.battery_state ~= nil then
 		take_battery(params.battery_level, text(params.battery_state))
 	end
+	commit()
+end)
+
+-- The bridge's link (#428 D4, D14; OD §6.1), sent to every motion device the
+-- bridge knows and first in every hello answer, before the configure and the
+-- state. A state this build does not know is ignored and logged once.
+local link_unknown_logged = false
+
+dispatch.commands["HUE_BRIDGE_LINK"] = after_late_init("HUE_BRIDGE_LINK", function(params)
+	local told = link.parse(params)
+	if not told then
+		if not link_unknown_logged then
+			link_unknown_logged = true
+			log.warn("HUE_BRIDGE_LINK with state %q ignored", tostring(type(params) == "table" and params.state))
+		end
+		return
+	end
+	set_link(told)
 	commit()
 end)
 

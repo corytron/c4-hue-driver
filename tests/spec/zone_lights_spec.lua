@@ -1183,6 +1183,65 @@ describe("bridge.zone_lights", function()
 		end)
 	end)
 
+	-- #428 D8 (docs/offline-design.md §6.2): after a failed PUT on a
+	-- grouped_light, the group queue's on_undelivered calls
+	-- zone_lights:undelivered(grouped_rid), and every zone or room device on
+	-- it hears its full state with reason "undelivered".
+	describe("undelivered (#428 D8)", function()
+		local function add_both()
+			add_downstairs()                -- device 2001, grouped_light g003 on at 73.52
+			Z:add(LIVING, LIVING_ROOM, done)  -- device 2002, grouped_light g002 on at 56.84
+			c4.sent = {}
+		end
+
+		it("sends the full cached state with reason undelivered to the device on that grouped_light only", function()
+			add_both()
+			assert.equal(1, Z:undelivered(G_DOWNSTAIRS))
+			assert.same({ "HUE_STATE@2001" }, commands_sent())
+			local expected = Z:state_params(DOWNSTAIRS, "undelivered")
+			assert.same(expected, c4.sent[1].params)
+			assert.equal("undelivered", c4.sent[1].params.reason)
+			assert.equal("true", c4.sent[1].params.on)
+			assert.equal("73.52", c4.sent[1].params.brightness)
+			assert.equal("true", c4.sent[1].params.online)
+		end)
+
+		it("carries the bridge's level, not the one a failed HUE_SET asked for", function()
+			add_both()
+			assert.is_true(Z:set({ rid = LIVING, brightness = "10", rate = "0" }))
+			Z:undelivered(G_LIVING)
+			assert.same({ "HUE_STATE@2002" }, commands_sent())
+			assert.equal("56.84", c4.sent[1].params.brightness)
+		end)
+
+		it("still answers when the group's on/off and level are not known, so the device settles", function()
+			add_downstairs({ body = '{"errors":[],"data":[]}' })
+			c4.sent = {}
+			assert.equal(1, Z:undelivered(G_DOWNSTAIRS))
+			local params = c4.sent[1].params
+			assert.equal("undelivered", params.reason)
+			assert.equal(DOWNSTAIRS, params.rid)
+			assert.is_nil(params.on)
+			assert.is_nil(params.brightness)
+		end)
+
+		it("tells nobody for a grouped_light no device is on, an unknown one, or none", function()
+			add_both()
+			assert.equal(0, Z:undelivered(G_GARAGE))
+			assert.equal(0, Z:undelivered("ffffffff-0000-4000-8000-0000000000aa"))
+			assert.equal(0, Z:undelivered(""))
+			assert.equal(0, Z:undelivered(nil))
+			assert.same({}, c4.sent)
+		end)
+
+		it("tells a device no longer bound to the bridge nothing", function()
+			add_both()
+			Z.reg:set_state(DOWNSTAIRS, "unbound")
+			assert.equal(0, Z:undelivered(G_DOWNSTAIRS))
+			assert.same({}, c4.sent)
+		end)
+	end)
+
 	describe("relink", function()
 		it("re-points the entry at another zone or room, keeping the device, and tells it", function()
 			add_downstairs()

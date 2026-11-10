@@ -7,9 +7,10 @@
 -- through `tools/devctl.py run`, the light path's Proxy Command and Lights
 -- Report, the device drivers' forwarded log lines (HUE_LOG), the Reload
 -- Credentials, Check CA Pinning and Connection Test actions, Test
--- Connection's Host override, and the registration of the 1.2 probe's
+-- Connection's Host override, the registration of the 1.2 probe's
 -- commands (bridge/probe12.lua: Probe Discovery, Probe Names, Probe Names
--- Restore, Probe Picker, Probe Picker Folders). See docs/dev-loop.md.
+-- Restore, Probe Picker, Probe Picker Folders), and Link Offline After, the
+-- short outage time of a house check (#428 D15). See docs/dev-loop.md.
 --
 -- driver.lua loads this module only when common/devloop.lua is present and
 -- hands over what the handlers need in devtools.install(ctx); nothing here
@@ -33,6 +34,7 @@ local devloop = require("common.devloop")
 local conntest = require("bridge.conntest")
 local pinning = require("bridge.pinning")
 local probe12 = require("bridge.probe12")
+local link_mod = require("bridge.link")
 
 local devtools = {}
 
@@ -46,6 +48,7 @@ local devtools = {}
 --   bridge_request(req, cb)  an authenticated request on the dotted address
 --   restart_stream(force)    rebuild the event stream and start it again
 --   test_connection(host)    the Test Connection action against `host`
+--   last_action(text)        Last Action, word-wrapped, and the log
 local ctx
 
 local function trimmed(value)
@@ -617,6 +620,38 @@ local function test_connection(params)
 	ctx.test_connection(host)
 end
 
+-- Link Offline After (signed dev loop commands only; #428 D15,
+-- docs/offline-design.md §8.2): Seconds, clamped to LINK_MIN_S..LINK_MAX_S,
+-- becomes bridge/link.lua's OFFLINE_AFTER_S for this run, so a house check
+-- sees the devices go offline within a minute instead of 5. A count already
+-- running follows at once (link:retime). Release builds ship neither this
+-- nor any other way to change it; a new run of the code brings the 300 s back.
+local LINK_MIN_S, LINK_MAX_S = 10, 3600
+
+local function link_offline_after(params)
+	params = params or {}
+	local seconds = tonumber(params.Seconds)
+	local function say(text)
+		if type(ctx.last_action) == "function" then
+			return ctx.last_action(text)
+		end
+		log.always("%s", text)
+		ctx.prop("Last Action", text)
+	end
+	if not seconds or seconds ~= seconds then -- nil, or NaN (Lua 5.1's tonumber reads "nan")
+		return say(string.format("Link Offline After: Seconds %q is not a number (%d to %d); unchanged at %d s",
+			tostring(params.Seconds), LINK_MIN_S, LINK_MAX_S, link_mod.OFFLINE_AFTER_S))
+	end
+	seconds = math.max(LINK_MIN_S, math.min(LINK_MAX_S, math.floor(seconds)))
+	link_mod.OFFLINE_AFTER_S = seconds
+	local l = ctx.state and ctx.state.link
+	if type(l) == "table" and type(l.retime) == "function" then
+		l:retime()
+	end
+	say(string.format("Link Offline After: Hue devices go offline after %d s of bridge trouble, for this run",
+		seconds))
+end
+
 -- The dev loop's redactor (devloop.set_redactor): every line the loop
 -- ships, and every error text it reports, has the application key the
 -- driver holds now replaced by "<key>" [security review 2026-10-25, finding
@@ -689,6 +724,8 @@ function devtools.install(given)
 		Proxy_Command = proxy_command,
 		Lights_Report = lights_report,
 		Test_Connection = test_connection,
+		-- The short outage time of a house check (#428 D15).
+		Link_Offline_After = link_offline_after,
 		-- The 1.2 probe (bridge/probe12.lua, docs/simplify-actions-design.md §2.2).
 		Probe_Discovery = probe12.discovery,
 		Probe_Names = probe12.names,
