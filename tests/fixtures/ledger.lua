@@ -820,6 +820,18 @@ ledger.rows = {
 			{ documentation = "www/documentation.html", find = "<!-- CHANGELOG -->", driver = "hue_motion" },
 		},
 	},
+	{
+		id = "G3",
+		capability = "Every Hue device offline after 5 minutes of bridge trouble, back at the first contact (#428)",
+		gate = { "auto" },
+		paths = {
+			{ message = "HUE_BRIDGE_LINK", driver = "hue_light" },
+			{ message = "HUE_BRIDGE_LINK", driver = "hue_scene" },
+			{ message = "HUE_BRIDGE_LINK", driver = "hue_motion" },
+			{ auto = "300 s of bridge trouble; the first contact", proof = { spec = "tests/spec/offline_roundtrip_spec.lua",
+				test = "takes every device offline once after 300 s of trouble, drops commands" } },
+		},
+	},
 }
 
 -- The actions of 1.2 (docs/simplify-actions-design.md §3.3), per driver,

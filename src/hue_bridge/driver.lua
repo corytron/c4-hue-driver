@@ -2036,6 +2036,11 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 		log.debug("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
 			tostring(otherDeviceID), tostring(otherBindingID))
 	end
+	-- A device bound during an outage hears the link before the state its
+	-- binding brings (#428 E21, D4): no online-then-offline flicker.
+	if state.link and tonumber(idBinding) == 1 and (bIsBound == true or bIsBound == "true") then
+		state.link:tell(tonumber(otherDeviceID))
+	end
 	if state.scenes then
 		state.scenes:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
 	end

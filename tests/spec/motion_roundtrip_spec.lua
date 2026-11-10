@@ -450,7 +450,8 @@ describe("motion round trip", function()
 			-- Bound again: the bridge tells it its configuration and state at
 			-- once, and the state is Hue's latest (no motion, E2).
 			fake.as(bridge, function() bc4:Bind(BRIDGE_ID, 1, SENSOR_ID, 1, "HUE_BRIDGE") end)
-			assert.same({ "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
+			-- The link first, as for a hello (#428 E21).
+			assert.same({ "HUE_BRIDGE_LINK", "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
 			fake.pump()
 			assert.equal("false", last_sent(SENSOR_ID, "HUE_MOTION_STATE").motion)
 			assert.same({ "OPENED", "CLOSED" }, contact(sensor), "no motion, as it shows")
@@ -613,8 +614,9 @@ describe("motion round trip", function()
 			fake.project.devices[AREA_ID].name = "Porch sensor"
 			fake.as(area, area.OnDriverLateInit, "DIT_ADDING")
 			fake.as(bridge, function() bc4:Bind(BRIDGE_ID, 1, AREA_ID, 1, "HUE_BRIDGE") end)
-			-- Its hello, and the link the bridge answers every hello with (#428 D4).
-			assert.equal(2, fake.pump(), "its hello")
+			-- The link its binding brings, its hello, and the link the bridge
+			-- answers every hello with (#428 D4, E21).
+			assert.equal(3, fake.pump(), "its hello")
 			assert.equal("Bound; waiting for the bridge", area.Properties["Status"])
 			assert.is_nil((bc4.persist.hue_motion or {})[M.devices.porch])
 
