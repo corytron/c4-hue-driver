@@ -12,7 +12,8 @@
 -- docs/relative-level-design.md; the turn-on behaviour (brightness On Mode,
 -- the On and Dim colours, the colour on modes, the rate ranges) in
 -- docs/turn-on-design.md (#429, #427, #430), whose decisions the comments
--- cite as D<n>.
+-- cite as D<n>; the bridge's link offline and its answers to commands that
+-- did not land in docs/offline-design.md, cited as #428 D<n>.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -280,6 +281,11 @@ end
 -- order is the order Status explains things in: a forgotten light is told
 -- what to do even while its binding is already gone. A group with no lights
 -- has no grouped_light to command (docs/zone-light-design.md Decision 11).
+-- The bridge's link offline (#428 D5, docs/offline-design.md §6.3) comes
+-- after the device's own deliberate ends and before no lights: "Hue Bridge
+-- not answering since 14:02". Its first letter stays upper case, unlike the
+-- other reasons: "Hue" is a name ("brightness target dropped: Hue Bridge
+-- not answering since 14:02").
 local function blocker()
 	if st.forgotten then
 		return "forgotten by the bridge; " .. FORGOTTEN_INSTRUCTION:gsub("^D", "d")
@@ -292,14 +298,18 @@ local function blocker()
 			return group_word():lower() .. " deleted in Hue; " .. GONE_REMEDY
 		end
 		return "gone from the Hue bridge; " .. GONE_REMEDY
+	elseif dev.link_offline() then
+		return dev.link_text()
 	elseif st.no_lights then
 		return no_lights_text()
 	end
 	return nil
 end
 
--- What ONLINE_CHANGED carries: reachable through a bridge that knows us, and
--- not reported unreachable by Zigbee (a group: not without lights).
+-- What ONLINE_CHANGED carries: reachable through a bridge that knows us and
+-- whose link is not offline, and not reported unreachable by Zigbee (a
+-- group: not without lights). The link and Zigbee are two conditions, both
+-- needed (#428 D6).
 local function is_online()
 	return blocker() == nil and st.online ~= false
 end
@@ -312,6 +322,9 @@ local function identity_status()
 	return string.format("%s (%s)", st.name, st.model or "unknown model")
 end
 
+-- While the bridge's link is offline Status names it, whatever Zigbee last
+-- said: that is not current then (#428 D6, §6.3), and the bridge's fix is
+-- the one to act on. A light the bridge has not linked yet keeps saying so.
 local function refresh_status()
 	if st.forgotten then
 		prop("Status", forgotten_status())
@@ -319,6 +332,8 @@ local function refresh_status()
 		prop("Status", "Not bound to a Hue Bridge")
 	elseif st.gone then
 		prop("Status", gone_status())
+	elseif st.rid and dev.link_offline() then
+		prop("Status", dev.link_text())
 	elseif not st.rid or not st.name then
 		prop("Status", "Bound; waiting for the bridge")
 	elseif st.no_lights then
@@ -327,7 +342,7 @@ local function refresh_status()
 		prop("Status", identity_status())
 	end
 	-- "" while nothing says either way: bound, but the bridge has not reported.
-	if not bridge or st.forgotten or st.gone or st.no_lights or st.online == false then
+	if not bridge or st.forgotten or st.gone or dev.link_offline() or st.no_lights or st.online == false then
 		prop("Online", "Offline")
 	else
 		prop("Online", st.online and "Online" or "")
@@ -613,9 +628,12 @@ end
 -- the bridge has not confirmed within the ramp plus FALLBACK_MS. `goal` is
 -- the level a turn-on from off waits for (nil otherwise); a report held back
 -- for it is reported then instead, as the bridge's word beats a guess.
-local function arm(kind, rate, assume, goal)
+-- `from` is the level the brightness CHANGING started from: what the proxy
+-- hears when the target ends without the bridge knowing any level (an
+-- undelivered answer or the link going offline, #428 D9, D5; report_known).
+local function arm(kind, rate, assume, goal, from)
 	settle(kind)
-	local pending = { assume = assume, goal = goal, ramp = rate > 0 }
+	local pending = { assume = assume, goal = goal, ramp = rate > 0, from = from }
 	pending.timer = C4:SetTimer(rate + FALLBACK_MS, function()
 		fallback[kind] = nil
 		if kind == "brightness" then
@@ -961,8 +979,11 @@ local function set_brightness(target, rate, opts)
 		log.debug("brightness target %s unconfirmed after %d ms; assuming it", tostring(target), rate + FALLBACK_MS)
 		apply({ on = params.on, brightness = params.brightness })
 		report_brightness()
-	end, goal)
+	end, goal, current)
 	fallback.brightness.target, fallback.brightness.turning_on = target, turning_on or nil
+	-- #428 D9: an undelivered answer puts back the preset named before this
+	-- CHANGING, as a send that fails does above.
+	fallback.brightness.before = { preset = mark }
 	if rate > 0 then
 		begin_ramp(current, target, rate, opts.tap)
 	end
@@ -1175,9 +1196,88 @@ local function noticed_color(confirming)
 	mem.expected = seen
 end
 
+-- The bridge's link (#428, docs/offline-design.md) ----------------------------
+
+-- The proxy hears the level the cache shows, or, while it shows none (a
+-- light the bridge has no model of), `from`: the level the CHANGING it
+-- closes started from (#428 D9, L4). Nothing without either.
+local function report_known(from)
+	if not report_brightness() and from then
+		brightness_changed(from)
+	end
+end
+
+-- #428 D8, D9 (§6.2): a HUE_STATE with reason "undelivered", the bridge's
+-- answer to a PUT for this light (a zone or room light: its grouped_light)
+-- that did not land, carrying what the bridge last knew (only the rid when
+-- it has no model of the light). Nothing of it is held back (#421 D10 does
+-- not apply): the running ramp ends, the brightness and colour targets
+-- settle with no fallback left to assume them, a report held back for
+-- either goes into the cache under the answer's fields, and the proxy hears
+-- them as CHANGED: the level the bridge knows, not the target. The keypad
+-- LEDs follow (L53). The brightness preset named before that CHANGING
+-- comes back, as for a send that fails (#429 D7); a light the answer shows
+-- off ends a blend its turn-on started (#427 D14, as apply does for a light
+-- that goes off); and the colour reported is the one Control4 expects from
+-- now on (§7.4), with no foreign change read into it. A hold in progress
+-- goes on: its release sends the stop as usual, and the stop's own failure
+-- brings the next answer.
+local function undelivered(params)
+	local pending = fallback.brightness
+	if pending and pending.before then
+		mem.preset = pending.before.preset
+	end
+	settle("brightness")
+	settle("color")
+	local changed = apply(params)
+	if st.on == false then
+		turnon.ended(modes)
+	end
+	mem.expected = cached_color() or mem.expected
+	log.debug("undelivered: the proxy hears what the bridge last knew (%s)",
+		st.on == nil and "nothing" or (st.on and ("on at " .. tostring(state.to_proxy_brightness(st)) .. " %") or "off"))
+	report_known(pending and pending.from)
+	report_color()
+	if changed.online then
+		report_online()
+		refresh_status()
+	end
+end
+
+-- #428 D5, D6 (common/device.lua calls it at every HUE_BRIDGE_LINK). Going
+-- offline, a ramp running or a target pending ends with the cached state,
+-- a report held back for it included, and the proxy hears it: nothing is
+-- assumed, since the command may not have landed. A hold's blend still
+-- waiting goes. Either way ONLINE_CHANGED and Status follow (is_online,
+-- blocker); back online, the resync that every stream connect runs brings
+-- the state (D7). An unchanged link changes nothing.
+function dev.on_link(_, changed)
+	if not changed then
+		return
+	end
+	if dev.link_offline() then
+		local pending = fallback.brightness
+		local moving, coloring = pending ~= nil or ramp ~= nil, fallback.color ~= nil
+		settle("brightness")
+		settle("color")
+		cancel_hold_color()
+		if moving then
+			report_known(pending and pending.from)
+		end
+		if coloring then
+			report_color()
+		end
+	end
+	report_online()
+	refresh_status()
+end
+
 dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
+	end
+	if params.reason == "undelivered" then
+		return undelivered(params)
 	end
 	params = hold_back(params)
 	local colored = params.x ~= nil or params.mirek ~= nil or params.color_mode ~= nil
@@ -2036,6 +2136,7 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 		hello(otherDevice)
 	else
 		bridge = nil
+		dev.link = nil -- the next bridge's hello answer says its own (#428 D4)
 		settle("brightness")
 		settle("color")
 		cancel_hold_color()

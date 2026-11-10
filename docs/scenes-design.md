@@ -25,6 +25,11 @@ device also takes keypad holds and drives keypad LEDs
 state follows the on rule (`docs/scene-dimmer-design.md`). The parts that
 changed are marked "Superseded" below; `docs/status.md` describes the
 present.
+Current (2026-11-09, #428): a scene device goes offline after 5 minutes
+of bridge trouble and back at the first contact, and a recall, OFF or
+level move the bridge fails to deliver is answered with the bridge's
+state; [the offline contract](offline-design.md) has the rules, and dated
+notes below say where it changed this file.
 
 ## 1. Decisions (all approved defaults)
 
@@ -73,6 +78,18 @@ CONFIGURE's `name` and `group_name` are display names
 carries `tree`, `version`, `bundle` (the signed payload) and `mac`, and
 the device checks the signature with its own package's key before it
 runs anything (`src/common/devloop.lua:apply_forwarded`).
+
+Current (2026-11-09, #428, [the offline contract](offline-design.md) §6.1,
+§6.2): the bridge sends every scene device `HUE_BRIDGE_LINK`, as every
+light (`docs/lights-design.md`, Messages), first in every answer to
+`HUE_SCENE_HELLO`. `HUE_SCENE_STATE`'s `reason` gains `undelivered`: a
+recall or a time-based activation that fails is answered with the
+scene's current status and `undelivered` instead of `recall`, always from
+a 1 ms timer, never inside the device's own `HUE_SCENE_RECALL`; the
+success paths keep `recall`. `HUE_SCENE_GROUP` carries `reason`
+`undelivered` with the group's cached `on` and `level` after every failed
+grouped_light PUT on the scene's group (an OFF, a level move, a hold's
+step or stop; `scenes:undelivered_group`).
 
 ## 3. Scene device (`src/hue_scene/`)
 
@@ -126,6 +143,15 @@ runs anything (`src/common/devloop.lua:apply_forwarded`).
   the slot is unknown, "…; not running" while inactive
   (`docs/smart-scenes-design.md` Decisions 12 and 13;
   `src/hue_scene/driver.lua:smart_status`, `refresh_status`).
+  Current (2026-11-09, #428 D5, D9, D10): while the bridge's link is
+  offline the device is offline (a blocker after forgotten, unbound and
+  gone), its Status reads the link's text ("Hue Bridge not answering
+  since 14:02", [`offline-design.md`](offline-design.md) §6.3) and it
+  drops every command before any CHANGING. An undelivered
+  `HUE_SCENE_STATE` ends the ramp, settles the target and takes the
+  status; an undelivered `HUE_SCENE_GROUP` settles a pending level or
+  switch target with the group's on and level. The 2 s fallback stays for
+  a bridge that accepts the request and sends no event.
 
 ## 4. Bridge side (`src/hue_bridge/bridge/scenes.lua`, new)
 

@@ -108,7 +108,7 @@ double-tap window more precisely than about half a second (C4-LIGHTING).
 | L1 | Use the brightness target API: declare `supports_target` and take `SET_BRIGHTNESS_TARGET` with a target and a rate. Snap One requires it for certification from OS 3.3.0. | BP "Brightness Target API"; LV2 caps `_4-SUPPORTSTARGET`; LV2 cmds `_1.5-SETBRIGHTNESSTARGET` | light, zone, scene | Meets | [verified: `src/hue_light/driver.xml:155`, `src/hue_scene/driver.xml:128`, `src/hue_light/driver.lua:933`; hardware 2026-10-21, a Navigator slider move arrives as `SET_BRIGHTNESS_TARGET`, `docs/design.md` "Lights: verified on hardware"] | |
 | L2 | A dimmer reports a transition with `LIGHT_BRIGHTNESS_CHANGING` (current, target, rate) when it starts and `LIGHT_BRIGHTNESS_CHANGED` where it ends. It never sends `LIGHT_LEVEL` or a stream of in-between levels. | BP "Brightness Target API"; LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED`, `_10.3-LIGHTBRIGHTNESSCHANGING`, `_12-LIGHTLEVEL` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:444`; no `LIGHT_LEVEL` anywhere under `src/`] | |
 | L3 | When the end of a ramp is unknown (a held button), CHANGING names the end of the range as the target. When the ramp stops, CHANGED reports where it stopped. | BP "Brightness Target API"; LV2 notif `_10.3-LIGHTBRIGHTNESSCHANGING` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:1048`, `:1105`; `src/hue_scene/driver.lua:1252`, `:1340`; hardware 2026-10-25, a lamp held for about 3 s of a 10 s ramp stopped near 46 % (#249)] | The level after a tap's stop is part of #421. |
-| L4 | Every CHANGING is closed by a CHANGED, including when the command cannot be delivered. Otherwise a tile keeps animating. | BP "Brightness Target API" (UIs animate from CHANGING) | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:359` (fallback after the ramp plus 1 s), `:463-467` (send failure)] | The fallback reports the target as reached even when the bridge is away; see L87. |
+| L4 | Every CHANGING is closed by a CHANGED, including when the command cannot be delivered. Otherwise a tile keeps animating. | BP "Brightness Target API" (UIs animate from CHANGING) | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:359` (fallback after the ramp plus 1 s), `:463-467` (send failure)] | The fallback reports the target as reached even when the bridge is away; see L87. Current (2026-11-09, #428): a command the bridge fails to deliver is answered with the bridge's cached state (`reason = "undelivered"`), which closes the CHANGING with that state, or with the CHANGING's start level when the bridge has none (`docs/offline-design.md` D8, D9); an offline device sends no CHANGING (D5); the fallback stays for a bridge that says nothing (D10, departure D17). |
 | L5 | Report the real brightness when the driver starts and whenever the device comes online. | LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:619` (configure: capabilities, colour, brightness, online); the bridge resyncs and sends full state after every stream connect, `docs/design.md` "Lights"] | |
 | L6 | Changes made outside Control4 (Hue app, Hue switches, Hue automations) reach the proxy promptly, so programming and tiles stay true. | LV2 notif `_10.2-LIGHTBRIGHTNESSCHANGED`; LV2 events `_0-HEADER` | light, zone, scene | Meets | [verified: hardware 2026-10-25, a change in Hue reached zone, room and scene devices within a second, `docs/status.md` "Verified on hardware"] | Hue reports no transition target, so only CHANGED (D3). |
 | L7 | Do not flood the proxy with intermediate levels during a ramp. Snap One lists the costs: slow UIs, wrong scene tracking, wrong LEDs, programming fired too often. | BP "Brightness Target API"; LV2 notif `_12-LIGHTLEVEL` usage note | light, zone | Partial | [verified: each Hue event becomes one CHANGED (`src/hue_light/driver.lua:626`); the bridge sends at most about 2 event containers a second (#65); the scene device throttles to 1/s (`src/hue_scene/driver.lua:36`), the light does not] | A Hue dimmer switch held in the Hue system reaches Control4 as steps (D14). |
@@ -185,7 +185,7 @@ double-tap window more precisely than about half a second (C4-LIGHTING).
 | Id | Guideline | Source | Drivers | Status | Evidence | Note |
 |---|---|---|---|---|---|---|
 | L55 | A tile's slider animates from CHANGING and settles on CHANGED. Slider moves stick at the level chosen. | BP "Brightness Target API" | light, zone, scene | Meets | [verified: hardware 2026-10-21, once whole percents were sent, slider moves to 25, 60, 100 and off stuck; hardware 2026-10-24, a scene tile's slider in the iPhone app, `docs/design.md`] | |
-| L56 | An offline device's tile is disabled. The proxy assumes online at start, so the driver must report. | LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:241`, `:309`] | A bridge outage is L87. |
+| L56 | An offline device's tile is disabled. The proxy assumes online at start, so the driver must report. | LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:241`, `:309`] A bridge outage (#428, `docs/offline-design.md` D1, D4, D5, D12): `src/hue_bridge/bridge/link.lua` sends `HUE_BRIDGE_LINK` offline to every device after `OFFLINE_AFTER_S` = 300 s of bridge trouble, online at the first contact, and first in every hello answer, so the proxy's start-up "online" is corrected; `src/common/device.lua` keeps it and the light and scene drivers' `blocker()` reports `ONLINE_CHANGED` false; specs `tests/spec/link_spec.lua`, `device_spec.lua`, `light_driver_spec.lua`, `scene_driver_spec.lua`, `offline_roundtrip_spec.lua` [assumed until `docs/composer-checklist.md` step 120: the tiles grey on the house] | Current (2026-11-09, #428): a bridge outage counts too; after 5 minutes every Hue device reports offline, and back at the bridge's first answer (L87). |
 | L57 | The colour wheel and the temperature control match what the bulb can do. | LV2 caps `_30-SUPPORTSCOLOR`, `_31-SUPPORTSCOLORCORRELATEDTEMPERATURE` | light, zone | Meets | [verified: hardware 2026-10-24/25, zone light picks, `docs/status.md`] | A zone shows the union of its lamps. |
 | L58 | Lighting lives in the Lighting menu as light_v2 devices. The UI Button proxy is for experience menus (Listen, Watch, Security, Comfort). | UIB `103_ui_button_proxy_overview/_1-UIBUTTONPROXYOVERVIEW.md`; C4-USER-MENU | light, zone, scene | Meets | [verified: every lighting driver uses light_v2, `src/hue_scene/driver.xml:107`] | |
 | L59 | Scenes belong in the Lighting menu's Scenes view, which lists Advanced Lighting scenes. | C4-USER-MENU | scene | Partial | [verified: a Hue Scene device is a light_v2 dimmer, so it is listed among Lights with a slider] | No documented DriverWorks API adds a driver's scene to that list [assumed]; no issue is proposed. |
@@ -241,7 +241,7 @@ double-tap window more precisely than about half a second (C4-LIGHTING).
 | Id | Guideline | Source | Drivers | Status | Evidence | Note |
 |---|---|---|---|---|---|---|
 | L86 | `ONLINE_CHANGED` is reported at start and on every change of the device's reachability. | LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Meets | [verified: `src/hue_light/driver.lua:241`, `:309`; unbound, gone, forgotten and Zigbee-unreachable all read Offline] | |
-| L87 | While the bridge is unreachable or rejects the key, commands must not look delivered, and devices should show offline after a while. | FUND `23_command_handling_and_dropped_connections/_1-COMMANDHANDLINGANDDROPPEDCONNECTIONS.md`; LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Partial | [verified: lights stay online during a bridge outage; the tile shows the requested level a second after the ramp (`src/hue_light/driver.lua:359`); the light's manual says so; `docs/edge-cases-hue.md` keeps the last known state through a bridge reboot] | The owner sees a tile that claims success. |
+| L87 | While the bridge is unreachable or rejects the key, commands must not look delivered, and devices should show offline after a while. | FUND `23_command_handling_and_dropped_connections/_1-COMMANDHANDLINGANDDROPPEDCONNECTIONS.md`; LV2 notif `_15-ONLINECHANGED` | light, zone, scene | Meets | #428 (`docs/offline-design.md` D1, D2, D5, D7 to D9): `src/hue_bridge/bridge/link.lua` takes every Hue device offline after `OFFLINE_AFTER_S` = 300 s of trouble (no answer, key rejected, not paired, blocked, another bridge) and back at the first contact; `src/hue_bridge/bridge/commands.lua` `on_undelivered` answers every failed PUT through `lights:undelivered`, `zone_lights:undelivered` and `scenes:undelivered_group`, and a failed recall gets `HUE_SCENE_STATE` `undelivered`; the light and scene drivers close their targets with the bridge's state; specs `tests/spec/link_spec.lua`, `commands_spec.lua`, `lights_spec.lua`, `zone_lights_spec.lua`, `scenes_spec.lua`, `light_driver_spec.lua`, `scene_driver_spec.lua`, `offline_roundtrip_spec.lua`; the four manuals say so [assumed until `docs/composer-checklist.md` steps 119 to 122: on the house] | Departure D17: a command sent in the first seconds of an outage, before the bridge driver has noticed it, can show its target for 5 to 15 s until its request times out. Until #428 (audit of 2026-11-08) this row was Partial: lights stayed online through an outage and the tile showed the requested level a second after the ramp. |
 | L88 | Status rows say what is wrong and what to do. | XML `20_properties/_25-readonly.md` | all | Meets | [verified: Status, Online and Last Action on devices; Attention on the bridge, `docs/status.md`] | |
 | L89 | A command sent while the device cannot be reached is retried for a bounded time, then dropped, not queued forever. | FUND `23_command_handling_and_dropped_connections/_1-COMMANDHANDLINGANDDROPPEDCONNECTIONS.md` | light, zone, scene | Meets | [verified: 30 s retry cap, #43, `docs/design.md` "Lights"] | |
 
@@ -249,8 +249,8 @@ double-tap window more precisely than about half a second (C4-LIGHTING).
 
 | Status | Rows |
 |---|---|
-| Meets | 70 |
-| Partial | 13 |
+| Meets | 71 |
+| Partial | 12 |
 | Gap | 3 |
 | Hue cannot | 1 |
 | Not applicable | 2 |
@@ -260,6 +260,8 @@ Current (2026-11-09): recounted after the turn-on contract
 L23, L32 to L36 and L85 to Meets. The audit's own counts were Meets 57,
 Partial 19, Gap 10; the rows changed since (L71 and L74 by #434) count as
 they now stand.
+Current (2026-11-09, #428): L87 moved to Meets under
+`docs/offline-design.md`, with departure D17.
 
 ## 4. Gaps and partials, ranked
 
@@ -307,6 +309,11 @@ own issue, filed with this file (2026-11-08); #421 was filed before it.
      knows, not the target.
    Hue limits: none. A bridge reboot takes minutes, so the threshold must
    ride it out (question 2).
+   Current (2026-11-09): built under `docs/offline-design.md`. After 5
+   minutes of bridge trouble every Hue device goes offline, motion devices'
+   Online included (D1, D14), and a command the bridge does not take is
+   answered with the bridge's state, not shown as done (D8, D9). L87 meets
+   with departure D17, and L56 covers a bridge outage.
 4. **#429: "Turn-on behaviour: Control4's brightness On Mode (Preset and
    Previous) with preset ids".** Rows: L20, L21, L23, and L85 (drop the
    deprecated capabilities in the same reboot).
@@ -388,6 +395,7 @@ Partials and gaps with no new issue proposed:
 | D14 | A Hue-side ramp (a Hue dimmer switch held) appears in Control4 as steps. | The bridge sends at most about two event containers a second (#65). | L7 |
 | D15 | The light device's own buttons are virtual; button events belong to the keypad that is pressed. | Hue lamps have no buttons. | L46 |
 | D16 | The Dim colour goes only with a turn-off that has a fade time, not with an instant off (#427, `docs/turn-on-design.md` D12). | Hue keeps an off lamp's colour and shows it at the next Hue-side turn-on. An instant off would show nothing and only change what a Hue switch later turns on in. | L33 |
+| D17 | A command sent in the first seconds of a bridge outage, before the bridge driver has noticed it, can show its target for 5 to 15 s, until its request times out; then the tile goes back to the bridge's state (#428, `docs/offline-design.md` D10). | Hue acknowledges a command only by answering the PUT and by its event, which a dead bridge cannot send. The fallback that closes every CHANGING when Hue sends no event for an unchanged value (L4) cannot tell the two apart until the request fails (5 s connect, 15 s total timeout). | L87, L4 |
 
 ## 6. Where the written docs and the controller disagree
 
@@ -433,6 +441,9 @@ reference in these places. A contract that cites the rows above should not
    - after 5 minutes, when the bridge already starts looking for a moved
      bridge (recommended, because a bridge reboot takes minutes);
    - only after an hour, when Attention reports the bridge missing.
+   Answered (owner, 2026-11-09, #428): after 5 minutes, the recommended
+   option, and a Hue Motion Sensor's Online with them; built under
+   `docs/offline-design.md` (D1, D14).
 3. **On Mode Previous (item 4, #429).** Offer Control4's "Previous" (turn on at
    the last level) next to Preset? It needs a controller reboot and
    replaces the deprecated capability. Existing devices would stay on

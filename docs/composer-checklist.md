@@ -1446,6 +1446,8 @@ is put back at once. Each step takes under a minute.
      each, the **Hue Automations** row still lists it as
      `Disabled by Control4 <date>`. Restore it and delete it in the Hue
      app afterwards.
+     - **Done:** open.
+
 ## O. Turn-on behaviour, colour presets and rate ranges (#429, #427, #430)
 
 Written on 2026-11-09 from the contract (`docs/turn-on-design.md`,
@@ -1552,6 +1554,74 @@ bridge, so the bridge's PUT line is where its `mirek` shows.
      designed (lamps at their scene levels). Set its Click Rate Up to
      `1.000`: a top tap from off fades it in over about 1 s. Set it back to
      `3.000`. Then set `Debug Mode` Off on every device of this section.
+     - **Done:** open.
+
+## P. Bridge outage: devices offline (#428)
+
+Written on 2026-11-09 from the contract (`docs/offline-design.md`, its
+§8.2), before the build; check every quoted text against the first build
+that brings it and paste what differs. The owner's manual says the same in
+prose: the bridge's chapter 4 ("When the bridge is offline") and 14.10,
+and the section "When the Hue bridge does not answer" of the Hue Light's
+and the Hue Scene's own Documentation tabs. Nothing in `driver.xml`
+changes, so the install needs no controller reboot. The steps need a
+`--dev` build with the dev loop (`docs/dev-loop.md`): its signed command
+shortens the 5 minutes to 30 seconds for the run, which a release build
+cannot do. The Windows session reads Composer, sets fields and `Debug Mode`
+and pastes the Lua output (standing approval: no need to ask); the owner
+taps the Navigator and the keypad and watches the lamp. Each step takes
+under a minute.
+
+Setup: `Debug Mode` On on the Hue Bridge and on one Hue Light that is
+bound to a switch run as a 2-button keypad (steps 33, 34 and 39), for
+steps 117 to 122; Off on both at the end.
+
+117. **Short offline time for the test.** `tools/devctl.py run
+     "Link_Offline_After" Seconds=30`. The bridge's **Last Action** reads
+     `Link Offline After: Hue devices go offline after 30 s of bridge
+     trouble, for this run`.
+     - **Done:** open.
+118. **Make the bridge unreachable.** Note the Hue Bridge's **Bridge IP
+     Address**, then set it to an address nothing answers at (for example
+     `192.0.2.250`) and click Set. Within a few seconds **Status** reads
+     `Bridge at 192.0.2.250 not reachable (…); checking again in 30 s`.
+     Paste **Status** and **Event Stream**.
+     - **Done:** open.
+119. **A command during the grace** (within 30 s of step 118). On a
+     Navigator, tap the Hue Light's tile from off to on. The tile does not
+     stay on: within about a second it shows the light off again. The
+     light's Lua output shows the `HUE_STATE` with reason `undelivered`.
+     Paste the tile and the lines.
+     - **Done:** open.
+120. **Offline after 30 s.** About 30 s after step 118: every Hue Light,
+     zone light, room light and Hue Scene tile is disabled on the
+     Navigator. Their **Status** reads `Hue Bridge not answering since
+     <time>` and **Online** reads `Offline`. The Hue Bridge's **Attention**
+     reads `Hue devices offline since <time>: the bridge has not answered
+     since <time>; they come back by themselves when it answers` (it may
+     also offer the bridge's real address in Bridges Found, because the
+     address was typed by hand: leave that item). A Hue Motion Sensor, if
+     the project has one, reads **Online** `No` and **Status** `Hue Bridge
+     not answering since <time>; motion not current`. The bridge's Lua
+     output has `Hue devices offline: the bridge has not answered since
+     <time> (not_answering); <n> devices told`. Paste each.
+     - **Done:** open.
+121. **Keypad while offline.** Tap the top button of the keypad bound to
+     the Hue Light: the lamp does nothing, the LED stays as it was, and the
+     light's Lua output says the command was dropped. Paste the line.
+     - **Done:** open.
+122. **Back online.** Set **Bridge IP Address** back to the noted value and
+     click Set. Within a few seconds **Status** reads `Paired`, **Event
+     Stream** `Connected since …`, every tile is usable again and shows the
+     lamps' real state, the Attention item is gone, and the motion device
+     reads **Online** `Yes`. The bridge's Lua output has `Hue devices
+     online: the bridge answers again after <duration>; <n> devices told`.
+     Paste the rows and the time from the Set to usable tiles.
+     - **Done:** open.
+123. **Release build.** Install the release build as usual (the deploy
+     brief; a release install ends the dev loop). The 30 s setting is gone
+     (5 minutes again). Nothing else to check. Set `Debug Mode` Off on the
+     bridge and the light if it is still On.
      - **Done:** open.
 
 ## What to paste back
