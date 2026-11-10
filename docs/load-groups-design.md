@@ -357,8 +357,10 @@ load_group.hold_plan(from, up, rate_ms, max_ms) --> { to, duration, full, step }
   each change from §6.2.
 - `set_brightness(target, rate, urgent, tap, group)`: a fifth argument puts
   `group` in the params; `begin_ramp` keeps it in the ramp record.
-- `stop_ramp(why)` copies the ramp's group into its `HUE_SET` or `HUE_DIM`,
-  so a group's stop is batched with its siblings.
+- `stop_ramp(why, group)`: the group is an explicit argument. A group's own
+  stop carries it, so it is batched with its siblings; a member's own stop
+  (a keypad tap during a group ramp) goes out untagged, so the bridge never
+  holds it in a batch (D11). As built, 2026-11-10.
 - A group hold record `{ group, level, step, to, timer, full }` separate from
   the keypad's: `start_ramp` takes a liveness test instead of calling
   `dev.holding(h)` directly (the keypad's record passes `dev.holding`, the
@@ -511,7 +513,7 @@ fields clear paced.
   SET_GROUP_SYNC likewise; a hello is followed by `HUE_LOAD_GROUPS`;
 - `GROUP_SET_LEVEL` sends CHANGING and a `HUE_SET` with `group` and rate 0;
 - `GROUP_RAMP_TO_LEVEL` starts a ramp: reports held back, a keypad tap
-  stops it with a tagged level `HUE_SET`, CHANGED with the estimate;
+  stops it with an untagged level `HUE_SET` (D11), CHANGED with the estimate;
 - `GROUP_START_RAMP` up, down, up from off (1 % then the dim), down from
   off (nothing); `GROUP_STOP_RAMP` stops it; a stop for another group id
   leaves it running; a lost stop ends the record after the whole range plus

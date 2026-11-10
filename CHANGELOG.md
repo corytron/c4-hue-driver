@@ -14,6 +14,15 @@ listed.
 ## Unreleased
 
 ### Added
+- Hue Light devices (single lights, zone lights and room lights) can join
+  Control4 load groups and follow the group's on, off, level, ramp and hold
+  commands, so a load group can drive Hue lights in Control4 programming.
+  When the Hue lights of a load group make up whole Hue rooms or zones, each
+  such room or zone gets one request and its lamps move together; other
+  lamps get one request each, a few hundredths of a second apart. Each
+  light's new Load Groups row shows its groups. Hue Scene devices cannot
+  join. After this update, reboot the controller from System Manager once
+  (#435).
 - The Hue Bridge checks the automations stored on the Hue bridge (schedules,
   wake-ups, timers, coming home, motion and MotionAware set-ups, Hue switches)
   and lists them on a new Hue Automations row; the ones that move lights

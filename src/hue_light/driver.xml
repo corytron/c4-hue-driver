@@ -41,6 +41,13 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- The Control4 load groups this device is in (#435, docs/load-groups-design.md §6.1). -->
+			<property>
+				<name>Load Groups</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
 			<property>
 				<name>Hue Light ID</name>
 				<default></default>
@@ -173,7 +180,8 @@
 		<hide_proxy_events>False</hide_proxy_events>
 		<reduced_als_support>True</reduced_als_support>
 		<advanced_scene_support>False</advanced_scene_support>
-		<load_group_support>False</load_group_support>
+		<!-- #435 (docs/load-groups-design.md §6.1): single, zone and room lights join Control4 load groups. -->
+		<load_group_support>True</load_group_support>
 	</capabilities>
 	<events/>
 	<connections>

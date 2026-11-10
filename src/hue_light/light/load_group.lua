@@ -72,7 +72,9 @@
 --   ramp() --> r|nil           the driver's running timed ramp record (#421 D6), r.group its tag
 --   stop_ramp(why, group) --> bool
 --   	the driver's stop_ramp, its HUE_SET (or HUE_DIM) tagged with `group` (D12)
---   report()                   CHANGED with the cache: stop("brightness", report_brightness)
+--   report()                   CHANGED with the cache; the light driver leaves a brightness
+--   	target still waiting for the bridge to close its own CHANGING instead (the cache
+--   	would show the level before it)
 --   start_dim(rec, up, from, rate)
 --   	the driver's start_ramp for a group record: rec.active is its liveness test
 --   	(instead of dev.holding); `rate` is the whole-range time, already capped (hold_plan's
@@ -97,6 +99,7 @@
 -- so a correction after the house round (H0 to H8) is a Lua-only edit there.
 
 local log = require("common.log")
+local device = require("common.device")
 
 local load_group = {}
 
@@ -141,9 +144,12 @@ load_group.ASSUME = {
 }
 
 -- Mirrors of the light driver's and common/device.lua's constants, which
--- the group hold must match (§6.2 GROUP_START_RAMP):
+-- the group hold must match (§6.2 GROUP_START_RAMP); the cap is read where
+-- it is kept:
 load_group.HOLD_TICK_MS = 100      -- driver.lua HOLD_TICK_MS: the estimate's tick
-load_group.HOLD_MAX_MS = 6000000   -- driver.lua HOLD_MAX_MS: the cap on a hold's whole-range time
+-- driver.lua HOLD_MAX_MS, which is device.RATE_MAX since #430 D20: the cap
+-- on a hold's whole-range time.
+load_group.HOLD_MAX_MS = device.RATE_MAX
 load_group.DIM_AFTER_ON_MS = 600   -- device.lua DIM_AFTER_ON_MS: the dim after a hold's 1 % turn-on
 load_group.FALLBACK_MS = 1000      -- driver.lua FALLBACK_MS: E10's grace after the whole range
 -- A start without RATE and without the hold_rate hook: the Hold Rate
@@ -238,6 +244,12 @@ local function describe(params)
 	end
 	table.sort(out)
 	return #out > 0 and table.concat(out, ", ") or "no parameters"
+end
+
+-- True when `l` would print a line at `level`; a log without enabled()
+-- (a spec's capture) prints everything.
+local function enabled(l, level)
+	return type(l.enabled) ~= "function" or l.enabled(level) == true
 end
 
 local function default_set_timer(ms, fn)
@@ -726,7 +738,10 @@ end
 -- without a level), or nil and why.
 function methods:handle(command, params)
 	params = type(params) == "table" and params or {}
-	if load_group.COMMANDS[command] and not self.seen[command] then
+	-- As common/device.lua's first_arrival: one that arrives while the log
+	-- would not show it is not marked, so the first one after Debug Mode is
+	-- turned on is logged instead (H2 reads the spellings off it).
+	if load_group.COMMANDS[command] and not self.seen[command] and enabled(self.log, "info") then
 		self.seen[command] = true
 		self.log.info("first %s this run: %s", command, describe(params))
 	end
