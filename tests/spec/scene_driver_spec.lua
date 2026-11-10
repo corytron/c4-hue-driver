@@ -37,7 +37,8 @@ local function stub_attribs(c4)
 end
 
 -- opts.bind=false leaves the device unbound; opts.rid persists a rid first,
--- opts.name a name and opts.kind a kind. On State Follows is "This scene"
+-- opts.name a name and opts.kind a kind, opts.persist any other keys
+-- (settings, default rates). On State Follows is "This scene"
 -- (the on rule these cases pin) unless opts.props names it; opts.follow =
 -- false leaves it unset (the driver's default, the lights mode).
 local function load_scene(opts)
@@ -60,6 +61,9 @@ local function load_scene(opts)
 	end
 	if opts.kind then
 		c4.persist.hue_kind = opts.kind
+	end
+	for k, v in pairs(opts.persist or {}) do
+		c4.persist[k] = v
 	end
 	env.OnDriverLateInit("DIT_STARTUP")
 	return env, c4
@@ -309,7 +313,8 @@ describe("Hue Scene driver", function()
 			assert.equal(LINKED_STATUS, env.Properties["Status"])
 			assert.equal("Online", env.Properties["Online"])
 
-			assert.equal(0, #notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "the switch declares everything statically")
+			assert.same({ { brightness_rate_min = 0, brightness_rate_max = 6000000 } },
+				notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "only the rate range (#430 D20); the rest is static")
 			assert.equal(0, #notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "state not known yet")
 			assert.same({ { STATE = true } }, notifies(c4, "ONLINE_CHANGED"))
 		end)
@@ -1194,21 +1199,36 @@ describe("Hue Scene driver", function()
 
 		it("is a dimmer on the light_v2 proxy with the brightness-target API", function()
 			assert.equal("True", capability("dimmer"))
-			assert.equal("True", capability("on_off"))
 			assert.equal("True", capability("set_level"))
-			assert.equal("True", capability("ramp_level"))
 			assert.equal("True", capability("supports_target"))
 			assert.equal("True", capability("supports_brightness_stop"))
 			assert.equal("False", capability("supports_color"))
 			assert.equal("False", capability("supports_color_correlated_temperature"))
 			assert.equal("True", capability("reduced_als_support"))
 			assert.equal("False", capability("advanced_scene_support"))
-			assert.equal("True", capability("buttons_are_virtual"))
+			assert.equal("True", capability("has_leds"))
 			assert.equal("False", capability("hide_proxy_properties"), "the proxy's own settings are shown (#59)")
 			assert.truthy(xml:find('<proxy proxybindingid="5001" name="Hue Scene" image_source="c4z" '
 				.. 'small_image="images/devices_sm/hue_scene_16.png" large_image="images/devices_lg/hue_scene_32.png">'
 				.. 'light_v2</proxy>', 1, true))
 			assert.truthy(xml:find('<documentation file="www/documentation.html"/>', 1, true))
+		end)
+
+		-- docs/turn-on-design.md §7.1 (one reboot for #429, #427, #430): the click rates
+		-- shown in Composer (D21), both maxima at common/device.lua's RATE_MAX
+		-- (D20), the deprecated flags gone (D22), and no On Mode (D1).
+		it("declares click rates and both maxima, no deprecated flags and no On Mode (#430, #429 D1)", function()
+			assert.equal("True", capability("click_rates"))
+			assert.equal("0", capability("click_rate_min"))
+			assert.equal("6000000", capability("click_rate_max"))
+			assert.equal("True", capability("hold_rates"))
+			assert.equal("1000", capability("hold_rate_min"))
+			assert.equal("6000000", capability("hold_rate_max"))
+			for _, name in ipairs({ "ramp_level", "on_off", "min_max", "buttons_are_virtual", "fixed_ramp_rate",
+				"num_buttons", "supports_default_on", "brightness_on_mode_preset", "brightness_on_mode_previous",
+				"color_on_mode_preset", "color_on_mode_previous", "color_on_mode_fade" }) do
+				assert.is_nil(capability(name), name)
+			end
 		end)
 
 		it("names the driver and its minimum OS", function()
@@ -2136,12 +2156,17 @@ describe("Hue Scene driver", function()
 				assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 100, RATE = 0 }, changing)
 			end)
 
-			it("above the bridge's bound of 6 000 000 ms: the tile's share of the bound, Hue the rate as set (#243)",
-				function()
-					local dim, changing = hold(40, 200, { up = 86400000 })
-					assert.equal("86400000", dim.duration, "the bridge holds it to 6 000 000 ms (scenes.DIM_MAX_DURATION)")
-					assert.equal(3600000, changing.RATE, "60 % of the bound")
-				end)
+			it("at the bridge's bound of 6 000 000 ms: the tile's share of it, Hue the whole rate (#243)", function()
+				local dim, changing = hold(40, 200, { up = 6000000 })
+				assert.equal("6000000", dim.duration, "scenes.DIM_MAX_DURATION, now also the hold rates' maximum")
+				assert.equal(3600000, changing.RATE, "60 % of the bound")
+			end)
+
+			it("above it the proxy's hold rate is refused, so the hold keeps the rate it had (#430 D20)", function()
+				local dim, changing = hold(40, 200, { up = 86400000 })
+				assert.equal("5000", dim.duration)
+				assert.equal(3000, changing.RATE, "60 % of 5000 ms")
+			end)
 
 			it("from off: the tile keeps the whole hold rate from 0, the dim up the whole rate too (#243)", function()
 				local env, c4 = known_scene("inactive")
@@ -3022,13 +3047,28 @@ describe("Hue Scene driver", function()
 				assert.same({ { 100, 0, 3000 } }, changing(c4))
 			end)
 
-			it("uses the default click rates whatever the proxy sends: the scene declares none (D3)", function()
+			-- Until #430 the scene declared no click rates and always tapped at
+			-- the 3000 ms defaults; #430 D21 shows them in Composer.
+			it("a tap uses a changed click rate, persisted and confirmed to the proxy (#430 D21)", function()
 				local env, c4 = scene("inactive")
-				env.ReceivedFromProxy(5001, "SET_CLICK_RATE_UP", { RATE = "500" })
-				assert.same({}, notifies(c4, "CLICK_RATE_UP"), "no click rate setting to answer")
-				assert.is_nil(c4.persist.click_rate_up)
+				env.ReceivedFromProxy(5001, "SET_CLICK_RATE_UP", { RATE = "1000" })
+				env.ReceivedFromProxy(5001, "SET_CLICK_RATE_DOWN", { RATE = "500" })
+				assert.same({ "1000" }, notifies(c4, "CLICK_RATE_UP"), "the bare value the proxy stores")
+				assert.same({ "500" }, notifies(c4, "CLICK_RATE_DOWN"))
+				assert.equal(1000, c4.persist.click_rate_up)
+				assert.equal(500, c4.persist.click_rate_down)
 				tap(env, 0)
-				assert.equal("3000", params_of(c4, "HUE_SCENE_RECALL")[1].duration)
+				assert.same({ { rid = "s1", action = "active", duration = "1000", urgent = "true" } },
+					params_of(c4, "HUE_SCENE_RECALL"))
+				assert.same({ { 0, 100, 1000 } }, changing(c4))
+
+				env, c4 = scene("static", 40)
+				env.ReceivedFromProxy(5001, "SET_CLICK_RATE_DOWN", { RATE = "500" })
+				tap(env, 1)
+				assert.same({ { rid = "s1", duration = "200", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"),
+					"the share of 500 ms for the 40 % shown")
+				env.ReceivedFromProxy(5001, "SET_CLICK_RATE_UP", { RATE = "7000000" })
+				assert.same({ "3000" }, notifies(c4, "CLICK_RATE_UP"), "above 6 000 000 ms: refused, the rate kept")
 			end)
 		end)
 
@@ -3332,6 +3372,409 @@ describe("Hue Scene driver", function()
 				assert.same({ rid = "s1" }, params_of(c4, "HUE_SCENE_OFF")[2], "a stop has no duration at Hue")
 				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
 				assert.equal(0, #messages(c4, "HUE_SCENE_DIM"))
+			end)
+		end)
+	end)
+
+	-- docs/turn-on-design.md: the rate parts of #430 on a Hue Scene device
+	-- (D8 the default rate, D20 the rate range, D21 the click rates, D25
+	-- DYNAMIC_ON / DYNAMIC_OFF); no On Mode (D1).
+	describe("rates and turn-on (#430)", function()
+		local RATE_CAPS = { brightness_rate_min = 0, brightness_rate_max = 6000000 }
+
+		after_each(function() log.set_debug(false) end)
+
+		-- Params of every SendToDevice with that command, in order.
+		local function params_of(c4, command)
+			local out = {}
+			for _, m in ipairs(messages(c4, command)) do out[#out + 1] = m.params end
+			return out
+		end
+
+		-- Every CHANGING as { current, target, rate }, in order.
+		local function changing(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")) do
+				out[#out + 1] = { p.LIGHT_BRIGHTNESS_CURRENT, p.LIGHT_BRIGHTNESS_TARGET, p.RATE }
+			end
+			return out
+		end
+
+		-- A known scene (`active`) whose proxy has sent the default brightness
+		-- rate `rate` (none for nil), the recording cleared.
+		local function with_default(active, rate)
+			local env, c4 = known_scene(active)
+			if rate then
+				env.ReceivedFromProxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = tostring(rate) })
+			end
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function tap(env, button)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "1" })
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = "2" })
+		end
+
+		it("loads and reports the click rates at late init, and taps over them", function()
+			local env, c4 = load_scene({ rid = "s1", persist = { click_rate_up = 1500 } })
+			assert.same({ "1500" }, notifies(c4, "CLICK_RATE_UP"))
+			assert.same({ "3000" }, notifies(c4, "CLICK_RATE_DOWN"), "never set: the default the scene used before")
+			assert.same({ "5000" }, notifies(c4, "HOLD_RATE_UP"))
+			configure(env)
+			state(env, "inactive", { reason = "hello" })
+			c4.calls, c4.sent = {}, {}
+			tap(env, 0)
+			assert.same({ { rid = "s1", action = "active", duration = "1500", urgent = "true" } },
+				params_of(c4, "HUE_SCENE_RECALL"))
+		end)
+
+		it("sends the rate ranges at late init, after the settings, and on configure (D20)", function()
+			local env, c4 = load_scene({ rid = "s1" })
+			assert.same({ RATE_CAPS }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			local order = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do
+				if args[2] == "HOLD_RATE_DOWN" or args[2] == "DYNAMIC_CAPABILITIES_CHANGED" then
+					order[#order + 1] = args[2]
+				end
+			end
+			assert.same({ "HOLD_RATE_DOWN", "DYNAMIC_CAPABILITIES_CHANGED" }, order)
+			c4.calls = {}
+			configure(env)
+			assert.same({ RATE_CAPS }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"))
+			c4.calls = {}
+			configure(env, SMART)
+			assert.same({ RATE_CAPS }, notifies(c4, "DYNAMIC_CAPABILITIES_CHANGED"), "a time-based scene too")
+		end)
+
+		it("ON, OFF, TOGGLE use the default rate; 0 until the proxy sends one (D8)", function()
+			local env, c4 = with_default("inactive")
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ { rid = "s1", action = "active" } }, params_of(c4, "HUE_SCENE_RECALL"), "instant, as before")
+			assert.same({ { 0, 100, 0 } }, changing(c4))
+
+			env, c4 = with_default("inactive", 2000)
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.same({ { rid = "s1", action = "active", duration = "2000" } }, params_of(c4, "HUE_SCENE_RECALL"),
+				"the scene as designed, faded in; not urgent")
+			assert.same({ { 0, 100, 2000 } }, changing(c4))
+			assert.same({ 2000, 4000 }, delays(c4), "the fade's end, and the fallback that waits it out")
+
+			env, c4 = with_default("static", 2000)
+			env.ReceivedFromProxy(5001, "OFF", {})
+			assert.same({ { rid = "s1", duration = "2000" } }, params_of(c4, "HUE_SCENE_OFF"))
+			assert.same({ { 100, 0, 2000 } }, changing(c4))
+
+			env, c4 = with_default("static", 1000)
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ { rid = "s1", duration = "1000" } }, params_of(c4, "HUE_SCENE_OFF"))
+			env.ReceivedFromProxy(5001, "TOGGLE", {})
+			assert.same({ { rid = "s1", action = "active", duration = "1000" } }, params_of(c4, "HUE_SCENE_RECALL"),
+				"a second TOGGLE goes by where the scene is heading")
+		end)
+
+		it("a SET_BRIGHTNESS_TARGET without a RATE uses the default rate; one with a RATE its own (D8)", function()
+			local env, c4 = with_default("inactive", 1500)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50" })
+			assert.same({ { rid = "s1", action = "active", duration = "1500", brightness = "50" } },
+				params_of(c4, "HUE_SCENE_RECALL"))
+			assert.same({ { 0, 50, 1500 } }, changing(c4))
+
+			env, c4 = with_default("inactive", 1500)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "50", RATE = "0" })
+			assert.same({ { rid = "s1", action = "active", brightness = "50" } }, params_of(c4, "HUE_SCENE_RECALL"))
+
+			env, c4 = with_default("static", 1500)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0",
+				LIGHT_BRIGHTNESS_TARGET_PRESET_ID = "2" })
+			assert.same({ { rid = "s1", duration = "1500" } }, params_of(c4, "HUE_SCENE_OFF"),
+				"a preset id changes nothing: a scene has no On Mode (D1)")
+
+			env, c4 = with_default("inactive", 1500)
+			env.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "50" })
+			assert.same({ { rid = "s1", action = "active", brightness = "50" } }, params_of(c4, "HUE_SCENE_RECALL"),
+				"the legacy SET_LEVEL keeps TIME absent as 0")
+		end)
+
+		it("keypad taps keep the click rates, whatever the default rate (D8)", function()
+			local env, c4 = with_default("inactive", 2000)
+			tap(env, 0)
+			assert.same({ { rid = "s1", action = "active", duration = "3000", urgent = "true" } },
+				params_of(c4, "HUE_SCENE_RECALL"))
+			env, c4 = smart_scene("inactive")
+			env.ReceivedFromProxy(5001, "UPDATE_BRIGHTNESS_RATE_DEFAULT", { RATE = "2000" })
+			c4.calls, c4.sent = {}, {}
+			tap(env, 2)
+			assert.same({ { 0, 100, 0 } }, changing(c4), "a time-based scene's toggle tap acts at once (S-D5)")
+		end)
+
+		it("the default rate persists across a restart", function()
+			local env, c4 = load_scene({ rid = "s1", persist = { brightness_rate_default = 2500 } })
+			configure(env)
+			state(env, "inactive", { reason = "hello" })
+			c4.calls, c4.sent = {}, {}
+			env.ReceivedFromProxy(5001, "ON", {})
+			assert.equal("2500", params_of(c4, "HUE_SCENE_RECALL")[1].duration)
+			env.ReceivedFromProxy(5001, "UPDATE_COLOR_RATE_DEFAULT", { RATE = "900" })
+			assert.equal(900, c4.persist.color_rate_default, "kept, and never used by a scene")
+		end)
+
+		it("DYNAMIC_ON recalls, DYNAMIC_OFF turns off, over the default rate (D25)", function()
+			local env, c4 = with_default("inactive")
+			env.ReceivedFromProxy(5001, "DYNAMIC_ON", {})
+			assert.same({ { rid = "s1", action = "active" } }, params_of(c4, "HUE_SCENE_RECALL"))
+			assert.same({ { 0, 100, 0 } }, changing(c4))
+			state(env, "static", { reason = "recall" })
+			env.ReceivedFromProxy(5001, "DYNAMIC_OFF", {})
+			assert.same({ { rid = "s1" } }, params_of(c4, "HUE_SCENE_OFF"))
+
+			env, c4 = with_default("inactive", 1000)
+			env.ReceivedFromProxy(5001, "DYNAMIC_ON", {})
+			assert.same({ { rid = "s1", action = "active", duration = "1000" } }, params_of(c4, "HUE_SCENE_RECALL"))
+			env, c4 = with_default("static", 1000)
+			env.ReceivedFromProxy(5001, "DYNAMIC_OFF", {})
+			assert.same({ { rid = "s1", duration = "1000" } }, params_of(c4, "HUE_SCENE_OFF"))
+			assert.same({ { 100, 0, 1000 } }, changing(c4))
+		end)
+
+		it("logs the first DYNAMIC_ON and SET_BRIGHTNESS_TARGET at debug with their parameters (§7.3)", function()
+			local env = with_default("inactive")
+			local lines = {}
+			log.set_debug(true)
+			log.sink = function(line) lines[#lines + 1] = line end
+			env.ReceivedFromProxy(5001, "DYNAMIC_ON", {})
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+			local firsts = {}
+			for _, line in ipairs(lines) do
+				if line:find(": first ", 1, true) then firsts[#firsts + 1] = line end
+			end
+			assert.same({
+				"[DEBUG] Hue Scene: first DYNAMIC_ON from the proxy: no parameters",
+				"[DEBUG] Hue Scene: first SET_BRIGHTNESS_TARGET from the proxy: LIGHT_BRIGHTNESS_TARGET=40 RATE=0",
+			}, firsts)
+		end)
+	end)
+
+	-- #428, docs/offline-design.md: the bridge's link offline as one more
+	-- blocker (D5), and its answers to a recall or a group command that did
+	-- not land (D8, D9, §6.2 "undelivered").
+	describe("the bridge's link and commands that do not land (#428)", function()
+		local link = require("common.link")
+		local SINCE = os.time() - 120 -- two minutes ago, in epoch seconds as the bridge sends it
+		local NOT_ANSWERING = "Hue Bridge not answering since " .. link.clock(SINCE)
+
+		local function offline(env, reason)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = reason or "not_answering",
+				since = tostring(SINCE) })
+		end
+
+		local function online(env)
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "online" })
+		end
+
+		-- scenes:undelivered_group's HUE_SCENE_GROUP: the group as the bridge last knew it.
+		local function group_undelivered(env, on, level)
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = on, level = level, reason = "undelivered" })
+		end
+
+		local function proxy(env, command, params)
+			env.ReceivedFromProxy(5001, command, params or {})
+		end
+
+		-- A keypad tap on a Button Link (200 top, 201 bottom): push, release, click.
+		local function link_tap(env, binding)
+			env.ReceivedFromProxy(binding, "DO_PUSH", {})
+			env.ReceivedFromProxy(binding, "DO_RELEASE", {})
+			env.ReceivedFromProxy(binding, "DO_CLICK", {})
+		end
+
+		-- An ordinary scene Hue reports `active`, its group lit at `level`
+		-- (none for nil); every timer run out and the recording cleared.
+		local function scene(active, level)
+			local env, c4 = known_scene(active)
+			if level then
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = tostring(level) })
+			end
+			c4.advance(5000)
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		local function online_states(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "ONLINE_CHANGED")) do out[#out + 1] = p.STATE end
+			return out
+		end
+
+		describe("offline (D5)", function()
+			it("goes offline with Status naming the bridge, drops every command before any CHANGING, and comes back",
+				function()
+					local env, c4 = scene("static", 60)
+					offline(env)
+					assert.same({ false }, online_states(c4))
+					assert.equal(NOT_ANSWERING, env.Properties["Status"])
+					assert.equal("Offline", env.Properties["Online"])
+					c4.calls, c4.sent = {}, {}
+					proxy(env, "ON")
+					proxy(env, "OFF")
+					proxy(env, "TOGGLE")
+					proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+					link_tap(env, 200)
+					c4.advance(1000)
+					link_tap(env, 201)
+					c4.advance(1000)
+					env.ReceivedFromProxy(200, "DO_PUSH", {})
+					c4.advance(500) -- held: a hold
+					env.ReceivedFromProxy(200, "DO_RELEASE", {})
+					assert.same({}, c4.sent, "nothing to the bridge")
+					assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+					assert.same({}, levels(c4))
+					assert.equal(NOT_ANSWERING, env.Properties["Status"])
+					c4.calls = {}
+					online(env)
+					assert.same({ true }, online_states(c4))
+					assert.equal(LINKED_STATUS, env.Properties["Status"])
+					assert.equal("Online", env.Properties["Online"])
+				end)
+
+			it("names a new reason while offline; an unchanged link changes nothing", function()
+				local env, c4 = scene("static", 60)
+				online(env)
+				assert.same({}, online_states(c4))
+				offline(env)
+				offline(env)
+				assert.same({ false }, online_states(c4))
+				offline(env, "not_paired")
+				assert.equal("Hue Bridge not paired since " .. link.clock(SINCE), env.Properties["Status"])
+			end)
+
+			it("ends a tap fade as it goes offline with the scene as it was; nothing follows", function()
+				local env, c4 = scene("inactive")
+				link_tap(env, 200) -- a recall over 3000 ms
+				c4.advance(1000)
+				c4.calls = {}
+				offline(env)
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "no fallback assumes the recall")
+			end)
+
+			it("forgets the link with its bridge binding", function()
+				local env, c4 = scene("static", 60)
+				offline(env)
+				c4.bindings = {}
+				env.OnBindingChanged(1, "HUE_BRIDGE", false, BRIDGE_ID, 1)
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+				assert.equal(LINKED_STATUS, env.Properties["Status"])
+				assert.equal("Online", env.Properties["Online"])
+			end)
+		end)
+
+		describe("undelivered (D8, D9)", function()
+			it("a recall during a tap fade ends it at once with the scene as it was", function()
+				local env, c4 = scene("inactive")
+				link_tap(env, 200) -- a recall over 3000 ms
+				c4.advance(1000)
+				c4.calls = {}
+				state(env, "inactive", { reason = "undelivered" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "nothing at the fade's end or the fallback time")
+				c4.sent = {}
+				link_tap(env, 200)
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"), "the fade is over: the next press is a fresh tap")
+			end)
+
+			it("a recall the bridge knows no status for closes at the level its CHANGING started from (L4)", function()
+				local env, c4 = load_scene({ rid = "s1" })
+				configure(env)
+				c4.calls, c4.sent = {}, {}
+				proxy(env, "ON")
+				env.ExecuteCommand("HUE_SCENE_STATE", { rid = "s1", reason = "undelivered" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "the recall is never assumed")
+			end)
+
+			it("a time-based scene's start: nothing follows it", function()
+				local env, c4 = smart_scene("inactive")
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+				c4.calls = {}
+				state(env, "inactive", { reason = "undelivered" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(5000)
+				assert.same({}, messages(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 0 }, levels(c4))
+			end)
+
+			it("the group's answer settles a level move at once with the level the bridge knows", function()
+				local env, c4 = scene("static", 80)
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "500" })
+				assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
+				c4.calls = {}
+				group_undelivered(env, "true", "80")
+				assert.same({ 80 }, levels(c4), "at once, not held back for the ramp's end (#421 D10)")
+				c4.advance(5000)
+				assert.same({ 80 }, levels(c4), "no fallback assumes 40")
+			end)
+
+			it("the group's answer settles a tap's fade-out: the scene stays lit at the bridge's level", function()
+				local env, c4 = scene("static", 60)
+				link_tap(env, 201) -- the group off over 1800 ms
+				assert.same({ { rid = "s1", duration = "1800", urgent = "true" } },
+					(function()
+						local out = {}
+						for _, m in ipairs(messages(c4, "HUE_SCENE_OFF")) do out[#out + 1] = m.params end
+						return out
+					end)())
+				state(env, "inactive", { reason = "recall" }) -- the bridge's at-once inactive, held back
+				c4.advance(300)
+				c4.calls = {}
+				group_undelivered(env, "true", "60")
+				assert.same({ 60 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 60 }, levels(c4), "the off is never assumed, nor the held state ended")
+			end)
+
+			it("an instant OFF that did not land puts the held state back while the group is on", function()
+				local env, c4 = scene("static", 60)
+				proxy(env, "OFF")
+				state(env, "inactive", { reason = "recall" }) -- the bridge's at-once inactive settles it
+				assert.same({ 0 }, levels(c4))
+				group_undelivered(env, "true", "60")
+				assert.same({ 0, 60 }, levels(c4), "This scene: still on, as its lamps are")
+				c4.advance(10000)
+				assert.same({ 0, 60 }, levels(c4))
+			end)
+
+			it("an OFF that landed is not undone by a later answer: any group report ends the wait", function()
+				local env, c4 = scene("static", 60)
+				proxy(env, "OFF")
+				state(env, "inactive", { reason = "recall" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+				env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "30" }) -- the Hue app
+				c4.calls = {}
+				group_undelivered(env, "true", "30") -- another device's command on the group
+				assert.same({ 0 }, levels(c4), "This scene: still off")
+			end)
+
+			it("an answer for a scene that asked nothing reports what it shows", function()
+				local env, c4 = scene("static", 60)
+				state(env, "inactive") -- Hue calls a dimmed scene inactive; the on rule keeps it on
+				c4.calls = {}
+				group_undelivered(env, "true", "60")
+				assert.same({ 60 }, levels(c4))
+				group_undelivered(env, "false")
+				assert.same({ 60, 0 }, levels(c4), "the bridge says the group is off: the held state ends")
 			end)
 		end)
 	end)

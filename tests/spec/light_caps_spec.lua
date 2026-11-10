@@ -48,6 +48,16 @@ describe("light.caps", function()
 		assert.equal(2700, p.color_correlated_temperature_max)
 	end)
 
+	it("gives the rate ranges for their own notify: 0 to 6 000 000 ms, one rate for both (#430 D20)", function()
+		assert.same({
+			brightness_rate_min = 0,
+			brightness_rate_max = 6000000,
+			color_rate_behavior = 1,
+			color_rate_min = 0,
+			color_rate_max = 6000000,
+		}, caps.rate_params())
+	end)
+
 	it("keeps the bounds inside what the proxy accepts", function()
 		local p = caps.params(bulb({ has_cct = "true", mirek_min = "10", mirek_max = "5000" }))
 		assert.equal(500, p.color_correlated_temperature_min)

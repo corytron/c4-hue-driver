@@ -9,13 +9,18 @@
 -- docs/lights-design.md, docs/import-design.md §4/§13 and
 -- docs/zone-light-design.md §5; the light_v2 facts in docs/design.md; the
 -- programming commands (Raise Level By, Restore Saved Level) in
--- docs/relative-level-design.md.
+-- docs/relative-level-design.md; the turn-on behaviour (brightness On Mode,
+-- the On and Dim colours, the colour on modes, the rate ranges) in
+-- docs/turn-on-design.md (#429, #427, #430), whose decisions the comments
+-- cite as D<n>; the bridge's link offline and its answers to commands that
+-- did not land in docs/offline-design.md, cited as #428 D<n>.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
 local device = require("common.device")
 local state = require("light.state")
 local caps = require("light.caps")
+local turnon = require("light.turnon")
 
 -- Binding IDs, see driver.xml; common/device.lua holds the proxy's (5001).
 local BRIDGE_BINDING = device.BRIDGE_BINDING
@@ -37,7 +42,30 @@ local COLOR_KEYS = {
 	y = { "LIGHT_COLOR_TARGET_Y", "LIGHT_COLOR_TARGET_Y_CIE_1931" },
 	mode = { "LIGHT_COLOR_TARGET_COLOR_MODE", "LIGHT_COLOR_TARGET_MODE" },
 	rate = { "LIGHT_COLOR_TARGET_RATE", "LIGHT_COLOR_TARGET_COLOR_RATE", "RATE" },
+	-- #427 D16: a driver with colour on modes is sent the preset a colour
+	-- target comes from [verified: LV2 cmds _9.6-SET_COLOR_TARGET.md, which
+	-- prints the names with spaces]; underscores first, as the house's
+	-- proxy spells the other names (docs/turn-on-design.md §2.4).
+	preset_id = { "LIGHT_COLOR_TARGET_PRESET_ID", "LIGHT COLOR TARGET PRESET ID" },
+	preset_origin = { "LIGHT_COLOR_TARGET_PRESET_ORIGIN", "LIGHT COLOR TARGET PRESET ORIGIN" },
 }
+
+-- #429 D7, D6: a SET_BRIGHTNESS_TARGET from a driver with On Modes names the
+-- preset it goes to [verified: LV2 cmds _1.5-SETBRIGHTNESSTARGET.md]; both
+-- spellings, as COLOR_KEYS.
+local BRIGHTNESS_PRESET_KEYS = { "LIGHT_BRIGHTNESS_TARGET_PRESET_ID", "LIGHT BRIGHTNESS TARGET PRESET ID" }
+
+-- docs/turn-on-design.md §7.7. The proxy's presets are read SETUP_READ_MS
+-- after late init (D19), out of late init itself; a hold's blend follows
+-- its release by HOLD_COLOR_DELAY_MS, gliding over HOLD_COLOR_GLIDE_MS
+-- (D15); every rate sent to Hue is clamped to 0..RATE_MAX (D20).
+local SETUP_READ_MS = 3000
+local HOLD_COLOR_DELAY_MS = 500
+local HOLD_COLOR_GLIDE_MS = 1000
+local RATE_MAX = device.RATE_MAX
+-- The raw GET_SETUP (or variable 1300) text is logged at debug once per
+-- read, cut here (D19).
+local SETUP_LOG_MAX = 2000
 
 -- The light's own copy of its identity (PersistSetValue key per state field),
 -- so a bridge that lost its registry can rebuild it from the lights instead
@@ -74,6 +102,34 @@ local fallback = {}          -- "brightness" / "color" -> { timer = armed C4LuaT
 -- begins and ends.
 local ramp = nil
 
+-- The turn-on behaviour's own state (docs/turn-on-design.md). The proxy's
+-- On Modes and presets, and the decisions made from them, live in the
+-- light.turnon module, which persists its copies through the functions it
+-- is handed (§7.6); `modes` is that module's instance. What only the driver
+-- knows, in one table (it keeps the main chunk's locals down):
+--   last_on   the last non-zero level reported in LIGHT_BRIGHTNESS_CHANGED,
+--             which Previous turns on to (D6: the proxy tracks the same,
+--             F3); in memory only, empty after a restart
+--   preset    { id, level }: the brightness preset last targeted, while the
+--             light may still sit at it (D7)
+--   color     { id, origin, fields }: the colour preset last sent and the
+--             HUE_SET fields it went out as, while the light may show it (D16)
+--   expected  the HUE_SET colour fields Control4 last sent, then what the
+--             bridge confirmed for them: what tells a colour changed in Hue
+--             (§7.4 foreign_color)
+--   stored    the proxy colour { x, y, mode, id, origin } behind the colour
+--             fields state keeps for the next turn-on (st.pending_color)
+--   hold_color  the timer of a hold's blend after its release (D15)
+--   setup_timer the timer of the GET_SETUP read after late init (D19)
+local mem = {}
+local modes = turnon.new({
+	-- One value: Director's PersistGetValue returns none for a key never
+	-- written (#298, common/device.lua).
+	get = function(key) return (C4:PersistGetValue(key)) end,
+	set = function(key, value) C4:PersistSetValue(key, value) end,
+	delete = function(key) C4:PersistDeleteValue(key) end,
+})
+
 -- The plumbing both device drivers share (common/device.lua): properties and
 -- proxy notifies, the bridge and proxy lookups, Driver Version, the buffer
 -- for bridge messages that arrive before late init, the keypad (LEDs, Button
@@ -87,7 +143,8 @@ local dev = device.new({
 	bridge = function() return bridge end,
 	rid = function() return st.rid end,
 	noun = "light",
-	-- driver.xml declares supports_default_on, click_rates and hold_rates.
+	-- driver.xml declares the brightness On Modes (#429 D2), click_rates and
+	-- hold_rates; the preset is the On preset's level, Default On Brightness.
 	settings = { "preset", "click_up", "click_down", "hold_up", "hold_down" },
 })
 local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
@@ -224,6 +281,11 @@ end
 -- order is the order Status explains things in: a forgotten light is told
 -- what to do even while its binding is already gone. A group with no lights
 -- has no grouped_light to command (docs/zone-light-design.md Decision 11).
+-- The bridge's link offline (#428 D5, docs/offline-design.md §6.3) comes
+-- after the device's own deliberate ends and before no lights: "Hue Bridge
+-- not answering since 14:02". Its first letter stays upper case, unlike the
+-- other reasons: "Hue" is a name ("brightness target dropped: Hue Bridge
+-- not answering since 14:02").
 local function blocker()
 	if st.forgotten then
 		return "forgotten by the bridge; " .. FORGOTTEN_INSTRUCTION:gsub("^D", "d")
@@ -236,14 +298,18 @@ local function blocker()
 			return group_word():lower() .. " deleted in Hue; " .. GONE_REMEDY
 		end
 		return "gone from the Hue bridge; " .. GONE_REMEDY
+	elseif dev.link_offline() then
+		return dev.link_text()
 	elseif st.no_lights then
 		return no_lights_text()
 	end
 	return nil
 end
 
--- What ONLINE_CHANGED carries: reachable through a bridge that knows us, and
--- not reported unreachable by Zigbee (a group: not without lights).
+-- What ONLINE_CHANGED carries: reachable through a bridge that knows us and
+-- whose link is not offline, and not reported unreachable by Zigbee (a
+-- group: not without lights). The link and Zigbee are two conditions, both
+-- needed (#428 D6).
 local function is_online()
 	return blocker() == nil and st.online ~= false
 end
@@ -256,6 +322,9 @@ local function identity_status()
 	return string.format("%s (%s)", st.name, st.model or "unknown model")
 end
 
+-- While the bridge's link is offline Status names it, whatever Zigbee last
+-- said: that is not current then (#428 D6, §6.3), and the bridge's fix is
+-- the one to act on. A light the bridge has not linked yet keeps saying so.
 local function refresh_status()
 	if st.forgotten then
 		prop("Status", forgotten_status())
@@ -263,6 +332,8 @@ local function refresh_status()
 		prop("Status", "Not bound to a Hue Bridge")
 	elseif st.gone then
 		prop("Status", gone_status())
+	elseif st.rid and dev.link_offline() then
+		prop("Status", dev.link_text())
 	elseif not st.rid or not st.name then
 		prop("Status", "Bound; waiting for the bridge")
 	elseif st.no_lights then
@@ -271,7 +342,7 @@ local function refresh_status()
 		prop("Status", identity_status())
 	end
 	-- "" while nothing says either way: bound, but the bridge has not reported.
-	if not bridge or st.forgotten or st.gone or st.no_lights or st.online == false then
+	if not bridge or st.forgotten or st.gone or dev.link_offline() or st.no_lights or st.online == false then
 		prop("Online", "Offline")
 	else
 		prop("Online", st.online and "Online" or "")
@@ -295,14 +366,105 @@ end
 -- Proxy notifies -----------------------------------------------------------
 -- The report_* functions return true when they had something to report.
 
+-- #429 D7: the brightness notifies name presets, so the proxy can move the
+-- light when a preset's level changes (the Daylight Agent) [verified: LV2
+-- notif _10.2-LIGHTBRIGHTNESSCHANGED.md, _10.3-LIGHTBRIGHTNESSCHANGING.md].
+-- CHANGING names the preset it goes to, when it goes to one; CHANGING and
+-- CHANGED name the preset last targeted while the light sits at it (within
+-- a point, as Hue reports its Zigbee level). A level away from it, or a
+-- target that names none, forgets it.
+local function preset_at(level)
+	local mark = mem.preset
+	if mark and level and math.abs(level - mark.level) <= 1 then
+		return mark.id
+	end
+	return nil
+end
+
+-- LIGHT_BRIGHTNESS_CHANGING; `preset_id` the preset the target is, or nil.
+local function brightness_changing(current, target, rate, preset_id)
+	notify("LIGHT_BRIGHTNESS_CHANGING", {
+		LIGHT_BRIGHTNESS_CURRENT = current,
+		LIGHT_BRIGHTNESS_TARGET = target,
+		RATE = rate,
+		LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = preset_at(current),
+		LIGHT_BRIGHTNESS_TARGET_PRESET_ID = preset_id,
+	})
+	mem.preset = preset_id and { id = preset_id, level = target } or nil
+end
+
+-- LIGHT_BRIGHTNESS_CHANGED with `level`. The last level above 0 is what a
+-- Previous turn-on goes back to (#429 D6), as the proxy remembers the last
+-- non-zero level reported before a 0 [verified: LV2 caps
+-- _7-brightnessonmodeprevious.md].
+local function brightness_changed(level)
+	local id = preset_at(level)
+	if not id then
+		mem.preset = nil
+	end
+	if level > 0 then
+		mem.last_on = level
+	end
+	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = level, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = id })
+end
+
 local function report_brightness()
 	local brightness = state.to_proxy_brightness(st)
 	if not brightness then
 		return false
 	end
-	notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = brightness })
+	brightness_changed(brightness)
 	update_leds()
 	return true
+end
+
+-- How close a reported colour must be to one Control4 sent to count as it
+-- (§7.4, §7.7): Hue rounds what it stores.
+local FOREIGN_XY, FOREIGN_MIREK = turnon.FOREIGN_XY, turnon.FOREIGN_MIREK
+
+-- HUE_SET colour fields (state.color_fields) as numbers, or nil when the
+-- params carry no colour.
+local function color_of(params)
+	if params.mirek then
+		return { mirek = tonumber(params.mirek) }
+	elseif params.x and params.y then
+		return { x = tonumber(params.x), y = tonumber(params.y) }
+	end
+	return nil
+end
+
+-- The colour the cache shows, in the same form.
+local function cached_color()
+	if st.color_mode == "ct" and st.mirek then
+		return { mirek = st.mirek }
+	elseif st.x and st.y then
+		return { x = st.x, y = st.y }
+	end
+	return nil
+end
+
+-- True when the cache shows the colour `fields` describe.
+local function shows(fields)
+	if not fields then
+		return false
+	end
+	if fields.mirek then
+		return st.color_mode == "ct" and st.mirek ~= nil and math.abs(st.mirek - fields.mirek) <= FOREIGN_MIREK
+	end
+	return st.color_mode ~= "ct" and st.x ~= nil and st.y ~= nil and math.abs(st.x - fields.x) <= FOREIGN_XY
+		and math.abs(st.y - fields.y) <= FOREIGN_XY
+end
+
+-- #427 D16: the colour notifies name the preset the light shows [verified:
+-- LV2 notif _10.5-LIGHTCOLORCHANGED.md, _10.7-LIGHTCOLORCHANGING.md; the
+-- origin parameters: LV2 caps _7.3-coloronmodepreset.md]. The id and origin
+-- of the colour preset last sent, while the light shows it.
+local function color_preset_now()
+	local mark = mem.color
+	if mark and shows(mark.fields) then
+		return mark.id, mark.origin
+	end
+	return nil
 end
 
 local function report_color()
@@ -310,12 +472,42 @@ local function report_color()
 	if not x then
 		return false
 	end
+	local id, origin = color_preset_now()
+	if not id then
+		mem.color = nil
+	end
 	notify("LIGHT_COLOR_CHANGED", {
 		LIGHT_COLOR_CURRENT_X = x,
 		LIGHT_COLOR_CURRENT_Y = y,
 		LIGHT_COLOR_CURRENT_COLOR_MODE = mode,
+		LIGHT_COLOR_CURRENT_PRESET_ID = id,
+		LIGHT_COLOR_CURRENT_PRESET_ORIGIN = origin,
 	})
 	return true
+end
+
+-- LIGHT_COLOR_CHANGING toward the proxy colour `c` ({ x, y, mode, id,
+-- origin }) over `rate`, sent as the HUE_SET fields `fields`: for a
+-- SET_COLOR_TARGET, and since #427 also for a turn-on, turn-off or blend
+-- that carries a colour (§7.3). The preset it names, if any, is the one the
+-- light shows from now on.
+local function color_changing(c, rate, fields)
+	local cx, cy, cmode = state.to_proxy_color(st)
+	local id, origin = color_preset_now()
+	notify("LIGHT_COLOR_CHANGING", {
+		LIGHT_COLOR_TARGET_X = c.x,
+		LIGHT_COLOR_TARGET_Y = c.y,
+		LIGHT_COLOR_TARGET_COLOR_MODE = c.mode,
+		LIGHT_COLOR_TARGET_RATE = rate,
+		LIGHT_COLOR_CURRENT_X = cx,
+		LIGHT_COLOR_CURRENT_Y = cy,
+		LIGHT_COLOR_CURRENT_COLOR_MODE = cmode,
+		LIGHT_COLOR_CURRENT_PRESET_ID = id,
+		LIGHT_COLOR_CURRENT_PRESET_ORIGIN = origin,
+		LIGHT_COLOR_TARGET_PRESET_ID = c.id,
+		LIGHT_COLOR_TARGET_PRESET_ORIGIN = c.id and c.origin or nil,
+	})
+	mem.color = c.id and { id = c.id, origin = c.origin, fields = color_of(fields or {}) } or nil
 end
 
 local function report_online()
@@ -367,6 +559,30 @@ local function on_level(brightness)
 	return state.to_proxy_brightness({ on = true, brightness = brightness })
 end
 
+-- #430 D20: every rate the light sends Hue, 0 to RATE_MAX (6 000 000 ms,
+-- the Hue duration ceiling the bridge already clamps scenes and groups to
+-- [assumed for a light: docs/turn-on-design.md D20]). A rate that is not a
+-- number is 0, as before.
+local function clamp_rate(rate)
+	rate = tonumber(rate) or 0
+	if rate ~= rate then -- NaN
+		return 0
+	end
+	return math.max(0, math.min(RATE_MAX, rate))
+end
+
+-- Every merge into the cache goes through here. A light that goes from on
+-- to off ends a blend (#427 D14, turnon.ended): Control4's colours apply
+-- again from the next turn-on.
+local function apply(params)
+	local was = st.on
+	local changed = state.apply_hue(st, params)
+	if was == true and st.on == false then
+		turnon.ended(modes)
+	end
+	return changed
+end
+
 -- The controller's clock in ms [verified: API 34_timer/_2-GetTime, OS 3.2.3
 -- on], or os.time() where it is missing, as common/devloop.lua reads it.
 local function now_ms()
@@ -392,7 +608,7 @@ end
 local function release(pending)
 	local held = pending.held
 	pending.held, pending.stale = nil, nil
-	return held and state.apply_hue(st, held)
+	return held and apply(held)
 end
 
 -- The target is over, and for brightness so is its ramp.
@@ -412,9 +628,12 @@ end
 -- the bridge has not confirmed within the ramp plus FALLBACK_MS. `goal` is
 -- the level a turn-on from off waits for (nil otherwise); a report held back
 -- for it is reported then instead, as the bridge's word beats a guess.
-local function arm(kind, rate, assume, goal)
+-- `from` is the level the brightness CHANGING started from: what the proxy
+-- hears when the target ends without the bridge knowing any level (an
+-- undelivered answer or the link going offline, #428 D9, D5; report_known).
+local function arm(kind, rate, assume, goal, from)
 	settle(kind)
-	local pending = { assume = assume, goal = goal, ramp = rate > 0 }
+	local pending = { assume = assume, goal = goal, ramp = rate > 0, from = from }
 	pending.timer = C4:SetTimer(rate + FALLBACK_MS, function()
 		fallback[kind] = nil
 		if kind == "brightness" then
@@ -547,6 +766,73 @@ local STOP_MODE = "level"
 -- and the proxy hold the estimate already.
 local STOP_GLIDE_MS = 1000
 
+-- Turn-on state (docs/turn-on-design.md) -------------------------------------
+
+-- True while the light is on, or while a Control4 turn-on of it is under
+-- way whose report has not come yet (#427 D17): a brightness target above 0
+-- sent from off (its pending record says turning_on), or a ramp to a level
+-- above 0. The cache alone says off until the bridge reports the turn-on.
+local function lit()
+	if st.on == true or (ramp and ramp.to > 0) then
+		return true
+	end
+	local pending = fallback.brightness
+	return pending ~= nil and pending.turning_on == true
+end
+
+-- The level the light heads for: a ramp's target, a target the bridge has
+-- not confirmed, else the level it shows (nil while unknown).
+local function heading()
+	if ramp then
+		return ramp.to
+	end
+	local pending = fallback.brightness
+	if pending and pending.target then
+		return pending.target
+	end
+	return state.to_proxy_brightness(st)
+end
+
+-- What light.turnon decides from (§7.4): the On preset's level (Default On
+-- Brightness), a zone or room light, the last level above 0 reported, the
+-- level Hue keeps while the light is off, and the bulb's colour abilities.
+local function context()
+	return {
+		preset = setting("preset"),
+		group = state.is_group(st),
+		last_on = mem.last_on,
+		cached = st.brightness and on_level(st.brightness) or nil,
+		has_color = st.has_color,
+		has_cct = st.has_cct,
+	}
+end
+
+-- #427 D15: a hold's blend waiting for its time after the release goes when
+-- anything else moves the light: a brightness or colour command, a press.
+local function cancel_hold_color()
+	if mem.hold_color then
+		mem.hold_color:Cancel()
+		mem.hold_color = nil
+	end
+end
+
+-- After a HUE_SET that carried a colour (`params`; `c` the proxy colour it
+-- came from, nil when unknown): the colour CHANGING (§7.3), the colour
+-- Control4 now expects to see (§7.4), and a colour target of its own, so
+-- the proxy hears CHANGED for it even when Hue reports nothing new.
+local function color_sent(c, rate, params)
+	local fields = { x = params.x, y = params.y, mirek = params.mirek }
+	if c then
+		color_changing(c, rate, params)
+	end
+	mem.expected = color_of(params)
+	arm("color", rate, function()
+		log.debug("colour unconfirmed after %d ms; assuming it", rate + FALLBACK_MS)
+		apply(fields)
+		report_color()
+	end)
+end
+
 -- #421 D5, D7: stop the running ramp where the light is by the clock; false
 -- when none runs. The estimate is at least 1, so a stop near off leaves the
 -- light on, as a dimmer stopped near the bottom does (§3). It goes into the
@@ -555,7 +841,8 @@ local STOP_GLIDE_MS = 1000
 -- report goes straight through: in "level" mode the estimate itself, at
 -- once, which matches the cache and sends no second CHANGED; any other
 -- level corrects it. A #308 wait ends with it. `why` names the stop in the
--- log.
+-- log. In "level" mode the stop carries the blend for the estimate while one
+-- runs (#427 D15); HUE_DIM stop has no colour.
 local function stop_ramp(why)
 	local r = ramp
 	if not r then
@@ -567,13 +854,18 @@ local function stop_ramp(why)
 	log.debug("%s: the %sramp to %d %% stopped at %d %% after %d of %d ms", why, r.tap and "tap " or "", r.to, level,
 		elapsed, r.time)
 	if STOP_MODE == "level" then
-		local params = state.from_brightness_target(st, level, STOP_GLIDE_MS)
+		local c = turnon.level_color(modes, level, context())
+		local fields = c and state.color_fields(st, c.x, c.y, c.mode) or nil
+		local params, which = state.from_brightness_target(st, level, STOP_GLIDE_MS, { color = fields })
 		params.urgent = "true" -- #421 D12
-		send("HUE_SET", params)
+		if send("HUE_SET", params) and which == "given" then
+			color_sent(c, STOP_GLIDE_MS, params)
+		end
 	else
 		send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
 	end
-	state.apply_hue(st, { on = "true", brightness = tostring(level) })
+	mem.preset = nil -- a stop is no preset
+	apply({ on = "true", brightness = tostring(level) })
 	report_brightness()
 	return true
 end
@@ -603,74 +895,136 @@ local function ready(command)
 	return true
 end
 
+-- The colour a brightness target carries (docs/turn-on-design.md §4): a
+-- turn-off with a fade time the Dim colour (#427 D12); a target while the
+-- light is lit the blend, while one runs (D14, D15); a turn-on from off the
+-- colour its colour on mode asks for, C(level) (D10, D11, D13). nil for
+-- none: Previous, no On colour known, a bulb without colour (light.turnon),
+-- and a turn-off of a light that is off already.
+local function target_color(target, rate, was_lit)
+	if target <= 0 then
+		return was_lit and turnon.off_color(modes, rate) or nil
+	elseif was_lit then
+		return turnon.level_color(modes, target, context())
+	end
+	return turnon.on_color(modes, target, context())
+end
+
 -- True when the target went to the bridge. When the send fails
 -- (common/device.lua logs why) nothing changed: the proxy hears CHANGED with
 -- the level its CHANGING came from, and a colour kept for the next turn-on
 -- keeps waiting for it. A running ramp is replaced (#421 D11): the CHANGING
--- starts from its estimate, where the tile is. `urgent` (a keypad tap, D12)
--- sends the HUE_SET past the bridge's request bucket; `tap` marks the ramp
--- a tap's, for the log.
-local function set_brightness(target, rate, urgent, tap)
-	target, rate = tonumber(target), tonumber(rate) or 0
+-- starts from its estimate, where the tile is. `opts`:
+--   urgent     a keypad tap (#421 D12): the HUE_SET goes past the bridge's
+--              request bucket
+--   tap        marks the ramp a tap's, for the log
+--   preset_id  the brightness preset the target is (#429 D7); an off names
+--              the Off preset by itself when its id is known
+--   native     a zone or room light's Previous turn-on: on without a
+--              brightness, so Hue brings every lamp back at its own level;
+--              `target` is only what the proxy is told (#429 D6), and no
+--              #308 goal is set, since the group's level is only known from
+--              Hue
+-- A target above 0 carries the colour of target_color (#427), unless a
+-- colour stored while the light was off wins (D11); a turn-on from off then
+-- starts or skips the blend (turnon.started). The rate is clamped (#430
+-- D20).
+local function set_brightness(target, rate, opts)
+	opts = opts or {}
+	target, rate = tonumber(target), clamp_rate(rate)
 	if not target then
 		return log.warn("brightness command without a target")
 	end
 	if not ready("brightness target") then
 		return
 	end
+	cancel_hold_color()
+	local was_lit = lit()
 	local current = ramp and ramp_estimate(ramp) or state.to_proxy_brightness(st) or 0
 	end_ramp()
 	-- From off, the level the turn-on waits for (#308); Hue raises a level
 	-- below the bulb's lowest to that.
-	local goal = st.on == false and target > 0 and on_level(math.max(target, st.min_dim or 0)) or nil
-	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = current,
-		LIGHT_BRIGHTNESS_TARGET = target,
-		RATE = rate,
-	})
+	local goal = st.on == false and target > 0 and not opts.native and on_level(math.max(target, st.min_dim or 0))
+		or nil
+	local c = target_color(target, rate, was_lit)
+	local fields = c and state.color_fields(st, c.x, c.y, c.mode) or nil
+	local preset_id = opts.preset_id
+	if target <= 0 and preset_id == nil then
+		preset_id = turnon.off_preset_id(modes)
+	end
+	local mark = mem.preset
+	brightness_changing(current, target, rate, preset_id)
 	local stored = st.pending_color
-	local params = state.from_brightness_target(st, target, rate)
-	if urgent then
+	local params, which = state.from_brightness_target(st, target, rate, { color = fields, native = opts.native })
+	if opts.urgent then
 		params.urgent = "true"
 	end
 	if not send("HUE_SET", params) then
 		st.pending_color = stored
-		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = current })
+		mem.preset = mark
+		brightness_changed(current)
 		return false
+	end
+	local turning_on = target > 0 and not was_lit
+	if turning_on then
+		turnon.started(modes, which == "given")
+	end
+	if which == "given" then
+		color_sent(c, rate, params)
+	elseif which == "stored" then
+		color_sent(mem.stored, rate, params)
+		mem.stored = nil
 	end
 	arm("brightness", rate, function()
 		log.debug("brightness target %s unconfirmed after %d ms; assuming it", tostring(target), rate + FALLBACK_MS)
-		local changed = state.apply_hue(st, params)
+		apply({ on = params.on, brightness = params.brightness })
 		report_brightness()
-		if changed.color then
-			report_color() -- the turn-on carried a colour stored while off
-		end
-	end, goal)
+	end, goal, current)
+	fallback.brightness.target, fallback.brightness.turning_on = target, turning_on or nil
+	-- #428 D9: an undelivered answer puts back the preset named before this
+	-- CHANGING, as a send that fails does above.
+	fallback.brightness.before = { preset = mark }
 	if rate > 0 then
-		begin_ramp(current, target, rate, tap)
+		begin_ramp(current, target, rate, opts.tap)
 	end
 	return true
 end
 
-local function set_color(x, y, mode, rate)
-	x, y, mode, rate = tonumber(x), tonumber(y), tonumber(mode) or state.MODE_XY, tonumber(rate) or 0
+-- SET_COLOR_TARGET. `id` and `origin` name the colour preset it comes from,
+-- when the proxy says (#427 D16); without x and y the learned preset gives
+-- them. The on colour (turnon.is_on_color) leaves a blend running; any other
+-- is explicit and ends a Preset blend (D14). While a Control4 turn-on is
+-- under way the colour goes out at once (D17); the on colour then goes out
+-- as the blend for where the light heads, so both orders of the proxy's
+-- turn-on commands end alike. While the light is off a colour waits for the
+-- next turn-on (light_v2 best practice), except the on colour, which the
+-- next turn-on sends by itself, blended for its level (D11).
+local function set_color(x, y, mode, rate, id, origin)
+	x, y, id, origin = tonumber(x), tonumber(y), tonumber(id), tonumber(origin)
+	if not (x and y) and id then
+		local known = turnon.color_for_preset(modes, id, origin)
+		if known then
+			x, y, mode = known.x, known.y, mode or known.mode
+		end
+	end
+	mode, rate = tonumber(mode) or state.MODE_XY, clamp_rate(rate)
 	if not (x and y) then
-		return log.warn("colour command without x/y")
+		return log.warn("colour command without x/y%s", id and (" (preset " .. tostring(id) .. " not known)") or "")
 	end
 	if not ready("colour target") then
 		return
 	end
-	local cx, cy, cmode = state.to_proxy_color(st)
-	notify("LIGHT_COLOR_CHANGING", {
-		LIGHT_COLOR_TARGET_X = x,
-		LIGHT_COLOR_TARGET_Y = y,
-		LIGHT_COLOR_TARGET_COLOR_MODE = mode,
-		LIGHT_COLOR_TARGET_RATE = rate,
-		LIGHT_COLOR_CURRENT_X = cx,
-		LIGHT_COLOR_CURRENT_Y = cy,
-		LIGHT_COLOR_CURRENT_COLOR_MODE = cmode,
-	})
-	local params, why = state.from_color_target(st, x, y, mode, rate)
+	cancel_hold_color()
+	local soon = lit()
+	local on_color = turnon.is_on_color(modes, x, y, mode, id, origin)
+	local target = { x = x, y = y, mode = mode, id = id, origin = origin }
+	local level = soon and on_color and heading() or nil
+	local blend = level and level > 0 and turnon.level_color(modes, level, context()) or nil
+	if blend then
+		target.x, target.y, target.mode = blend.x, blend.y, blend.mode
+	end
+	color_changing(target, rate, state.color_fields(st, target.x, target.y, target.mode))
+	local params, why = state.from_color_target(st, target.x, target.y, target.mode, rate, { on_soon = soon })
 	if params then
 		if not send("HUE_SET", params) then
 			-- Nothing reached the bridge (logged): the proxy hears the colour
@@ -678,25 +1032,48 @@ local function set_color(x, y, mode, rate)
 			report_color()
 			return
 		end
+		mem.expected = color_of(params)
+		if not on_color then
+			turnon.explicit_color(modes)
+		end
 		arm("color", rate, function()
 			log.debug("colour target unconfirmed after %d ms; assuming it", rate + FALLBACK_MS)
-			state.apply_hue(st, params)
+			apply(params)
 			report_color()
 		end)
 	elseif why == "stored" then
 		-- Light off: the colour waits for the next turn-on (light_v2 best
 		-- practice). The proxy still needs its CHANGED, and the colour it
 		-- asked for is what the light will show.
-		log.debug("light is off; colour stored for the next turn-on")
+		if on_color and turnon.on_color(modes, setting("preset"), context()) then
+			st.pending_color, mem.stored = nil, nil
+			log.debug("light is off; the on colour goes with the next turn-on, blended for its level")
+		else
+			mem.stored = target
+			log.debug("light is off; colour stored for the next turn-on")
+		end
 		notify("LIGHT_COLOR_CHANGED", {
 			LIGHT_COLOR_CURRENT_X = x,
 			LIGHT_COLOR_CURRENT_Y = y,
 			LIGHT_COLOR_CURRENT_COLOR_MODE = mode,
+			LIGHT_COLOR_CURRENT_PRESET_ID = id,
+			LIGHT_COLOR_CURRENT_PRESET_ORIGIN = id and origin or nil,
 		})
 	else
 		log.warn("colour target ignored: %s", tostring(why))
 		report_color()
 	end
+end
+
+-- The brightness On Mode (#429 D5, D6): a turn-on from off goes to the
+-- level the mode names, with the preset it is; a zone or room light's
+-- Previous is Hue's own on (native). `rate_for(level)` gives the ramp time
+-- for that level; the opts are set_brightness's.
+local function turn_on(rate_for, opts)
+	local go = turnon.turn_on(modes, context())
+	opts = opts or {}
+	opts.preset_id, opts.native = go.preset_id, go.native or nil
+	return set_brightness(go.level, rate_for(go.level), opts)
 end
 
 -- Bridge binding -----------------------------------------------------------
@@ -790,21 +1167,122 @@ dispatch.commands["HUE_CONFIGURE"] = after_late_init("HUE_CONFIGURE", function(p
 	elseif st.no_lights then
 		log.debug("configured without lights; nothing to control until the group is refilled")
 	end
-	-- Both supports_* in one notify, then the current colour straight after
-	-- (the proxy docs ask for both), then brightness.
+	-- Both supports_* in one notify, then the rate ranges in a second one of
+	-- their own (#430 D20, §7.2: a proxy that refuses them cannot take the
+	-- colour flags down too), then the current colour (the proxy docs ask for
+	-- it straight after the colour flags), then brightness.
 	notify("DYNAMIC_CAPABILITIES_CHANGED", caps.params(st))
+	notify("DYNAMIC_CAPABILITIES_CHANGED", caps.rate_params())
 	report_color()
 	report_brightness()
 	report_online()
 	refresh_status()
 end)
 
+-- §7.4: a reported colour no Control4 command explains (none pending, and
+-- not the colour Control4 last sent or saw confirmed, within FOREIGN_XY or
+-- FOREIGN_MIREK) was changed in Hue: the Hue app, a switch, a Hue scene. A
+-- Preset blend ends there (#427 D14); nothing is pushed back (§5). Either
+-- way the reported colour is the one expected from now on.
+local function noticed_color(confirming)
+	local seen = cached_color()
+	if not seen then
+		return
+	end
+	if not confirming and mem.expected and not shows(mem.expected) then
+		log.debug("colour changed outside Control4")
+		turnon.foreign_color(modes)
+	end
+	mem.expected = seen
+end
+
+-- The bridge's link (#428, docs/offline-design.md) ----------------------------
+
+-- The proxy hears the level the cache shows, or, while it shows none (a
+-- light the bridge has no model of), `from`: the level the CHANGING it
+-- closes started from (#428 D9, L4). Nothing without either.
+local function report_known(from)
+	if not report_brightness() and from then
+		brightness_changed(from)
+	end
+end
+
+-- #428 D8, D9 (§6.2): a HUE_STATE with reason "undelivered", the bridge's
+-- answer to a PUT for this light (a zone or room light: its grouped_light)
+-- that did not land, carrying what the bridge last knew (only the rid when
+-- it has no model of the light). Nothing of it is held back (#421 D10 does
+-- not apply): the running ramp ends, the brightness and colour targets
+-- settle with no fallback left to assume them, a report held back for
+-- either goes into the cache under the answer's fields, and the proxy hears
+-- them as CHANGED: the level the bridge knows, not the target. The keypad
+-- LEDs follow (L53). The brightness preset named before that CHANGING
+-- comes back, as for a send that fails (#429 D7); a light the answer shows
+-- off ends a blend its turn-on started (#427 D14, as apply does for a light
+-- that goes off); and the colour reported is the one Control4 expects from
+-- now on (§7.4), with no foreign change read into it. A hold in progress
+-- goes on: its release sends the stop as usual, and the stop's own failure
+-- brings the next answer.
+local function undelivered(params)
+	local pending = fallback.brightness
+	if pending and pending.before then
+		mem.preset = pending.before.preset
+	end
+	settle("brightness")
+	settle("color")
+	local changed = apply(params)
+	if st.on == false then
+		turnon.ended(modes)
+	end
+	mem.expected = cached_color() or mem.expected
+	log.debug("undelivered: the proxy hears what the bridge last knew (%s)",
+		st.on == nil and "nothing" or (st.on and ("on at " .. tostring(state.to_proxy_brightness(st)) .. " %") or "off"))
+	report_known(pending and pending.from)
+	report_color()
+	if changed.online then
+		report_online()
+		refresh_status()
+	end
+end
+
+-- #428 D5, D6 (common/device.lua calls it at every HUE_BRIDGE_LINK). Going
+-- offline, a ramp running or a target pending ends with the cached state,
+-- a report held back for it included, and the proxy hears it: nothing is
+-- assumed, since the command may not have landed. A hold's blend still
+-- waiting goes. Either way ONLINE_CHANGED and Status follow (is_online,
+-- blocker); back online, the resync that every stream connect runs brings
+-- the state (D7). An unchanged link changes nothing.
+function dev.on_link(_, changed)
+	if not changed then
+		return
+	end
+	if dev.link_offline() then
+		local pending = fallback.brightness
+		local moving, coloring = pending ~= nil or ramp ~= nil, fallback.color ~= nil
+		settle("brightness")
+		settle("color")
+		cancel_hold_color()
+		if moving then
+			report_known(pending and pending.from)
+		end
+		if coloring then
+			report_color()
+		end
+	end
+	report_online()
+	refresh_status()
+end
+
 dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if st.rid and params.rid and params.rid ~= st.rid then
 		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
 	end
+	if params.reason == "undelivered" then
+		return undelivered(params)
+	end
 	params = hold_back(params)
-	local changed = state.apply_hue(st, params)
+	local colored = params.x ~= nil or params.mirek ~= nil or params.color_mode ~= nil
+	local confirming = fallback.color ~= nil
+	local changed = apply(params)
 	-- Any report of a pending field that got past hold_back settles the
 	-- target, whatever the value: the proxy heard CHANGING and must hear
 	-- CHANGED. One held back for a ramp settles it at the ramp's end.
@@ -812,7 +1290,10 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 		settle("brightness")
 		changed.brightness = true
 	end
-	if fallback.color and (params.x ~= nil or params.mirek ~= nil or params.color_mode ~= nil) then
+	if colored then
+		noticed_color(confirming)
+	end
+	if fallback.color and colored then
 		settle("color")
 		changed.color = true
 	end
@@ -1126,17 +1607,17 @@ dispatch.commands["Restore_Saved_Level"] = after_late_init("Restore Saved Level"
 end)
 
 -- From the proxy (ReceivedFromProxy) ------------------------------------------
--- Commands without a handler are logged at debug by common.dispatch.
+-- Commands without a handler are logged at debug by common.dispatch. The
+-- first arrival of each turn-on command per driver start is logged at debug
+-- with every parameter (§7.3, dev.first_arrival): their names and the order
+-- the proxy sends them in can only be seen on a controller (D27, checks
+-- T2-T11).
 
 -- The proxy asks for current state after Director starts or a UI connects.
 dispatch.proxy["SYNCHRONIZE"] = function()
 	report_online()
 	report_brightness()
 	report_color()
-end
-
-dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
-	set_brightness(params.LIGHT_BRIGHTNESS_TARGET, params.RATE)
 end
 
 local function pick(params, names)
@@ -1148,14 +1629,39 @@ local function pick(params, names)
 	return nil
 end
 
+-- A rate the command left out (or sent empty) is the proxy's default rate
+-- (#430 D8, common/device.lua); 0 until the proxy sends one.
+local function rate_or_default(rate, which)
+	if rate == nil or rate == "" then
+		return dev.rate_default(which)
+	end
+	return rate
+end
+
+-- #429 D7, D6: the preset the target names goes into the notifies; on a
+-- zone or room light that is off, the Previous preset is Hue's own on, as
+-- for any Previous turn-on.
+dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
+	dev.first_arrival("SET_BRIGHTNESS_TARGET", params)
+	local id = tonumber(pick(params, BRIGHTNESS_PRESET_KEYS))
+	local target = tonumber(params.LIGHT_BRIGHTNESS_TARGET)
+	local native = id ~= nil and target ~= nil and target > 0 and state.is_group(st) and not lit()
+		and turnon.is_previous_preset(modes, id)
+	set_brightness(params.LIGHT_BRIGHTNESS_TARGET, rate_or_default(params.RATE, "brightness"),
+		{ preset_id = id, native = native or nil })
+end
+
 -- A Navigator's colour pick arrives as LIGHT_COLOR_TARGET_MODE 0 with X and
 -- Y, a temperature pick as mode 1 with the temperature's X and Y, and RATE
 -- [verified: hardware 2026-10-22, the one-time parameter log this driver
 -- carried until 2026-10-25, checklist D.10]; the other spellings in
--- COLOR_KEYS are kept for other proxy versions [assumed].
+-- COLOR_KEYS are kept for other proxy versions [assumed]. With colour on
+-- modes it can name a preset instead (#427 D16).
 dispatch.proxy["SET_COLOR_TARGET"] = function(_, params)
-	set_color(pick(params, COLOR_KEYS.x), pick(params, COLOR_KEYS.y),
-		pick(params, COLOR_KEYS.mode), pick(params, COLOR_KEYS.rate))
+	dev.first_arrival("SET_COLOR_TARGET", params)
+	set_color(pick(params, COLOR_KEYS.x), pick(params, COLOR_KEYS.y), pick(params, COLOR_KEYS.mode),
+		rate_or_default(pick(params, COLOR_KEYS.rate), "color"), pick(params, COLOR_KEYS.preset_id),
+		pick(params, COLOR_KEYS.preset_origin))
 end
 
 -- Advanced Lighting Scenes with reduced_als_support drive the light with
@@ -1183,28 +1689,114 @@ end
 -- is accepted as a brightness stop.
 dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
 
--- ON and TOGGLE turn the light on at the On preset, the Default On
--- Brightness a top keypad tap goes to (#233, owner 2026-11-08), at once as
--- before: TOGGLE from off activates the On preset [verified: proxy
--- reference, light_v2 TOGGLE], and the On preset is the level a top tap
--- gives whatever level the light is at, a higher one too [verified: proxy
--- reference, light_v2 variables, Default On Preset Brightness], so ON on a
--- light already on goes to it as well, as the top tap here does. A preset
--- never set reads as 100, the level both commands always had, and one out
--- of range (0 included) is never taken (common/device.lua), so neither
--- turns a light off. The click rates stay with keypad taps, so a light at
--- the default preset behaves exactly as before; a zone or room light sends
--- the same HUE_SET and the bridge sets every lamp.
+-- ON, TOGGLE and OFF over the proxy's default brightness rate (#430 D8; 0,
+-- at once as before, until the proxy sends one). From off, ON and TOGGLE
+-- follow the brightness On Mode (#429 D5, D6; turn_on): Preset, the
+-- default, goes to the On preset at the Default On Brightness as before
+-- (#233), Previous to the level the light had. TOGGLE from off activates the
+-- On Mode [verified: proxy reference, light_v2 TOGGLE]. ON on a light
+-- already on goes to the on mode preset's level, in Previous mode to the On
+-- preset, as the top tap does (D5) [verified: proxy reference, light_v2
+-- variables, Default On Preset Brightness]. A preset never set reads as 100,
+-- the level both commands always had, and one out of range (0 included) is
+-- never taken (common/device.lua), so neither turns a light off. A zone or
+-- room light sends the same HUE_SET and the bridge sets every lamp. Whether
+-- the light is on counts a Control4 turn-on under way (lit), so a second
+-- TOGGLE right after the first turns the light off again.
+local function default_rate()
+	return dev.rate_default("brightness")
+end
+
+local function turn_off()
+	set_brightness(0, default_rate())
+end
+
 dispatch.proxy["TOGGLE"] = function()
-	set_brightness(st.on and 0 or setting("preset"), 0)
+	if lit() then
+		return turn_off()
+	end
+	turn_on(default_rate)
 end
 
 -- Legacy commands that old programming may still send. Which command
 -- "Turn On" in programming sends is unverified; ON goes where TOGGLE does.
-dispatch.proxy["ON"] = function() set_brightness(setting("preset"), 0) end
-dispatch.proxy["OFF"] = function() set_brightness(0, 0) end
+-- OFF on a light that shows off and has no turn-on under way only reports
+-- (§4): there is nothing to fade, and no Dim colour to give it.
+dispatch.proxy["ON"] = function()
+	if lit() then
+		local go = turnon.while_on(modes, context())
+		return set_brightness(go.level, default_rate(), { preset_id = go.preset_id })
+	end
+	turn_on(default_rate)
+end
+
+dispatch.proxy["OFF"] = function()
+	if st.on == false and not lit() then
+		return report_brightness()
+	end
+	turn_off()
+end
+
 dispatch.proxy["SET_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
 dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_brightness(params.LEVEL, params.TIME) end
+
+-- #429 D25: from OS 3.3.2 Navigators send DYNAMIC_ON and DYNAMIC_OFF
+-- [verified: LV2 cmds _1.3-DYNAMICON.md, _1.2-DYNAMICOFF.md]; whether the
+-- proxy forwards them to a driver with On Modes or turns them into targets
+-- itself is [assumed] (F21). Handled in case they arrive: on as ON from
+-- off, at the default rate; off as OFF. On a light already on (or off),
+-- only a report.
+dispatch.proxy["DYNAMIC_ON"] = function(_, params)
+	dev.first_arrival("DYNAMIC_ON", params)
+	if lit() then
+		return report_brightness()
+	end
+	turn_on(default_rate)
+end
+
+dispatch.proxy["DYNAMIC_OFF"] = function(_, params)
+	dev.first_arrival("DYNAMIC_OFF", params)
+	if st.on == false and not lit() then
+		return report_brightness()
+	end
+	turn_off()
+end
+
+-- What the proxy tells a driver with On Modes (#429 D4, #427 D10, D16): the
+-- on modes and the presets, kept and persisted by light.turnon and used
+-- from the next command. None of them moves the light (D26): when a preset
+-- the light sits at changes, the proxy moves it itself (F8). The On
+-- preset's level also becomes the Default On Brightness the keypad uses,
+-- without the PRESET_LEVEL echo SET_PRESET_LEVEL gets, so proxy and driver
+-- never ping-pong (D4, dev.take_setting, which warns about a value out of
+-- range itself).
+dispatch.proxy["UPDATE_BRIGHTNESS_ON_MODE"] = function(_, params)
+	dev.first_arrival("UPDATE_BRIGHTNESS_ON_MODE", params)
+	if turnon.update_brightness_on_mode(modes, params) then
+		log.debug("brightness On Mode now %s", (turnon.modes(modes)))
+	end
+end
+
+dispatch.proxy["UPDATE_BRIGHTNESS_PRESET"] = function(_, params)
+	dev.first_arrival("UPDATE_BRIGHTNESS_PRESET", params)
+	local _, level = turnon.update_brightness_preset(modes, params)
+	local before = setting("preset")
+	if level and dev.take_setting("preset", level) and setting("preset") ~= before then
+		log.debug("Default On Brightness now %s %% (UPDATE_BRIGHTNESS_PRESET)", tostring(setting("preset")))
+	end
+end
+
+dispatch.proxy["UPDATE_COLOR_ON_MODE"] = function(_, params)
+	dev.first_arrival("UPDATE_COLOR_ON_MODE", params)
+	if turnon.update_color_on_mode(modes, params) then
+		log.debug("colour on mode now %s", select(2, turnon.modes(modes)))
+	end
+end
+
+dispatch.proxy["UPDATE_COLOR_PRESET"] = function(_, params)
+	dev.first_arrival("UPDATE_COLOR_PRESET", params)
+	turnon.update_color_preset(modes, params)
+end
 
 -- Keypad buttons ----------------------------------------------------------
 -- What a tap and a hold do to a light; the press / click / release machine
@@ -1217,26 +1809,33 @@ local HOLD_TICK_MS = 100 -- the level estimate advances this often during a ramp
 -- A longer hold rate is used as this, for the light and its tile alike: the
 -- bound the bridge holds a zone light's and a scene's hold to (100 minutes;
 -- zone_lights.DIM_MAX_DURATION, scenes.DIM_MAX_DURATION), which a light's
--- lacked (#234).
-local HOLD_MAX_MS = 6000000
+-- lacked (#234); since #430 D20 also the most the proxy can set.
+local HOLD_MAX_MS = RATE_MAX
 
 -- A tap ramps the light, and a press while it ramps stops it (#421,
 -- docs/tap-stop-design.md §3). Click rates are whole-range times, as hold
 -- rates are (D3): a tap's ramp takes the rate's share of the distance,
 -- rounded to whole ms; a rate of 0 is a change at once, with nothing to
--- stop. The start goes past the bridge's request bucket (D12).
-local function tap(target, rate, distance)
-	set_brightness(target, math.floor(rate * distance / 100 + 0.5), true, true)
+-- stop. The start goes past the bridge's request bucket (D12). `preset_id`
+-- and `native` as set_brightness's (#429 D6, D7).
+local function tap(target, rate, distance, preset_id, native)
+	set_brightness(target, math.floor(rate * distance / 100 + 0.5),
+		{ urgent = true, tap = true, preset_id = preset_id, native = native })
 end
 
--- An idle tap (§3). Top goes to the On preset (D2, #233): from off over the
--- click rate up's share of the preset, up to it from below, down to it from
--- above over the click rate down; at it (within a point) nothing goes to
--- Hue and the proxy hears the level. Bottom goes off over the click rate
--- down's share of the level; off already, nothing. Toggle goes off while
--- the light shows on, else as top from off. A light whose state is not
--- known yet is taken as off by top and toggle, and bottom turns it off over
--- the whole rate. The machine stops a running ramp on the press and
+-- An idle tap (§3). Top from off follows the brightness On Mode (#429 D5,
+-- D6): Preset goes to the on mode preset (the On preset at the Default On
+-- Brightness, D2 and #233, unless the dealer chose another), Previous to
+-- the level the light had, over the click rate up's share of that level.
+-- Top while on goes to turnon.while_on's level (the on mode preset; in
+-- Previous mode the On preset): up to it from below over the click rate up,
+-- down to it from above over the click rate down; at it (within a point)
+-- nothing goes to Hue and the proxy hears the level, at that preset. Bottom
+-- goes off over the click rate down's share of the level; off already,
+-- nothing. Toggle goes off while the light shows on, else as top from off.
+-- A light whose state is not known yet is taken as off by top and toggle,
+-- and bottom turns it off over the whole rate. Colours as for any target
+-- (set_brightness, #427). The machine stops a running ramp on the press and
 -- swallows its click (D5, common/device.lua), so a click reaches here during
 -- a ramp only when the ramp began between the press and the click: it stops
 -- that one too. A device that cannot be driven drops the tap with its
@@ -1245,7 +1844,7 @@ function dev.on_click(button)
 	if stop_ramp("tap") or not ready("brightness target") then
 		return
 	end
-	local preset, on, level = setting("preset"), st.on, state.to_proxy_brightness(st)
+	local on, level = st.on, state.to_proxy_brightness(st)
 	if button == BUTTON_BOTTOM or (button ~= BUTTON_TOP and on) then
 		if on == false then
 			return log.debug("tap: the %s is off already", what())
@@ -1253,16 +1852,19 @@ function dev.on_click(button)
 		return tap(0, setting("click_down"), level or 100)
 	end
 	if not on then
-		return tap(preset, setting("click_up"), preset)
+		local go = turnon.turn_on(modes, context())
+		return tap(go.level, setting("click_up"), go.level, go.preset_id, go.native or nil)
 	end
-	if math.abs(level - preset) <= 1 then
-		log.debug("tap: at the On preset (%d %%) already", preset)
+	local go = turnon.while_on(modes, context())
+	if math.abs(level - go.level) <= 1 then
+		log.debug("tap: at the on preset (%d %%) already", go.level)
+		mem.preset = go.preset_id and { id = go.preset_id, level = go.level } or nil
 		return report_brightness()
 	end
-	if level < preset then
-		return tap(preset, setting("click_up"), preset - level)
+	if level < go.level then
+		return tap(go.level, setting("click_up"), go.level - level, go.preset_id)
 	end
-	tap(preset, setting("click_down"), level - preset)
+	tap(go.level, setting("click_down"), level - go.level, go.preset_id)
 end
 
 -- The machine's hooks for the stop (#421 D5, common/device.lua): a press
@@ -1318,18 +1920,14 @@ local function start_ramp(h, up, from)
 	-- The ramp replaces whatever target was pending (the turn-on at 1 %), and
 	-- a brightness ramp still running (#421: a hold ends it).
 	settle("brightness")
-	notify("LIGHT_BRIGHTNESS_CHANGING", {
-		LIGHT_BRIGHTNESS_CURRENT = from,
-		LIGHT_BRIGHTNESS_TARGET = to,
-		RATE = duration,
-	})
+	brightness_changing(from, to, duration, nil) -- a hold names no preset (#429 D7)
 	log.debug("hold: dim %s from %d, the tile over %d ms, Hue the whole range over %d ms", up and "up" or "down",
 		from, duration, full)
 	if not send("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
 		duration = string.format("%d", full) }) then
 		h.timer:Cancel()
 		h.timer, h.ramping = nil, false
-		notify("LIGHT_BRIGHTNESS_CHANGED", { LIGHT_BRIGHTNESS_CURRENT = from })
+		brightness_changed(from)
 	end
 end
 
@@ -1341,6 +1939,7 @@ end
 -- programming, say) holds from its estimate, and the hold's dim replaces it
 -- at Hue [assumed: #421 §7 L9]; start_ramp ends its record.
 function dev.on_hold(h, up, on)
+	cancel_hold_color()
 	if not ready("hold") then
 		return
 	end
@@ -1356,12 +1955,50 @@ function dev.on_hold(h, up, on)
 	end)
 end
 
+-- #427 D15: a hold carries no colour, since Hue's dimming_delta has no
+-- colour curve (guidelines D12), and the Dim colour never goes with a hold
+-- down, whose end is unknown (D12). HOLD_COLOR_DELAY_MS after the release,
+-- once the stop has gone out (a colour merged onto a pending dim stop is
+-- dropped by the bridge's queue, docs/tap-stop-design.md §8), the blend for
+-- the level reached glides in over HOLD_COLOR_GLIDE_MS, while a blend runs
+-- (in Fade mode always). The level is the bridge's report of the stop, or
+-- the release's estimate while that has not come. A press, or any
+-- brightness or colour command, cancels it first (cancel_hold_color).
+-- Nothing is armed while no blend would follow.
+local function hold_color(estimate)
+	cancel_hold_color()
+	if not turnon.level_color(modes, estimate, context()) then
+		return
+	end
+	mem.hold_color = C4:SetTimer(HOLD_COLOR_DELAY_MS, function()
+		mem.hold_color = nil
+		if blocker() then
+			return
+		end
+		local level = (not fallback.brightness and state.to_proxy_brightness(st)) or estimate
+		local c = turnon.level_color(modes, level, context())
+		local fields = c and state.color_fields(st, c.x, c.y, c.mode) or nil
+		if not fields then
+			return
+		end
+		local params = { rid = st.rid, rate = string.format("%d", HOLD_COLOR_GLIDE_MS) }
+		for k, v in pairs(fields) do
+			params[k] = v
+		end
+		log.debug("hold: the blend for %d %% follows the release", level)
+		if send("HUE_SET", params) then
+			color_sent(c, HOLD_COLOR_GLIDE_MS, params)
+		end
+	end)
+end
+
 -- The release (or release-as-click) after a hold: stop the dim at Hue,
 -- which keeps the level it reached; `level` is the estimate, for the bridge
 -- to write should Hue refuse the stop. The proxy hears the bridge's next
 -- report, or the estimate after the fallback time, also when the stop
 -- itself never reaches the bridge (logged; Hue then dims on to the end of
--- the range and reports it). The machine has armed the click guard.
+-- the range and reports it). The machine has armed the click guard. The
+-- blend follows (hold_color).
 function dev.on_finish(h)
 	if not (h.ramping and bridge and st.rid) then
 		return
@@ -1370,9 +2007,69 @@ function dev.on_finish(h)
 	send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level) })
 	arm("brightness", 0, function()
 		log.debug("dim stop unconfirmed after %d ms; assuming %d %%", FALLBACK_MS, level)
-		state.apply_hue(st, { on = "true", brightness = tostring(level) })
+		apply({ on = "true", brightness = tostring(level) })
 		report_brightness()
 	end)
+	hold_color(level)
+end
+
+-- #427 D15: any new press cancels a hold's blend still waiting. Every keypad
+-- route ends in dev.button_action (common/device.lua), so the press is
+-- caught here, before the machine judges it.
+local machine_action = dev.button_action
+function dev.button_action(button, action)
+	if action == device.ACT_PRESS then
+		cancel_hold_color()
+	end
+	return machine_action(button, action)
+end
+
+-- Presets at start (#427 D19) ---------------------------------------------
+
+-- One answer read (`read` returns the text) and handed to light.turnon's
+-- parser; how many colour presets it gave, 0 when it failed or gave none.
+-- The raw text is logged once at debug, cut at SETUP_LOG_MAX characters.
+local function setup_from(source, read)
+	local ok, text = pcall(read)
+	if not ok then
+		log.warn("%s failed: %s; presets not read from it", source, tostring(text))
+		return 0
+	end
+	if type(text) ~= "string" or text == "" then
+		log.debug("%s gave nothing", source)
+		return 0
+	end
+	log.debug("%s: %s", source, text:sub(1, SETUP_LOG_MAX))
+	local colors, levels = turnon.take_setup(modes, text)
+	log.debug("%s: %d colour and %d brightness presets", source, colors, levels)
+	return colors
+end
+
+-- SETUP_READ_MS after late init (a timer keeps the calls out of late init,
+-- and GetDeviceVariable must not run in OnDriverInit [verified: API
+-- 36_variable/_5-GetDeviceVariable.md]): the proxy's own answer to GET_SETUP
+-- through C4:SendUIRequest [verified: API 22_miscellaneous/_36-SendUIRequest.md;
+-- that the light_v2 proxy answers GET_SETUP to a driver this way is
+-- assumed, F19], else its variable 1300 "Color Presets" [verified: LV2 vars
+-- _0-HEADER.md; its format assumed, F20]. Both calls are protected, and what
+-- they give only fills gaps and maps: it never moves a light (D26). The
+-- persisted copies cover a proxy that answers neither.
+local function read_setup()
+	mem.setup_timer = nil
+	local id = proxy_id()
+	if not id then
+		return log.debug("no light_v2 proxy bound; presets not read")
+	end
+	if setup_from("GET_SETUP", function() return C4:SendUIRequest(id, "GET_SETUP", {}) end) == 0 then
+		setup_from("variable 1300", function() return C4:GetDeviceVariable(id, 1300) end)
+	end
+end
+
+local function cancel_setup_read()
+	if mem.setup_timer then
+		mem.setup_timer:Cancel()
+		mem.setup_timer = nil
+	end
 end
 
 -- Lifecycle ----------------------------------------------------------------
@@ -1397,6 +2094,9 @@ function OnDriverLateInit()
 	load_saved() -- before dev.late_init() runs a Restore that arrived early
 	dev.load_settings()
 	dev.load_colors()
+	turnon.load(modes) -- the On Modes and presets persisted before (#429, #427 §7.6)
+	cancel_setup_read() -- a late init run again (a dev reload) starts one read
+	mem.setup_timer = C4:SetTimer(SETUP_READ_MS, read_setup)
 	dispatch.replay_properties(Properties)
 	dev.show_driver_version(1)
 	prop("Hue Light ID", light_id_label())
@@ -1436,8 +2136,10 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 		hello(otherDevice)
 	else
 		bridge = nil
+		dev.link = nil -- the next bridge's hello answer says its own (#428 D4)
 		settle("brightness")
 		settle("color")
+		cancel_hold_color()
 		refresh_status()
 		report_online()
 	end
@@ -1453,5 +2155,7 @@ end
 function OnDriverDestroyed()
 	settle("brightness")
 	settle("color")
+	cancel_hold_color()
+	cancel_setup_read()
 	dev.cancel_timers() -- a keypad press and the click guard, the binding re-check, the Driver Version looks
 end

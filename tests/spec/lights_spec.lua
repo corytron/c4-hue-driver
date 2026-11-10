@@ -1507,6 +1507,65 @@ describe("bridge.lights", function()
 		end)
 	end)
 
+	-- #428 D8 (docs/offline-design.md §6.2): after a failed PUT on a light,
+	-- the light queue's on_undelivered calls lights:undelivered(rid), and the
+	-- device hears the bridge's last known state with reason "undelivered".
+	describe("undelivered (#428 D8)", function()
+		local hue_model
+
+		before_each(function()
+			hue_model = require("bridge.hue_model")
+			import_all()
+			c4.sent = {}
+		end)
+
+		it("sends the cached full state with reason undelivered to the light's device", function()
+			assert.is_true(L:undelivered(F.rids.living))
+			assert.equal(1, #c4.sent)
+			assert.equal(ID.living, c4.sent[1].id)
+			assert.equal("HUE_STATE", c4.sent[1].command)
+			assert.same(hue_model.state_params(L.models[F.rids.living], nil, "undelivered"), c4.sent[1].params)
+			assert.equal("undelivered", c4.sent[1].params.reason)
+			assert.truthy(c4.sent[1].params.on, "the full state, not only what changed")
+		end)
+
+		it("carries what the bridge last reported, not what was asked for", function()
+			L:on_container(container(F.events.brightness))  -- the bridge reports Living Room Lamp at 50 %
+			c4.sent = {}
+			L:undelivered(F.rids.living)
+			assert.equal("50", c4.sent[1].params.brightness)
+			assert.equal("undelivered", c4.sent[1].params.reason)
+		end)
+
+		it("sends a bare rid and reason for a registered light without a model", function()
+			L = new_lights()
+			L:load()  -- after a restart, before the first GET: entries but no models
+			c4.sent = {}
+			assert.is_nil(L.models[F.rids.garage])
+			assert.is_true(L:undelivered(F.rids.garage))
+			assert.same({ { id = ID.garage, command = "HUE_STATE",
+				params = { rid = F.rids.garage, reason = "undelivered" } } }, c4.sent)
+		end)
+
+		it("returns false and sends nothing for an unregistered rid, or none", function()
+			assert.is_false(L:undelivered("ffffffff-0000-4000-8000-0000000000aa"))
+			assert.is_false(L:undelivered(nil))
+			assert.equal(0, #c4.sent)
+		end)
+
+		it("sends nothing to a device no longer bound to the bridge", function()
+			L.reg:set_state(F.rids.garage, "unbound")
+			assert.is_false(L:undelivered(F.rids.garage))
+			assert.equal(0, #c4.sent)
+		end)
+
+		it("tells a light whose device belongs to another module nothing", function()
+			L.ctx.skip_devices = { [ID.garage] = true }
+			L:undelivered(F.rids.garage)
+			assert.equal(0, #c4.sent)
+		end)
+	end)
+
 	describe("relink", function()
 		before_each(function()
 			import_all()

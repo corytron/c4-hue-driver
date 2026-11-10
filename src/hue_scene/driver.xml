@@ -120,12 +120,12 @@
 	<capabilities>
 		<dimmer>True</dimmer>
 		<set_level>True</set_level>
-		<ramp_level>True</ramp_level>
-		<on_off>True</on_off>
-		<min_max>False</min_max>
-		<click_rates>False</click_rates>
+		<click_rates>True</click_rates>
+		<click_rate_min>0</click_rate_min>
+		<click_rate_max>6000000</click_rate_max>
 		<hold_rates>True</hold_rates>
 		<hold_rate_min>1000</hold_rate_min>
+		<hold_rate_max>6000000</hold_rate_max>
 		<cold_start>False</cold_start>
 		<has_leds>True</has_leds>
 		<supports_target>True</supports_target>
@@ -140,7 +140,6 @@
 		<reduced_als_support>True</reduced_als_support>
 		<advanced_scene_support>False</advanced_scene_support>
 		<load_group_support>False</load_group_support>
-		<buttons_are_virtual>True</buttons_are_virtual>
 	</capabilities>
 	<events/>
 	<connections>

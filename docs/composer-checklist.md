@@ -14,7 +14,8 @@ Bridge, Import All New, Add From Hue, Link Device, Forget Device, Resolve
 Names, Set Room Mapping, Diagnostics, Forget Pairing), the Hue Light and Hue
 Scene none, the Hue Motion Sensor one (Test Motion Programming), and much of
 what was a click is a background task. Section L holds the checks of 1.2 and
-the table of where each old action went. The steps of sections A to K keep
+the table of where each old action went. Release 1.5 adds a tenth bridge
+action, **Hue Automations** (#280, section N). The steps of sections A to K keep
 the action names of the build they were written for, as the record of what
 was checked; repeat one on 1.2 through the action that replaced it.
 
@@ -1384,6 +1385,244 @@ scene's) and back to Off at the end: its Lua tab then shows each command from th
     from off: the schedule starts once, and the second tap changes
     nothing.
     - **Done:** open.
+
+## N. Hue automation audit (#280)
+
+Written on 2026-11-09 from the contract
+(`docs/hue-automation-audit-design.md`, sections 6.2 to 6.5 and the house
+checks of section 8), before the build; check every quoted text against
+the first build that brings it and paste what differs. The owner's manual
+says the same in prose: the bridge's chapter 15 ("Hue automations"). The
+feature adds one property and one action to the Hue Bridge and changes no
+`<capabilities>`, so the install needs no reboot. The house bridge's only
+Hue automation today is its MotionAware area's, set to Do nothing on
+2026-10-26 (Discussion #290), so the first run should show no conflict.
+The reads of step 101 need a `--dev` build and the dev loop's `Hue Request`
+(`docs/dev-loop.md`). Standing approval covers every write here; each one
+is put back at once. Each step takes under a minute.
+
+99. **The row after install** (HC1). On the bridge's Properties page the
+    **Hue Automations** row reads `1 on bridge, 0 on Control4 lights, 0
+    disabled by Control4` (or the house's current count; paste it). Open
+    its drop-down: it shows `Does nothing: <area> (MotionAware), Control4
+    decides`, and its last line is `Not seen here: other apps' v1 rules,
+    Hue Labs, Alexa, Google, Apple Home routines`. **Attention** has no
+    automation item. The bridge's Lua output shows no `PUT` to
+    `behavior_instance`. Paste the row, the drop-down lines and Attention.
+    - **Done:** open.
+100. **A full read leaves it unchanged** (HC2). **Diagnostics** ▸
+     `Read everything from the bridge now`. The **Hue Automations** row reads
+     as in step 99, and **Last Action** names the read. Paste both.
+     - **Done:** open.
+101. **The area's automation refuses a switch-off** (HC3; dev loop,
+     `Hue Request`). Send `PUT /clip/v2/resource/behavior_instance/<the
+     area's instance>` with `{"enabled": false}`. Paste the HTTP status and
+     the error words (expected: 400). If the bridge accepts it, send
+     `{"enabled": true}` at once and note whether motion kept reaching the
+     area's Hue Motion device meanwhile.
+     - **Done:** open.
+102. **A Hue schedule on a Control4 lamp, end to end** (HC4; the owner's
+     phone, about a minute). In the Hue app make a Lighting schedule on one
+     lamp that has a Hue Light device. Within seconds the **Hue Automations**
+     row lists it under `On Control4 lights`, and **Attention** names it in
+     its `… on Control4 lights: <name> (Hue Automations)` item (paste the
+     item as written).
+     Run **Hue Automations** ▸ `Disable in Hue (…)` ▸ the schedule:
+     **Last Action** reads `Disabled in Hue: <name>. It stays on the bridge
+     and shows as off in the Hue app; Hue Automations ▸ Restore turns it on
+     again.`, and the Hue app shows the schedule off. Run **Hue
+     Automations** ▸ `Restore (…)` ▸ the schedule: it is on again, and
+     **Last Action** says it is now kept. Disable it once more, edit it in
+     the Hue app while it is disabled, and paste whether it comes back
+     enabled and whether it keeps its id (the row's line, and the Lua
+     output). Delete it in the Hue app: the row drops it. Read the Hue app
+     steps texts of the contract's section 6.5 (MotionAware, motion sensor,
+     Hue switch, Mimic presence) against the app's labels and paste every
+     label that differs.
+     - **Done:** open.
+103. **The record survives an update and a reboot** (HC5). With one Hue
+     automation disabled by Control4 (step 102's schedule, made again),
+     update the bridge driver in place, then reboot the controller: after
+     each, the **Hue Automations** row still lists it as
+     `Disabled by Control4 <date>`. Restore it and delete it in the Hue
+     app afterwards.
+     - **Done:** open.
+
+## O. Turn-on behaviour, colour presets and rate ranges (#429, #427, #430)
+
+Written on 2026-11-09 from the contract (`docs/turn-on-design.md`,
+decisions D1 to D27, the rules of its §4 and the checks T0 to T12 of its
+§9.2), before the build; check every quoted text against the first build
+that brings it and paste what differs. The owner's manual says the same in
+prose: the Hue Light's own Documentation tab ("On Mode", "Colours"), the
+Hue Scene's ("Keypad settings") and the bridge's chapter 11. This build
+changes the capabilities of `hue_light.c4z` and `hue_scene.c4z`: answer
+Yes to "Restart Director?" for each, then the owner reboots the controller
+from System Manager. Contract D27 installs it first as a `--dev` build, so
+that the parsers can be fixed Lua-only through the dev loop and the
+release needs no second reboot. The Windows session reads Composer, sets
+fields and `Debug Mode` and pastes the Lua output (standing approval: no
+need to ask); the owner taps and watches lamps. Each step takes under a
+minute.
+
+Setup: one Hue Light device for a single lamp, bound to a switch run as a
+2-button keypad (steps 33, 34 and 39); one zone light of two lamps, bound
+to a switch for step 108 (step 34); one Hue Scene device, bound to a switch
+for step 116. `Debug Mode` On on the light, the zone light and the scene
+for steps 106 to 116, and on the Hue Bridge where a step asks for its PUT
+lines; Off on all of them at the end. A device's Lua tab then shows each
+command from the proxy as `ReceivedFromProxy <binding> <command>` and each
+notice to it as `-> proxy <command> <parameters>`; the bridge's shows each
+request to Hue as `PUT <resource> <id>: <body>`. The contract's checks
+speak of "the HUE_SET line": the light does not log what it sends the
+bridge, so the bridge's PUT line is where its `mirek` shows.
+
+104. **Before the build (read only)** (T0; contract §2.3 and D10). On the
+    light, the zone light and the scene, read the proxy's settings page
+    above "Advanced Properties" (step 35): every field name and value,
+    especially Default On Brightness, any On Mode, the colour on mode, the
+    On colour, the Dim colour and its checkbox, and any default rate.
+    Paste them.
+    - **Done:** open.
+105. **Install and reboot** (T1; contract §7.1, D20 to D22). Install all
+     four files in place (step 1 or the deploy brief); "Restart Director?"
+     for the light and the scene drivers: Yes; the owner reboots the
+     controller from System Manager. Every Hue device shows the new
+     `Driver Version`. The settings page now shows a brightness On Mode
+     (Preset, Previous) and a colour on mode with Preset, Previous and
+     Fade; the scene shows Click Rate Up and Down at `3.000`. Type `7000`
+     into a hold rate: refused or brought back to at most `6000`; type
+     `6000`: kept; then set it back to `5.000`. In Programming, the light
+     still offers "Ramp to level" with times up to 6000 s. Paste.
+     - **Done:** open.
+106. **Default On Brightness** (T2; contract D4 and D7). Set it to 60 on
+     the light (Enter). Paste the Lua lines (expect
+     `UPDATE_BRIGHTNESS_PRESET` and/or `SET_PRESET_LEVEL`). Light off, tap
+     top: 60 %; the CHANGING line shows
+     `LIGHT_BRIGHTNESS_TARGET_PRESET_ID=1`. Set it back to 100.
+     - **Done:** open.
+107. **Previous on a lamp** (T3; contract D5, D6 and D25). Set On Mode to
+     Previous (paste the `UPDATE_BRIGHTNESS_ON_MODE` line). Slider to
+     35 %, tap bottom, tap top: back at 35 %. Off again, tap the Navigator
+     tile: 35 %; paste which command arrived (`SET_BRIGHTNESS_TARGET` with
+     a preset id, or `DYNAMIC_ON`). Light at 35 %, tap top: it goes to the
+     Default On Brightness. Set On Mode back to Preset.
+     - **Done:** open.
+108. **Previous on a zone** (T4; contract D6). On Mode Previous on the zone
+     light. In the Hue app set its lamps to 20 % and 80 %. Turn the zone
+     off from its tile, then tap top on its switch: each lamp comes back
+     at its own level (owner watching). Set it back to Preset.
+     - **Done:** open.
+109. **On and Dim colours** (T5; contract D10, D11, D13 and D14). On the
+     light: On colour 2700 K, Dim colour 2200 K with its checkbox ticked,
+     colour on mode Preset (paste the `UPDATE_COLOR_*` lines). Pick red on
+     the Navigator, turn the light off, tap top: it comes on warm white
+     (2700 K) at 100 %. Slider to 50: a little warmer. Pick blue: blue;
+     slider to 70: stays blue. Off and on again: 2700 K.
+     - **Done:** open.
+110. **Dim on a fade-out** (T6; contract D12). Light at 100 %, tap bottom:
+     it fades warmer as it goes off over about 3 s; the bridge's PUT line
+     carries `mirek`. Paste.
+     - **Done:** open.
+111. **A hold** (T7; contract D15). Light at 100 %, hold bottom to about
+     40 % and let go: the colour stays during the hold, then within about
+     1.5 s glides warmer.
+     - **Done:** open.
+112. **Fade** (T8; contract D13 and D14). Colour on mode Fade with On
+     4000 K and Dim 2000 K. Slider to 1, 50 and 100: about 2000 K, 3000 K
+     and 4000 K (owner watching; paste the bridge's PUT lines). Pick red,
+     then slider to 60: back to the fade colour.
+     - **Done:** open.
+113. **Previous colour** (T9; contract D11). Colour on mode Previous. Pick
+     red, off, tap top: red. Then set the light to what the owner chose
+     (contract §11): On colour 2700 K, the Dim colour's checkbox unticked,
+     colour on mode Preset.
+     - **Done:** open.
+114. **What the driver learned** (T10; contract D19 and §7.3). After a
+     restart of the light's driver with `Debug Mode` On (a Director
+     restart, or a reload through the dev loop while the `--dev` build of
+     contract D27 is installed), paste the light's `GET_SETUP` debug line
+     and the first `UPDATE_COLOR_ON_MODE` line seen in step 109 or 112.
+     - **Done:** open.
+115. **Default rate** (T11; contract D8). If the page shows a brightness
+     default rate, set it to 2 s: the tile's turn-on, and "Turn On" in
+     programming, now fade in over 2 s (a program on a spare keypad
+     button's tap will do, as in step 93; remove it afterwards). Set the
+     rate back.
+     - **Done:** open.
+116. **The scene** (T12; contract D1 and D21). Its tile turns it on as
+     designed (lamps at their scene levels). Set its Click Rate Up to
+     `1.000`: a top tap from off fades it in over about 1 s. Set it back to
+     `3.000`. Then set `Debug Mode` Off on every device of this section.
+     - **Done:** open.
+
+## P. Bridge outage: devices offline (#428)
+
+Written on 2026-11-09 from the contract (`docs/offline-design.md`, its
+§8.2), before the build; check every quoted text against the first build
+that brings it and paste what differs. The owner's manual says the same in
+prose: the bridge's chapter 4 ("When the bridge is offline") and 14.10,
+and the section "When the Hue bridge does not answer" of the Hue Light's
+and the Hue Scene's own Documentation tabs. Nothing in `driver.xml`
+changes, so the install needs no controller reboot. The steps need a
+`--dev` build with the dev loop (`docs/dev-loop.md`): its signed command
+shortens the 5 minutes to 30 seconds for the run, which a release build
+cannot do. The Windows session reads Composer, sets fields and `Debug Mode`
+and pastes the Lua output (standing approval: no need to ask); the owner
+taps the Navigator and the keypad and watches the lamp. Each step takes
+under a minute.
+
+Setup: `Debug Mode` On on the Hue Bridge and on one Hue Light that is
+bound to a switch run as a 2-button keypad (steps 33, 34 and 39), for
+steps 117 to 122; Off on both at the end.
+
+117. **Short offline time for the test.** `tools/devctl.py run
+     "Link_Offline_After" Seconds=30`. The bridge's **Last Action** reads
+     `Link Offline After: Hue devices go offline after 30 s of bridge
+     trouble, for this run`.
+     - **Done:** open.
+118. **Make the bridge unreachable.** Note the Hue Bridge's **Bridge IP
+     Address**, then set it to an address nothing answers at (for example
+     `192.0.2.250`) and click Set. Within a few seconds **Status** reads
+     `Bridge at 192.0.2.250 not reachable (…); checking again in 30 s`.
+     Paste **Status** and **Event Stream**.
+     - **Done:** open.
+119. **A command during the grace** (within 30 s of step 118). On a
+     Navigator, tap the Hue Light's tile from off to on. The tile does not
+     stay on: within about a second it shows the light off again. The
+     light's Lua output shows the `HUE_STATE` with reason `undelivered`.
+     Paste the tile and the lines.
+     - **Done:** open.
+120. **Offline after 30 s.** About 30 s after step 118: every Hue Light,
+     zone light, room light and Hue Scene tile is disabled on the
+     Navigator. Their **Status** reads `Hue Bridge not answering since
+     <time>` and **Online** reads `Offline`. The Hue Bridge's **Attention**
+     reads `Hue devices offline since <time>: the bridge has not answered
+     since <time>; they come back by themselves when it answers` (it may
+     also offer the bridge's real address in Bridges Found, because the
+     address was typed by hand: leave that item). A Hue Motion Sensor, if
+     the project has one, reads **Online** `No` and **Status** `Hue Bridge
+     not answering since <time>; motion not current`. The bridge's Lua
+     output has `Hue devices offline: the bridge has not answered since
+     <time> (not_answering); <n> devices told`. Paste each.
+     - **Done:** open.
+121. **Keypad while offline.** Tap the top button of the keypad bound to
+     the Hue Light: the lamp does nothing, the LED stays as it was, and the
+     light's Lua output says the command was dropped. Paste the line.
+     - **Done:** open.
+122. **Back online.** Set **Bridge IP Address** back to the noted value and
+     click Set. Within a few seconds **Status** reads `Paired`, **Event
+     Stream** `Connected since …`, every tile is usable again and shows the
+     lamps' real state, the Attention item is gone, and the motion device
+     reads **Online** `Yes`. The bridge's Lua output has `Hue devices
+     online: the bridge answers again after <duration>; <n> devices told`.
+     Paste the rows and the time from the Set to usable tiles.
+     - **Done:** open.
+123. **Release build.** Install the release build as usual (the deploy
+     brief; a release install ends the dev loop). The 30 s setting is gone
+     (5 minutes again). Nothing else to check. Set `Debug Mode` Off on the
+     bridge and the light if it is still On.
+     - **Done:** open.
 
 ## What to paste back
 

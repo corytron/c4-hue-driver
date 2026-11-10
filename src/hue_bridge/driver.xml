@@ -210,6 +210,14 @@
 				<type>DYNAMIC_LIST</type>
 				<readonly>false</readonly>
 			</property>
+			<!-- docs/hue-automation-audit-design.md §6.3 (#280): every Hue
+				 automation and how it meets Control4; a pick changes nothing. -->
+			<property>
+				<name>Hue Automations</name>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
+				<tooltip>Open the list to read every Hue automation and how it meets Control4</tooltip>
+			</property>
 			<property>
 				<name>Stream Address</name>
 				<default></default>
@@ -368,10 +376,24 @@
 					</param>
 				</params>
 			</action>
+			<!-- docs/hue-automation-audit-design.md §6.2 (#280, owner's Q1): one
+				 picker; Disable and Restore write only behavior_instance enabled,
+				 Keep and Stop keeping write nothing to Hue. -->
+			<action>
+				<name>Hue Automations</name>
+				<command>Hue Automations</command>
+				<sort_order>8</sort_order>
+				<params>
+					<param>
+						<name>Automation</name>
+						<type>CUSTOM_SELECT:HueAutomationList</type>
+					</param>
+				</params>
+			</action>
 			<action>
 				<name>Diagnostics</name>
 				<command>Diagnostics</command>
-				<sort_order>8</sort_order>
+				<sort_order>9</sort_order>
 				<params>
 					<param>
 						<name>What</name>
@@ -382,7 +404,7 @@
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
-				<sort_order>9</sort_order>
+				<sort_order>10</sort_order>
 				<params>
 					<param>
 						<name>Confirm</name>

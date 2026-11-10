@@ -16,6 +16,15 @@ light-side lifecycle), `docs/keypad-design.md` (Button Links, `HUE_DIM`,
 keypad LEDs) and `docs/scenes-design.md` §6 (a third dev-loop tree). The
 parts those changed are marked "Superseded" below; `docs/status.md`
 describes the present (the house has no Hue Light device at the moment).
+Current (2026-11-09, #429, #427, #430): turn-ons follow Control4's
+brightness On Mode and colour on modes, and the driver declares the rate
+ranges Control4 enforces; [the turn-on contract](turn-on-design.md) has
+the rules, and dated notes below say where it changed this file.
+Current (2026-11-09, #428): a light, zone or room light goes offline
+after 5 minutes of bridge trouble and back at the first contact, and a
+command the bridge fails to deliver is answered with the bridge's state;
+[the offline contract](offline-design.md) has the rules, and dated notes
+below say where it changed this file.
 
 ## Roles
 
@@ -61,6 +70,20 @@ Current (2026-10-25, build 316): `name` and `model` in `HUE_CONFIGURE` (and
 `bridge/lights.lua:configure_params`, #217), and a dev build's `DEV_RELOAD`
 carries `tree`, `version`, `bundle` (the signed payload) and `mac`
 (`common/devloop.lua`, `docs/dev-loop.md`).
+
+Current (2026-11-09, #428, [the offline contract](offline-design.md) §6.1,
+§6.2): a new bridge → light message, `HUE_BRIDGE_LINK` { `state`
+("online"/"offline"), with "offline" `reason` (`not_answering`,
+`other_bridge`, `key_rejected`, `blocked`, `not_paired`) and `since`
+(epoch seconds as a decimal string) }, goes to every Hue device at the
+change to offline after 300 s of bridge trouble, at the change back, at a
+reason change while offline, at the first evaluation of a run, and first
+in every answer to `HUE_HELLO`, before `HUE_CONFIGURE`. `HUE_STATE`'s
+`reason` gains `undelivered`: after every failed PUT on a light's rid
+(each retry, the final drop, a final refusal, another 4xx), the bridge
+sends the cached state with it (`lights:undelivered`; a bare
+`{ rid, reason }` when it has no model), and for a zone or room light
+after a failed grouped_light PUT (`zone_lights:undelivered`).
 
 `ExecuteCommand` does not tell the receiver who sent a message, so `rid` is
 in every message and the bridge maps rid → deviceId through its registry.
@@ -197,6 +220,13 @@ with the scenes and the zone lights (#56).
   runs at one PUT a second with a burst of 3, not the same constants, and in
   both queues a hold's start and stop skip the bucket (`new_group_queue`,
   `commands.urgent`; `docs/zone-light-design.md` Decision 9).
+- Current (2026-11-09, #428 D8): a new option, `on_undelivered(rid, err)`,
+  pcall-wrapped, is called after every PUT that did not land (each
+  retriable failure before its retry or drop, the final refusals, another
+  4xx, a raising `send`) and never for an ok; the retry and drop rule is
+  unchanged. The light queue passes `lights:undelivered`, the
+  grouped_light queue `zone_lights:undelivered` and
+  `scenes:undelivered_group`.
 - The light's limits (`min_dim`, `mirek_min/max`) come from the registry's
   cached model; `q:limits(rid, {...})` sets them.
 
@@ -204,6 +234,9 @@ with the scenes and the zone lights (#56).
 
 Modules under `src/hue_light/light/`: `state.lua` (cached Hue state, the
 mapping both ways), `caps.lua` (capability notify), plus `driver.lua`.
+Current (2026-11-09, #429, #427): `turnon.lua` joins them, pure Lua: the
+On Mode, the learned brightness and colour presets, the turn-on, turn-off
+and blend colours, persisted per device (turn-on contract §7.4, §7.6).
 Properties in `driver.xml`: `Hue Light ID`, `Hue Name`, `Model`, `Online`
 ("Online"/"Offline"/"" when unknown; read-only) alongside the existing
 ones (`Hue Room` and `Last Action` added by `docs/import-design.md` §7).
@@ -221,10 +254,25 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   `LIGHT_BRIGHTNESS_TARGET`, `RATE` } [verified], then
   `LIGHT_BRIGHTNESS_CHANGED` when the matching `HUE_STATE` arrives, or
   after `rate + 1000 ms` if it never does (so the UI never sticks).
+  Current (2026-11-09, #428 D9, D10): a `HUE_STATE` with reason
+  `undelivered` ends the ramp (not held back by #421 D10), settles every
+  pending brightness and colour target with the bridge's fields and reports
+  them as `CHANGED`, or, with no level in it, `LIGHT_BRIGHTNESS_CHANGED` at
+  the level the CHANGING started from; the fallback stays for a bridge that
+  accepts the PUT and sends no event. While the bridge's link is offline
+  the device is offline (a blocker after forgotten, unbound, unlinked and
+  gone) and drops every command before any CHANGING.
   Since 1.3 (#308), while a turn-on from off waits for its target, a
   report that shows the light on at another level (the lamp's previous
   brightness, seen for about 16 ms on the house) is held back until the
   target arrives or that deadline passes; an off always goes through.
+  Current (2026-11-09): a target without `RATE` uses the proxy's default
+  brightness rate (#430 D8), and every `HUE_SET` rate is clamped to 0 to
+  6 000 000 ms (D20). `LIGHT_BRIGHTNESS_TARGET_PRESET_ID` is read, and
+  CHANGING and CHANGED carry the preset ids (#429 D7); a zone or room
+  light's target from off naming the Previous preset is a group on with no
+  brightness (D6). A target above 0 carries the colour of the colour on
+  mode, and a target of 0 with a rate the Dim colour (#427 D11 to D15).
 - `SET_COLOR_TARGET` with xy and mode [assumed param keys:
   `LIGHT_COLOR_TARGET_X`, `LIGHT_COLOR_TARGET_Y`,
   `LIGHT_COLOR_TARGET_COLOR_MODE`, `LIGHT_COLOR_TARGET_RATE`; the docs print
@@ -237,7 +285,15 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   (`docs/design.md`, "Hardware pass of 2026-10-25 night"): the mode arrives
   as `LIGHT_COLOR_TARGET_MODE`, 1 for a Navigator temperature pick and 0 for
   a colour pick; the driver reads both mode spellings
-  (`src/hue_light/driver.lua`, `COLOR_KEYS`).
+  (`src/hue_light/driver.lua`, `COLOR_KEYS`). Current (2026-11-09, #427
+  D16, D17): a colour is stored only while the light is off **and** no
+  Control4 turn-on is pending; one that follows a turn-on before Hue
+  reports the light on is sent, so brightness-then-colour no longer loses
+  the colour. `LIGHT_COLOR_TARGET_PRESET_ID` and `…_PRESET_ORIGIN` are
+  read; a target without x and y is looked up among the learned colour
+  presets; a target that is the on colour leaves the blend running, any
+  other ends it (Preset mode). A target without a rate uses the colour
+  default rate (#430 D8).
 - Legacy, defensively: `ON` → target 100 (or the last on level),
   `OFF` → 0, `SET_LEVEL`/`RAMP_TO_LEVEL` { `LEVEL`, `TIME` } → the same path
   [assumed these may still arrive from old programming]. As built, `ON`
@@ -260,6 +316,16 @@ Proxy → bridge (`ReceivedFromProxy`, binding 5001):
   or programming's "Turn On" arrives as is still unverified: the reference
   says a Navigator uses the On preset when a driver lacks `DYNAMIC_ON`
   (`_1.3-DYNAMICON.md`), and the driver reports its preset to the proxy.
+  Current (2026-11-09, #429 D5, D6, D25; #430 D8): the on-mode preset API
+  is adopted. `ON`, `TOGGLE` from off and `DYNAMIC_ON` follow the On Mode
+  (Preset: the on mode preset's level, normally the On preset; Previous:
+  the last level reported to the proxy, else Hue's remembered level, else
+  the On preset, and on a zone or room light `HUE_SET {on = "true"}` with
+  no brightness) over the proxy's default brightness rate, 0 until the
+  proxy sends one. `OFF`, `TOGGLE` from on and `DYNAMIC_OFF` go off over
+  the same rate, with the Dim colour when it is above 0. Which command a
+  Navigator's tap arrives as is still to be logged (check T3 of the
+  turn-on contract, for #431).
 - `SYNCHRONIZE` → report cached state (brightness, colour, online).
 
 Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
@@ -268,6 +334,12 @@ Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
   `color_correlated_temperature_min`, `color_correlated_temperature_max`
   (Kelvin = 1000000 / mirek_max and / mirek_min, rounded) [verified: the
   docs require both supports_* in a single notify]; properties updated.
+  Current (2026-11-09, #430 D20): a second `DYNAMIC_CAPABILITIES_CHANGED`
+  follows it with `brightness_rate_min` 0, `brightness_rate_max` 6000000,
+  `color_rate_behavior` 1, `color_rate_min` 0 and `color_rate_max` 6000000
+  (`caps.rate_params()`), so a proxy that refused those values would keep
+  the colour flags. 3 s after late init the driver asks its proxy for
+  `GET_SETUP` to learn the presets (#427 D19).
 - `HUE_STATE`: `on=false` → `LIGHT_BRIGHTNESS_CHANGED` 0; `on=true` with
   `brightness` → that value rounded to a whole percent, at least 1. Hue
   reports its Zigbee level as a decimal percent (a requested 20 comes back
@@ -277,6 +349,11 @@ Bridge → proxy (`ExecuteCommand` `HUE_STATE`/`HUE_CONFIGURE`):
   mirek)` and `LIGHT_COLOR_CHANGED` { `LIGHT_COLOR_CURRENT_X`,
   `LIGHT_COLOR_CURRENT_Y`, `LIGHT_COLOR_CURRENT_COLOR_MODE = 1` }; mode "xy"
   → the xy with mode 0. `online` → `ONLINE_CHANGED` { `STATE` }.
+  Current (2026-11-09, #428 D5, D6): `ONLINE_CHANGED` is true only while
+  the bridge's link is not offline, the device's own blockers are clear
+  and Hue does not report the light unreachable; while the link is
+  offline, Status reads the link's text, for example "Hue Bridge not
+  answering since 14:02" ([`offline-design.md`](offline-design.md) §6.3).
 - Notify parameter names use underscores (`LIGHT_BRIGHTNESS_CURRENT` is
   verified in the sample driver; the colour ones follow the same pattern
   [assumed]).

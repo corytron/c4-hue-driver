@@ -612,6 +612,29 @@ end
 -- push (CONFIGURE when asked for or changed, then the full STATE once
 -- state_known) is bridge/owner.lua's.
 
+-- #428 D8 (docs/offline-design.md §6.2): a PUT on grouped_light
+-- `grouped_rid` failed (the group queue's on_undelivered, after each failed
+-- attempt). Every linked zone or room device on it hears its full state with
+-- reason "undelivered": the bridge's last known on/off and level (whatever
+-- is cached; without them the device still settles, D9), so it closes its
+-- target with that instead of the level it asked for. The group queue also
+-- carries the scenes' moves on the same grouped_light; a device that asked
+-- for nothing hears the state it already shows. Returns the number of
+-- devices told.
+function zone_lights:undelivered(grouped_rid)
+	if type(grouped_rid) ~= "string" or grouped_rid == "" then
+		return 0
+	end
+	local sent = 0
+	for _, rid in ipairs(self.reg:rids()) do
+		if self.registry[rid].state == "linked" and self:grouped_light_of(rid) == grouped_rid
+			and self:send_state(rid, "undelivered") then
+			sent = sent + 1
+		end
+	end
+	return sent
+end
+
 -- A group that left the bridge: CONFIGURE with state "gone", STATE online false.
 function zone_lights:announce_gone(rid, reason)
 	local entry = self.registry[rid]

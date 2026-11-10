@@ -250,59 +250,97 @@ end
 
 -- Proxy -> HUE_SET ---------------------------------------------------------
 
--- SET_BRIGHTNESS_TARGET -> HUE_SET params. Target 0 is off; anything else is
--- on at that brightness (the bridge clamps to the bulb's minimum). A colour
--- stored while the light was off rides along and is forgotten here.
-function state.from_brightness_target(st, target, rate)
-	target = to_num(target) or 0
-	local params = { rid = st.rid, rate = str(to_num(rate) or 0) }
-	if target <= 0 then
-		params.on = "false"
-		return params
+local function copy_into(params, fields)
+	for k, v in pairs(fields) do
+		params[k] = v
 	end
-	params.on = "true"
-	params.brightness = str(target)
-	if st.pending_color then
-		for k, v in pairs(st.pending_color) do
-			params[k] = v
-		end
-		st.pending_color = nil
-	end
-	return params
 end
 
--- SET_COLOR_TARGET -> HUE_SET params. Mode 1 (CCT) becomes a mirek clamped
--- to the bulb's range; mode 0 passes xy through (the bridge clamps to the
--- gamut). A bulb with only one of the two abilities gets that one whatever
--- the mode. Returns nil plus a reason instead when nothing is to be sent:
--- "stored" (light off: kept for the next turn-on, the light_v2 best
--- practice), "unsupported" (no colour at all) or "no xy".
-function state.from_color_target(st, x, y, mode, rate)
+-- The HUE_SET colour fields for a proxy colour (x, y, light_v2 mode): a
+-- mirek clamped to the bulb's range for a CCT colour on a bulb with CCT, and
+-- for any colour on a bulb with CCT alone; xy passed through on a colour
+-- bulb (the bridge clamps it to the gamut). nil plus why instead: "no xy",
+-- or "unsupported" (a white-only bulb, which never gets colour: #427 D18).
+-- Every colour the driver sends goes through here: a SET_COLOR_TARGET, the
+-- On and Dim colours of a turn-on or turn-off, a blend (#427 D11-D15).
+function state.color_fields(st, x, y, mode)
 	x, y = to_num(x), to_num(y)
 	mode = to_num(mode) or state.MODE_XY
 	if not (x and y) then
 		return nil, "no xy"
 	end
-	local fields
 	if st.has_cct and (mode == state.MODE_CCT or not st.has_color) then
 		local kelvin = C4:ColorXYtoCCT(x, y)
 		if not kelvin or kelvin <= 0 then
 			kelvin = 1 -- off the locus entirely; clamps to the warmest the bulb has
 		end
-		fields = { mirek = str(clamp(round(1000000 / kelvin), st.mirek_min, st.mirek_max)) }
+		return { mirek = str(clamp(round(1000000 / kelvin), st.mirek_min, st.mirek_max)) }
 	elseif st.has_color then
-		fields = { x = str(x), y = str(y) }
-	else
-		return nil, "unsupported"
+		return { x = str(x), y = str(y) }
 	end
-	if st.on == false then
+	return nil, "unsupported"
+end
+
+-- SET_BRIGHTNESS_TARGET -> HUE_SET params. Target 0 is off; anything else is
+-- on at that brightness (the bridge clamps to the bulb's minimum).
+-- `opts` (#429, #427):
+--   color   HUE_SET colour fields (state.color_fields) to send along: the
+--           On colour of a turn-on, the Dim colour of a timed turn-off, a
+--           blend (D11-D15). A colour stored while the light was off wins
+--           over it on a turn-on (D11) and is forgotten here; a turn-off
+--           never spends a stored colour.
+--   native  on only, no brightness: a zone or room light's Previous
+--           turn-on, where Hue brings every lamp back at its own level (D6).
+-- Returns the params and which colour went out: "stored", "given" or nil.
+function state.from_brightness_target(st, target, rate, opts)
+	opts = opts or {}
+	target = to_num(target) or 0
+	local params = { rid = st.rid, rate = str(to_num(rate) or 0) }
+	if target <= 0 then
+		params.on = "false"
+		if opts.color then
+			copy_into(params, opts.color)
+			return params, "given"
+		end
+		return params, nil
+	end
+	params.on = "true"
+	if not opts.native then
+		params.brightness = str(target)
+	end
+	if st.pending_color then
+		copy_into(params, st.pending_color)
+		st.pending_color = nil
+		return params, "stored"
+	elseif opts.color then
+		copy_into(params, opts.color)
+		return params, "given"
+	end
+	return params, nil
+end
+
+-- SET_COLOR_TARGET -> HUE_SET params, mapped by state.color_fields. Returns
+-- nil plus a reason instead when nothing is to be sent: "stored" (light
+-- off: kept for the next turn-on, the light_v2 best practice), or
+-- color_fields' "unsupported" or "no xy". `opts.on_soon` (#427 D17): a
+-- Control4 turn-on of this light is under way whose report has not come
+-- yet, so the cache still says off; the colour goes out instead of being
+-- stored, and the bridge usually folds it into the turn-on's request.
+-- Until 1.5 it was stored, and the report of the turn-on then voided it
+-- (apply_hue): brightness then colour lost the colour.
+function state.from_color_target(st, x, y, mode, rate, opts)
+	local fields, why = state.color_fields(st, x, y, mode)
+	if not fields then
+		return nil, why
+	end
+	if st.on == false and not (opts and opts.on_soon) then
 		st.pending_color = fields
 		return nil, "stored"
 	end
+	-- Sent now: a colour stored before is superseded by this one.
+	st.pending_color = nil
 	local params = { rid = st.rid, rate = str(to_num(rate) or 0) }
-	for k, v in pairs(fields) do
-		params[k] = v
-	end
+	copy_into(params, fields)
 	return params
 end
 

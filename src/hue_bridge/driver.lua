@@ -18,6 +18,7 @@ local scenes_mod = require("bridge.scenes")
 local zone_lights_mod = require("bridge.zone_lights")
 local motion_mod = require("bridge.motion")
 local motion_diag_mod = require("bridge.motion_diag")
+local automations_mod = require("bridge.automations")
 local commands = require("bridge.commands")
 local netcheck = require("bridge.netcheck")
 local project_mod = require("bridge.project")
@@ -30,6 +31,7 @@ local group_hold_mod = require("bridge.group_hold")
 local rows_mod = require("bridge.rows")
 local bridges_found_mod = require("bridge.bridges_found")
 local away_mod = require("bridge.away")
+local link_mod = require("bridge.link")
 local identity_mod = require("bridge.identity")
 local tasks_mod = require("bridge.tasks")
 local netgate_mod = require("bridge.netgate")
@@ -68,6 +70,7 @@ local state = {
 	scenes = nil,        -- bridge.scenes (docs/scenes-design.md), created in OnDriverLateInit
 	zone_lights = nil,   -- bridge.zone_lights (docs/zone-light-design.md), created in OnDriverLateInit
 	motion = nil,        -- bridge.motion (docs/motion-design.md), created in OnDriverLateInit
+	automations = nil,   -- bridge.automations (docs/hue-automation-audit-design.md, #280), created in OnDriverLateInit
 	motion_diag = nil,   -- bridge.motion_diag, Log Motion Diagnostics
 	queue = nil,         -- bridge.commands coalescer, created in OnDriverLateInit
 	group_queue = nil,   -- the same for grouped_light (scene OFF)
@@ -159,6 +162,11 @@ local function refresh_status()
 	-- Every change of what the background tasks' guards read passes here.
 	if state.hk then
 		state.hk:wake()
+	end
+	-- The bridge cannot be used (unpaired, key rejected, TLS, identity): the
+	-- link counts it as trouble (#428 D2 d).
+	if state.link then
+		state.link:evaluate()
 	end
 end
 
@@ -410,6 +418,16 @@ local function bridge_request(req, callback)
 		if type(r) == "table" and (r.code == 401 or r.code == 403) then
 			confirm_key_rejected(r.code)
 		end
+		-- The link to the bridge (#428 D2 c, f): a 2xx is contact; a transfer
+		-- that failed without an HTTP status is trouble, except the local
+		-- invalid request path. 429, 5xx and other 4xx are neither.
+		if type(r) == "table" and state.link then
+			if r.ok then
+				state.link:contact()
+			elseif r.code == nil and r.err ~= http.INVALID_PATH then
+				state.link:trouble()
+			end
+		end
 		callback(r)
 	end)
 end
@@ -591,6 +609,9 @@ local function attention_text()
 	for _, item in ipairs(state.away:attention_items()) do
 		items[#items + 1] = item
 	end
+	for _, item in ipairs(state.link and state.link:attention_items() or {}) do
+		items[#items + 1] = item
+	end
 	local text = state.lights:attention()
 	if text and text ~= "" and text ~= "None" then
 		items[#items + 1] = text
@@ -603,6 +624,12 @@ local function attention_text()
 	end
 	if state.motion then
 		for _, item in ipairs(state.motion:attention_items() or {}) do
+			items[#items + 1] = item
+		end
+	end
+	-- Hue automations acting on Control4 lights (#280, contract §6.4).
+	if state.automations then
+		for _, item in ipairs(state.automations:attention_items() or {}) do
 			items[#items + 1] = item
 		end
 	end
@@ -647,6 +674,10 @@ local function refresh_lights_props()
 	if not state.zone_lights then
 		return -- before late init created the modules
 	end
+	-- The audit's view is computed from the devices, never stored (#280 D19).
+	if state.automations then
+		state.automations:evaluate()
+	end
 	show_module_list("Lights", state.lights)
 	local attention = attention_text()
 	if attention ~= state.attention_sent then
@@ -659,12 +690,21 @@ local function refresh_lights_props()
 	if state.motion then
 		show_module_list("Motion Sensors", state.motion)
 	end
+	if state.automations then
+		show_module_list("Hue Automations", state.automations)
+	end
 end
 
 local function new_queue()
 	return commands.new({
 		send = function(rid, body, done)
 			bridge_request({ method = "PUT", path = "/clip/v2/resource/light/" .. rid, body = body }, done)
+		end,
+		-- A PUT that failed answers the device with the bridge's last word (#428 D8).
+		on_undelivered = function(rid)
+			if state.lights then
+				state.lights:undelivered(rid)
+			end
 		end,
 	})
 end
@@ -685,6 +725,16 @@ local function new_group_queue()
 		-- Where a refused dim stop's fallback estimate starts.
 		level_of = function(rid)
 			return state.scenes and state.scenes.group_level and state.scenes.group_level[rid] or nil
+		end,
+		-- A grouped_light PUT that failed answers the zone lights and the
+		-- scenes on that group with the bridge's last word (#428 D8, D9).
+		on_undelivered = function(rid)
+			if state.zone_lights then
+				state.zone_lights:undelivered(rid)
+			end
+			if state.scenes then
+				state.scenes:undelivered_group(rid)
+			end
 		end,
 	})
 end
@@ -729,10 +779,17 @@ local function resync_all(done, tier)
 				note("zone light", zok, zerr, zsent)
 				state.motion:resync(function(mok, merr, msent)
 					note("motion", mok, merr, msent)
-					refresh_lights_props()
-					if done then
-						done(failures)
-					end
+					-- The Hue automations last: the full tier reads them, the
+					-- quick tier answers at once (#280 D18).
+					state.automations:resync(function(aok, aerr, asent)
+						if tier ~= "quick" then
+							note("automation", aok, aerr, asent)
+						end
+						refresh_lights_props()
+						if done then
+							done(failures)
+						end
+					end, tier)
 				end)
 			end, grouped)
 		end)
@@ -787,6 +844,37 @@ state.away = away_mod.new({
 	log = log,
 	now_ms = now_ms,
 })
+
+-- The link to the bridge (#428, docs/offline-design.md §3): every Hue device
+-- goes offline after OFFLINE_AFTER_S of trouble and back at the first contact.
+-- The devices of all four modules, as one set of device ids.
+local function link_device_ids()
+	local ids = {}
+	local function add(registry)
+		for _, entry in pairs(registry or {}) do
+			if entry.device_id then
+				ids[tonumber(entry.device_id) or entry.device_id] = true
+			end
+		end
+	end
+	add(state.lights and state.lights.registry)
+	add(state.scenes and state.scenes.registry)
+	add(state.zone_lights and state.zone_lights.registry)
+	add(state.motion and state.motion.registry)
+	return ids
+end
+state.link = link_mod.new({
+	state = state,
+	paired = paired,
+	keyed_refusal = keyed_refusal,
+	now_ms = now_ms,
+	device_ids = link_device_ids,
+	send = device_send,
+	refresh = refresh_lights_props,
+	log = log,
+	clock = function(ms) return state.away:clock(ms) end,
+})
+state.away.ctx.link = state.link
 
 local function new_stream()
 	return (use_netstream() and netstream or stream).new({
@@ -854,11 +942,13 @@ local function new_stream()
 			state.zone_lights:on_container(container)
 			state.motion:on_container(container)
 			state.motion_diag:on_container(container)
+			local automations_changed = state.automations and state.automations:on_container(container)
 			-- A resource appearing or disappearing changes the counts and the
 			-- Attention list; plain updates (state, names) do not, except the
 			-- motion devices' battery, reachability and switched-off state,
 			-- which Attention lists at once (docs/motion-design.md D5, D6).
-			if container.type == "add" or container.type == "delete" or motion_rows_changed(container) then
+			if container.type == "add" or container.type == "delete" or motion_rows_changed(container)
+				or automations_changed then
 				refresh_lights_props()
 			end
 			prop_soon("Events Received", state.stream.stats.containers)
@@ -892,7 +982,8 @@ local function show_bridge_info(info)
 	prop("Bridge Model", config.model_label(info.model))
 	state.bridges_found:show() -- its summary names the model
 	prop("Bridge Name", util.display_name(info.name))
-	prop("Bridge Firmware", config.firmware_label(info.sw_version, info.api_version))
+	state.bridge_firmware = config.firmware_label(info.sw_version, info.api_version)
+	prop("Bridge Firmware", state.bridge_firmware)
 	if config.firmware_check(info.sw_version) == "old" then
 		log.warn("bridge firmware %s is older than %d: the CLIP v2 API may be missing", tostring(info.sw_version),
 			config.MIN_FIRMWARE)
@@ -958,6 +1049,9 @@ local function choose_stream_address(callback)
 		return state.identity:verify("stream", function(ok)
 			if ok then
 				choose_stream_address(callback)
+			elseif state.link then
+				-- An unsupported model fails without a Status refresh: count it (#428 E11).
+				state.link:evaluate()
 			end
 		end)
 	end
@@ -1290,6 +1384,7 @@ dispatch.properties["Lights"] = list_pick("Lights")
 dispatch.properties["Scenes"] = list_pick("Scenes")
 dispatch.properties["Zone_Lights"] = list_pick("Zone Lights")
 dispatch.properties["Motion_Sensors"] = list_pick("Motion Sensors")
+dispatch.properties["Hue_Automations"] = list_pick("Hue Automations")
 
 -- False, with the reason in Last Action, when an action cannot run.
 local function can()
@@ -1642,6 +1737,8 @@ end
 
 dispatch.commands["HUE_MOTION_HELLO"] = function(params)
 	params = params or {}
+	-- The link first, so the device knows before its state (#428 D4).
+	state.link:tell(tonumber(params.device_id))
 	if not state.motion:hello(params) then
 		log.debug("HUE_MOTION_HELLO from unregistered motion device %q (device %s)", tostring(params.rid),
 			tostring(params.device_id))
@@ -1727,6 +1824,8 @@ end
 -- Messages from scene devices (docs/scenes-design.md §2).
 dispatch.commands["HUE_SCENE_HELLO"] = function(params)
 	params = params or {}
+	-- The link first, so the device knows before its state (#428 D4).
+	state.link:tell(tonumber(params.device_id))
 	-- hello(rid, params): the rid is a separate argument, as for lights.
 	if not state.scenes:hello(params.rid or "", params) then
 		log.debug("HUE_SCENE_HELLO not answered for %q (device %s)", tostring(params.rid), tostring(params.device_id))
@@ -1836,6 +1935,8 @@ end
 -- and state.
 dispatch.commands["HUE_HELLO"] = function(params)
 	params = params or {}
+	-- The link first, so the device knows before its state (#428 D4).
+	state.link:tell(tonumber(params.device_id))
 	local rid = params.rid or ""
 	if params.kind == "group" then
 		if not state.zone_lights:hello(params) then
@@ -1889,6 +1990,7 @@ dispatch.commands["Forget_Pairing"] = function()
 	prop("Stream Address", "")
 	prop("Bridge Model", "")
 	prop("Bridge Name", "")
+	state.bridge_firmware = nil
 	prop("Bridge Firmware", "")
 	prop("Events Received", 0)
 	prop("Last Event", "")
@@ -1933,6 +2035,11 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 	if log.enabled("debug") then
 		log.debug("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
 			tostring(otherDeviceID), tostring(otherBindingID))
+	end
+	-- A device bound during an outage hears the link before the state its
+	-- binding brings (#428 E21, D4): no online-then-offline flicker.
+	if state.link and tonumber(idBinding) == 1 and (bIsBound == true or bIsBound == "true") then
+		state.link:tell(tonumber(otherDeviceID))
 	end
 	if state.scenes then
 		state.scenes:on_binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
@@ -2107,6 +2214,143 @@ local diagnostics = {
 	[D.CHECK_PINNING] = { order = 9, dev = true, text = "(dev) Check CA pinning", run = dev_command("Check_CA_Pinning") },
 }
 
+-- Hue automation audit (#280, docs/hue-automation-audit-design.md §6.1) -------
+-- The context the audit runs on: which lights Control4 controls (Hue Light
+-- devices directly, and the members of rooms and zones with a zone light or
+-- Hue Scene device, D3), how a Hue reference expands to lights (D4), and the
+-- driver's own hooks. Built in a function so the main chunk keeps its locals.
+local function new_automations()
+	local function composer_name(entry)
+		local ok, name = pcall(function() return C4:GetDeviceDisplayName(entry.device_id) end)
+		if ok and type(name) == "string" and name ~= "" then
+			return name
+		end
+		return entry.device_name or entry.name
+	end
+	local function lights_of(rid, rtype, out, seen)
+		if rid == nil or seen[rid] then
+			return out
+		end
+		seen[rid] = true
+		local groups = state.lights and state.lights.groups
+		local devices = state.lights and state.lights.devices or {}
+		if rtype == "light" then
+			out[#out + 1] = rid
+		elseif rtype == "device" then
+			for _, light in ipairs(devices[rid] and devices[rid].light_rids or {}) do
+				out[#out + 1] = light
+			end
+		elseif rtype == "room" or rtype == "zone" or rtype == "bridge_home" then
+			local group = groups and groups:group(rid)
+			for _, child in ipairs(group and group.children or {}) do
+				local child_type = (group.child_rtypes and group.child_rtypes[child]) or group.child_rtype
+				if devices[child] then
+					child_type = "device"
+				elseif groups:group(child) then
+					child_type = groups:group(child).type
+				end
+				lights_of(child, child_type, out, seen)
+			end
+		elseif rtype == "grouped_light" then
+			for _, group in ipairs(groups and groups:groups() or {}) do
+				if group.grouped_light_rid == rid then
+					lights_of(group.rid, group.type, out, seen)
+				end
+			end
+			local home = groups and groups:groups("bridge_home") or {}
+			for _, group in ipairs(home) do
+				if group.grouped_light_rid == rid then
+					lights_of(group.rid, group.type, out, seen)
+				end
+			end
+		elseif rtype == "scene" or rtype == "smart_scene" then
+			local scene = state.scenes and state.scenes:scene(rid)
+			local group_rid = scene and scene.group_rid
+			local group = group_rid and groups and groups:group(group_rid)
+			if group then
+				lights_of(group.rid, group.type, out, seen)
+			end
+		end
+		return out
+	end
+	local function expand(rid, rtype)
+		return lights_of(rid, rtype, {}, {})
+	end
+	return automations_mod.new(module_ctx({
+		bridge_id = function() return paired() and state.creds.bridge_id or nil end,
+		firmware = function() return state.bridge_firmware end, -- D12: refusals per firmware
+		paired = function() return connection() ~= nil and not state.key_rejected end,
+		control4 = function()
+			local lights, via = {}, {}
+			for rid, entry in pairs(state.lights and state.lights.registry or {}) do
+				if entry.state ~= "gone" then
+					lights[rid] = composer_name(entry)
+				end
+			end
+			for group_rid, entry in pairs(state.zone_lights and state.zone_lights.registry or {}) do
+				if entry.state ~= "gone" then
+					local group = state.lights.groups and state.lights.groups:group(group_rid)
+					for _, light in ipairs(group and expand(group_rid, group.type) or {}) do
+						via[light] = via[light] or composer_name(entry)
+					end
+				end
+			end
+			for scene_rid, entry in pairs(state.scenes and state.scenes.registry or {}) do
+				if entry.state ~= "gone" then
+					for _, light in ipairs(expand(scene_rid, "scene")) do
+						via[light] = via[light] or composer_name(entry)
+					end
+				end
+			end
+			return { lights = lights, via = via }
+		end,
+		expand = expand,
+		light_name = function(rid)
+			local model = state.lights and state.lights.models and state.lights.models[rid]
+			return model and model.name or nil
+		end,
+		motion_device = function(rid)
+			local entry = state.motion and state.motion.registry and state.motion.registry[rid]
+			if entry and entry.state ~= "gone" then
+				return composer_name(entry)
+			end
+			return nil
+		end,
+		last_action = function(text) last_action(text) end,
+		changed = function() refresh_lights_props() end,
+		-- A resync or an import running refuses a click with its busy text (R9).
+		busy = function()
+			for _, module in ipairs({ state.lights, state.scenes, state.zone_lights, state.motion }) do
+				local text = module and module.busy_text and module:busy_text()
+				if text then
+					return text
+				end
+			end
+			return nil
+		end,
+		wrote = function() state.last_write_ms = C4:GetTime() end,
+		set_timer = function(ms, fn) return C4:SetTimer(ms, fn) end, -- [verified: API 34/_1]
+	}))
+end
+
+-- The action's one picker returns Composer's list and its Back link (§6.2).
+function HueAutomationList(folder)
+	if not state.automations then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	local ok, list, back = pcall(state.automations.picker, state.automations, folder)
+	if ok and type(list) == "table" then
+		return list, back
+	end
+	log.warn("HueAutomationList: %s", tostring(list))
+	return { { text = "(error building the list; see Lua output)", value = "" } }
+end
+dispatch.commands["Hue_Automations"] = function(params)
+	if can() then
+		state.automations:run(params)
+	end
+end
+
 local function new_actions()
 	return actions_mod.new({
 		lights = state.lights, scenes = state.scenes, zone_lights = state.zone_lights, motion = state.motion,
@@ -2153,8 +2397,11 @@ dispatch.commands["Forget_Pairing"] = function(params)
 	if (params or {}).Confirm ~= actions_mod.CONFIRM_YES then
 		return last_action(actions_mod.NOT_CONFIRMED)
 	end
+	-- C8: what Control4 disabled in Hue stays disabled; say so (#280).
+	local automations_text = state.automations and state.automations:forget_pairing_text()
 	forget_pairing(params)
-	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept")
+	last_action("Pairing forgotten: the key is gone and the event stream stopped; devices and the address are kept"
+		.. (automations_text and (". " .. automations_text) or ""))
 end
 
 -- Set Room Mapping's second picker is "Control4 Room" in 1.2; "Room" still
@@ -2230,6 +2477,7 @@ function OnDriverLateInit(dit)
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
 	state.away:load() -- the last good address and the last move, from the store
+	state.link:load() -- an outage that outlived the last run (#428 D12)
 	state.lights = new_lights()
 	state.lights:load()
 	-- Configure every known light from the persisted registry before any
@@ -2282,6 +2530,8 @@ function OnDriverLateInit(dit)
 	state.motion:load()
 	state.motion:configure_all()
 	state.motion:reconcile()
+	state.automations = new_automations()
+	state.automations:load()
 	-- The diagnostics' output goes into public issues: everything that
 	-- identifies this bridge is scrubbed from every line (docs/motion-design.md §4.3).
 	-- Attention items that wait an hour (a sensor unreachable, an area
@@ -2375,10 +2625,20 @@ end
 -- started by unloaded code holds binding 6001 beside the new code's, never
 -- sees a report, and ends the new code's connection with its own connect
 -- timeout and retries (the flapping of 2026-11-05).
+-- The driver deleted from the project (API 22_miscellaneous/_26-OnDriverRemovedFromProject.md):
+-- what Control4 disabled in Hue stays disabled; the log says which (#280 C9).
+function OnDriverRemovedFromProject()
+	local text = state.automations and state.automations:removal_text()
+	if text then
+		log.always("%s", text)
+	end
+end
+
 function OnDriverDestroyed()
 	state.destroyed = true
 	pair_window:close()
 	state.away:cancel_outage_check()
+	state.link:cancel()
 	attention_rows:cancel()
 	last_action_rows:cancel()
 	if state.hk then
