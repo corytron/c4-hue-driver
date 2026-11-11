@@ -70,6 +70,13 @@ and goes onto the house (`deploy/house.yaml`, #441). What 1.4 changes
     0.250 / 0.750);
   - the stairwell motion device's hold time is 60 s (was 300);
   - the bedroom switches' ambient LED profile never turns the LEDs off.
+  - **2026-11-11, #467:** the three bedroom switches' Status LED curve is
+    now a ramp (dark below ambient 10, bright above 50, was a step at
+    74/75) with the night minimum halved (13 on the keypad dimmer, 17 on
+    the two switches; maximum 255), so the keypad no longer sits at the
+    night level while the switches are at full by day. Set in Composer
+    through each device's Ambient Light Customization editor, read back
+    from Composer's log; nothing is saved to the project file.
 - **Next: 1.5** (one controller reboot), built on feature branches on
   2026-11-09 after the owner's decisions on the audit issues: the Hue
   automation audit (#280, PR #285, merged first: no reboot of its own),
