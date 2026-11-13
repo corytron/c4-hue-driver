@@ -311,7 +311,8 @@ The trust rules of #483 apply on both sides:
     the secrets check refuses;
   - a box address `10.0.2.150`.
 
-  Both go into `.gitleaks.toml`'s allowlist and `CLAUDE.md`.
+  Both go into `.gitleaks.toml`'s allowlist and `CLAUDE.md`; the address is
+  allowlisted since 2026-11-13, the id with the first fixture.
   `src/hue_syncbox/certs/` is allowlisted like the bridge's certs.
 - **The ledger** (`tests/fixtures/ledger.lua`) gains the box driver's rows.
   The `lua_limits` rule applies.
