@@ -16,16 +16,20 @@ present, this page and the code win. Brought up to date on 2026-11-13
   after 8 hours; a development build's Driver Version reads `<build>-dev`;
   devices ignore bridge messages for another resource; a burst of light
   commands goes out at most three requests at a time. No `<capabilities>`
-  change, so no controller reboot. Its install on the house is in progress
-  (`deploy/house.yaml` names v1.7, build 636); until it is recorded, the
-  house runs 1.6 as below. The first release from the four-job Release
+  change, so no controller reboot.
+- **The house runs 1.7, build 636: installed.** The Windows session installed
+  it in place at 00:15 local; deployment 7757781288 is recorded as a success
+  (2026-11-13 05:19 UTC), and the deploy issue #502 is closed. All eight Hue
+  devices read Driver Version 636 exactly (no `-dev`), with `Debug Mode` Off,
+  every one Online with the same Status as on 1.6, and the log since the
+  install shows no error or warning. The first release from the four-job Release
   workflow, verified by `deploy.py` against the tag's commit and `main`.
 - **Before it: 1.6 "Kassa", build 624**, released 2026-11-13
   ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.6),
   #474). It carries the four drivers: Hue Bridge (`hue_bridge.c4z`), Hue
   Light (`hue_light.c4z`), Hue Scene (`hue_scene.c4z`) and Hue Motion
   Sensor (`hue_motion.c4z`). Install all four from the same release.
-- **The house runs 1.6, build 624: installed.** `deploy/house.yaml` names
+- **Before that the house ran 1.6, build 624.** `deploy/house.yaml` names
   v1.6, build 624 (PR #475). The Windows session installed it in place at
   22:56 local time; deployment 7756665067 on the environment
   [`house`](https://github.com/corytron/c4-hue-driver/deployments/house)
