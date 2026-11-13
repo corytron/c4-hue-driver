@@ -2126,6 +2126,19 @@ function motion:unimported_named(wanted)
 	return out
 end
 
+-- (owner hook) The Hue room or zone whose mapping decides a device's room
+-- mark. A whole-home area has none: since #469 the whole home can be mapped,
+-- but only for scenes (docs/scene-tracking-design.md P6), so its mapping
+-- never marks a motion device.
+function motion:mark_group(_rid, entry)
+	local g = entry and entry.hue_room_rid
+	local group = g and self:groups():group(g)
+	if group and group.type == "bridge_home" then
+		return nil
+	end
+	return g
+end
+
 -- Add Motion Sensor / Add Motion Area --------------------------------------------------------------
 
 -- (owner hook) The room an add goes to: the mapping of a sensor's Hue room,

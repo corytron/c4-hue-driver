@@ -1715,6 +1715,17 @@ describe("bridge.motion", function()
 			assert.equal(PORCH, fake.project.devices[2001].room_id, "nothing moved")
 		end)
 
+		it("never marks a whole-home area by the whole home's mapping, which is for scenes only (#469 P6)", function()
+			local groups = { group = function(_, rid)
+				return ({ home = { type = "bridge_home" }, kitchen = { type = "room" } })[rid]
+			end }
+			local self = setmetatable({ groups = function() return groups end }, { __index = motion })
+			assert.is_nil(motion.mark_group(self, "a1", { hue_room_rid = "home" }))
+			assert.equal("kitchen", motion.mark_group(self, "a2", { hue_room_rid = "kitchen" }))
+			assert.equal("gone", motion.mark_group(self, "a3", { hue_room_rid = "gone" }))
+			assert.is_nil(motion.mark_group(self, "a4", {}))
+		end)
+
 		it("names (bridge/names.lua): a sensor's name is its device's, an area's its configuration's; a Hue rename is told",
 			function()
 			add_both()

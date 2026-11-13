@@ -631,10 +631,13 @@ ledger.rows = {
 	},
 	{
 		id = "S6",
-		capability = "Scene device: recall, OFF, dimmer, Recall As, On State Follows, time-of-day, keypad",
+		capability = "Scene device: recall, OFF, dimmer, Recall As, Keypad Follows, time-of-day, keypad",
 		gate = { "prop" },
 		paths = {
 			{ property = "Recall As", type = "LIST", items = { "As set in Hue", "Static", "Dynamic" }, driver = "hue_scene" },
+			{ property = "Keypad Follows", type = "LIST", items = { "Room/zone lights", "This scene" },
+				driver = "hue_scene" },
+			-- Hidden since #469; declared until 2.0 so its value carries over (D12).
 			{ property = "On State Follows", type = "LIST", items = { "Room/zone lights", "This scene" },
 				driver = "hue_scene" },
 			{ proxy = "light_v2", driver = "hue_scene" },

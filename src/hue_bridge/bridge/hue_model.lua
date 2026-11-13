@@ -1045,11 +1045,11 @@ function hue_model.group_color(lights)
 end
 
 -- A group's owner-facing label from its raw name and type: "Bedside Lights
--- (zone)", "Master Bedroom", "(all lights)" for the bridge_home, "(no room)"
+-- (zone)", "Master Bedroom", "(whole home)" for the bridge_home, "(no room)"
 -- without a name (the wording of groups:label and scenes.lua).
 function hue_model.group_label(name, gtype)
 	if gtype == "bridge_home" then
-		return "(all lights)"
+		return "(whole home)"
 	elseif name == nil or name == "" then
 		return "(no room)"
 	elseif gtype == "zone" then
