@@ -20,6 +20,12 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
   for its grouped_light (`dimming.brightness`, the average of the lights
   that are on), rounded and clamped to 1–100 while the scene is on; 0 while
   off; 100 while on but no level is known yet.
+  Current (2026-11-12, #469): "on" here is the scene's own on state (the
+  on rule below) and nothing else. The lights mode of
+  [`scene-led-design.md`](scene-led-design.md) also showed the room's
+  level while only its lamps were on; that branch is gone, and a scene
+  that is not active shows 0 while another scene lights the room
+  ([`scene-tracking-design.md`](scene-tracking-design.md) D1, D13).
 - **The on rule (new).** The scene is on from the moment it becomes active
   (recalled from Control4, from a keypad, or from the Hue app: any
   `HUE_SCENE_STATE` static / dynamic_palette) until its group turns off
@@ -34,6 +40,11 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
   scene is on exactly while Hue says it runs
   (`docs/smart-scenes-design.md` Decision 2;
   `src/hue_scene/driver.lua:held`).
+  Current (2026-11-12, #469): the rule stays, also through a lamp changed
+  from outside. `other_active` now also comes for scenes of groups that
+  share a lamp, from a recall's answer and at every resync and hello; a
+  configure that says the scene is gone ends the held state, and one
+  that brings a new rid clears it ([`scene-tracking-design.md`](scene-tracking-design.md) D2, D3, D7).
 - **Slider / SET_BRIGHTNESS_TARGET {LIGHT_BRIGHTNESS_TARGET, RATE}:**
   target 0 → off (as OFF, with the rate); target > 0 while off → recall
   with `brightness = target` and `duration = RATE`; target > 0 while on →
@@ -42,6 +53,11 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
   and `LIGHT_BRIGHTNESS_CHANGED` when the bridge's level report arrives,
   or the target after RATE + 1 s (the existing fallback pattern).
   SET_LEVEL / RAMP_TO_LEVEL map to the same path.
+  Current (2026-11-12, #469): "while off" means while this scene is not
+  the active one, also while another scene lights the room, so the slider
+  switches scenes; after a recall at a level the bridge assumes that
+  level until Hue reports, and a target right after a recall as designed
+  waits for the first level report ([`scene-tracking-design.md`](scene-tracking-design.md) D4, D6).
   Current (2026-10-25, build 316): on a time-based scene a target below
   100 from off starts the schedule, and the move follows once its look is
   on (`docs/smart-scenes-design.md` Decision 4;

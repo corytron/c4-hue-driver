@@ -19,6 +19,12 @@ becomes one of two modes.
    after the update) or `This scene` (the on rule as before).
 2. In the lights mode, the Navigator tile and slider follow too, not only
    the keypad LEDs: the device has one on state.
+   Current (2026-11-12, #469): superseded. The tile, the slider and the
+   proxy's events follow the scene alone, in both modes; the property,
+   renamed **Keypad Follows** with its stored value copied once, chooses
+   only what a bound keypad treats as on. One device with two states is
+   departure D20 of [the guidelines](c4-lighting-guidelines.md), the
+   owner's exception ([`scene-tracking-design.md`](scene-tracking-design.md) O1, D1, D9 to D13).
 
 ## Behaviour
 
@@ -46,6 +52,11 @@ becomes one of two modes.
       off the top button plays the scene at 1 % and brightens.
   - What the commands do is unchanged: ON and a tap on top play the scene;
     OFF and a tap on bottom turn the room or zone off.
+  - Current (2026-11-12, #469): two states now. The scene half
+    (`effective_on()`) drives the tile's level, the proxy's events, TOGGLE
+    and the slider's choice; the keypad's own state (the scene half, or
+    with `Room/zone lights` also the group on) drives the LEDs, the toggle
+    button and the holds ([`scene-tracking-design.md`](scene-tracking-design.md) D1, D9 to D11).
 - **Not persisted.** The group's on/off is not kept across a restart: the
   bridge sends it again with its answer to the device's hello. Until then
   the on rule's persisted `held_on` and the scene's status decide, as
