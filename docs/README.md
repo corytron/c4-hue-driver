@@ -58,6 +58,10 @@ of it is live.
 - [`scene-led-design.md`](scene-led-design.md): On State Follows: a scene
   device's tile and keypad LEDs follow its room or zone's lights, or the
   scene alone (#310).
+- [`scene-tracking-design.md`](scene-tracking-design.md): a scene device's
+  tile follows its own scene, its slider switches to it, Keypad Follows
+  keeps the keypad on the room's lights, and scenes stay in the Control4
+  room their Hue room or zone maps to (#469).
 - [`smart-scenes-design.md`](smart-scenes-design.md): Hue's time-of-day
   ("smart") scenes as Hue Scene devices: start, stop, dim while running,
   listing and naming.
