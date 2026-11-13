@@ -12,8 +12,12 @@ present, this page and the code win. Brought up to date on 2026-11-13
 - **Latest release: 1.8 "B2EMO", build 644**, released 2026-11-13
   ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.8),
   #509): a Hue Scene that is on shows its last level after a reload instead of
-  100 until the bridge reports (#505). Lua only, no reboot. Its install on
-  the house is in progress (`deploy/house.yaml` names v1.8, build 644).
+  100 until the bridge reports (#505). Lua only, no reboot.
+- **The house runs 1.8, build 644: installed** at 01:10 local; deployment
+  7758551474 recorded as a success, deploy issue #511 closed. All eight Hue
+  devices read 644 exactly with `Debug Mode` Off, every one Online, no error
+  or warning in the log. The #505 check passed on a second reload: Shine,
+  on at 17 %, held 17 and never showed 100.
 - **Before it: 1.7 "Clem", build 636**, released 2026-11-13
   ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.7),
   #500): the fixes of the security review of 2026-11-13 (#480, PR #496,
@@ -22,7 +26,7 @@ present, this page and the code win. Brought up to date on 2026-11-13
   devices ignore bridge messages for another resource; a burst of light
   commands goes out at most three requests at a time. No `<capabilities>`
   change, so no controller reboot.
-- **The house runs 1.7, build 636: installed.** The Windows session installed
+- **Before that the house ran 1.7, build 636.** The Windows session installed
   it in place at 00:15 local; deployment 7757781288 is recorded as a success
   (2026-11-13 05:19 UTC), and the deploy issue #502 is closed. All eight Hue
   devices read Driver Version 636 exactly (no `-dev`), with `Debug Mode` Off,
