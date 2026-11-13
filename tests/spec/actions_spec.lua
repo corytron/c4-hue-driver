@@ -102,8 +102,8 @@ local BASE = {
 
 local KEYS = { "lights", "zone_lights", "scenes", "motion", "names" }
 
--- opts: [module] = false (absent) or { method = fn | false }, paired = false,
--- diagnostics, dev.
+-- opts: [module] = false (absent) or { method = fn | false | a table field
+-- such as the scenes' `project` }, paired = false, diagnostics, dev.
 local function world(opts)
 	opts = opts or {}
 	local w = { calls = {}, said = {}, logs = {} }
@@ -115,9 +115,13 @@ local function world(opts)
 			for name, fn in pairs(BASE[key]) do methods[name] = fn end
 			for name, fn in pairs(opts[key] or {}) do methods[name] = fn or nil end
 			for name, fn in pairs(methods) do
-				m[name] = function(self, ...)
-					w.calls[#w.calls + 1] = { name = key .. ":" .. name, args = { ... } }
-					return fn(self, ...)
+				if type(fn) == "function" then
+					m[name] = function(self, ...)
+						w.calls[#w.calls + 1] = { name = key .. ":" .. name, args = { ... } }
+						return fn(self, ...)
+					end
+				else
+					m[name] = fn
 				end
 			end
 			ctx[key] = m
@@ -154,7 +158,8 @@ local function world(opts)
 		for _, c in ipairs(w.calls) do
 			local method = c.name:match(":(.+)$")
 			if not method:match("^picker_") and not ({ record_of = true, group_label = true, new_count = true,
-				new_records = true, bridge_count = true, device_ids = true, suggested = true, resolve_rows = true })[method] then
+				new_records = true, bridge_count = true, device_ids = true, suggested = true, resolve_rows = true,
+				group_target = true })[method] then
 				out[#out + 1] = c.name
 			end
 		end
@@ -439,8 +444,10 @@ describe("bridge/actions.lua", function()
 				{ { What = "light:L1", Room = "none" }, "Not added: pick a room under Room, or (mapped room)" },
 				{ { What = "all:lights", Room = "7" }, "Not added: all new lights go each into the room its Hue room "
 					.. "maps to; set Room to (mapped room), or pick one" },
-				{ { What = "f:scenes:R1", Room = "7" }, "Not added: all new scenes of a room or zone go each into the "
-					.. "room its Hue room maps to; set Room to (mapped room), or pick one" },
+				-- #469 F2: without scenes:group_target (an older module) an explicit Room is still
+				-- refused, without the misleading "or pick one".
+				{ { What = "f:scenes:R1", Room = "7" }, "Not added: the scenes of a room or zone go into the room it maps "
+					.. "to; set Room to (mapped room)" },
 				{ { What = "f:lights" }, "Not added: Lights is a folder; open it and pick one inside" },
 				{ { What = "f:scenes" }, "Not added: Scenes is a folder; open it and pick one inside" },
 				{ { What = "f:scenes:?" }, "Not added: open this folder and pick one scene" },
@@ -825,6 +832,259 @@ describe("bridge/actions.lua", function()
 			assert.equal("Nothing run: \"diag:reload_credentials\" is not a diagnostic of this build", w.said[2])
 			assert.equal("Raise: started", w.said[3])
 			assert.truthy(w.said[4]:find("^Diagnostics failed: .*broken"))
+		end)
+	end)
+
+	-- #469 (docs/scene-tracking-design.md Part 2): scene folders name where
+	-- their scenes go (S1), Link Device's scene rows name the device's room
+	-- (S2), "All scenes of" a group takes its own mapped room (F2), and the
+	-- scenes module's refusals reach Last Action as they are.
+	describe("scenes and their Control4 rooms (#469)", function()
+		-- Six groups, one per kind of target scenes:group_target answers.
+		local RECORDS = {
+			S1 = { group_rid = "R1" }, S2 = { group_rid = "R1" }, S3 = { group_rid = "Z1" },
+			S4 = { group_rid = "R2" }, S5 = { group_rid = "R2" }, S6 = { group_rid = "R3" },
+			S7 = { group_rid = "Z2" }, S8 = { group_rid = "H", group_type = "bridge_home" },
+		}
+		local LABELS = { R1 = "Kitchen", Z1 = "Attic (zone)", R2 = "Garden", R3 = "Pantry", Z2 = "TV Area (zone)",
+			H = "(whole home)" }
+		local TARGETS = {
+			R1 = { text = "Kitchen", room_id = 7, sort_key = "kitchen" },
+			Z1 = { text = "Living Room", room_id = 8, sort_key = "living room" },
+			R2 = { text = "(unmapped)", sort_key = "~" },
+			R3 = { text = "(Control4 room gone)", sort_key = "~" },
+			Z2 = { text = "(no mapping)", sort_key = "~" },
+			H = { text = "(unmapped)", sort_key = "~" },
+		}
+		local P1 = "Not added: Hue room Garden is not mapped to a Control4 room. Map it with Set Room Mapping (Hue Room "
+			.. "Garden, Control4 room of your choice), then add again"
+
+		local function rooms_world(opts)
+			opts = opts or {}
+			local scenes = {
+				picker_scenes = function()
+					return { { text = "Kitchen: Relax", value = "S1" }, { text = "Kitchen: Bright (dynamic)", value = "S2" },
+						{ text = "Attic (zone): Night", value = "S3" }, { text = "Garden: Calm", value = "S4" },
+						{ text = "Garden: Read", value = "S5" }, { text = "Pantry: Work", value = "S6" },
+						{ text = "TV Area (zone): Movie", value = "S7" }, { text = "(whole home): Bright", value = "S8" } }
+				end,
+				record_of = function(_, rid) return RECORDS[rid] end,
+				group_label = function(_, g) return LABELS[g] end,
+				group_target = function(_, g) return TARGETS[g] end,
+				-- As scenes:add_all_of_group judges an explicit Room (scenes:placement).
+				add_all_of_group = function(_, g, room_id, done)
+					local t = TARGETS[g]
+					if not t.room_id then
+						done(false, P1)
+					elseif room_id and room_id ~= t.room_id then
+						done(false, string.format("Not added: the scenes of %s go to Control4 room %s, its mapped room, "
+							.. "not %s; set Room to (mapped room), or change the mapping with Set Room Mapping", LABELS[g],
+							t.text, room_id == 13 and "Den" or ("room " .. room_id)))
+					else
+						done(true, "Added 2 scenes of " .. LABELS[g] .. " to " .. t.text)
+					end
+					return true
+				end,
+			}
+			for k, v in pairs(opts.scenes or {}) do scenes[k] = v end
+			opts.scenes = scenes
+			opts.lights = opts.lights or { picker_rooms = function()
+				return { { text = "(mapped room)", value = "mapped" }, { text = "Main / Kitchen", value = "7" },
+					{ text = "Main / Living Room", value = "8" }, { text = "Upstairs / Den", value = "13" } }
+			end }
+			return world(opts)
+		end
+
+		it("S1: each folder names where its scenes go, sorted by that room, groups with no room last", function()
+			local w = rooms_world()
+			local folders = w.a:add_list("f:scenes")
+			assert.same({ "Back to all folders",
+				"Kitchen → Kitchen: 2 scenes",
+				"Attic (zone) → Living Room: 1 scene",
+				"(whole home) → (unmapped; Set Room Mapping first): 1 scene",
+				"Garden → (unmapped; Set Room Mapping first): 2 scenes",
+				"Pantry → (Control4 room gone): 1 scene",
+				"TV Area (zone) → (no mapping): 1 scene" }, texts(folders))
+			assert.same({ "f:top", "f:scenes:R1", "f:scenes:Z1", "f:scenes:H", "f:scenes:R2", "f:scenes:R3",
+				"f:scenes:Z2" }, values(folders))
+			-- Only a folder with a room to go to is picked as a whole.
+			assert.same({ true, true }, { folders[2].selectable, folders[3].selectable })
+			for i = 4, 7 do assert.is_nil(folders[i].selectable, folders[i].text) end
+			-- Link Device's To: the same labels and order, never selectable.
+			local to = w.a:link_target_list("f:scenes")
+			assert.same(texts(folders), texts(to))
+			for _, e in ipairs(to) do assert.is_nil(e.selectable) end
+			assert.same({}, w.acted())
+		end)
+
+		it("S1: a mapped folder opens on an All row naming its room; an unmapped one only lists its scenes", function()
+			local w = rooms_world()
+			assert.same({ "Back to Scenes", "All 2 scenes of Kitchen into Kitchen", "Relax", "Bright (dynamic)" },
+				texts((w.a:add_list("f:scenes:R1"))))
+			assert.same({ "f:scenes", "f:scenes:R1", "scene:S1", "scene:S2" }, values((w.a:add_list("f:scenes:R1"))))
+			assert.same({ "Back to Scenes", "All 1 scene of Attic (zone) into Living Room", "Night" },
+				texts((w.a:add_list("f:scenes:Z1"))))
+			for _, g in ipairs({ "R2", "R3", "Z2" }) do
+				local list = w.a:add_list("f:scenes:" .. g)
+				assert.equal("f:scenes", list[1].value)
+				for i = 2, #list do
+					assert.truthy(list[i].value:find("^scene:"), g .. ": no All row: " .. list[i].text)
+				end
+			end
+			assert.same({ "Back to Scenes", "Calm", "Read" }, texts((w.a:add_list("f:scenes:R2"))))
+			-- The whole home's scenes lose the "(whole home): " the scenes' picker puts in front.
+			assert.same({ "Back to Scenes", "Bright" }, texts((w.a:add_list("f:scenes:H"))))
+			-- Mapped (P6), its All row says "the whole home".
+			local home = rooms_world({ scenes = { group_target = function(_, g)
+				if g == "H" then return { text = "Den", room_id = 13, sort_key = "den" } end
+				return TARGETS[g]
+			end } })
+			assert.same({ "Back to Scenes", "All 1 scene of the whole home into Den", "Bright" },
+				texts((home.a:add_list("f:scenes:H"))))
+			assert.equal("(whole home) → Den: 1 scene", texts((home.a:add_list("f:scenes")))[2])
+			local problems = {}
+			walk(function(f) return w.a:add_list(f) end, problems)
+			assert.same({}, problems)
+		end)
+
+		it("S1: reads the project's rooms once for the list, and puts a room of any name before the groups with none",
+			function()
+			local reads, given = 0, {}
+			local rooms = { [7] = "Kitchen", [9] = "Ölraum" }
+			local w = rooms_world({ scenes = {
+				project = { rooms = function() reads = reads + 1 return rooms end },
+				group_target = function(_, g, r)
+					given[#given + 1] = r
+					if g == "R3" then return "Ölraum", 9, "ölraum" end  -- "ö" is bytes above "~"
+					return TARGETS[g]
+				end } })
+			local folders = texts((w.a:add_list("f:scenes")))
+			assert.same({ "Back to all folders", "Kitchen → Kitchen: 2 scenes", "Attic (zone) → Living Room: 1 scene",
+				"Pantry → Ölraum: 1 scene", "(whole home) → (unmapped; Set Room Mapping first): 1 scene",
+				"Garden → (unmapped; Set Room Mapping first): 2 scenes", "TV Area (zone) → (no mapping): 1 scene" }, folders)
+			assert.equal(1, reads)
+			assert.equal(6, #given)
+			for _, r in ipairs(given) do assert.equal(rooms, r) end
+		end)
+
+		it("S1: takes group_target's three values too, and falls back to the old folder when it fails", function()
+			local w = rooms_world({ scenes = { group_target = function(_, g)
+				if g == "R2" then error("broken") end
+				local t = TARGETS[g]
+				return t.text, t.room_id, t.sort_key
+			end } })
+			local folders = texts((w.a:add_list("f:scenes")))
+			assert.equal("Kitchen → Kitchen: 2 scenes", folders[2])
+			assert.equal("Garden: 2 scenes", folders[5], "today's label, sorted with the groups with no room")
+			assert.truthy(w.logs[1]:find("scenes:group_target failed: ", 1, true))
+			assert.same({ "Back to Scenes", "All scenes of Garden not in Control4 yet", "Calm", "Read" },
+				texts((w.a:add_list("f:scenes:R2"))))
+		end)
+
+		it("F2: all scenes of a group go in with Room set to its own mapped room; another room is refused", function()
+			local w = rooms_world()
+			w.a:run_add({ What = "f:scenes:R1", Room = "7" })
+			assert.same({ "scenes:add_all_of_group" }, w.acted())
+			assert.equal("R1", w.of("scenes:add_all_of_group")[1][1])
+			assert.same({ "Added 2 scenes of Kitchen to Kitchen" }, w.said)
+			w = rooms_world()
+			w.a:run_add({ What = "f:scenes:R1", Room = "mapped" })
+			assert.same({ "Added 2 scenes of Kitchen to Kitchen" }, w.said)
+			-- Another room: the scenes module refuses it (one text, scenes:placement), naming both rooms
+			-- and the ways out; the room picked reaches it as a number.
+			w = rooms_world()
+			w.a:run_add({ What = "f:scenes:Z1", Room = "13" })
+			assert.same({ "scenes:add_all_of_group" }, w.acted())
+			assert.equal(13, w.of("scenes:add_all_of_group")[1][2])
+			assert.same({ "Not added: the scenes of Attic (zone) go to Control4 room Living Room, its mapped room, not Den; "
+				.. "set Room to (mapped room), or change the mapping with Set Room Mapping" }, w.said)
+			-- A group with no room: the scenes module's own refusal, whatever the Room.
+			for _, room in ipairs({ "7", "mapped" }) do
+				w = rooms_world()
+				w.a:run_add({ What = "f:scenes:R2", Room = room })
+				assert.same({ "scenes:add_all_of_group" }, w.acted())
+				assert.same({ P1 }, w.said)
+			end
+		end)
+
+		it("S2: Link Device's scene rows name the device's Control4 room from one lookup, when they are shown", function()
+			local lookups = {}
+			local function project(answer)
+				return { call = function(_, name, filter)
+					lookups[#lookups + 1] = { name, filter.DeviceIds }
+					return answer()
+				end, rooms = function() return { [14] = "Hall" } end }
+			end
+			local scenes = {
+				picker_relink_devices = function()
+					return { { text = "Kitchen: Concentrate (device 1241, gone since 10-21)", value = "1241" },
+						{ text = "Kitchen: Old (device 12, unbound since 10-20)", value = "12" },
+						{ text = "Attic (zone): Night (device 1250)", value = "1250" } }
+				end,
+				project = project(function()
+					return true, { ["1241"] = { roomId = 13, roomName = "Den" }, [12] = { roomId = 14, roomName = "" } }
+				end),
+			}
+			local w = world({ scenes = scenes })
+			assert.same({ "Back to all folders", "Kitchen: Concentrate (device 1241 in Den, gone since 10-21)",
+				"Kitchen: Old (device 12 in Hall, unbound since 10-20)", "Attic (zone): Night (device 1250)" },
+				texts((w.a:link_list("f:scenes"))))
+			assert.same({ { "devices", "1241,12,1250" } }, lookups)
+			-- No lookup when the scene rows are not shown.
+			w.a:link_list("f:lights")
+			w.a:link_list("")
+			assert.equal(1, #lookups)
+			-- At the top when the scenes are the only kind.
+			w = world({ scenes = scenes, lights = { picker_relink_devices = function() return {} end },
+				motion = { picker_relink_devices = function() return {} end } })
+			assert.equal("Kitchen: Concentrate (device 1241 in Den, gone since 10-21)", (w.a:link_list(""))[2].text)
+			assert.equal(2, #lookups)
+			assert.same({}, w.acted())
+			-- A failed lookup names no room.
+			for _, answer in ipairs({ function() return false, nil end, function() error("no project") end,
+				function() return true, "junk" end }) do
+				scenes.project = project(answer)
+				w = world({ scenes = scenes })
+				assert.same({ "Back to all folders", "Kitchen: Concentrate (device 1241, gone since 10-21)",
+					"Kitchen: Old (device 12, unbound since 10-20)", "Attic (zone): Night (device 1250)" },
+					texts((w.a:link_list("f:scenes"))))
+			end
+			-- Without the scenes' project calls, the rows as before.
+			scenes.project = nil
+			assert.equal("Kitchen: Concentrate (device 1241, gone since 10-21)",
+				texts((world({ scenes = scenes }).a:link_list("f:scenes")))[2])
+			-- scenes:device_rooms, when the module has it, is the lookup ({ [id] = { id, name } });
+			-- its failure names no room and adds no "could not be listed" row.
+			scenes.device_rooms = function(_, ids)
+				lookups[#lookups + 1] = { "device_rooms", table.concat(ids, ",") }
+				return { [1241] = { id = 13, name = "Den" } }
+			end
+			w = world({ scenes = scenes })
+			assert.same({ "Back to all folders", "Kitchen: Concentrate (device 1241 in Den, gone since 10-21)",
+				"Kitchen: Old (device 12, unbound since 10-20)", "Attic (zone): Night (device 1250)" },
+				texts((w.a:link_list("f:scenes"))))
+			assert.same({ "device_rooms", "1241,12,1250" }, lookups[#lookups])
+			scenes.device_rooms = function() error("lookup failed") end
+			w = world({ scenes = scenes })
+			assert.same({ "Back to all folders", "Kitchen: Concentrate (device 1241, gone since 10-21)",
+				"Kitchen: Old (device 12, unbound since 10-20)", "Attic (zone): Night (device 1250)" },
+				texts((w.a:link_list("f:scenes"))))
+		end)
+
+		it("passes a scene refusal on to Last Action as the scenes module wrote it", function()
+			local P3 = "Not linked: device 1201 is in Den; Relax belongs to Hue room Kitchen, which maps to Kitchen. Pick a "
+				.. "scene of a Hue room mapped to Den, or change the mapping with Set Room Mapping"
+			local w = world({ scenes = { relink = function() return false, P3 end } })
+			w.a:run_link({ Device = "dev:1201", To = "scene:S1" })
+			assert.same({ P3 }, w.said)
+			w = world({ scenes = { relink = function() return P3 end } })
+			w.a:run_link({ Device = "dev:1201", To = "scene:S1" })
+			assert.same({ P3 }, w.said)
+			-- Among the first line's suggested matches, unchanged too.
+			w = world({ scenes = { relink = function() return false, P3 end,
+				suggested = function() return { { device_id = 1201, rid = "S1" } } end } })
+			w.a:run_link({ Device = "dev:suggested" })
+			assert.truthy(w.last():find("Suggested matches: " .. P3 .. " | ", 1, true), w.last())
 		end)
 	end)
 

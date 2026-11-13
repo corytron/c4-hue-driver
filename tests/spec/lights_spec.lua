@@ -1231,8 +1231,9 @@ describe("bridge.lights", function()
 			L:load()
 			resync()
 			assert.same({}, said)
-			assert.equal("Garage → (no mapping, by hand); Living Room → Living Room (by name); Attic (zone) → (unmapped); "
-				.. "Downstairs (zone) → (unmapped)", L:room_mappings_text())
+			-- #469 S4: "(no mapping)" says what it means for the scenes.
+			assert.equal("Garage → (no mapping, by hand; its scenes cannot be added); Living Room → Living Room (by name); "
+				.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped)", L:room_mappings_text())
 
 			-- A project whose room list is unknown postpones the run instead of using it up.
 			c4 = fake.install_c4()
@@ -2122,14 +2123,15 @@ describe("bridge.lights", function()
 				{ L:set_room_mapping(F.group_rids.attic, nil) })
 			assert.same({ [F.group_rids.garage] = "none", [F.group_rids.living_room] = "name",
 				[F.group_rids.downstairs] = "hand", [F.group_rids.attic] = "none" }, c4.persist.hue_rooms_auto.how)
-			assert.equal("Garage → (no mapping, by hand); Living Room → Living Room (by name); "
-				.. "Attic (zone) → (no mapping, by hand); Downstairs (zone) → Garage (by hand)", L:room_mappings_text())
+			-- #469 S4: "(no mapping)" says what it means for the scenes.
+			assert.equal("Garage → (no mapping, by hand; its scenes cannot be added); Living Room → Living Room (by name); "
+				.. "Attic (zone) → (no mapping, by hand; its scenes cannot be added); Downstairs (zone) → Garage (by hand)",
+				L:room_mappings_text())
 			assert.same({ false, "Not mapped: pick a Hue room first" }, { L:set_room_mapping("", LIVING_ROOM) })
 			assert.same({ false, "Not mapped: Hue room nope is not on the bridge (Diagnostics ▸ Read everything from the "
 				.. "bridge now, then try again)" },
 				{ L:set_room_mapping("nope", LIVING_ROOM) })
-			assert.same({ false, "Not mapped: the whole bridge cannot be mapped to one room" },
-				{ L:set_room_mapping(F.group_rids.home, LIVING_ROOM) })
+			-- #469 P6: the whole home is mapped now ("room mappings for the whole home" below).
 			assert.same({ false, "Not mapped: Control4 room 99 does not exist" },
 				{ L:set_room_mapping(F.group_rids.garage, 99) })
 			assert.same({ false, "Not mapped: pick a Control4 room or (no mapping)" },
@@ -2142,10 +2144,11 @@ describe("bridge.lights", function()
 			fake.add_room(9, " Downstairs ", 4, "Lower")
 			fake.add_room(10, "Living Room", 4, "Lower")  -- a second room with that name: ambiguous
 			resync()
-			-- The update to 1.2 maps nothing by itself; the matches are offered.
-			assert.equal("Garage → (unmapped; Control4 room GARAGE matches); Living Room → (unmapped); "
-				.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped; Control4 room  Downstairs  matches)",
-				L:room_mappings_text())
+			-- The update to 1.2 maps nothing by itself; the matches are offered, and
+			-- since #469 (S4) an ambiguous name says why it is not.
+			assert.equal("Garage → (unmapped; Control4 room GARAGE matches); Living Room → (unmapped; 2 Control4 rooms are "
+				.. "named Living Room); Attic (zone) → (unmapped); Downstairs (zone) → (unmapped; Control4 room  Downstairs  "
+				.. "matches)", L:room_mappings_text())
 			assert.equal("Mapped 2: Garage → GARAGE, Downstairs (zone) →  Downstairs ; no Control4 room named: Attic (zone); "
 				.. "ambiguous: Living Room (2 Control4 rooms are named Living Room)", L:map_rooms_by_name())
 			L:set_room_mapping(F.group_rids.living_room, 10)
@@ -2176,14 +2179,16 @@ describe("bridge.lights", function()
 			}
 			L:load()
 			resync()
-			assert.equal("Garage → (Control4 room gone) (before 1.2); Living Room → Living Room (by name); "
-				.. "Attic (zone) → (unmapped); Downstairs (zone) → (unmapped); Office (deleted in Hue) → Living Room "
+			-- #469 S4: the gone room's offer, Control4 room Garage having the Hue room's name.
+			assert.equal("Garage → (Control4 room gone; Control4 room Garage matches) (before 1.2); Living Room → Living Room "
+				.. "(by name); Attic (zone) → (unmapped); Downstairs (zone) → (unmapped); Office (deleted in Hue) → Living Room "
 				.. "(before 1.2); Upstairs (zone) (deleted in Hue) → (Control4 room gone) (before 1.2)", L:room_mappings_text())
 			assert.truthy(L:attention():find("; 2 room mappings point at a Control4 room that no longer exists: Garage, "
 				.. "Upstairs (zone) (deleted in Hue) (Set Room Mapping)", 1, true), L:attention())
 			-- The stale mappings can still be removed through the picker.
 			local hue_rooms = L:picker_hue_rooms()
-			assert.same({ "Garage → (Control4 room gone) (before 1.2)", "Living Room → Living Room (by name)",
+			assert.same({ "Garage → (Control4 room gone; Control4 room Garage matches) (before 1.2)",
+				"Living Room → Living Room (by name)",
 				"Attic (zone) → (unmapped)", "Downstairs (zone) → (unmapped)", "Office (deleted in Hue) → Living Room "
 					.. "(before 1.2)",
 				"Upstairs (zone) (deleted in Hue) → (Control4 room gone) (before 1.2)" }, texts(hue_rooms))
@@ -2361,8 +2366,9 @@ describe("bridge.lights", function()
 				L = new_lights()
 				L:load()
 				resync()
-				assert.equal("Garage → (no mapping, by hand); Living Room → Living Room (by name); "
-					.. "Attic (zone) → Living Room (before 1.2); Downstairs (zone) → (unmapped)", L:room_mappings_text())
+				-- #469 S4: "(no mapping)" says what it means for the scenes.
+				assert.equal("Garage → (no mapping, by hand; its scenes cannot be added); Living Room → Living Room (by "
+					.. "name); Attic (zone) → Living Room (before 1.2); Downstairs (zone) → (unmapped)", L:room_mappings_text())
 				assert.equal("none", L:mapping_how(F.group_rids.garage))
 				assert.equal("earlier", L:mapping_how(F.group_rids.attic))
 				assert.is_nil(L:mapping_how(F.group_rids.downstairs))
@@ -2451,6 +2457,204 @@ describe("bridge.lights", function()
 			assert.equal("1 of 4 are not in the room their Hue room maps to: Bedside Lights is in Living Room; "
 				.. "Hue says Downstairs (zone) → drag it to Garage in Composer if you want it there",
 				L:room_audit({ { device_id = 2005, name = "Other Name", group_rid = F.group_rids.downstairs } }))
+		end)
+	end)
+
+	-- #469 (docs/scene-tracking-design.md Part 2): the whole home maps like a
+	-- group, for its scenes only (P6); the mapping rows offer what the scene
+	-- devices and deleted groups suggest (S4); Set Room Mapping counts the
+	-- devices it leaves in other rooms (S5). The scenes module is a stub with
+	-- the fields lights.lua reads: registry, group_rid_of, scenes_of_group.
+	describe("room mappings and the scenes (#469)", function()
+		local NEW_HOME = "0d0d0d0d-0000-4000-8000-0000000home2"
+
+		-- entries: rid → { device_id, state, group_rid }; with_scenes: the group
+		-- rids that have scenes on the bridge.
+		local function scenes_stub(entries, with_scenes)
+			local with = {}
+			for _, g in ipairs(with_scenes or {}) do with[g] = true end
+			return {
+				registry = entries or {},
+				group_rid_of = function(self, rid) return self.registry[rid] and self.registry[rid].group_rid end,
+				scenes_of_group = function(_, g, smart)
+					return (with[g] and not smart) and { { rid = "scene-of-" .. g, group_rid = g } } or {}
+				end,
+			}
+		end
+
+		-- A scene device the dealer has in a Control4 room.
+		local function scene_device(room_id)
+			local id
+			c4:AddDevice("hue_scene.c4z", room_id, "Scene", function(device_id) id = device_id end)
+			return id
+		end
+
+		local function lookups() return #c4.calls_to("GetDevices") end
+
+		it("P6: maps the whole home for its scenes, lists it only with scenes or a mapping, and removes it", function()
+			resync()
+			assert.equal(4, #L:picker_hue_rooms(), "no scenes module: no whole-home row")
+			local scenes = scenes_stub({}, { F.group_rids.home })
+			L = new_lights({ scenes = function() return scenes end })
+			L:load()
+			resync()
+			assert.same({ text = "(whole home) → (unmapped)", value = F.group_rids.home }, L:picker_hue_rooms()[5])
+			local items, unmapped = L:room_mapping_items()
+			assert.equal("(whole home) → (unmapped)", items[5])
+			assert.equal(2, unmapped, "Attic and Downstairs; the whole home is never counted")
+			assert.same({ true, "Mapped (whole home) → Living Room" }, { L:set_room_mapping(F.group_rids.home, LIVING_ROOM) })
+			assert.same({ c4_room_id = LIVING_ROOM, c4_room_name = "Living Room", hue_name = "(whole home)", type = "room" },
+				c4.persist.hue_rooms[F.group_rids.home])
+			assert.equal("hand", c4.persist.hue_rooms_auto.how[F.group_rids.home])
+			assert.equal("(whole home) → Living Room (by hand)", texts(L:picker_hue_rooms())[5])
+			-- A restart and a resync neither re-point nor rename it; mapped, it is
+			-- listed without the scenes too, so it can be removed.
+			L = new_lights()
+			L:load()
+			resync()
+			assert.equal(LIVING_ROOM, c4.persist.hue_rooms[F.group_rids.home].c4_room_id)
+			assert.equal("(whole home)", c4.persist.hue_rooms[F.group_rids.home].hue_name)
+			assert.equal("(whole home) → Living Room (by hand)", (L:room_mapping_items())[5])
+			-- Its Control4 room deleted: Attention names it as any mapping.
+			fake.add_room(13, "Den")
+			L:set_room_mapping(F.group_rids.home, 13)
+			fake.delete_room(13)
+			assert.truthy(L:attention():find("1 room mapping points at a Control4 room that no longer exists: (whole home) "
+				.. "(Set Room Mapping)", 1, true), L:attention())
+			assert.same({ true, "Removed the mapping for (whole home); it is not mapped by name again" },
+				{ L:set_room_mapping(F.group_rids.home, nil) })
+			assert.is_nil(c4.persist.hue_rooms[F.group_rids.home])
+			assert.equal(4, #L:picker_hue_rooms(), "unmapped, no scenes known: not listed")
+			L.ctx.scenes = scenes
+			assert.equal("(whole home) → (no mapping, by hand; its scenes cannot be added)", (L:room_mapping_items())[5])
+			assert.equal(F.group_rids.home, L:picker_hue_rooms()[5].value)
+		end)
+
+		it("P6: a light never reads the whole home's mapping: not by name, not for its room, not for its mark", function()
+			resync()
+			assert.is_nil(c4.persist.hue_rooms[F.group_rids.home], "never mapped by name")
+			assert.is_nil(c4.persist.hue_rooms_auto.seen[F.group_rids.home])
+			assert.same({ true, "Mapped (whole home) → Garage" }, { L:set_room_mapping(F.group_rids.home, GARAGE_ROOM) })
+			assert.is_nil(L:map_rooms_by_name():find("whole home", 1, true))
+			resync()
+			assert.equal(GARAGE_ROOM, c4.persist.hue_rooms[F.group_rids.home].c4_room_id, "kept, never re-pointed")
+			-- Kitchen Strip is in no Hue room: "(mapped room)" has nothing to go by.
+			L:add_light(F.rids.kitchen, nil, done)
+			assert.is_false(last_result().ok)
+			assert.equal(0, #c4.calls_to("AddDevice"))
+			-- Into a room picked, it has no Hue room: no mark and no lookup.
+			L:add_light(F.rids.kitchen, LIVING_ROOM, done)
+			assert.is_true(last_result().ok)
+			local kitchen = L.registry[F.rids.kitchen].device_id
+			local before = lookups()
+			assert.same({}, L:room_marks())
+			assert.equal(before, lookups())
+			-- Every light imported: none has the whole home for its Hue room, and
+			-- the marks look up the lights of mapped Hue rooms alone.
+			L:import_new(done)
+			answer_gets()
+			for rid, entry in pairs(L.registry) do
+				assert.is_true(entry.hue_room_rid ~= F.group_rids.home, rid)
+			end
+			L:room_marks()
+			local ids = c4.calls_to("GetDevices")[lookups()][1].DeviceIds
+			assert.is_nil(("," .. ids .. ","):find("," .. kitchen .. ",", 1, true), ids)
+		end)
+
+		it("S4/O6: after a bridge reset the new whole home is offered the old one's mapping, never given it", function()
+			local scenes = scenes_stub({}, { F.group_rids.home, NEW_HOME })
+			L = new_lights({ scenes = scenes })
+			resync()
+			L:set_room_mapping(F.group_rids.home, GARAGE_ROOM)
+			resync({ bridge_home = replace(F.bridge_home, F.group_rids.home, NEW_HOME) })
+			local items = L:room_mapping_items()
+			assert.equal("(whole home) → (unmapped; the deleted (whole home) was mapped to Garage)", items[5])
+			assert.equal("(whole home) (deleted in Hue) → Garage (by hand)", items[6])
+			assert.is_nil(c4.persist.hue_rooms[NEW_HOME], "only offered")
+		end)
+
+		it("S4: the rows offer where the scene devices sit, a deleted group's mapping, a shared name and a gone "
+			.. "room's match; nothing is mapped by them", function()
+			fake.add_room(9, " garage ", 4, "Lower")  -- two Control4 rooms named Garage
+			fake.add_room(13, "Den")
+			local a, b = scene_device(13), scene_device(13)
+			local c, d = scene_device(13), scene_device(LIVING_ROOM)
+			c4.persist.hue_rooms = { ["old-downstairs"] = { c4_room_id = 13, c4_room_name = "Den", hue_name = "Downstairs",
+				type = "zone" } }
+			local scenes = scenes_stub({
+				s1 = { device_id = a, state = "linked", group_rid = F.group_rids.attic },
+				s2 = { device_id = b, state = "gone", group_rid = F.group_rids.attic },
+				s3 = { device_id = c, state = "linked", group_rid = F.group_rids.downstairs },
+				s4 = { device_id = d, state = "linked", group_rid = F.group_rids.downstairs },
+			})
+			L = new_lights({ scenes = scenes })
+			L:load()
+			-- Before this run has read the groups nothing is offered.
+			assert.same({ "Downstairs (zone) → Den (before 1.2)" }, (L:room_mapping_items()))
+			resync()
+			local before = lookups()
+			local want = {
+				"Garage → (unmapped; 2 Control4 rooms are named Garage)",
+				"Living Room → Living Room (by name)",
+				"Attic (zone) → (unmapped; its 2 scene devices are in Den)",
+				"Downstairs (zone) → (unmapped; the deleted Downstairs (zone) was mapped to Den)",
+				"Downstairs (zone) (deleted in Hue) → Den (before 1.2)",
+			}
+			assert.same(want, (L:room_mapping_items()))
+			assert.equal(before + 1, lookups(), "one lookup, of the never-mapped groups' scene devices")
+			local asked = {}
+			for id in c4.calls_to("GetDevices")[lookups()][1].DeviceIds:gmatch("%d+") do asked[#asked + 1] = tonumber(id) end
+			table.sort(asked)
+			assert.same({ a, b, c, d }, asked)
+			assert.same(want, texts(L:picker_hue_rooms()))
+			-- Offers only: nothing is mapped until a Set Room Mapping click.
+			for _, rid in ipairs({ F.group_rids.garage, F.group_rids.attic, F.group_rids.downstairs }) do
+				assert.is_nil(c4.persist.hue_rooms[rid], rid)
+			end
+			-- A failed lookup offers no room for the devices.
+			local good = L
+			L = new_lights({ scenes = scenes, project = { devices = function() error("lookup failed") end } })
+			L:load()
+			resync()
+			assert.equal("Attic (zone) → (unmapped)", (L:room_mapping_items())[3])
+			L = good
+			-- A hand mapping whose Control4 room was deleted: the room of its old name is offered.
+			fake.add_room(14, "Shed")
+			assert.same({ true, "Mapped Attic (zone) → Shed; 1 scene device is in another room (its row says where)" },
+				{ L:set_room_mapping(F.group_rids.attic, 14) })
+			fake.delete_room(14)
+			fake.add_room(15, "Shed")
+			assert.equal("Attic (zone) → (Control4 room gone; Control4 room Shed matches) (by hand)",
+				(L:room_mapping_items())[3])
+			assert.equal(14, c4.persist.hue_rooms[F.group_rids.attic].c4_room_id, "only offered")
+		end)
+
+		it("S5: Set Room Mapping counts the scene devices and lights it leaves in other rooms, from one lookup", function()
+			import_all()
+			fake.add_room(13, "Den")
+			local den1, den2, living = scene_device(13), scene_device(13), scene_device(LIVING_ROOM)
+			local gone = scene_device(LIVING_ROOM)
+			L.ctx.scenes = scenes_stub({
+				s1 = { device_id = den1, state = "linked", group_rid = F.group_rids.living_room },
+				s2 = { device_id = den2, state = "linked", group_rid = F.group_rids.living_room },
+				s3 = { device_id = living, state = "linked", group_rid = F.group_rids.living_room },
+				s4 = { device_id = gone, state = "gone", group_rid = F.group_rids.living_room },
+			})
+			local before = lookups()
+			assert.same({ true, "Mapped Living Room → Den; 1 scene device and 2 lights are in other rooms (their rows say "
+				.. "where)" }, { L:set_room_mapping(F.group_rids.living_room, 13) })
+			assert.equal(before + 1, lookups())
+			assert.equal(" (in Living Room instead of Den)", L:room_marks()[ID.hallway], "the rows say where")
+			assert.same({ true, "Mapped Living Room → Living Room; 2 scene devices are in other rooms (their rows say "
+				.. "where)" }, { L:set_room_mapping(F.group_rids.living_room, LIVING_ROOM) })
+			assert.same({ true, "Mapped Garage → Living Room; 1 light is in another room (its row says where)" },
+				{ L:set_room_mapping(F.group_rids.garage, LIVING_ROOM) })
+			before = lookups()
+			assert.same({ true, "Mapped Attic (zone) → Den" }, { L:set_room_mapping(F.group_rids.attic, 13) })
+			assert.equal(before, lookups(), "nothing of the zone's: no lookup")
+			-- A failed lookup counts nothing.
+			L.ctx.project.devices = function() error("lookup failed") end
+			assert.same({ true, "Mapped Living Room → Den" }, { L:set_room_mapping(F.group_rids.living_room, 13) })
 		end)
 	end)
 

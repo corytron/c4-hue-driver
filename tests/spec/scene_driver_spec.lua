@@ -36,17 +36,29 @@ local function stub_attribs(c4)
 	end
 end
 
+-- The SetPropertyAttribs calls for one property, in order. Since #469 (D12)
+-- late init also hides On State Follows, so the cases of one row ask by name.
+local function attribs_of(c4, name)
+	local out = {}
+	for _, args in ipairs(c4.calls_to("SetPropertyAttribs")) do
+		if args[1] == name then out[#out + 1] = args end
+	end
+	return out
+end
+
 -- opts.bind=false leaves the device unbound; opts.rid persists a rid first,
 -- opts.name a name and opts.kind a kind, opts.persist any other keys
--- (settings, default rates). On State Follows is "This scene"
--- (the on rule these cases pin) unless opts.props names it; opts.follow =
--- false leaves it unset (the driver's default, the lights mode).
+-- (settings, default rates). Keypad Follows is "This scene" (the on rule
+-- these cases pin for the keypad; the tile follows the scene alone in either
+-- mode since #469 D1) unless opts.props names it; opts.follow = false leaves
+-- it unset (the driver's default, the keypad following the room's lights).
+-- Until #469 this was On State Follows, which then chose the tile too.
 local function load_scene(opts)
 	opts = opts or {}
 	local props = {}
 	for k, v in pairs(opts.props or {}) do props[k] = v end
-	if props["On State Follows"] == nil and opts.follow ~= false then
-		props["On State Follows"] = "This scene"
+	if props["Keypad Follows"] == nil and opts.follow ~= false then
+		props["Keypad Follows"] = "This scene"
 	end
 	local env, c4 = fake.load_driver("hue_scene", props, { device_id = SCENE_ID })
 	stub_attribs(c4)
@@ -306,7 +318,8 @@ describe("Hue Scene driver", function()
 			c4.calls = {}
 			configure(env)
 
-			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active" }, c4.persist)
+			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active",
+				keypad_follows_migrated = true }, c4.persist, "the flag: #469 D12's migration ran at late init")
 			assert.equal("#AbCdEf (s1)", env.Properties["Hue Scene ID"], "a rid without dashes is shown whole")
 			assert.equal("Relax", env.Properties["Hue Scene"])
 			assert.equal("Kitchen", env.Properties["Hue Room"])
@@ -737,7 +750,8 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.calls_to("SendToProxy"), "not even CHANGING")
 			assert.equal(0, #c4.active_timers())
 			assert.equal(FORGOTTEN, env.Properties["Status"])
-			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active", held_on = true },
+			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active", held_on = true,
+				keypad_follows_migrated = true }, -- #469 D12, set at late init
 				c4.persist, "the identity stays, so binding the device again lets the bridge adopt it")
 		end)
 
@@ -2260,93 +2274,123 @@ describe("Hue Scene driver", function()
 		end)
 	end)
 
-	describe("On State Follows (docs/scene-led-design.md)", function()
-		-- A scene Hue calls inactive, in the lights mode (the driver's default:
-		-- the property unset), with the recording cleared.
+	-- #469 (docs/scene-tracking-design.md Part 1): until #469 On State Follows
+	-- chose one on state for the tile and the keypad, and its default made the
+	-- tile read on whenever the room was. Since D1 the tile follows the scene
+	-- alone, and Keypad Follows (D9, D12) chooses only what a keypad bound to
+	-- the scene treats as on. The cases that pinned the room turning the tile
+	-- on are kept below with the new rule (#469 D1, D13).
+	describe("Keypad Follows (#469 D9 to D13; On State Follows before, docs/scene-led-design.md)", function()
+		-- A scene Hue calls inactive, the keypad following the room's lights
+		-- (the driver's default: the property unset), with the recording cleared.
 		local function lights_scene()
 			return known_scene("inactive", { rid = "s1", follow = false })
 		end
 
 		local function group(env, params)
-			params.rid = "s1"
+			params.rid = params.rid or "s1"
 			env.ExecuteCommand("HUE_SCENE_GROUP", params)
 		end
 
-		it("defaults to the room/zone lights: the group on lights the tile and the LEDs, off clears them", function()
+		-- Every MATCH_LED_STATE the Top Button Link (200) heard, in order.
+		local function led_states(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do
+				if args[1] == 200 and args[2] == "MATCH_LED_STATE" then out[#out + 1] = args[3].STATE end
+			end
+			return out
+		end
+
+		-- #469 D13: the group on lit the tile too until #469; now only the LEDs.
+		it("defaults to the room/zone lights: the group on lights the LEDs but not the tile; off clears them", function()
 			local env, c4 = lights_scene()
 			local proxy = capture_proxy(c4)
 			group(env, { on = "true", level = "40" })
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the tile follows the scene alone (D1, D13)")
 			assert.same(leds(true), with_command(proxy, "MATCH_LED_STATE"))
 			group(env, { on = "false" })
-			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			local m = with_command(proxy, "MATCH_LED_STATE")
 			assert.same(leds(false), { m[4], m[5], m[6] })
 		end)
 
-		it("stays on when another scene of the group is played, and follows the group's level", function()
-			local env, c4 = lights_scene()
-			state(env, "static")
-			group(env, { on = "true", level = "70" })
-			c4.calls = {}
-			group(env, { other_active = "true" })
-			state(env, "inactive")
-			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "still on: nothing to report")
-			group(env, { level = "30" })
-			fire(c4, 1000) -- the level reports' one-second window (LEVEL_REPORT_MS)
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 30 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
-		end)
+		-- #469 D1 (T7): the tile stayed on and mirrored the room until #469.
+		it("another scene of the group played: the tile goes to 0 and ignores the room's level; the keypad stays lit",
+			function()
+				local env, c4 = lights_scene()
+				state(env, "static")
+				group(env, { on = "true", level = "70" })
+				c4.calls = {}
+				group(env, { other_active = "true" })
+				state(env, "inactive")
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+				group(env, { level = "30" })
+				c4.advance(5000) -- the level reports' window (LEVEL_REPORT_MS) runs out
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"),
+					"another scene's level is not this tile's")
+				assert.same({}, led_states(c4), "the keypad still reads the lit room")
+			end)
 
 		it("in This scene, a group on alone changes nothing (the on rule)", function()
-			local env, c4 = known_scene("inactive", { rid = "s1", props = { ["On State Follows"] = "This scene" } })
+			local env, c4 = known_scene("inactive", { rid = "s1", props = { ["Keypad Follows"] = "This scene" } })
 			local proxy = capture_proxy(c4)
 			group(env, { on = "true", level = "40" })
 			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 			assert.same({}, with_command(proxy, "MATCH_LED_STATE"))
 		end)
 
-		it("TOGGLE while only the group is on turns the room or zone off", function()
+		-- #469 D4 (L19, L66): TOGGLE turned the room off here until #469.
+		it("TOGGLE while only the group is on plays the scene as designed: TOGGLE follows the tile", function()
 			local env, c4 = lights_scene()
 			group(env, { on = "true", level = "40" })
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "TOGGLE", {})
-			assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
-			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+			assert.equal(0, #messages(c4, "HUE_SCENE_OFF"))
+			assert.same({ { rid = "s1", action = "active" } },
+				(function()
+					local out = {}
+					for _, m in ipairs(messages(c4, "HUE_SCENE_RECALL")) do out[#out + 1] = m.params end
+					return out
+				end)())
 		end)
 
-		it("the slider while only the group is on moves the group's level instead of playing the scene", function()
+		-- #469 D4 (T19): the slider moved the room's level here until #469.
+		it("the slider while only the group is on plays the scene at the target", function()
 			local env, c4 = lights_scene()
 			group(env, { on = "true", level = "40" })
 			c4.sent = {}
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
-			assert.equal(1, #messages(c4, "HUE_SCENE_LEVEL"))
-			assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"))
+			assert.equal(0, #messages(c4, "HUE_SCENE_LEVEL"))
+			assert.same({ rid = "s1", action = "active", brightness = "60" }, messages(c4, "HUE_SCENE_RECALL")[1].params)
 		end)
 
-		it("a property change shows at once, both ways", function()
+		-- #469 D9: the tile followed the property too until #469.
+		it("a property change shows at once, both ways, on the LEDs only", function()
 			local env, c4 = lights_scene()
 			group(env, { on = "true", level = "40" })
 			c4.calls = {}
 			local proxy = capture_proxy(c4)
-			env.Properties["On State Follows"] = "This scene"
-			env.OnPropertyChanged("On State Follows")
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			env.Properties["Keypad Follows"] = "This scene"
+			env.OnPropertyChanged("Keypad Follows")
 			assert.same(leds(false), with_command(proxy, "MATCH_LED_STATE"))
-			env.Properties["On State Follows"] = "Room/zone lights"
-			env.OnPropertyChanged("On State Follows")
-			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40 }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")[2])
+			env.Properties["Keypad Follows"] = "Room/zone lights"
+			env.OnPropertyChanged("Keypad Follows")
+			local m = with_command(proxy, "MATCH_LED_STATE")
+			assert.same(leds(true), { m[4], m[5], m[6] })
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the tile never follows the property")
 		end)
 
 		it("an unknown value warns and follows the lights", function()
 			local env, c4 = lights_scene()
 			local warned = {}
 			log.sink = function(line) if line:find("[WARN]", 1, true) then warned[#warned + 1] = line end end
-			env.Properties["On State Follows"] = "Sometimes"
-			env.OnPropertyChanged("On State Follows")
+			env.Properties["Keypad Follows"] = "Sometimes"
+			env.OnPropertyChanged("Keypad Follows")
 			quiet()
 			assert.equal(1, #warned)
 			group(env, { on = "true", level = "40" })
-			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.same({ true }, led_states(c4))
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 		end)
 
 		it("a configure for another scene forgets the old group's on state", function()
@@ -2357,7 +2401,609 @@ describe("Hue Scene driver", function()
 			state(env, "inactive", { rid = "s2" })
 			env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
 			local changed = notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")
-			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, changed[#changed], "off: the new scene is inactive, its group unknown")
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 0 }, changed[#changed], "off: the new scene is inactive")
+			assert.same({ false }, led_states(c4), "the keypad too: the new scene's group is not known yet")
+		end)
+
+		it("knows the keypad's state from the group alone before the scene's status comes", function()
+			local env, c4 = load_scene({ rid = "s1", follow = false })
+			configure(env)
+			c4.calls = {}
+			group(env, { on = "true", level = "40" })
+			assert.same({ true }, led_states(c4))
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the tile: nothing known yet")
+		end)
+
+		describe("the rename from On State Follows (D12)", function()
+			-- The hue_scene runtime as Director starts it after the update: the
+			-- property values `props`, PersistData `persist`, bound, rid s1.
+			local function updated(props, persist)
+				local env, c4 = fake.load_driver("hue_scene", props, { device_id = SCENE_ID })
+				stub_attribs(c4)
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				c4.persist.hue_rid = "s1"
+				for k, v in pairs(persist or {}) do c4.persist[k] = v end
+				env.OnDriverLateInit("DIT_STARTUP")
+				return env, c4
+			end
+
+			local function keypad_writes(c4)
+				local out = {}
+				for _, args in ipairs(c4.calls_to("UpdateProperty")) do
+					if args[1] == "Keypad Follows" then out[#out + 1] = args[2] end
+				end
+				return out
+			end
+
+			-- The scene inactive in a lit room: what the keypad then reads.
+			local function keypad_reads(env, c4)
+				configure(env)
+				state(env, "inactive", { reason = "hello" })
+				group(env, { on = "true", level = "40" })
+				local states = led_states(c4)
+				return states[#states]
+			end
+
+			it("copies a stored This scene into Keypad Follows once, applies it, and sets the flag", function()
+				local env, c4 = updated({ ["On State Follows"] = "This scene" })
+				assert.same({ "This scene" }, keypad_writes(c4))
+				assert.equal("This scene", env.Properties["Keypad Follows"])
+				assert.is_true(c4.persist.keypad_follows_migrated)
+				assert.is_false(keypad_reads(env, c4), "applied at once: UpdateProperty calls no OnPropertyChanged")
+			end)
+
+			it("never overwrites a later choice: once the flag is set, nothing is copied", function()
+				local env, c4 = updated({ ["On State Follows"] = "This scene", ["Keypad Follows"] = "Room/zone lights" },
+					{ keypad_follows_migrated = true })
+				assert.same({}, keypad_writes(c4))
+				assert.equal("Room/zone lights", env.Properties["Keypad Follows"])
+				assert.is_true(keypad_reads(env, c4), "the dealer's choice: the room's lights")
+			end)
+
+			it("copies nothing when the old value is the default, and still sets the flag", function()
+				local env, c4 = updated({ ["Keypad Follows"] = "This scene" })
+				assert.same({}, keypad_writes(c4))
+				assert.equal("This scene", env.Properties["Keypad Follows"], "a value set already stays")
+				assert.is_true(c4.persist.keypad_follows_migrated)
+				env, c4 = updated({})
+				assert.same({}, keypad_writes(c4))
+				assert.is_true(keypad_reads(env, c4), "the default: the room's lights")
+			end)
+
+			it("hides On State Follows at every late init; a change to it does nothing", function()
+				local env, c4 = updated({}, { keypad_follows_migrated = true })
+				assert.same({ { "On State Follows", 1 } }, attribs_of(c4, "On State Follows"))
+				env.Properties["On State Follows"] = "This scene"
+				env.OnPropertyChanged("On State Follows")
+				assert.same({}, keypad_writes(c4))
+				assert.is_true(keypad_reads(env, c4), "still the room's lights")
+			end)
+
+			it("declares Keypad Follows with the same items and default, and keeps On State Follows until 2.0", function()
+				local props = fake.declared_properties("hue_scene")
+				assert.equal("Room/zone lights", props["Keypad Follows"])
+				assert.equal("Room/zone lights", props["On State Follows"])
+				local xml = io.open("src/hue_scene/driver.xml"):read("*a")
+				local body = xml:match("<name>Keypad Follows</name>(.-)</property>")
+				assert.truthy(body and body:find("<item>Room/zone lights</item>", 1, true))
+				assert.truthy(body:find("<item>This scene</item>", 1, true))
+			end)
+		end)
+	end)
+
+	-- #469 Part 1: the tile follows its own scene (D1 to D6), the keypad what
+	-- Keypad Follows names (D9 to D11); the cases table of
+	-- docs/scene-tracking-design.md, as far as one device sees it. The other
+	-- scene tiles of the room are this device when it is the one that lost:
+	-- the bridge tells it with other_active, and sends it the room's level.
+	describe("what the tile follows (#469, docs/scene-tracking-design.md)", function()
+		local LIGHTS, SCENE = "Room/zone lights", "This scene"
+		local MODES = { LIGHTS, SCENE }
+
+		local function group(env, params)
+			params.rid = params.rid or "s1"
+			env.ExecuteCommand("HUE_SCENE_GROUP", params)
+		end
+
+		-- A device with Keypad Follows `mode`, Hue reporting its scene `active`,
+		-- its room lit at `level` (none for nil); every timer run out and the
+		-- recording cleared.
+		local function tracked(mode, active, level)
+			local env, c4 = known_scene(active or "inactive", { rid = "s1", props = { ["Keypad Follows"] = mode } })
+			if level then
+				group(env, { on = "true", level = tostring(level) })
+			end
+			c4.advance(5000)
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		-- Another scene of the room played, the room lit at `level`: what this
+		-- device hears from the bridge (T7, T8).
+		local function lost(mode, level)
+			local env, c4 = tracked(mode, "inactive")
+			group(env, { on = "true", level = tostring(level or 60) })
+			group(env, { other_active = "true" })
+			c4.advance(5000)
+			c4.calls, c4.sent = {}, {}
+			return env, c4
+		end
+
+		local function levels(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")) do out[#out + 1] = p.LIGHT_BRIGHTNESS_CURRENT end
+			return out
+		end
+
+		local function changing(c4)
+			local out = {}
+			for _, p in ipairs(notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")) do
+				out[#out + 1] = { p.LIGHT_BRIGHTNESS_CURRENT, p.LIGHT_BRIGHTNESS_TARGET, p.RATE }
+			end
+			return out
+		end
+
+		local function led_states(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("SendToProxy")) do
+				if args[1] == 200 and args[2] == "MATCH_LED_STATE" then out[#out + 1] = args[3].STATE end
+			end
+			return out
+		end
+
+		local function params_of(c4, command)
+			local out = {}
+			for _, m in ipairs(messages(c4, command)) do out[#out + 1] = m.params end
+			return out
+		end
+
+		local function action(env, button, act)
+			env.ReceivedFromProxy(5001, "BUTTON_ACTION", { BUTTON_ID = tostring(button), ACTION = act })
+		end
+		local function tap(env, button)
+			action(env, button, "1")
+			action(env, button, "2")
+		end
+		-- A hold on `button`: the press, then its hold time.
+		local function hold(env, c4, button)
+			action(env, button, "1")
+			c4.advance(400)
+		end
+		local function release(env, button) action(env, button, "0") end
+
+		local function target(env, level, rate)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = tostring(level),
+				RATE = tostring(rate or 0) })
+		end
+
+		describe("the cases table", function()
+			it("T1, T2: this scene played from Control4 or from outside reads on at the room's level", function()
+				for _, mode in ipairs(MODES) do
+					local env, c4 = tracked(mode)
+					env.ReceivedFromProxy(5001, "ON", {})
+					state(env, "static", { reason = "recall" })
+					group(env, { on = "true", level = "55" })
+					assert.same({ 100, 55 }, levels(c4), mode .. ": Control4")
+					assert.same({ true }, led_states(c4), mode)
+
+					env, c4 = tracked(mode)
+					state(env, "dynamic_palette", { reason = "event" }) -- the Hue app, a Hue switch or automation
+					group(env, { on = "true", level = "55" })
+					assert.same({ 100, 55 }, levels(c4), mode .. ": outside")
+					assert.same({ true }, led_states(c4), mode)
+				end
+			end)
+
+			it("T3, T4: dimmed from its slider, the Hue app or a Zone Light: this tile moves, a scene that lost stays 0",
+				function()
+					for _, mode in ipairs(MODES) do
+						local env, c4 = tracked(mode, "static", 60)
+						group(env, { level = "30" }) -- the Hue app's room slider
+						assert.same({ 30 }, levels(c4), mode)
+						env, c4 = lost(mode)
+						group(env, { level = "30" })
+						c4.advance(5000)
+						assert.same({}, levels(c4), mode .. ": the other tile stays 0")
+					end
+				end)
+
+			it("T5, T6: held from its keypad, or one lamp changed from outside: still on at the room's level (O2)",
+				function()
+					for _, mode in ipairs(MODES) do
+						local env, c4 = tracked(mode, "static", 60)
+						state(env, "inactive", { reason = "event" })
+						group(env, { level = "45" })
+						assert.same({ 45 }, levels(c4), mode)
+						assert.same({}, led_states(c4), mode .. ": the LEDs stay on")
+						assert.is_true(c4.persist.held_on)
+					end
+				end)
+
+			it("T7, T8: another scene played, with or without a device: the tile 0, the keypad by Keypad Follows",
+				function()
+					for _, case in ipairs({ { LIGHTS, {} }, { SCENE, { false } } }) do
+						local env, c4 = tracked(case[1], "static", 60)
+						group(env, { other_active = "true" })
+						state(env, "inactive", { reason = "event" })
+						assert.same({ 0 }, levels(c4), case[1])
+						assert.same(case[2], led_states(c4), case[1])
+						assert.is_false(c4.persist.held_on)
+					end
+				end)
+
+			it("T9: lamps turned on by hand from off: the tile stays 0, the keypad by Keypad Follows", function()
+				for _, case in ipairs({ { LIGHTS, { true } }, { SCENE, {} } }) do
+					local env, c4 = tracked(case[1])
+					group(env, { on = "true", level = "35" })
+					assert.same({}, levels(c4), case[1])
+					assert.same(case[2], led_states(c4), case[1])
+				end
+			end)
+
+			it("T10: the room off from anywhere: the tile 0 and the keypad off, in either mode", function()
+				for _, mode in ipairs(MODES) do
+					local env, c4 = tracked(mode, "static", 60)
+					state(env, "inactive", { reason = "event" }) -- Hue: the room off ends the scene (V9)
+					group(env, { on = "false" })
+					assert.same({ 0 }, levels(c4), mode)
+					assert.same({ false }, led_states(c4), mode)
+					assert.is_false(c4.persist.held_on)
+				end
+			end)
+
+			it("T12: a schedule and the slot scene it plays both read on (O7)", function()
+				local env, c4 = smart_scene("inactive")
+				state(env, "active", { reason = "event", slot_name = "Relax" })
+				assert.same({ 100 }, levels(c4), "the schedule")
+				local slot, slot_c4 = tracked(LIGHTS)
+				state(slot, "static", { reason = "event" }) -- the bridge tells the slot scene no other_active
+				assert.same({ 100 }, levels(slot_c4), "its slot scene")
+			end)
+
+			it("T16: the scene deleted in Hue: the held state ends at once, the tile 0 and the keypad off", function()
+				for _, mode in ipairs(MODES) do
+					local env, c4 = tracked(mode, "static", 60)
+					state(env, "inactive", { reason = "event" }) -- held on (the on rule)
+					configure(env, { state = "gone" })
+					assert.same({ 0 }, levels(c4), mode)
+					assert.same({ false }, led_states(c4), mode)
+					assert.is_false(c4.persist.held_on)
+					assert.equal("Offline", env.Properties["Online"])
+					env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+					assert.same({ 0, 0 }, levels(c4), mode)
+				end
+			end)
+
+			it("T16: a recall on its way when the scene is deleted ends without its fallback", function()
+				local env, c4 = tracked(LIGHTS)
+				env.ReceivedFromProxy(5001, "ON", {})
+				configure(env, { state = "gone" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "no fallback assumes the recall")
+			end)
+
+			it("T17: linked to another scene: nothing shows until the bridge reports it", function()
+				local env, c4 = tracked(LIGHTS, "static", 60)
+				configure(env, { rid = "s2" })
+				assert.is_false(c4.persist.held_on, "the old scene's held state")
+				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
+				assert.same({}, levels(c4), "no status, no held state, no level")
+				assert.same({}, led_states(c4), "the keypad: unknown until reported")
+				group(env, { rid = "s2", level = "20" })
+				state(env, "static", { rid = "s2", reason = "hello" })
+				assert.same({ 20 }, levels(c4), "the new scene's own report")
+			end)
+
+			it("T17: a command on its way for the old scene closes with the level it started from", function()
+				local env, c4 = tracked(SCENE)
+				env.ReceivedFromProxy(5001, "ON", {})
+				configure(env, { rid = "s2" })
+				assert.same({ 0 }, levels(c4))
+				c4.advance(10000)
+				assert.same({ 0 }, levels(c4), "no fallback assumes the recall")
+				assert.equal(0, #c4.active_timers())
+			end)
+
+			it("T19: the slider of a scene that is not active plays it at the target, over the target's rate", function()
+				for _, mode in ipairs(MODES) do
+					local env, c4 = lost(mode)
+					target(env, 30)
+					assert.same({ { rid = "s1", action = "active", brightness = "30" } }, params_of(c4, "HUE_SCENE_RECALL"),
+						mode)
+					assert.same({ { 0, 30, 0 } }, changing(c4), mode .. ": from the tile's 0")
+					state(env, "static", { reason = "recall" })
+					assert.same({ 30 }, levels(c4), mode)
+					target(env, 45) -- now the active one: its next target moves the room
+					assert.same({ rid = "s1", device_id = "2061", level = "45", rate = "0" },
+						params_of(c4, "HUE_SCENE_LEVEL")[1], mode)
+
+					env, c4 = lost(mode)
+					target(env, 30, 1500)
+					assert.same({ { rid = "s1", action = "active", brightness = "30", duration = "1500" } },
+						params_of(c4, "HUE_SCENE_RECALL"), mode)
+				end
+			end)
+		end)
+
+		describe("commands on a scene that is not the active one (D4, D5)", function()
+			it("a target of 100 recalls it as designed", function()
+				local env, c4 = lost(LIGHTS)
+				target(env, 100)
+				assert.same({ { rid = "s1", action = "active" } }, params_of(c4, "HUE_SCENE_RECALL"))
+			end)
+
+			it("ON, DYNAMIC_ON and TOGGLE recall it as designed, in either mode", function()
+				for _, mode in ipairs(MODES) do
+					for _, command in ipairs({ "ON", "DYNAMIC_ON", "TOGGLE" }) do
+						local env, c4 = lost(mode)
+						env.ReceivedFromProxy(5001, command, {})
+						assert.same({ { rid = "s1", action = "active" } }, params_of(c4, "HUE_SCENE_RECALL"),
+							mode .. " " .. command)
+						assert.same({}, messages(c4, "HUE_SCENE_OFF"))
+						assert.same({ { 0, 100, 0 } }, changing(c4))
+					end
+				end
+			end)
+
+			it("OFF, DYNAMIC_OFF and a target of 0 still turn the room off", function()
+				for _, mode in ipairs(MODES) do
+					for _, send in ipairs({
+						function(env) env.ReceivedFromProxy(5001, "OFF", {}) end,
+						function(env) env.ReceivedFromProxy(5001, "DYNAMIC_OFF", {}) end,
+						function(env) target(env, 0) end,
+					}) do
+						local env, c4 = lost(mode)
+						send(env)
+						assert.same({ { rid = "s1" } }, params_of(c4, "HUE_SCENE_OFF"), mode)
+						assert.same({}, messages(c4, "HUE_SCENE_RECALL"))
+						assert.same({ { 0, 0, 0 } }, changing(c4), "the tile reads 0 and stays there")
+					end
+				end
+			end)
+
+			it("slider spam while the recall is unconfirmed recalls again at each new level (D5)", function()
+				local env, c4 = lost(LIGHTS)
+				target(env, 30)
+				target(env, 40)
+				assert.same({ "30", "40" }, { params_of(c4, "HUE_SCENE_RECALL")[1].brightness,
+					params_of(c4, "HUE_SCENE_RECALL")[2].brightness })
+				assert.same({}, messages(c4, "HUE_SCENE_LEVEL"))
+			end)
+		end)
+
+		describe("the stale level after a recall as designed (D6)", function()
+			-- `mode`'s device that lost to another scene at 60 played as
+			-- designed from Control4 and confirmed: the tile shows the room's
+			-- 60, which is still the other scene's level.
+			local function recalled(mode)
+				local env, c4 = lost(mode or SCENE, 60)
+				env.ReceivedFromProxy(5001, "ON", {})
+				state(env, "static", { reason = "recall" })
+				assert.same({ 60 }, levels(c4))
+				c4.calls, c4.sent = {}, {}
+				return env, c4
+			end
+
+			it("a target before the recall's first level report waits for it, then moves from that level", function()
+				local env, c4 = recalled()
+				target(env, 40)
+				assert.same({ { 60, 40, 0 } }, changing(c4), "the proxy hears its CHANGING at once")
+				assert.same({}, c4.sent, "nothing measured from the other scene's 60")
+				group(env, { level = "80" }) -- this scene's own look
+				assert.same({ { rid = "s1", device_id = "2061", level = "40", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+				assert.same({}, levels(c4), "the move closes the transaction, not the 80")
+				group(env, { level = "40.2" })
+				assert.same({ 40 }, levels(c4))
+			end)
+
+			it("keeps only the latest waiting target", function()
+				local env, c4 = recalled(LIGHTS)
+				target(env, 40)
+				target(env, 35)
+				assert.same({ { 60, 40, 0 }, { 60, 35, 0 } }, changing(c4))
+				group(env, { level = "80" })
+				assert.same({ { rid = "s1", device_id = "2061", level = "35", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("waits FOLLOW_MS at most; then the move goes, and later targets go at once", function()
+				local env, c4 = recalled()
+				target(env, 40)
+				c4.advance(1499)
+				assert.same({}, c4.sent)
+				c4.advance(1)
+				assert.same({ { rid = "s1", device_id = "2061", level = "40", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+				target(env, 50)
+				assert.equal("50", params_of(c4, "HUE_SCENE_LEVEL")[2].level, "no second wait")
+			end)
+
+			it("a target after the recall's rate plus FOLLOW_MS goes at once, report or not", function()
+				local env, c4 = recalled()
+				c4.advance(2000)
+				target(env, 40)
+				assert.same({ { rid = "s1", device_id = "2061", level = "40", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("a target after the first level report goes at once", function()
+				local env, c4 = recalled()
+				group(env, { level = "80" })
+				target(env, 40)
+				assert.same({ { rid = "s1", device_id = "2061", level = "40", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("no wait after a recall at a level: that level is known", function()
+				local env, c4 = lost(SCENE, 60)
+				target(env, 30)
+				state(env, "static", { reason = "recall" })
+				target(env, 50)
+				assert.same({ { rid = "s1", device_id = "2061", level = "50", rate = "0" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+			end)
+
+			it("a waiting target with a rate moves over it as a ramp once the level is known", function()
+				local env, c4 = recalled()
+				target(env, 40, 2000)
+				group(env, { level = "80" })
+				assert.same({ { rid = "s1", device_id = "2061", level = "40", rate = "2000" } },
+					params_of(c4, "HUE_SCENE_LEVEL"))
+				c4.advance(1000)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.same({ { rid = "s1", device_id = "2061", direction = "stop", level = "60" } },
+					params_of(c4, "HUE_SCENE_DIM"), "a ramp from the reported 80, stopped halfway")
+			end)
+
+			it("is dropped when another scene takes over or the room goes off; the proxy hears the tile", function()
+				local env, c4 = recalled()
+				target(env, 40)
+				group(env, { other_active = "true" })
+				state(env, "inactive", { reason = "event" })
+				c4.advance(5000)
+				assert.same({}, messages(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 60, 0 }, levels(c4), "the transaction closed, then the tile went to 0")
+
+				env, c4 = recalled()
+				target(env, 40)
+				group(env, { on = "false" })
+				state(env, "inactive", { reason = "event" })
+				c4.advance(5000)
+				assert.same({}, messages(c4, "HUE_SCENE_LEVEL"))
+				assert.same({ 60, 0 }, levels(c4))
+			end)
+
+			it("a SET_BRIGHTNESS_STOP drops the waiting target and closes it with the tile", function()
+				local env, c4 = recalled()
+				target(env, 40)
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_STOP", {})
+				assert.same({ 60 }, levels(c4))
+				group(env, { level = "80" })
+				c4.advance(5000)
+				assert.same({}, messages(c4, "HUE_SCENE_LEVEL"))
+			end)
+		end)
+
+		describe("the keypad (D9 to D11)", function()
+			it("Room/zone lights, another scene lit the room: a top hold dims the room and does not hold this scene",
+				function()
+					for _, case in ipairs({ { 0, "up" }, { 1, "down" }, { 2, "down" } }) do
+						local env, c4 = lost(LIGHTS)
+						hold(env, c4, case[1])
+						assert.same({ { rid = "s1", device_id = "2061", direction = case[2], duration = "5000" } },
+							params_of(c4, "HUE_SCENE_DIM"), "button " .. case[1])
+						assert.same({}, messages(c4, "HUE_SCENE_RECALL"))
+						assert.same({}, changing(c4), "the tile does not move")
+						assert.is_not_true(c4.persist.held_on)
+						group(env, { level = case[2] == "up" and "80" or "40" })
+						release(env, case[1])
+						assert.equal("stop", params_of(c4, "HUE_SCENE_DIM")[2].direction)
+						c4.advance(5000)
+						assert.same({}, levels(c4), "its tile stays 0")
+						assert.same({}, led_states(c4), "the keypad stays lit")
+					end
+				end)
+
+			it("This scene, another scene lit the room: a top hold plays this scene at the room's level, then brightens",
+				function()
+					local env, c4 = lost(SCENE, 60)
+					hold(env, c4, 0)
+					assert.same({ { rid = "s1", action = "active", brightness = "60" } }, params_of(c4, "HUE_SCENE_RECALL"),
+						"not 1 %: the room does not dip")
+					assert.same({ { 60, 100, 2000 } }, changing(c4), "the 40 % left at 100 % per 5000 ms")
+					assert.is_true(c4.persist.held_on)
+					assert.same({ true }, led_states(c4))
+					c4.advance(600)
+					assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } },
+						params_of(c4, "HUE_SCENE_DIM"))
+				end)
+
+			it("This scene, another scene lit the room: a bottom hold does nothing (L43)", function()
+				local env, c4 = lost(SCENE, 60)
+				hold(env, c4, 1)
+				release(env, 1)
+				assert.same({}, c4.sent)
+			end)
+
+			it("a top hold from a room that is off still recalls at 1 %, in either mode", function()
+				for _, mode in ipairs(MODES) do
+					local env, c4 = tracked(mode)
+					hold(env, c4, 0)
+					assert.equal("1", params_of(c4, "HUE_SCENE_RECALL")[1].brightness, mode)
+				end
+			end)
+
+			it("taps while another scene lit the room: top plays this scene, bottom turns the room off", function()
+				for _, mode in ipairs(MODES) do
+					local env, c4 = lost(mode, 60)
+					tap(env, 0)
+					assert.same({ { rid = "s1", action = "active", duration = "3000", urgent = "true" } },
+						params_of(c4, "HUE_SCENE_RECALL"), mode)
+					assert.same({ { 0, 100, 3000 } }, changing(c4), mode)
+				end
+				local env, c4 = lost(SCENE, 60)
+				tap(env, 1)
+				assert.same({ { rid = "s1", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"), "This scene: at once")
+				assert.same({ { 0, 0, 0 } }, changing(c4))
+			end)
+
+			it("Room/zone lights: a bottom tap fades the lit room over the share of its level, the LEDs on till the end",
+				function()
+					local env, c4 = lost(LIGHTS, 60)
+					tap(env, 1)
+					assert.same({ { rid = "s1", duration = "1800", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"))
+					assert.same({ { 0, 0, 1800 } }, changing(c4), "the tile reads 0 and stays there")
+					state(env, "inactive", { reason = "recall" })
+					group(env, { on = "false" })
+					assert.same({}, led_states(c4), "held back while the room fades")
+					c4.advance(1800)
+					assert.same({ 0 }, levels(c4))
+					assert.same({ false }, led_states(c4))
+				end)
+
+			it("Room/zone lights: a press stops that fade with the room lit at the estimate, this scene not held",
+				function()
+					local env, c4 = lost(LIGHTS, 60)
+					tap(env, 1)
+					group(env, { on = "false" })
+					c4.advance(900)
+					tap(env, 0) -- outside the double-tap window of button 1: a stop
+					assert.same({ { rid = "s1", device_id = "2061", direction = "stop", level = "30" } },
+						params_of(c4, "HUE_SCENE_DIM"))
+					assert.same({ 0 }, levels(c4), "the tile stays 0")
+					assert.is_not_true(c4.persist.held_on)
+					assert.same({}, led_states(c4), "the room is still lit")
+					assert.equal(0, #messages(c4, "HUE_SCENE_RECALL"), "the top press only stopped")
+				end)
+
+			it("the toggle button follows the keypad: room off with Room/zone lights, this scene with This scene",
+				function()
+					local env, c4 = lost(LIGHTS, 60)
+					tap(env, 2)
+					assert.same({ { rid = "s1", duration = "1800", urgent = "true" } }, params_of(c4, "HUE_SCENE_OFF"))
+					env, c4 = lost(SCENE, 60)
+					tap(env, 2)
+					assert.equal(1, #messages(c4, "HUE_SCENE_RECALL"))
+					assert.same({}, messages(c4, "HUE_SCENE_OFF"))
+				end)
+
+			it("a time-based scene's keypad follows the room too: its toggle tap stops the room, its hold dims it",
+				function()
+					local env, c4 = load_scene({ rid = "s1", follow = false })
+					configure(env, SMART)
+					state(env, "inactive", { reason = "hello" })
+					group(env, { on = "true", level = "50" })
+					c4.calls, c4.sent = {}, {}
+					tap(env, 2)
+					assert.equal(1, #messages(c4, "HUE_SCENE_OFF"))
+					c4.advance(5000)
+					hold(env, c4, 0)
+					assert.same({ { rid = "s1", device_id = "2061", direction = "up", duration = "5000" } },
+						params_of(c4, "HUE_SCENE_DIM"))
+					assert.same({}, messages(c4, "HUE_SCENE_RECALL"))
+				end)
 		end)
 	end)
 
@@ -2796,9 +3442,9 @@ describe("Hue Scene driver", function()
 		describe("Recall As (Decision 12)", function()
 			it("is hidden after late init on a time-based device and shown on an ordinary one", function()
 				local _, smart = load_scene({ rid = "s1", kind = "smart_scene" })
-				assert.same({ { "Recall As", 1 } }, smart.calls_to("SetPropertyAttribs"))
+				assert.same({ { "Recall As", 1 } }, attribs_of(smart, "Recall As"))
 				local _, plain = load_scene({ rid = "s1" })
-				assert.same({ { "Recall As", 0 } }, plain.calls_to("SetPropertyAttribs"))
+				assert.same({ { "Recall As", 0 } }, attribs_of(plain, "Recall As"))
 			end)
 
 			it("is shown or hidden again whenever a configure changes the kind, and only then", function()
@@ -2818,7 +3464,7 @@ describe("Hue Scene driver", function()
 				configure(env, SMART)
 				assert.same({}, c4.calls_to("SetPropertyAttribs"), "never before late init")
 				env.OnDriverLateInit("DIT_STARTUP")
-				assert.same({ { "Recall As", 1 } }, c4.calls_to("SetPropertyAttribs"))
+				assert.same({ { "Recall As", 1 } }, attribs_of(c4, "Recall As"))
 			end)
 
 			it("never stops late init: on a runtime without SetPropertyAttribs, or when it fails", function()
@@ -2990,8 +3636,10 @@ describe("Hue Scene driver", function()
 				end
 			end)
 
-			it("top on a scene shown on only because something else lights its room recalls it over the whole rate",
-				function()
+			-- Until #469 the tile showed the room at 100 here, so the CHANGING
+			-- started from 100; since D1 it follows the scene alone and reads 0.
+			it("top on a scene whose keypad reads on only because something else lights its room recalls it over the "
+				.. "whole rate, from the tile's 0 (#469 D1, D10)", function()
 					local env, c4 = scene("inactive", nil, { rid = "s1", follow = false }) -- Room/zone lights
 					env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "true", level = "100" })
 					env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", other_active = "true" })
@@ -3000,7 +3648,7 @@ describe("Hue Scene driver", function()
 					tap(env, 0)
 					assert.same({ { rid = "s1", action = "active", duration = "3000", urgent = "true" } },
 						params_of(c4, "HUE_SCENE_RECALL"))
-					assert.same({ { 100, 100, 3000 } }, changing(c4), "the tile shows the room at 100")
+					assert.same({ { 0, 100, 3000 } }, changing(c4), "the tile reads 0: another scene lights the room")
 				end)
 
 			it("top on a scene held on at 100 that Hue no longer calls active recalls its look at once", function()

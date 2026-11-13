@@ -63,6 +63,10 @@ lights.ROOMS_AUTO_KEY = "hue_rooms_auto"
 lights.LIGHT_DRIVER = "hue_light.c4z"
 lights.BINDING = 1
 lights.BINDING_CLASS = "HUE_BRIDGE"
+-- The whole home (bridge_home) in mapping texts (#469 P6): Set Room Mapping
+-- maps it for its scenes only; a light's Hue room is never the bridge_home,
+-- so no light reads its mapping (hue_room_of reads rooms alone).
+lights.WHOLE_HOME = "(whole home)"
 lights.OFFLINE_NAG_S = 24 * 3600              -- Attention nags about lights offline this long [Q 8]
 lights.MAX_NAMED = 3                          -- names listed per Attention item before "+n more"
 lights.EARLY_HELLOS_MAX = 200                 -- hellos kept before load(), as the driver's early queue
@@ -162,6 +166,13 @@ lights.RESOURCES = {
 --                            one of them; Forget Light on one only drops the
 --                            stale entry. Optional; link_devices(skip_ids) adds
 --                            to it for one call.
+--   scenes                   the bridge.scenes instance, or a function returning
+--                            it, read at each use (the scenes are created after
+--                            the lights): Room Mappings and Set Room Mapping
+--                            read its registry, group_rid_of and
+--                            scenes_of_group for the whole home's row and the
+--                            scene devices of a group (#469 P6, S4, S5).
+--                            Optional: without it those are left out.
 function lights.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "lights.new: ctx.http is required")
@@ -1864,13 +1875,16 @@ function lights:map_by_name(group, hit)
 	self:mark()
 end
 
--- The label of a Hue group for mapping texts: the cached group's, or the
+-- The label of a Hue group for mapping texts: the cached group's ("(whole
+-- home)" for the bridge_home, #469 P6, whose mapping remembers that as its
+-- name, since the bridge_home has none), or the
 -- mapping's remembered name, marked deleted in Hue only once this run has
 -- fetched the groups (right after a reload the cache is simply empty
 -- [verified: hardware 2026-10-21, every mapping read "(deleted in Hue)"]).
 function lights:group_label(group_rid, mapping)
-	if self.groups:group(group_rid) then
-		return self.groups:label(group_rid)
+	local group = self.groups:group(group_rid)
+	if group then
+		return group.type == "bridge_home" and lights.WHOLE_HOME or self.groups:label(group_rid)
 	end
 	if mapping then
 		local label = tostring(mapping.hue_name or group_rid) .. (mapping.type == "zone" and " (zone)" or "")
@@ -1885,7 +1899,9 @@ end
 -- Set Room Mapping: Hue room or zone → Control4 room, recorded as a hand
 -- choice; room_id nil ("(no mapping)") removes the mapping and records that
 -- the owner wants none, so no mapping by name ever comes back for it (CR4).
--- Affects only future adds and the room marks. Returns ok, text.
+-- The whole home (bridge_home) is mapped like a group, for its scenes only
+-- (#469 P6). Affects only future adds and the room marks; a mapping's text
+-- counts the devices it leaves in other rooms (S5). Returns ok, text.
 function lights:set_room_mapping(group_rid, room_id)
 	local busy = self:busy_text()
 	if busy then
@@ -1896,9 +1912,6 @@ function lights:set_room_mapping(group_rid, room_id)
 	end
 	local group = self.groups:group(group_rid)
 	local existing = self.reg:room_mapping(group_rid)
-	if group and group.type == "bridge_home" then
-		return false, "Not mapped: the whole bridge cannot be mapped to one room"
-	end
 	if not group and not existing then
 		return false, string.format("Not mapped: Hue room %s is not on the bridge (Diagnostics ▸ Read everything "
 			.. "from the bridge now, then try again)",
@@ -1933,18 +1946,149 @@ function lights:set_room_mapping(group_rid, room_id)
 		end
 		name = "room " .. tostring(room_id)
 	end
+	local hue_name = group and group.name or (existing and existing.hue_name)
+	if group and group.type == "bridge_home" then
+		hue_name = lights.WHOLE_HOME  -- the bridge_home has no name; its label once it is gone
+	end
 	self.reg:set_room_mapping(group_rid, {
 		c4_room_id = room_id,
 		c4_room_name = name,
-		hue_name = group and group.name or existing.hue_name,
+		hue_name = hue_name,
 		type = group and group.type or existing.type,
 	})
 	self:set_how(group_rid, "hand")
 	self:mark()
 	self:flush()
 	local text = string.format("Mapped %s → %s", label, name)
+	local elsewhere = self:elsewhere_text(group_rid, room_id)
+	if elsewhere then
+		text = text .. "; " .. elsewhere
+	end
 	self.ctx.log.always("lights: %s", text)
 	return true, text
+end
+
+-- The scenes module (ctx.scenes, the instance or a function returning it),
+-- or nil.
+function lights:scenes_module()
+	local s = self.ctx.scenes
+	if type(s) == "function" then
+		local ok, value = pcall(s)
+		s = ok and value or nil
+	end
+	return type(s) == "table" and s or nil
+end
+
+-- The registered scene devices by the Hue room or zone of their scene (the
+-- scenes' group_rid_of, else the entry's group_rid): { [group_rid] = { device
+-- ids } }, the linked ones only with `linked`. Empty without ctx.scenes, or
+-- when reading it fails (logged).
+function lights:scene_devices_by_group(linked)
+	local s = self:scenes_module()
+	if not s or type(s.registry) ~= "table" then
+		return {}
+	end
+	local ok, out = pcall(function()
+		local by_group, seen = {}, {}
+		for rid, entry in pairs(s.registry) do
+			local id = type(entry) == "table" and positive(entry.device_id) or nil
+			if id and not seen[id] and (not linked or entry.state == "linked") then
+				local g = type(s.group_rid_of) == "function" and s:group_rid_of(rid) or entry.group_rid
+				if type(g) == "string" and g ~= "" then
+					seen[id] = true
+					by_group[g] = by_group[g] or {}
+					table.insert(by_group[g], id)
+				end
+			end
+		end
+		return by_group
+	end)
+	if not ok then
+		self.ctx.log.warn("lights: the scene devices could not be read: %s", tostring(out))
+		return {}
+	end
+	return out
+end
+
+-- Whether a Hue group has scenes on the bridge (either kind) or scene
+-- devices: the whole home's row is shown only then (#469 P6).
+function lights:group_has_scenes(group_rid)
+	local s = self:scenes_module()
+	if not s then
+		return false
+	end
+	if type(s.scenes_of_group) == "function" then
+		for _, smart in ipairs({ false, true }) do
+			local ok, list = pcall(s.scenes_of_group, s, group_rid, smart)
+			if ok and type(list) == "table" and #list > 0 then
+				return true
+			end
+		end
+	end
+	return self:scene_devices_by_group()[group_rid] ~= nil
+end
+
+-- One GetDevices lookup: { [device_id] = info } with numeric ids, or nil when
+-- the lookup fails or answers nothing usable (unknown is never "elsewhere").
+function lights:device_infos(ids)
+	if #ids == 0 then
+		return nil
+	end
+	local ok, raw = self.project:call("devices", { DeviceIds = table.concat(ids, ",") })
+	if not ok or type(raw) ~= "table" then
+		return nil
+	end
+	local out = {}
+	for id, info in pairs(raw) do
+		local device_id = tonumber(id)
+		if device_id and type(info) == "table" then
+			out[device_id] = info
+		end
+	end
+	return out
+end
+
+-- S5 (#469, rooms research M4): what a new mapping leaves in other rooms, the
+-- group's linked scene devices and, for a Hue room, its linked lights,
+-- counted from one lookup: "2 scene devices and 1 light are in other rooms
+-- (their rows say where)". Their list rows carry the room mark; nothing is
+-- moved. nil when none is elsewhere or the lookup fails.
+function lights:elsewhere_text(group_rid, room_id)
+	local ids, kind_of = {}, {}
+	for _, id in ipairs(self:scene_devices_by_group(true)[group_rid] or {}) do
+		kind_of[id] = "scene"
+		ids[#ids + 1] = tostring(id)
+	end
+	for _, rid in ipairs(self.reg:rids("linked")) do
+		local entry = self.registry[rid]
+		local id = entry.device_id
+		if entry.hue_room_rid == group_rid and not kind_of[id] and not self:foreign(id) then
+			kind_of[id] = "light"
+			ids[#ids + 1] = tostring(id)
+		end
+	end
+	local infos = self:device_infos(ids) or {}
+	local n = { scene = 0, light = 0 }
+	for id, info in pairs(infos) do
+		local here = tonumber(info.roomId)
+		if kind_of[id] and here and here ~= room_id then
+			n[kind_of[id]] = n[kind_of[id]] + 1
+		end
+	end
+	local parts = {}
+	if n.scene > 0 then
+		parts[#parts + 1] = plural(n.scene, "scene device")
+	end
+	if n.light > 0 then
+		parts[#parts + 1] = plural(n.light, "light")
+	end
+	if #parts == 0 then
+		return nil
+	end
+	if n.scene + n.light == 1 then
+		return parts[1] .. " is in another room (its row says where)"
+	end
+	return table.concat(parts, " and ") .. " are in other rooms (their rows say where)"
 end
 
 -- Map Rooms By Name (a hidden alias since 1.2): auto_map_rooms' rule once,
@@ -2200,11 +2344,13 @@ function lights:attention()
 	return table.concat(items, "; ")
 end
 
--- Every cached room and zone (rooms first, each sorted by name), then every
--- mapping whose Hue group is gone, in the order the Room Mappings list and
--- Set Room Mapping's Hue Room picker show them: fn(group_rid, label, mapping)
--- per row, the mapping nil for an unmapped group. Returns how many cached
--- groups have no mapping.
+-- Every cached room and zone (rooms first, each sorted by name), the whole
+-- home when it has scenes or a mapping (#469 P6), then every mapping whose
+-- Hue group is gone, in the order the Room Mappings list and Set Room
+-- Mapping's Hue Room picker show them: fn(group_rid, label, mapping) per
+-- row, the mapping nil for an unmapped group. Returns how many cached rooms
+-- and zones have no mapping (the whole home is never counted: its mapping
+-- is for its scenes alone).
 function lights:each_mapping_row(fn)
 	local mappings = self.reg:room_mappings()
 	local seen, unmapped = {}, 0
@@ -2214,6 +2360,12 @@ function lights:each_mapping_row(fn)
 			unmapped = unmapped + 1
 		end
 		fn(group.rid, self.groups:label(group.rid), mappings[group.rid])
+	end
+	for _, home in ipairs(self.groups:groups("bridge_home")) do
+		if mappings[home.rid] or self:group_has_scenes(home.rid) then
+			seen[home.rid] = true
+			fn(home.rid, lights.WHOLE_HOME, mappings[home.rid])
+		end
 	end
 	local stale = {}
 	for group_rid, mapping in pairs(mappings) do
@@ -2228,44 +2380,162 @@ function lights:each_mapping_row(fn)
 	return unmapped
 end
 
+-- The key a group and a deleted group's mapping are matched by for O6
+-- (#469): the name and whether it is a zone (a room and a zone of one name
+-- stay apart). The whole home's name is lights.WHOLE_HOME, as its mapping
+-- remembers it.
+local function group_match_key(name, gtype)
+	return norm(name) .. (gtype == "zone" and "|zone" or "|room")
+end
+
+-- What the offers of the mapping rows need, read once per list (#469 S4):
+-- { rooms, by_key (rooms_by_name), earlier = { [group_rid] = { label, room } }
+-- the mapping a deleted group of the same name and type had (O6), placed =
+-- { [group_rid] = { count, room } } where all of a never-mapped group's scene
+-- devices sit (one GetDevices lookup, only while such a group has scene
+-- devices) }. Every offer waits for a Set Room Mapping click.
+function lights:mapping_view()
+	local rooms = self.project:rooms()
+	local view = { rooms = rooms, by_key = rooms_by_name(rooms), earlier = {}, placed = {} }
+	local mappings = self.reg:room_mappings()
+	local candidates = {}
+	for _, group in ipairs(self.groups:groups()) do
+		candidates[#candidates + 1] = group
+	end
+	for _, home in ipairs(self.groups:groups("bridge_home")) do
+		candidates[#candidates + 1] = home
+	end
+	-- The never-mapped groups, and each by its name and type (false when two
+	-- share them: no deleted group's mapping is offered to either).
+	local open, by_match = {}, {}
+	for _, group in ipairs(candidates) do
+		if not mappings[group.rid] and self:mapping_how(group.rid) == nil then
+			open[#open + 1] = group
+			local key = group_match_key(group.type == "bridge_home" and lights.WHOLE_HOME or group.name, group.type)
+			by_match[key] = by_match[key] == nil and group or false
+		end
+	end
+	if #open == 0 then
+		return view
+	end
+	-- O6: a deleted group's mapping, once this run has read the groups (before
+	-- that every mapping's group only looks missing).
+	if self.groups_loaded then
+		for group_rid, mapping in pairs(mappings) do
+			local group = by_match[group_match_key(mapping.hue_name, mapping.type)]
+			local room = rooms[mapping.c4_room_id] or (next(rooms) == nil and mapping.c4_room_name) or nil
+			if group and room and not self.groups:group(group_rid) then
+				local was = view.earlier[group.rid]
+				if was == nil then
+					view.earlier[group.rid] = { label = self:group_label(group.rid), room = room }
+				elseif was and was.room ~= room then
+					view.earlier[group.rid] = false  -- two deleted groups, two rooms: no offer
+				end
+			end
+		end
+	end
+	-- Where the scene devices of a never-mapped group sit.
+	local by_group, ids = self:scene_devices_by_group(), {}
+	for _, group in ipairs(open) do
+		for _, id in ipairs(by_group[group.rid] or {}) do
+			ids[#ids + 1] = tostring(id)
+		end
+	end
+	local infos = self:device_infos(ids)
+	for _, group in ipairs(infos and open or {}) do
+		local room_id, count, name = nil, 0, ""
+		for _, id in ipairs(by_group[group.rid] or {}) do
+			local info = infos[id]
+			local here = info and tonumber(info.roomId)
+			if here and room_id and here ~= room_id then
+				count = 0  -- in two rooms: no offer
+				break
+			elseif here then
+				room_id, count = here, count + 1
+				if name == "" then
+					name = util.display_name(info.roomName)
+				end
+			end
+		end
+		if count > 0 then
+			view.placed[group.rid] = { count = count,
+				room = name ~= "" and name or rooms[room_id] or ("room " .. tostring(room_id)) }
+		end
+	end
+	return view
+end
+
+-- A Control4 room that matches a gone mapping's room by name: the one room
+-- named as the old one, else as the group (#469 S4), or nil.
+local function matching_room(by_key, ...)
+	for _, name in ipairs({ ... }) do
+		local hit = name and by_key[norm(name)]
+		if hit and hit.count == 1 then
+			return hit
+		end
+	end
+	return nil
+end
+
 -- What a mapping row says after its arrow (1.2): the Control4 room and how
 -- the mapping was made ("Office (by name)", "Study (by hand)", "Office
 -- (before 1.2)", the target "(Control4 room gone)" when so), "(no mapping,
--- by hand)" for a group the owner left unmapped on purpose, else
--- "(unmapped)", offering the Control4 room of exactly the group's name when
--- there is one ("(unmapped; Control4 room Porch matches)"): what the update
--- to 1.2 or a later Control4 room leaves unmapped is offered, never mapped
--- by itself (import research §5.4, CR1). `by_key` is rooms_by_name(rooms).
-function lights:mapping_text(group_rid, mapping, rooms, by_key)
+-- by hand; its scenes cannot be added)" for a group the owner left unmapped
+-- on purpose, else "(unmapped)". What the update to 1.2 or a later Control4
+-- room leaves unmapped is offered, never mapped by itself (import research
+-- §5.4, CR1), and since 1.6 (#469 S4, rooms research 6.4) so is more, each
+-- an offer a Set Room Mapping click takes, in this order:
+--   "(unmapped; its 3 scene devices are in Den)"   all of them in one room (M8, C24)
+--   "(unmapped; the deleted Great Room was mapped to Living)"   O6, H4
+--   "(unmapped; Control4 room Porch matches)"      one room of the group's name
+--   "(unmapped; 2 Control4 rooms are named Garage)"   M2
+--   "(Control4 room gone; Control4 room Kitchen matches)"   C21, C23
+-- `view` is mapping_view()'s (rooms, by_key and the offers).
+function lights:mapping_text(group_rid, mapping, view)
 	local how = self:mapping_how(group_rid)
+	local group = self.groups:group(group_rid)
 	if mapping and mapping.c4_room_id then
-		return self:mapping_target(mapping, rooms) .. (HOW_SUFFIX[how] or "")
+		local target = self:mapping_target(mapping, view.rooms)
+		if target == "(Control4 room gone)" then
+			local hit = matching_room(view.by_key, mapping.c4_room_name, group and group.name or mapping.hue_name)
+			if hit then
+				target = string.format("(Control4 room gone; Control4 room %s matches)", hit.name)
+			end
+		end
+		return target .. (HOW_SUFFIX[how] or "")
 	end
 	if how == "none" then
-		return "(no mapping, by hand)"
+		return "(no mapping, by hand; its scenes cannot be added)"
 	end
-	local group = self.groups:group(group_rid)
-	local hit = group and by_key[norm(group.name)]
+	local placed, earlier = view.placed[group_rid], view.earlier[group_rid]
+	if placed then
+		return string.format("(unmapped; its %s %s in %s)", plural(placed.count, "scene device"),
+			placed.count == 1 and "is" or "are", placed.room)
+	elseif earlier then
+		return string.format("(unmapped; the deleted %s was mapped to %s)", earlier.label, earlier.room)
+	end
+	local hit = group and group.name and view.by_key[norm(group.name)]
 	if hit and hit.count == 1 then
 		return string.format("(unmapped; Control4 room %s matches)", hit.name)
+	elseif hit then
+		return string.format("(unmapped; %d Control4 rooms are named %s)", hit.count, group.name)
 	end
 	return "(unmapped)"
 end
 
 -- The Room Mappings property: one "Hue room → Control4 room (how)" line per
--- Hue room and zone (mapping_text), then the mappings whose group is gone
--- from Hue, plus how many groups have no mapping; an empty list while no
--- group is cached and no mapping exists. The bridge shows them as the
--- `Room Mappings` drop-down.
+-- Hue room and zone (mapping_text), the whole home's, then the mappings
+-- whose group is gone from Hue, plus how many groups have no mapping; an
+-- empty list while no group is cached and no mapping exists. The bridge
+-- shows them as the `Room Mappings` drop-down.
 function lights:room_mapping_items()
 	if next(self.reg:room_mappings()) == nil and #self.groups:groups() == 0 then
 		return {}, 0
 	end
-	local rooms = self.project:rooms()
-	local by_key = rooms_by_name(rooms)
+	local view = self:mapping_view()
 	local parts = {}
 	local unmapped = self:each_mapping_row(function(rid, label, mapping)
-		parts[#parts + 1] = string.format("%s → %s", label, self:mapping_text(rid, mapping, rooms, by_key))
+		parts[#parts + 1] = string.format("%s → %s", label, self:mapping_text(rid, mapping, view))
 	end)
 	return parts, unmapped
 end
@@ -2365,14 +2635,14 @@ function lights:device_text(rid, entry, rest, relink)
 end
 
 -- Set Room Mapping's Hue Room: rooms then zones, each with its mapping and
--- how it was made (mapping_text), then mappings whose Hue group was deleted
--- (so they can be removed).
+-- how it was made (mapping_text, its offers included), the whole home when it
+-- has scenes or a mapping (#469 P6), then mappings whose Hue group was
+-- deleted (so they can be removed).
 function lights:picker_hue_rooms()
-	local rooms = self.project:rooms()
-	local by_key = rooms_by_name(rooms)
+	local view = self:mapping_view()
 	local list = {}
 	self:each_mapping_row(function(rid, label, mapping)
-		local target = self:mapping_text(rid, mapping, rooms, by_key)
+		local target = self:mapping_text(rid, mapping, view)
 		list[#list + 1] = { text = string.format("%s → %s", sanitise(label), sanitise(target)), value = rid }
 	end)
 	if #list == 0 then

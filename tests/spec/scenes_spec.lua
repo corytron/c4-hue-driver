@@ -199,6 +199,15 @@ describe("bridge.scenes", function()
 		return 2001
 	end
 
+	-- #469 (docs/scene-tracking-design.md Part 2): a scene goes only into the
+	-- Control4 room its Hue room or zone maps to. The specs that put a
+	-- Downstairs scene into a room map the zone there first (the Garage
+	-- unless named); until 1.6 an explicit Room took it without a mapping.
+	local function map_downstairs(room_id, room_name)
+		L.reg:set_room_mapping(F.group_rids.downstairs, { c4_room_id = room_id or GARAGE_ROOM,
+			c4_room_name = room_name or "Garage", hue_name = "Downstairs", type = "zone" })
+	end
+
 	-- scenes.RECALL_WINDOW_MS pass: every scene's recall window ends, and a
 	-- recall that waited in one goes now (the fake's timers are those windows
 	-- alone here). Before #47 F9 each recall was a PUT of its own at once.
@@ -423,8 +432,12 @@ describe("bridge.scenes", function()
 			assert.is_true(saw_log("scenes: Added Relax to Living Room (device 2001)"))
 		end)
 
-		it("names a zone scene '<Zone> <Scene>' and takes the room given; a dynamic scene says so", function()
+		-- #469: the room given is taken when it is the mapped room (any room was
+		-- taken before).
+		it("names a zone scene '<Zone> <Scene>' and takes the room given when it is the mapped one; a dynamic scene "
+			.. "says so", function()
 			resync()
+			map_downstairs()
 			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
 			assert.same({ ok = true, text = "Added Nightlight to Garage (device 2001)" }, last_result())
 			assert.equal("Downstairs Nightlight", c4.added[1].name)
@@ -438,19 +451,27 @@ describe("bridge.scenes", function()
 			assert.is_true(S:entry(F.scene_rids.savanna).auto_dynamic)
 		end)
 
-		it("refuses a scene whose Hue room is unmapped unless a room is picked, and a room that is gone", function()
+		-- #469 P1, P4: until 1.6 a room picked took a scene of an unmapped group,
+		-- and the texts pointed at "pick a room".
+		it("refuses a scene whose Hue room is unmapped whatever the room picked, one mapped to a room that is gone, "
+			.. "and a room that is gone", function()
 			resync()
+			local p1 = "Not added: Hue zone Downstairs is not mapped to a Control4 room; map it with Set Room Mapping "
+				.. "(Hue Room Downstairs (zone), a Control4 room of your choice), then add again"
 			S:add_scene(F.scene_rids.nightlight, nil, done)
-			assert.same({ ok = false, text = "Not added: Nightlight: Hue room Downstairs (zone) not mapped; pick a room, "
-				.. "or Set Room Mapping first" }, last_result())
-			S:add_scene(F.scene_rids.nightlight, "99", done)
-			assert.same({ ok = false, text = "Not added: Control4 room 99 no longer exists" }, last_result())
+			assert.same({ ok = false, text = p1 }, last_result())
+			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
+			assert.same({ ok = false, text = p1 }, last_result(), "a room picked does not place it")
 			assert.equal(0, #c4.added)
 			L.reg:set_room_mapping(F.group_rids.downstairs, { c4_room_id = 99, c4_room_name = "Cellar", hue_name = "Downstairs",
 				type = "zone" })
 			S:add_scene(F.scene_rids.nightlight, nil, done)
-			assert.equal("Not added: Nightlight: Hue room Downstairs (zone) mapped to a Control4 room that no longer exists; "
-				.. "pick a room, or Set Room Mapping first", last_result().text)
+			assert.equal("Not added: Hue zone Downstairs maps to a Control4 room that no longer exists; map it again with "
+				.. "Set Room Mapping, then add again", last_result().text)
+			map_downstairs()
+			S:add_scene(F.scene_rids.nightlight, "99", done)
+			assert.same({ ok = false, text = "Not added: Control4 room 99 no longer exists" }, last_result())
+			assert.equal(0, #c4.added)
 		end)
 
 		it("reports an AddDevice failure", function()
@@ -516,8 +537,9 @@ describe("bridge.scenes", function()
 				.. "then try again)",
 				last_result().text)
 			S:add_all_of_group(F.group_rids.downstairs, done)
-			assert.same({ ok = false, text = "Not added: Hue room Downstairs (zone) not mapped; Set Room Mapping first" },
-				last_result())
+			assert.same({ ok = false, text = "Not added: Hue zone Downstairs is not mapped to a Control4 room; map it with Set "
+				.. "Room Mapping (Hue Room Downstairs (zone), a Control4 room of your choice), then add again" },
+				last_result(), "#469 P1")
 			S:add_all_of_group(F.group_rids.attic, done)
 			assert.same({ ok = false, text = "Not added: Attic (zone) has no scenes" }, last_result())
 			assert.equal(0, #c4.added)
@@ -1287,13 +1309,14 @@ describe("bridge.scenes", function()
 				n = #c4.transfers
 				S:recall({ rid = relax })
 				S:recall({ rid = relax, brightness = "90" })  -- waits
-				S.ctx.group_set = function(rid, fields)
-					sets[#sets + 1] = { rid = rid, fields = fields, after = #c4.transfers }
-					return true
-				end
 				assert.is_true(S:level({ rid = relax, level = "35" }))
 				assert.same({ relax, relax .. " at 90" }, puts(n))
-				assert.equal(n + 2, sets[1].after, "the level is unknown here: an absolute set, after the recall")
+				-- #469 D6: the recall at 90 makes 90 the group's level until Hue
+				-- reports one, so the move is a relative one from there (an absolute
+				-- set from an unknown level before 1.6), queued after the recall.
+				assert.same({ action = "down", brightness_delta = 55 }, dims[#dims].body.dimming_delta)
+				assert.equal(n + 2, dims[#dims].after)
+				assert.same({}, sets)
 			end)
 
 			it("drops a waiting recall whose device was forgotten, or whose scene left the bridge, meanwhile", function()
@@ -2078,6 +2101,7 @@ describe("bridge.scenes", function()
 		it("re-points the entry at the new scene, keeping the device, and tells it", function()
 			add_relax()
 			S:on_container(container(F.events.scene_deleted))
+			map_downstairs(LIVING_ROOM, "Living Room")  -- #469 P3: Bright's zone maps to the room device 2001 is in
 			c4.sent = {}
 			local ok, text = S:relink("2001", F.scene_rids.bright)
 			assert.is_true(ok)
@@ -2229,6 +2253,9 @@ describe("bridge.scenes", function()
 
 		it("adopts by announced rid, by Composer name, by the zone creation name, and reports the rest", function()
 			resync()
+			-- #469 S3: the devices sit in the Living Room, so their names are
+			-- matched among the scenes of the groups mapped there.
+			map_downstairs(LIVING_ROOM, "Living Room")
 			for id, name in pairs({ [2091] = "Whatever", [2092] = "Savanna sunset", [2093] = "Downstairs Nightlight",
 				[2094] = "Mystery", [2095] = "Bright", [2096] = "Bright" }) do
 				fake.project.devices[id] = { name = name, room_id = LIVING_ROOM, c4i = "hue_scene.c4z", driver_name = "Hue Scene" }
@@ -2242,8 +2269,9 @@ describe("bridge.scenes", function()
 			assert.equal("Linked 3 scene devices: Whatever (device 2091) to Living Room: Relax by its rid, "
 				.. "Savanna sunset (device 2092) to Living Room: Savanna sunset by name, "
 				.. "Downstairs Nightlight (device 2093) to Downstairs (zone): Nightlight by name; "
-				.. "not linked 3: Mystery (device 2094): no unimported Hue scene has that name; rename the device in Composer "
-				.. "to the Hue scene's exact name and run Link Device again; "
+				.. "not linked 3: Mystery (device 2094): no unimported scene of a Hue room mapped to Living Room has that name; "
+				.. "rename the device in Composer to the Hue scene's exact name, or move the device to its scene's mapped "
+				.. "room, and run Link Device again; "
 				.. "Bright (device 2095): 2 bound devices share that name; rename one in Composer and run Link Device again; "
 				.. "Bright (device 2096): 2 bound devices share that name; rename one in Composer and run Link Device again",
 				text)
@@ -2281,6 +2309,7 @@ describe("bridge.scenes", function()
 	describe("names", function()
 		local function import_two()
 			add_relax()
+			map_downstairs()
 			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
 			-- The proxies the fake made for the two devices.
 			S.registry[F.scene_rids.relax].proxy_id = 3001
@@ -2339,6 +2368,7 @@ describe("bridge.scenes", function()
 
 		it("gives the Composer form of each scene and the PUT that names it", function()
 			resync()
+			map_downstairs()
 			S:add_scene(F.scene_rids.relax, nil, done)
 			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
 			local relax, night = S.registry[F.scene_rids.relax], S.registry[F.scene_rids.nightlight]
@@ -2367,6 +2397,7 @@ describe("bridge.scenes", function()
 			assert.same({ "pass", "scene" }, calls[#calls])
 			calls = {}
 			S:on_container(container(F.events.scene_deleted))
+			map_downstairs(LIVING_ROOM, "Living Room")  -- #469 P3: Bright's zone maps to the room device 2001 is in
 			assert.is_true((S:relink(2001, F.scene_rids.bright)))
 			assert.same({ "relinked", "scene", F.scene_rids.relax, F.scene_rids.bright }, calls[1])
 			S:forget(2001)
@@ -2427,6 +2458,7 @@ describe("bridge.scenes", function()
 			L = lights.new({ http = http_ctx, now = function() return now end })
 			L:absorb({ room = decode_data(F.room), zone = decode_data(replace(F.zone, '"name":"Downstairs"',
 				'"name":"' .. ZONE .. '"')), bridge_home = decode_data(F.bridge_home) })
+			map_downstairs()  -- #469: the zone's scenes go to the Garage, as these specs add them
 			S = new_scenes()
 		end)
 
@@ -2529,6 +2561,7 @@ describe("bridge.scenes", function()
 			assert.same({ { text = "(no gone or unbound scene devices)", value = "" } }, S:picker_relink_devices())
 			assert.same({ { text = "(no registered scenes)", value = "" } }, S:picker_forget_devices())
 			add_relax()
+			map_downstairs()
 			S:add_scene(F.scene_rids.nightlight, tostring(GARAGE_ROOM), done)
 			S:add_scene(F.scene_rids.concentrate, nil, done)
 			assert.same({ "Garage: Concentrate (device 2003)", "Downstairs (zone): Nightlight (device 2002)",
@@ -2616,11 +2649,6 @@ describe("bridge.scenes", function()
 			resync(opts)
 		end
 
-		local function map_downstairs()
-			L.reg:set_room_mapping(F.group_rids.downstairs, { c4_room_id = GARAGE_ROOM, c4_room_name = "Garage",
-				hue_name = "Downstairs", type = "zone" })
-		end
-
 		-- Resync, then Add Scene for Golden hours 4 (device 2001, Living Room).
 		local function add_living(opts)
 			resync_smart(opts)
@@ -2656,6 +2684,7 @@ describe("bridge.scenes", function()
 
 			it("names a zone one '<Zone> <base name>'; a sunset slot and a slot scene the catalogue lacks", function()
 				resync()  -- the default answer: Golden hours over Downstairs, Tuesday's slot 1 (sunset, Nightlight)
+				map_downstairs()
 				S:add_scene(F.smart_scene_rid, tostring(GARAGE_ROOM), done)
 				assert.equal("Added Golden hours to Garage (device 2001)", last_result().text)
 				assert.equal("Downstairs Golden hours", c4.added[1].name)
@@ -2740,8 +2769,10 @@ describe("bridge.scenes", function()
 
 			it("Link Devices matches the base name and the creation name of time-based scenes", function()
 				resync_smart()
+				-- In no Control4 room the project names: the name match is not
+				-- narrowed to a room's scenes (#469 S3; its own specs narrow it).
 				for id, name in pairs({ [2091] = "Downstairs Natural light", [2092] = "Golden hours" }) do
-					fake.project.devices[id] = { name = name, room_id = LIVING_ROOM, c4i = "hue_scene.c4z", driver_name = "Hue Scene" }
+					fake.project.devices[id] = { name = name, room_id = nil, c4i = "hue_scene.c4z", driver_name = "Hue Scene" }
 					c4:Bind(15, 1, id, 1, "HUE_BRIDGE")
 				end
 				assert.equal("Linked 1 scene device: Downstairs Natural light (device 2091) to Downstairs (zone): Natural light "
@@ -3210,6 +3241,479 @@ describe("bridge.scenes", function()
 		end)
 	end)
 
+	-- #469 (docs/scene-tracking-design.md): the bridge's half of "a scene's
+	-- tile follows its own scene" (D6, D7) and "scenes stay in their room"
+	-- (the rule's table, P1 to P5, S3, placement and group_target).
+	describe("scene tracking and rooms (#469)", function()
+		local RELAX, SAVANNA, BRIGHT, NIGHTLIGHT, CONCENTRATE = F.scene_rids.relax, F.scene_rids.savanna,
+			F.scene_rids.bright, F.scene_rids.nightlight, F.scene_rids.concentrate
+		local G_LIVING = F.grouped_light_rids.living_room
+		local OK = '{"data":[{"rid":"x","rtype":"scene"}],"errors":[]}'
+
+		-- A scene of the whole home (bridge_home), with the Attic's empty zone
+		-- scene beside it.
+		local HOME_RID = "5e4d3c2b-0000-4000-8000-00000000s0bb"
+		local HOME_ITEM = '{"id":"' .. HOME_RID .. '","id_v1":"/scenes/HoMe0000000Brgh","actions":[],'
+			.. '"metadata":{"name":"Everything"},"group":{"rid":"' .. F.group_rids.home .. '","rtype":"bridge_home"},'
+			.. '"speed":0.5,"auto_dynamic":false,"status":{"active":"inactive"},"type":"scene"}'
+		local WITH_HOME = { body = F.scene:gsub("%]}$", "," .. HOME_ITEM .. "," .. ATTIC_ITEM .. "]}") }
+
+		-- The lights' device cache, so the groups' lamps are known: the Living
+		-- Room holds Living Room Lamp and Hallway Ambiance, the Garage Garage
+		-- White, the Downstairs zone Living Room Lamp and Garage White, the
+		-- Attic zone none, the bridge_home every one.
+		local function with_lamps()
+			L:absorb({ device = decode_data(F.device) })
+		end
+
+		local function map(key, room_id, room_name)
+			L.reg:set_room_mapping(F.group_rids[key], { c4_room_id = room_id, c4_room_name = room_name, hue_name = key,
+				type = key == "downstairs" and "zone" or "room" })
+		end
+
+		-- A one-item container: scene `rid`'s status.
+		local function status(rid, active)
+			return container('[{"creationtime":"2026-11-12T18:00:00Z","id":"9de116fc-0469-4a2b-8c3d-000000000469",'
+				.. '"type":"update","data":[{"id":"' .. rid .. '","type":"scene","status":{"active":"' .. active .. '"}}]}]')
+		end
+
+		-- The devices told other_active, in id order.
+		local function told()
+			local out = {}
+			for _, m in ipairs(c4.sent) do
+				if m.command == "HUE_SCENE_GROUP" and m.params.other_active == "true" then
+					assert.same({ rid = m.params.rid, other_active = "true" }, m.params, "other_active goes alone")
+					out[#out + 1] = m.id
+				end
+			end
+			table.sort(out)
+			return out
+		end
+
+		-- A bare scene device in the project, bound to the bridge.
+		local function bare(id, name, room_id)
+			fake.project.devices[id] = { name = name, room_id = room_id, c4i = "hue_scene.c4z", driver_name = "Hue Scene" }
+			c4:Bind(15, 1, id, 1, "HUE_BRIDGE")
+		end
+
+		describe("other_active reaches every scene that lost (D7)", function()
+			-- Relax 2001 and Savanna sunset 2002 (Living Room), Concentrate 2003
+			-- (Garage), Bright 2004 and Nightlight 2005 (Downstairs, mapped to the
+			-- Garage).
+			local function add_five(opts)
+				resync(opts)
+				map_downstairs()
+				S:add_all_of_group(F.group_rids.living_room, done)
+				S:add_scene(CONCENTRATE, nil, done)
+				S:add_scene(BRIGHT, nil, done)
+				S:add_scene(NIGHTLIGHT, nil, done)
+				assert.equal(5, #c4.added)
+				c4.sent = {}
+			end
+
+			it("a zone scene played tells the scenes of every room that shares a lamp with it, once the lamps are known",
+				function()
+				add_five()
+				S:on_container(status(NIGHTLIGHT, "inactive"))
+				c4.sent = {}
+				S:on_container(status(BRIGHT, "static"))
+				assert.same({ 2005 }, told(), "without the lamps: its own group only, as before")
+				with_lamps()
+				S:on_container(status(BRIGHT, "inactive"))
+				c4.sent = {}
+				assert.equal(4 + 1, S:on_container(status(BRIGHT, "static")))
+				assert.same({ 2001, 2002, 2003, 2005 }, told(), "the Living Room and the Garage share its lamps")
+				assert.same({ "HUE_SCENE_STATE" }, { sent_to(2004)[1].command }, "not itself")
+			end)
+
+			it("a room scene played tells a zone over its lamps, not a room that shares none", function()
+				add_five()
+				with_lamps()
+				S:on_container(container(F.events.scene_recalled))  -- Relax static
+				assert.same({ 2002, 2004, 2005 }, told(), "Savanna sunset, and the Downstairs scenes; not the Garage's")
+				c4.sent = {}
+				S:on_container(status(CONCENTRATE, "static"))
+				assert.same({ 2004, 2005 }, told(), "the Garage shares Garage White with Downstairs only")
+			end)
+
+			it("a whole-home scene shares every lamp; an empty zone shares none", function()
+				resync(WITH_HOME)
+				with_lamps()
+				map("home", LIVING_ROOM, "Living Room")
+				map("attic", GARAGE_ROOM, "Garage")
+				S:add_scene(RELAX, nil, done)        -- 2001
+				S:add_scene(CONCENTRATE, nil, done)  -- 2002
+				S:add_scene(ATTIC_RID, nil, done)    -- 2003, the empty Attic
+				S:add_scene(HOME_RID, nil, done)     -- 2004
+				c4.sent = {}
+				S:on_container(status(HOME_RID, "static"))
+				assert.same({ 2001, 2002 }, told())
+				c4.sent = {}
+				S:on_container(status(CONCENTRATE, "static"))
+				assert.same({ 2004 }, told(), "a scene anywhere ends the whole home's, not the Living Room's")
+				c4.sent = {}
+				S:on_container(status(ATTIC_RID, "static"))
+				assert.same({}, told(), "the empty zone's scene lights nothing")
+			end)
+
+			it("keeps Decision 10: a time-based scene is not told about the scene its current slot plays", function()
+				resync({ smart = F.smart_scenes })
+				S:add_all_of_group(F.group_rids.living_room, done)  -- Relax 2001, Savanna 2002, Golden hours 4 2003
+				with_lamps()
+				S:on_container(container(F.events.smart_activated))  -- its slot 0: Savanna sunset
+				c4.sent = {}
+				S:on_container(container(F.events.smart_slot_scene))
+				assert.same({ 2001 }, told(), "Relax only; the schedule keeps running")
+			end)
+
+			it("goes out from a recall's answer when the event has not come first, once per activation", function()
+				add_five()
+				S:recall({ rid = RELAX })
+				c4.last_transfer():respond(200, OK)
+				assert.same({ 2002 }, told(), "without the lamps known: its group")
+				assert.same({ rid = RELAX, active = "static", reason = "recall" }, sent_to(2001, "HUE_SCENE_STATE")[1].params)
+				c4.sent = {}
+				-- The event after the answer: as every event carrying an active
+				-- status, it tells them (today's rule; a second other_active
+				-- changes nothing on a device).
+				S:on_container(container(F.events.scene_recalled))
+				assert.same({ 2002 }, told())
+				-- The event first, then the answer.
+				window_ends()
+				with_lamps()
+				S:recall({ rid = SAVANNA })
+				local put = c4.last_transfer()
+				c4.sent = {}
+				S:on_container(container(F.events.scene_dynamic))
+				assert.same({ 2001, 2004, 2005 }, told())
+				c4.sent = {}
+				put:respond(200, OK)
+				assert.same({}, told(), "the answer after the event tells nobody again")
+				assert.equal("dynamic_palette", sent_to(2002, "HUE_SCENE_STATE")[1].params.active)
+				-- A recall that fails tells nobody.
+				window_ends()
+				S:recall({ rid = CONCENTRATE })
+				c4.sent = {}
+				c4.last_transfer():respond(503, "")
+				c4.fire_timers_of(1)
+				assert.same({}, told())
+			end)
+
+			it("goes out at a resync to every linked scene that lost to an active one, registered or not", function()
+				add_five()  -- the fixture's Nightlight is static
+				S:forget(2005)  -- Nightlight has no device now
+				c4.sent = {}
+				resync({ grouped = grouped_lights({ downstairs = true, living_room = true }) })
+				assert.same({ 2004 }, told(), "Bright, in Nightlight's group")
+				assert.same({ "HUE_SCENE_STATE", "HUE_SCENE_GROUP", "HUE_SCENE_GROUP" },
+					{ sent_to(2004)[1].command, sent_to(2004)[2].command, sent_to(2004)[3].command })
+				assert.equal("true", sent_to(2004)[2].params.other_active, "before the group's on and level")
+				assert.same({ rid = BRIGHT, on = "true", level = "50" }, sent_to(2004)[3].params)
+				c4.sent = {}
+				with_lamps()
+				resync()
+				assert.same({ 2001, 2002, 2003, 2004 }, told(), "and the rooms sharing a lamp with Downstairs")
+				c4.sent = {}
+				resync({ body = F.scene:gsub('"active":"static"', '"active":"inactive"') })
+				assert.same({}, told(), "no scene active, nobody told")
+			end)
+
+			it("at a resync, a time-based scene running counts while its state is current; Decision 10 holds", function()
+				local living_on = '{"errors":[],"data":[' .. F.smart_scene_items.golden .. ',' .. F.smart_scene_items.natural
+					.. ',' .. replace(F.smart_scene_items.living, '"state":"inactive"', '"state":"active"') .. ']}'
+				local none_static = F.scene:gsub('"active":"static"', '"active":"inactive"')
+				resync({ smart = living_on, body = none_static })
+				S:add_scene(RELAX, nil, done)    -- 2001
+				map_downstairs()
+				S:add_scene(F.smart_scene_rids.golden, nil, done)  -- 2002, Golden hours: its slot 0 plays Bright
+				c4.sent = {}
+				resync({ smart = living_on, body = none_static })
+				assert.same({ 2001 }, told(), "Golden hours 4 runs in the Living Room")
+				c4.sent = {}
+				resync({ smart = living_on, body = none_static:gsub('("name":"Bright".-"active":)"inactive"', '%1"static"') })
+				assert.equal("static", S:scene(BRIGHT).active)
+				assert.same({ 2001 }, told(), "Golden hours is not told about Bright, the scene its slot plays")
+				c4.sent = {}
+				resync({ smart = living_on })  -- Nightlight static, which its slot does not play
+				assert.same({ 2001, 2002 }, told())
+				c4.sent = {}
+				resync({ smart_code = 503, body = none_static })
+				assert.same({}, told(), "a kept time-based state is not current")
+			end)
+
+			it("answers a hello with other_active, before the group's on and level, when another scene is active", function()
+				add_five()
+				resync({ grouped = grouped_lights({ downstairs = true }) })
+				c4.sent = {}
+				assert.is_true(S:hello(BRIGHT, { device_id = "2004" }))
+				assert.same({ "HUE_SCENE_CONFIGURE@2004", "HUE_SCENE_STATE@2004", "HUE_SCENE_GROUP@2004",
+					"HUE_SCENE_GROUP@2004" }, commands_sent())
+				assert.same({ rid = BRIGHT, other_active = "true" }, c4.sent[3].params)
+				assert.same({ rid = BRIGHT, on = "true", level = "50" }, c4.sent[4].params)
+				c4.sent = {}
+				assert.is_true(S:hello(NIGHTLIGHT, { device_id = "2005" }))
+				assert.same({}, told(), "the active scene itself")
+				assert.is_true(S:hello(RELAX, { device_id = "2001" }))
+				assert.same({}, told(), "no lamp known in common")
+				with_lamps()
+				assert.is_true(S:hello(RELAX, { device_id = "2001" }))
+				assert.same({ 2001 }, told())
+			end)
+		end)
+
+		describe("the level assumed after a recall at a level (D6)", function()
+			it("is the group's level from the PUT until Hue reports one; a recall that fails puts Hue's back", function()
+				add_relax({ grouped = grouped_lights({ living_room = true }) })  -- the room at 50
+				S:recall({ rid = RELAX, brightness = "30" })
+				assert.equal(30, S.group_level[G_LIVING])
+				assert.is_true(S:level({ rid = RELAX, level = "40", rate = "0" }))
+				assert.same({ action = "up", brightness_delta = 10 }, dims[1].body.dimming_delta, "from 30, not from 50")
+				S:on_container(container(grouped_light_event("living_room", nil, 40)))
+				assert.is_nil(S.level_before[G_LIVING], "Hue reported")
+				window_ends()
+				S:recall({ rid = RELAX, brightness = "80" })
+				assert.equal(80, S.group_level[G_LIVING])
+				c4.last_transfer():respond(503, "")
+				assert.equal(40, S.group_level[G_LIVING], "the lamps did not move")
+				assert.is_nil(S.level_before[G_LIVING])
+				window_ends()
+				S:recall({ rid = RELAX })
+				c4.last_transfer():respond(200, OK)
+				assert.equal(40, S.group_level[G_LIVING], "a recall as designed leaves the level to Hue's report")
+			end)
+
+			it("is undone by a failed group move like a slider's, and measured from by a waiting recall's move", function()
+				add_relax({ grouped = grouped_lights({ living_room = true }) })
+				S:recall({ rid = RELAX, brightness = "20" })
+				assert.equal(1, S:undelivered_group(G_LIVING))
+				assert.equal(50, S.group_level[G_LIVING])
+				S:recall({ rid = RELAX, brightness = "70" })  -- waits in the window
+				assert.equal(50, S.group_level[G_LIVING], "nothing assumed before its PUT")
+				assert.is_true(S:level({ rid = RELAX, level = "60", rate = "0" }))
+				assert.same({ action = "down", brightness_delta = 10 }, dims[#dims].body.dimming_delta,
+					"the waiting recall went first, and the move is measured from its 70")
+			end)
+		end)
+
+		describe("the room rule (P1 to P4) for Add From Hue", function()
+			it("adds into the mapped room, takes the room picked when it is that room, refuses another (P2)", function()
+				resync()
+				S:add_scene(RELAX, tostring(GARAGE_ROOM), done)
+				assert.same({ ok = false, text = "Not added: Relax belongs to Hue room Living Room, which maps to Control4 room "
+					.. "Living Room, not Garage; set Room to (mapped room), or change the mapping with Set Room Mapping" },
+					last_result())
+				S:add_scene(RELAX, tostring(LIVING_ROOM), done)
+				assert.same({ ok = true, text = "Added Relax to Living Room (device 2001)" }, last_result())
+				map_downstairs()
+				S:add_scene(BRIGHT, LIVING_ROOM, done)
+				assert.equal("Not added: Bright belongs to Hue zone Downstairs, which maps to Control4 room Garage, not Living "
+					.. "Room; set Room to (mapped room), or change the mapping with Set Room Mapping", last_result().text)
+				assert.equal(1, #c4.added)
+			end)
+
+			it("adds all scenes of a group with Room set to its mapped room, and refuses another room (F2, P2)", function()
+				resync()
+				S:add_all_of_group(F.group_rids.living_room, GARAGE_ROOM, done)
+				assert.same({ ok = false, text = "Not added: the scenes of Hue room Living Room go to Control4 room Living "
+					.. "Room, its mapped room, not Garage; set Room to (mapped room), or change the mapping with Set Room "
+					.. "Mapping" }, last_result())
+				S:add_all_of_group(F.group_rids.living_room, tostring(LIVING_ROOM), done)
+				assert.same({ ok = true, text = "Added 2 scenes of Living Room to Living Room: Relax (device 2001), "
+					.. "Savanna sunset (device 2002)" }, last_result())
+				assert.same({ LIVING_ROOM, LIVING_ROOM }, { c4.added[1].room, c4.added[2].room })
+			end)
+
+			it("refuses a group set to (no mapping), and one mapped to a room that is gone (P1, P4)", function()
+				resync()
+				assert.is_true((L:set_room_mapping(F.group_rids.downstairs, nil)))  -- Set Room Mapping: (no mapping)
+				local none = "Not added: Hue zone Downstairs is set to (no mapping); map it to one Control4 room with Set Room "
+					.. "Mapping, then add again"
+				S:add_scene(BRIGHT, nil, done)
+				assert.same({ ok = false, text = none }, last_result())
+				S:add_scene(BRIGHT, GARAGE_ROOM, done)
+				assert.same({ ok = false, text = none }, last_result(), "no escape hatch (O4)")
+				S:add_all_of_group(F.group_rids.downstairs, GARAGE_ROOM, done)
+				assert.same({ ok = false, text = none }, last_result())
+				fake.project.rooms[GARAGE_ROOM] = nil
+				S:add_scene(CONCENTRATE, nil, done)
+				assert.equal("Not added: Hue room Garage maps to a Control4 room that no longer exists; map it again with "
+					.. "Set Room Mapping, then add again", last_result().text)
+				assert.equal(0, #c4.added)
+			end)
+
+			it("treats the whole home as any group: refused until Set Room Mapping maps it, then into its room (P6, S8)",
+				function()
+				resync(WITH_HOME)
+				local p1 = "Not added: the whole home is not mapped to a Control4 room; map it with Set Room Mapping (Hue Room "
+					.. "(whole home), a Control4 room of your choice), then add again"
+				S:add_scene(HOME_RID, nil, done)
+				assert.same({ ok = false, text = p1 }, last_result())
+				S:add_scene(HOME_RID, GARAGE_ROOM, done)
+				assert.same({ ok = false, text = p1 }, last_result())
+				S:add_all_of_group(F.group_rids.home, done)
+				assert.same({ ok = false, text = p1 }, last_result())
+				map("home", GARAGE_ROOM, "Garage")
+				S:add_scene(HOME_RID, GARAGE_ROOM, done)
+				assert.same({ ok = true, text = "Added Everything to Garage (device 2001)" }, last_result())
+				S:add_all_of_group(F.group_rids.home, done)
+				assert.same({ ok = true, text = "No new scenes in (whole home) (1 on bridge, 1 imported)" }, last_result())
+			end)
+
+			it("while the project's rooms are unknown, adds into the room the mapping remembers, and only that one", function()
+				resync()
+				S.ctx.project.rooms = function() return {} end
+				S:add_scene(RELAX, GARAGE_ROOM, done)
+				assert.same({ ok = false, text = "Not added: the project's rooms are not read yet; pick (mapped room), or try "
+					.. "again in a minute" }, last_result())
+				S:add_scene(RELAX, LIVING_ROOM, done)
+				assert.same({ ok = true, text = "Added Relax to Living Room (device 2001)" }, last_result())
+				S:add_scene(SAVANNA, nil, done)
+				assert.same({ ok = true, text = "Added Savanna sunset to Living Room (device 2002)" }, last_result())
+			end)
+
+			it("placement answers for a scene and for a group, as Add From Hue's group add asks it (F2)", function()
+				resync()
+				assert.same({ true, LIVING_ROOM, "Living Room" }, { S:placement(RELAX) })
+				assert.same({ true, LIVING_ROOM, "Living Room" }, { S:placement(RELAX, tostring(LIVING_ROOM)) })
+				assert.same({ true, LIVING_ROOM, "Living Room" }, { S:placement(F.group_rids.living_room, LIVING_ROOM) })
+				local ok, text = S:placement(F.group_rids.living_room, GARAGE_ROOM)
+				assert.is_false(ok)
+				assert.truthy(text:find("^Not added: the scenes of Hue room Living Room go to Control4 room Living Room"))
+				ok, text = S:placement(F.smart_scene_rid)
+				assert.is_false(ok)
+				assert.truthy(text:find("^Not added: Hue zone Downstairs is not mapped"))
+				assert.same({ false, "Not added: scene nope is not on the bridge (Diagnostics ▸ Read everything from the "
+					.. "bridge now, then try again)" }, { S:placement("nope") })
+				assert.same({ false, "Not added: pick a scene first" }, { S:placement(nil) })
+				assert.equal(0, #c4.added, "placement adds nothing")
+			end)
+
+			it("group_target names where a group's scenes go, with its room and a sort key that puts no room last", function()
+				resync(WITH_HOME)
+				assert.same({ "Living Room", LIVING_ROOM, "living room" }, { S:group_target(F.group_rids.living_room) })
+				assert.same({ "(unmapped)", nil, "~" }, { S:group_target(F.group_rids.downstairs) })
+				assert.same({ "(unmapped)", nil, "~" }, { S:group_target(F.group_rids.home) })
+				L:set_room_mapping(F.group_rids.downstairs, nil)
+				assert.same({ "(no mapping)", nil, "~" }, { S:group_target(F.group_rids.downstairs) })
+				map("home", GARAGE_ROOM, "Garage")
+				assert.same({ "Garage", GARAGE_ROOM, "garage" }, { S:group_target(F.group_rids.home) })
+				map("garage", 99, "Cellar")
+				assert.same({ "(Control4 room gone)", nil, "~" }, { S:group_target(F.group_rids.garage) })
+				assert.same({ "(whole home) → Garage (1 scene)", "Downstairs (zone) → (no mapping) (2 scenes, 1 time-based)",
+					"Garage → (Control4 room gone) (1 scene)" }, { texts(S:picker_groups())[1], texts(S:picker_groups())[3],
+					texts(S:picker_groups())[4] })
+				S.ctx.project.rooms = function() return {} end
+				assert.same({ "Cellar", 99, "cellar" }, { S:group_target(F.group_rids.garage) },
+					"the project's rooms unknown: the room the mapping remembers")
+			end)
+		end)
+
+		describe("the room rule for a re-link (P3 to P5)", function()
+			it("links a device that sits in the scene's mapped room, and refuses one elsewhere (P3, P1, P4)", function()
+				add_relax()  -- device 2001, in the Living Room
+				local ok, text = S:relink(2001, CONCENTRATE)
+				assert.is_false(ok)
+				assert.equal("Not linked: device 2001 is in Living Room; Concentrate belongs to Hue room Garage, which maps to "
+					.. "Garage; pick a scene of a Hue room mapped to Living Room, or change the mapping with Set Room Mapping",
+					text)
+				assert.equal(RELAX, (S.reg:by_device(2001)), "nothing changed")
+				assert.same({ false, "Not linked: Hue zone Downstairs is not mapped to a Control4 room; map it with Set Room "
+					.. "Mapping (Hue Room Downstairs (zone), a Control4 room of your choice), then link again" },
+					{ S:relink(2001, BRIGHT) })
+				map("downstairs", 99, "Cellar")
+				assert.same({ false, "Not linked: Hue zone Downstairs maps to a Control4 room that no longer exists; map it "
+					.. "again with Set Room Mapping, then link again" }, { S:relink(2001, BRIGHT) })
+				L:set_room_mapping(F.group_rids.downstairs, nil)
+				assert.same({ false, "Not linked: Hue zone Downstairs is set to (no mapping); map it to one Control4 room with "
+					.. "Set Room Mapping, then link again" }, { S:relink(2001, BRIGHT) })
+				map_downstairs(LIVING_ROOM, "Living Room")
+				ok, text = S:relink(2001, BRIGHT)
+				assert.is_true(ok)
+				assert.equal("Re-linked device 2001 (was Relax) to Downstairs (zone): Bright", text)
+				fake.move_device(2001, GARAGE_ROOM)  -- dragged in Composer
+				assert.is_true((S:relink(2001, CONCENTRATE)), "now in the Garage")
+			end)
+
+			it("never judges a re-link within the device's group, an internal one, or an adoption by its rid (P5)", function()
+				add_relax()
+				fake.move_device(2001, GARAGE_ROOM)  -- Relax's device dragged to the Garage
+				local ok, text = S:relink(2001, SAVANNA)
+				assert.is_true(ok, "the same group as Relax: the earlier placement stands")
+				assert.equal("Re-linked device 2001 (was Relax) to Living Room: Savanna sunset", text)
+				assert.is_true((S:relink(2001, BRIGHT, true)), "an internal re-link (by radio)")
+				-- A bound device in the Garage announcing a Living Room scene is adopted by its rid.
+				bare(2099, "Relax", GARAGE_ROOM)
+				assert.is_true(S:hello(RELAX, { device_id = "2099", name = "Relax" }))
+				assert.equal(2099, S:entry(RELAX).device_id)
+				-- Link Devices by the rid a forgotten device had, wherever it sits.
+				S:forget(2099)
+				c4:Bind(15, 1, 2099, 1, "HUE_BRIDGE")
+				assert.equal("Linked 1 scene device: Relax (device 2099) to Living Room: Relax by its rid", S:link_devices())
+			end)
+
+			it("skips the check, with a log line, while the device's room is unknown", function()
+				add_relax()
+				local devices = S.ctx.project.devices
+				S.ctx.project.devices = function(filter)
+					if filter and filter.DeviceIds then return nil end
+					return devices(filter)
+				end
+				assert.is_true((S:relink(2001, CONCENTRATE)))
+				assert.is_true(saw_log("re-link of device 2001 to Garage: Concentrate: its Control4 room is not known; the room "
+					.. "check is skipped"))
+			end)
+
+			it("is refused as busy before anything is looked up", function()
+				add_relax()
+				S.adding, S.adding_since = true, os.time()
+				c4.calls = {}
+				assert.same({ false, "Busy: adding scenes; try again in a moment" }, { S:relink(2001, CONCENTRATE) })
+				assert.same({}, c4.calls_to("GetDevices"))
+			end)
+		end)
+
+		describe("Link Devices' name match by room (S3)", function()
+			-- A second "Relax", in the Garage (Concentrate renamed).
+			local TWO_RELAX = { body = F.scene:gsub('"name":"Concentrate"', '"name":"Relax"') }
+
+			it("narrows a bare device's name match to the scenes of the groups mapped to its room", function()
+				resync(TWO_RELAX)
+				bare(2091, "Relax", GARAGE_ROOM)
+				assert.equal("Linked 1 scene device: Relax (device 2091) to Garage: Relax by name", S:link_devices())
+				assert.equal(2091, S:entry(CONCENTRATE).device_id)
+				bare(2092, "relax", LIVING_ROOM)
+				assert.equal("Linked 1 scene device: relax (device 2092) to Living Room: Relax by name", S:link_devices())
+				assert.equal(2092, S:entry(RELAX).device_id)
+			end)
+
+			it("keeps today's rule while the device's room is unknown", function()
+				resync(TWO_RELAX)
+				bare(2091, "Relax", nil)
+				assert.equal("Not linked 1: Relax (device 2091): 2 unimported Hue scenes have that name; rename the device in "
+					.. "Composer to one Hue scene's exact name and run Link Device again", S:link_devices())
+			end)
+
+			it("says what is missing or ambiguous in the device's room", function()
+				resync(TWO_RELAX)
+				bare(2091, "Savanna sunset", GARAGE_ROOM)
+				assert.equal("Not linked 1: Savanna sunset (device 2091): no unimported scene of a Hue room mapped to Garage has "
+					.. "that name; rename the device in Composer to the Hue scene's exact name, or move the device to its "
+					.. "scene's mapped room, and run Link Device again", S:link_devices())
+				map_downstairs()
+				resync({ body = TWO_RELAX.body:gsub('"name":"Bright"', '"name":"Relax"') })
+				assert.equal("Not linked 1: Savanna sunset (device 2091): no unimported scene of a Hue room mapped to Garage has "
+					.. "that name; rename the device in Composer to the Hue scene's exact name, or move the device to its "
+					.. "scene's mapped room, and run Link Device again", S:link_devices())
+				fake.project.devices[2091].name = "Relax"
+				assert.equal("Not linked 1: Relax (device 2091): 2 unimported scenes of Hue rooms mapped to Garage have that "
+					.. "name; rename the device in Composer to one Hue scene's exact name and run Link Device again",
+					S:link_devices())
+				assert.is_nil(rawget(S, "WORDS"), "the words are the module's again")
+				assert.equal("Hue scene", S.WORDS.link_none)
+			end)
+		end)
+	end)
+
 	describe("rids_where (efficiency R8)", function()
 		it("orders any subset of the registry exactly as reg:rids() orders the whole", function()
 			-- Names that tie case-insensitively or exactly, a missing name, digits and a non-ASCII letter.
@@ -3239,6 +3743,7 @@ describe("bridge.scenes", function()
 			assert.equal("0 scenes + 0 time-based on bridge, 0 imported, 0 new", S:summary())
 			resync({ body = '{"errors":[],"data":[' .. ATTIC_ITEM .. ']}' })
 			assert.equal("1 scene + 1 time-based on bridge, 0 imported, 2 new", S:summary())
+			map_downstairs()
 			S:add_scene(F.smart_scene_rid, GARAGE_ROOM, done)
 			assert.equal("Added Golden hours to Garage (device 2001)", last_result().text)
 			assert.equal("1 scene + 1 time-based on bridge, 1 imported, 1 new", S:summary())
@@ -3276,6 +3781,7 @@ describe("bridge.scenes", function()
 				"Living Room: Savanna sunset",
 			}, S:list_items())
 			S:add_scene(F.scene_rids.relax, nil, done)
+			map_downstairs()
 			S:add_scene(F.smart_scene_rid, GARAGE_ROOM, done)
 			local items = S:list_items()
 			assert.equal("Downstairs (zone): Golden hours (time-based) → device 2002", items[1])
@@ -3284,9 +3790,15 @@ describe("bridge.scenes", function()
 		end)
 
 		it("marks a scene device that sits in another Control4 room than its room or zone maps to (1.2)", function()
+			-- #469: an add goes into the mapped room only, so the device that sits
+			-- elsewhere was dragged there in Composer (S6), and the unmapped
+			-- group's device was added before its mapping was removed.
 			add_relax()                                                -- device 2001, into the Living Room
-			S:add_scene(F.scene_rids.concentrate, LIVING_ROOM, done)   -- device 2002, the Garage's scene
-			S:add_scene(F.smart_scene_rid, GARAGE_ROOM, done)          -- device 2003, Downstairs is unmapped
+			S:add_scene(F.scene_rids.concentrate, nil, done)           -- device 2002, the Garage's scene
+			fake.move_device(2002, LIVING_ROOM)
+			map_downstairs()
+			S:add_scene(F.smart_scene_rid, GARAGE_ROOM, done)          -- device 2003
+			L.reg:remove_room_mapping(F.group_rids.downstairs)         -- Downstairs is unmapped
 			local items = S:list_items()
 			assert.equal("Downstairs (zone): Golden hours (time-based) → device 2003", items[1])
 			assert.equal("Garage: Concentrate → device 2002 (in Living Room instead of Garage)", items[4])
@@ -3298,6 +3810,7 @@ describe("bridge.scenes", function()
 
 		it("marks tombstones, missing scenes and unbound devices", function()
 			add_relax()                                             -- device 2001
+			map_downstairs()
 			S:add_scene(F.scene_rids.nightlight, GARAGE_ROOM, done) -- device 2002
 			S:add_scene(F.scene_rids.concentrate, nil, done)        -- device 2003
 			now = T0 + 100

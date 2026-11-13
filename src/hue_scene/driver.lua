@@ -20,7 +20,10 @@
 -- docs/smart-scenes-design.md and docs/offline-design.md (#428: the bridge's
 -- link offline, and its answers to commands that did not land); the
 -- structure is the Hue Light driver's (src/hue_light/driver.lua) with
--- everything colour specific left out.
+-- everything colour specific left out. Since #469
+-- (docs/scene-tracking-design.md, Part 1) the tile follows the scene alone,
+-- and a keypad bound to it follows what Keypad Follows names: the scene, or
+-- also its room or zone's lights (D1, D9 to D13).
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -46,7 +49,9 @@ local LEVEL_REPORT_MS = 1000
 
 -- A time-based scene started from off with a level or a hold to follow waits
 -- this long at most for the bridge to report its group on with a level
--- before that follows anyway (docs/smart-scenes-design.md, Decision 4).
+-- before that follows anyway (docs/smart-scenes-design.md, Decision 4); so
+-- does a target right after a recall as designed, for the recalled scene's
+-- first level report (#469 D6).
 local FOLLOW_MS = 1500
 
 -- Prefix of every line this driver logs.
@@ -60,8 +65,9 @@ local RECALL_ACTIONS = {
 }
 local DEFAULT_RECALL = "active"
 
--- On State Follows property values (docs/scene-led-design.md): the room or
--- zone's lights (the default) or this scene alone (the on rule).
+-- Keypad Follows property values (#469 D9, D12; On State Follows before,
+-- docs/scene-led-design.md): the room or zone's lights (the default) or this
+-- scene alone (the on rule).
 local FOLLOW_LIGHTS, FOLLOW_SCENE = "Room/zone lights", "This scene"
 
 -- The device's kinds (docs/smart-scenes-design.md, Decision 1): an ordinary
@@ -97,6 +103,10 @@ local st = {
 	slot_start = nil,     -- time-based: when that slot starts ("07:00", "sunset"); nil while unknown
 	active = nil,         -- "inactive" / "static" / "dynamic_palette" / "active"; nil until reported
 	level = nil,          -- the group's brightness (0-100, decimals) last reported lit; nil until then
+	-- #469 D6: { seq, until_ms } after a recall as designed of an ordinary
+	-- scene: level_seq then, and the controller ms after which a target no
+	-- longer waits for that recall's first level report (awaiting_level).
+	recall_wait = nil,
 }
 local recall_action = DEFAULT_RECALL
 -- The on rule (docs/scene-dimmer-design.md, Behaviour): set whenever the scene
@@ -108,13 +118,14 @@ local recall_action = DEFAULT_RECALL
 -- Persisted under "held_on", so it survives a restart. Ordinary scenes only:
 -- a time-based scene is on exactly while Hue says it runs (held() below).
 local held_on = false
--- The lights mode (docs/scene-led-design.md): the device also reads on while
--- its room or zone is on, whatever turned it on. group_on is the group's
+-- The keypad's room mode (#469 D9; docs/scene-led-design.md before): a
+-- keypad bound to the scene also reads on while its room or zone is on,
+-- whatever turned it on; the tile never does (D1). group_on is the group's
 -- on/off from HUE_SCENE_GROUP (nil until the bridge sends it; not persisted,
--- the hello's answer carries it again); follow_lights is the On State Follows
--- property.
+-- the hello's answer carries it again); keypad_lights is Keypad Follows =
+-- "Room/zone lights".
 local group_on = nil
-local follow_lights = true
+local keypad_lights = true
 local level_seq = 0       -- counts lit level reports, to tell whether one arrived since a recall
 local last_reported = nil  -- the LIGHT_BRIGHTNESS_CURRENT last sent to the proxy
 local level_window = nil   -- { timer, dirty } for LEVEL_REPORT_MS after a level report went out
@@ -311,23 +322,22 @@ local function held()
 	return held_on and not is_smart()
 end
 
--- What the tile and the LEDs show: the scene is active, or held on since it
--- was (held_on above).
+-- The scene half: the scene is active, or held on since it was (held_on
+-- above). Since #469 (D1) it alone decides what the tile shows, the proxy's
+-- on and off events, TOGGLE and the slider's choice between recalling and
+-- moving; the room's on/off never makes the tile read on.
 local function effective_on()
 	return is_on() or held()
 end
 
--- The device's one on state: the tile, the LEDs, TOGGLE, the slider's choice
--- and the holds follow it. In the lights mode the scene's own state or its
--- group being on; the union keeps the tile from blinking off between a
--- recall's status and its group report (docs/scene-led-design.md).
-local function shown_on()
-	return effective_on() or (follow_lights and group_on == true)
-end
-
--- Whether the lights mode knows the group's on/off.
-local function group_known()
-	return follow_lights and group_on ~= nil
+-- #469 D9: what a keypad bound to the scene treats as on: the scene half, or
+-- with Keypad Follows "Room/zone lights" also its room or zone being on,
+-- whatever lit it (the owner's #310 wish, departure D20). It drives the
+-- LEDs (dev.is_on), the toggle button's tap and hold direction, whether a
+-- hold dims a lit room, and the bottom tap's fade (keypad_level). A scene
+-- deleted in Hue reads off (D3, T16).
+local function keypad_on()
+	return effective_on() or (keypad_lights and group_on == true and not st.gone)
 end
 
 local function set_held(on)
@@ -361,12 +371,14 @@ end
 
 -- LIGHT_BRIGHTNESS_CURRENT: the group's level while the scene is on (100
 -- while none is known yet), 0 while off, nil until the bridge has reported
--- (or a hold turned it on, or held_on came back from a restart).
+-- (or a hold turned it on, or held_on came back from a restart). The room's
+-- level is the level shown while the scene is on; the room being on alone
+-- shows nothing (#469 D1, D13).
 local function brightness()
-	if st.active == nil and not held() and not group_known() then
+	if st.active == nil and not held() then
 		return nil
 	end
-	if not shown_on() then
+	if not effective_on() then
 		return 0
 	end
 	return st.level and whole_percent(st.level) or 100
@@ -374,20 +386,36 @@ end
 
 -- Keypad LEDs ----------------------------------------------------------------
 -- MATCH_LED_STATE on each Button Link and BUTTON_INFO per button follow the
--- scene (common/device.lua, docs/keypad-design.md "Keypad LEDs"): what they
--- follow here is shown_on(), nil while neither a status, a held-on state nor
--- (in the lights mode) the group's on/off is known yet. While a ramp runs
--- whose start or end is lit, the scene is on throughout, whatever the cache
--- says before its held reports come out (#421 D10): a tap from off lights
--- the LEDs as it starts, and an off keeps them on until its ramp ends.
+-- keypad's state (common/device.lua, docs/keypad-design.md "Keypad LEDs"):
+-- keypad_on(), nil while neither a status, a held-on state nor (with Keypad
+-- Follows "Room/zone lights") the group's on/off is known yet (#469 D9).
+-- While a ramp runs whose start or end is lit, the scene is on throughout,
+-- whatever the cache says before its held reports come out (#421 D10): a tap
+-- from off lights the LEDs as it starts, and an off keeps them on until its
+-- ramp ends.
 function dev.is_on()
 	if ramp and (ramp.from > 0 or ramp.to > 0) then
 		return true
 	end
-	if brightness() == nil then
+	if keypad_on() then
+		return true
+	end
+	if brightness() == nil and not (keypad_lights and group_on ~= nil) then
 		return nil
 	end
-	return shown_on()
+	return false
+end
+
+-- #469 D9: the level a keypad bound to the scene reads, a bottom tap's fade
+-- being its click-down share: the room's while keypad_on() (100 while none is
+-- known), so a tap in a room another scene lit still fades and its tap stop
+-- (#421) works; 0 while off; nil while unknown.
+local function keypad_level()
+	local on = dev.is_on()
+	if on == nil then
+		return nil
+	end
+	return on and (st.level and whole_percent(st.level) or 100) or 0
 end
 
 -- The report_* functions return true when they had something to report.
@@ -590,6 +618,12 @@ end
 --
 -- Time-based scenes never ramp (S-D5): Hue's activate and deactivate have no
 -- duration, so their taps and targets act at once as before.
+--
+-- A room ramp (`room` true, #469 D9, D10) is a keypad's bottom tap fading out
+-- a room that another scene or a hand-set lamp lit, while this scene's tile
+-- reads 0: it runs from the room's level, so the LEDs stay lit and a press
+-- stops it as any ramp, but the tile never shows it (tile_level) and a stop
+-- leaves this scene as it was, not held (stop_ramp).
 
 -- The controller's clock in ms [verified: API 34_timer/_2-GetTime, OS 3.2.3
 -- on], or os.time() where it is missing, as the Hue Light driver reads it.
@@ -605,10 +639,11 @@ local function ramp_estimate(r)
 	return math.floor(r.from + (r.to - r.from) * elapsed / r.time + 0.5), elapsed
 end
 
--- Where the tile is: a running ramp's estimate, else the level shown, else
--- `default` (a CHANGING's current).
+-- Where the tile is: a running ramp's estimate (not a room ramp's, which the
+-- tile does not show), else the level shown, else `default` (a CHANGING's
+-- current).
 local function tile_level(default)
-	if ramp then
+	if ramp and not ramp.room then
 		return (ramp_estimate(ramp))
 	end
 	return brightness() or default
@@ -783,8 +818,9 @@ end
 -- estimate. A recall stopped partway leaves the scene held on (the on rule:
 -- it was played from here); an off stopped partway leaves it as it was,
 -- held on too should nothing else show it lit (its recall never confirmed):
--- the stop leaves its lamps lit. A stop that never reaches the bridge
--- (logged) still closes the proxy's ramp.
+-- the stop leaves its lamps lit. A room ramp's stop (#469 D10) leaves the
+-- room lit at the estimate and this scene as it was: its tile stays 0. A
+-- stop that never reaches the bridge (logged) still closes the proxy's ramp.
 -- `why` names the stop in the log.
 local function stop_ramp(why)
 	local r = ramp
@@ -799,10 +835,10 @@ local function stop_ramp(why)
 		elapsed, r.time)
 	send_dim("stop", nil, level)
 	st.level = level
-	if r.recall or not shown_on() then
+	if r.recall or not (r.room or effective_on()) then
 		set_held(true)
 	end
-	report_unchanged(level)
+	report_unchanged(r.room and 0 or level)
 	return true
 end
 
@@ -811,8 +847,10 @@ end
 -- until the bridge reports the scene's group on with a level (the slot's look
 -- is on, so a relative move is measured from it), FOLLOW_MS at the latest;
 -- then `go(f)` sends it and answers true when something went to the bridge.
+-- An ordinary scene's target right after a recall as designed waits the same
+-- way for the recall's first level report (#469 D6, go_move).
 -- follow = { kind = "level" | "dim", go, timer, level and rate (the slider)
--- or hold (the button) }; one at a time.
+-- and from (its CHANGING's current), or hold (the button) }; one at a time.
 local function cancel_follow()
 	if follow then
 		if follow.timer then
@@ -828,7 +866,7 @@ local function fire_follow(why)
 	if not f then
 		return false
 	end
-	log.debug("time-based scene started (%s); its %s follows", why, f.kind)
+	log.debug("%s: the %s that waited follows", why, f.kind)
 	return f.go(f) == true
 end
 
@@ -892,15 +930,49 @@ local function go_level(f)
 	return send_level(f.level, f.rate, not is_on(), 0)
 end
 
+-- #469 D6: what follows a target that waited for a recall's first level
+-- report (or FOLLOW_MS): the room moves from the level then known, as
+-- move_level does, over the target's rate (a ramp when above 0, #421 D6).
+-- The proxy's CHANGING went out when the target arrived. A scene that is no
+-- longer on (another scene took over) or cannot be driven moves nothing:
+-- the proxy hears what the tile shows. Either way the wait is over, so later
+-- targets go at once.
+local function go_move(f)
+	st.recall_wait = nil
+	if blocker() or not effective_on() then
+		report_unchanged(f.from)
+		return true
+	end
+	local current = brightness() or f.from
+	if send_level(f.level, f.rate, false, f.from) and f.rate > 0 then
+		begin_ramp({ from = current, to = f.level, time = f.rate, lo = math.min(current, f.level),
+			hi = math.max(current, f.level) })
+	end
+	return true
+end
+
 -- The level the room moves to once a starting time-based scene's look is
--- on; a target before then replaces it (a second activate could land after
--- the move and undo it).
-local function follow_with_level(level, rate)
+-- on, or once an ordinary scene's recall as designed has reported its level
+-- (#469 D6); a target before then replaces it (only the latest is kept: a
+-- second activate could land after the move and undo it). `from` is the
+-- CHANGING's current.
+local function follow_with_level(level, rate, from)
 	if follow and follow.kind == "level" then
 		follow.level, follow.rate = level, rate
 	else
-		arm_follow({ kind = "level", level = level, rate = rate, go = go_level })
+		arm_follow({ kind = "level", level = level, rate = rate, from = from, go = is_smart() and go_level or go_move })
 	end
+end
+
+-- #469 D6: true while an ordinary scene's recall as designed went out and no
+-- lit level report has come since, within its rate plus FOLLOW_MS: the
+-- room's level is the previous scene's until Hue reports this one's, so a
+-- relative move now would be measured from the wrong level (tracking
+-- research 5.2). A target in that window waits (set_target); one later goes
+-- at once, as when the recall changed no lamp and Hue reports nothing.
+local function awaiting_level()
+	local w = st.recall_wait
+	return w ~= nil and w.seq == level_seq and now_ms() < w.until_ms
 end
 
 -- A time-based scene starts with an activate: the bridge turns any recall of
@@ -940,7 +1012,9 @@ end
 -- ramp (#421 S-D1, D6): its STATE then settles it at the ramp's end, and the
 -- fallback waits the ramp out too. A ramp running is replaced (D11), the
 -- CHANGING starting from its estimate. `urgent` (a keypad tap, S-D6, D12)
--- sends the recall past the bridge's request bucket.
+-- sends the recall past the bridge's request bucket. A recall as designed
+-- leaves the room's level to Hue's next report, which a target then waits
+-- for (#469 D6, awaiting_level).
 local function turn_on(rate, level, urgent)
 	rate = tonumber(rate) or 0
 	-- 100 % from off is the scene as designed: a brightness override would
@@ -954,6 +1028,7 @@ local function turn_on(rate, level, urgent)
 	end
 	cancel_follow()
 	off_unheld = false
+	st.recall_wait = nil
 	local current = tile_level(0)
 	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
@@ -977,6 +1052,9 @@ local function turn_on(rate, level, urgent)
 	end
 	if not send("HUE_SCENE_RECALL", params) then
 		return report_unchanged(current)
+	end
+	if not level then
+		st.recall_wait = { seq = level_seq, until_ms = now_ms() + rate + FOLLOW_MS }
 	end
 	local p = { kind = "switch", on = true, level = level, seq = level_seq, from = current }
 	local delay = rate + FALLBACK_MS
@@ -1003,12 +1081,16 @@ end
 -- which ends the held state at its end rather than now (Ramps above), and
 -- the fallback waits it out. A ramp running is replaced (D11). `urgent` (a
 -- keypad tap, S-D6, D12) sends the off past the bridge's request bucket.
-local function turn_off(rate, urgent)
+-- `from` (a keypad tap, #469 D9) is the keypad's level: in a room another
+-- scene lit, the tile reads 0 while the keypad reads the room's level, and
+-- the fade runs from there as a room ramp, which the tile does not show.
+local function turn_off(rate, urgent, from)
 	rate = tonumber(rate) or 0
 	if not ready("OFF") then
 		return
 	end
 	cancel_follow()
+	st.recall_wait = nil
 	local current = tile_level(100)
 	end_ramp(true)
 	notify("LIGHT_BRIGHTNESS_CHANGING", {
@@ -1023,7 +1105,9 @@ local function turn_off(rate, urgent)
 	if urgent then
 		params.urgent = "true"
 	end
-	local timed = params.duration ~= nil and current > 0
+	local room = from ~= nil and not effective_on()
+	local fade_from = room and from or current
+	local timed = params.duration ~= nil and fade_from > 0
 	local was_held = held_on
 	if not timed then
 		set_held(false)
@@ -1045,7 +1129,7 @@ local function turn_off(rate, urgent)
 	-- bridge answer that the off did not land (group_undelivered).
 	off_unheld = was_held and not timed and not is_smart()
 	if timed then
-		begin_ramp({ from = current, to = 0, time = rate, tap = urgent, lo = 0, hi = current })
+		begin_ramp({ from = fade_from, to = 0, time = rate, tap = urgent, lo = 0, hi = fade_from, room = room or nil })
 	end
 end
 
@@ -1075,12 +1159,30 @@ local function move_level(level, rate)
 	end
 end
 
--- SET_BRIGHTNESS_TARGET (and SET_LEVEL / RAMP_TO_LEVEL): 0 turns the scene off
--- over the rate; above 0 recalls it at that brightness over the rate while it
--- is off, or while a recall or off is still on its way (the group's level is
--- in flux then, so only an absolute target is safe), and moves the group's
--- level otherwise. A time-based scene on its way up (its start is out, or
--- something still follows it) takes the target as the level that follows.
+-- Whether a target waits to follow (follow_with_level) instead of going now:
+-- one waits already (the latest replaces it); a time-based scene is on its
+-- way up (its start is out, or something still follows it); an ordinary
+-- scene that is on was just recalled as designed and its level is not
+-- reported yet (#469 D6).
+local function target_waits()
+	if follow and follow.kind == "level" then
+		return true
+	end
+	local switching = pending ~= nil and pending.kind == "switch"
+	if is_smart() then
+		return follow ~= nil or (switching and pending.on)
+	end
+	return not switching and ramp == nil and effective_on() and awaiting_level()
+end
+
+-- SET_BRIGHTNESS_TARGET (and SET_LEVEL / RAMP_TO_LEVEL): 0 turns the scene's
+-- room or zone off over the rate, whether or not the scene is the active one;
+-- above 0 recalls this scene at that brightness over the rate while it is not
+-- on (#469 D4: the slider of a scene that is not the active one switches the
+-- room to it; 100 recalls it as designed), or while a recall or off is still
+-- on its way (the group's level is in flux then, so only an absolute target
+-- is safe; D5), and moves the group's level otherwise. A target that must
+-- wait (target_waits) hears its CHANGING now and follows later.
 local function set_target(target, rate)
 	target = tonumber(target)
 	if not target then
@@ -1091,19 +1193,21 @@ local function set_target(target, rate)
 		return turn_off(rate)
 	end
 	local level = whole_percent(target)
-	if is_smart() and (follow or (pending and pending.kind == "switch" and pending.on)) then
+	if target_waits() then
 		if not ready("brightness target") then
 			return
 		end
+		local current = brightness() or 0
 		notify("LIGHT_BRIGHTNESS_CHANGING", {
-			LIGHT_BRIGHTNESS_CURRENT = brightness() or 0,
+			LIGHT_BRIGHTNESS_CURRENT = current,
 			LIGHT_BRIGHTNESS_TARGET = level,
 			RATE = rate,
 		})
-		log.info("level: %d %% once the time-based scene has started", level)
-		return follow_with_level(level, rate)
+		log.info("level: %d %% once the %s", level,
+			is_smart() and "time-based scene has started" or "recalled scene's level is reported")
+		return follow_with_level(level, rate, current)
 	end
-	if (pending and pending.kind == "switch") or not shown_on() then
+	if (pending and pending.kind == "switch") or not effective_on() then
 		return turn_on(rate, level)
 	end
 	move_level(level, rate)
@@ -1183,25 +1287,50 @@ dispatch.properties["Recall_As"] = function(value)
 	log.info("Recall As %q -> recall action %s", tostring(value), action)
 end
 
--- What the device's on state follows (docs/scene-led-design.md): the room or
+-- What a keypad bound to the scene treats as on (#469 D9, D12): the room or
 -- zone's lights as well as the scene (the default, also when Director has no
--- value yet after an update), or the scene alone. A change shows at once.
-dispatch.properties["On_State_Follows"] = function(value)
+-- value yet after an update), or the scene alone. The tile follows the scene
+-- alone either way (D1), so a change shows on the LEDs only, at once.
+local function take_keypad_follows(value)
 	if value ~= FOLLOW_LIGHTS and value ~= FOLLOW_SCENE and value ~= nil and value ~= "" then
-		log.warn("On State Follows %q is not a known choice; using %q", tostring(value), FOLLOW_LIGHTS)
+		log.warn("Keypad Follows %q is not a known choice; using %q", tostring(value), FOLLOW_LIGHTS)
 	end
-	local before = brightness()
-	follow_lights = value ~= FOLLOW_SCENE
-	log.debug("On State Follows %q", follow_lights and FOLLOW_LIGHTS or FOLLOW_SCENE)
-	report_if_changed(before)
+	keypad_lights = value ~= FOLLOW_SCENE
+	log.debug("Keypad Follows %q", keypad_lights and FOLLOW_LIGHTS or FOLLOW_SCENE)
+	update_leds()
+end
+
+dispatch.properties["Keypad_Follows"] = take_keypad_follows
+
+-- #469 D12: On State Follows stays declared, hidden, until 2.0, only so its
+-- stored value can be carried into Keypad Follows once (migrate_keypad_follows
+-- below); a change to it does nothing.
+dispatch.properties["On_State_Follows"] = function()
+	log.debug("On State Follows is replaced by Keypad Follows; ignored")
+end
+
+-- Show or hide a property row [verified: API 24_properties/_4,
+-- SetPropertyAttribs(name, 1) hides and is not for OnDriverInit; 0 shows, as
+-- in Snap One's drivers-common-public SetPropertyVisible]. Every controller
+-- has it (OS 1.6.0); looked up first, as Snap One's libraries look up
+-- C4.GetTime, so a runtime without it (the test harness) only skips it, and
+-- protected, so it cannot stop late init. True when it was applied.
+local function set_hidden(name, hide)
+	if not C4.SetPropertyAttribs then
+		log.debug("no C4:SetPropertyAttribs here; %s left as it is", name)
+		return false
+	end
+	local ok, err = pcall(C4.SetPropertyAttribs, C4, name, hide and 1 or 0)
+	if not ok then
+		log.warn("could not %s %s: %s", hide and "hide" or "show", name, tostring(err))
+	end
+	return ok
 end
 
 -- Recall As means nothing to a time-based scene (its start has no action to
 -- choose), so Composer hides it there and shows it on ordinary scenes
--- (docs/smart-scenes-design.md, Decision 12) [verified: API 24_properties/_4,
--- SetPropertyAttribs(name, 1) hides and is not for OnDriverInit; 0 shows, as
--- in Snap One's drivers-common-public SetPropertyVisible]. Applied at late
--- init and whenever a configure changes the kind; nil until applied.
+-- (docs/smart-scenes-design.md, Decision 12). Applied at late init and
+-- whenever a configure changes the kind; nil until applied.
 local recall_as_hidden = nil
 
 local function apply_recall_as()
@@ -1210,18 +1339,29 @@ local function apply_recall_as()
 		return
 	end
 	recall_as_hidden = hide
-	-- Every controller has it (OS 1.6.0); looked up first, as Snap One's
-	-- libraries look up C4.GetTime, so a runtime without it (the test
-	-- harness) only skips it, and protected, so it cannot stop late init.
-	if not C4.SetPropertyAttribs then
-		return log.debug("no C4:SetPropertyAttribs here; Recall As left as it is")
-	end
-	local ok, err = pcall(C4.SetPropertyAttribs, C4, "Recall As", hide and 1 or 0)
-	if ok then
+	if set_hidden("Recall As", hide) then
 		log.debug("Recall As %s", hide and "hidden (time-based scene)" or "shown")
-	else
-		log.warn("could not %s Recall As: %s", hide and "hide" or "show", tostring(err))
 	end
+end
+
+-- #469 D12, at every late init after the properties are replayed: On State
+-- Follows is hidden, and once (PersistData keypad_follows_migrated) a stored
+-- "This scene" is carried into Keypad Follows. UpdateProperty does not call
+-- OnPropertyChanged [verified: API 24_properties/_5-UpdateProperty.md,
+-- _3-OnPropertyChanged.md], so the value is applied here too. Once the flag
+-- is set a dealer's later choice of Keypad Follows is never overwritten; a
+-- device whose old value is the default has nothing to carry over.
+local function migrate_keypad_follows()
+	set_hidden("On State Follows", true)
+	if to_bool(C4:PersistGetValue("keypad_follows_migrated")) == true then
+		return
+	end
+	if Properties["On State Follows"] == FOLLOW_SCENE then
+		C4:UpdateProperty("Keypad Follows", FOLLOW_SCENE)
+		take_keypad_follows(FOLLOW_SCENE)
+		log.info("Keypad Follows set to %q, the value On State Follows had", FOLLOW_SCENE)
+	end
+	C4:PersistSetValue("keypad_follows_migrated", true)
 end
 
 -- From the bridge (ExecuteCommand) -------------------------------------------
@@ -1255,15 +1395,66 @@ local function take_kind(params)
 	end
 end
 
+-- The proxy hears what the tile shows, or, while nothing is known, `from`:
+-- the level the CHANGING it closes started from (#428 D9, L4). Nothing
+-- without either.
+local function report_known(from)
+	if from then
+		report_unchanged(from)
+	else
+		report_brightness()
+	end
+end
+
+-- What a command in flight leaves to close: the level its CHANGING started
+-- from (a pending recall, off or level move, else the running ramp), and
+-- whether anything is in flight at all.
+local function in_flight()
+	local from = (pending and pending.from) or (ramp and ramp.from)
+	return from, pending ~= nil or ramp ~= nil or follow ~= nil
+end
+
+-- #469 D3: what a configure ends. `gone` (T16): the scene is deleted in Hue,
+-- so the held state ends at once and the tile reads 0, and the keypad reads
+-- off too (no group message comes for a gone scene). Otherwise (T17) the
+-- configure brings another rid: nothing of the old scene carries over (the
+-- held state, the status, the cached level and the group's on/off), so the
+-- tile and the keypad show nothing until the bridge reports the new scene.
+-- Either way a command in flight ends without its fallback; a re-link closes
+-- its CHANGING with the level it started from, a gone scene's configure
+-- reports the 0 right after.
+local function drop_scene_state(gone)
+	local from, busy = in_flight()
+	settle()
+	cancel_follow()
+	end_ramp(false)
+	set_held(false)
+	off_unheld = false
+	group_on = nil
+	st.recall_wait = nil
+	if gone then
+		st.active = "inactive"
+		return
+	end
+	st.active, st.level = nil, nil
+	if busy then
+		report_known(from)
+	end
+end
+
 -- The bridge builds every configure from its whole registry entry, so the
 -- group, kind, time slot and lifecycle fields are taken as sent and reset
 -- when absent. A configure also ends a forgotten state: the bridge knows the
--- scene again.
+-- scene again. Another rid, or the scene gone in Hue, drops what the device
+-- knew of its state (#469 D3, drop_scene_state).
 dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE", function(params)
 	params = params or {}
 	if text(params.rid) then
 		if params.rid ~= st.rid then
-			group_on = nil -- another scene's group: its first group message refills it
+			if st.rid then
+				log.info("linked to another Hue scene: what was known of the last one is dropped")
+			end
+			drop_scene_state(false)
 		end
 		st.rid = params.rid
 	end
@@ -1286,8 +1477,7 @@ dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE"
 	prop("Hue Room", group_label())
 	apply_recall_as()
 	if st.gone then
-		cancel_follow()
-		end_ramp(false)
+		drop_scene_state(true)
 		log.debug("configured as deleted in Hue%s", st.gone_since and (" since " .. st.gone_since) or "")
 	end
 	report_rate_caps() -- with every configure, as the light sends its capabilities (#430 D20)
@@ -1306,25 +1496,7 @@ local function take_slot(params)
 end
 
 -- The bridge's link (#428, docs/offline-design.md) ----------------------------
-
--- The proxy hears what the tile shows, or, while nothing is known, `from`:
--- the level the CHANGING it closes started from (#428 D9, L4). Nothing
--- without either.
-local function report_known(from)
-	if from then
-		report_unchanged(from)
-	else
-		report_brightness()
-	end
-end
-
--- What a command in flight leaves to close: the level its CHANGING started
--- from (a pending recall, off or level move, else the running ramp), and
--- whether anything is in flight at all.
-local function in_flight()
-	local from = (pending and pending.from) or (ramp and ramp.from)
-	return from, pending ~= nil or ramp ~= nil or follow ~= nil
-end
+-- (report_known and in_flight, which the configure uses too, are above it.)
 
 -- #428 D8, D9 (§6.2): a HUE_SCENE_STATE with reason "undelivered", the
 -- bridge's answer to a recall (or a time-based scene's activate) that did
@@ -1367,10 +1539,11 @@ end
 -- cache (the group off ends the held state, as any report of it does); and
 -- the proxy hears what the tile shows: the level the bridge knows, not the
 -- target. An instant OFF from here ended the held state when it went out
--- (turn_off): the group still on puts it back, so a scene shown alone (On
--- State Follows "This scene") stays on with its lamps. What is to follow a
+-- (turn_off): the group still on puts it back, so the scene, which its tile
+-- follows alone (#469 D1), stays on with its lamps. What is to follow a
 -- time-based scene's start waits for its own report or timer, since the
 -- answer is about the group, not the start; a hold in progress goes on (D9).
+-- The LEDs follow the group's on/off too (#469 D9).
 local function group_undelivered(lit, on)
 	local from = in_flight()
 	end_ramp(true)
@@ -1392,6 +1565,7 @@ local function group_undelivered(lit, on)
 	log.debug("undelivered: the proxy hears the group as the bridge last knew it (on=%s level=%s)", tostring(on),
 		tostring(lit))
 	report_known(from)
+	update_leds()
 end
 
 -- #428 D5 (common/device.lua calls it at every HUE_BRIDGE_LINK). Going
@@ -1528,19 +1702,23 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 	-- A time-based scene started from here: the group on with a level means
 	-- the slot's look is on, so what was to follow goes now; the group off
 	-- means the start was undone (a dropped slider level closes the proxy's
-	-- transaction with what is known). A slider's move closes the transaction
-	-- itself, so the slot's level just cached is not reported on its own.
+	-- transaction with what is known, below). A slider's move closes the
+	-- transaction itself, so the slot's level just cached is not reported on
+	-- its own. An ordinary scene's target that waits for its recall's level
+	-- (#469 D6) follows the first lit level, and is dropped with the group off
+	-- or another scene active.
+	local dropped = false
 	if follow then
 		local kind = follow.kind
-		if on == false then
-			log.debug("the group went off before the time-based scene's %s followed; dropped", kind)
+		if on == false or (other and not is_smart()) then
+			log.debug("%s before the waiting %s followed; dropped", on == false and "the group went off"
+				or "another scene became active", kind)
 			cancel_follow()
-			if kind == "level" and not pending then
-				report_brightness()
-			end
-		elseif (level and level > 0) or (on == true and st.level) then
-			if fire_follow("the bridge reported the group on") and kind == "level" then
-				return
+			dropped = kind == "level" and not pending
+		elseif lit or (on == true and st.level and is_smart()) then
+			if fire_follow(lit and "the bridge reported the group's level" or "the bridge reported the group on")
+				and kind == "level" then
+				return update_leds()
 			end
 		end
 	end
@@ -1566,14 +1744,16 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 		if level then
 			open_level_window()
 		end
+	elseif dropped then
+		report_brightness()
 	elseif ended then
 		report_if_changed(before)
-	elseif on ~= nil and group_known() and (before or 0) == 0 and brightness() ~= before then
-		-- The lights mode: the group came on, so the tile and LEDs go on at once.
-		report_brightness()
-	elseif level and level > 0 and shown_on() then
+	elseif level and level > 0 and effective_on() then
 		report_level()
 	end
+	-- #469 D13: the room coming on no longer turns the tile on; a keypad that
+	-- follows the room's lights (keypad_on) still hears the change at once.
+	update_leds()
 end)
 
 -- The bridge ran Forget for this scene (from its own action or ours): the
@@ -1690,13 +1870,18 @@ dispatch.proxy["STOP_SCENE_RAMP"] = dispatch.proxy["SET_BRIGHTNESS_STOP"]
 -- Toggle relative to where the scene is heading: a pending recall counts as
 -- on, so two quick presses end up off [verified: proxy ref, TOGGLE]. Over
 -- `rate`: the proxy's TOGGLE fades over the default brightness rate (#430
--- D8), a time-based scene's toggle tap acts at once (S-D5).
-local function toggle(rate)
+-- D8), a time-based scene's toggle tap acts at once (S-D5). The proxy's
+-- TOGGLE follows the tile, so it plays a scene that is not the active one,
+-- as an Advanced Lighting scene's toggle does (#469 D4, L19, L66); a keypad's
+-- toggle button (`keypad`) follows the keypad's state (D9).
+local function toggle(rate, keypad)
 	local on
 	if pending then
 		on = pending.on
+	elseif keypad then
+		on = keypad_on()
 	else
-		on = shown_on()
+		on = effective_on()
 	end
 	if on then
 		turn_off(rate)
@@ -1734,12 +1919,13 @@ end
 -- (with the double-tap window and the stop on the press, #421 D4, D5) and
 -- the proxy's hold rates are common/device.lua's. A tap of the top button
 -- fades the scene in, of the bottom button fades its group out, of the
--- toggle button does either by the on state, and a press while a fade runs
--- stops it there (#421 §10.1). A hold dims the scene's group relatively, so
--- its colours and per-light differences stay; holding top while off recalls
--- at 1 % first. A hold's record carries changing (the proxy heard the hold's
--- CHANGING) and dim_sent (a dim went out: the release stops it).
--- docs/keypad-design.md.
+-- toggle button does either by the keypad's state (keypad_on, #469 D9), and
+-- a press while a fade runs stops it there (#421 §10.1). A hold dims the
+-- scene's group relatively, so its colours and per-light differences stay;
+-- holding top while off recalls first, at 1 %, or at the room's level when
+-- another scene lights it (#469 D11). A hold's record carries changing (the
+-- proxy heard the hold's CHANGING) and dim_sent (a dim went out: the release
+-- stops it). docs/keypad-design.md.
 local BUTTON_TOP, BUTTON_BOTTOM = device.BUTTON_TOP, device.BUTTON_BOTTOM
 local setting = dev.setting
 
@@ -1756,19 +1942,21 @@ end
 
 -- A tap (#421 §10.1). A ramp still running here began between the press and
 -- its click (the machine stops one running at the press and swallows its
--- click): it is stopped instead. Top, or toggle while the scene shows off
--- or is heading off, fades the scene in over the click rate up's share of
--- the distance from the scene's own level to 100 (S-D1): the whole rate
--- from off or when only its room is lit by something else (On State
--- Follows "Room/zone lights"), the rest of it from a level the scene was
--- dimmed to. A scene Hue reports active at 100 is there already: nothing
--- goes to Hue and the proxy hears the level. Bottom, or toggle while it
--- shows on, fades the group out over the click rate down's share of the
--- level shown (S-D2): at once while it shows off (the group goes off as
--- before), over the whole rate while nothing is known. Both go past the
--- bridge's request bucket (S-D6, D12). A time-based scene keeps its taps,
--- at once (S-D5), and the double-tap window. A device that cannot be driven
--- drops the tap with its reason, as it drops a target.
+-- click): it is stopped instead. Top, or toggle while the keypad reads off
+-- or the scene is heading off, fades the scene in over the click rate up's
+-- share of the distance from the scene's own level to 100 (S-D1): the whole
+-- rate from off or when only its room is lit by something else (another
+-- scene or a hand-set lamp; the tile reads 0 then, #469 D1, D10), the rest
+-- of it from a level the scene was dimmed to. A scene Hue reports active at
+-- 100 is there already: nothing goes to Hue and the proxy hears the level.
+-- Bottom, or toggle while the keypad reads on, fades the group out over the
+-- click rate down's share of the keypad's level (S-D2; keypad_level, #469
+-- D9: the room's while the keypad follows its lights, a room ramp when the
+-- tile reads 0): at once while it reads off (the group goes off as before),
+-- over the whole rate while nothing is known. Both go past the bridge's
+-- request bucket (S-D6, D12). A time-based scene keeps its taps, at once
+-- (S-D5), and the double-tap window. A device that cannot be driven drops
+-- the tap with its reason, as it drops a target.
 function dev.on_click(button)
 	if stop_ramp("tap") then
 		return
@@ -1779,7 +1967,7 @@ function dev.on_click(button)
 		elseif button == BUTTON_BOTTOM then
 			turn_off(0)
 		else
-			toggle(0)
+			toggle(0, true)
 		end
 		return
 	end
@@ -1791,13 +1979,14 @@ function dev.on_click(button)
 		if pending then
 			up = not pending.on
 		else
-			up = not shown_on()
+			up = not keypad_on()
 		end
 	end
-	local level = brightness()
 	if not up then
-		return turn_off(share(setting("click_down"), level or 100), true)
+		local shown = keypad_level()
+		return turn_off(share(setting("click_down"), shown or 100), true, shown)
 	end
+	local level = brightness()
 	if is_on() and level == 100 then
 		log.debug("tap: the scene is on at 100 %% already")
 		return report_brightness()
@@ -1894,15 +2083,30 @@ end
 -- the cache (S3: a hold right after a stop rises from where the lamps
 -- stopped). A ramp that began after the press (programming, say) ends here,
 -- and the hold starts from its estimate.
+--
+-- #469 D10, D11: `on` is the keypad's state (dev.is_on). While it reads on
+-- only because another scene or a hand-set lamp lights the room (Keypad
+-- Follows "Room/zone lights", the scene not on), a hold dims the room from
+-- where it is and leaves this scene as it was: not held, its tile 0, no
+-- CHANGING (the tile does not move). While it reads off in a room another
+-- scene lit (Keypad Follows "This scene"), a top hold recalls this scene at
+-- the room's level rather than 1 %, so the room does not dip, then
+-- brightens; the tile starts there.
 function dev.on_hold(h, up, on)
 	if not ready("hold") then
 		return
 	end
 	cancel_follow()
 	off_unheld = false
-	local estimate = ramp and (ramp_estimate(ramp))
+	st.recall_wait = nil
+	local estimate = ramp and not ramp.room and (ramp_estimate(ramp))
 	end_ramp(true)
 	local duration = setting(up and "hold_up" or "hold_down")
+	if on and not estimate and not effective_on() then
+		log.info("hold: dimming the room %s; this scene is not the one lighting it, and stays so", up and "up" or "down")
+		h.dim_sent = send_dim(up and "up" or "down", duration)
+		return
+	end
 	local was_held = held_on
 	if not is_smart() then
 		set_held(true)
@@ -1925,12 +2129,14 @@ function dev.on_hold(h, up, on)
 	if is_smart() then
 		return start_smart_hold(h, duration)
 	end
-	-- Off: recall at 1 %, then ramp up from there once Hue has applied it.
-	-- The LEDs turn on once the recall is out; the tile follows the CHANGING.
-	hold_changing(h, 0, true, duration)
+	-- Off: recall at 1 % (at the room's level while another scene lights it,
+	-- #469 D11), then ramp up from there once Hue has applied it. The LEDs
+	-- turn on once the recall is out; the tile follows the CHANGING.
+	local room = group_on == true and st.level and whole_percent(st.level) or nil
+	hold_changing(h, room or 0, true, duration)
 	local params = recall_params(0)
-	params.brightness = "1"
-	log.info("hold: recalling as %s at 1 %%, then dimming up", recall_action)
+	params.brightness = string.format("%d", room or 1)
+	log.info("hold: recalling as %s at %s %%, then dimming up", recall_action, params.brightness)
 	if not send("HUE_SCENE_RECALL", params) then
 		return failed(0)
 	end
@@ -1985,6 +2191,7 @@ function OnDriverLateInit()
 	dev.load_colors()
 	load_held()
 	dispatch.replay_properties(Properties)
+	migrate_keypad_follows() -- #469 D12: after the replay, which applied the stored Keypad Follows
 	dev.show_driver_version(1)
 	prop("Hue Scene ID", scene_id_label())
 	prop("Hue Scene", st.name)
