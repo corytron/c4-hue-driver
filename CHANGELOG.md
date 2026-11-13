@@ -13,6 +13,8 @@ listed.
 
 ## Unreleased
 
+## 1.6 "Kassa", build 624 (2026-11-13)
+
 ### Added
 - Set Room Mapping can map the whole home, listed as `(whole home)` when
   the bridge has scenes for all its lights, so those scenes can be added to
