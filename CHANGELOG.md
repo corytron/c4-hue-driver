@@ -1,17 +1,26 @@
 # Changelog
 
-Every published release of the Hue Bridge, Hue Light, Hue Scene and (from
-1.1) Hue Motion drivers,
-newest first, with what changed since the release before it. A version X.Y
-is the GitHub release of the tag `vX.Y` and carries its own codename
-(`.github/codenames.json`). A version
-can be released as several builds: the build number is the commit count of
-the released commit and the Driver Version that Composer shows for every
-driver, and each newer build of a version replaces the files of its
-release. Development builds and builds installed only for tests are not
-listed.
+Every release of the Hue Bridge, Hue Light, Hue Scene and (from 1.1) Hue
+Motion Sensor drivers, newest first, with what changed since the release
+before it, written for the people who install and use them. A version X.Y is
+the GitHub release tagged `vX.Y` and has its own name, which every build of
+it keeps. A version can be published as several builds: the build number is
+the commit count of the released commit and the Driver Version that Composer
+shows on every device, and a newer build of a version replaces the files of
+its release. Unreleased collects what the next release changes. Prereleases
+for testers (X.Y-beta.N), development builds and builds installed only for
+tests are not listed; what a prerelease brought is in the release that
+follows it.
 
 ## Unreleased
+
+### Changed
+- The documentation was reviewed for coherence: each driver's Documentation
+  tab and the project's GitHub page now read in order, from what a driver is
+  to installing, everyday use and troubleshooting, use the same words for
+  the same things, and no longer contradict each other or the drivers, for
+  example on the number of drivers (four) and of the Hue Bridge's actions
+  (ten) (#478).
 
 ## 1.6 "Kassa", build 624 (2026-11-13)
 
@@ -315,8 +324,8 @@ listed.
   state, the design notes, the contributing guide, the security policy, the
   code of conduct and the license, and every link in the project's
   documents is checked on each change (#263).
-- The top of the project's GitHub page has a download link for each of
-  the three drivers of the latest release (#266).
+- The top of the project's GitHub page has a download link for each
+  driver of the latest release (#266).
 
 ### Fixed
 - Import All New Lights no longer adds a light that looks like the

@@ -10,6 +10,12 @@
 > record; [community: …] is a public source outside Signify's login-walled
 > reference; [assumed] is neither. SDK paths are short: "API" is
 > `docs-driverworks-api/source/includes/`.
+>
+> Current (2026-11-13, #478): decided and built in 1.6 by
+> `docs/scene-tracking-design.md` Part 2, which differs from §9 and §10 here
+> where the owner chose otherwise: an add with an explicit room for a scene
+> of an unmapped Hue room or zone is refused (O3, not mapped on the click),
+> and there is no escape hatch, "(no mapping)" included (O4).
 
 ## Contents
 

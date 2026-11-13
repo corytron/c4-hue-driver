@@ -298,6 +298,8 @@ Action`.
 Current (2026-11-05, release 1.2, #334): the bridge's 29 actions became 9
 (`docs/simplify-actions-design.md` §1.2 and §3.3; the old command strings
 stay hidden aliases until 2.0). The rows of this contract that change:
+Current (2026-11-13, #478): ten since 1.5, which added Hue Automations
+(#280, `docs/hue-automation-audit-design.md` D20).
 
 | Action (1.2) | Params | Does |
 | --- | --- | --- |

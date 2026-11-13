@@ -405,7 +405,11 @@ to merge in `driver.lua` and keep the modules' API.
 The data lives in `tests/fixtures/feature_ledger.lua`, one entry per §4 row:
 `{ id, what, paths = { {action=…, driver=…, params={…}} | {property=…} | {command=…} | {event=…} | {task=…, off=…} | {alias=…, until="2.0"} }, gate = "click"|"offered"|"auto"|… }`.
 The table in §4 moves there and becomes the one copy; this document then
-links to it. The spec asserts:
+links to it. Current (2026-11-13, #478): built in 1.2 as
+`tests/spec/ledger_spec.lua`, with the data in `tests/fixtures/ledger.lua`
+(not `feature_ledger.lua`); §4 stays here as the copy of 2026-11-04.
+
+The spec asserts:
 
 1. **XML ↔ handlers, release build too.**
    - For each driver, parse `driver.xml` and its release form (the

@@ -18,7 +18,7 @@ of `release-prep` at `98daca6`.
 ## 1. Findings, ranked
 
 No must-fix. Nothing in the diff breaks a documented text, message, picker or
-action; the five rows below are a hygiene gap in the hot path, two timing
+action; the five should-fix rows below are a hygiene gap in the hot path, two timing
 changes the coordinator chose that the owner should see written down, a
 default that the house will not pick up, and contract documents a rename pass
 mangled.

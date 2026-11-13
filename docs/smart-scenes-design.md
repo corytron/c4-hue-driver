@@ -6,6 +6,9 @@ background and holds unless this page says otherwise). Hue's time-based
 scenes ("Golden hours", "Natural light"; CLIP v2 `smart_scene`) become
 ordinary Hue Scene devices with a kind, listed in Add Scene and Add All
 Scenes Of Room, playable from tiles, keypads, programming and the slider.
+Current (2026-11-13, #478): since 1.2 (#334) those pickers, and Re-link
+Scene's, are Add From Hue's and Link Device's
+(`docs/simplify-actions-design.md` §1.2).
 
 ## Decisions
 
@@ -97,6 +100,10 @@ Scenes Of Room, playable from tiles, keypads, programming and the slider.
     bridge, <k> imported, <d> deleted", "?" for the time-based count until
     a `/smart_scene` GET has succeeded, "N missing" and "N unbound" only
     when not zero (`src/hue_bridge/bridge/scenes.lua:summary`).
+    Current (2026-11-13, #478): since #325 it reads "<n> scenes + <m>
+    time-based on bridge, <k> imported, <j> new", then missing, unbound
+    and deleted only when not zero (`bridge/owner.lua:row_summary`,
+    `docs/list-rows-design.md` §2).
 
 ## Messages (strings; additions to `docs/scenes-design.md` §2)
 

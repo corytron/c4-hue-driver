@@ -88,7 +88,7 @@ parallel tool starts (default `nproc`; `JOBS=1` runs everything serially):
 | `secrets` | `gitleaks dir . --config .gitleaks.toml --no-banner --redact` and, at the same time, `gitleaks git . --config .gitleaks.toml --no-banner --redact --log-opts=<refs>`: on the VM `--all`, the history of every local ref (branches, tags, stashes, remote-tracking refs), because a stale tag or branch can hold history that never reached GitHub and a `--tags` or `--mirror` push would publish it (security review 2026-10-25, finding 14); in CI (`GITHUB_ACTIONS=true`) `HEAD`, the history a pull request publishes (its `fetch-depth: 0` checkout also holds every other branch and tag, whose findings are not the pull request's) | tree and history |
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
 | `changelog` | `python3 tools/changelog.py check --file CHANGELOG.md` | `CHANGELOG.md` against `docs/changelog-design.md` |
-| `links` | `python3 tools/check_links.py` | every link in every tracked Markdown file and in the three Documentation tabs resolves (files and heading anchors); `--unlinked` lists the documents `README.md` does not reach, for the owner's decision on what the front page links (never a failure) |
+| `links` | `python3 tools/check_links.py` | every link in every tracked Markdown file and in every driver's Documentation tab (`src/*/www/documentation.html`: three then, four since 1.1) resolves (files and heading anchors); `--unlinked` lists the documents `README.md` does not reach, for the owner's decision on what the front page links (never a failure) |
 
 `tools/setup-checks.sh` installs what the VM lacks into `~/.local/bin`
 without `sudo`. `ruff`, `zizmor` and `shellcheck-py` come from
@@ -101,7 +101,10 @@ release binaries whose sha256 the script carries and verifies; when a
 release URL fails, the script fetches the same asset by its pinned id from
 the REST API (#419). Today:
 ruff 0.17.2, zizmor 1.31.1, shellcheck-py 0.10.0.1, actionlint 1.7.12,
-gitleaks 8.30.1. CI runs the same script (ubuntu-latest has `shellcheck`
+gitleaks 8.30.1. Current (2026-11-13, #478): ruff 0.17.3, zizmor 1.31.1,
+shellcheck-py 0.11.0.1, actionlint 1.7.12, gitleaks 8.30.1
+(`tools/requirements-checks.txt`, `tools/setup-checks.sh`; Dependabot
+moves the first three). CI runs the same script (ubuntu-latest has `shellcheck`
 and `pwsh` already; the script skips what is present). Since #456 it
 installs in three lanes at the same time (the pip packages one after
 another, actionlint, gitleaks) and prints their lines in the order above;
@@ -196,6 +199,10 @@ Current (2026-10-26, #269): the input also takes a prerelease version
 tag `v1.1-beta.1` is built the same way. A prerelease tag never moves: a
 dispatch whose prerelease tag exists already fails in the build job's tag
 step, before anything is built (§5.6).
+Current (2026-11-13, #478): "later releases of the same spike move the
+tag" held for 1.0 only. Since 1.1 every X.Y has its own tag `vX.Y` (1.1
+to 1.6 so far), and a later build of the same version moves that tag
+(`docs/release-checklist.md`, "Naming").
 
 ### 5.2 `build/manifest.json`
 
@@ -286,6 +293,12 @@ No third-party code runs where the write token or the signing identity is:
   `CHANGELOG.md` (§5.2).
 - `GH_TOKEN` (`github.token`) is set only on the steps that push the tag or
   call `gh`: the tag push and the release with its files, title and notes.
+
+Current (2026-11-13, #478): with four packages since 1.1, the publish job
+checks seven files from the build job (four packages, `SHA256SUMS.txt`,
+the manifest and the notes) and the release carries eight (the four
+packages, `SHA256SUMS.txt`, `manifest.json`, `attestations.sigstore.json`
+and `hue-drivers.intoto.jsonl`).
 
 Current (2026-10-26, #269): the publish job checks out this run's commit on
 both paths (without credentials; nothing in it is run, and `python3 -I`
@@ -403,6 +416,13 @@ from the file's (CI runs the offline form; `drift` uses the online form).
 Until issue #237 (2026-10-25) `validate` took 60–86400 and 30–3600, so a
 watchdog of 30 to 59 s validated that Composer refuses.
 
+Current (2026-11-13, #478): since #269 `release` also takes a prerelease
+tag (`^v[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$`), and `drivers` must be
+driver names, each once; offline `validate` checks only that form, while
+`validate --online`, `drift` and `start` require exactly the release
+manifest's packages (§5.6). Today's file names `release: v1.6`, `build:
+624` and `drivers: hue_bridge hue_light hue_motion hue_scene`.
+
 Changing the desired state is a PR that edits `build:` (and `release:` when
 the version changes). The release must exist first (§5), so the order is:
 merge the code → cut the release → PR that bumps `deploy/house.yaml` →
@@ -478,6 +498,13 @@ repository from `gh repo view` or `--repo`. Subcommands:
   `build` and `tag` agree, **3** on drift, 1 on error.
 - `drift --issue`: §7.1 (what `drift.yml` runs). Without `--issue` it only
   prints, like `status`.
+
+Current (2026-11-13, #478): `start` downloads and verifies every package
+the release's manifest names (four since 1.1), and the brief tells the
+session to install all four at once; it also tells it to answer Yes to
+"Overwrite Driver or Agent?" ("Current version is newer") for exactly those
+packages, when the house runs a newer dev or feature-branch build (#365).
+`done` and `record` exit 3 too when drift remains after them.
 
 Current (2026-10-25, build 316): `start` also refuses while a deployment
 is `queued` or has no status yet, and `deployment.json` also holds
@@ -570,6 +597,9 @@ over: once from the VM, once from the workflow finding nothing to do.
 | Dependabot | automatic PRs; auto-merge for action pins only | CI gates them; everything else is reviewed |
 | Scorecard, CodeQL | automatic, read-only reports | |
 | Code scanning issue | automatic open/update/close of one `security` issue; never dismisses an alert, never reopens or edits closed issues, never a second | a record, not an actor; a dismissal is a decision with a reason |
+
+Current (2026-11-13, #478): "the `v1.0` tag" reads today as any release
+tag `vX.Y`; a prerelease tag never moves (§5.6).
 
 Corner cases decided: the tag moves while a deployment is `in_progress` →
 `deploy.py start` of the new build refuses until `done`/`failed`/`--supersede`;

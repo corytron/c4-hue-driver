@@ -677,7 +677,7 @@ describe("motion round trip", function()
 			-- open the bridge's Lua tab).
 			local first, transfers = #logged + 1, #bc4.transfers
 			assert.equal("Motion diagnostics start in 20 seconds: open this bridge's Lua tab now. The pass and 10 "
-				.. "minutes of events follow; copy them into the Beta feedback issue.", action("Log Motion Diagnostics"))
+				.. "minutes of events follow; copy them into a bug report.", action("Log Motion Diagnostics"))
 			assert.equal(transfers, #bc4.transfers, "nothing fetched before the 20 s are up")
 
 			-- 20 s later the pass: one GET at a time (each answered before the
@@ -721,8 +721,8 @@ describe("motion round trip", function()
 				capture.active = false
 				capture.callback(capture, 0)
 			end)
-			assert.equal("Motion diagnostics done: 3 items of events logged. Copy the Lua output into the Beta "
-				.. "feedback issue.", fake.last_action(bridge))
+			assert.equal("Motion diagnostics done: 3 items of events logged. Copy the Lua output into "
+				.. "a bug report.", fake.last_action(bridge))
 
 			-- Every line the run logged, and both Last Action texts: no key,
 			-- address, bridge id, full resource id, MAC or Hue name.

@@ -9,6 +9,10 @@ house bridge. The tester's first run of the diagnostics in §6 confirms or
 corrects every shape marked assumed; §7 lists what he, the house bridge and
 Signify's login-only pages can still answer.
 
+**Current (2026-11-13, #478):** decided and built. The contract is
+`docs/motion-design.md`, and motion sensors and MotionAware areas shipped in
+1.1 as the Hue Motion Sensor driver (`hue_motion.c4z`).
+
 Markers:
 
 - **[verified: S]**: shown by source S (§8): code that parses real bridges

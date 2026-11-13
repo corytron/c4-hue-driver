@@ -3,8 +3,9 @@
 Written 2026-10-24 for the first release build, after the slimming pass;
 updated 2026-10-25 for the CI/CD and GitOps setup (`docs/cicd-gitops-design.md`:
 one check script, releases cut by the Release workflow, the house deployed
-through `tools/deploy.py`) and checked against build 316 and today's tools
-(issue #231). The owner's rule: after any code change that is more than a
+through `tools/deploy.py`), checked against build 316 and the tools of
+that day (issue #231), and again against build 624 and the tools of
+2026-11-13 (issue #478). The owner's rule: after any code change that is more than a
 text, test for functional regressions on the dev loop **and** on the real
 system before the code is called good. Three passes, in this order (and
 section 4 once after each controller OS upgrade); every line is a check
@@ -14,19 +15,22 @@ findings as comments), and `docs/status.md` sums them up.
 ## 0. On this VM
 
 - `tools/check.sh --strict --only lua-lint lua-test lua-limits shell python-lint
-  python-test xml workflows secrets house` passes (every check but
-  `powershell`, which needs `pwsh`; CI runs that one): `luacheck src tests
-  tools` clean, `busted tests` green, the shell and Python tooling clean,
-  every `driver.xml` well-formed, the
+  python-test xml workflows secrets house changelog links` passes (every
+  check but `powershell`, which needs `pwsh`; CI runs that one): `luacheck
+  src tests tools` clean, `busted tests` green, no Lua function over 180
+  locals or 50 upvalues, the shell and Python tooling clean, every
+  `driver.xml` well-formed, the
   workflows clean under actionlint and zizmor, gitleaks clean over the tree
   and the history of every local ref (branches, tags, stashes,
   remote-tracking refs: on the VM the check reads `git log --all`, so a
   stale ref holding old history fails it until it is removed),
-  `deploy/house.yaml` valid. `tools/setup-checks.sh` first if a tool is
-  missing.
+  `deploy/house.yaml` valid, `CHANGELOG.md` and the codename files valid,
+  and every link in the Markdown files and the Documentation tabs working.
+  `tools/setup-checks.sh` first if a tool is missing.
 - `tools/build.sh` (release) and `tools/build.sh --dev`: the release
-  `hue_bridge.c4z` has 9 actions since 1.2 (#334; 29 before) (`unzip -p
-  build/hue_bridge.c4z driver.xml | grep -c '<action>'`), `hue_light.c4z`
+  `hue_bridge.c4z` has 10 actions (9 from 1.2, #334, and Hue Automations
+  since 1.5, #280; 29 before 1.2) (`unzip -p build/hue_bridge.c4z
+  driver.xml | grep -c '<action>'`), `hue_light.c4z`
   and `hue_scene.c4z` 0, and `hue_motion.c4z` 1 (Test Motion Programming);
   the bridge has no `Dev Server` or `Diagnostic Server` property (the
   `DEV-ONLY` blocks of `src/hue_bridge/driver.xml`, which `tools/build.sh`
@@ -34,11 +38,12 @@ findings as comments), and `docs/status.md` sums them up.
   experiments, reload credentials, check CA pinning: they come from
   `bridge/devtools.lua`, which a release does not carry); no
   package holds `common/devloop.lua` or `common/devkey.lua`, and the bridge
-  no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua`
-  (`tools/build.sh` refuses to package a release stage that still has one).
-  The dev build has all of them (the same 9 actions, with the four
-  development entries inside the Diagnostics list; 32 actions before 1.2,
-  the three diagnostics before `Forget Pairing`); each package carries the dev
+  no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua` or
+  `bridge/probe12.lua` (`tools/build.sh` refuses to package a release stage
+  that still has one). The dev build has all of them (the same 10 actions,
+  with the four development entries inside the Diagnostics list; 32
+  actions before 1.2, the three diagnostics before `Forget Pairing`); each
+  package carries the dev
   key as `common/devkey.lua` and is written 0600). `build/manifest.json`
   names the build, the commit, `"dev": false` or `true`, and the four
   packages' checksums and sizes.
@@ -153,8 +158,10 @@ Install the four release files from the GitHub release through
 below); no "Restart Director?" unless a capability changed (then the owner
 reboots the controller). Read:
 
-1. `Driver Version` on the bridge, Shine, Golden hours, Bedside Lights and
-   Master Bedroom Lights = the build; `Debug Mode` reads Off on every device
+1. `Driver Version` on every Hue device = the build (on the house the
+   eight of `docs/status.md`, "What runs on the house": the bridge, Shine,
+   Golden hours, Bedside Lights, Master Bedroom Lights, the two single
+   lights and the motion device); `Debug Mode` reads Off on every device
    (a dev-loop session often leaves it On, and Director keeps the value
    through the release install).
 2. The bridge's Properties page: no `Dev Server` / `Diagnostic Server` rows;
@@ -164,9 +171,10 @@ reboots the controller). Read:
    summary and changes nothing. `Last Action` is a read-only text that
    continues on `Last Action (2)` to `(6)`, and `Attention` the same on
    `Attention (2)` to `(6)`, rows shown only while they hold text.
-3. The Actions tab: 9 actions (Pair Bridge, Import All New, Add From Hue,
-   Link Device, Forget Device, Resolve Names, Set Room Mapping, Diagnostics,
-   Forget Pairing; 29 before 1.2), and the Diagnostics list without the
+3. The Actions tab: 10 actions (Pair Bridge, Import All New, Add From Hue,
+   Link Device, Forget Device, Resolve Names, Set Room Mapping, Hue
+   Automations, Diagnostics, Forget Pairing; 9 in 1.2 to 1.4, 29 before
+   1.2), and the Diagnostics list without the
    four "(dev) …" entries; a Hue Light's and a Hue Scene's Actions tab
    empty, a Hue Motion Sensor's with Test Motion Programming alone.
    `Bridges Found` below `Bridge IP Address`, reading "Paired with Hue
@@ -238,28 +246,31 @@ the release waits.
 
 ## Naming
 
-The release of this spike is **1.0 "Cassian"** (owner, 2026-10-24): git tag
-`v1.0`, a GitHub release titled `1.0 "Cassian"` with the Release workflow's
-seven assets attached (the three `.c4z` files, `SHA256SUMS.txt`,
-`manifest.json` and the provenance in two forms; "How a release is cut"
-below). Since 2026-10-26 (#304) every X.Y has its own codename, kept by
-all its builds and betas. Before the first build of a new X.Y the
-coordinator picks one and reports it, without waiting for approval
-(#396); then one pull request adds the name to `.github/codenames.json`
-and its blurb to `.github/codename-notes.json` (#464), both read by
-`tools/changelog.py`. The blurb is one line that opens the notes of every
-build of the X.Y, its betas included: what the name means in the show and,
-where it fits, how that ties to what the release changes. The rule for how
-names are picked is never written down in public text, the blurbs, release
-notes and this checklist included (#416). The
-driver files carry the
-build number, the commit count, as `Driver Version` (Control4 needs an
-integer there); it is named in the release's `manifest.json`, in the
-release notes (step 4 below) and in `deploy/house.yaml` (`build:`); the
-README names no build and links to the Releases and Environments pages, and
-`docs/status.md` names the build it describes. Later releases of the same spike move
-the tag and replace the attached files; a new version number comes when
-development here is finished.
+- **Versions and tags.** A release is a version `X.Y` (1.0, 1.1, … 1.6),
+  tagged `vX.Y`, published as a GitHub release titled `X.Y "<codename>"`
+  with the Release workflow's eight assets (the four `.c4z` files,
+  `SHA256SUMS.txt`, `manifest.json` and the provenance in two forms; "How a
+  release is cut" below). A later build of the same version is cut by
+  running the workflow with that version again: it moves the tag and
+  replaces the attached files. A prerelease is `X.Y-beta.N`, whose tag
+  never moves ("Prerelease" below). The first release was 1.0 "Cassian"
+  (2026-10-24); until 1.1 its later builds moved `v1.0`.
+- **Codenames.** Since 2026-10-26 (#304) every X.Y has its own codename,
+  kept by all its builds and betas. Before the first build of a new X.Y
+  the coordinator picks one and reports it, without waiting for approval
+  (#396); then one pull request adds the name to `.github/codenames.json`
+  and its blurb to `.github/codename-notes.json` (#464), both read by
+  `tools/changelog.py`. The blurb is one line that opens the notes of every
+  build of the X.Y, its betas included: what the name means in the show
+  and, where it fits, how that ties to what the release changes. The rule
+  for how names are picked is never written down in public text, the
+  blurbs, release notes and this checklist included (#416).
+- **Build numbers.** The driver files carry the build number, the commit
+  count, as `Driver Version` (Control4 needs an integer there); it is named
+  in the release's `manifest.json`, in the release notes (step 4 below)
+  and in `deploy/house.yaml` (`build:`). The README names no build and
+  links to the Releases and Environments pages, and `docs/status.md` names
+  the build it describes.
 
 **How a release is cut** (`.github/workflows/release.yml`; contract
 `docs/cicd-gitops-design.md` §5):
@@ -277,7 +288,8 @@ development here is finished.
    third-party code, checks what the build job handed over, signs the
    provenance and attaches to the release of the tag, creating it when
    missing, with the title and notes written from `CHANGELOG.md` (step 4):
-   `hue_bridge.c4z`, `hue_light.c4z`, `hue_scene.c4z`, `SHA256SUMS.txt`,
+   `hue_bridge.c4z`, `hue_light.c4z`, `hue_motion.c4z`, `hue_scene.c4z`
+   (the packages `build/manifest.json` names), `SHA256SUMS.txt`,
    `manifest.json` (contract §5.2: tag, version, build, commit, build time,
    each package's sha256 and size), `attestations.sigstore.json`, the
    signed build provenance, and `hue-drivers.intoto.jsonl`, the same
@@ -349,10 +361,12 @@ automatic, since the controller has no install API. After the release exists:
    is (`docs/composer-remote.md`): the four GitHub download URLs, each
    file's sha256, the PowerShell that fetches them into
    `C:\c4-hue\drivers\<tag>\` and checks them with `Get-FileHash`, the
-   Composer steps (Driver ▸ Add or Update Driver or Agent…, all three at
-   once, in place, never delete and re-add the bridge), what to read back,
-   the note, and the standing-approval sentence. It carries no LAN address
-   and no bridge id.
+   Composer steps (Driver ▸ Add or Update Driver or Agent…, all four at
+   once, in place, never delete and re-add the bridge; "Overwrite Driver or
+   Agent?" with "Current version is newer", once per package, answered Yes
+   when the house runs a newer dev or feature-branch build, #365), what to
+   read back, the note, and the standing-approval sentence. It carries no
+   LAN address and no bridge id.
 5. **What the Windows session reads back.** Every device's `Driver Version`
    equals the build; on the bridge, `Stream Timeout (s)`, `Stream Watchdog
    (s)` and `Debug Mode` match `deploy/house.yaml`, and the `Status` and

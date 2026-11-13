@@ -12,6 +12,12 @@ and `scenes.lua` (the lifecycle code this copies).
 Current (2026-10-25, build 316): that lifecycle code is shared since #56:
 `bridge/owner.lua` holds it once for the lights, the scenes and the zone
 lights.
+Current (2026-11-13, #478): since 1.2 (#334) the actions this file names
+are merged: `Add Light` and `Add Zone Light` are Add From Hue, the Re-link
+actions and `Link Devices` are Link Device, `Forget Light` is Forget
+Device, Adopt Hue Names and Accept Names As They Are are Resolve Names, and
+`Room Audit` is a mark on the list rows; the old commands answer as hidden
+aliases until 2.0 (`docs/simplify-actions-design.md` §1.2, §1.3).
 
 ## 1. Problem
 

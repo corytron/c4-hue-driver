@@ -101,6 +101,12 @@ offered or forbidden split to make.
     held state, the recalled level and the time-based scene's follow.
   - A group message, or a property change, that changes what the tile shows
     reports it.
+  - Current (2026-11-13, #478): since #469 there is no `shown_on()` or
+    `follow_lights`. `effective_on()` drives the tile, and `keypad_on()`
+    (the scene half, or with Keypad Follows = `Room/zone lights` also
+    `group_on`) drives the LEDs, the toggle button and the holds
+    ([`scene-tracking-design.md`](scene-tracking-design.md) D9;
+    `src/hue_scene/driver.lua`).
 - `tests/spec/scene_driver_spec.lua`:
   - the existing cases load with `This scene`, the behaviour they pin;
   - new cases pin the lights mode (the table above) and the switch between

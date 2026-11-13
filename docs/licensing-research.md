@@ -5,6 +5,13 @@ repository was changed. Every statement is marked **[verified: source, read
 2026-10-24]** or **[assumed]**. Quotes are kept to a sentence. This is research,
 not legal advice; the owner decides whether to publish (CLAUDE.md, "Licensing").
 
+**Current (2026-11-13, #478):** the repository is public since 2026-10-24
+under the Apache License 2.0, as §5 recommends. The history was rewritten that
+day and again on 2026-10-25 (#62), replacing the house's addresses and bridge
+id with the placeholders everywhere, this file included: where P1 to P3, §6
+step 7 and Summary items 3 and 4 name a "real" address or id, or a
+replacement pair, they now print the placeholder (`docs/status.md`).
+
 Owner's four requirements: (1) not run afoul of Control4/Snap One or Signify,
 (2) not expose us legally, (3) as open as possible, (4) allow forking.
 

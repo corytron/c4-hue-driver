@@ -214,7 +214,11 @@ Exit codes: 0 done, 1 refused or invalid, 2 usage.
   Release workflow's build, and `tools/build.sh` on a tagged commit), with
   `--dev-build <build>` in a `--dev` build, and with neither otherwise. The
   file in `src/` keeps the marker. A build whose documentation lacks the
-  marker, or whose changelog fails `check`, fails.
+  marker, or whose changelog fails `check`, fails. Current (2026-11-13,
+  #478): the Release workflow names its tag in `C4_HUE_RELEASE_TAG`, which
+  `tools/build.sh` uses before `git describe` (a commit can carry a
+  prerelease tag and a release tag at once); every one of the four
+  drivers' tabs gets the list.
 - **GitHub, per release:** the Release workflow's build job runs
   `changelog.py notes` and hands `release-notes.md` to the publish job with
   the packages; the publish job sets it as the release's notes on every
@@ -263,6 +267,6 @@ place, before its bold first line. `{this_build}` comes under a heading
 
 `tools/check.sh` passes, including `changelog`; `tools/build.sh` and
 `tools/build.sh --dev` put the rendered changelog at the bottom of all
-three Documentation tabs (checked by unzipping); a dry run of
+three Documentation tabs (four since 1.1) (checked by unzipping); a dry run of
 `changelog.py notes` for the next build reads right; the next release
 publishes its notes from the changelog and its packages carry it.

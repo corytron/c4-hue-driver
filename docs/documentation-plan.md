@@ -17,6 +17,13 @@ The manual has since been revised with the features that followed (keypad
 Button Links, the scene dimmer). What shipped is noted in §1, §5, §6 and
 §8. The 32 px List View tile of lights and scenes cannot be custom (verified 2026-10-25, `docs/icons-research.md`).
 
+**Current (2026-11-13, #478):** the drivers are four since 1.1: the Hue
+Motion Sensor (`hue_motion.c4z`) has a Documentation tab of its own. Release
+1.2 merged and renamed most of the actions §3 to §8 name (the Hue Bridge's 29
+became nine, ten since 1.5), so the chapter list of §3 and the names in it are
+history; §4's HTML rules still hold, and the order each tab follows now is in
+`docs/doc-coherence-design.md` §3.
+
 ## 1. Mechanics (verified in the SDK fundamentals)
 
 - Documentation tab: `driver.xml` gets `<documentation file="www/documentation.html"/>`
@@ -227,7 +234,9 @@ Current (2026-10-25, build 316): 22 files. `tree-bridge.png` left the
 manual and the repository on 2026-10-24 (build 231, PR #34, #158: it
 showed the house's device inventory), and `bridge-properties.png` was
 redacted to the placeholder bridge id; the retake on a demo project is #61
-(`docs/screenshots-plan.md`).
+(`docs/screenshots-plan.md`). Current (2026-11-13, #478): retaken in the
+house project with the house's texts painted over, not on a demo project (PR
+#251, build 349): 24 files, with the zone light's two.
 
 ## 6. Icons
 

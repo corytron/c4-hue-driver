@@ -2,15 +2,17 @@
 
 > Addresses: the house's own LAN addresses were replaced on 2026-10-24 by placeholders of the same shape (`10.0.2.143` for the bridge, `192.0.2.7` for this VM), per CLAUDE.md; the behaviour described is unchanged.
 
-**Current state:** `docs/status.md` (2026-10-25) is the one page that says
-what runs on the house, what the drivers do now and what is open; where
-this notebook and `docs/status.md` disagree about the present,
-`docs/status.md` and the code win. This file is the engineering history:
-dated sections stay as written, and where behaviour changed later a dated
-"Superseded (date): …" line says so at that spot. On 2026-10-25 (#231) the
-sections that describe behaviour were checked against the code of build
-316; a "Current (2026-10-25, build 316): …" note marks where the code now
-differs from what a section first recorded.
+**How to read this file.** The "Overview" below is kept current; it names
+the four drivers and the modules and points to the feature contracts in
+`docs/`. Everything after it is the engineering history: dated sections
+stay as written, and where behaviour changed later a dated "Superseded
+(date): …" or "Current (date): …" line says so at that spot. On 2026-10-25
+(#231) the sections that describe behaviour were checked against the code
+of build 316, and on 2026-11-13 (#478) the decisions that changed since
+were marked against build 624. `docs/status.md` is the one page that says
+what is released, what runs on the house and what is open; where this
+notebook and `docs/status.md` disagree about the present, `docs/status.md`
+and the code win.
 
 How the work gets done (process, not architecture): every change that can
 be split into parts touching disjoint files is built by parallel agents
@@ -36,10 +38,84 @@ drivers, Signify's Hue developer docs (Core Concepts, Using HTTPS, Hue Bridge
 Discovery and the CLIP v2 API reference, as of 2025), or independent sources;
 **[assumed]** = not yet confirmed, to be tested on the real controller or bridge.
 
+## Overview (current, 2026-11-13, build 624)
+
+**Four drivers**, installed together from one release (`tools/build.sh`
+packs one `.c4z` per `src/<name>/driver.xml`):
+
+| Driver | Package | Proxy | What one device is |
+| --- | --- | --- | --- |
+| Hue Bridge | `hue_bridge.c4z` | its own (`hue_bridge`) | one Hue bridge: pairing, every HTTPS request, the event stream, the registry of the other devices, Attention |
+| Hue Light | `hue_light.c4z` | `light_v2` (binding 5001) | one Hue light, or a whole Hue room or zone as one zone light |
+| Hue Scene | `hue_scene.c4z` | `light_v2` (binding 5001) | one Hue scene, ordinary or time-of-day |
+| Hue Motion Sensor | `hue_motion.c4z` (since 1.1) | `contactsingle_motionsensor` (binding 5001) | one Hue motion sensor, or a MotionAware area (Bridge Pro only) |
+
+- **Where they run.** Meant for Control4 OS 3.x and 4.x (minimum OS 3.3.0
+  in every `driver.xml`, "Targets" below); run so far on OS 3.4 only, so
+  OS 4.x has not been tried. CLIP API v2 only; run with a Hue Bridge Pro
+  (the house) and a Hue Bridge v2 (an outside tester on the 1.1 betas,
+  #309). One bridge per Hue Bridge device.
+- **Bindings and messages.** The bridge's provider binding 1 (class
+  `HUE_BRIDGE`, "Hue Lights") serves every device; each device's consumer
+  binding 1 ("Hue Bridge") is made by the bridge with `C4:Bind` when it
+  creates the device. Bridge and devices talk with `C4:SendToDevice` in
+  both directions (the `HUE_*` messages, "Lights" below and each
+  contract). Lights and scenes also declare the Top, Bottom and Toggle
+  Button Links (200–202); the motion device a Temperature output (2).
+- **Only the bridge talks to Hue**, over HTTPS with the
+  `hue-application-key` header, pinned to Signify's roots
+  (`certs/hue_ca_bundle.pem`). Before any request that carries the key,
+  the bridge checks the bridge's identity without the key and the
+  controller's pinning with a decoy bundle ("TLS self-check" below;
+  `bridge/identity.lua`, `bridge/tlscheck.lua`).
+- **The event stream** runs on a raw SSL network connection by default
+  (Event Stream Transport `Network connection`, binding 6001,
+  `bridge/netstream.lua`, since 1.1, #317, `docs/raw-stream-design.md`
+  §0); `Web transfer`, the `C4:url` stream of 1.0 (`bridge/stream.lua`
+  with the padded-address queues below), is the fallback. Every connect is
+  followed by a resync.
+- **By itself** (1.2, `docs/simplify-actions-design.md`): the background
+  tasks of `bridge/housekeeping.lua` read the bridge in tiers, find a moved
+  bridge on the LAN (`bridge/discovery.lua`, `mdns.lua`, `sweep.lua`; never
+  the internet), map new Hue rooms by name, sync names both ways and
+  re-link a returned bulb by its radio. Nothing is created, deleted or
+  moved without a click.
+- **Ten actions** on the bridge (`bridge/actions.lua`): Pair Bridge, Import
+  All New, Add From Hue, Link Device, Forget Device, Resolve Names, Set
+  Room Mapping, Hue Automations, Diagnostics, Forget Pairing. The 1.1
+  commands answer as hidden aliases until 2.0. The Hue Light and Hue Scene
+  have no actions; the motion device has Test Motion Programming.
+- **Modules.** `src/hue_bridge/bridge/` holds the bridge's modules (one
+  lifecycle base, `owner.lua`, under `lights.lua`, `scenes.lua`,
+  `zone_lights.lua` and `motion.lua`; the command queues in
+  `commands.lua`; the registry in `registry.lua`); `src/hue_light/light/`
+  the light's state, turn-on, load group, capability and report-throttle
+  logic;
+  `src/common/` what every device driver shares (`device.lua`, the keypad
+  machine and the proxy plumbing; `dispatch.lua`, `log.lua`, `link.lua`;
+  `devloop.lua` in dev builds only, `docs/dev-loop.md`). Lua 5.1 limits
+  are checked by `tools/lua_limits.py` (`docs/driver-locals-design.md`).
+- **Where the detail is:** pairing and bridges
+  `docs/bridge-compat-design.md`; import, rooms and lifecycle
+  `docs/import-design.md` and `docs/simplify-actions-design.md`; lights
+  `docs/lights-design.md`, `docs/zone-light-design.md`,
+  `docs/turn-on-design.md`, `docs/load-groups-design.md`,
+  `docs/light-events-design.md`; keypads `docs/keypad-design.md`,
+  `docs/group-hold-design.md`, `docs/tap-stop-design.md`; scenes
+  `docs/scenes-design.md`, `docs/scene-dimmer-design.md`,
+  `docs/smart-scenes-design.md`, `docs/scene-tracking-design.md`; motion
+  `docs/motion-design.md`; outages `docs/offline-design.md`; Hue
+  automations `docs/hue-automation-audit-design.md`; the index of all of
+  them is `docs/README.md`.
+
 ## Targets
 
 - Controller: OS 3.4.2 today; must keep working on OS 4.x.
-- `driver.xml` declares `<minimum_os_version>3.3.0</minimum_os_version>`.
+  Current (2026-11-13, #478): the house controller reports OS 3.4.3 (the
+  diagnostics of 2026-10-26, `3.4.3.727848-res`); the notes of 2026-10-25
+  and before say 3.4.2.
+- `driver.xml` declares `<minimum_os_version>3.3.0</minimum_os_version>`
+  (all four drivers' since 1.1).
   3.3.0 introduced the light_v2 brightness-target and color APIs
   (`SET_COLOR_TARGET`, `LIGHT_COLOR_CHANGED`, CCT capabilities,
   `C4:ColorXYtoCCT` and friends) **[verified]**.
@@ -79,6 +155,12 @@ zone or room, driven through its grouped_light (kind "group",
 and zone lights share one lifecycle base, `bridge/owner.lua` (#56), and the
 two device drivers share `common/device.lua` (their plumbing since
 2026-10-24, the keypad machine since #57).
+
+Current (2026-11-13, #478): **four drivers** since 1.1. The fourth, **Hue
+Motion Sensor** (`hue_motion.c4z`, #268, `docs/motion-design.md`), stands
+for a Hue motion sensor or a MotionAware area through Control4's stock
+`contactsingle_motionsensor` proxy, binds to the bridge like the others
+and uses `common/device.lua` too. The table is in "Overview" above.
 
 ## Networking
 
@@ -347,6 +429,13 @@ blocking rule, `docs/security-fixes-design.md`):
   tested]**.
   Superseded (2026-10-21): not built; option A below was chosen and runs on
   the house.
+  Current (2026-11-13, #478): built after all on 2026-10-27 (#317,
+  `docs/raw-stream-design.md` §0, `bridge/netstream.lua`), once a tester's
+  controller showed every bridge request timing out while the `C4:url`
+  stream held one of Director's four transfers. It is the default since
+  1.1 (Event Stream Transport `Network connection`, binding 6001, with
+  `CACERTFILE` and `VERIFY_MODE` peer; verified on the house on
+  2026-10-27, OS 3.4.3); option A stays as `Web transfer`.
 
 ### `C4:url` transfer scheduling on OS 3.4.2 (measured through the dev loop)
 
@@ -420,6 +509,12 @@ a 47-light listing came back in under a second **[verified]**. Fallback
 (self-check fails or no octet below 8): shared queue with the stream
 timeout capped at 60 s, shown in the `Stream Address` property. B stays
 documented as the alternative if a future OS changes the scheduler.
+
+Current (2026-11-13, #478): B became the default in 1.1 (#317; "Event
+stream" above). A runs only with Event Stream Transport `Web transfer`,
+and this section and the rotation below apply to that setting alone; with
+`Network connection` the stream uses the dotted address and `Stream
+Address` reads `<ip> (network connection, binding 6001)`.
 
 Operational notes from the same session: every stream reconnect leaves the
 previous transfer alive until its next callback or its timeout, now on the
@@ -568,6 +663,11 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   renames, gone lights and deletions go through `Attention`, Adopt Hue
   Names, Re-link Device To Light, Forget Light and tombstones
   (`docs/import-design.md`).
+  Current (2026-11-13, #478): since 1.2 (#334) these are **Add From Hue**
+  and **Import All New** (lights, zone lights, scenes and motion alike),
+  **Link Device**, **Forget Device** and **Resolve Names**, and names sync
+  both ways by themselves (`docs/simplify-actions-design.md`); the 1.1
+  names answer as hidden aliases until 2.0.
 - **State fan-out and resync.** Each `light` item in a stream container
   becomes a `HUE_STATE` with just the changed fields; a `zigbee_connectivity`
   item maps device → light rids → `HUE_STATE` with `online` (`status ==
@@ -689,6 +789,15 @@ persisted one out of range is deleted and the default used
 (`report_setting`, `in_range`, `load_settings`). Seen on the house on
 2026-10-25 ("Hardware pass of 2026-10-25 night", #59).
 
+Current (2026-11-13, #478): a hold on a scene, zone light or room light
+ramps lamp by lamp or in steps since 1.3 (#249,
+`docs/group-hold-design.md`); since 1.4 (#421, `docs/tap-stop-design.md`)
+a light's tap ramps over the click rate, whose default is 3000 ms each way
+(`common/device.lua`, `SETTINGS`), a second tap after the double-tap
+window stops the ramp, a scene's tap fades over a fixed 3 s, and
+`SET_BRIGHTNESS_STOP` stops the lamp; since 1.5 the light fires its own
+button events (#432, `docs/light-events-design.md`).
+
 On hardware (builds 144 and 146): the Top, Bottom and Toggle Button Links
 are connections the driver declares (ids 200–202, BUTTON_LINK outputs),
 not something the proxy creates; a capability change made Composer ask for
@@ -782,6 +891,12 @@ by hand in Connections to the Top and Bottom Button Links of the Hue Scene
   activation (Control4, keypad, Hue app) until the group turns off, another
   scene of the group becomes active or the device turns it off, whatever
   Hue later says about the scene; persisted as `held_on`.
+  Current (2026-11-13, #478): the on rule stays, but since 1.6 (#469,
+  `docs/scene-tracking-design.md`) the tile shows the room's level only
+  while its own scene is on and reads 0 otherwise; the slider, ON and
+  Toggle of a scene that is not playing switch the room to it; and
+  **Keypad Follows** (formerly On State Follows, 1.1, `docs/scene-led-design.md`)
+  decides only what a bound keypad treats as on.
 - **Keypad LEDs** (both device drivers): on every on/off change, at late
   init and when a keypad binds to a link, `MATCH_LED_STATE` on links
   200–202 and `BUTTON_INFO` to the proxy **[verified: Snap One's
@@ -1290,6 +1405,16 @@ is no Discover Bridges action and no automatic IP follow-up (`src/` has no
 discovery code): a new bridge address is typed into `Bridge IP Address`,
 and the pairing survives it.
 
+Current (2026-11-13, #478): since 1.2 (#334,
+`docs/simplify-research-discovery.md`) the bridge finds a Hue bridge on
+the local network by itself, never through the internet (the owner's
+rule; step 2 below is not built): a legacy unicast mDNS query for
+`_hue._tcp.local` (`bridge/mdns.lua`, sent by `bridge/discovery.lua`;
+answered on the house, 2026-11-05), then a bounded sweep of the subnet
+(`bridge/sweep.lua`), each candidate checked as in step 3. The results
+show in the `Bridges Found` row at first load, and a paired bridge that
+stops answering is looked for by its id (`bridge/away.lua`).
+
 1. **Manual IP** (v1): the `Bridge IP Address` property. A DHCP reservation
    for the bridge is recommended.
 2. **Cloud discovery endpoint** (v1): a "Discover Bridges" action calls
@@ -1342,7 +1467,12 @@ and the pairing survives it.
   a keypad hold's start and stop skip the bucket (`commands.urgent`,
   Decision 9). On the house 50 slider targets in 5 s on a zone light made 9
   grouped_light PUTs (a burst of 3, then one a second) and no 429
-  (2026-10-25, #39).
+  (2026-10-25, #39). Current (2026-11-13, #478): since 1.5 a command that
+  covers a whole Hue room or zone from a Control4 load group goes out as
+  one grouped_light request (#435, `docs/load-groups-design.md`), and a
+  command that never reached the bridge is not shown as done; devices go
+  offline after 5 minutes without the bridge (#428,
+  `docs/offline-design.md`).
 - Rooms and zones are controlled through their `grouped_light` service.
   Scenes are recalled through `/resource/scene/{id}` **[verified: resources
   exist; recall body to be confirmed from the API reference]**.
@@ -1418,7 +1548,16 @@ and the pairing survives it.
   `hue_zone_light_tombstones` (zone lights, build 196),
   `hue_scene_forgotten` (devices Forget Scene let go, #47) and
   `tls_pinned_on` (the Director version that answered `pinned`, #217;
-  unencrypted, it is no secret).
+  unencrypted, it is no secret). Current (2026-11-13, #478): more since,
+  among them the motion registry (`hue_motion`, `hue_motion_tombstones`,
+  `hue_motion_forgotten`, 1.1), the network connection's TLS probe ids
+  (`netcheck_next_binding`, `netcheck_removed_below`, #317 and #329), the
+  rooms mapped by name (`hue_rooms_auto`) and the moved-bridge follow-up
+  (`hue_bridge_last_good_ip`, `hue_bridge_moved`, 1.2), the Hue automation
+  record (`hue_automations`, 1.5); on the devices `saved_level` (Restore
+  Saved Level, #297), `motion_hold` (#371) and `keypad_follows_migrated`
+  (1.6). The names are the `*_KEY` constants and `C4:PersistSetValue`
+  calls of the modules.
 
 ## Hardware facts of the 2026-10-25 dev pass (build 276, OS 3.4.2, Bridge Pro)
 

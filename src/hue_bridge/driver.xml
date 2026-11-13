@@ -283,7 +283,7 @@
 			</property>
 		</properties>
 		<actions>
-			<!-- The nine actions of 1.2 (#334, docs/simplify-actions-design.md §3.3).
+			<!-- The actions: the nine of 1.2 (#334, docs/simplify-actions-design.md §3.3) and Hue Automations, the tenth, since 1.5 (#280).
 			     The pickers are CUSTOM_SELECT lists built on demand by the named Lua
 			     functions (bridge/actions.lua); the merged ones open on folders, and
 			     a pick returns the entry's value under the param name. Every command

@@ -8,6 +8,8 @@ Status: contract, 2026-10-28 (#325). Asked for by the tester in #309. The rows a
 - A bulk add is **Import All New …**: Import All New Lights already exists, and **Add All New Motion Sensors becomes Import All New Motion Sensors**. The Composer action and its command change; no programming depends on actions.
 - Add All Scenes Of Room stays: it is scoped to a room, not "all new".
 
+Current (2026-11-13, #478): since 1.2 (#334) the Add actions are one, Add From Hue, and the two Import All New actions are one, Import All New; the old commands answer as hidden aliases until 2.0 (`docs/simplify-actions-design.md` §1.2). The rows of section 2 are unchanged (`bridge/owner.lua:row_summary`).
+
 ## 2. The list rows (Lights, Scenes, Zone Lights, Motion Sensors)
 
 Every row's summary reads, in this order:

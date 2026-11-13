@@ -113,7 +113,7 @@ reach the queue unchanged.
 
 | Owner | Files |
 | --- | --- |
-| Agent **G** (code) | new `src/hue_bridge/bridge/group_hold.lua`; new `tests/spec/group_hold_spec.lua`; read-only helpers in `src/hue_bridge/bridge/zone_lights.lua` and (for G6a) `src/hue_bridge/bridge/scenes.lua` (cases in `tests/spec/scenes_spec.lua`), plus (member light rids of a grouped_light, for `members`), if none exists, with its cases in `tests/spec/zone_lights_spec.lua` |
+| Agent **G** (code) | new `src/hue_bridge/bridge/group_hold.lua`; new `tests/spec/group_hold_spec.lua`; read-only helpers in `src/hue_bridge/bridge/zone_lights.lua` and (for G6a) `src/hue_bridge/bridge/scenes.lua` (cases in `tests/spec/scenes_spec.lua`), plus a helper in `zone_lights.lua` (member light rids of a grouped_light, for `members`) if none exists, with its cases in `tests/spec/zone_lights_spec.lua` |
 | Agent **D** (docs) | `src/hue_scene/www/documentation.html`, `src/hue_bridge/www/documentation.html` (the zone and room light sections), `docs/keypad-design.md`, `docs/zone-light-design.md` (Decision 6), and any other design note describing group holds, except `docs/design.md` |
 | Coordinator | this document; `src/hue_bridge/driver.lua` (the `group_dim` hook and the wiring, after #373 lands, because the driver's main chunk has no room for another local until then); `docs/design.md`, `CHANGELOG.md`, `docs/status.md`, git |
 

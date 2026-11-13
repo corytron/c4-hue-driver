@@ -9,6 +9,10 @@ and OS 4.x. Hue's resources and the lifecycle edge cases are the other
 research notes of #268; the few Hue facts used here are marked [assumed] and
 belong to them.
 
+**Current (2026-11-13, #478):** decided and built. `docs/motion-design.md`
+§1 answers §9 (one driver with two kinds, sensor and area: D2), and the
+feature shipped in 1.1 as the Hue Motion Sensor driver (`hue_motion.c4z`).
+
 Snap One documents and drivers are paraphrased: only interface names
 (commands, connection classes, property and event names) appear as written.
 This is not legal advice.

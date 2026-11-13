@@ -30,6 +30,14 @@ of bridge trouble and back at the first contact, and a recall, OFF or
 level move the bridge fails to deliver is answered with the bridge's
 state; [the offline contract](offline-design.md) has the rules, and dated
 notes below say where it changed this file.
+Current (2026-11-13, #478): since 1.2 (#334) the actions this file names
+are merged: `Add Scene` and `Add All Scenes Of Room` are Add From Hue (a
+scene, or a Hue room's folder of scenes), `Re-link Scene` and `Link
+Devices` are Link Device, `Forget Scene` is Forget Device, and the Hue
+Scene device has no actions (`Adopt Hue Name` and `Forget This Scene` are
+gone); the old commands answer as hidden aliases until 2.0
+(`docs/simplify-actions-design.md` §1.2). The `Scenes` row reads as
+`docs/list-rows-design.md` §2 says.
 
 ## 1. Decisions (all approved defaults)
 
@@ -281,6 +289,9 @@ Built as below. The house has run release builds without the dev loop
 since 2026-10-22 (`docs/dev-loop.md`, "Current state").
 
 - `tools/build.sh`: `DRIVERS=(hue_bridge hue_light hue_scene)`.
+  Current (2026-11-13, #478): `tools/build.sh` builds one package per
+  `src/*/driver.xml`, four since `hue_motion` (1.1); the dev server's trees
+  are still `bridge`, `light` and `scene`.
 - `tools/devserver.py`: `TREES = ("bridge", "light", "scene")`; status gains
   `running_scene_version` / `local_scene_version`; `devctl status` shows it.
 - `src/common/devloop.lua`: the bridge fetches and forwards every non-bridge
