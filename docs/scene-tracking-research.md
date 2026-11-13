@@ -4,6 +4,11 @@ Research for issue #469, part 1 of 2 (the other part, which room a scene
 device belongs in, is `docs/scene-rooms-research.md`). Read-only: nothing
 here has been built. It feeds the contract `docs/scene-tracking-design.md`.
 
+Current (2026-11-13, #478): built in 1.6. The contract's owner's decisions
+O1, O2 and O7 answer §9: the tile follows its own scene, a bound keypad keeps
+following the room's lights by default, and the property is renamed
+**Keypad Follows**.
+
 The owner's report (2026-11-12, house): with several Hue Scene devices in
 the Master Bedroom, dimming one of them in the iPhone app makes every scene
 device of the room show the same level. That is right for lights and zone

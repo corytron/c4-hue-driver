@@ -9,9 +9,12 @@ running inside the Claude desktop app **on the Windows VM** acts as the
 coordinator's hands in Composer, driven by messages from the coordinator's
 session.
 
-**Current state (2026-10-25):** in use since 2026-10-21; round 43 (2026-10-25
-03:24, dev build 309 for the checks of issue #40) is the last one recorded
-(history at the end; `docs/status.md`). A release install follows
+**Current state (2026-11-13):** in use since 2026-10-21, for every install
+and every Composer check. The latest round installed release 1.6, build
+624, on 2026-11-13 and ran checklist section S's first steps
+(`docs/status.md`). Rounds since 2026-10-26 are reported in the issues and
+Discussions rather than numbered here; "History" below keeps the numbered
+rounds of the first week. A release install follows
 `docs/release-checklist.md`, "Deploy to the house": `tools/deploy.py start`
 writes the brief the session works from ("Workflow" below). While a dev
 build runs, the dev loop's shipped log is the coordinator's view
@@ -201,8 +204,11 @@ writes `build/release/<tag>/BRIEF.md` (`docs/release-checklist.md`,
 GitHub download URLs and their sha256, the PowerShell that fetches them
 into `C:\c4-hue\drivers\<tag>\` and checks them with `Get-FileHash`, the
 Composer steps, what to read back, and the standing-approval sentence. The
-session installs all three at once with Driver ▸ "Add or Update Driver or
-Agent…", in place (approval per rule 8), and reads back every device's
+session installs all four at once with Driver ▸ "Add or Update Driver or
+Agent…", in place (approval per rule 8; when the house runs a newer dev or
+feature-branch build, Composer asks "Overwrite Driver or Agent?" with
+"Current version is newer" once per package, and the brief says to answer
+Yes for exactly those packages, #365), and reads back every device's
 `Driver Version` and the bridge's `Stream Timeout (s)`, `Stream Watchdog
 (s)`, `Debug Mode`, `Status` and `Attention`; the coordinator records the
 result with `tools/deploy.py done` or `failed`. A dev build or a

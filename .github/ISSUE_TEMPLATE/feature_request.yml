@@ -6,11 +6,11 @@ body:
     attributes:
       value: |
         This is a personal project with no roadmap (CONTRIBUTING.md); a request is
-        welcome and may stay open for a while. Known out-of-scope items (README, "What
-        it is not"): Hue motion sensors, buttons and dimmer switches as Control4 devices,
-        entertainment areas, Hue automations and MotionAware, a second bridge, Hue's
+        welcome and may stay open for a while. Known limits (README, "Limits"): a second
+        bridge; Hue buttons, dimmer switches and other switches, entertainment areas, the
+        motion of a whole Hue room or zone and Hue cameras as Control4 devices; Hue's
         whole-home group as a light. If your request is one of them, say why it matters
-        to you anyway.
+        to you anyway. A security problem is not a feature request: see SECURITY.md.
   - type: textarea
     id: problem
     attributes:
@@ -30,7 +30,9 @@ body:
       options:
         - Lights (on/off, dimming, colour)
         - Rooms, zones and scenes
+        - Motion sensors and MotionAware areas
         - Keypads and Button Links
+        - Hue automations
         - Pairing, event stream and bridge connectivity
         - Composer properties, actions and texts
         - The manual and the documentation

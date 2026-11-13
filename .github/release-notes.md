@@ -12,17 +12,17 @@ Install every `.c4z` file of the release at once through Driver ▸ "Add or Upda
 
 ### What you get
 
-- **Hue Bridge** driver: pairing with the link button, the bridge's event stream for live two-way state, room mappings, import of lights, lifecycle handling (renames, deletions, re-links, restores), scenes and time-of-day scenes, zone and room lights, readable Composer properties, and a Documentation tab with the full owner's manual.
-- **Hue Light** driver (light_v2): on/off, dimming, colour temperature and colour where the bulb supports them; a Hue zone or room as one light; keypad Button Links (Top, Bottom, Toggle) with hold-to-dim and LEDs.
-- **Hue Scene** driver (light_v2 dimmer): ordinary and time-of-day scenes with a slider in sync with the Hue app and keypad LEDs.
-- **Hue Motion** driver (a stock Control4 motion sensor): Hue motion sensors and MotionAware areas (Hue Bridge Pro), with an occupancy hold time and the temperature and light level where the sensor has them.
+- **Hue Bridge** driver: pairs with one Hue bridge with its link button and creates the other devices; the bridge's event stream for live two-way state, room mappings, import of lights and motion sensors, lifecycle handling (renames, deletions, re-links, restores), the Hue automations check, readable Composer properties, and a Documentation tab with the full owner's manual.
+- **Hue Light** driver (light_v2): on/off, dimming, colour temperature and colour where the bulb supports them; a Hue zone or room as one light (a zone light); keypad Button Links (Top, Bottom, Toggle) that tap, ramp and hold as on a Control4 dimmer, with LEDs; Control4 load groups.
+- **Hue Scene** driver (light_v2 dimmer): ordinary and time-of-day scenes; the tile follows its own scene, the slider dims the room or zone while keeping the scene's look, and keypad Button Links with LEDs.
+- **Hue Motion Sensor** driver (a stock Control4 motion sensor): Hue motion sensors and MotionAware areas (Hue Bridge Pro), with an occupancy hold time and the temperature, light level and battery where the sensor has them.
 
 Each driver's Documentation tab ends with the full list of releases.
 
 ### Requirements
 
 - Control4 OS 3.3.0 or newer; tested on OS 3.4.2 with Composer Pro 3.4.2. Not yet tried on OS 4.
-- A Hue Bridge Pro (tested) or Hue Bridge v2 (not yet tried) on the LAN, with a fixed IPv4 address; HTTPS (port 443) to the bridge.
+- A Hue Bridge Pro or a Hue Bridge v2 (the square bridge) on the same network as the controller, preferably with a fixed IPv4 address; HTTPS (port 443) to the bridge. No internet access and no Hue account are needed.
 
 ### Verify a download
 

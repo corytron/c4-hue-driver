@@ -138,7 +138,7 @@ After this change:
 
 - Composer accepted click rates of 3.000 s on the four Hue Light devices on
   2026-11-09, so the documented `click_rate_max` default of 1 ms does not
-  apply on OS 3.4.2 [verified: `docs/status.md` "Now"].
+  apply on OS 3.4.2 [verified: `docs/status.md`, the house settings of 1.4].
 - The proxy's settings page shows Default On Brightness, the rates, LED
   colours and, on lights, a colour on mode [verified: `docs/design.md`,
   #59 round]. What it shows as On and Dim colours and as the colour on mode

@@ -7,6 +7,13 @@ keypad contract's `dimmed_on`, and since a Hue Scene device is now a
 dimmer, question 5 asks what a time-based one should do with a level. The
 present behaviour of the drivers is in `docs/status.md`.
 
+**Current (2026-11-13, #478):** the owner answered on 2026-10-24 (§6), the
+contract is `docs/smart-scenes-design.md`, and time-of-day scenes shipped in
+1.0. What was left of #40 (§7b, §8) was not parked for 2.0 after all: the
+owner closed it on 2026-11-10 without the remaining manual tests, and
+`docs/house-checks-plan.md` §3.4 had found (d) and (e) obsolete for the
+driver.
+
 Owner, 2026-10-23: "think about how to get the scenes that follow the time
 of day in hue, like golden hour and daylight, to show up as available scenes
 I can trigger for zones. as right now they are not showing."

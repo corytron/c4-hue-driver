@@ -63,6 +63,8 @@ In short:
   `hue-drivers.intoto.jsonl`); verification with `gh attestation verify ...
   --signer-workflow corytron/c4-hue-driver/.github/workflows/release.yml`
   (GitHub CLI 2.102.0 or newer).
+  Current (2026-11-13, #478): eight assets since 1.1 added the fourth
+  driver, `hue_motion.c4z`.
 
 ## 3. Who owns which file
 

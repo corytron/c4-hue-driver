@@ -20,7 +20,7 @@ Install every `.c4z` file of the [latest stable release](https://github.com/cory
 
 ### Feedback
 
-Report what you tried and what you saw with the [Beta feedback form](https://github.com/corytron/c4-hue-driver/issues/new?template=beta-feedback.yml), or tell the person who sent you this link. Replace LAN addresses and the bridge id with placeholders, and never paste a Hue application key.
+Report what you tried and what you saw with the [Beta feedback form](https://github.com/corytron/c4-hue-driver/issues/new?template=beta-feedback.yml), or tell the person who sent you this link. Replace LAN addresses and the bridge id with placeholders, and never paste a Hue application key. Report a security problem privately, as the [security policy](https://github.com/corytron/c4-hue-driver/security/policy) says, never in an issue.
 
 ### Verify a download
 

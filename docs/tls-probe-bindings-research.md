@@ -198,7 +198,7 @@ Record the results as comments on #329 and in `docs/raw-stream-design.md` §0.2.
 
 ## 6. What was implemented (2026-11-08)
 
-Steps 2–4 of §4 were built on `fix/tls-probe-bindings-329` as written, with one addition. The house checks of §5 are still to come.
+Steps 2–4 of §4 were built on `fix/tls-probe-bindings-329` as written, with one addition. The house checks of §5 are still to come. Current (2026-11-13, #478): the house checks ran the same day (§7), and the fix shipped in 1.3.
 
 - `close()` makes the three calls of §4.1, each under its own `pcall`, with a warning per failure. `tidy()` replaces `close_open()` in `finish()` and `cancel()`. `run()` sets `check.sweep_to` before its short cuts. The mark is `netcheck_removed_below` (`netcheck.REMOVED_NAME`), kept in this run as `removed_below`.
 - **The addition: removing earlier runs' ids counts as a close for the 1.5 s gap** (`last_close`). `run()` cancels a check still in flight, and that cancel's tidy removes the leftovers. Without this rule the new decoy could follow that burst of removals by only what was left of an earlier gap. With it, no decoy is created less than 1.5 s after any removal. One side effect: a second run that finds the ids used up gives its answer 1.5 s later.

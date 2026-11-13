@@ -1,5 +1,5 @@
 name: Bug report
-description: The Hue Bridge, Hue Light or Hue Scene driver does something wrong
+description: The Hue Bridge, Hue Light, Hue Scene or Hue Motion Sensor driver does something wrong
 labels: [bug]
 body:
   - type: markdown
@@ -12,9 +12,10 @@ body:
         application key; **never paste one**. If you think you have found a security
         problem, do not open an issue: see `SECURITY.md`.
 
-        Click **Test Connection** on the Hue Bridge device first and check chapter 12
-        of the manual (the Documentation tab of the Hue Bridge device), which lists
-        every text the properties can show and what to do about it.
+        First run the Hue Bridge device's **Diagnostics** action with *Check the connection
+        now*, and read the troubleshooting chapter of the manual (the Documentation tab of
+        the Hue Bridge device), which lists every text the properties can show and what to
+        do about it. Testing a prerelease? Use the Beta feedback form instead.
   - type: textarea
     id: what-happened
     attributes:
@@ -47,8 +48,8 @@ body:
     id: build
     attributes:
       label: Driver build number
-      description: The **Driver Version** property of the Hue Bridge device (an integer; the Releases page says which release it belongs to). Say so if the Hue Light or Hue Scene devices show a different number.
-      placeholder: "228"
+      description: The **Driver Version** property of the Hue Bridge device (an integer; the Releases page says which release it belongs to). Say so if a Hue Light, Hue Scene or Hue Motion Sensor device shows a different number.
+      placeholder: "624"
     validations:
       required: true
   - type: dropdown
@@ -66,7 +67,7 @@ body:
     id: properties
     attributes:
       label: Status, Event Stream, Attention and Last Action
-      description: The texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties (with **Last Action (2)** to **(6)** when shown), and the **Status** of the Hue Light or Hue Scene device concerned. Copy them as they are; they are written to be read.
+      description: The texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties (with **Attention (2)** to **(6)** and **Last Action (2)** to **(6)** when shown), and the **Status** of the Hue Light, Hue Scene or Hue Motion Sensor device concerned. Copy them as they are; they are written to be read.
       render: text
     validations:
       required: true

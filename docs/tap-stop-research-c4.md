@@ -5,6 +5,11 @@ agent. It covers the Control4 side only. A separate note covers the Hue
 side: whether and how a lamp, a zone or a room can ramp and be stopped.
 Nothing here is built yet.
 
+Current (2026-11-13, #478): built in 1.4 as `docs/tap-stop-design.md`
+decides. Its §10 records the house measurement of 2026-11-09: the second tap
+writes the driver's estimate with a one-second glide, and Hue Scene devices
+ramp and stop too.
+
 The owner's request, in short:
 
 - A keypad tap ramps the light from wherever it is to the top (On preset)

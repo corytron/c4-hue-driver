@@ -4,6 +4,9 @@ Status: contract, 2026-11-09, written against `main` at 4910aa3 (release
 1.4 "Maarva", build 565). Nothing here is built. It closes **#280** and
 supersedes the draft notes of PR #285 where they disagree. Target release:
 1.5, with no controller reboot of its own (section 9).
+Current (2026-11-13, #478): built and released in 1.5 "Kenari", build 609
+(2026-11-10): the modules of section 6.1, the Hue Automations row and the
+tenth bridge action (`docs/status.md`).
 
 ## 1. Summary
 

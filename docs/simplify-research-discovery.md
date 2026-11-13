@@ -11,6 +11,10 @@ same for `docs-driverworks-fundamentals`, `LIB/` is
 Addresses are placeholders: `10.0.2.143` the paired bridge, `192.0.2.x`
 any other host, `001788fffe123abc` the bridge id.
 
+Current (2026-11-13, #478): built in 1.2 (`bridge/discovery.lua`,
+`bridge/mdns.lua`, `bridge/sweep.lua`): mDNS first, then a search of at most
+two nearby address blocks (the contract's D12), never Signify's service.
+
 ## 1. Findings
 
 1. **mDNS can be sent with documented calls; whether answers come back is

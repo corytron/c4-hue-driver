@@ -202,6 +202,13 @@ conclusive answer.
 - **Test Connection clears the lock** (finding 4). A 200 with the paired
   bridge id while `state.key_rejected` is set clears it, logs it, refreshes
   Status and starts the stream again.
+  Current (2026-11-13, #478): since 1.2 (#334) Test Connection is the
+  Diagnostics item "Check the connection now" (the old command is a hidden
+  alias until 2.0), and it is no longer the one way to lift the lock: a
+  background task checks a rejected key again 5 min after the refusal,
+  then 15 min, an hour and hourly (`bridge/tasks.lua` `key_recheck`,
+  `hue_bridge/driver.lua:recheck_key`; `docs/simplify-actions-design.md`
+  §1.8 D8).
 - **Fan-out** (finding 6): `on_container` returns at once for a non-table.
 - **Names** (finding 8): `Bridge Name` shows `util.display_name(name)`.
 - **Release stage assertion**: `tools/build.sh` also refuses `conntest.lua`

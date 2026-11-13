@@ -8,6 +8,13 @@ what the driver can report while it does. The owner's addition of
 2026-11-08 applies throughout: every lighting change follows Control4's own
 lighting behaviour and its published light_v2 guidance (§3).
 
+Current (2026-11-13, #478): built in 1.4. The measurement of §9 ran on the
+house on 2026-11-09 (`docs/tap-stop-design.md` §10): a `dimming_delta` stop
+halts an absolute fade (L2, S2), a grouped_light honours an absolute
+duration (Z1), and the stop that shipped is option C, the estimate written
+with a one-second glide (`STOP_MODE = "level"`), on lights and on zone and
+room lights alike.
+
 Markers: **[verified: …]** names a repo file and line, an issue, a Snap One
 reference file (paraphrased, never copied) or a public URL. **[assumed]**
 means nobody has measured it on the house bridge, a Hue Bridge Pro. Claims

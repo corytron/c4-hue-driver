@@ -647,7 +647,7 @@ local function deep_copy(v)
 end
 
 local START_TEXT = "Motion diagnostics start in 20 seconds: open this bridge's Lua tab now. The pass and 10 "
-	.. "minutes of events follow; copy them into the Beta feedback issue."
+	.. "minutes of events follow; copy them into a bug report."
 
 describe("bridge.motion_diag", function()
 	local motion_diag, c4, M, logged, pending, answers, dones
@@ -1390,8 +1390,8 @@ describe("bridge.motion_diag", function()
 				.. " 1, motion " .. A("motion1") .. " 1; counted only: camera_motion 0, contact 1, tamper 0; "
 				.. "other items: 3", logged[#logged])
 			assert.is_false(M:capturing())
-			assert.same({ "Motion diagnostics done: 3 items of events logged. Copy the Lua output into the Beta "
-				.. "feedback issue." }, dones)
+			assert.same({ "Motion diagnostics done: 3 items of events logged. Copy the Lua output into "
+				.. "a bug report." }, dones)
 			assert.equal(0, feed(E[1], 601000), "nothing after the end")
 		end)
 

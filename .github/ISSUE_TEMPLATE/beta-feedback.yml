@@ -66,7 +66,7 @@ body:
     id: what-happened
     attributes:
       label: What you did and what you saw
-      description: The steps (a Composer action, a Navigator tile, a keypad, the Hue app, a sensor, ...), what the drivers did, and what you expected instead. Add the texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties when they matter.
+      description: The steps (a Composer action, a Navigator tile, a keypad, the Hue app, a sensor, ...), what the drivers did, and what you expected instead. Add the texts of the Hue Bridge device's **Status**, **Event Stream**, **Attention** and **Last Action** properties (with their rows (2) to (6) when shown) when they matter.
     validations:
       required: true
   - type: textarea

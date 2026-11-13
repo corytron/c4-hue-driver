@@ -11,6 +11,11 @@ the house bridge (a Hue Bridge Pro with one MotionAware area), the owner and
 Signify's login-only pages can still answer. The feature's contract follows
 the owner's answers.
 
+**Current (2026-11-13, #478):** decided and built. The contract is
+`docs/hue-automation-audit-design.md` (2026-11-09), and the audit shipped in
+1.5 as the Hue Bridge's tenth action, Hue Automations. The #268 research
+cited below merged with 1.1.
+
 The owner's rule behind the feature: **Control4 is the source of truth for
 automations, not the Hue app.** Hue-side automations that act on lights
 Control4 also programs are to be found and reported, and switched off where
