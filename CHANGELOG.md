@@ -14,6 +14,8 @@ follows it.
 
 ## Unreleased
 
+## 1.7 "Clem", build 636 (2026-11-13)
+
 ### Changed
 - The documentation was reviewed for coherence: each driver's Documentation
   tab and the project's GitHub page now read in order, from what a driver is

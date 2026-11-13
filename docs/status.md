@@ -9,7 +9,18 @@ present, this page and the code win. Brought up to date on 2026-11-13
 
 ## Now (2026-11-13)
 
-- **Latest release: 1.6 "Kassa", build 624**, released 2026-11-13
+- **Latest release: 1.7 "Clem", build 636**, released 2026-11-13
+  ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.7),
+  #500): the fixes of the security review of 2026-11-13 (#480, PR #496,
+  issues #481 to #493). What owners notice: Debug Mode turns itself Off
+  after 8 hours; a development build's Driver Version reads `<build>-dev`;
+  devices ignore bridge messages for another resource; a burst of light
+  commands goes out at most three requests at a time. No `<capabilities>`
+  change, so no controller reboot. Its install on the house is in progress
+  (`deploy/house.yaml` names v1.7, build 636); until it is recorded, the
+  house runs 1.6 as below. The first release from the four-job Release
+  workflow, verified by `deploy.py` against the tag's commit and `main`.
+- **Before it: 1.6 "Kassa", build 624**, released 2026-11-13
   ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.6),
   #474). It carries the four drivers: Hue Bridge (`hue_bridge.c4z`), Hue
   Light (`hue_light.c4z`), Hue Scene (`hue_scene.c4z`) and Hue Motion
