@@ -20,6 +20,10 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
   for its grouped_light (`dimming.brightness`, the average of the lights
   that are on), rounded and clamped to 1–100 while the scene is on; 0 while
   off; 100 while on but no level is known yet.
+  Current (2026-11-13, #505): after a reload the last level the bridge
+  reported, saved once it settled (PersistData `last_level`), is shown
+  until the bridge reports again; 100 only when no level was ever known.
+  The house saw Shine read 100 for 5 s after the 1.7 install.
   Current (2026-11-12, #469): "on" here is the scene's own on state (the
   on rule below) and nothing else. The lights mode of
   [`scene-led-design.md`](scene-led-design.md) also showed the room's

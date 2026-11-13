@@ -14,6 +14,11 @@ follows it.
 
 ## Unreleased
 
+### Fixed
+- A Hue Scene that is on no longer shows 100 % for a few seconds after
+  the driver reloads (an update or a controller restart): it shows the
+  percentage it had until the bridge reports the room's (#505).
+
 ## 1.7 "Clem", build 636 (2026-11-13)
 
 ### Changed
