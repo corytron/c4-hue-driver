@@ -1,6 +1,31 @@
-# Status of the Hue driver (2026-11-10)
+# Status of the Hue driver (2026-11-13)
 
-**Now (2026-11-10).** **1.5 "Kenari", build 609, is released**
+**Now (2026-11-13).** **1.6 "Kassa", build 624, is released**
+([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.6),
+#474) and goes onto the house (`deploy/house.yaml`). What 1.6 changes
+(#469, contract `docs/scene-tracking-design.md`, research in
+[Discussion #471](https://github.com/corytron/c4-hue-driver/discussions/471)):
+- **Scene tiles follow their own scene.**
+  - A Hue Scene's tile reads on, at its room's level, only while that
+    scene is playing. Another scene, a scene without a device, lamps turned
+    on by hand or a scene of an overlapping zone all leave it at 0.
+  - The slider, ON and Toggle on a scene that is not playing switch the
+    room to it.
+- **Keypad Follows** replaces On State Follows (the value is copied once;
+  the old row is hidden). It decides only what a bound keypad treats as on,
+  so the bedroom switch stays lit with the room (departure D20, the owner's
+  exception).
+- **Scenes stay in their mapped room.**
+  - Add From Hue and Link Device accept a scene only in the Control4 room
+    its Hue room or zone maps to.
+  - Unmapped rooms are refused with a pointer to Set Room Mapping. There
+    are no one-to-many mappings.
+  - Set Room Mapping can map the whole home (for scenes only), offers the
+    mappings it found, and counts devices left in other rooms.
+- **No capability change**, so no reboot. Checks on the house:
+  `docs/composer-checklist.md` section S (steps 140 to 154).
+
+**Before (2026-11-10).** **1.5 "Kenari", build 609, is released**
 ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.5),
 #457) and goes onto the house (`deploy/house.yaml`). What 1.5 changes:
 - **Hue automation audit** (#280, `docs/hue-automation-audit-design.md`): a
