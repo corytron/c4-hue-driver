@@ -130,6 +130,13 @@ are dated research; what was built from them is in the contracts and
   deletions, project restores, binding changes) and what the driver can know.
 - [`edge-cases-ux.md`](edge-cases-ux.md): the owner-facing policy that came
   out of the two: what is automatic, what is offered, what is forbidden.
+- [`scene-tracking-research.md`](scene-tracking-research.md): research for
+  #469 (2026-11-12): why every scene tile of a room mirrors the room's level,
+  what a scene's tile, slider and keypad should follow, and Control4's scene
+  tracking.
+- [`scene-rooms-research.md`](scene-rooms-research.md): research for #469
+  (2026-11-12): keeping each scene device in the Control4 room its Hue room
+  or zone maps to, case by case on both sides, with the texts.
 - [`smart-scenes-research.md`](smart-scenes-research.md): the time-of-day
   scene research (2026-10-23 and 24; its status line predates the build, the
   decisions are in `smart-scenes-design.md`), the owner's answers, the checks
