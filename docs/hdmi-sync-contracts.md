@@ -1,9 +1,9 @@
 # 2.0 contracts: the Hue Sync Box driver, its messages and the bridge's changes
 
 The contracts that go with [`hdmi-sync-design.md`](hdmi-sync-design.md)
-(#514). Status: **proposed, for review with the owner** (2026-11-13). Names,
-ids and texts here become fixed at release, so the review is the time to
-change them. Each builder works against this text and nothing else, and a
+(#514). Status: **reviewed with the owner on 2026-11-13** (decisions O1 to
+O16 of the design, section 10). Names, ids and texts here become fixed at
+release. Each builder works against this text and nothing else, and a
 change to it goes through the coordinator.
 
 - C1 is the box driver's Composer and programming surface (`driver.xml`).
@@ -31,7 +31,10 @@ settles it.
 | Id | Proxy | Name | Why |
 |---|---|---|---|
 | 5001 | `avswitch` | Hue Sync Box | The HDMI switch (design 5.1) |
-| 5002 | `uibutton` | Hue Sync | The Watch-menu button (design 5.6; only if Q7 keeps it) |
+| 5002 | `uibutton` | Hue Sync | Toggles sync; icon on/off (design 5.6, O7, O16) |
+| 5003 | `uibutton` | Sync Brighter | Brightness +10 points |
+| 5004 | `uibutton` | Sync Dimmer | Brightness −10 points |
+| 5005 | `uibutton` | Sync Intensity | The next intensity; icon shows the current one |
 
 ### C1.2 Connections (fixed for good once released)
 
@@ -75,8 +78,12 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 | Inputs | STRING | `1 Apple TV (on), 2 PlayStation, 3 —, 4 —`; one input on HSB3 | yes |
 | Sync | STRING | `Video, high, brightness 100 %` or `Off (passthrough)` or `Power save` | yes |
 | Bridge Link | STRING | `Hue Bridge 001788fffe123abc, connected` / `busy` / `invalid area` / `not linked` | yes |
-| When Control4 Selects An Input | LIST | As the box decides, Start syncing, Pass the picture only / As the box decides | no |
-| At Room Off | LIST | Power save, Stop syncing and keep the picture / Power save | no |
+| HDMI 1 Sync Mode … HDMI 4 Sync Mode | LIST | Automatic, Video, Game, Music, Do not sync / Automatic (by the input's type; an audio-only route is Music; design 5.3, O5). HSB3 shows only HDMI 1 | no |
+| Day Starts, Evening Starts, Night Starts | STRING | `07:00`, `18:00`, `22:00` (24-hour; checked) | no |
+| Day Intensity, Evening Intensity, Night Intensity | LIST | Subtle, Moderate, High, Intense / High, Moderate, Subtle | no |
+| Day Brightness, Evening Brightness, Night Brightness | RANGED_INTEGER | 0–200 % / 100, 100, 70 | no |
+| At Room Off | LIST | Power save, Stop syncing and keep the picture / Power save (O6) | no |
+| When The Source Leaves The Box | LIST | Stop syncing and keep the picture, Power save / Stop syncing and keep the picture (O6) | no |
 | Input Switching | STRING | what the box does by itself: `By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2` | yes |
 
 ### C1.5 Actions
@@ -84,7 +91,7 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 | Action | Parameters | Does |
 |---|---|---|
 | Pair Sync Box | Box (DYNAMIC_LIST: the Sync Boxes Found, or "Type an address"), Address (STRING) | Identity check, then a 2-minute window for the button |
-| Sync Box Settings | What (DYNAMIC_LIST: Let Control4 choose inputs; Restore the box's input switching; Take over sync from another app) | The offers (design 5.4, 7.3) |
+| Sync Box Settings | What (DYNAMIC_LIST: Let Control4 choose inputs; Restore the box's input switching) | The offers (design 5.4) |
 | Diagnostics | What (LIST: Check the box now; Read everything from the box now; Show the box's raw state in the Lua output) | As the bridge's Diagnostics |
 | Forget Pairing | Confirm (LIST: No, Yes) | Deletes the registration; keeps the device |
 
@@ -97,8 +104,9 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 | Toggle Sync | — |
 | Set Sync Mode | Mode (LIST: Video, Music, Game) |
 | Set Intensity | Intensity (LIST: Subtle, Moderate, High, Intense) |
+| Next Intensity | — (Subtle → Moderate → High → Intense → Subtle) |
 | Set Brightness | Brightness (RANGED_INTEGER 0–200 %, where 100 % leaves the picture's brightness as is) |
-| Adjust Brightness | Step (RANGED_INTEGER −200 to 200) |
+| Adjust Brightness | Step (RANGED_INTEGER −200 to 200; the buttons send ±10) |
 | Set Entertainment Area | Area (DYNAMIC_LIST) |
 | Apply Sync Settings | Mode, Intensity, Brightness, Area, Start (LIST: Leave, Start, Stop): each optional, sent as one PUT, the mode before the intensity |
 | Power Save | — |
@@ -116,7 +124,7 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 | 5 | Brightness Changed |
 | 6 | HDMI Input Changed |
 | 7 | Entertainment Area Changed |
-| 8 | Area Busy |
+| 8 | Sync Taken Over (the box replaced another app's sync, O12) |
 | 9 | Powered On |
 | 10 | Power Save |
 | 11 | Online |
@@ -149,6 +157,11 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 Every variable is set before the event that reports its change fires. At
 start, variables come from persisted values, and no event fires for a value
 that did not change (design 5.5).
+
+**Manual and scheduled values.** The period's intensity and brightness
+apply when sync starts and at each period boundary. A manual change
+(buttons, commands, remotes) holds until the source changes or sync stops,
+and the period boundaries skip it while it holds (design 5.3).
 
 ## C2. The box's API as the driver uses it
 
@@ -224,9 +237,10 @@ The bridge's modules call them, and the bridge's specs pass unchanged.
 
 | From the proxy (5001) | The driver |
 |---|---|
-| `ON` | Queues `hdmiActive: true` (and the mode the setting asks for); sends `ON` to the proxy once the box reads on |
-| `SET_INPUT {INPUT, OUTPUT, AUDIO, VIDEO}` | Input n = `INPUT − 999` for video or `− 2999` for audio; an n the box lacks is refused with Last Action `Not switched: this box has 1 HDMI input`. Queues `hdmiSource: inputN` (with wake if in power save, and the "When Control4 Selects An Input" setting). Confirms `INPUT_OUTPUT_CHANGED {INPUT, OUTPUT, AUDIO, VIDEO}` only when a read shows the input. Retries every 2 s, 4 tries, then Last Action `Not switched: the box did not change input` |
-| `OFF`, `DISCONNECT_OUTPUT` | The "At Room Off" setting: `mode: powersave`, or `syncActive: false` with HDMI on; `OFF` to the proxy once done |
+| `ON` | Queues `hdmiActive: true`; sends `ON` to the proxy once the box reads on |
+| `SET_INPUT {INPUT, OUTPUT, AUDIO, VIDEO}` | Input n = `INPUT − 999` for video or `− 2999` for audio; an n the box lacks is refused with Last Action `Not switched: this box has 1 HDMI input`. Queues one PUT: `hdmiSource: inputN`, wake if in power save, `syncActive: true` with the input's mode (its HDMI n Sync Mode; `Automatic` by the input's type, Music for an audio-only route) and the period's intensity and brightness (design 5.3). `Do not sync` sends only the input. Confirms `INPUT_OUTPUT_CHANGED {INPUT, OUTPUT, AUDIO, VIDEO}` only when a read shows the input. Retries every 2 s, 4 tries, then Last Action `Not switched: the box did not change input` |
+| `OFF` | The At Room Off setting (default `mode: powersave`); `OFF` to the proxy once done |
+| `DISCONNECT_OUTPUT` without `OFF` | The When The Source Leaves The Box setting (default `syncActive: false`, HDMI on) |
 | `CONNECT_OUTPUT` | Nothing beyond noting it |
 | `BINDING_CHANGE_ACTION {BINDING_ID, IS_BOUND}` | Notes which inputs are bound (for Inputs and the source names) |
 | `GET_AUDIO_INPUTS`, `SET_ROOM_BINDING_NAME`, volume and tone commands | Ignored |
@@ -247,7 +261,7 @@ All values are strings, as the existing messages are.
 | `HUE_SYNCBOX_HELLO` | box → bridge | `box_id`, `bridge_id` (the box's own link), `area_id` | At late init and on binding |
 | `HUE_SYNCBOX_CONFIGURE` | bridge → box | `bridge_id`, `match` (`true` when the box is linked to this bridge), `areas` (JSON list of `{id, name, type, status, lamps, rooms}`) | The answer to a hello, and after every resync |
 | `HUE_SYNCBOX_AREA` | bridge → box | `id`, `status` (`active`/`inactive`), `streamer` (`this_box`/`other`/`none`) | A stream starts or stops on any area. The box reads its own state at once; nothing else changes |
-| `HUE_SYNCBOX_STOP_AREA` | box → bridge | `area_id` | Only from the "Take over sync" click: the bridge PUTs `action: stop` on the area with its own key (check T6) |
+| `HUE_SYNCBOX_STOP_AREA` | box → bridge | `area_id` | When the box reports the bridge busy as it starts syncing (O12, automatic): the bridge PUTs `action: stop` on the area with its own key (check T6), then the box starts its sync and fires Sync Taken Over |
 | `HUE_SYNCBOX_GOODBYE` | box → bridge | `box_id` | Unbind or removal |
 
 The trust rules of #483 apply on both sides:
@@ -272,8 +286,19 @@ The trust rules of #483 apply on both sides:
     events on the bridge driver.
 - **The connection.** Provider connection id 2 "Hue Sync Boxes", class
   `HUE_SYNCBOX` (design 4.2).
-- **Never written:** areas, their "light state after streaming" setting,
-  and a stream (except `STOP_AREA` after its click).
+- **After a sync ends (O11).**
+  - The bridge keeps each streamed lamp's state from before the stream:
+    its last state reported before `mode` turned `streaming`, or the
+    command that arrived during the stream (design 6.3).
+  - At the stream's end, a lamp whose end state differs is set back through
+    the existing queues, coalesced per room or zone where every lamp of it
+    goes to the same state.
+  - A Hue Bridge property **After A Sync Ends** (LIST: Put the lights back,
+    As Hue decides / Put the lights back) switches this.
+  - Check T7 settles when Hue's own end state lands, so the restore comes
+    after it.
+- **Never written:** areas, and their "light state after streaming"
+  setting. A stream is stopped only through `STOP_AREA` (O12).
 
 ## C7. Lights, zone lights and scenes while lamps stream
 

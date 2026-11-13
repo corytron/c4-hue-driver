@@ -1,9 +1,9 @@
 # 2.0: Hue Play HDMI Sync Boxes and entertainment areas in Control4
 
 The design spec for issue #514, the first feature of the 2.x release train.
-Status: **proposed, for review with the owner** (2026-11-13). Nothing here is
-built. The decisions marked **[owner]** wait for the owner's answer in
-section 10. The rest are proposed defaults that the review may change.
+Status: **reviewed with the owner on 2026-11-13; his decisions are O1 to O16
+in section 10**. Nothing here is built. Where a decision changed the first
+proposal, the text below follows the decision.
 
 The wire-level details every builder works against are in
 [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md).
@@ -38,14 +38,20 @@ Control4 as a standard HDMI switch.
   source into a box input, the box's output into the TV). Control4's own
   routing then picks the box's input whenever someone watches a source,
   powers the box with the room, and switches it off at Room Off.
+- **Syncing.** Whenever Control4 routes a source through the box, the box
+  syncs in that source's mode: video for an Apple TV, game for a console,
+  music for an audio-only source. Intensity and brightness follow the time
+  of day and are easy to adjust by hand.
 - **Programming.** Start and stop sync, the mode, intensity, brightness,
   entertainment area and power, with events, conditionals and variables.
-  Navigators get a Watch-menu button that shows and toggles sync.
+  Navigators get four Watch-menu buttons: Hue Sync, Sync Brighter, Sync
+  Dimmer and Sync Intensity.
 - **Areas.** An entertainment area belongs to the box that drives it. Its
   Control4 rooms are worked out from its lamps.
 - **Lights while syncing.** The Hue Light, zone light and Hue Scene devices
   learn when their lamps are syncing and say so, instead of showing a
-  command as done while the lamp keeps following the TV.
+  command as done while the lamp keeps following the TV. When a sync ends,
+  the lights go back to what they were set to before it started.
 
 ## 3. Scope
 
@@ -55,8 +61,8 @@ Control4 as a standard HDMI switch.
 |---|---|---|---|
 | Hue Play HDMI Sync Box (original, now also sold as "4K") | `HSB1` | 4 in, 1 out | Yes |
 | Hue Play HDMI Sync Box 8K | `HSB2` | 4 in, 1 out, eARC | Yes |
-| Hue Play HDMI Sync Box 4K (2026) | `HSB3` | 1 in, 1 out | Yes, with a bridge. Standalone (Bluetooth) mode **[owner]**, Q2 |
-| Hue Play Screen Sync camera | `HSC001` | none | **[owner]**, Q2. Proposed: not in 2.0 |
+| Hue Play HDMI Sync Box 4K (2026) | `HSB3` | 1 in, 1 out | Yes, linked to a Hue bridge (O2). Standalone (Bluetooth) mode is not supported: the box device says so and keeps switching HDMI |
+| Hue Play Screen Sync camera | `HSC001` | none | No (O2) |
 
 The model is read from the box's `deviceType` at run time, never from the
 product name. Signify now calls two different boxes "4K". One driver covers
@@ -65,6 +71,9 @@ every model, and each model shows only the controls it has.
 ### 3.2 In
 
 - HDMI switching through Control4's routing: inputs, power, Room Off.
+- Syncing whenever Control4 routes a source through the box, in the mode
+  that source calls for, at the intensity and brightness of the time of
+  day, adjustable by hand (O5, 5.3).
 - Sync control: start, stop and toggle; mode (video, music, game); intensity
   (subtle, moderate, high, intense); brightness; entertainment area; power
   (wake, power save); one combined "Apply Sync Settings" command.
@@ -74,8 +83,10 @@ every model, and each model shows only the controls it has.
   has them.
 - The bridge reads entertainment areas and each lamp's streaming mode, and
   the light devices behave honestly while their lamps stream.
-- Offers, never automatic: handing input selection to Control4 (turning off
-  the box's own input switching), and taking over a sync another app runs.
+- Offered, never automatic: handing input selection to Control4 (turning
+  off the box's own input switching).
+- Automatic, as the owner decided: taking over a sync another app runs
+  (O12), and putting the lights back as they were when a sync ends (O11).
 
 ### 3.3 Out of 2.0
 
@@ -84,8 +95,9 @@ every model, and each model shows only the controls it has.
 - The box's Wi-Fi, IR learning, presets, ARC bypass, Dolby Vision and HDR
   settings, and its bridge link. These stay in the Hue Sync app; some are
   shown as read-only facts.
-- A light_v2 "sync brightness" tile with keypad LEDs (a later separate
-  driver if wanted, Q7).
+- A light_v2 "sync brightness" tile (O8: commands, variables and
+  Watch-menu buttons instead).
+- HSB3 in standalone mode and the Screen Sync camera (O2).
 - Several Hue bridges (still later work).
 
 ## 4. Architecture
@@ -143,34 +155,58 @@ The box is an **`avswitch`** proxy device between the sources and the TV.
 
 Control4 owns routing. The driver carries it out and never steers it.
 
-- **ON** wakes the box: `mode` passthrough, or the sync mode the routing
-  setting asks for (5.3).
+- **ON** wakes the box. Syncing starts with the input's mode once
+  `SET_INPUT` names the input (5.3).
 - **SET_INPUT** switches the box to HDMI n. The driver wakes the box first
   if needed, switches, reads the input back, and only then confirms with
   `INPUT_OUTPUT_CHANGED`. The command goes through one queue per box. A
   write that does not land is retried (2 s, up to 4 tries, the starting
   values from Snap One's template; probe P2 may adjust them), then answered
   as undelivered.
-- **OFF and DISCONNECT_OUTPUT** (Room Off, or a source that doesn't pass
-  the box) apply the Room Off setting (5.3).
+- **OFF** (Room Off) stops syncing and puts the box in power save.
+  **DISCONNECT_OUTPUT** with the room still on (its source no longer passes
+  the box) stops syncing and keeps the picture (5.3).
 - **Changes made outside Control4** (the Hue Sync app, the box's own CEC or
   hot-plug switching) are reported in the box's properties, variables and
   events. They never move a Control4 room, and the driver never switches
   back. Control4's Watch screen can then be out of step: that is why
   handing inputs to Control4 is offered (5.4).
 
-### 5.3 Settings that decide what routing does to sync
+### 5.3 What routing does to sync (O5, O6)
 
-Two properties on the box device:
+**Every source syncs, in its own way.** When Control4 routes a source
+through the box, the box syncs, in the mode that source calls for:
 
-| Property | Choices | Proposed default |
+| Source | Mode | How the driver knows |
 |---|---|---|
-| **When Control4 Selects An Input** | `As the box decides` (its own per-input auto-sync) / `Start syncing` / `Pass the picture only` | `As the box decides`, so an install changes nothing **[owner]**, Q5 |
-| **At Room Off** | `Power save` / `Stop syncing, keep the picture` | **[owner]**, Q6. Proposed: `Power save` |
+| Video (Apple TV, a set-top box, a disc player) | Video | The input's type in the Hue Sync app (`appletv`, `roku`, `settopbox` …), else the default |
+| Game console | Game | The input's type (`xbox`, `playstation`, `nintendoswitch`) |
+| Audio only | Music | The route: `SET_INPUT` with audio and no video (a Listen source), or an input typed `avreceiver`, `soundbar`, `music` |
 
-Per-source sync settings (each input with its own mode, intensity and area,
-applied when Control4 selects it) are something Control4 can do better than
-the Hue app. Proposed for a 2.x point release, not 2.0 (Q5).
+Each input has a **HDMI n Sync Mode** property: `Automatic` (the table
+above, the default), `Video`, `Game`, `Music`, or `Do not sync`. The dealer
+can override the guess per input.
+
+**Intensity and brightness follow the time of day.**
+- Three periods, **Day**, **Evening** and **Night**, each with a start time
+  and its own intensity and brightness (properties; proposed defaults: Day
+  from 07:00 at High and 100 %, Evening from 18:00 at Moderate and 100 %,
+  Night from 22:00 at Subtle and 70 %).
+- The period's settings apply when sync starts, and again at each period
+  boundary while syncing.
+- **A manual adjustment** (a Watch-menu button, a remote, a keypad,
+  programming) holds until the source changes or sync stops. The next
+  period boundary leaves it alone.
+
+**When the box leaves the path:**
+
+| What happens | The box |
+|---|---|
+| Room Off (`OFF`) | Stops syncing and goes to power save |
+| The room stays on but its source no longer passes the box (`DISCONNECT_OUTPUT` without `OFF`) | Stops syncing and keeps the picture (passthrough) |
+
+Probe P4 confirms which command Director sends in each case; the contract
+follows it.
 
 ### 5.4 One owner for input switching
 
@@ -192,13 +228,13 @@ The driver treats these like the Hue automations of 1.5:
 The names and ids are fixed at release; the contract lists them all.
 
 - **Commands:** Start Sync, Stop Sync, Toggle Sync, Set Sync Mode, Set
-  Intensity, Set Brightness, Adjust Brightness, Set Entertainment Area,
-  Apply Sync Settings (each field optional, sent in the box's order),
-  Power Save, Wake. Select HDMI Input is listed with a warning that the
-  room does not follow it.
+  Intensity, Next Intensity, Set Brightness, Adjust Brightness, Set
+  Entertainment Area, Apply Sync Settings (each field optional, sent in the
+  box's order), Power Save, Wake. Select HDMI Input is listed with a
+  warning that the room does not follow it.
 - **Events:** Sync Started, Sync Stopped, Sync Mode Changed, Intensity
   Changed, Brightness Changed, HDMI Input Changed (from any cause),
-  Entertainment Area Changed, Area Busy, Powered On, Power Save, Online,
+  Entertainment Area Changed, Sync Taken Over, Powered On, Power Save, Online,
   Offline.
 - **Conditionals:** Sync Active, Sync Mode, Intensity, HDMI Input,
   Brightness, Powered On, Online.
@@ -208,22 +244,33 @@ The names and ids are fixed at release; the contract lists them all.
 - **No events at start-up** for values that did not change, so a Director
   restart during a film never runs "sync started" programming again.
 
-### 5.6 Navigator
+### 5.6 Navigator, remotes and keypads (O7, O16)
 
-A **UI Button** (`uibutton` proxy) in the room's Watch menu, labelled
-"Hue Sync". It toggles sync and shows sync on or off by its icon. A second
-proxy is fixed for good once released, so it is decided now **[owner]**, Q7.
+Four **UI Buttons** (`uibutton` proxies) in the room's Watch menu:
+
+| Button | Does | Icon shows |
+|---|---|---|
+| Hue Sync | Toggles sync | Sync on or off |
+| Sync Brighter | Brightness +10 points | — |
+| Sync Dimmer | Brightness −10 points | — |
+| Sync Intensity | The next intensity (Subtle → Moderate → High → Intense → Subtle) | The current intensity |
+
+Halo and other remotes, keypads and touchscreens' custom buttons get the
+same four through programming commands. Proxies are fixed for good once
+released, so the four are frozen before `v2.0-beta.1`.
 
 ### 5.7 The box device's Composer surface
 
 - **Properties:** Driver Version, Debug Mode, Status, Online, Last Action
   (with continuation rows), Sync Box, Model, Firmware, Box ID, Box Address,
-  Sync Boxes Found, Entertainment Area, Inputs, Sync, Bridge Link, the two
-  settings of 5.3, and Input Switching (what the box does by itself).
+  Sync Boxes Found, Entertainment Area, Inputs, Sync, Bridge Link, the
+  settings of 5.3 (each input's sync mode, the three periods, the Room Off
+  and out-of-path behaviours), and Input Switching (what the box does by
+  itself).
 - **Actions**, kept few as 1.2 decided:
   - **Pair Sync Box:** pick a found box or type an address, then hold its
     button.
-  - **Sync Box Settings:** the offers of 5.4 and 7.3.
+  - **Sync Box Settings:** the offers of 5.4.
   - **Diagnostics.**
   - **Forget Pairing.**
 
@@ -251,7 +298,7 @@ No ecosystem the comparables research found maps an area to a room.
   first choice offered is the area whose lamps are in the box's room. It is
   never chosen silently.
 
-**[owner]**, Q3: accept this, or keep "area = room" as a strict mapping.
+**The owner chose this (O3)** over a strict "area = room" mapping.
 
 ### 6.2 What the bridge learns
 
@@ -261,7 +308,7 @@ No ecosystem the comparables research found maps an area to a room.
   stopping.
 - The bridge shows the areas in a new row, and fires two new events, Sync
   Started and Sync Stopped (with the area's name), for any streamer: a box,
-  or Hue's own apps. **[owner]**, Q10.
+  or Hue's own apps (O10).
 
 ### 6.3 Lights while their lamps stream
 
@@ -271,15 +318,27 @@ proposed behaviour:
 
 | Device | While its lamps stream |
 |---|---|
-| Hue Light | Shows the last state Hue reported, never goes offline because of the stream, and Status reads "Syncing with the TV (Living Room sync box)". A command is answered at once with the known state, and Last Action says why **[owner]**, Q9. |
+| Hue Light | Shows the last state Hue reported, never goes offline because of the stream, and Status reads "Syncing with the TV (Living Room sync box)". A command is answered at once with the known state, and Last Action says why (O9). |
 | Zone light with some lamps streaming | State from the lamps that are not streaming; commands go out as today and the other lamps obey; Status "2 of 6 lamps syncing with the TV". |
 | Zone light with all lamps streaming | As a Hue Light. |
 | Hue Scene | Recalled as today; Keypad Follows "Room/zone lights" reads only the lamps that are not streaming; Status says which lamps keep syncing. |
 | Hue Motion Sensor | Unchanged, unless check T8 shows MotionAware stops while its lamps stream. |
 
-When the stream ends, Hue's end state reaches Control4 as an ordinary change
-from outside. Hue's "light state after streaming" setting stays Hue's
-**[owner]**, Q11.
+**When the stream ends, the lights go back to what they were set to before
+it started (O11).**
+- The bridge keeps each streamed lamp's last state from before the stream.
+  Hue keeps reporting it while the lamp streams, so the light devices show
+  it all along.
+- At the stream's end, wherever Hue's end state differs from that state, the
+  bridge restores it, coalesced per room or zone where it can.
+- A Control4 command that came in during the stream, and was answered
+  without changing the lamp (O9), is what the lamp was "set to". It is
+  applied at the end instead of the older state. This is proposed: the
+  owner's words cover it, and the review can drop it.
+- A Hue Bridge property, **After A Sync Ends**, chooses `Put the lights back`
+  (the default) or `As Hue decides`. Hue's own "light state after
+  streaming" setting is never written.
+- The restore is a Control4 change: programming sees it like any other.
 
 This departs from the lighting guidelines while a stream runs (L6, L9, L53,
 L68): Hue reports no state for a streamed lamp. That departure is **D21**,
@@ -290,8 +349,8 @@ written into `docs/c4-lighting-guidelines.md` with the reason.
 ### 7.1 Pairing and discovery
 
 - **Adding a box.** The dealer adds the Hue Sync Box driver from Composer's
-  list, like any AV switch, in the TV's room. **[owner]**, Q13: should the
-  bridge's Add From Hue also offer boxes?
+  list, like any AV switch, in the TV's room (O13). The bridge's Add From
+  Hue does not offer boxes.
 - **Finding the box.** By mDNS `_huesync._tcp` (local only, with the
   discovery rules of #490) or a typed address.
 - **Pairing.** Pair Sync Box opens a 2-minute window while the owner holds
@@ -326,11 +385,13 @@ The rules of the 2026-11-13 review apply from the first line:
 - redirects refused on keyed requests;
 - messages from other drivers trusted only as hints.
 
-The bridge's key never reaches the box driver. The driver never changes the
-box's bridge link, its area list, or another app's sync without a click:
-- **Taking over** another app's stream is offered when the box reports it
-  busy ("Take over sync"), never done by itself. Home Assistant does it
-  silently.
+The bridge's key never reaches the box driver. The driver never changes the box's bridge link or its area list without a
+click.
+- **Taking over** another app's stream is automatic, as the owner decided
+  (O12). When the box reports the bridge busy, the box asks the bridge to
+  stop that area's stream and starts its own. Last Action and the Sync
+  Taken Over event say whose sync it replaced. Home Assistant does the
+  same.
 
 ## 8. Lifecycle defaults (from `edge-cases-syncbox.md`)
 
@@ -343,7 +404,7 @@ box's bridge link, its area list, or another app's sync without a click:
   one place. When Hue re-creates an area under a new id, the same-name
   successor is offered once, never applied by itself.
 - Two-way names for the box's name, as 1.2 decided for lights, scenes and
-  motion sensors. Input names are only shown and offered **[owner]**, Q14.
+  motion sensors. Input names are only shown and offered (O14).
 
 ## 9. Testing and the release train
 
@@ -366,8 +427,8 @@ box's bridge link, its area list, or another app's sync without a click:
 
 Pairing, real fixtures recorded from the box (which replace the
 hand-written ones), routing through the box, CEC fights, and power save.
-These need a box and the owner's hands (the button, a source, a TV),
-**[owner]**, Q1.
+**The house has an 8K box (HSB2, O1).** These checks need the owner's hands
+for the button, and his word on where the box sits in the HDMI chain.
 
 ### 9.3 Releases
 
@@ -379,49 +440,45 @@ These need a box and the owner's hands (the button, a source, a TV),
 - **Prereleases.** `v2.0-beta.N`, as for motion (#268): the house where a
   box exists, an outside tester otherwise.
 - **The promises "until 2.0".** The 37 hidden 1.1 action aliases and the
-  hidden On State Follows property were kept until 2.0, and naming 2.0
-  fails the ledger spec until they are settled **[owner]**, Q15.
+  hidden On State Follows property go in 2.0, as announced (O15), in the
+  first commit that names 2.0.
 - **Build order.** Four beta stages, each one PR:
   1. The `common/` move and the bridge's entertainment awareness, with the
      light devices of 6.3. Testable now, with T0–T9.
   2. The box driver's client, pairing, identity and state.
   3. The AV switch, routing and sequencing (P1–P7).
-  4. Programming, the UI Button and the offers.
+  4. Programming, the four UI Buttons, the time-of-day periods and the
+     offers.
 
-## 10. Questions for the owner
+## 10. The owner's decisions (2026-11-13)
 
-Each has the proposed answer first.
+The proposed answers went to the owner question by question (issue #517).
+His answers, quoted where they changed the proposal:
 
-1. **Hardware.** Is there a sync box in the house, and which model, between
-   which devices? If not, can one be lent, or is there a tester?
-2. **Models.** HSB1, HSB2 and HSB3 with a bridge in 2.0. HSB3 standalone
-   (Bluetooth, no bridge) for HDMI switching and sync, without area
-   control. The Screen Sync camera later.
-3. **Areas.** The area belongs to the box, picked from its list, with its
-   Control4 rooms derived; or a strict "area = room" mapping.
-4. **Input switching.** Control4 owns inputs. The box's own CEC and hot-plug
-   switching is shown and offered off with one reversible click. The
-   driver never switches back.
-5. **Selecting a source.** "As the box decides" at first (nothing changes on
-   install), with the Start Syncing and Pass Only choices available, and
-   per-source settings in a 2.x point release.
-6. **Room Off.** Power save, with "stop syncing, keep the picture" as the
-   other choice.
-7. **Navigator.** A Watch-menu UI Button; a light_v2 sync tile later, only
-   if keypads with LEDs are wanted.
-8. **Sync brightness as a Control4 light.** No in 2.0 (a command, a
-   variable and a property).
-9. **A command to a syncing lamp.** Leave the sync running, answer with the
-   known state and say so; or end the sync first and apply the command.
-10. **Streams with no box** (Hue's PC or TV apps). The bridge's own Sync
-    Started and Sync Stopped events, for any streamer.
-11. **After a sync ends.** Keep Hue's "light state after streaming" setting
-    as it is, never written by Control4.
-12. **Another app is syncing.** "Take over sync" is offered with a click,
-    never done by itself.
-13. **Adding a box.** From Composer's driver list only; or also from the
-    bridge's Add From Hue.
-14. **Names.** Two-way for the box's name; input names only shown and
-    offered.
-15. **The "until 2.0" promises.** Remove the 1.1 aliases and the hidden On
-    State Follows property in 2.0, as announced.
+| # | Question | Decision |
+|---|---|---|
+| O1 | Hardware | The house has a **Hue Play HDMI Sync Box 8K (HSB2)** |
+| O2 | Models | **Bridge-linked boxes only:** HSB1, HSB2, HSB3 with a bridge. No standalone mode, no camera |
+| O3 | Areas | **The box owns its area**, picked from its list; its Control4 rooms are derived |
+| O4 | Input switching | **Control4 owns inputs.** The box's own switching is offered off with one reversible click; the driver never switches back |
+| O5 | Selecting a source | Changed: "I always want syncing, but I want to do different things depending on the source. If it's an apple TV you'd get movie style syncing, if it's a game console you switch to the game mode, if it's an audio only source you get the music style syncing. The brightness or intensity of the syncing depends on time of day, but can be manually adjusted easily from navigators or remotes, or halo remotes or touch screens" (5.3) |
+| O6 | Room Off | Changed: "If the room turns off power save, if the box drops out of the path but room still on, stop sync, keep picture" (5.3) |
+| O7 | Navigator | **Watch-menu buttons** (5.6) |
+| O8 | Sync brightness as a light | **No:** commands, a variable, the buttons |
+| O9 | A command to a syncing lamp | **Leave the sync running and say so** |
+| O10 | Streams with no box | **The bridge's Sync Started and Sync Stopped events**, for any streamer |
+| O11 | After a sync ends | Changed: "Go back to whatever those lights were set to before sync started" (6.3) |
+| O12 | Another app is syncing | Changed: **take over silently** (7.3) |
+| O13 | Adding a box | **From Composer's driver list** only |
+| O14 | Names | **Two-way for the box's name**; input names only offered |
+| O15 | The "until 2.0" promises | **Removed in 2.0 as announced** |
+| O16 | Adjusting from Navigators and remotes | **Several Watch-menu buttons:** Hue Sync, Sync Brighter, Sync Dimmer, Sync Intensity (5.6) |
+
+Still to settle, none of them blocking the contract:
+- **Where the house's box sits** in the HDMI chain (straight to the TV, or
+  behind an AV receiver) and which room it serves. This decides the first
+  hardware round.
+- **The time-of-day periods:** the proposed start times and levels of 5.3,
+  and whether Night should follow sunset rather than a clock time.
+- **Commands during a sync:** whether a Control4 command that arrived during
+  a sync is applied when it ends (proposed in 6.3).
