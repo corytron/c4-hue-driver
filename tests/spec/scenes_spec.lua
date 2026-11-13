@@ -1124,17 +1124,19 @@ describe("bridge.scenes", function()
 
 		it("clamps the duration as the dim and level durations are; one not above 0 sends none (#47 F12)", function()
 			add_relax()
-			for _, case in ipairs({ { "400", 400 }, { "99999999", 6000000 }, { "1e400", 6000000 }, { "inf", 6000000 },
-				{ "0.4", 0 } }) do
+			for _, case in ipairs({ { "400", 400 }, { "99999999", 6000000 }, { "0.4", 0 } }) do
 				window_ends()
 				S:recall({ rid = F.scene_rids.relax, duration = case[1] })
 				assert.same({ recall = { action = "active", duration = case[2] } }, json.decode(c4.last_transfer().data),
 					case[1])
+				respond_ok(c4.last_transfer()) -- at most 3 keyed requests in flight (bridge/http.lua, #489 N-8)
 			end
-			for _, none in ipairs({ "0", "-5", "nan", "soon", "" }) do
+			-- Infinity is no duration either since #486 (C-3): dropped, not clamped.
+			for _, none in ipairs({ "0", "-5", "nan", "soon", "", "1e400", "inf", "-inf" }) do
 				window_ends()
 				S:recall({ rid = F.scene_rids.relax, duration = none })
 				assert.same({ recall = { action = "active" } }, json.decode(c4.last_transfer().data), none)
+				respond_ok(c4.last_transfer())
 			end
 		end)
 
@@ -1262,6 +1264,9 @@ describe("bridge.scenes", function()
 			end)
 
 			it("sends a waiting recall before any other scene command, so nothing overtakes it", function()
+				-- The order the recalls leave in, not the cap on keyed requests in
+				-- flight (bridge/http.lua MAX_KEYED, #489 N-8), which would hold the fourth.
+				http.MAX_KEYED = math.huge
 				resync()
 				S:add_all_of_group(F.group_rids.living_room, done)  -- Relax 2001, Savanna sunset 2002
 				S:add_scene(F.scene_rids.concentrate, nil, done)     -- Concentrate 2003, the Garage
@@ -1775,6 +1780,12 @@ describe("bridge.scenes", function()
 			S.ctx.group_dim = function(rid, body) dims[#dims + 1] = { rid = rid, body = body }; return true end
 			assert.is_false(level("loud", "400"))
 			assert.is_true(saw_log("bad level loud"))
+			-- #486 (C-3): infinity is no level either (it used to become 100).
+			assert.is_false(level("inf", "400"))
+			assert.is_false(level("nan", "400"))
+			assert.is_false(level("bad\nline", "400"))
+			assert.is_true(saw_log("bad level badline"), "one log line, whatever the value holds (#489)")
+			assert.same({}, dims)
 			assert.is_false(level(nil, "400"))
 			assert.is_false(S:level({ rid = "nope", level = "80" }))
 			assert.is_false(S:level({ level = "80" }))
@@ -1872,7 +1883,8 @@ describe("bridge.scenes", function()
 				S.ctx.group_off = capture
 				local cases = {
 					{ { duration = "99999999" }, { rate = 6000000 } },
-					{ { duration = "1e400", urgent = "true" }, { rate = 6000000, urgent = true } },
+					-- Infinity is no duration since #486 (C-3): dropped, not clamped.
+					{ { duration = "1e400", urgent = "true" }, { urgent = true } },
 					{ { duration = "0.4" }, { rate = 0 } },
 					{ { urgent = true }, { urgent = true } },
 					{ { duration = "-5", urgent = "true" }, { urgent = true } },

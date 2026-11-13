@@ -88,6 +88,19 @@ local function configure(env, extra)
 	env.ExecuteCommand("HUE_SCENE_CONFIGURE", params)
 end
 
+-- #483 D-1 (common/device.lua): a configure that moves a scene device with a
+-- rid to another rid is taken only as the answer to its own hello. The
+-- bridge's Link Device sends one by itself: the device leaves it, says hello
+-- VERIFY_MS later, and takes the bridge's answer, the same configure.
+local VERIFY_MS = 500
+local function relink(env, c4, extra)
+	configure(env, extra)
+	local before = #c4.sent
+	assert(c4.fire_timers_of(VERIFY_MS) == 1, "the configure left alone makes the device ask the bridge")
+	assert(c4.sent[before + 1] and c4.sent[before + 1].command == "HUE_SCENE_HELLO", "the device says hello")
+	configure(env, extra)
+end
+
 local function state(env, active, extra)
 	local params = { rid = "s1", active = active, reason = "event" }
 	for k, v in pairs(extra or {}) do params[k] = v end
@@ -333,10 +346,10 @@ describe("Hue Scene driver", function()
 		end)
 
 		it("shortens a UUID rid behind the v1 id, and shows the rid alone without one", function()
-			local env = load_scene()
+			local env, c4 = load_scene()
 			configure(env, { rid = "0f3a2b1c-1234-5678-9abc-def012345678" })
 			assert.equal("#AbCdEf (0f3a2b1c…)", env.Properties["Hue Scene ID"])
-			configure(env, { rid = "s1", id_v1 = "" })
+			relink(env, c4, { rid = "s1", id_v1 = "" }) -- #483 D-1: through the device's hello
 			assert.equal("s1", env.Properties["Hue Scene ID"])
 		end)
 
@@ -2397,7 +2410,7 @@ describe("Hue Scene driver", function()
 			local env, c4 = lights_scene()
 			group(env, { on = "true", level = "40" })
 			c4.calls = {}
-			configure(env, { rid = "s2" })
+			relink(env, c4, { rid = "s2" }) -- #483 D-1: through the device's hello
 			state(env, "inactive", { rid = "s2" })
 			env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
 			local changed = notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")
@@ -2685,7 +2698,7 @@ describe("Hue Scene driver", function()
 
 			it("T17: linked to another scene: nothing shows until the bridge reports it", function()
 				local env, c4 = tracked(LIGHTS, "static", 60)
-				configure(env, { rid = "s2" })
+				relink(env, c4, { rid = "s2" }) -- #483 D-1: through the device's hello
 				assert.is_false(c4.persist.held_on, "the old scene's held state")
 				env.ReceivedFromProxy(5001, "SYNCHRONIZE", {})
 				assert.same({}, levels(c4), "no status, no held state, no level")
@@ -2698,7 +2711,7 @@ describe("Hue Scene driver", function()
 			it("T17: a command on its way for the old scene closes with the level it started from", function()
 				local env, c4 = tracked(SCENE)
 				env.ReceivedFromProxy(5001, "ON", {})
-				configure(env, { rid = "s2" })
+				relink(env, c4, { rid = "s2" }) -- #483 D-1: through the device's hello
 				assert.same({ 0 }, levels(c4))
 				c4.advance(10000)
 				assert.same({ 0 }, levels(c4), "no fallback assumes the recall")
@@ -4424,6 +4437,76 @@ describe("Hue Scene driver", function()
 				group_undelivered(env, "false")
 				assert.same({ 60, 0 }, levels(c4), "the bridge says the group is off: the held state ends")
 			end)
+		end)
+	end)
+
+	-- The security review of 2026-11-13 (docs/security-fixes-2026-11-design.md).
+	describe("security review 2026-11-13", function()
+		it("ignores a status, group or forgotten message without its rid once it has one (#483 D-1)", function()
+			local env, c4 = known_scene("static")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { on = "false" })
+			env.ExecuteCommand("HUE_SCENE_STATE", { active = "inactive" })
+			env.ExecuteCommand("HUE_SCENE_FORGOTTEN", { name = "Relax" })
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "until #483 each was taken: the tile went off")
+			assert.equal(LINKED_STATUS, env.Properties["Status"])
+			-- The bridge's own messages name the scene's rid (bridge/scenes.lua send_group, state_params).
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", on = "false" })
+			env.ExecuteCommand("HUE_SCENE_STATE", { rid = "s1", active = "inactive" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("keeps its scene against a configure that answers no hello, and asks the bridge (#483 D-1)", function()
+			local env, c4 = known_scene("static")
+			configure(env, { rid = "s9", group_type = "bridge_home", group_name = "Home" })
+			assert.equal("s1", c4.persist.hue_rid, "until #483 an OFF could then turn the whole home off")
+			env.ReceivedFromProxy(5001, "OFF", {})
+			assert.equal("s1", messages(c4, "HUE_SCENE_OFF")[1].params.rid)
+			assert.equal(1, fire(c4, 500))
+			assert.equal("s1", messages(c4, "HUE_SCENE_HELLO")[1].params.rid)
+		end)
+
+		it("takes no timer or ramp from a TIME that is no finite number, and holds a huge one to RATE_MAX (#486 D-4)",
+			function()
+				local env, c4 = known_scene("static")
+				env.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "0", TIME = "inf" })
+				assert.same({ rid = "s1" }, messages(c4, "HUE_SCENE_OFF")[1].params,
+					"until #486 a duration of -9223372036854775808 and a ramp that never ended")
+				for _, t in ipairs(c4.active_timers()) do
+					assert.truthy(t.delay < math.huge, "no timer of inf")
+				end
+				local env2, c42 = known_scene("static")
+				env2.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "0", TIME = "1e12" })
+				assert.equal("6000000", messages(c42, "HUE_SCENE_OFF")[1].params.duration)
+				env2.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "nan", RATE = "0" })
+				assert.equal(1, #messages(c42, "HUE_SCENE_OFF") + #messages(c42, "HUE_SCENE_RECALL"),
+					"a target that is no number is dropped")
+			end)
+
+		it("takes no group level that is no finite number (#486)", function()
+			local env, c4 = known_scene("static")
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", level = "40" })
+			env.ExecuteCommand("HUE_SCENE_GROUP", { rid = "s1", level = "nan" })
+			c4.advance(2000)
+			local changed = notifies(c4, "LIGHT_BRIGHTNESS_CHANGED")
+			assert.same({ LIGHT_BRIGHTNESS_CURRENT = 40 }, changed[#changed])
+		end)
+
+		it("reads a gone time os.date cannot take as none, and keeps working (#487 D-6)", function()
+			local env = known_scene("static")
+			assert.has_no.errors(function()
+				configure(env, { state = "gone", gone_since = "1e300" })
+			end)
+			assert.equal("Scene deleted in Hue; ON does nothing; Link or Forget Device", env.Properties["Status"])
+			assert.has_no.errors(function() env.ReceivedFromProxy(5001, "ON", {}) end)
+		end)
+
+		it("sends its messages to the bridge with logCommand only in Debug Mode (#493 D-8)", function()
+			local env, c4 = known_scene("inactive")
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ExecuteCommand("Forget_This_Scene", {})
+			assert.same({ "HUE_SCENE_RECALL", "HUE_SCENE_FORGET" }, { c4.sent[1].command, c4.sent[2].command })
+			assert.is_false(c4.sent[1].log_command)
+			assert.is_false(c4.sent[2].log_command)
 		end)
 	end)
 end)

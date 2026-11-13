@@ -17,6 +17,7 @@
 -- next real report differs from it and corrects the proxy.
 
 local device = require("common.device")
+local num = require("common.num")
 
 local state = {}
 
@@ -26,6 +27,13 @@ state.MODE_CCT = 1
 
 -- Hue's widest CCT range, used until HUE_CONFIGURE says what this bulb does.
 local DEFAULT_MIREK_MIN, DEFAULT_MIREK_MAX = 153, 500
+
+-- #486 (C-3, D-4): the mirek values taken from the bridge, the bulb's limits
+-- included, are finite and clamped to 50 to 2000, the 500 to 20 000 K the
+-- proxy's CCT bounds can say (light.caps); a pair of limits the wrong way
+-- round reads as the default range, so a colour sent is always within the
+-- light's own limits, else 153 to 500.
+local MIREK_LO, MIREK_HI = 50, 2000
 
 -- What the device stands for: a Hue light, or a Hue zone or room (its
 -- grouped_light). A configure names the kind; a device never told one is a
@@ -72,12 +80,10 @@ end
 -- use (common/device.lua).
 local text, to_bool = device.text, device.to_bool
 
-local function to_num(v)
-	if v == nil then
-		return nil
-	end
-	return tonumber(v)
-end
+-- A finite number, else nil: NaN and the infinities, which tonumber takes
+-- from "nan" and "inf", never reach the cache or a HUE_SET (#486,
+-- common/num.lua).
+local to_num = num.finite
 
 local function round(n)
 	return math.floor(n + 0.5)
@@ -121,7 +127,7 @@ function state.configure(st, params)
 		st.kind = kind
 	end
 	st.group_type = text(params.group_type)
-	st.light_count = to_num(params.light_count)
+	st.light_count = num.within(params.light_count, 0, nil)
 	st.no_lights = to_bool(params.no_lights) == true
 	if st.no_lights then
 		-- Nothing in the group can be lit and there is no grouped_light to
@@ -134,15 +140,19 @@ function state.configure(st, params)
 	st.hue_room = text(params.hue_room)
 	st.id_v1 = text(params.id_v1)
 	st.gone = params.state == "gone"
-	st.gone_since = st.gone and to_num(params.gone_since) or nil
+	-- #487 D-6: a time os.date takes on every controller, else none.
+	st.gone_since = st.gone and num.timestamp(params.gone_since) or nil
 	st.forgotten = nil
 	local b = to_bool(params.has_color)
 	if b ~= nil then st.has_color = b end
 	b = to_bool(params.has_cct)
 	if b ~= nil then st.has_cct = b end
-	st.mirek_min = to_num(params.mirek_min) or st.mirek_min
-	st.mirek_max = to_num(params.mirek_max) or st.mirek_max
-	st.min_dim = to_num(params.min_dim) or st.min_dim
+	st.mirek_min = num.clamp(params.mirek_min, MIREK_LO, MIREK_HI) or st.mirek_min
+	st.mirek_max = num.clamp(params.mirek_max, MIREK_LO, MIREK_HI) or st.mirek_max
+	if st.mirek_min > st.mirek_max then
+		st.mirek_min, st.mirek_max = DEFAULT_MIREK_MIN, DEFAULT_MIREK_MAX
+	end
+	st.min_dim = num.within(params.min_dim, 0, 100) or st.min_dim
 end
 
 -- A zone or room device (docs/zone-light-design.md §2); false for a light
@@ -176,9 +186,12 @@ function state.apply_hue(st, params)
 		end
 		st.on = on
 	end
-	st.brightness = to_num(params.brightness) or st.brightness
+	-- #486: a finite level, clamped to 0..100, and mirek (MIREK_LO..MIREK_HI);
+	-- xy within 0..1. Anything else leaves the field as it was.
+	st.brightness = num.clamp(params.brightness, 0, 100) or st.brightness
 
-	local x, y, mirek = to_num(params.x), to_num(params.y), to_num(params.mirek)
+	local x, y = num.within(params.x, 0, 1), num.within(params.y, 0, 1)
+	local mirek = num.clamp(params.mirek, MIREK_LO, MIREK_HI)
 	if x and y then
 		st.x, st.y = x, y
 	end

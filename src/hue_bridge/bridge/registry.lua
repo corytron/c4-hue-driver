@@ -52,7 +52,9 @@
 -- numeric device_id, and no other entry holding that device.
 
 local default_log = require("common.log")
+local num = require("common.num")
 local util = require("bridge.util")
+local hue_model = require("bridge.hue_model")
 
 local registry = {}
 registry.__index = registry
@@ -67,7 +69,11 @@ registry.STATES = { linked = true, gone = true, unbound = true }
 local STAMP = { gone = "gone_since", unbound = "unbound_since" }
 
 -- The entry fields that are numbers: timestamps and ids, coerced at load.
+-- A timestamp that num.timestamp refuses (NaN, infinity, before 1970 or
+-- past 2099) is cleared, so no os.date of it raises later, here or in the
+-- device that is told it (security review 2026-11-13 D-6, #487).
 local NUMERIC_FIELDS = { "gone_since", "unbound_since", "created_at", "created_room_id" }
+local TIMESTAMP_FIELDS = { gone_since = true, unbound_since = true, created_at = true }
 
 -- The entry fields the registry itself reads or writes, whatever the owner
 -- module's schema: always kept at load.
@@ -148,8 +154,12 @@ local function clear(t)
 	end
 end
 
+-- A rid the registry keeps: hue_model.resource_id, the one rid check
+-- (letters, digits and "-"), so no rid from a hello, an adoption or the
+-- store can leave the request path it is pasted into (security review
+-- 2026-11-13 D-2, #485).
 local function valid_rid(rid)
-	return type(rid) == "string" and rid ~= ""
+	return hue_model.resource_id(rid) ~= nil
 end
 
 -- Membership in a { [device_id] = true } set. The sets come from C4 calls
@@ -237,7 +247,15 @@ function registry:normalise_entry(rid, raw)
 		entry.state = "linked"
 	end
 	for _, field in ipairs(NUMERIC_FIELDS) do
-		entry[field] = tonumber(raw[field])
+		if TIMESTAMP_FIELDS[field] then
+			entry[field] = num.timestamp(raw[field])
+			if entry[field] == nil and raw[field] ~= nil then
+				self.log.debug("registry: %s: %s %s is no time; cleared", label(rid, entry), field,
+					util.echo(raw[field], 40))
+			end
+		else
+			entry[field] = num.finite(raw[field])
+		end
 	end
 	for state, field in pairs(STAMP) do
 		if entry.state ~= state then
@@ -265,7 +283,7 @@ function registry:load()
 		if entry then
 			self.lights[rid] = entry
 		else
-			self.log.warn("registry: dropped a malformed %s entry for %s", self.keys.lights, tostring(rid))
+			self.log.warn("registry: dropped a malformed %s entry for %s", self.keys.lights, util.echo(rid, 80))
 		end
 	end
 	if self.keys.rooms then
@@ -278,7 +296,7 @@ function registry:load()
 	for rid, raw in pairs(self:read(self.keys.tombstones)) do
 		if valid_rid(rid) and type(raw) == "table" then
 			local tomb = shallow_copy(raw)
-			tomb.deleted_at = tonumber(raw.deleted_at)
+			tomb.deleted_at = num.timestamp(raw.deleted_at) -- #487: no time, no date
 			self.tombs[rid] = tomb
 		end
 	end

@@ -76,4 +76,51 @@ describe("bridge.sse", function()
 		assert.is_true(p.overflowed)
 		assert.equal("", p.buffer)
 	end)
+
+	-- Security review 2026-11-13, N-1 (#489): an empty `data:` line added 0
+	-- to the event's byte count and one entry to the event, so the cap never
+	-- tripped and memory grew without bound. Scaled down (MAX_EVENT 4 KB)
+	-- so that the spec runs in milliseconds; the arithmetic is the same.
+	describe("the per-event cap (N-1, #489)", function()
+		local saved
+
+		before_each(function() saved = sse.MAX_EVENT end)
+		after_each(function() sse.MAX_EVENT = saved end)
+
+		it("counts empty data lines: twice the cap of them overflows and dispatches nothing", function()
+			sse.MAX_EVENT = 4096
+			local p = sse.new()
+			local events = p:feed(string.rep("data:\n", 2 * 4096) .. string.rep("data\n", 16) .. "\n")
+			assert.is_true(p.overflowed)
+			assert.same({}, events)
+			assert.is_true(#p.data < 4096, "the entries do not pile up: " .. #p.data)
+		end)
+
+		it("bounds the dispatched string by the cap, newlines included", function()
+			sse.MAX_EVENT = 10
+			local events = sse.new():feed("data: 1234\ndata: 1234\n\n") -- 5 + 5 counted
+			assert.same({ "1234\n1234" }, { events[1].data })
+			local p = sse.new()
+			assert.same({}, p:feed("data: 12345\ndata: 1234\n\n")) -- 6 + 5 counted
+			assert.is_true(p.overflowed)
+		end)
+
+		it("yields nothing more once it overflowed, whatever follows in the chunk or later", function()
+			sse.MAX_EVENT = 8
+			local p = sse.new()
+			local events = p:feed("data: 0123456789\n\nid: 2\ndata: ok\n\n")
+			assert.same({}, events)
+			assert.same({}, p:feed("id: 3\ndata: ok\n\n"))
+			assert.equal("", p.buffer)
+		end)
+
+		it("still dispatches the events completed before the overflow", function()
+			sse.MAX_EVENT = 8
+			local p = sse.new()
+			local events = p:feed("id: 1\ndata: ok\n\ndata: 0123456789\n\n")
+			assert.equal(1, #events)
+			assert.equal("ok", events[1].data)
+			assert.is_true(p.overflowed)
+		end)
+	end)
 end)

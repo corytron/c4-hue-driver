@@ -347,6 +347,15 @@ local function new_c4(env)
 		c4.property_attribs[name] = attribs
 	end
 
+	-- C4:AllowExecute(bool): whether Composer's Lua command window may run
+	-- code [verified: API 22_miscellaneous/_2-AllowExecute.md; FUND
+	-- 6_Understanding .c4z Drivers/_3-C4ALLOWEXECUTE.md: false by default].
+	-- c4.allow_execute keeps the last value set, nil while never set (#492 I-5).
+	function c4:AllowExecute(allow)
+		record("AllowExecute", allow)
+		c4.allow_execute = allow
+	end
+
 	function c4:UpdatePropertyList(name, list, value)
 		record("UpdatePropertyList", name, list, value)
 		c4.property_lists[name] = list

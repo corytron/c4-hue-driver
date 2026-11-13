@@ -28,6 +28,8 @@
 local log = require("common.log")
 local dispatch = require("common.dispatch")
 local device = require("common.device")
+-- #486, #487: every number and time from outside (docs/security-fixes-2026-11-design.md).
+local num = require("common.num")
 
 -- Binding IDs, see driver.xml; common/device.lua holds the proxy's (5001).
 local BRIDGE_BINDING = device.BRIDGE_BINDING
@@ -215,8 +217,9 @@ local function forgotten_status()
 		FORGOTTEN_INSTRUCTION)
 end
 
+-- The time comes from the bridge's configure: num.date (#487 D-6) never raises.
 local function gone_status()
-	local since = st.gone_since and (" since " .. os.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
+	local since = st.gone_since and (" since " .. num.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
 	return "Scene deleted in Hue" .. since .. "; ON does nothing; " .. GONE_REMEDY
 end
 
@@ -1016,7 +1019,7 @@ end
 -- leaves the room's level to Hue's next report, which a target then waits
 -- for (#469 D6, awaiting_level).
 local function turn_on(rate, level, urgent)
-	rate = tonumber(rate) or 0
+	rate = math.floor(num.clamp(rate, 0, device.RATE_MAX, 0) + 0.5) -- #486 D-4
 	-- 100 % from off is the scene as designed: a brightness override would
 	-- set every light to 100 % and lose its look, and a Navigator's plain
 	-- "on" may arrive as a target of 100.
@@ -1085,7 +1088,7 @@ end
 -- scene lit, the tile reads 0 while the keypad reads the room's level, and
 -- the fade runs from there as a room ramp, which the tile does not show.
 local function turn_off(rate, urgent, from)
-	rate = tonumber(rate) or 0
+	rate = math.floor(num.clamp(rate, 0, device.RATE_MAX, 0) + 0.5) -- #486 D-4
 	if not ready("OFF") then
 		return
 	end
@@ -1184,11 +1187,14 @@ end
 -- is safe; D5), and moves the group's level otherwise. A target that must
 -- wait (target_waits) hears its CHANGING now and follows later.
 local function set_target(target, rate)
-	target = tonumber(target)
+	-- #486 D-4: a finite target, clamped to 0..100; a finite rate, clamped to
+	-- 0..RATE_MAX as the light's (until then "inf" armed a timer of inf and a
+	-- ramp that never ended).
+	target = num.clamp(target, 0, 100)
 	if not target then
 		return log.warn("brightness command without a target")
 	end
-	rate = math.max(0, math.floor((tonumber(rate) or 0) + 0.5))
+	rate = math.floor(num.clamp(rate, 0, device.RATE_MAX, 0) + 0.5)
 	if target <= 0 then
 		return turn_off(rate)
 	end
@@ -1243,13 +1249,21 @@ end
 -- scene's status when it knows the rid. `hint` is the device id
 -- OnBindingChanged named, for when Director's lookup does not reflect the
 -- new binding yet.
+-- The first configure after it may move the device to another rid (#483
+-- D-1, dev.greeted); one that would without it makes the device ask again
+-- (dev.greet), through the bridge it has.
 local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
-		C4:SendToDevice(bridge, "HUE_SCENE_HELLO", hello_params())
+		dev.send_to(bridge, "HUE_SCENE_HELLO", hello_params())
+		dev.greeted()
 		dev.flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
+end
+
+function dev.greet()
+	hello(bridge)
 end
 
 local function load_identity()
@@ -1447,8 +1461,13 @@ end
 -- when absent. A configure also ends a forgotten state: the bridge knows the
 -- scene again. Another rid, or the scene gone in Hue, drops what the device
 -- knew of its state (#469 D3, drop_scene_state).
+-- #483 D-1: one that would move the device to another rid is taken only as
+-- the answer to its hello (dev.configure_ok).
 dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE", function(params)
 	params = params or {}
+	if not dev.configure_ok("HUE_SCENE_CONFIGURE", params) then
+		return
+	end
 	if text(params.rid) then
 		if params.rid ~= st.rid then
 			if st.rid then
@@ -1468,7 +1487,7 @@ dispatch.commands["HUE_SCENE_CONFIGURE"] = after_late_init("HUE_SCENE_CONFIGURE"
 	st.slot_name = text(params.slot_name)
 	st.slot_start = text(params.slot_start)
 	st.gone = params.state == "gone"
-	st.gone_since = st.gone and tonumber(params.gone_since) or nil
+	st.gone_since = st.gone and num.timestamp(params.gone_since) or nil -- #487 D-6
 	st.forgotten = nil
 	st.configured = true
 	save_identity()
@@ -1609,8 +1628,11 @@ end
 -- settles it at once, with or without a status (state_undelivered).
 dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", function(params)
 	params = params or {}
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_SCENE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
+	-- #483 D-1: once the device has a rid, a status that does not name it
+	-- (another rid, or none) is not this device's; before #483 one without a
+	-- rid was taken, and one for another rid ignored with a warning.
+	if not dev.addressed("HUE_SCENE_STATE", params) then
+		return
 	end
 	if params.reason == "undelivered" then
 		return state_undelivered(params)
@@ -1671,10 +1693,13 @@ end)
 -- instant off's held state has nothing more to wait for.
 dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", function(params)
 	params = params or {}
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_SCENE_GROUP for rid %s ignored (ours is %s)", params.rid, st.rid)
+	-- #483 D-1: the bridge names the scene's own rid in every group message
+	-- (bridge/scenes.lua send_group); one that does not is not this device's.
+	if not dev.addressed("HUE_SCENE_GROUP", params) then
+		return
 	end
-	local level = tonumber(params.level)
+	-- #486: a finite level, clamped to 0..100; anything else is no level.
+	local level = num.clamp(params.level, 0, 100)
 	local lit = level and level > 0 and math.min(level, 100) or nil
 	local on = to_bool(params.on)
 	if params.reason == "undelivered" then
@@ -1761,8 +1786,8 @@ end)
 -- binding the device again lets the bridge adopt it from its own rid.
 dispatch.commands["HUE_SCENE_FORGOTTEN"] = after_late_init("HUE_SCENE_FORGOTTEN", function(params)
 	params = params or {}
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_SCENE_FORGOTTEN for rid %s ignored (ours is %s)", params.rid, st.rid)
+	if not dev.addressed("HUE_SCENE_FORGOTTEN", params) then -- #483 D-1, as HUE_SCENE_STATE
+		return
 	end
 	st.forgotten = { name = text(params.name) or st.name }
 	settle()
@@ -1820,7 +1845,7 @@ dispatch.commands["Forget_This_Scene"] = alias("Forget This Scene", "Forget Devi
 	if not bridge then
 		return result("Not sent: not bound to a Hue Bridge")
 	end
-	C4:SendToDevice(bridge, "HUE_SCENE_FORGET", { rid = st.rid, device_id = device_id() })
+	dev.send_to(bridge, "HUE_SCENE_FORGET", { rid = st.rid, device_id = device_id() }) -- #493 D-8
 	result("Asked the bridge to forget this scene; its answer sets Status")
 end)
 
@@ -1841,7 +1866,7 @@ end
 -- scene has no On Mode (#429 D1), so a target is the level it names.
 dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
 	dev.first_arrival("SET_BRIGHTNESS_TARGET", params)
-	local rate = tonumber(params.RATE)
+	local rate = num.finite(params.RATE) -- #486 D-4: "nan" or "inf" is no rate
 	if rate == nil then
 		rate = default_rate()
 	end
@@ -2170,7 +2195,10 @@ dispatch.proxy["RAMP_TO_LEVEL"] = function(_, params) set_target(params.LEVEL, p
 
 dispatch.install(_G)
 
+-- #492 (I-5, I-6): a release build locks Composer's Lua command window and
+-- refuses a dev loop left behind by an earlier dev build (common/device.lua).
 function OnDriverInit()
+	dev.init()
 end
 
 -- After a Director restart the binding to the bridge can be invisible at late

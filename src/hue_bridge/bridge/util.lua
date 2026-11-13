@@ -2,11 +2,15 @@
 -- lights, registry). Until 2026-10-24 each module carried its own
 -- byte-identical copy (docs/reviews/slim-lights.md). No state, no C4 calls,
 -- so the outputs are exactly what the copies produced.
+local num = require("common.num")
+local http = require("bridge.http")
+
 local util = {}
 
--- A number above zero, or nil.
+-- A finite number above zero, or nil: infinity is no device id, duration or
+-- count (security review 2026-11-13 C-3, #486; NaN fails `> 0` anyway).
 function util.positive(value)
-	local n = tonumber(value)
+	local n = num.finite(value)
 	if n and n > 0 then
 		return n
 	end
@@ -34,14 +38,37 @@ function util.norm(name)
 	return rtrim((tostring(name or ""):gsub("^%s+", ""))):lower()
 end
 
+-- Text from a caller or a peer (a picked value, a message parameter, a
+-- name), fit for a row (a picker or list row, Status, Attention, Last
+-- Action: at most ECHO_MAX bytes) or a log line (LOG_MAX): bridge/http.lua's
+-- http.peer_text, the one helper for it (security review 2026-11-13 C-4 and
+-- N-4, #489; docs/security-fixes-2026-11-design.md). It replaces the `%q`
+-- echoes, which let ESC and BEL through and quoted any length.
+util.ECHO_MAX = http.TEXT_ROW
+util.LOG_MAX = http.TEXT_LOG
+
+-- `value` cut to `max` bytes (default ECHO_MAX) before a character, "..."
+-- in place of the rest, its control characters removed (http.peer_text).
+function util.echo(value, max)
+	return http.peer_text(value, max or util.ECHO_MAX)
+end
+
+-- A continuation byte of a UTF-8 character (0x80-0xBF); every other byte
+-- starts a character.
+local function continuation(b)
+	return b >= 0x80 and b <= 0xBF
+end
+
 -- A text with its commas turned into spaces (picker items are
 -- comma-delimited) and its control characters removed (`%c`: a newline or a
 -- tab in a Hue name would garble a Composer row). `%c` is ASCII only (bytes
 -- 0-31 and 127): LuaJIT, which runs the drivers (docs/design.md), classes
 -- characters without the locale, so UTF-8 text such as "→" or "ü" is kept.
+-- At most ECHO_MAX bytes stay (util.echo): a hostile peer's megabyte name no
+-- longer goes whole into every picker and list row (#489 C-4); every row the
+-- drivers build is far shorter.
 function util.sanitise(text)
-	local s = tostring(text):gsub(",", " ")
-	return (s:gsub("%c", ""))
+	return (util.echo(text):gsub(",", " "))
 end
 
 -- The most characters a name the bridge hands to Control4 may have, and the
@@ -52,12 +79,6 @@ end
 -- is still bounded. 100 characters of UTF-8 are at most 400 bytes.
 util.NAME_MAX = 100
 util.NAME_MAX_BYTES = 400
-
--- A continuation byte of a UTF-8 character (0x80-0xBF); every other byte
--- starts a character.
-local function continuation(b)
-	return b >= 0x80 and b <= 0xBF
-end
 
 -- The length of the longest prefix of `s` that holds at most NAME_MAX
 -- characters (counted by their first bytes) and ends before a character.
@@ -127,26 +148,20 @@ function util.name_key(text)
 end
 
 -- A persisted timestamp is trusted only within this century: os.date
--- raises on absurd values, and a restored backup is not above them.
-local function sane(ts)
-	ts = tonumber(ts)
-	return ts and ts >= 0 and ts < 4102444800 and ts or nil
-end
-
+-- raises on absurd values, and a restored backup is not above them
+-- (common/num.lua's num.timestamp and num.date, #487). An unknown one reads "?".
 function util.date_of(ts)
-	ts = sane(ts)
-	if not ts then
+	if ts == nil then
 		return "?"
 	end
-	return os.date("%Y-%m-%d", ts)
+	return num.date("%Y-%m-%d", ts, "?")
 end
 
 function util.short_date_of(ts)
-	ts = sane(ts)
-	if not ts then
+	if ts == nil then
 		return "?"
 	end
-	return os.date("%m-%d", ts)
+	return num.date("%m-%d", ts, "?")
 end
 
 function util.plural(n, word)
@@ -209,9 +224,10 @@ function util.copy_caps(caps, min_dim_default)
 	return {
 		has_color = caps.has_color == true or caps.has_color == "true",
 		has_cct = caps.has_cct == true or caps.has_cct == "true",
-		mirek_min = tonumber(caps.mirek_min),
-		mirek_max = tonumber(caps.mirek_max),
-		min_dim = tonumber(caps.min_dim) or min_dim_default,
+		-- Finite numbers only: a store is outside data too (#486).
+		mirek_min = num.finite(caps.mirek_min),
+		mirek_max = num.finite(caps.mirek_max),
+		min_dim = num.finite(caps.min_dim) or min_dim_default,
 	}
 end
 

@@ -1150,6 +1150,31 @@ describe("bridge.motion", function()
 			assert.same({}, states(2002), "grouped motion is not this module's (D13)")
 		end)
 
+		-- Security review 2026-11-13 C-3, D-5 (#486): what the device takes, and nothing else.
+		it("passes no temperature outside -40 to 60 °C and no battery outside 0 to 100 %", function()
+			add_both()
+			D:add(M.devices.porch, PORCH, done)
+			c4.sent = {}
+			local function temperature(value)
+				return '{"id":"' .. M.temperature.porch .. '","owner":{"rid":"' .. M.devices.porch .. '","rtype":"device"},'
+					.. '"temperature":{"temperature":' .. value .. ',"temperature_report":{"changed":'
+					.. '"2026-10-26T07:19:04.610Z","temperature":' .. value .. '},"temperature_valid":true},"type":"temperature"}'
+			end
+			for _, value in ipairs({ "99.5", "-41", "1e999" }) do
+				feed(container("update", temperature(value)))
+			end
+			for _, m in ipairs(states(2003)) do
+				assert.is_nil(m.temperature, tostring(m.temperature))
+			end
+			feed(container("update", '{"id":"' .. M.device_power.porch .. '","owner":{"rid":"' .. M.devices.porch
+				.. '","rtype":"device"},"power_state":{"battery_level":250,"battery_state":"normal"},"type":"device_power"}'))
+			for _, m in ipairs(states(2003)) do
+				assert.is_nil(m.battery_level, tostring(m.battery_level))
+			end
+			feed(container("update", temperature("21.5")))
+			assert.equal("21.5", states(2003)[#states(2003)].temperature)
+		end)
+
 		it("E3, E4, E12: light level, temperature and battery go out on their own; S8: a low battery in Attention at once",
 			function()
 			add_both()

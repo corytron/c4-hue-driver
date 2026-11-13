@@ -56,6 +56,7 @@
 -- every late callback.
 
 local log = require("common.log")
+local num = require("common.num")
 
 local commands = {}
 commands.__index = commands
@@ -67,13 +68,38 @@ commands.BACKOFF_MS = 500            -- first retry delay, doubled per consecuti
 commands.BACKOFF_MAX_MS = 8000
 commands.MAX_AGE_S = 30              -- a failing state is retried this long after its last change, then dropped
 commands.DEFAULT_LIMITS = { min_dim = 1, mirek_min = 153, mirek_max = 500 }
+-- The longest ramp a PUT asks for, in ms: the devices' device.RATE_MAX and
+-- the scenes' and zone lights' DIM_MAX_DURATION (#430 D20).
+commands.RATE_MAX = 6000000
 
 -- Answers that no retry can mend: bridge_request (hue_bridge/driver.lua)
 -- gives them at once, without a request, while the driver has no key or the
 -- bridge has refused it. The pending state ends there (issue #43).
 local FINAL_ERRORS = { ["not paired"] = true, ["key rejected"] = true, ["TLS check failed"] = true }
 
+-- The numbers set() takes, each with the range it is clamped into (nil: the
+-- light's own limits, applied by body()). A value that is not a finite
+-- number is dropped, never sent: Lua 5.1's tonumber reads "nan" and "inf",
+-- NaN fails every comparison, and a body cannot carry either (security
+-- review 2026-11-13 C-3, #486; common/num.lua).
 local NUMERIC_FIELDS = { "brightness", "x", "y", "mirek", "rate" }
+local RANGE = {
+	brightness = { 0, 100 },
+	x = { 0, 1 },
+	y = { 0, 1 },
+	rate = { 0, commands.RATE_MAX },
+	level = { 0, 100 },
+	delta = { 0, 100 },
+}
+
+-- `v` as a finite number clamped into `name`'s range, else nil.
+local function field(name, v)
+	local range = RANGE[name]
+	if range then
+		return num.clamp(v, range[1], range[2])
+	end
+	return num.finite(v)
+end
 
 local function c4_time()
 	return C4:GetTime()
@@ -190,9 +216,7 @@ end
 -- nothing is sent for it. Colour fields pending beside it stay as they are;
 -- they lose the ramp's time with it.
 local function stop_unsent_ramp(pending, level)
-	if level ~= level then
-		level = nil -- NaN
-	end
+	level = field("level", level) -- NaN and infinity: no level
 	pending.dim, pending.level, pending.delta = nil, nil, nil
 	pending.urgent = true
 	if level == nil then
@@ -217,7 +241,7 @@ end
 local function merge(pending, fields)
 	local f = {}
 	for _, name in ipairs(NUMERIC_FIELDS) do
-		f[name] = tonumber(fields[name])
+		f[name] = field(name, fields[name])
 	end
 	if fields.on == true or fields.on == "true" then
 		f.on = true
@@ -229,7 +253,7 @@ local function merge(pending, fields)
 	end
 
 	if fields.dim == "stop" and unsent_ramp(pending) then
-		return stop_unsent_ramp(pending, tonumber(fields.level)), true
+		return stop_unsent_ramp(pending, fields.level), true
 	end
 
 	-- A relative dim (Hue's dimming_delta) is an action, not a state: it
@@ -239,8 +263,8 @@ local function merge(pending, fields)
 	-- lands on an empty pending state and stays a dimming_delta stop.
 	if fields.dim == "up" or fields.dim == "down" or fields.dim == "stop" then
 		pending.dim = fields.dim
-		pending.level = tonumber(fields.level)
-		pending.delta = tonumber(fields.delta)
+		pending.level = field("level", fields.level)
+		pending.delta = field("delta", fields.delta)
 		pending.brightness, pending.on = nil, nil
 	elseif f.brightness or f.on ~= nil then
 		pending.dim, pending.level, pending.delta = nil, nil, nil
@@ -297,9 +321,17 @@ end
 -- light's range; xy is clamped to [0, 1] and rounded to 4 decimals and needs
 -- both coordinates. dynamics.duration goes along only when there is
 -- something for it to apply to. The queue's own fields (`urgent`, `paced`,
--- `level`, `delta`) never go into a body as such (#421 D12, #435 D9).
+-- `level`, `delta`) never go into a body as such (#421 D12, #435 D9). A
+-- number that is not finite, or a limit that is not, counts as absent: set()
+-- never keeps one, and body() holds to that whatever it is given (#486).
 function commands.body(pending, limits)
 	limits = limits or commands.DEFAULT_LIMITS
+	pending = {
+		dim = pending.dim, on = pending.on,
+		brightness = num.finite(pending.brightness), x = num.finite(pending.x), y = num.finite(pending.y),
+		mirek = num.finite(pending.mirek), rate = num.clamp(pending.rate, 0, commands.RATE_MAX),
+		delta = num.finite(pending.delta),
+	}
 	local body = {}
 	if pending.dim then
 		-- Hue ramps the whole range over `rate` and keeps the lights' relative
@@ -331,14 +363,16 @@ function commands.body(pending, limits)
 			body.on = { on = pending.on == true }
 		end
 		if pending.brightness ~= nil then
-			body.dimming = { brightness = round(clamp(pending.brightness, limits.min_dim or 1, 100), 2) }
+			local min_dim = num.clamp(limits.min_dim, 0, 100, 1)
+			body.dimming = { brightness = round(clamp(pending.brightness, min_dim, 100), 2) }
 		end
 	end
 	if pending.x ~= nil and pending.y ~= nil then
 		body.color = { xy = { x = round(clamp(pending.x, 0, 1), 4), y = round(clamp(pending.y, 0, 1), 4) } }
 	elseif pending.mirek ~= nil then
-		local lo = limits.mirek_min or commands.DEFAULT_LIMITS.mirek_min
-		local hi = limits.mirek_max or commands.DEFAULT_LIMITS.mirek_max
+		-- Within the light's own limits, else Hue's 153 to 500.
+		local lo = num.finite(limits.mirek_min) or commands.DEFAULT_LIMITS.mirek_min
+		local hi = num.finite(limits.mirek_max) or commands.DEFAULT_LIMITS.mirek_max
 		body.color_temperature = { mirek = clamp(round(pending.mirek), lo, hi) }
 	end
 	if next(body) ~= nil and pending.rate and pending.rate > 0 then

@@ -62,6 +62,15 @@
 local util = require("bridge.util")
 
 local actions = {}
+
+-- A picked value quoted in Last Action (`"%s"`), or in a log line: control
+-- characters made spaces and the length capped (util.echo), never `%q`,
+-- which lets ESC and BEL through and quotes any length (security review
+-- 2026-11-13 C-4, #489).
+local echo = util.echo
+local function logged(value)
+	return util.echo(value, util.LOG_MAX)
+end
 actions.__index = actions
 
 actions.CONFIRM_YES = "Yes, forget"
@@ -552,7 +561,7 @@ function actions:add_list(folder_value)
 			if list then
 				return list, back
 			end
-			s.log.debug("actions: Add From Hue has no folder %q; the top instead", key)
+			s.log.debug("actions: Add From Hue has no folder %s; the top instead", logged(key))
 		end
 		return s:add_root()
 	end)
@@ -1036,7 +1045,7 @@ function actions:run_add(params, say)
 			return
 		end
 		local what = selection(params, "What")
-		self.log.info("actions: Add From Hue What=%s Room=%s", tostring(what), tostring(selection(params, "Room")))
+		self.log.info("actions: Add From Hue What=%s Room=%s", logged(what), logged(selection(params, "Room")))
 		if not what then
 			return say("Not added: pick a light, zone, scene or motion sensor under What first")
 		end
@@ -1067,7 +1076,7 @@ function actions:run_add(params, say)
 		local prefix, rid = what:match("^(%a+):(.+)$")
 		local route = prefix and ADD[prefix]
 		if not route then
-			return say(string.format("Not added: %q is not something Add From Hue offers; open What again", what))
+			return say(string.format('Not added: "%s" is not something Add From Hue offers; open What again', echo(what)))
 		end
 		if not self:has(route[1], route[2]) then
 			return not_ready("added", route[1], say)
@@ -1154,7 +1163,7 @@ function actions:run_link(params, say)
 			return
 		end
 		local device, to = selection(params, "Device"), selection(params, "To")
-		self.log.info("actions: Link Device Device=%s To=%s", tostring(device), tostring(to))
+		self.log.info("actions: Link Device Device=%s To=%s", logged(device), logged(to))
 		if not device then
 			return say("Not linked: pick a device under Device first")
 		end
@@ -1163,7 +1172,7 @@ function actions:run_link(params, say)
 		end
 		local id = id_of(device)
 		if not id then
-			return say(string.format("Not linked: %q is not a device Link Device offers; open Device again", device))
+			return say(string.format('Not linked: "%s" is not a device Link Device offers; open Device again', echo(device)))
 		end
 		local _, by_device = self:suggestions()
 		local suggestion = by_device[id]
@@ -1190,7 +1199,7 @@ function actions:run_link(params, say)
 			prefix, rid = to:match("^(%a+):(.*)$")
 			local want = prefix and LEAF_KIND[prefix]
 			if not want then
-				return say(string.format("Not linked: %q is not something Link Device offers; open To again", to))
+				return say(string.format('Not linked: "%s" is not something Link Device offers; open To again', echo(to)))
 			end
 			if rid == "" then
 				return say(string.format("Not linked: pick %s under To", KINDS[want].pick))
@@ -1223,7 +1232,7 @@ function actions:run_forget(params, say)
 			return
 		end
 		local device = selection(params, "Device")
-		self.log.info("actions: Forget Device Device=%s Confirm=%s", tostring(device), tostring(selection(params,
+		self.log.info("actions: Forget Device Device=%s Confirm=%s", logged(device), logged(selection(params,
 			"Confirm")))
 		if not device then
 			return say("Not forgotten: pick a device under Device first")
@@ -1233,7 +1242,8 @@ function actions:run_forget(params, say)
 		end
 		local id = id_of(device)
 		if not id then
-			return say(string.format("Not forgotten: %q is not a device Forget Device offers; open Device again", device))
+			return say(string.format('Not forgotten: "%s" is not a device Forget Device offers; open Device again',
+				echo(device)))
 		end
 		local kind, all = self:device_kind(id, "picker_forget_devices")
 		if not kind then
@@ -1271,7 +1281,7 @@ function actions:run_names(params, say)
 	say = self:say(say)
 	self:guard("Resolve Names", say, function()
 		local value = selection(params, "Names")
-		self.log.info("actions: Resolve Names Names=%s", tostring(value))
+		self.log.info("actions: Resolve Names Names=%s", logged(value))
 		if not value then
 			return say("Nothing renamed: pick a row under Names first")
 		end
@@ -1314,7 +1324,7 @@ function actions:run_diagnostics(params, say)
 	say = self:say(say)
 	self:guard("Diagnostics", say, function()
 		local value = selection(params, "What")
-		self.log.info("actions: Diagnostics What=%s", tostring(value))
+		self.log.info("actions: Diagnostics What=%s", logged(value))
 		if not value then
 			return say("Nothing run: pick what to run under What first")
 		end
@@ -1325,7 +1335,7 @@ function actions:run_diagnostics(params, say)
 			end
 		end
 		if not entry then
-			return say(string.format("Nothing run: %q is not a diagnostic of this build", value))
+			return say(string.format('Nothing run: "%s" is not a diagnostic of this build', echo(value)))
 		end
 		-- First, so that whatever the entry writes itself (Last Action, now
 		-- or later) is what stays.

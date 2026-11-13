@@ -61,7 +61,10 @@ describe("bridge.pairing", function()
 		assert.is_nil(c4.persist.hue_app_key)
 	end)
 
-	it("stores the key encrypted on success", function()
+	-- #490 (N-9): the key used to be stored here, before the pairing window
+	-- could check that it was still open; bridge/pair_window.lua stores it
+	-- now (pair_window_spec.lua: "stores the key encrypted").
+	it("hands the key over on success, and stores nothing itself", function()
 		pairing.pair("192.0.2.10", handlers())
 		c4.transfers[1]:respond(200, CONFIG)
 		c4.transfers[2]:respond(200, '[{"success":{"username":"abc123","clientkey":"DEADBEEF"}}]')
@@ -69,21 +72,10 @@ describe("bridge.pairing", function()
 		assert.equal("paired", events[2][1])
 		assert.equal("abc123", events[2][2].key)
 		assert.equal("001788fffe25b8f8", events[2][2].bridge_id)
-
-		local set = c4.calls_to("PersistSetValue")
-		local saw_key
-		for _, args in ipairs(set) do
-			if args[1] == "hue_app_key" then
-				saw_key = true
-				assert.equal("abc123", args[2])
-				assert.is_true(args[3], "key must be stored encrypted")
-			end
-		end
-		assert.is_true(saw_key)
-
-		local creds = credentials.load()
-		assert.is_true(credentials.paired(creds))
-		assert.equal("192.0.2.10", creds.ip)
+		assert.equal("192.0.2.10", events[2][2].ip)
+		assert.equal("BSB002", events[2][2].model)
+		assert.same({}, c4.calls_to("PersistSetValue"))
+		assert.is_false(credentials.paired(credentials.load()))
 	end)
 
 	it("surfaces other bridge errors", function()
@@ -94,6 +86,28 @@ describe("bridge.pairing", function()
 		assert.truthy(events[2][2]:find("invalid value", 1, true))
 		-- the driver prefixes "Pairing failed: " itself; the module must not
 		assert.is_nil(events[2][2]:find("Pairing failed", 1, true), events[2][2])
+	end)
+
+	-- #489: the error description, the model and the firmware are the peer's
+	-- text, of any length; they reach Status.
+	it("cuts the bridge's own text and removes its control characters", function()
+		pairing.pair("192.0.2.10", handlers())
+		c4.transfers[1]:respond(200, CONFIG)
+		local description = string.rep("x", 100000) .. "\nforged"
+		c4.transfers[2]:respond(200, c4:JsonEncode({ { error = { type = 7, description = description } } }))
+		assert.is_true(#events[2][2] < 256, #events[2][2] .. " bytes")
+		assert.is_nil(events[2][2]:find("\n", 1, true))
+		events = {}
+		pairing.pair("192.0.2.10", handlers())
+		c4.transfers[3]:respond(200, '{"bridgeid":"001788FFFE25B8F8","modelid":"X' .. string.rep("y", 100000) .. '"}')
+		assert.equal("error", events[2][1])
+		assert.is_true(#events[2][2] < 256, #events[2][2] .. " bytes")
+		events = {}
+		pairing.pair("192.0.2.10", handlers())
+		c4.transfers[4]:respond(200, '{"bridgeid":"001788FFFE25B8F8","modelid":"BSB002","swversion":"1'
+			.. string.rep(" ", 100000) .. '"}')
+		assert.equal("error", events[2][1])
+		assert.is_true(#events[2][2] < 256, #events[2][2] .. " bytes")
 	end)
 
 	-- Issue #236, item 3: the driver prefixes "Pairing failed: ", so the

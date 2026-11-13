@@ -760,7 +760,7 @@ ledger.rows = {
 			{ connection = "Hue Bridge", id = 1, driver = "hue_motion" },
 			{ connection = "Temperature", id = 2, driver = "hue_motion" },
 			{ proxy_command = "GET_STATE", driver = "hue_motion" },
-			{ proxy_command = "GET_SENSOR_VALUE", driver = "hue_motion" },
+			{ proxy_command = "GET_SENSOR_VALUE", binding = 2, driver = "hue_motion" },
 			{ property = "Occupancy Hold Time (s)", type = "RANGED_INTEGER", driver = "hue_motion" },
 			{ property = "Hue Motion", type = "STRING", driver = "hue_motion" },
 			{ property = "Light Level", type = "STRING", driver = "hue_motion" },
@@ -925,7 +925,11 @@ ledger.earlier_commands = {
 -- send them by name. driver (the one that still answers the old command)
 -- defaults to "hue_bridge"; target is the action that does the job now, on
 -- target_driver (default: driver). dev = true: a developer command that only
--- dev builds answer (bridge/devtools.lua), and release builds must not. The
+-- dev builds answer (bridge/devtools.lua), and release builds must not.
+-- signed = true (with dev): since #484 (security review 2026-11-13 C-2) a
+-- dev build answers it only for a signed dev loop command (devloop.execute)
+-- and through its Diagnostics entry, never through ExecuteCommand, where any
+-- driver in the project could send it. The
 -- bridge's aliases into the merged actions are bridge/actions.lua's
 -- ALIASES (the spec checks the two lists agree); the others keep their
 -- beta 8 handlers. The spec fails once the code's version line reaches
@@ -964,11 +968,12 @@ ledger.aliases = {
 	{ command = "Map Rooms By Name", target = "Set Room Mapping", expires = "2.0" },
 	{ command = "Room Audit", target = "Set Room Mapping", expires = "2.0" },
 	{ command = "Refresh Scenes", target = "Diagnostics", expires = "2.0" },
-	-- Dev builds only: entries of Diagnostics' list there.
-	{ command = "Connection Test", target = "Diagnostics", dev = true, expires = "2.0" },
-	{ command = "Reload Credentials", target = "Diagnostics", dev = true, expires = "2.0" },
-	{ command = "Check CA Pinning", target = "Diagnostics", dev = true, expires = "2.0" },
-	{ command = "Probe Picker Folders", target = "Diagnostics", dev = true, expires = "2.0" },
+	-- Dev builds only: entries of Diagnostics' list there, and signed dev loop
+	-- commands (#484).
+	{ command = "Connection Test", target = "Diagnostics", dev = true, signed = true, expires = "2.0" },
+	{ command = "Reload Credentials", target = "Diagnostics", dev = true, signed = true, expires = "2.0" },
+	{ command = "Check CA Pinning", target = "Diagnostics", dev = true, signed = true, expires = "2.0" },
+	{ command = "Probe Picker Folders", target = "Diagnostics", dev = true, signed = true, expires = "2.0" },
 	-- The child drivers' (their handlers unchanged in behaviour).
 	{ command = "Adopt Hue Name", driver = "hue_light", target = "Resolve Names", target_driver = "hue_bridge",
 		expires = "2.0" },

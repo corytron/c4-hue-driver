@@ -126,6 +126,37 @@ describe("bridge.registry", function()
 			assert.truthy(saw_log("had state tombstone"))
 		end)
 
+		-- Security review 2026-11-13 D-2 (#485): a stored rid goes into a
+		-- request path; #487: a stored time into os.date.
+		it("drops a stored rid that is no resource id, and clears a stored time os.date cannot take", function()
+			store.hue_lights = {
+				["x/../../grouped_light/g1"] = { device_id = 2001, name = "Path" },
+				["rid?x"] = { device_id = 2002, name = "Query" },
+				[("a"):rep(65)] = { device_id = 2003, name = "Long" },
+				["gone-1"] = { device_id = 2004, name = "Gone", state = "gone", gone_since = "1e300", created_at = "nan" },
+				["gone-2"] = { device_id = 2005, name = "Gone too", state = "gone", gone_since = 1700000000,
+					created_at = -5 },
+				["unbound-1"] = { device_id = 2006, name = "Unbound", state = "unbound", unbound_since = "inf" },
+			}
+			store.hue_tombstones = { ["t-1"] = { name = "Deleted", deleted_at = "1e400" },
+				["t/2"] = { name = "Path", deleted_at = 1700000000 } }
+			store.hue_rooms = { ["r/1"] = { c4_room_id = 7 }, ["r-2"] = { c4_room_id = 8 } }
+			local counts = reg:load()
+			assert.same({ linked = 0, gone = 2, unbound = 1, tombstones = 1, rooms = 1 }, counts)
+			assert.is_nil(reg:get("x/../../grouped_light/g1"))
+			assert.is_nil(reg:get("rid?x"))
+			assert.is_nil(reg:get(("a"):rep(65)))
+			assert.is_nil(reg:get("gone-1").gone_since)
+			assert.is_nil(reg:get("gone-1").created_at)
+			assert.equal(1700000000, reg:get("gone-2").gone_since)
+			assert.is_nil(reg:get("gone-2").created_at)
+			assert.is_nil(reg:get("unbound-1").unbound_since)
+			assert.is_nil(reg:tombstones()["t-1"].deleted_at)
+			assert.is_nil(reg:tombstones()["t/2"])
+			assert.is_nil(reg:room_mappings()["r/1"])
+			assert.is_nil(reg:add("a/b", { device_id = 2099 }), "add refuses one too")
+		end)
+
 		it("keeps the table identity of entries(), tombstones() and room_mappings() across a reload", function()
 			local entries, tombs, rooms = reg:entries(), reg:tombstones(), reg:room_mappings()
 			add("rid-a", 2043, "Desk Lamp")

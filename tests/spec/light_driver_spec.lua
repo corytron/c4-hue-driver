@@ -49,6 +49,20 @@ local function configure(env, extra)
 	env.ExecuteCommand("HUE_CONFIGURE", params)
 end
 
+-- #483 D-1 (common/device.lua): a configure that moves a light with a rid to
+-- another rid is taken only as the answer to the light's own hello. The
+-- bridge's Link Device sends one by itself: the light leaves it, says hello
+-- VERIFY_MS later, and takes the bridge's answer. `send(env)` delivers the
+-- configure, twice: by itself, then as that answer.
+local VERIFY_MS = 500
+local function through_hello(env, c4, send)
+	send(env)
+	local before = #c4.sent
+	assert(c4.fire_timers_of(VERIFY_MS) == 1, "the configure left alone makes the light ask the bridge")
+	assert(c4.sent[before + 1] and c4.sent[before + 1].command == "HUE_HELLO", "the light says hello")
+	send(env)
+end
+
 -- The window of the light's Hue-side level reports (#433 D12, LEVEL_REPORT_MS).
 local LEVEL_REPORT_MS = 1000
 -- The double-tap window, after which a press's tap count goes to the proxy
@@ -412,11 +426,12 @@ describe("Hue Light driver", function()
 		end)
 
 		it("shows the Hue room and the v1 id in front of the rid", function()
-			local env = load_light()
+			local env, c4 = load_light()
 			configure(env, { rid = "e0e51794-1234-5678-9abc-def012345678", hue_room = "Office", id_v1 = "/lights/12" })
 			assert.equal("#12 (e0e51794…)", env.Properties["Hue Light ID"])
 			assert.equal("Office", env.Properties["Hue Room"])
-			configure(env, { rid = "l1", id_v1 = "7" })
+			-- #483 D-1: another rid reaches the light through its hello.
+			through_hello(env, c4, function(e) configure(e, { rid = "l1", id_v1 = "7" }) end)
 			assert.equal("#7 (l1)", env.Properties["Hue Light ID"], "a rid without dashes is shown whole")
 		end)
 
@@ -3153,9 +3168,12 @@ describe("Hue Light driver", function()
 			assert.equal(0, #c4.sent, "dropped")
 			assert.equal(expected, env.Properties["Status"])
 
-			-- Link Device on the bridge, to another zone: a configure with the new identity.
+			-- Link Device on the bridge, to another zone: a configure with the new
+			-- identity, which reaches the device through its hello (#483 D-1).
 			local other = "c0ffee00-aaaa-4bbb-8ccc-ddddeeeeffff"
-			configure_group(env, ZONE, { rid = other, name = "Reading Nook", id_v1 = "/groups/7", light_count = "3" })
+			through_hello(env, c4, function(e)
+				configure_group(e, ZONE, { rid = other, name = "Reading Nook", id_v1 = "/groups/7", light_count = "3" })
+			end)
 			assert.equal("Hue zone Reading Nook (3 lights)", env.Properties["Status"])
 			assert.equal("zone #7 (c0ffee00…)", env.Properties["Hue Light ID"])
 			assert.equal("Online", env.Properties["Online"])
@@ -4438,6 +4456,118 @@ describe("Hue Light driver", function()
 				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "80", RATE = "0" })
 				assert.same({}, c4.sent)
 			end)
+		end)
+	end)
+
+	-- The security review of 2026-11-13 (docs/security-fixes-2026-11-design.md).
+	describe("security review 2026-11-13", function()
+		after_each(function()
+			log.set_debug(false)
+			package.preload["common.build_kind"] = nil
+			package.loaded["common.build_kind"] = nil
+		end)
+
+		-- #483 D-1: a driver that is not the bridge sends what the bridge would.
+		it("ignores a state without a rid once the light has one (#483 D-1)", function()
+			local env, c4 = lit_light()
+			env.ExecuteCommand("HUE_STATE", { on = "false" })
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "until #483 it reached the proxy as 0")
+			assert.equal(0, #c4.calls_to("SendToProxy"), "nor the keypad LEDs")
+			env.ExecuteCommand("HUE_STATE", { rid = "l2", on = "false" })
+			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			env.ExecuteCommand("HUE_FORGOTTEN", { name = "Desk" })
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"], "nor a forgotten without a rid")
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+		end)
+
+		it("keeps its rid against a configure that answers no hello, and asks the bridge (#483 D-1)", function()
+			local env, c4 = lit_light()
+			configure(env, { rid = "l9", name = "Porch" })
+			assert.equal("l1", c4.persist.hue_rid, "until #483 the re-target was persisted")
+			assert.equal("Desk", env.Properties["Hue Name"])
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "20", RATE = "0" })
+			assert.equal("l1", messages(c4, "HUE_SET")[1].params.rid, "commands still go to its own light")
+			assert.equal(1, c4.fire_timers_of(500))
+			local hello = messages(c4, "HUE_HELLO")[1]
+			assert.equal("l1", hello.params.rid, "the hello names the rid it has")
+			-- The bridge answers with the rid it holds for this device: its own.
+			configure(env)
+			assert.equal("l1", c4.persist.hue_rid)
+			configure(env, { rid = "l9", name = "Porch" })
+			assert.equal("l1", c4.persist.hue_rid, "the hello's grant went to the bridge's answer")
+		end)
+
+		it("takes the rid the bridge holds when it answers the light's hello: a re-link while away (#483 D-1)",
+			function()
+				local env, c4 = load_light({ rid = "l0" })
+				assert.equal("l0", messages(c4, "HUE_HELLO")[1].params.rid, "adoption by its remembered rid")
+				configure(env, { rid = "l1" })
+				assert.equal("l1", c4.persist.hue_rid)
+				assert.equal(0, #c4.active_timers(), "nothing to ask")
+			end)
+
+		it("drops a brightness or colour target that is no finite number, and clamps one past 100 (#486 D-4)",
+			function()
+				local env, c4 = lit_light()
+				for _, target in ipairs({ "inf", "nan", "-inf", "1e999" }) do
+					env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = target, RATE = "0" })
+				end
+				env.ReceivedFromProxy(5001, "SET_LEVEL", { LEVEL = "nan", TIME = "0" })
+				env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "nan",
+					LIGHT_COLOR_TARGET_Y = "0.3", LIGHT_COLOR_TARGET_MODE = "0", RATE = "0" })
+				env.ReceivedFromProxy(5001, "SET_COLOR_TARGET", { LIGHT_COLOR_TARGET_X = "1.5",
+					LIGHT_COLOR_TARGET_Y = "0.3", LIGHT_COLOR_TARGET_MODE = "0", RATE = "0" })
+				assert.same({}, messages(c4, "HUE_SET"), "until #486 \"inf\" went out as brightness -9223372036854775808")
+				assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"))
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "150", RATE = "inf" })
+				assert.same({ rid = "l1", on = "true", brightness = "100", rate = "0" }, messages(c4, "HUE_SET")[1].params)
+			end)
+
+		it("reads a gone time os.date cannot take as none, and keeps working (#487 D-6)", function()
+			local env, c4 = lit_light()
+			assert.has_no.errors(function()
+				configure(env, { state = "gone", gone_since = "1e300" })
+			end)
+			assert.equal("Gone from the Hue bridge; Link or Forget Device", env.Properties["Status"])
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "20", RATE = "0" })
+			assert.same({}, messages(c4, "HUE_SET"), "dropped, with its reason, without an error")
+			configure(env, { state = "gone", gone_since = "nan" })
+			assert.equal("Gone from the Hue bridge; Link or Forget Device", env.Properties["Status"])
+		end)
+
+		it("clears a stored Raise time that is no time, keeping the level (#487)", function()
+			local env, c4 = load_light({ rid = "l1", persist = { saved_level = { level = 30, target = 60, at = 1e300 } } })
+			assert.same({ level = 30, target = 60 }, c4.persist.saved_level)
+			configure(env)
+			env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "60", reason = "hello" })
+			assert.has_no.errors(function()
+				env.ExecuteCommand("Raise_Level_By", { Points = "10" })
+			end)
+			assert.equal("Raised from 30 % to 40 % again", env.Properties["Last Action"])
+		end)
+
+		it("sends its messages to the bridge with logCommand only in Debug Mode (#493 D-8)", function()
+			local env, c4 = load_light({ bind = false, rid = "l1" })
+			local sends = capture_sends(c4)
+			c4:Bind(BRIDGE_ID, 1, LIGHT_ID, 1, "HUE_BRIDGE")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
+			configure(env)
+			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "20", RATE = "0" })
+			env.ExecuteCommand("Forget_This_Light", {})
+			for _, m in ipairs(sends) do
+				assert.is_false(m.log_command, m.command)
+				assert.is_false(m.allow_empty, m.command)
+			end
+			assert.same({ "HUE_HELLO", "HUE_LOAD_GROUPS", "HUE_SET", "HUE_FORGET" },
+				{ sends[1].command, sends[2].command, sends[3].command, sends[4].command })
+		end)
+
+		it("locks Composer's Lua window at init in a release build (#492 I-5)", function()
+			package.preload["common.build_kind"] = function() return "release" end
+			local env, c4 = fake.load_driver("hue_light", {}, { device_id = LIGHT_ID })
+			env.OnDriverInit("DIT_STARTUP")
+			assert.same({ { false } }, c4.calls_to("AllowExecute"))
 		end)
 	end)
 end)

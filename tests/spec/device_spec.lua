@@ -1879,6 +1879,316 @@ describe("common.device", function()
 		end)
 	end)
 
+	-- The security review of 2026-11-13 (docs/security-fixes-2026-11-design.md).
+	describe("trust between drivers (#483 D-1)", function()
+		-- A configured device: it has rid r1, and its hello's grant is spent.
+		local function configured()
+			local dev, c4, env, dispatch, st = new_device()
+			dev.late_init()
+			local greets = 0
+			dev.greet = function() greets = greets + 1 end
+			return dev, c4, env, dispatch, st, function() return greets end
+		end
+
+		it("takes every message while the device has no rid (adoption, Link Devices by name)", function()
+			local dev, _, _, _, st = configured()
+			st.rid = nil
+			assert.is_true(dev.addressed("HUE_STATE", { rid = "x9" }))
+			assert.is_true(dev.addressed("HUE_STATE", {}))
+			assert.is_true(dev.configure_ok("HUE_CONFIGURE", { rid = "x9" }))
+		end)
+
+		it("ignores a state for another rid, or for none, once it has one (debug line only)", function()
+			local dev = configured()
+			local lines = capture_log()
+			log.set_debug(true)
+			assert.is_true(dev.addressed("HUE_STATE", { rid = "r1" }))
+			assert.is_false(dev.addressed("HUE_STATE", { rid = "r2" }))
+			assert.is_false(dev.addressed("HUE_STATE", {}), "until #483 a message without a rid was taken")
+			assert.is_false(dev.addressed("HUE_STATE", { rid = "" }))
+			assert.same({ "[DEBUG] Hue Test: HUE_STATE for rid r2 ignored (ours is r1)",
+				"[DEBUG] Hue Test: HUE_STATE for no rid ignored (ours is r1)",
+				"[DEBUG] Hue Test: HUE_STATE for no rid ignored (ours is r1)" }, lines)
+		end)
+
+		it("takes a configure naming its own rid at any time", function()
+			local dev, c4 = configured()
+			assert.is_true(dev.configure_ok("HUE_CONFIGURE", { rid = "r1" }))
+			assert.is_true(dev.configure_ok("HUE_CONFIGURE", { rid = "r1" }))
+			assert.same({}, delays(c4), "nothing to ask")
+		end)
+
+		it("leaves a configure for another rid that answers no hello, and asks the bridge VERIFY_MS later", function()
+			local dev, c4, _, _, _, greets = configured()
+			assert.is_false(dev.configure_ok("HUE_CONFIGURE", { rid = "r2" }), "a spoofed re-target is not taken")
+			assert.is_false(dev.configure_ok("HUE_CONFIGURE", {}), "nor a configure without a rid")
+			assert.same({ 500 }, delays(c4), "one hello is due, however many came")
+			assert.equal(0, greets())
+			c4.fire_timers()
+			assert.equal(1, greets())
+		end)
+
+		it("takes the first configure within GRANT_MS of its own hello, whatever its rid (a re-link's answer)", function()
+			local dev, c4 = configured()
+			dev.greeted()
+			c4.now_ms = c4.now_ms + 29999
+			assert.is_true(dev.configure_ok("HUE_CONFIGURE", { rid = "r2" }))
+			assert.is_false(dev.configure_ok("HUE_CONFIGURE", { rid = "r3" }), "the hello's grant is spent")
+			dev.greeted()
+			c4.now_ms = c4.now_ms + 30001
+			assert.is_false(dev.configure_ok("HUE_CONFIGURE", { rid = "r2" }), "too late for that hello")
+		end)
+
+		it("a hello cancels the hello still due", function()
+			local dev, c4, _, _, _, greets = configured()
+			dev.configure_ok("HUE_CONFIGURE", { rid = "r2" })
+			dev.greeted()
+			assert.same({}, delays(c4))
+			c4.fire_timers()
+			assert.equal(0, greets())
+		end)
+
+		it("cancel_timers stops the hello still due", function()
+			local dev, c4, _, _, _, greets = configured()
+			dev.configure_ok("HUE_CONFIGURE", { rid = "r2" })
+			dev.cancel_timers()
+			assert.equal(0, c4.fire_timers())
+			assert.equal(0, greets())
+		end)
+
+		it("takes HUE_BRIDGE_LINK without a rid (the bridge sends none) but not one naming another rid", function()
+			local dev, _, _, dispatch = configured()
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "offline", reason = "not_answering", since = "1762696920" })
+			assert.is_true(dev.link_offline())
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "online", rid = "r2" })
+			assert.is_true(dev.link_offline(), "another rid's word is not ours")
+			dispatch.commands["HUE_BRIDGE_LINK"]({ state = "online", rid = "r1" })
+			assert.is_false(dev.link_offline())
+		end)
+	end)
+
+	describe("the binding a proxy command is taken on (#483 D-7)", function()
+		it("takes the proxy's commands on 5001 only", function()
+			local _, c4, _, dispatch = new_device({ settings = { "preset" } })
+			dispatch.received_from_proxy(201, "SET_PRESET_LEVEL", { LEVEL = "5" })
+			dispatch.received_from_proxy(200, "BUTTON_ACTION", { BUTTON_ID = "0", ACTION = "1" })
+			assert.is_nil(c4.persist.preset_level, "until #483 a Button Link changed Default On Brightness")
+			assert.equal(0, #c4.calls_to("SendToProxy"))
+			dispatch.received_from_proxy(5001, "SET_PRESET_LEVEL", { LEVEL = "5" })
+			assert.equal(5, c4.persist.preset_level)
+		end)
+
+		it("leaves the Button Link commands to their own check (a link only)", function()
+			local _, _, _, dispatch, st = new_device()
+			dispatch.received_from_proxy(200, "DO_PUSH", {})
+			assert.same({ { 0, 1 } }, st.buttons)
+			local lines = capture_log()
+			dispatch.received_from_proxy(5001, "DO_PUSH", {})
+			assert.same({ "[WARN] Hue Test: DO_PUSH on binding 5001: not a Button Link" }, lines)
+		end)
+
+		it("takes a command a driver names on its own binding there only (motion: GET_SENSOR_VALUE on 2)", function()
+			package.loaded["common.device"] = nil
+			package.loaded["common.dispatch"] = nil
+			fake.install_c4({})
+			local device = require("common.device")
+			local dispatch = require("common.dispatch")
+			device.new({ prefix = "Hue Test", tree = "motion", bridge = function() return 15 end,
+				rid = function() return "r1" end, proxy_bindings = { GET_SENSOR_VALUE = 2 } })
+			local asked = 0
+			dispatch.proxy["GET_SENSOR_VALUE"] = function() asked = asked + 1 end
+			dispatch.received_from_proxy(5001, "GET_SENSOR_VALUE", {})
+			assert.equal(0, asked)
+			dispatch.received_from_proxy(2, "GET_SENSOR_VALUE", {})
+			assert.equal(1, asked)
+			assert.is_false(dispatch.proxy_binding_ok(2, "GET_STATE"))
+			assert.is_true(dispatch.proxy_binding_ok(5001, "GET_STATE"))
+		end)
+	end)
+
+	describe("BUTTON_ACTION's numbers (#486 D-4)", function()
+		it("takes BUTTON_ID and ACTION only as 0, 1 or 2, and echoes nothing else", function()
+			local _, c4, _, dispatch, st = new_device()
+			local lines = capture_log()
+			for _, p in ipairs({ { "nan", "1" }, { "0", "nan" }, { "3", "1" }, { "0", "4" }, { "-1", "1" },
+				{ "1.5", "1" }, { "inf", "1" } }) do
+				dispatch.received_from_proxy(5001, "BUTTON_ACTION", { BUTTON_ID = p[1], ACTION = p[2] })
+			end
+			assert.same({}, st.buttons)
+			assert.equal(0, #c4.calls_to("SendToProxy"), "until #486 \"nan\" was echoed, then raised")
+			assert.equal(7, #lines)
+			assert.equal("[WARN] Hue Test: BUTTON_ACTION with BUTTON_ID nan and ACTION 1 ignored: each is 0, 1 or 2",
+				lines[1])
+			dispatch.received_from_proxy(5001, "BUTTON_ACTION", { BUTTON_ID = "2", ACTION = "0" })
+			assert.same({ { 2, 0 } }, st.buttons)
+		end)
+	end)
+
+	describe("Director's log of the device's messages (#493 D-8)", function()
+		it("send, send_to and goodbye pass allowEmptyValues false and logCommand only in Debug Mode", function()
+			local dev, c4 = new_device()
+			dev.send("HUE_SET", { rid = "r1" })
+			dev.send_to(15, "HUE_HELLO", { rid = "r1" })
+			dev.goodbye("HUE_GOODBYE")
+			log.set_debug(true)
+			dev.send("HUE_SET", { rid = "r1" })
+			local flags = {}
+			for i, m in ipairs(c4.sent) do
+				flags[i] = { m.allow_empty, m.log_command }
+			end
+			assert.same({ { false, false }, { false, false }, { false, false }, { false, true } }, flags)
+		end)
+	end)
+
+	describe("Debug Mode's own end (#493 C-5)", function()
+		local HOURS_8 = 8 * 3600 * 1000
+
+		it("turns itself Off 8 hours after it was turned On, and Last Action says so", function()
+			local dev, c4, env, dispatch = new_device()
+			assert.equal(HOURS_8, dev and require("common.device").DEBUG_MS)
+			dispatch.property_changed("Debug Mode", "On")
+			assert.is_true(log.enabled("debug"))
+			assert.equal(c4.now_ms + HOURS_8, c4.persist.debug_mode_until)
+			c4.advance(HOURS_8 - 1)
+			assert.is_true(log.enabled("debug"))
+			c4.advance(1)
+			assert.is_false(log.enabled("debug"))
+			assert.equal("Off", env.Properties["Debug Mode"])
+			assert.equal("Debug Mode turned itself Off after 8 hours", env.Properties["Last Action"])
+			assert.is_nil(c4.persist.debug_mode_until)
+			assert.same({}, delays(c4))
+		end)
+
+		it("a timer that fires early waits on for what is left", function()
+			local _, c4, env, dispatch = new_device()
+			dispatch.property_changed("Debug Mode", "On")
+			c4.fire_timers() -- no time has passed
+			assert.is_true(log.enabled("debug"))
+			assert.equal("Off", env.Properties["Debug Mode"], "the row as install_c4 set it: untouched")
+			assert.same({ HOURS_8 }, delays(c4))
+		end)
+
+		it("keeps the time left across a restart, and turns Off at once when it passed meanwhile", function()
+			local _, c4, _, dispatch = new_device()
+			c4.persist.debug_mode_until = c4.now_ms + 3600000
+			dispatch.property_changed("Debug Mode", "On") -- the replay at late init
+			assert.same({ 3600000 }, delays(c4))
+			assert.equal(c4.now_ms + 3600000, c4.persist.debug_mode_until, "not extended")
+
+			local _, c42, env2, dispatch2 = new_device()
+			c42.persist.debug_mode_until = c42.now_ms - 1
+			dispatch2.property_changed("Debug Mode", "On")
+			assert.is_false(log.enabled("debug"))
+			assert.equal("Off", env2.Properties["Debug Mode"])
+			assert.equal("Debug Mode turned itself Off after 8 hours", env2.Properties["Last Action"])
+		end)
+
+		it("starts a fresh 8 hours for a stored end it did not write (too far off, or not a number)", function()
+			for _, stored in ipairs({ "nan", "inf", 1e300, "x" }) do
+				local _, c4, _, dispatch = new_device()
+				c4.persist.debug_mode_until = stored
+				dispatch.property_changed("Debug Mode", "On")
+				assert.same({ HOURS_8 }, delays(c4), tostring(stored))
+			end
+		end)
+
+		it("Off by hand forgets the end; cancel_timers keeps it for the next instance", function()
+			local dev, c4, _, dispatch = new_device()
+			dispatch.property_changed("Debug Mode", "On")
+			dispatch.property_changed("Debug Mode", "Off")
+			assert.is_nil(c4.persist.debug_mode_until)
+			assert.same({}, delays(c4))
+			dispatch.property_changed("Debug Mode", "On")
+			dev.cancel_timers()
+			assert.same({}, delays(c4))
+			assert.is_not_nil(c4.persist.debug_mode_until)
+		end)
+	end)
+
+	describe("builds (#492 I-4 to I-6)", function()
+		-- Run `fn` with common/build_kind.lua answering `kind`, as tools/build.sh
+		-- writes it into every package.
+		local function as_kind(kind, fn)
+			package.loaded["common.build_kind"] = nil
+			package.preload["common.build_kind"] = function() return kind end
+			local ok, err = pcall(fn)
+			package.preload["common.build_kind"] = nil
+			package.loaded["common.build_kind"] = nil
+			assert(ok, err)
+		end
+
+		it("build_kind reads common/build_kind.lua; without it (the specs) or with another value, source", function()
+			local device = require("common.device")
+			assert.equal("source", device.build_kind())
+			as_kind("dev", function() assert.equal("dev", device.build_kind()) end)
+			as_kind("release", function() assert.equal("release", device.build_kind()) end)
+			as_kind("beta", function() assert.equal("source", device.build_kind()) end)
+		end)
+
+		it("a dev build's Driver Version reads <build>-dev; a release's, or one without a kind, the build (I-4)",
+			function()
+				as_kind("dev", function()
+					local dev, c4, env = new_device()
+					dev.show_driver_version(1)
+					assert.equal("1-dev", env.Properties["Driver Version"])
+					c4.config_info.version = ""
+					dev.show_driver_version(1)
+					assert.equal("", env.Properties["Driver Version"], "empty stays empty, and is looked at again")
+				end)
+				as_kind("release", function()
+					local dev, _, env = new_device()
+					dev.show_driver_version(1)
+					assert.equal("1", env.Properties["Driver Version"])
+				end)
+				local dev, _, env = new_device()
+				dev.show_driver_version(1)
+				assert.equal("1", env.Properties["Driver Version"])
+			end)
+
+		it("a release build locks Composer's Lua window at init; a dev build or one without a kind does not (I-5)",
+			function()
+				as_kind("release", function()
+					local dev, c4 = new_device()
+					assert.equal("release", dev.init())
+					assert.same({ { false } }, c4.calls_to("AllowExecute"))
+				end)
+				as_kind("dev", function()
+					local dev, c4 = new_device()
+					assert.equal("dev", dev.init())
+					assert.same({}, c4.calls_to("AllowExecute"), "dp3's AllowExecute(true) stays in charge")
+				end)
+				local dev, c4 = new_device()
+				assert.equal("source", dev.init())
+				assert.same({}, c4.calls_to("AllowExecute"))
+			end)
+
+		it("a release build that finds the dev loop warns, and uses it not: no DEV_RELOAD, no forwarding (I-6)",
+			function()
+				as_kind("release", function()
+					local sink = function() end
+					log.sink = sink
+					local dev, c4, _, dispatch = new_device()
+					assert.is_function(dispatch.commands["DEV_RELOAD"], "the module is there")
+					local lines = {}
+					log.sink = function(line) lines[#lines + 1] = line end
+					dev.init()
+					assert.same({ "[WARN] Hue Test: this release build found the dev loop of an earlier dev build "
+						.. "(common/devloop.lua); not used" }, lines)
+					assert.is_nil(dispatch.commands["DEV_RELOAD"])
+					assert.is_nil(dev.devloop)
+					assert.equal(sink, log.sink, "the sink from before the loop wrapped it")
+					log.warn("after")
+					dev.flush_log()
+					assert.equal(0, #c4.sent, "nothing forwarded as HUE_LOG")
+				end)
+				as_kind("dev", function()
+					local dev, _, _, dispatch = new_device()
+					dev.init()
+					assert.is_function(dispatch.commands["DEV_RELOAD"], "a dev build keeps its loop")
+				end)
+			end)
+	end)
+
 	describe("parsers", function()
 		it("text is a string or nil for absent and empty", function()
 			local device = require("common.device")

@@ -129,4 +129,21 @@ describe("common.link", function()
 			assert.equal("Hue Bridge not answering since 11-09 23:50", link.text(l, at(2026, 11, 10, 0, 5)))
 		end)
 	end)
+
+	-- #487 D-6: every time goes through common/num.lua.
+	describe("times os.date cannot take (#487)", function()
+		it("drops a since past 2100, NaN or an infinity: the text names no time", function()
+			for _, since in ipairs({ "4102444800", "4294967295", "nan", "inf", "1e300", "-5" }) do
+				local l = link.parse({ state = "offline", since = since })
+				assert.is_nil(l.since, since)
+				assert.equal("Hue Bridge not answering", link.text(l, NOW), since)
+			end
+		end)
+
+		it("clock reads ? for a time os.date cannot take, never raises", function()
+			assert.equal("?", link.clock(1e300, NOW))
+			assert.equal("?", link.clock(0 / 0, NOW))
+			assert.equal(link.clock(TODAY), link.clock(TODAY, "nan"), "a bad now is the controller's clock")
+		end)
+	end)
 end)

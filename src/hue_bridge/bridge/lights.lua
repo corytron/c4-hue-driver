@@ -376,6 +376,21 @@ function lights:device_for(rid)
 	return entry and entry.device_id or nil
 end
 
+-- The entry of a light that is "linked" (neither gone in Hue nor unbound
+-- from this bridge) and has a device, else nil and the entry's state
+-- ("unknown" without one): HUE_SET and HUE_DIM act for linked lights only
+-- (security review 2026-11-13 D-2, #485).
+function lights:linked_entry(rid)
+	local entry = rid ~= nil and self.registry[rid] or nil
+	if type(entry) ~= "table" then
+		return nil, "unknown"
+	end
+	if entry.state == "linked" and entry.device_id then
+		return entry
+	end
+	return nil, tostring(entry.state)
+end
+
 -- The proxy device id AddDevice reported for the light, or nil (not every
 -- OS reports one, and entries imported before it was kept have none).
 function lights:proxy_for(rid)

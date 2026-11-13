@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """CLI for the dev loop (docs/dev-loop.md). Talks to tools/devserver.py over
-its plain-HTTP port, found through build/dev/server.json (--server overrides);
-`log` reads build/dev/driver.log directly, so run it on the VM the server runs
-on. Every server call carries the admin token, derived from the dev key file
-the server uses (~/.config/c4-hue-driver/devkey, or $C4_HUE_DEVKEY_FILE, or
---key-file); the key itself never leaves this machine.
+its plain-HTTP port, found through build/dev/server.json (--server overrides
+the address); `log` reads build/dev/driver.log directly, so run it on the VM
+the server runs on. Every server call carries the admin token of the server's
+current run, which only that file holds (mode 0600): the server draws a new
+one at each start, and nothing derives it from the dev key (security review
+2026-11-13, I-1).
 
   devctl.py status                               versions of every tree (running vs
                                                  local), the dev key, last contact,
@@ -22,7 +23,7 @@ the server uses (~/.config/c4-hue-driver/devkey, or $C4_HUE_DEVKEY_FILE, or
 `run`, `set` and `reload` print only the queued command's id, so
 `devctl.py wait $(devctl.py run "Connection Test")` works.
 
-Exit codes: 0 success, 1 error (server unreachable, bad arguments, no key), 2 timeout.
+Exit codes: 0 success, 1 error (server unreachable, bad arguments, no server.json or token), 2 timeout.
 Standard library only.
 """
 
@@ -61,29 +62,39 @@ class DevctlError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def server_url(state_dir):
-    """The URL devserver.py wrote to <state_dir>/server.json when it started."""
+def server_file(state_dir):
+    """What devserver.py wrote to <state_dir>/server.json when it started, as a dict."""
     path = os.path.join(state_dir, "server.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
-            url = json.load(f).get("url")
+            info = json.load(f)
     except FileNotFoundError:
-        raise DevctlError("no %s: is tools/devserver.py running? (or pass --server URL)" % path) from None
-    except (OSError, ValueError, AttributeError) as exc:
-        raise DevctlError("unreadable %s (%s); pass --server URL" % (path, exc)) from exc
+        raise DevctlError("no %s: is tools/devserver.py running?" % path) from None
+    except (OSError, ValueError) as exc:
+        raise DevctlError("unreadable %s (%s)" % (path, exc)) from exc
+    if not isinstance(info, dict):
+        raise DevctlError("%s is not a JSON object" % path)
+    info["_path"] = path
+    return info
+
+
+def server_url(info):
+    """The plain-HTTP URL in server.json."""
+    url = info.get("url")
     if not isinstance(url, str) or not url.startswith("http://"):
-        raise DevctlError("%s holds no http:// url; pass --server URL" % path)
+        raise DevctlError("%s holds no http:// url; pass --server URL" % info["_path"])
     return url
 
 
-def token_for(key_file):
-    """The admin token for the key in `key_file` (never the key itself)."""
-    try:
-        return devserver.admin_token(devserver.load_key(key_file))
-    except devserver.DevKeyError as exc:
-        raise DevctlError(str(exc)) from exc
-    except OSError as exc:
-        raise DevctlError("cannot read the dev key file %s (%s)" % (key_file, exc.strerror or exc)) from exc
+def server_token(info):
+    """The admin token of the server's current run, from server.json."""
+    token = info.get("admin_token")
+    if not isinstance(token, str) or not devserver.TOKEN_RE.fullmatch(token):
+        raise DevctlError(
+            "%s holds no admin token: restart tools/devserver.py (a server from before the token was drawn at "
+            "random writes none)" % info["_path"]
+        )
+    return token
 
 
 def api(server, method, path, body=None, token=None):
@@ -103,8 +114,8 @@ def api(server, method, path, body=None, token=None):
         detail = exc.read().decode("utf-8", "replace").strip()
         if exc.code == 401:
             raise DevctlError(
-                "%s %s -> HTTP 401: the server refused the admin token; does it use the same dev key file "
-                "(compare the fingerprint it printed at start with `tools/devserver.py --ensure-key`)?" % (method, path)
+                "%s %s -> HTTP 401: the server refused the admin token; is the server.json read here the one of "
+                "the server at %s (--state-dir), and was the server restarted since?" % (method, path, server)
             ) from exc
         raise DevctlError("%s %s -> HTTP %d %s" % (method, path, exc.code, detail)) from exc
     except (urllib.error.URLError, OSError) as exc:
@@ -426,12 +437,9 @@ def build_parser():
         "--server", default=None, help="devserver plain-HTTP base URL (default: the url in <state-dir>/server.json)"
     )
     parser.add_argument(
-        "--state-dir", default=DEFAULT_STATE, help="the server's state directory (default %s)" % DEFAULT_STATE
-    )
-    parser.add_argument(
-        "--key-file",
-        default=None,
-        help="the dev key the server uses (default $%s, else ~/.config/c4-hue-driver/devkey)" % devserver.KEY_FILE_ENV,
+        "--state-dir",
+        default=DEFAULT_STATE,
+        help="the server's state directory, whose server.json holds the admin token (default %s)" % DEFAULT_STATE,
     )
     sub = parser.add_subparsers(dest="cmd", metavar="command")
     sub.required = True
@@ -478,11 +486,9 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         if args.func is not cmd_log:
-            key_file = (
-                os.path.abspath(os.path.expanduser(args.key_file)) if args.key_file else devserver.default_key_file()
-            )
-            args.token = token_for(key_file)
-            args.server = (args.server or server_url(args.state_dir)).rstrip("/")
+            info = server_file(args.state_dir)
+            args.token = server_token(info)
+            args.server = (args.server or server_url(info)).rstrip("/")
         return args.func(args)
     except DevctlError as exc:
         sys.stderr.write("devctl: %s\n" % exc)

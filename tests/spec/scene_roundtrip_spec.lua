@@ -279,6 +279,15 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.is_true(ok)
 		assert.equal("Re-linked device 2001 (was Relax) to Living Room: Savanna sunset", text)
 		assert.equal(2, fake.pump())
+		-- #483 D-1: that configure came by itself, not as the answer to the
+		-- device's hello, so the device leaves it and asks the bridge with a
+		-- hello; the bridge answers with the rid it holds for the device.
+		assert.equal("Scene deleted in Hue since " .. os.date("%Y-%m-%d %H:%M", now)
+			.. "; ON does nothing; Link or Forget Device", scene.Properties["Status"])
+		assert.equal(1, fake.as(scene, scene.C4.fire_timers_of, 500))
+		assert.equal("HUE_SCENE_HELLO", scene.C4.sent[#scene.C4.sent].command)
+		assert.equal(F.scene_rids.relax, scene.C4.sent[#scene.C4.sent].params.rid)
+		assert.equal(4, fake.pump(), "the hello, and the bridge's link, configure and state")
 		assert.equal("Hue scene Savanna sunset in Living Room", scene.Properties["Status"])
 		assert.equal(F.scene_rids.savanna, scene.C4.persist.hue_rid)
 		assert.equal("Relax", fake.project.devices[SCENE_ID].name, "the Composer name is the owner's")

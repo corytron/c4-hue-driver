@@ -18,8 +18,18 @@
 #
 # Each driver is staged into build/stage/<driver>/ with src/common copied in
 # as common/, so `require("common.log")` resolves inside the .c4z the same way
-# it does in the tests. The driver.xml <version> is set to the git commit
+# it does in the tests. Only the files git tracks under src/ are staged, as the
+# working tree has them (security review 2026-11-13, I-8): an untracked file,
+# an agent's scratch module or a *.orig, never reaches a package, and the build
+# names each one it left out. The driver.xml <version> is set to the git commit
 # count so every build from a newer commit is seen by Composer as an update.
+#
+# Every package carries common/build_version.lua (that count) and
+# common/build_kind.lua, which says "dev" in a --dev build and "release"
+# otherwise: a dev build's devices show Driver Version "<count>-dev", so it is
+# never taken for the release with the same count (I-4). The staged
+# Documentation tab, the changelog filled in, passes tools/check_doc_tabs.py
+# (I-7) before it is packed.
 #
 # The drivers are staged and packed at the same time, each in its own stage
 # and its own dp3 run (issue #456); each driver's lines are printed in the
@@ -87,6 +97,11 @@ version="$(git -C "$ROOT" rev-list --count HEAD)"
 if [[ -n "$(git -C "$ROOT" status --porcelain -- src)" ]]; then
 	echo "warning: src/ has uncommitted changes; version $version may repeat" >&2
 fi
+# What the stage leaves out (I-8): files under src/ git does not track. Named,
+# so a new module that was never added is not missed on the controller.
+while IFS= read -r -d '' untracked; do
+	echo "warning: $untracked is not tracked by git: it is left out of every package (git add it to ship it)" >&2
+done < <(git -C "$ROOT" ls-files -z --others --exclude-standard -- src)
 
 # The changelog at the bottom of every Documentation tab (docs/changelog-design.md
 # §3): rendered once from CHANGELOG.md, as this release when HEAD carries a
@@ -134,12 +149,29 @@ fi
 rm -rf "$stage_root"
 mkdir -p "$stage_root"
 
+# Copy the files git tracks in src/<from>/ into <to>/, as the working tree has
+# them (I-8). A tracked file deleted from the working tree is not shipped.
+stage_tracked() {
+	local from="$ROOT/src/$1" to="$2" path files=()
+	while IFS= read -r -d '' path; do
+		if [[ -e "$from/$path" || -L "$from/$path" ]]; then
+			files+=("$path")
+		fi
+	done < <(git -C "$from" ls-files -z --cached -- .)
+	if [[ ${#files[@]} -eq 0 ]]; then
+		echo "git tracks no file under src/$1" >&2
+		exit 1
+	fi
+	mkdir -p "$to"
+	(cd "$from" && cp --parents -p -- "${files[@]}" "$to/")
+}
+
 # Stage and pack one driver; run in the background, its output into its own log.
 build_driver() {
 	local driver="$1" stage doc manifest name entry
 	stage="$stage_root/$driver"
-	cp -R "$ROOT/src/$driver" "$stage"
-	cp -R "$ROOT/src/common" "$stage/common"
+	stage_tracked "$driver" "$stage"
+	stage_tracked common "$stage/common"
 	if [[ "$dev_build" == yes ]]; then
 		# What common/devloop.lua checks every bundle and command against.
 		# printf is a builtin, so the key is on no command line.
@@ -177,6 +209,12 @@ with open(fragment, encoding="utf-8") as f:
 with open(doc, "w", encoding="utf-8") as f:
     f.write(text.replace("<!-- CHANGELOG -->", html, 1))
 PY
+	# The tab as it ships, changelog included: nothing in it runs or fetches (I-7).
+	if ! JOBS=1 python3 -I "$ROOT/tools/check_doc_tabs.py" "$stage"/www/*.html >"$stage.doc-tabs" 2>&1; then
+		cat "$stage.doc-tabs" >&2
+		exit 1
+	fi
+	rm -f "$stage.doc-tabs"
 	# Apache 2.0 §4: the license and notice travel with every package.
 	cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$stage/"
 	# The device drivers' shared module is of no use to the bridge.
@@ -186,6 +224,13 @@ PY
 	# The drivers' own copy of the version: Director's answer is empty at the
 	# first init of a device created by AddDevice (docs/status.md, 2026-10-24).
 	printf 'return "%s"\n' "$version" > "$stage/common/build_version.lua"
+	# What kind of build this is (I-4): a dev build's Driver Version reads
+	# "<version>-dev". The <version> itself stays the number Composer compares.
+	if [[ "$dev_build" == yes ]]; then
+		printf 'return "dev"\n' > "$stage/common/build_kind.lua"
+	else
+		printf 'return "release"\n' > "$stage/common/build_kind.lua"
+	fi
 
 	# dp3 only stamps <version>/<modified> when building from a manifest, so
 	# generate one listing everything staged (directories recursively).

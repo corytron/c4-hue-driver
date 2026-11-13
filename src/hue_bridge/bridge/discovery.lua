@@ -3,9 +3,11 @@
 -- Hue bridges on the controller's network, never through the internet.
 --
 --   local d = discovery.new(ctx)
---   d:find_all(done(list, detail))
+--   d:find_all(done(list, detail), want_id)
 --       first load and "Search again": one mDNS search (about 3 s), then
 --       the identity check of every address that answered; nothing more.
+--       want_id (optional, the paired bridge's id) is taken first, as
+--       find_paired's is (below).
 --   d:find_subnet(done(list, detail), around_ip)
 --       the offered search, on a click only: the TCP 443 sweep of the
 --       controller's /24 (and first the /24 of around_ip, when given), then
@@ -144,6 +146,17 @@
 -- In dev builds bridge/probe12.lua's Probe Discovery claims 6004 to 6009
 -- while its own run lasts: do not run it during a discovery search.
 --
+-- What an mDNS answer must be to count (security review 2026-11-13, N-3,
+-- #490): an answer to this window's query, its id repeated (a legacy
+-- unicast answer repeats it, RFC 6762 §6.7; the house's Bridge Pro does,
+-- bridge/mdns.lua); every address it names, and the sender's on OS 4.x,
+-- on the controller's own kind of network (mdns.usable_address: private,
+-- link-local, documentation), never the internet. A window parses at most
+-- MAX_ANSWERS datagrams, and as many again that name an id a job waits for
+-- (find_paired's, or the paired id find_all is given): a flood of other
+-- answers cannot keep the paired bridge's out. Those addresses are also
+-- checked first.
+--
 -- Identity, exactly as pairing: ctx.identify is pairing.probe, and an
 -- address counts only when the bridge there reports the wanted id (both
 -- through config.normalise_bridge_id). No CN is compared: no API exposes
@@ -159,6 +172,7 @@
 -- persisted (STORE_LAST_SWEEP) before it starts, so no restart resets it.
 
 local config = require("bridge.config")
+local http = require("bridge.http")
 local mdns = require("bridge.mdns")
 local sweep = require("bridge.sweep")
 
@@ -396,17 +410,25 @@ function D:_close_window(w)
 	end
 end
 
--- `cb(candidates, info)` after the window, joining the one open.
+-- `cb(candidates, info)` after the window, joining the one open. `want`
+-- (optional): a normalised bridge id the caller waits for, whose answers
+-- the window takes beyond MAX_ANSWERS (see the header).
 -- candidates: { { id, raw_id, model, instance, ip, port, via = "a" | "from" } }
-function D:_mdns(cb)
+function D:_mdns(cb, want)
 	local w = self.window
 	if w then
 		w.waiters[#w.waiters + 1] = cb
+		if want then
+			w.want[want] = true
+		end
 		return
 	end
 	self.query_id = self.query_id % 65535 + 1
 	w = { waiters = { cb }, t0 = self:now(), open = true, sent = 0, answers = 0, parsed = 0, rejected = 0,
-		cands = {}, keys = {}, query_id = self.query_id }
+		parsed_wanted = 0, want = {}, cands = {}, keys = {}, query_id = self.query_id }
+	if want then
+		w.want[want] = true
+	end
 	self.window = w
 	local net = self.ctx.net
 	local ok, err = pcall(function()
@@ -469,14 +491,20 @@ function D:_take(w, data, from)
 	local cands, msg = mdns.read(data)
 	if not cands then
 		w.rejected = w.rejected + 1
-		self.log.debug("discovery mdns: an answer of %d bytes not used: %s", #data, tostring(msg))
+		self.log.debug("discovery mdns: an answer of %d bytes not used: %s", #data, http.peer_text(msg, 200))
 		return
 	end
 	if msg.id ~= w.query_id then
-		self.log.debug("discovery mdns: an answer with id 0x%04x to query 0x%04x, taken all the same", msg.id,
-			w.query_id)
+		-- Not an answer to this query (N-3, #490).
+		w.rejected = w.rejected + 1
+		self.log.debug("discovery mdns: an answer with id 0x%04x to query 0x%04x not used", msg.id, w.query_id)
+		return
 	end
 	local sender = type(from) == "string" and config.parse_ipv4(from) or nil
+	if sender and not mdns.usable_address(sender) then
+		self.log.debug("discovery mdns: sender %s is not on a private network; its own address not used", sender)
+		sender = nil
+	end
 	for _, c in ipairs(cands) do
 		local ips = {}
 		for _, ip in ipairs(c.ips) do
@@ -485,9 +513,9 @@ function D:_take(w, data, from)
 		if sender and not contains(ips, sender) then
 			ips[#ips + 1] = sender
 		end
-		self.log.debug("discovery mdns: %q: bridge id %s, model %s, host %s port %s, address %s", c.instance,
-			tostring(c.id or c.raw_id), tostring(c.model), tostring(c.host), tostring(c.port),
-			#ips > 0 and table.concat(ips, " or ") or "none")
+		self.log.debug("discovery mdns: %s: bridge id %s, model %s, host %s port %s, address %s",
+			http.peer_text(c.instance, 300), http.peer_text(c.id or c.raw_id, 64), http.peer_text(c.model, 64),
+			http.peer_text(c.host, 300), tostring(c.port), #ips > 0 and table.concat(ips, " or ") or "none")
 		for _, ip in ipairs(ips) do
 			local key = (c.id or ("?" .. c.instance:lower())) .. "@" .. ip
 			if not w.keys[key] then
@@ -497,6 +525,23 @@ function D:_take(w, data, from)
 			end
 		end
 	end
+end
+
+-- True when the datagram's bytes hold, in any case, an id the window's
+-- jobs wait for: the TXT record's bridgeid (bridge/mdns.lua). A plain
+-- search, before any parsing; a datagram longer than mdns.MAX_PACKET is
+-- refused by the parser anyway and is not searched.
+local function names_wanted(w, data)
+	if next(w.want) == nil or #data > mdns.MAX_PACKET then
+		return false
+	end
+	local lower = data:lower()
+	for id in pairs(w.want) do
+		if lower:find(id, 1, true) then
+			return true
+		end
+	end
+	return false
 end
 
 function D:received(binding, port, data, from)
@@ -511,10 +556,18 @@ function D:received(binding, port, data, from)
 		return true
 	end
 	w.answers = w.answers + 1
-	if w.parsed >= discovery.MAX_ANSWERS then
-		return true
+	if names_wanted(w, data) then
+		-- An answer that names an id a job waits for has a budget of its own (see the header).
+		if w.parsed_wanted >= discovery.MAX_ANSWERS then
+			return true
+		end
+		w.parsed_wanted = w.parsed_wanted + 1
+	else
+		if w.parsed >= discovery.MAX_ANSWERS then
+			return true
+		end
+		w.parsed = w.parsed + 1
 	end
-	w.parsed = w.parsed + 1
 	local ok, err = pcall(self._take, self, w, data, from)
 	if not ok then
 		w.rejected = w.rejected + 1
@@ -656,13 +709,17 @@ end
 
 -- find_all ---------------------------------------------------------------------------
 
-function D:find_all(done)
+function D:find_all(done, want_id)
 	if self.stopped then
 		return
 	end
+	local want = config.normalise_bridge_id(want_id)
 	local running = self.jobs.all
 	if running then
 		running.waiters[#running.waiters + 1] = done
+		if want and self.window then
+			self.window.want[want] = true
+		end
 		return
 	end
 	local items, dropped = {}, {}
@@ -672,9 +729,13 @@ function D:find_all(done)
 	end)
 	self:_mdns(self:_guard(job, function(cands, info)
 		local ips = {}
-		for _, c in ipairs(cands) do
-			if not contains(ips, c.ip) then
-				ips[#ips + 1] = c.ip
+		-- The wanted id's addresses first (see the header), then the rest.
+		for pass = 1, 2 do
+			for _, c in ipairs(cands) do
+				local first = want ~= nil and c.id == want
+				if (pass == 1) == first and not contains(ips, c.ip) then
+					ips[#ips + 1] = c.ip
+				end
 			end
 		end
 		self:_check_each(job, ips, function(ip, found, err)
@@ -682,8 +743,8 @@ function D:find_all(done)
 				add_item(items, item_of(found, ip, "mdns"), self.log)
 				for _, c in ipairs(cands) do
 					if c.ip == ip and c.id and c.id ~= found.bridge_id then
-						self.log.debug("discovery mdns: %s announced bridge %s at %s, but bridge %s answers there", c.instance,
-							c.id, ip, found.bridge_id)
+						self.log.debug("discovery mdns: %s announced bridge %s at %s, but bridge %s answers there",
+							http.peer_text(c.instance, 300), c.id, ip, found.bridge_id)
 					end
 				end
 			else
@@ -704,7 +765,7 @@ function D:find_all(done)
 			self:_deliver(job, sorted(items), { text = text, mdns = info, dropped = dropped, error = info.error,
 				ms = self:now() - job.t0 })
 		end)
-	end))
+	end), want)
 end
 
 -- Sweeps ----------------------------------------------------------------------------
@@ -1020,7 +1081,7 @@ function D:find_paired(bridge_id, last_ip, done)
 				or (#ips == 0 and "mDNS: no answer for it" or "mDNS: its answer did not check out")
 			self:_paired_sweep(job, last_ip, info, heard)
 		end)
-	end))
+	end), id)
 end
 
 function D:_paired_sweep(job, last_ip, mdns_info, heard)
@@ -1154,7 +1215,9 @@ end
 function discovery.item_label(item, paired_id)
 	local paired = config.normalise_bridge_id(paired_id)
 	local model = tostring(item.model or "")
-	local label = MODEL_LABELS[model] or (model:match("^BSB") and ("Hue bridge " .. model)) or "Hue bridge"
+	-- The peer's model id, cut (#489): a real one is six characters.
+	local label = MODEL_LABELS[model] or (model:match("^BSB") and ("Hue bridge " .. http.peer_text(model, 16)))
+		or "Hue bridge"
 	local tail
 	if item.supported == false or model == "BSB001" then
 		tail = "not supported (no CLIP v2)"
@@ -1164,8 +1227,13 @@ function discovery.item_label(item, paired_id)
 		tail = tostring(item.id or ""):sub(-6):upper()
 	end
 	local prefix = (paired and item.id == paired) and "(paired) " or ""
-	local name = tostring(item.name or ""):gsub("%c", ""):gsub("^%s+", ""):gsub("%s+$", "")
-	name = utf8_head(name, 20)
+	-- Its first 20 characters, without control characters and the blanks
+	-- around them. Cut before it is trimmed, so the trim reads at most 80
+	-- bytes: "%s+$" on the whole name took time quadratic in an inner run of
+	-- blanks, and the name is the peer's, of any length (security review
+	-- 2026-11-13, N-4, #489).
+	local name = tostring(item.name or ""):sub(1, 4096):gsub("%c", ""):gsub("^%s+", "")
+	name = utf8_head(name, 20):gsub("%s+$", "")
 	local function build(n)
 		local parts = { prefix .. label }
 		if n ~= "" then

@@ -77,6 +77,46 @@ describe("bridge.commands", function()
 			assert.same({ on = { on = true }, dynamics = { duration = 400 } }, commands.body({ on = true, rate = 400 }))
 			assert.same({}, commands.body({ rate = 400 }), "a lone rate is nothing to send")
 		end)
+
+		-- Security review 2026-11-13 C-3 (#486): Lua 5.1's tonumber reads "nan"
+		-- and "inf", and NaN fails every comparison of clamp().
+		it("leaves out every number that is not finite, and caps the duration at 100 minutes", function()
+			local nan, inf = 0 / 0, math.huge
+			assert.same({}, commands.body({ brightness = nan, x = nan, y = 0.3, mirek = inf, rate = inf }))
+			assert.same({ on = { on = true } }, commands.body({ on = true, brightness = nan, rate = nan }))
+			assert.same({ dimming = { brightness = 50 }, dynamics = { duration = 6000000 } },
+				commands.body({ brightness = 50, rate = 1e15 }))
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 } },
+				commands.body({ dim = "up", delta = nan, rate = -inf }))
+			assert.same({ mirek = 153 }, commands.body({ mirek = 100 }, { mirek_min = nan, mirek_max = inf })
+				.color_temperature, "limits that are not finite are Hue's 153..500")
+		end)
+	end)
+
+	-- Security review 2026-11-13 C-3 (#486).
+	describe("numbers that are not finite", function()
+		it("are dropped by set(), never kept or sent; a rate is clamped to 0..RATE_MAX", function()
+			set_now("r", { on = true, brightness = "nan", x = "inf", y = "-inf", mirek = "nan", rate = "1e400" })
+			assert.equal(1, #sends)
+			assert.same({ on = { on = true } }, sends[1].body)
+			sends[1].done({ ok = true, code = 200 })
+
+			set_now("r", { brightness = "1e300", rate = "1e15" })
+			assert.same({ dimming = { brightness = 100 }, on = { on = true }, dynamics = { duration = 6000000 } },
+				sends[2].body)
+			sends[2].done({ ok = true, code = 200 })
+
+			set_now("r", { dim = "up", rate = "inf", level = "nan", delta = "nan" })
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 } }, sends[3].body)
+			assert.equal(6000000, commands.RATE_MAX)
+		end)
+
+		it("leave a tap's stop on an unsent ramp without a level", function()
+			q:set("r", { brightness = 40, on = true, rate = 2000 })
+			q:set("r", { dim = "stop", level = "nan" })
+			c4.fire_timers()
+			assert.equal(0, #sends, "nothing to send: the stop has no level")
+		end)
 	end)
 
 	describe("set()", function()

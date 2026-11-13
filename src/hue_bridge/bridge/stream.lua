@@ -4,7 +4,9 @@
 -- each Hue "container" to the owner. Reconnects with backoff whenever the
 -- transfer ends, and a watchdog reconnects if nothing at all arrives for a
 -- while. Every reconnect is reported through on_status so the owner can
--- resync state with a full GET. A 401 or 403 is the bridge refusing the
+-- resync state with a full GET, and the owner calls resynced() once that
+-- resync succeeded: only then does the backoff go back to BACKOFF_MIN, not
+-- at a bare 200 (security review 2026-11-13, N-7, #489). A 401 or 403 is the bridge refusing the
 -- application key: every reconnect would present the same key, so the
 -- stream stops for good instead and tells the owner once, through
 -- on_key_rejected (issue #44).
@@ -133,7 +135,7 @@ function stream.new(opts)
 		connected_timer = nil,      -- defers on_connected out of OnHeaders
 		retry_timer = nil,
 		backoff = stream.BACKOFF_MIN,
-		hold_backoff = false,       -- an oversized line ended a transfer: keep the backoff (handle_headers)
+		hold_backoff = false,       -- an oversized line ended a transfer: resynced() keeps the backoff
 		cap_waiting = false,        -- connect() is waiting for an earlier transfer to close (wait_for_close)
 		abandoned = opts.abandoned or {}, -- see MAX_ABANDONED
 		transfer_expires_ms = nil,  -- when the current transfer's own timeout ends it
@@ -390,14 +392,7 @@ function stream:handle_headers(code)
 		return true -- abort; handle_done will run with err_code -1
 	end
 	self.state = "connected"
-	-- A connection resets the backoff, except after a transfer that ended in
-	-- an oversized line: a peer that answers 200 and then overflows would be
-	-- reconnected every second otherwise. The doubled backoff stays until a
-	-- transfer delivers an event normally (handle_chunk) [security review
-	-- 2026-10-25, finding 5].
-	if not self.hold_backoff then
-		self.backoff = stream.BACKOFF_MIN
-	end
+	-- The backoff is not reset here: only resynced() resets it (N-7, #489).
 	self.stats.connected_since = clock()
 	self.stats.started = self.stats.started or self.stats.connected_since
 	self:arm_watchdog()
@@ -506,11 +501,23 @@ function stream:handle_chunk(data)
 		-- OnDone (errCode -1, SDK 35_url/_8-OnDone) forgets it.
 		return true
 	end
-	if normal > 0 and self.hold_backoff then
-		self.hold_backoff = false
-		self.backoff = stream.BACKOFF_MIN
+	if normal > 0 then
+		self.hold_backoff = false -- resynced() may reset the backoff again
 	end
 	return false
+end
+
+-- The owner's resync after this transfer's on_connected succeeded: the
+-- backoff goes back to BACKOFF_MIN, while the transfer is still connected
+-- and unless an oversized line holds it (until a transfer delivers an event
+-- normally) [security review 2026-10-25, finding 5]. A bare 200 no longer
+-- resets it: a peer that answers 200 and ends the transfer was reconnected
+-- every second, with the key, and the resync and the identity re-check
+-- after an outage never ran (security review 2026-11-13, N-7, #489).
+function stream:resynced()
+	if self.state == "connected" and not self.hold_backoff then
+		self.backoff = stream.BACKOFF_MIN
+	end
 end
 
 -- An event of the current transfer. One that an abandoned transfer already
@@ -565,9 +572,11 @@ function stream:handle_event(event)
 	self.stats.events = self.stats.events + 1
 	self.stats.last_event = clock()
 	local containers, err = http.decode(event.data)
+	-- The event id is the peer's text, up to a line long (#489): capped in every log line.
+	local id = http.peer_text(event.id, 64)
 	if type(containers) ~= "table" then
-		log.warn("event stream: undecodable event %s: %s", tostring(event.id),
-			tostring(err or ("a " .. type(containers) .. ", not a list")))
+		log.warn("event stream: undecodable event %s: %s", id,
+			http.peer_text(err or ("a " .. type(containers) .. ", not a list"), http.TEXT_LOG))
 		return false
 	end
 	local skipped = 0
@@ -583,7 +592,8 @@ function stream:handle_event(event)
 						types[#types + 1] = type(item) == "table" and tostring(item.type) or type(item)
 					end
 				end
-				log.debug("event %s %s: %s", tostring(event.id), tostring(container.type), table.concat(types, ","))
+				log.debug("event %s %s: %s", id, http.peer_text(container.type, 64),
+					http.peer_text(table.concat(types, ","), http.TEXT_LOG))
 			end
 			if self.opts.on_container then
 				self.opts.on_container(container, event)
@@ -591,7 +601,7 @@ function stream:handle_event(event)
 		end
 	end
 	if skipped > 0 then
-		log.warn("event stream: event %s: skipped %d container(s) that are not objects", tostring(event.id), skipped)
+		log.warn("event stream: event %s: skipped %d container(s) that are not objects", id, skipped)
 	end
 	-- The per-event text only while connected: an abandoned transfer's last
 	-- chunk can arrive while the current one is still connecting or waiting

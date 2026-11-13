@@ -319,10 +319,20 @@ describe("Hue Light driver in Control4 load groups (#435)", function()
 
 		it("learns an unknown GROUP ID and announces it before the command's own request (D6)", function()
 			local env, c4 = light(40)
+			fake.project.devices[1234] = { name = "Kitchen Group" } -- #488: a learnt id names a device
 			group(env, "GROUP_SET_LEVEL", GROUP, { LEVEL = "70" })
 			assert.same({ "HUE_LOAD_GROUPS", "HUE_SET" }, commands(c4))
 			assert.equal("1234:0", c4.sent[1].params.groups)
 			assert.same({ [GROUP] = { sync = false } }, c4.persist.hue_load_groups)
+		end)
+
+		-- #488 (D-3): a GROUP ID no device has is acted on, never learnt.
+		it("acts on a GROUP ID no device has without learning it (#488)", function()
+			local env, c4 = light(40)
+			group(env, "GROUP_SET_LEVEL", "4242", { LEVEL = "70" })
+			assert.same({ "HUE_SET" }, commands(c4), "no HUE_LOAD_GROUPS: nothing learnt")
+			assert.is_nil(c4.persist.hue_load_groups)
+			assert.equal("4242", sent(c4, "HUE_SET")[1].group)
 		end)
 
 		it("takes the proxy's default brightness rate where none is given (#430 D8)", function()
@@ -404,6 +414,7 @@ describe("Hue Light driver in Control4 load groups (#435)", function()
 
 		it("a light that cannot be driven drops a group command with its Status; the id is still learnt (L56)", function()
 			local env, c4 = light(40)
+			fake.project.devices[1234] = { name = "Kitchen Group" } -- #488: a learnt id names a device
 			local since = os.time() - 120
 			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = "not_answering", since = tostring(since) })
 			c4.sent, c4.calls = {}, {}
@@ -422,9 +433,10 @@ describe("Hue Light driver in Control4 load groups (#435)", function()
 
 		it("an unbound light sends nothing at all, and still keeps and shows the group", function()
 			local env, c4 = light(40, { bind = false })
+			fake.project.devices[1234] = { name = "Kitchen Group" } -- #488: a learnt id names a device
 			group(env, "GROUP_SET_LEVEL", GROUP, { LEVEL = "70" })
 			assert.same({}, c4.sent)
-			assert.equal("device 1234 (not found)", env.Properties["Load Groups"])
+			assert.equal("Kitchen Group", env.Properties["Load Groups"])
 			assert.equal("Not bound to a Hue Bridge", env.Properties["Status"])
 		end)
 	end)

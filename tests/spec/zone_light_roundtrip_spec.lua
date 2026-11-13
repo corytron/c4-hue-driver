@@ -338,6 +338,11 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.is_true(ok)
 		assert.equal("Re-linked device 2001 (was Downstairs) to room Garage", text)
 		fake.pump()
+		-- #483 D-1: that configure came by itself, so the device leaves it and
+		-- asks the bridge with a hello, whose answer names the Garage room.
+		assert.equal(F.group_rids.downstairs, light.C4.persist.hue_rid, "not taken by itself")
+		assert.equal(1, fake.as(light, light.C4.fire_timers_of, 500))
+		fake.pump()
 		assert.equal("Hue room Garage (1 light)", light.Properties["Status"])
 		assert.equal(F.group_rids.garage, light.C4.persist.hue_rid)
 		assert.equal("Downstairs", fake.project.devices[DEVICE_ID].name, "the Composer name is the owner's")

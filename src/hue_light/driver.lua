@@ -21,6 +21,8 @@
 local log = require("common.log")
 local dispatch = require("common.dispatch")
 local device = require("common.device")
+-- #486, #487: every number and time from outside (docs/security-fixes-2026-11-design.md).
+local num = require("common.num")
 local state = require("light.state")
 local caps = require("light.caps")
 local turnon = require("light.turnon")
@@ -172,8 +174,8 @@ local setting = dev.setting -- the keypad settings: "preset" (Default On Brightn
 -- "#12" from Hue's v1 id (the bridge sends "/lights/12" or "12"; "/groups/2"
 -- for a zone or room), or nil.
 local function v1_label()
-	local num = st.id_v1 and st.id_v1:match("(%d+)%s*$")
-	return num and ("#" .. num) or nil
+	local digits = st.id_v1 and st.id_v1:match("(%d+)%s*$")
+	return digits and ("#" .. digits) or nil
 end
 
 -- Zone and room devices (kind "group", docs/zone-light-design.md §5
@@ -277,13 +279,15 @@ end
 
 -- "Gone from the Hue bridge since 2026-10-24 12:00; Link or Forget Device"
 -- for a light; "Zone deleted in Hue since 2026-10-24; Link or Forget Device"
--- for a group (the day alone keeps it under 60 characters).
+-- for a group (the day alone keeps it under 60 characters). The time comes
+-- from the bridge's configure, so it goes through num.date (#487 D-6): one
+-- os.date cannot take never raises here.
 local function gone_status()
 	if state.is_group(st) then
-		local since = st.gone_since and (" since " .. os.date("%Y-%m-%d", st.gone_since)) or ""
+		local since = st.gone_since and (" since " .. num.date("%Y-%m-%d", st.gone_since)) or ""
 		return group_word() .. " deleted in Hue" .. since .. "; " .. GONE_REMEDY
 	end
-	local since = st.gone_since and (" since " .. os.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
+	local since = st.gone_since and (" since " .. num.date("%Y-%m-%d %H:%M", st.gone_since)) or ""
 	return "Gone from the Hue bridge" .. since .. "; " .. GONE_REMEDY
 end
 
@@ -601,13 +605,9 @@ end
 -- #430 D20: every rate the light sends Hue, 0 to RATE_MAX (6 000 000 ms,
 -- the Hue duration ceiling the bridge already clamps scenes and groups to
 -- [assumed for a light: docs/turn-on-design.md D20]). A rate that is not a
--- number is 0, as before.
+-- finite number is 0, as before (#486: through common/num.lua).
 local function clamp_rate(rate)
-	rate = tonumber(rate) or 0
-	if rate ~= rate then -- NaN
-		return 0
-	end
-	return math.max(0, math.min(RATE_MAX, rate))
+	return num.clamp(rate, 0, RATE_MAX, 0)
 end
 
 -- Every merge into the cache goes through here. A light that goes from on
@@ -738,7 +738,7 @@ local function hold_back(params)
 		on = st.on
 	end
 	-- No level known at all (a plug never reports one): nothing to compare.
-	local brightness = tonumber(merged.brightness) or st.brightness
+	local brightness = num.finite(merged.brightness) or st.brightness
 	local level = on and brightness and on_level(brightness) or nil
 	local verdict = nil -- "stale" (#308), "ramp" (D10, held), "foreign" (through, ends the ramp)
 	if pending.goal and said ~= false then -- an off always gets past #308
@@ -991,12 +991,16 @@ end
 -- colour stored while the light was off wins (D11); a turn-on from off then
 -- starts or skips the blend (turnon.started). The rate is clamped (#430
 -- D20). A load group's hold still running ends without a stop: the target
--- replaces its dim at Hue (#435, #421 D11).
+-- replaces its dim at Hue (#435, #421 D11). The target is clamped to 0..100
+-- and one that is no finite number is dropped (#486 D-4): "inf" went out as
+-- a brightness of -9223372036854775808, "nan" as "nan".
 local function set_brightness(target, rate, opts)
 	opts = opts or {}
-	target, rate = tonumber(target), clamp_rate(rate)
+	local raw = target
+	target, rate = num.clamp(target, 0, 100), clamp_rate(rate)
 	if not target then
-		return log.warn("brightness command without a target")
+		return log.warn("brightness command without a target%s", raw ~= nil and string.format(" (%q)", tostring(raw))
+			or "")
 	end
 	if not ready("brightness target") then
 		return
@@ -1063,16 +1067,19 @@ end
 -- as the blend for where the light heads, so both orders of the proxy's
 -- turn-on commands end alike. While the light is off a colour waits for the
 -- next turn-on (light_v2 best practice), except the on colour, which the
--- next turn-on sends by itself, blended for its level (D11).
+-- next turn-on sends by itself, blended for its level (D11). #486 D-4: x and
+-- y are taken in 0..1 only, the mode as 0 or 1 (else xy), the preset's id
+-- and origin as finite numbers; anything else is dropped, never sent ("nan"
+-- went out as x = "nan").
 local function set_color(x, y, mode, rate, id, origin)
-	x, y, id, origin = tonumber(x), tonumber(y), tonumber(id), tonumber(origin)
+	x, y, id, origin = num.within(x, 0, 1), num.within(y, 0, 1), num.finite(id), num.finite(origin)
 	if not (x and y) and id then
 		local known = turnon.color_for_preset(modes, id, origin)
 		if known then
-			x, y, mode = known.x, known.y, mode or known.mode
+			x, y, mode = num.within(known.x, 0, 1), num.within(known.y, 0, 1), mode or known.mode
 		end
 	end
-	mode, rate = tonumber(mode) or state.MODE_XY, clamp_rate(rate)
+	mode, rate = num.int(mode, state.MODE_XY, state.MODE_CCT, state.MODE_XY), clamp_rate(rate)
 	if not (x and y) then
 		return log.warn("colour command without x/y%s", id and (" (preset " .. tostring(id) .. " not known)") or "")
 	end
@@ -1161,14 +1168,22 @@ end
 -- when Director's lookup does not reflect the new binding yet. The load
 -- groups follow every hello (#435 D6, E19: the bridge keeps them in memory
 -- only), and the Load Groups row is written with them (E5: names read now).
+-- The first configure after it may move the device to another rid (#483
+-- D-1, dev.greeted); a configure that would without one makes the device
+-- ask again (dev.greet), through the bridge it has.
 local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
-		C4:SendToDevice(bridge, "HUE_HELLO", hello_params())
+		dev.send_to(bridge, "HUE_HELLO", hello_params())
+		dev.greeted()
 		dev.flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
 	groups:announce()
+end
+
+function dev.greet()
+	hello(bridge)
 end
 
 local function load_identity()
@@ -1215,7 +1230,12 @@ end
 -- a light) is kept by state.configure; this only says what happened. A later
 -- configure also carries changed capabilities (lights added to or removed
 -- from a group, Decision 7), which the notify below re-announces every time.
+-- #483 D-1: one that would move the device to another rid is taken only as
+-- the answer to its hello (dev.configure_ok).
 dispatch.commands["HUE_CONFIGURE"] = after_late_init("HUE_CONFIGURE", function(params)
+	if not dev.configure_ok("HUE_CONFIGURE", params) then
+		return
+	end
 	local before = identity()
 	state.configure(st, params)
 	local named = params.kind
@@ -1365,9 +1385,12 @@ local function report_level(reason, settled)
 	levels:report()
 end
 
+-- #483 D-1: once the device has a rid, a state that does not name it (another
+-- rid, or none) is not this device's (dev.addressed); before #483 one without
+-- a rid was taken, and one for another rid ignored with a warning.
 dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_STATE for rid %s ignored (ours is %s)", params.rid, st.rid)
+	if not dev.addressed("HUE_STATE", params) then
+		return
 	end
 	if params.reason == "undelivered" then
 		return undelivered(params)
@@ -1405,8 +1428,8 @@ end)
 -- device stays, the owner decides. The identity stays persisted too, so
 -- binding the device again lets the bridge adopt it from its own rid.
 dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(params)
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_FORGOTTEN for rid %s ignored (ours is %s)", params.rid, st.rid)
+	if not dev.addressed("HUE_FORGOTTEN", params) then -- #483 D-1, as HUE_STATE
+		return
 	end
 	st.forgotten = { name = params.name or st.name }
 	settle("brightness")
@@ -1470,7 +1493,7 @@ dispatch.commands["Forget_This_Light"] = alias("Forget This Light", "Forget Devi
 	if not bridge then
 		return result("Not sent: not bound to a Hue Bridge")
 	end
-	C4:SendToDevice(bridge, "HUE_FORGET", { rid = st.rid, device_id = device_id() })
+	dev.send_to(bridge, "HUE_FORGET", { rid = st.rid, device_id = device_id() }) -- #493 D-8: logged only in Debug Mode
 	result(string.format("Asked the bridge to forget this %s; its answer sets Status", what()))
 end)
 
@@ -1535,15 +1558,16 @@ local function level_text(level)
 end
 
 -- When the saved level was saved: "at 14:02" today, "2026-10-24 14:02" on
--- another day (a Restore that never came); nil when unknown.
+-- another day (a Restore that never came); nil when unknown. Through
+-- num.date (#487 D-6), as the time was persisted.
 local function saved_when(at)
 	if not at then
 		return nil
 	end
-	if os.date("%Y-%m-%d", at) == os.date("%Y-%m-%d") then
-		return "at " .. os.date("%H:%M", at)
+	if num.date("%Y-%m-%d", at) == os.date("%Y-%m-%d") then
+		return "at " .. num.date("%H:%M", at)
 	end
-	return os.date("%Y-%m-%d %H:%M", at)
+	return num.date("%Y-%m-%d %H:%M", at)
 end
 
 -- The memory and the stored copy are separate tables: the database keeps
@@ -1560,17 +1584,24 @@ end
 
 -- At late init, before the buffered messages and commands run: what a Raise
 -- saved before the restart. Anything else under the key (not a table, a
--- level out of range) is dropped with a warning, never restored.
+-- level out of range) is dropped with a warning, never restored. A time
+-- num.timestamp refuses is cleared, stored copy included, and the level
+-- kept with its time unknown (#487 D-6).
 local function load_saved()
 	saved = nil
 	local value = C4:PersistGetValue(SAVED_KEY)
 	if value == nil then
 		return
 	end
-	local level = type(value) == "table" and tonumber(value.level) or nil
-	local target = type(value) == "table" and tonumber(value.target) or nil
-	if level and target and level >= 0 and level <= 100 and target >= 1 and target <= 100 then
-		saved = { level = math.floor(level + 0.5), target = math.floor(target + 0.5), at = tonumber(value.at) }
+	local level = type(value) == "table" and num.within(value.level, 0, 100) or nil
+	local target = type(value) == "table" and num.within(value.target, 1, 100) or nil
+	if level and target then
+		local at = num.timestamp(value.at)
+		saved = { level = math.floor(level + 0.5), target = math.floor(target + 0.5), at = at }
+		if value.at ~= nil and not at then
+			log.warn("stored %s time %s is not a time; cleared", SAVED_KEY, tostring(value.at))
+			save(saved.level, saved.target, nil)
+		end
 	else
 		log.warn("stored %s is not a saved level (%s); dropped", SAVED_KEY, tostring(value))
 		C4:PersistDeleteValue(SAVED_KEY)
@@ -1597,7 +1628,7 @@ local function level_now()
 	if on == nil then
 		on = st.on
 	end
-	return state.to_proxy_brightness({ on = on, brightness = tonumber(held.brightness) or st.brightness })
+	return state.to_proxy_brightness({ on = on, brightness = num.finite(held.brightness) or st.brightness })
 end
 
 -- " (capped; saved 40 %)": the notes after a Raise, "" without any.
@@ -1727,9 +1758,10 @@ local function pick(params, names)
 end
 
 -- A rate the command left out (or sent empty) is the proxy's default rate
--- (#430 D8, common/device.lua); 0 until the proxy sends one.
+-- (#430 D8, common/device.lua); 0 until the proxy sends one. So, since #486
+-- (D-4), is one that is no finite number, as the Hue Scene takes it.
 local function rate_or_default(rate, which)
-	if rate == nil or rate == "" then
+	if num.finite(rate) == nil then
 		return dev.rate_default(which)
 	end
 	return rate
@@ -1740,8 +1772,8 @@ end
 -- for any Previous turn-on.
 dispatch.proxy["SET_BRIGHTNESS_TARGET"] = function(_, params)
 	dev.first_arrival("SET_BRIGHTNESS_TARGET", params)
-	local id = tonumber(pick(params, BRIGHTNESS_PRESET_KEYS))
-	local target = tonumber(params.LIGHT_BRIGHTNESS_TARGET)
+	local id = num.finite(pick(params, BRIGHTNESS_PRESET_KEYS)) -- #486 D-4
+	local target = num.finite(params.LIGHT_BRIGHTNESS_TARGET)
 	local native = id ~= nil and target ~= nil and target > 0 and state.is_group(st) and not lit()
 		and turnon.is_previous_preset(modes, id)
 	set_brightness(params.LIGHT_BRIGHTNESS_TARGET, rate_or_default(params.RATE, "brightness"),
@@ -2266,7 +2298,10 @@ end
 
 dispatch.install(_G)
 
+-- #492 (I-5, I-6): a release build locks Composer's Lua command window and
+-- refuses a dev loop left behind by an earlier dev build (common/device.lua).
 function OnDriverInit()
+	dev.init()
 end
 
 -- After a Director restart the binding to the bridge can be invisible at late

@@ -2759,6 +2759,30 @@ describe("bridge.lights", function()
 			assert.truthy(L:attention():find("2 devices claim Hue light Kitchen Strip #2: 2004 and 2003", 1, true))
 		end)
 
+		-- Security review 2026-11-13 D-2 (#485): the rid lands in the light
+		-- path of a keyed PUT, /clip/v2/resource/light/<rid>.
+		it("adopts no rid that is no resource id, and sets only linked lights", function()
+			import_all()
+			c4.persist.hue_lights = nil
+			L = new_lights()
+			L:load()
+			resync()
+			c4.sent = {}
+			for _, rid in ipairs({ "x/../../grouped_light/" .. F.rids.garage, F.rids.garage .. "?x", ("a"):rep(65) }) do
+				assert.is_false(L:hello(rid, { device_id = tostring(ID.garage), name = "Garage White" }), rid)
+				assert.is_nil(L.registry[rid], rid)
+			end
+			assert.same({}, commands_sent())
+			assert.is_nil(next(c4.persist.hue_lights or {}), "nothing persisted")
+			assert.is_true(L:hello(F.rids.garage, { device_id = tostring(ID.garage), name = "Garage White" }))
+
+			assert.equal(ID.garage, L:linked_entry(F.rids.garage).device_id)
+			L.reg:set_state(F.rids.garage, "gone")
+			assert.same({ nil, "gone" }, { L:linked_entry(F.rids.garage) })
+			assert.same({ nil, "unknown" }, { L:linked_entry("not-a-light") })
+			assert.same({ nil, "unknown" }, { L:linked_entry(nil) })
+		end)
+
 		it("does not adopt an unbound device", function()
 			import_all()
 			c4:AddDevice("hue_light.c4z", LIVING_ROOM, "Loose", function() end)  -- 2005, never bound

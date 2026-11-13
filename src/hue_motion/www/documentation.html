@@ -87,7 +87,7 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <p>The device fills in its own rows itself, from what the bridge tells it; you set only <b>Occupancy Hold Time (s)</b> and, when asked, <b>Debug Mode</b>. An area's device hides <b>Light Level</b>, <b>Temperature</b> and <b>Battery</b>. Control4's contact rows above them are described in section 2.</p>
 <table>
 <tr><th>Property</th><th>What it shows or does</th></tr>
-<tr><td><b>Driver Version</b></td><td>The build number of the installed driver, for example <code>624</code>; the same as the bridge's after an update.</td></tr>
+<tr><td><b>Driver Version</b></td><td>The build number of the installed driver, for example <code>624</code>; the same as the bridge's after an update. A development build adds <code>-dev</code> to the number (the bridge's manual, chapter 3).</td></tr>
 <tr><td><b>Status</b></td><td>In normal use the sensor or area it stands for, for example <code>Hue motion sensor Hallway sensor in Hallway</code> or <code>MotionAware area Kitchen motion area in Kitchen</code>; otherwise why the motion is not current or what to do (section 6).</td></tr>
 <tr><td><b>Online</b></td><td><code>Yes</code> or <code>No</code>: whether the sensor, or the area, can report; <code>No</code> also while the Hue bridge has not answered, or has refused the pairing, for 5 minutes. Blank on a new device until the bridge first reports.</td></tr>
 <tr><td><b>Enabled</b></td><td><code>Yes</code>, <code>Switched off in the Hue app</code> (a sensor) or <code>Paused in the Hue app</code> (an area); blank on a new device until the bridge first reports. Only the Hue app changes it.</td></tr>
@@ -100,8 +100,8 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <tr><td><b>Temperature</b></td><td>For example <code>21.5 &deg;C (70.7 &deg;F)</code>, followed by <code>(old, 14:02)</code> while the sensor is offline; <code>Not available</code> on a sensor without one. Sensors only.</td></tr>
 <tr><td><b>Battery</b></td><td>For example <code>85 % (normal)</code> (just <code>85 %</code>, or <code>low</code>, when Hue gives only one of the two), followed by <code>(old, 14:02)</code> while the sensor is offline; <code>Not available</code> on a sensor without one. Sensors only.</td></tr>
 <tr><td><b>Occupancy Hold Time (s)</b></td><td>0 to 3600 seconds, default <code>0</code>: how long the sensor stays Open after Hue reports the end of motion (section 3).</td></tr>
-<tr><td><b>Last Action</b></td><td>The result of the last <b>Test Motion Programming</b> (section 5); after the bridge forgot the device, what to do: <code>Delete this device, or bind it again and use Link Device on the Hue Bridge</code>.</td></tr>
-<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>. On writes many more lines to this device's Lua output (the lower part of its <b>Lua</b> tab); for troubleshooting only.</td></tr>
+<tr><td><b>Last Action</b></td><td>The result of the last <b>Test Motion Programming</b> (section 5); after the bridge forgot the device, what to do: <code>Delete this device, or bind it again and use Link Device on the Hue Bridge</code>; or that <b>Debug Mode</b> turned itself back Off.</td></tr>
+<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>. On writes many more lines to this device's Lua output (the lower part of its <b>Lua</b> tab); for troubleshooting only. It turns itself back to <code>Off</code> 8 hours after it was set to <code>On</code>, and <b>Last Action</b> reads <code>Debug Mode turned itself Off after 8 hours</code>; a restart of the controller or the driver keeps the time that is left.</td></tr>
 </table>
 
 <h2 id="programming">5. Programming</h2>
@@ -179,6 +179,8 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <tr><td><code>Hue reports this area only in part; update the bridge</code></td><td>The bridge's software reports the area without its name, room or health.</td><td>Update the bridge in the Hue app. Motion is still reported.</td></tr>
 <tr><td><code>Forgotten by the bridge (was Hue motion sensor Hallway sensor)</code>, <code>Forgotten by the bridge (was MotionAware area Kitchen motion area)</code></td><td>The bridge's <b>Forget Device</b> released this device; <b>Last Action</b> says what to do.</td><td>Delete the device in Composer; or connect it to the bridge again and run <b>Link Device</b> on the bridge with the first line of its <b>Device</b> row, to link it to its sensor or area (connected alone, it stays released).</td></tr>
 </table>
+
+<p><b>Debug Mode is <code>Off</code> again although it was set to <code>On</code>.</b> It turns itself back Off after 8 hours, and <b>Last Action</b> says so (section 4). Set it On again if support still needs it.</p>
 
 <h3>Not yet seen working</h3>
 <p>The drivers are meant for Control4 OS 3.x and 4.x (minimum OS 3.3.0) and have been run on OS 3.4. Motion, light level and temperature from Hue motion sensors were seen working on a Hue Bridge v2 by an outside tester, and a MotionAware area's motion on a Hue Bridge Pro, with Control4 programming on it. These parts follow Control4's documentation and the code but had not been confirmed when this page was written:</p>

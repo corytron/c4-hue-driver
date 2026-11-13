@@ -6,7 +6,7 @@
 -- Server` property, the arbitrary request and the project probes reached
 -- through `tools/devctl.py run`, the light path's Proxy Command and Lights
 -- Report, the device drivers' forwarded log lines (HUE_LOG), the Reload
--- Credentials, Check CA Pinning and Connection Test actions, Test
+-- Credentials, Check CA Pinning and Connection Test diagnostics, Test
 -- Connection's Host override, the registration of the 1.2 probe's
 -- commands (bridge/probe12.lua: Probe Discovery, Probe Names, Probe Names
 -- Restore, Probe Picker, Probe Picker Folders), Link Offline After, the
@@ -21,13 +21,18 @@
 -- ExecuteCommand has no sender parameter
 -- [verified: API 5_director_command/_1-ExecuteCommand], so whatever sits in
 -- dispatch.commands any driver in the project can run with C4:SendToDevice.
--- Only what Composer itself sends (the DEV-ONLY actions of driver.xml) and
--- the devices' HUE_LOG go there; the requests, probes and proxy commands
--- run only for commands the dev loop verified (devloop.set_signed_commands),
--- and the loop's redactor keeps the application key out of every shipped
--- line [security review 2026-10-25, finding 9].
+-- Only the Dev Server property and the devices' HUE_LOG go there. The
+-- requests, probes, proxy commands and the four former DEV-ONLY actions
+-- (Connection Test, Reload Credentials, Check CA Pinning, Probe Picker
+-- Folders) run only for commands the dev loop verified
+-- (devloop.set_signed_commands); the first three also run from
+-- Diagnostics' (dev) entries, through devtools.diagnostics, which only the
+-- driver's Diagnostics action reads. The loop's redactor keeps the
+-- application key out of every shipped line [security review 2026-10-25,
+-- finding 9; security review 2026-11-13 C-2, #484].
 
 local log = require("common.log")
+local num = require("common.num")
 local dispatch = require("common.dispatch")
 local http = require("bridge.http")
 local credentials = require("bridge.credentials")
@@ -55,6 +60,20 @@ local ctx
 
 local function trimmed(value)
 	return (value or ""):match("^%s*(.-)%s*$")
+end
+
+-- The most bytes of one forwarded HUE_LOG line that are printed, and so
+-- kept by the dev loop and shipped (#484 C-2).
+devtools.LOG_LINE_MAX = 2000
+
+-- `text` as one line of at most `max` bytes: control characters made
+-- spaces, the rest cut with "..." in its place. Only the head is scanned.
+local function one_line(text, max)
+	local s = tostring(text)
+	if #s > max then
+		s = s:sub(1, max - 3) .. "..."
+	end
+	return (s:gsub("%c", " "))
 end
 
 -- Whether `host` spells the bridge's address `ip` (the dotted form the Bridge
@@ -383,15 +402,17 @@ end
 -- development handler that stays in dispatch.commands, where any driver in
 -- the project reaches it. All it does is print one line under the sender's
 -- name; control characters become spaces, so a message cannot forge further
--- lines of the shipped log.
+-- lines of the shipped log, and a line is cut at LOG_LINE_MAX bytes, so a
+-- driver cannot fill the loop's buffer with lines of any size (#484 C-2).
 local function hue_log(params)
 	params = params or {}
 	local who = "light"
-	if params.rid and params.rid ~= "" then
-		local entry = ctx.state.lights and ctx.state.lights.registry and ctx.state.lights.registry[params.rid]
-		who = (entry and entry.name) or tostring(params.rid):sub(1, 8)
+	if type(params.rid) == "string" and params.rid ~= "" then
+		local registry = ctx.state.lights and ctx.state.lights.registry
+		local entry = type(registry) == "table" and registry[params.rid] or nil
+		who = (type(entry) == "table" and entry.name) or params.rid:sub(1, 8)
 	end
-	log.always("[%s] %s", (tostring(who):gsub("%c", " ")), (tostring(params.line):gsub("%c", " ")))
+	log.always("[%s] %s", one_line(who, 100), one_line(params.line, devtools.LOG_LINE_MAX))
 end
 
 -- Find a registered light by rid, Hue name or protocol device id.
@@ -706,7 +727,7 @@ local function lights_report(params)
 	end
 	for rid, tomb in pairs(tombstones) do
 		log.always("  deleted in Composer: %s rid %s at %s", tostring(tomb.name), rid,
-			os.date("%Y-%m-%d %H:%M", tomb.deleted_at))
+			num.date("%Y-%m-%d %H:%M", tomb.deleted_at or -1)) -- #487: a stored time os.date cannot take
 	end
 end
 
@@ -870,12 +891,18 @@ local function redact_key(line)
 	return table.concat(parts)
 end
 
+-- Diagnostics' (dev) entries (driver.lua's dev_command), by dispatch name:
+-- the driver's Diagnostics action runs them, and nothing else does but a
+-- signed dev loop command (#484 C-2). Filled by install.
+devtools.diagnostics = {}
+
 -- Register the handlers; `given` is the context described above. The
--- dispatch tables get the Dev Server property, the three DEV-ONLY actions
--- of driver.xml (what Composer can send) and HUE_LOG (what the devices
--- send); the rest, Test Connection's Host variant included, runs only for
--- signed dev loop commands (devloop.execute), and the redactor goes to the
--- loop. See the top of this file.
+-- dispatch tables get the Dev Server property and HUE_LOG (what the devices
+-- send); everything else, Test Connection's Host variant and the four
+-- former DEV-ONLY actions included, runs only for signed dev loop commands
+-- (devloop.execute), the first three of those also from Diagnostics
+-- (devtools.diagnostics), and the redactor goes to the loop. See the top of
+-- this file.
 function devtools.install(given)
 	ctx = given
 	-- The event stream's abandoned transfers outlive a dev loop reload (#247):
@@ -905,11 +932,15 @@ function devtools.install(given)
 	-- functions of its picker test (Probe12PickerList, Probe12RoomList).
 	probe12.install(given)
 	dispatch.properties["Dev_Server"] = dev_server_changed
-	dispatch.commands["Connection_Test"] = connection_test
-	dispatch.commands["Reload_Credentials"] = reload_credentials
-	dispatch.commands["Check_CA_Pinning"] = check_ca_pinning
-	dispatch.commands["Probe_Picker_Folders"] = probe12.picker_action
 	dispatch.commands["HUE_LOG"] = hue_log
+	-- Not in dispatch.commands, where any driver in the project could run
+	-- them unsigned (one opens a TLS connection to an internet host): none
+	-- is a Composer action since 1.2 (#484 C-2).
+	devtools.diagnostics = {
+		Connection_Test = connection_test,
+		Reload_Credentials = reload_credentials,
+		Check_CA_Pinning = check_ca_pinning,
+	}
 	-- common/devloop.lua is the one module a reload never replaces: code
 	-- pushed to a bridge whose loop predates signed commands leaves these
 	-- out rather than fail to load.
@@ -937,6 +968,10 @@ function devtools.install(given)
 		Probe_Names_Restore = probe12.names_restore,
 		Probe_Picker = probe12.picker_dump,
 		Probe_Picker_Folders = probe12.picker_action,
+		-- Diagnostics' (dev) entries, signed (#484 C-2).
+		Connection_Test = connection_test,
+		Reload_Credentials = reload_credentials,
+		Check_CA_Pinning = check_ca_pinning,
 	})
 	devloop.set_redactor(redact_key)
 end

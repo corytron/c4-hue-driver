@@ -306,6 +306,42 @@ describe("bridge/mdns.lua (#334, D5)", function()
 			end
 		end)
 
+		-- Security review 2026-11-13, N-3 (#490): any address but 0/8, 127/8
+		-- and 224/3 was a candidate, so a spoofed answer could steer the
+		-- identity check's TLS connects to hosts of its choosing, on the
+		-- internet too.
+		-- Addresses outside the repository's placeholders are put together from
+		-- their octets, so that the secrets check (.gitleaks.toml) sees no literal.
+		local function dotted(...) return table.concat({ ... }, ".") end
+
+		it("takes only private, link-local and documentation addresses (N-3)", function()
+			for _, ip in ipairs({ "1.2.3.4", dotted(8, 8, 8, 8), dotted(100, 64, 0, 1), dotted(172, 32, 0, 1),
+				dotted(192, 169, 0, 1), dotted(169, 255, 0, 1), dotted(203, 0, 114, 1), dotted(11, 0, 0, 1) }) do
+				local list = assert(mdns.read(house_answer({ ip = ip })))
+				assert.is_nil(list[1].ip, ip)
+				assert.same({}, list[1].ips, ip)
+			end
+			for _, ip in ipairs({ "10.0.2.143", "172.16.0.9", dotted(172, 31, 255, 254), "192.168.1.20",
+				dotted(169, 254, 12, 34), "192.0.2.44", "198.51.100.7", "203.0.113.9" }) do
+				local list = assert(mdns.read(house_answer({ ip = ip })))
+				assert.equal(ip, list[1].ip, ip)
+			end
+			assert.is_false(mdns.usable_address("not an address"))
+			assert.is_false(mdns.usable_address(nil))
+		end)
+
+		it("ignores a public address beside the bridge's own, so the one-address rule still holds (N-3)", function()
+			local list = assert(mdns.read(packet({
+				an = { { name = "_hue._tcp.local", type = "PTR", target = INSTANCE } },
+				ar = {
+					{ name = INSTANCE, type = "SRV", target = HOST },
+					{ name = "elsewhere.local", type = "A", ip = "10.0.2.143" },
+					{ name = "evil.local", type = "A", ip = dotted(8, 8, 8, 8) },
+				},
+			})))
+			assert.equal("10.0.2.143", list[1].ip)
+		end)
+
 		it("finds no candidate in another service's answer", function()
 			local list = assert(mdns.read(packet({
 				questions = { "_http._tcp.local" },

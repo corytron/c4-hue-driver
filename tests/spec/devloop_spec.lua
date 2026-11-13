@@ -2432,7 +2432,7 @@ describe("bridge/devtools.lua development requests", function()
 		end
 	end)
 
-	it("puts only Composer's DEV-ONLY actions and HUE_LOG into the dispatch table", function()
+	it("puts only HUE_LOG into the dispatch table", function()
 		local function command_names()
 			paired(false)
 			local names = {}
@@ -2447,14 +2447,46 @@ describe("bridge/devtools.lua development requests", function()
 		end
 		table.sort(added)
 		-- Since 1.2 the dev entries live inside Diagnostics' list, so driver.xml
-		-- has no DEV-ONLY action left; their commands still answer in dev builds.
+		-- has no DEV-ONLY action left. Since #484 (security review 2026-11-13
+		-- C-2) their four commands answer signed dev loop commands and
+		-- Diagnostics' (dev) entries only, not any driver's ExecuteCommand.
 		assert.same({}, dev_only_commands())
-		local expected = { "HUE_LOG" }
-		for _, command in ipairs({ "Check CA Pinning", "Connection Test", "Probe Picker Folders", "Reload Credentials" }) do
-			expected[#expected + 1] = (command:gsub("%s+", "_"))
+		assert.same({ "HUE_LOG" }, added)
+	end)
+
+	-- Security review 2026-11-13 C-2 (#484).
+	it("answers Connection Test, Reload Credentials, Check CA Pinning and Probe Picker Folders signed or from "
+		.. "Diagnostics only", function()
+		paired()
+		local transfers, logged = #c4.transfers, #lines
+		local status = env.Properties["Status"]
+		for _, name in ipairs({ "Connection Test", "Reload Credentials", "Check CA Pinning", "Probe Picker Folders" }) do
+			local params = { Target = "Diagnostic Server", What = "light:01" }
+			env.ExecuteCommand(name, params) -- C4:SendToDevice from any driver in the project
+			action(name, params)             -- the same, dressed as a Composer action
 		end
-		table.sort(expected)
-		assert.same(expected, added)
+		assert.equal(transfers, #c4.transfers, "no transfer started, to example.com or anywhere")
+		assert.equal(logged, #lines, "nothing printed")
+		assert.equal(status, env.Properties["Status"])
+
+		-- Signed, they run.
+		signed("Check CA Pinning")
+		assert.equal("https://example.com/", c4.last_transfer().url)
+		signed("Reload Credentials")
+		assert.equal("Stored credentials readable and match memory", env.Properties["Status"])
+		signed("Probe Picker Folders", { What = "light:01" })
+		assert.truthy(count_containing(lines, "light:01") > 0)
+		-- And Diagnostics' (dev) entries reach them.
+		action("Diagnostics", { What = "diag:connection_test:server" })
+		assert.equal("Set the Diagnostic Server property first (host:port)", env.Properties["Status"])
+	end)
+
+	it("prints at most 2,000 bytes of a device's HUE_LOG line (#484)", function()
+		paired()
+		env.ExecuteCommand("HUE_LOG", { rid = ("r"):rep(5000), line = ("x"):rep(200000) })
+		local line = lines[#lines]
+		assert.truthy(#line < 2200, #line)
+		assert.truthy(line:find(("x"):rep(1990) .. "...", 1, true))
 	end)
 
 	it("answers the development commands for signed dev loop commands only", function()
@@ -2606,7 +2638,7 @@ describe("bridge/devtools.lua development requests", function()
 	it("holds Connection Test against the bridge until the bridge identity is verified", function()
 		paired(false)
 		local before, status = #c4.transfers, env.Properties["Status"]
-		action("Connection Test", { Target = "Bridge" })
+		signed("Connection Test", { Target = "Bridge" }) -- #484: signed, or Diagnostics' (dev) entry
 		assert.equal("Hue Bridge: Connection Test: bridge identity not verified yet; nothing is sent (see Status)",
 			lines[#lines])
 		assert.equal(before, #c4.transfers)
@@ -2615,7 +2647,7 @@ describe("bridge/devtools.lua development requests", function()
 		-- A different bridge at the address: still nothing, and Status says why.
 		answer_identity("001788FFFE456DEF")
 		before = #c4.transfers
-		action("Connection Test", { Target = "Bridge" })
+		action("Diagnostics", { What = "diag:connection_test:bridge" })
 		assert.equal(before, #c4.transfers)
 		assert.truthy(env.Properties["Status"]:find("reports ID 001788fffe456def", 1, true), env.Properties["Status"])
 	end)
@@ -2690,7 +2722,9 @@ describe("bridge/devtools.lua development requests", function()
 		local ok, err = pcall(function()
 			paired()
 			local dispatch = require("common.dispatch")
-			assert.is_function(dispatch.commands["Connection_Test"])
+			-- Diagnostics' (dev) entries still reach theirs (#484: not through dispatch.commands).
+			assert.is_nil(dispatch.commands["Connection_Test"])
+			assert.is_function(require("bridge.devtools").diagnostics.Connection_Test)
 			assert.is_function(dispatch.commands["HUE_LOG"])
 			assert.is_nil(dispatch.commands["Hue_Request"])
 			assert.equal(1, count_containing(lines, "the running common/devloop.lua predates signed commands"))

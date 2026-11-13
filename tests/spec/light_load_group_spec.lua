@@ -173,6 +173,7 @@ describe("light.load_group", function()
 
 	describe("membership", function()
 		it("join, leave, set_sync and learn report changed only on a change", function()
+			names[5678], names[4321] = "Hallway Group", "Porch Group" -- #488: a learnt id names a device
 			local m = new()
 			assert.is_true(m:join("1234", false))
 			assert.is_false(m:join("1234", false))
@@ -198,6 +199,7 @@ describe("light.load_group", function()
 		end)
 
 		it("has() and ids() in numeric order", function()
+			names[999] = "Stairs Group" -- #488: a learnt id names a device
 			local m = new()
 			m:join("1234", false)
 			m:learn("999")
@@ -209,6 +211,7 @@ describe("light.load_group", function()
 		end)
 
 		it("persists each change as a fresh table", function()
+			names[5678] = "Hallway Group" -- #488: a learnt id names a device
 			local m = new()
 			m:join("1234", true)
 			m:learn("5678")
@@ -278,6 +281,62 @@ describe("light.load_group", function()
 			assert.same({}, saves)
 		end)
 
+		-- #488 (D-3): until then any positive id from any group command was
+		-- learnt and persisted, so 1 500 fresh ids gave a list, a
+		-- HUE_LOAD_GROUPS and name lookups that grew without bound.
+		it("learns an id only when it names a device (#488)", function()
+			local m = new()
+			assert.is_false(m:learn("4242"))
+			assert.is_false(m:set_sync("4243", true))
+			assert.same({}, m:ids())
+			assert.same({}, saves, "nothing persisted")
+			assert.truthy(logged("^%[INFO%] a group command: load group 4242 not learnt: no device has that id$"))
+			names[4242] = "Kitchen Group"
+			assert.is_true(m:learn("4242"))
+			assert.same({ "4242" }, m:ids())
+		end)
+
+		it("keeps at most MAX load groups, however they come (#488)", function()
+			assert.equal(32, load_group.MAX)
+			local m = new()
+			for i = 1, load_group.MAX do
+				names[1000 + i] = "Group " .. i
+				assert.is_true(m:learn(tostring(1000 + i)))
+			end
+			names[2000] = "One too many"
+			assert.is_false(m:learn("2000"))
+			assert.is_false(m:join("2001", true), "a JOIN_GROUP too")
+			assert.is_false(m:set_sync("2000", true))
+			assert.equal(load_group.MAX, #m:ids())
+			assert.truthy(logged("^%[WARN%] JOIN_GROUP: load group 2001 not added; this light keeps 32 already"))
+			assert.is_true(m:leave("1001"))
+			assert.is_true(m:join("2001", true), "room again once one left")
+		end)
+
+		it("a JOIN_GROUP keeps an id no device name is found for (E3)", function()
+			local m = new()
+			assert.is_true(m:join("4242", false))
+			assert.same({ "4242" }, m:ids())
+		end)
+
+		it("keeps the first MAX of a longer stored list, and stores it again (#488)", function()
+			local stored = {}
+			for i = 1, 40 do
+				stored[tostring(1000 + i)] = { sync = false }
+			end
+			store.hue_load_groups = stored
+			local m = new()
+			assert.equal(load_group.MAX, m:load())
+			assert.equal("1001", m:ids()[1])
+			assert.equal("1032", m:ids()[load_group.MAX])
+			local kept = 0
+			for _ in pairs(store.hue_load_groups) do
+				kept = kept + 1
+			end
+			assert.equal(load_group.MAX, kept)
+			assert.truthy(logged("^%[WARN%] stored hue_load_groups holds 40 load groups; kept the first 32$"))
+		end)
+
 		it("load replaces what was in memory", function()
 			local m = new()
 			m:join("1234", true)
@@ -287,7 +346,7 @@ describe("light.load_group", function()
 		end)
 
 		it("logs JOIN, LEAVE and sync changes at info (D16)", function()
-			names[1234] = "Kitchen Group"
+			names[1234], names[5678] = "Kitchen Group", "Hallway Group" -- #488: a learnt id names a device
 			local m = new()
 			m:join("1234", false)
 			m:set_sync("1234", true)
@@ -296,7 +355,7 @@ describe("light.load_group", function()
 			assert.truthy(logged("^%[INFO%] joined load group 1234 %(Kitchen Group%), keep loads in sync off$"))
 			assert.truthy(logged("^%[INFO%] load group 1234 %(Kitchen Group%): keep loads in sync on$"))
 			assert.truthy(logged("^%[INFO%] left load group 1234 %(Kitchen Group%)$"))
-			assert.truthy(logged("^%[INFO%] load group 5678 learnt from a group command$"))
+			assert.truthy(logged("^%[INFO%] load group 5678 %(Hallway Group%) learnt from a group command$"))
 		end)
 	end)
 
@@ -534,6 +593,9 @@ describe("light.load_group", function()
 
 		before_each(function()
 			wired()
+			-- #488: an id is learnt from a group command only when it names a
+			-- device; the two groups these commands come from do.
+			names[1234], names[5678] = "Kitchen Group", "Hallway Group"
 		end)
 
 		describe("membership commands", function()
@@ -584,7 +646,7 @@ describe("light.load_group", function()
 			it("GROUP_SET_LEVEL learns the id, announces it, then sets the level at rate 0 with the tag (D3, D6)", function()
 				local _, done = m:handle("GROUP_SET_LEVEL", { GROUP_ID = "1234", LEVEL = "40" })
 				assert.equal("set", done)
-				assert.same({ { "send_groups", "1234:0" }, { "show", "device 1234 (not found)" },
+				assert.same({ { "send_groups", "1234:0" }, { "show", "Kitchen Group" },
 					{ "set_brightness", 40, 0, "1234" } }, calls)
 				assert.is_true(m:has("1234"))
 			end)

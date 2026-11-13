@@ -6,7 +6,11 @@
 --    (docs/bridge-compat-design.md, "Pairing another bridge (#236)").
 -- 2. POST /api {"devicetype": ..., "generateclientkey": true}. Until the
 --    link button has been pressed the bridge answers with error type 101.
--- 3. Store the key, bridge ID and IP.
+-- 3. Hand the key, bridge ID and IP to on_paired. Nothing is stored here:
+--    bridge/pair_window.lua stores them once it has checked that its window
+--    is still open and the address unchanged, so a key that arrives after
+--    Forget Pairing or after the window closed is never stored (security
+--    review 2026-11-13, N-9, #490).
 --
 -- The POST goes to the v1-era /api endpoint because key creation is the one
 -- operation CLIP v2 does not offer. Verified against a Bridge Pro (BSB003)
@@ -21,7 +25,6 @@
 local log = require("common.log")
 local http = require("bridge.http")
 local config = require("bridge.config")
-local credentials = require("bridge.credentials")
 
 local pairing = {}
 
@@ -83,7 +86,9 @@ function pairing.parse_response(json)
 		if err.type == pairing.LINK_BUTTON_ERROR then
 			return "link_button"
 		end
-		return "error", string.format("bridge error %s: %s", tostring(err.type), tostring(err.description))
+		-- The bridge's own text, cut for Status (#489).
+		return "error", string.format("bridge error %s: %s", http.peer_text(err.type, 16),
+			http.peer_text(err.description, 160))
 	end
 	return "error", "unexpected response"
 end
@@ -112,7 +117,8 @@ function pairing.other_bridge(ip, info, paired_id, picked)
 		.. "bridge", ip, tostring(info.bridge_id), expected)
 end
 
--- Why a probed bridge cannot be paired, or nil when it can.
+-- Why a probed bridge cannot be paired, or nil when it can. The model and
+-- the firmware are the peer's text, cut for Status (#489).
 function pairing.refusal(ip, info)
 	local model = tostring(info.model or "")
 	if not config.model_supported(model) then
@@ -120,11 +126,12 @@ function pairing.refusal(ip, info)
 			return "This is a Hue Bridge v1, round (BSB001): it has no CLIP v2 API; this driver needs a Hue Bridge v2 "
 				.. "(square) or a Hue Bridge Pro"
 		end
-		return string.format("The device at %s is not a Hue bridge (model %s)", ip, model ~= "" and model or "unknown")
+		return string.format("The device at %s is not a Hue bridge (model %s)", ip,
+			model ~= "" and http.peer_text(model, 32) or "unknown")
 	end
 	if config.firmware_check(info.sw_version) == "old" then
 		return string.format("Bridge firmware %s is older than %d, the first with the CLIP v2 API; update the bridge "
-			.. "in the Hue app, then pair again", tostring(info.sw_version), config.MIN_FIRMWARE)
+			.. "in the Hue app, then pair again", http.peer_text(info.sw_version, 32), config.MIN_FIRMWARE)
 	end
 	return nil
 end
@@ -133,7 +140,9 @@ end
 --   on_probed(info)        the bridge answered the config request, and it is
 --                          the paired bridge or none is stored
 --   on_link_button(info)   press the button and try again
---   on_paired(creds)       key stored; creds = { key, bridge_id, ip, model }
+--   on_paired(creds)       the bridge issued a key; creds = { key, bridge_id,
+--                          ip, model }, not stored (the caller stores them,
+--                          bridge/pair_window.lua, after its checks)
 --   on_error(message)      the reason, without a "Pairing failed" of its own
 --                          (the driver adds that prefix)
 -- `paired_id`: the stored bridge id, or nil; `picked`: it is the bridge
@@ -179,8 +188,7 @@ function pairing.pair(ip, handlers, paired_id, picked)
 				return handlers.on_error(value)
 			end
 			local creds = { key = value, bridge_id = info.bridge_id, ip = ip, model = info.model }
-			credentials.save(creds)
-			log.info("paired with bridge %s (%s)", info.bridge_id, tostring(info.model))
+			log.info("bridge %s (%s) issued a key", info.bridge_id, http.peer_text(info.model, 32))
 			handlers.on_paired(creds)
 		end)
 	end)

@@ -71,6 +71,8 @@
 -- DriverWorks calls: C4:SetTimer, C4:PersistGetValue, C4:PersistSetValue,
 -- C4:PersistDeleteValue, C4:GetTime.
 
+local num = require("common.num")
+
 local away = {}
 away.__index = away
 
@@ -116,19 +118,21 @@ function away:load()
 	local state = self.ctx.state
 	state.last_good_ip = C4:PersistGetValue(away.LAST_GOOD_IP_KEY)
 	local moved = C4:PersistGetValue(away.MOVED_KEY)
+	-- A stored time num.timestamp refuses is no move (#487): `at` is in ms.
 	if type(moved) == "table" and type(moved.to) == "string" and type(moved.text) == "string"
-			and tonumber(moved.at) then
+			and num.finite(moved.at) and num.timestamp(moved.at / 1000) then
 		state.moved = moved
 	end
 end
 
 -- "14:02" today, "10-26 14:02" on another day.
 function away:clock(ms)
-	local t = math.floor(ms / 1000)
-	if os.date("%Y-%m-%d", t) == os.date("%Y-%m-%d", math.floor(self.now() / 1000)) then
-		return os.date("%H:%M", t)
+	-- num.date (#487): a time os.date cannot take reads "?" instead of raising.
+	local t = num.finite(ms) and math.floor(ms / 1000) or -1
+	if num.date("%Y-%m-%d", t) == num.date("%Y-%m-%d", math.floor(self.now() / 1000)) then
+		return num.date("%H:%M", t)
 	end
-	return os.date("%m-%d %H:%M", t)
+	return num.date("%m-%d %H:%M", t)
 end
 
 -- The remedy of an event stream that stays down while the bridge answers: the other transport

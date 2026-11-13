@@ -64,6 +64,19 @@ local function configure(env, base, extra)
 	env.ExecuteCommand("HUE_MOTION_CONFIGURE", params)
 end
 
+-- #483 D-1 (common/device.lua): a configure that moves a device with a rid to
+-- another rid is taken only as the answer to its own hello. The bridge's
+-- re-link sends one by itself: the device leaves it, says hello VERIFY_MS
+-- later, and takes the bridge's answer, the same configure.
+local VERIFY_MS = 500
+local function relink(env, c4, base, extra)
+	configure(env, base, extra)
+	local before = #c4.sent
+	assert(c4.fire_timers_of(VERIFY_MS) == 1, "the configure left alone makes the device ask the bridge")
+	assert(c4.sent[before + 1] and c4.sent[before + 1].command == "HUE_MOTION_HELLO", "the device says hello")
+	configure(env, base, extra)
+end
+
 local function state(env, params)
 	params.rid = params.rid or RID
 	params.reason = params.reason or "event"
@@ -606,7 +619,7 @@ describe("Hue Motion driver", function()
 			assert.is_nil(c4.persist.motion_hold, "an unbind")
 
 			env, c4 = holding()
-			configure(env, SENSOR, { rid = OTHER_RID, name = "Hallway sensor 2" })
+			relink(env, c4, SENSOR, { rid = OTHER_RID, name = "Hallway sensor 2" }) -- #483 D-1: through its hello
 			assert.equal(0, count_timers(c4, 300000))
 			assert.is_nil(c4.persist.motion_hold, "a re-link")
 
@@ -1042,7 +1055,7 @@ describe("Hue Motion driver", function()
 			local env, c4 = known({ props = { [HOLD] = "30" }, motion = "true" })
 			state(env, { motion = "false" })
 			assert.equal(1, count_timers(c4, 30000))
-			configure(env, SENSOR, { rid = OTHER_RID, name = "Hallway sensor 2" })
+			relink(env, c4, SENSOR, { rid = OTHER_RID, name = "Hallway sensor 2" }) -- #483 D-1: through its hello
 			assert.equal(0, count_timers(c4, 30000), "the old sensor's hold ends")
 			assert.equal("Unknown", env.Properties["Hue Motion"])
 			assert.equal(OTHER_RID, c4.persist.hue_rid)
@@ -1600,7 +1613,7 @@ describe("Hue Motion driver", function()
 			assert.equal("MotionAware area", env.Properties["Kind"])
 			assert.equal("MotionAware area", env.Properties["Model"])
 			assert.is_nil(c4.persist.hue_model, "an area has no model of its own")
-			configure(env, SENSOR)
+			relink(env, c4, SENSOR) -- #483 D-1: another rid, through the device's hello
 			for _, name in ipairs({ "Light Level", "Temperature", "Battery" }) do
 				assert.equal(0, c4.property_attribs[name], name)
 			end
@@ -1948,6 +1961,103 @@ describe("Hue Motion driver", function()
 			assert.is_false(env.TestCondition("NUMBER_BATTERY_LEVEL", { LOGIC = "SOMETHING", VALUE = "90" }))
 			assert.is_false(env.TestCondition("NUMBER_BATTERY_LEVEL", { LOGIC = "EQUAL" }))
 			assert.is_false(env.TestCondition("NOT_OURS", {}))
+		end)
+	end)
+
+	-- The security review of 2026-11-13 (docs/security-fixes-2026-11-design.md).
+	describe("security review 2026-11-13", function()
+		-- The event ids FireEventByID was called with, in order.
+		local function events(c4)
+			local out = {}
+			for _, args in ipairs(c4.calls_to("FireEventByID")) do
+				out[#out + 1] = args[1]
+			end
+			return out
+		end
+
+		it("takes no motion from a state without its rid once it has one (#483 D-1)", function()
+			local env, c4 = known()
+			env.ExecuteCommand("HUE_MOTION_STATE", { motion = "true", reason = "event" })
+			assert.same({}, contact(c4), "until #483 any driver could raise OPENED")
+			env.ExecuteCommand("HUE_MOTION_FORGOTTEN", { name = "Hallway sensor" })
+			assert.equal(SENSOR_STATUS, env.Properties["Status"])
+			state(env, { motion = "true" })
+			assert.same({ "OPENED" }, contact(c4))
+		end)
+
+		it("is not silenced by a configure for another rid that answers no hello (#483 D-1)", function()
+			local env, c4 = known()
+			configure(env, SENSOR, { rid = OTHER_RID })
+			assert.equal(RID, c4.persist.hue_rid, "until #483 every real state was then dropped")
+			state(env, { motion = "true" })
+			assert.same({ "OPENED" }, contact(c4))
+			assert.equal(1, fire(c4, 500))
+			assert.equal(RID, messages(c4, "HUE_MOTION_HELLO")[1].params.rid, "it asks the bridge")
+		end)
+
+		it("takes HUE_BRIDGE_LINK without a rid, as the bridge sends it, but not one for another rid (#483 D-1)",
+			function()
+				local env = known()
+				env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = "not_answering", since = "1762696920",
+					rid = OTHER_RID })
+				assert.equal("Yes", env.Properties["Online"])
+				env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = "not_answering", since = "1762696920" })
+				assert.equal("No", env.Properties["Online"])
+			end)
+
+		it("answers GET_SENSOR_VALUE on the temperature output only, GET_STATE on the contact proxy only (#483 D-7)",
+			function()
+				local env, c4 = known()
+				state(env, { temperature = "20" })
+				c4.calls = {}
+				env.ReceivedFromProxy(5001, "GET_SENSOR_VALUE", {})
+				env.ReceivedFromProxy(2, "GET_STATE", {})
+				assert.same({}, c4.calls_to("SendToProxy"))
+				env.ReceivedFromProxy(2, "GET_SENSOR_VALUE", {})
+				assert.equal(1, #output(c4))
+			end)
+
+		it("drops a reading that is NaN or out of range: no NaN baseline, no \"nan\" to a thermostat (#486 D-5)",
+			function()
+				local env, c4 = known()
+				state(env, { lux = "nan", temperature = "nan", battery_level = "nan" })
+				state(env, { lux = "100001", temperature = "61", battery_level = "101" })
+				state(env, { lux = "-1", temperature = "-41" })
+				assert.same({}, output(c4), "nothing on the temperature output")
+				assert.is_nil(c4.persist.motion_values and c4.persist.motion_values.lux_fired)
+				-- Light Level Changed still fires: the first real reading is the baseline.
+				state(env, { lux = "10" })
+				state(env, { lux = "100" })
+				assert.same({ 1 }, events(c4), "until #486 a NaN baseline silenced it for good")
+				state(env, { temperature = "60", lux = "100000" })
+				assert.equal(1, #output(c4), "the ends of the range are readings")
+			end)
+
+		it("drops a stored reading or time that is not one, and starts without an error (#486 D-5, #487 D-6)",
+			function()
+				local env, c4
+				assert.has_no.errors(function()
+					env, c4 = load_motion({ persist = { hue_rid = RID, hue_kind = "sensor", motion_values = {
+						online = false, offline_since = 1e300, lux = 0 / 0, lux_fired = 0 / 0, temp_c = 1 / 0,
+						temp_fired = 500, battery_level = -3 } } })
+				end)
+				assert.equal("Waiting for the bridge", env.Properties["Status"], "late init wrote its rows")
+				assert.equal("0", variable(c4, "Light Level"))
+				configure(env, SENSOR)
+				state(env, { lux = "10", online = "true" })
+				state(env, { lux = "100" })
+				assert.same({ 6, 1 }, events(c4), "Online, then Light Level Changed: the stored NaN baseline is gone")
+			end)
+
+		it("marks a reading old with a time os.date can read, or with none (#487 D-6)", function()
+			local env, c4 = known()
+			state(env, { lux = "30" })
+			assert.has_no.errors(function()
+				env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = "not_answering", since = "1e300" })
+			end)
+			assert.equal("No", env.Properties["Online"])
+			assert.truthy(env.Properties["Light Level"]:find("^30 lux %(old, %d%d:%d%d%)$"), env.Properties["Light Level"])
+			assert.is_not_nil(c4.persist.motion_values.offline_since)
 		end)
 	end)
 end)

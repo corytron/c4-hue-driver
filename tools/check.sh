@@ -31,6 +31,10 @@
 #   changelog    python3 tools/changelog.py check (CHANGELOG.md, docs/changelog-design.md)
 #   links        python3 tools/check_links.py: every link in every tracked Markdown
 #                file and Documentation tab resolves (files and heading anchors)
+#   doc-tabs     python3 tools/check_doc_tabs.py: nothing in a Documentation tab
+#                (src/*/www/*.html) runs or fetches from outside the package: no script,
+#                frame, object, embed, form, link or event handler, only relative src
+#                and stylesheet addresses (security review 2026-11-13, I-7)
 #
 # The checks run at the same time (issue #456): each one's output is kept apart
 # and reported in the order above as soon as it and every check before it are
@@ -51,7 +55,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 
-ALL_CHECKS=(lua-lint lua-test lua-limits shell python-lint python-test xml powershell workflows secrets house changelog links)
+ALL_CHECKS=(lua-lint lua-test lua-limits shell python-lint python-test xml powershell workflows secrets house changelog links doc-tabs)
 
 usage() {
 	echo "usage: tools/check.sh [--strict] [--only <name>...]" >&2
@@ -67,7 +71,7 @@ tools_for() {
 		lua-limits) echo luac5.1 python3 ;;
 		shell) echo shellcheck ;;
 		python-lint) echo ruff ;;
-		python-test | xml | house | changelog) echo python3 ;;
+		python-test | xml | house | changelog | doc-tabs) echo python3 ;;
 		links) echo python3 git ;;
 		powershell) echo pwsh ;;
 		workflows) echo actionlint zizmor ;;
@@ -207,6 +211,10 @@ check_changelog() {
 
 check_links() {
 	run python3 -I tools/check_links.py
+}
+
+check_doc_tabs() {
+	run python3 -I tools/check_doc_tabs.py
 }
 
 strict=no

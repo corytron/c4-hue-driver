@@ -8,6 +8,15 @@
 -- An event is { id = string|nil, event = string|nil, data = string }.
 -- Comment lines (":keepalive") are counted but produce no event, so a
 -- caller can still treat them as signs of life.
+--
+-- Bounds: one line at most MAX_LINE bytes, one event's data at most
+-- MAX_EVENT bytes. Each data line counts its bytes and the newline the join
+-- adds, so an empty `data:` line counts too and the count bounds the string
+-- dispatched (security review 2026-11-13, N-1, #489: empty data lines used
+-- to add nothing to the count and one entry each to the event). Past either
+-- bound the parser sets `overflowed` and yields nothing more: the caller
+-- drops the connection and reconnects with a new parser, and the resync
+-- after the connect covers the event it lost.
 
 local sse = {}
 sse.__index = sse
@@ -23,6 +32,7 @@ function sse.new()
 		event = nil,
 		data = {},
 		comments = 0,
+		data_bytes = 0,
 		overflowed = false,
 	}, sse)
 end
@@ -48,6 +58,9 @@ function sse:dispatch(out)
 end
 
 function sse:line(text, out)
+	if self.overflowed then
+		return
+	end
 	if text == "" then
 		self:dispatch(out)
 		return
@@ -62,8 +75,10 @@ function sse:line(text, out)
 	end
 	if field == "data" then
 		-- One event's data is bounded like one line: a bridge (or whatever
-		-- answers at its address) cannot grow the buffer without end.
-		self.data_bytes = (self.data_bytes or 0) + #value
+		-- answers at its address) cannot grow the buffer without end. The
+		-- newline the join adds counts too, so `data:` lines with nothing
+		-- after them cannot pile up uncounted (N-1, #489).
+		self.data_bytes = (self.data_bytes or 0) + #value + 1
 		if self.data_bytes > sse.MAX_EVENT then
 			self.overflowed = true
 			reset_event(self)
@@ -84,9 +99,12 @@ end
 -- used to be copied about as many times as it had lines).
 function sse:feed(chunk)
 	local out = {}
+	if self.overflowed then
+		return out -- nothing more from this parser (see the header)
+	end
 	local buffer = self.buffer .. chunk
 	local pos = 1
-	while true do
+	while not self.overflowed do
 		local nl = buffer:find("\n", pos, true)
 		if not nl then
 			break
@@ -97,6 +115,10 @@ function sse:feed(chunk)
 			text = text:sub(1, -2)
 		end
 		self:line(text, out)
+	end
+	if self.overflowed then
+		self.buffer = ""
+		return out
 	end
 	self.buffer = pos > 1 and buffer:sub(pos) or buffer
 	if #self.buffer > sse.MAX_LINE then

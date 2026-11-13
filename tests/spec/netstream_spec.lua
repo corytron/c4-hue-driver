@@ -537,7 +537,9 @@ describe("bridge.netstream", function()
 	end)
 
 	describe("reconnecting", function()
-		it("reconnects after another status, with a backoff that doubles and resets on a 200", function()
+		-- #489 (N-7): a bare 200 no longer resets the backoff; the owner's
+		-- resync of that connection does (resynced), as the last lines show.
+		it("reconnects after another status, with a backoff that doubles and resets after a resync", function()
 			connect_ok("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
 			assert.equal("waiting", s.state)
 			assert.equal("HTTP 500", s.stats.last_error)
@@ -559,7 +561,45 @@ describe("bridge.netstream", function()
 			online()
 			receive(HEAD_200)
 			assert.equal("connected", s.state)
+			assert.equal(4, s.backoff, "a bare 200 keeps it (#489)")
+			s:resynced()
 			assert.equal(netstream.BACKOFF_MIN, s.backoff)
+		end)
+
+		-- Security review 2026-11-13, N-7 (#489): every 200 reset the backoff,
+		-- so a peer that answers 200 and closes got a keyed reconnect every
+		-- second, for ever, and the resync never ran.
+		it("does not reset the backoff on a 200 that ends at once (N-7)", function()
+			local delays = {}
+			s:start()
+			for _ = 1, 5 do
+				online()
+				receive("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+				assert.equal("server closed the stream (HTTP 200)", s.stats.last_error)
+				delays[#delays + 1] = s.retry_timer.delay
+				retry()
+			end
+			assert.same({ 1000, 2000, 4000, 8000, 16000 }, delays)
+		end)
+
+		it("resets the backoff on resynced() only while the connection is up (N-7)", function()
+			s:start()
+			online()
+			receive("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+			retry()
+			online()
+			receive(HEAD_200)
+			offline()
+			assert.equal(4, s.backoff)
+			s:resynced() -- the resync of a connection that has ended
+			assert.equal(4, s.backoff)
+			retry()
+			online()
+			receive(HEAD_200)
+			s:resynced()
+			assert.equal(netstream.BACKOFF_MIN, s.backoff)
+			offline()
+			assert.equal("Disconnected: connection closed (OFFLINE). Reconnecting in 1 s", last_status())
 		end)
 
 		it("reconnects after OFFLINE, without a disconnect of its own", function()
@@ -942,7 +982,8 @@ describe("bridge.netstream", function()
 			assert.equal("waiting", s.state)
 		end)
 
-		it("reconnects on a malformed chunk size and keeps the backoff until an event is delivered", function()
+		-- #489 (N-7): the event ends the hold; the resync after it resets the backoff.
+		it("reconnects on a malformed chunk size and keeps the backoff until an event and a resync", function()
 			connect_ok()
 			receive("zz\r\n")
 			assert.equal("malformed answer: chunk size", s.stats.last_error)
@@ -951,8 +992,13 @@ describe("bridge.netstream", function()
 			online()
 			receive(HEAD_200)
 			assert.equal(2, s.backoff, "the 200 did not reset it")
+			s:resynced()
+			assert.equal(2, s.backoff, "nor a resync while the hold lasts")
 			receive(chunk(event_text("1:0")))
-			assert.equal(netstream.BACKOFF_MIN, s.backoff, "an event delivered normally does")
+			assert.is_false(s.hold_backoff, "an event delivered normally ends the hold")
+			assert.equal(2, s.backoff)
+			s:resynced()
+			assert.equal(netstream.BACKOFF_MIN, s.backoff)
 		end)
 
 		it("reconnects on a chunk longer than its size", function()
@@ -979,6 +1025,48 @@ describe("bridge.netstream", function()
 			receive("HTTP/1.1 200 OK\r\nX-Big: " .. string.rep("x", netstream.MAX_LINE))
 			assert.equal("oversized answer head", s.stats.last_error)
 			assert.equal("waiting", s.state)
+		end)
+
+		-- Security review 2026-11-13, N-2 (#489): the head was read up to 1 MB,
+		-- every header trimmed with "%s+$" and every repeated name joined onto
+		-- the growing value, both quadratic: one answer head stalled the driver.
+		it("ends the connection at a head over 16 KB, however short its lines (N-2)", function()
+			s:start()
+			online()
+			receive("HTTP/1.1 200 OK\r\n" .. string.rep("X-A: b\r\n", 20 * 1024 / 8) .. "\r\n")
+			assert.equal("oversized answer head", s.stats.last_error)
+			assert.equal("waiting", s.state)
+			assert.equal(2, count("NetDisconnect"), "the connection is closed")
+			assert.is_true(s.hold_backoff)
+			s:start()
+			online()
+			receive("HTTP/1.1 100 Continue\r\n" .. string.rep("X-A: b\r\n", 1100) .. "\r\n"
+				.. "HTTP/1.1 200 OK\r\n" .. string.rep("X-A: b\r\n", 1100) .. "\r\n")
+			assert.equal("oversized answer head", s.stats.last_error, "interim answers count towards it")
+		end)
+
+		it("reads a head of blanks and repeated names in linear time (N-2)", function()
+			local blanks = string.rep(" \t", 3600) -- two of these fit in 16 KB
+			local started = os.clock()
+			s:start()
+			online()
+			receive("HTTP/1.1 200 OK\r\nX-Pad: a" .. blanks .. "b\r\n" .. string.rep("Via: x\n", 100)
+				.. "Transfer-Encoding: chunked" .. blanks .. "x\r\n\r\n")
+			assert.equal("malformed answer: unsupported transfer coding", s.stats.last_error)
+			s:start()
+			online()
+			receive("HTTP/1.1 200 OK\r\nTransfer-Encoding:" .. blanks .. "\r\n" .. string.rep(" chunked\r\n", 1)
+				.. "Content-Type: text/event-stream\r\n\r\n" .. chunk(event_text("1:0")))
+			assert.equal("connected", s.state, "a folded Transfer-Encoding still reads")
+			assert.equal(1, #seen.containers)
+			assert.is_true(os.clock() - started < 0.15, "took " .. (os.clock() - started) .. " s")
+		end)
+
+		it("keeps only the headers it reads, joining a repeated one with a comma", function()
+			local r = netstream.new_reader()
+			local items = r:feed("HTTP/1.1 200 OK\r\nTransfer-Encoding: identity \r\nX-Other: 1\r\n"
+				.. "transfer-encoding:\tchunked\r\n\r\n")
+			assert.same({ ["transfer-encoding"] = "identity, chunked" }, items[1].headers)
 		end)
 
 		it("does not hold more than a line's worth of chunk size", function()
@@ -1034,6 +1122,23 @@ describe("bridge.netstream", function()
 			assert.equal("stopped", s.state)
 			assert.equal("Stopped", last_status(), "the end of the body after it is not read")
 			assert.same({}, timer_delays())
+		end)
+
+		-- #489: an event's id is the peer's text, up to a line long; it was
+		-- logged whole, control characters and all.
+		it("caps the event id and strips its control characters in the warning lines", function()
+			connect_ok()
+			receive(chunk("id: " .. string.rep("i", 100000) .. "\r[FORGED]\ndata: not json\n\n"))
+			receive(chunk("id: 7\27[2J\ndata: [1]\n\n"))
+			local warned = {}
+			for _, line in ipairs(lines) do
+				if line:find("event", 1, true) and line:find("^%[WARN%]") then warned[#warned + 1] = line end
+			end
+			assert.equal(2, #warned)
+			assert.is_true(#warned[1] < 300, #warned[1] .. " bytes")
+			assert.truthy(warned[1]:find("undecodable event iii", 1, true), warned[1])
+			assert.is_nil(warned[1]:find("\r", 1, true))
+			assert.truthy(warned[2]:find("event 7[2J: skipped 1 container(s)", 1, true), warned[2])
 		end)
 
 		it("skips containers that are not objects and events that do not decode", function()

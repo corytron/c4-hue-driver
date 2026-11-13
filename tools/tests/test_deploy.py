@@ -133,14 +133,22 @@ def attestation_for(digest, name="hue_bridge.c4z", predicate="https://slsa.dev/p
     return {"attestations": [{"bundle": {"dsseEnvelope": envelope}, "repository_id": 1}]}
 
 
-def verified_result(repo=REPO, workflow=".github/workflows/release.yml", ref="refs/heads/main"):
-    """One entry of what `gh attestation verify --format json` prints (the fields deploy.py reads)."""
+def verified_result(repo=REPO, workflow=".github/workflows/release.yml", ref="refs/heads/main", commit=COMMIT):
+    """One entry of what `gh attestation verify --format json` prints (the fields deploy.py reads;
+    the names are those gh 2.103.2 printed for v1.6's packages)."""
     san = "https://github.com/%s/%s@%s" % (repo, workflow, ref)
+    certificate = {
+        "subjectAlternativeName": san,
+        "sourceRepositoryRef": ref,
+        "sourceRepositoryDigest": commit,
+        "buildSignerDigest": commit,
+        "githubWorkflowTrigger": "workflow_dispatch" if ref == "refs/heads/main" else "push",
+    }
     return {
         "attestation": {"bundle": {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"}},
         "verificationResult": {
             "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
-            "signature": {"certificate": {"subjectAlternativeName": san, "sourceRepositoryRef": ref}},
+            "signature": {"certificate": certificate},
         },
     }
 
@@ -169,6 +177,8 @@ class FakeGh:
         self.version = "2.103.2"  # what `gh --version` names
         self.verify_failures = {}  # digest -> gh's stderr when `gh attestation verify` refuses that package
         self.verify_output = {}  # digest -> what `gh attestation verify` prints instead of one good result
+        self.made_from = {}  # digest -> (commit, ref) of the run that attested it; default (COMMIT, main)
+        self.off_main = set()  # commits GitHub's compare finds off main
 
     # -- plumbing ---------------------------------------------------------
 
@@ -322,6 +332,12 @@ class FakeGh:
                 if tag_object(tag) == tail[2]:
                     return json.dumps({"tag": tag, "sha": tail[2], "object": {"type": "commit", "sha": commit}})
             self._not_found(args)
+        if tail[0] == "compare":
+            commit, _, head = tail[1].partition("...")
+            assert head == "main" and "per_page=1" in query, path
+            if commit in self.off_main:
+                return json.dumps({"status": "diverged", "merge_base_commit": {"sha": "d" * 40}})
+            return json.dumps({"status": "ahead", "ahead_by": 6, "merge_base_commit": {"sha": commit}})
         if tail[0] == "attestations":
             digest = tail[1].split(":", 1)[1]
             if digest not in self.attestations:
@@ -332,21 +348,33 @@ class FakeGh:
     # -- gh attestation verify ----------------------------------------------
 
     def attestation_verify(self, args):
-        """gh attestation verify FILE --repo R --signer-workflow R/.github/workflows/release.yml --format json:
-        the file's digest decides the answer, as on GitHub."""
+        """gh attestation verify FILE --repo R --signer-workflow R/.github/workflows/release.yml
+        --source-digest C --signer-digest C --deny-self-hosted-runners --format json: the file's
+        digest decides the answer, as on GitHub, and a run from another commit is refused as gh
+        2.103.2 refuses it."""
         assert args[1] == "verify", args
         assert args[args.index("--repo") + 1] == self.repo, args
         assert args[args.index("--signer-workflow") + 1] == self.repo + "/.github/workflows/release.yml", args
         assert args[args.index("--format") + 1] == "json", args
+        assert "--deny-self-hosted-runners" in args, args
+        assert "--source-ref" not in args, "a release may come from main or from its tag: the ref is checked after"
+        source = args[args.index("--source-digest") + 1]
+        assert args[args.index("--signer-digest") + 1] == source, args
         with open(args[2], "rb") as handle:
             digest = sha(handle.read())
         if digest in self.verify_failures:
             raise deploy.GhError(args, 1, "", self.verify_failures[digest])
         if digest not in self.attestations:
             raise deploy.GhError(args, 1, "", "✗ No attestations found for subject sha256:%s" % digest)
+        commit, ref = self.made_from.get(digest, (None, "refs/heads/main"))
+        commit = commit or (BETA_COMMIT if digest in {sha(d) for d in BETA_PACKAGE_BYTES.values()} else COMMIT)
+        if source != commit:
+            raise deploy.GhError(
+                args, 1, "", "Error: expected SourceRepositoryDigest to be %s, got %s" % (source, commit)
+            )
         if digest in self.verify_output:
             return self.verify_output[digest]
-        return json.dumps([verified_result(self.repo)]) + "\n"
+        return json.dumps([verified_result(self.repo, ref=ref, commit=commit)]) + "\n"
 
     # -- gh release download ----------------------------------------------
 
@@ -669,7 +697,21 @@ class VerificationTest(unittest.TestCase):
         with self.assertRaises(deploy.DeployError) as ctx:
             deploy.check_manifest(manifest_for(tag="v1.1"), "v1.0", 252, COMMIT)
         self.assertIn("tag", str(ctx.exception))
-        deploy.check_manifest(manifest_for(tag=None), "v1.0", 252, COMMIT)  # a local build names no tag
+
+    def test_check_manifest_wants_this_tag_and_dev_false(self):
+        """I-9: a VM build between releases names no tag, and a hand-made manifest may leave dev out."""
+        for manifest, reason in (
+            (manifest_for(tag=None), "manifest.json names the tag null, not v1.0"),
+            (dict(manifest_for(), tag=""), 'manifest.json names the tag "", not v1.0'),
+            ({k: v for k, v in manifest_for().items() if k != "dev"}, "manifest.json says dev: null, not false"),
+            (manifest_for(dev="false"), 'manifest.json says dev: "false", not false'),
+            (manifest_for(dev=0), "manifest.json says dev: 0, not false"),
+        ):
+            with self.subTest(reason=reason):
+                with self.assertRaises(deploy.DeployError) as ctx:
+                    deploy.check_manifest(manifest, "v1.0", 252, COMMIT)
+                self.assertIn(reason, str(ctx.exception))
+        deploy.check_manifest(manifest_for(), "v1.0", 252, COMMIT)
 
     def test_read_manifest_shape(self):
         for broken in (
@@ -848,6 +890,8 @@ class StartTest(DeployCase):
         self.assertIn("Get-FileHash", brief)
         self.assertIn("C:\\c4-hue\\drivers\\v1.0\\", brief)
         self.assertIn("`Driver Version` = 252", brief)
+        self.assertIn("A value that ends in `-dev` (252-dev) is a development build, not this release", brief)
+        self.assertIn("The bridge has no `Dev Server` row (only a development build has one)", brief)
         self.assertIn("`Stream Timeout (s)` = 3600, `Stream Watchdog (s)` = 600 and `Debug Mode` = Off", brief)
         self.assertIn("every `Attention (2)` to `Attention (6)` row that is shown", brief)
         self.assertIn(APPROVAL, brief)
@@ -888,22 +932,18 @@ class StartTest(DeployCase):
         self.assertNotEqual(new_id, old["id"])
         self.assertEqual(self.gh.statuses[new_id][-1]["state"], "in_progress")
 
-    def test_start_fails_without_attestation_unless_flagged(self):
+    def test_start_refuses_a_package_without_attestation(self):
+        """I-9: --no-attestation is gone; a package without provenance is not the release's."""
         del self.gh.attestations[sha(PACKAGE_BYTES["hue_scene.c4z"])]
         code, out, err = self.run_main("start")
         self.assertEqual(code, 1)
         self.assertIn("no provenance attestation for hue_scene.c4z", err)
         self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
-        code, out, err = self.run_main("start", "--no-attestation")
-        self.assertEqual(code, 0, err)
-        self.assertIn("no provenance attestation", err)
-        with open(self.release_file("BRIEF.md"), encoding="utf-8") as handle:
-            brief = handle.read()
-        self.assertIn("hue_scene.c4z: NO provenance attestation", brief)
-        self.assertIn("hue_bridge.c4z: provenance verified, signed by", brief)
-        # The two attested packages were still verified; the third has nothing to verify.
-        verified = [args[2] for args, _ in self.gh.calls_matching("attestation", "verify")]
-        self.assertEqual(verified, [self.release_file("hue_bridge.c4z"), self.release_file("hue_light.c4z")])
+        self.assertEqual(self.gh.calls_matching("attestation"), [], "nothing is verified before the refusal")
+        with contextlib.redirect_stderr(io.StringIO()) as usage, self.assertRaises(SystemExit) as caught:
+            deploy.main(["start", "--no-attestation", "--file", self.house])
+        self.assertEqual(2, caught.exception.code)
+        self.assertIn("unrecognized arguments: --no-attestation", usage.getvalue())
 
     def read_brief(self):
         with open(self.release_file("BRIEF.md"), encoding="utf-8") as handle:
@@ -914,19 +954,61 @@ class StartTest(DeployCase):
         self.assertEqual(code, 0, err)
         calls = self.gh.calls_matching("attestation", "verify")
         self.assertEqual([args[2] for args, _ in calls], [self.release_file(name) for name in PACKAGES])
-        policy = ["--repo", "octo/hue", "--signer-workflow", "octo/hue/.github/workflows/release.yml"]
+        policy = [
+            "--repo",
+            "octo/hue",
+            "--signer-workflow",
+            "octo/hue/.github/workflows/release.yml",
+            "--source-digest",
+            COMMIT,
+            "--signer-digest",
+            COMMIT,
+            "--deny-self-hosted-runners",
+        ]
         for args, _ in calls:
             self.assertEqual(args[3:], policy + ["--format", "json"])
         signer = "https://github.com/octo/hue/.github/workflows/release.yml@refs/heads/main"
         self.assertIn("attestation hue_light.c4z: verified (gh 2.103.2), signed by " + signer, out)
+        self.assertIn("commit %s is on main" % COMMIT, out)
         brief = self.read_brief()
         for name in PACKAGES:
             self.assertIn("- %s: provenance verified, signed by %s" % (name, signer), brief)
         self.assertIn(
-            "Verified on the VM with gh 2.103.2: `gh attestation verify <file> --repo octo/hue --signer-workflow "
-            "octo/hue/.github/workflows/release.yml` for each package",
+            "Verified on the VM with gh 2.103.2: `gh attestation verify <file> %s` for each package, the "
+            "certificate's ref then checked to be refs/heads/main or refs/tags/v1.0" % " ".join(policy),
             brief,
         )
+        self.assertIn("- Build 252, commit %s, on main;" % COMMIT, brief)
+
+    def test_start_refuses_a_tag_whose_commit_is_off_main(self):
+        """I-2 path (a): a tag pushed on a commit off main runs that commit's own release.yml."""
+        self.gh.off_main.add(COMMIT)
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 1)
+        self.assertIn("the tag's commit %s is not on main" % COMMIT, err)
+        self.assertIn("'diverged'", err)
+        self.assertEqual(self.gh.calls_matching("attestation"), [])
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+        self.assertEqual(
+            [("repos/octo/hue/compare/%s...main?per_page=1" % COMMIT, None)], self.gh.api_calls("GET", "compare")
+        )
+
+    def test_start_refuses_packages_attested_from_another_commit(self):
+        """I-2 path (b): an older release's genuine packages, swapped in under this tag's manifest."""
+        digest = sha(PACKAGE_BYTES["hue_light.c4z"])
+        self.gh.made_from[digest] = (OTHER_COMMIT, "refs/heads/main")
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 1)
+        self.assertIn("hue_light.c4z: gh attestation verify refused it", err)
+        self.assertIn("expected SourceRepositoryDigest to be %s, got %s" % (COMMIT, OTHER_COMMIT), err)
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
+
+    def test_start_accepts_a_release_cut_from_its_pushed_tag(self):
+        for name in PACKAGES:
+            self.gh.made_from[sha(PACKAGE_BYTES[name])] = (COMMIT, "refs/tags/v1.0")
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 0, err)
+        self.assertIn("signed by https://github.com/octo/hue/.github/workflows/release.yml@refs/tags/v1.0", out)
 
     def test_start_refuses_an_attestation_another_workflow_signed(self):
         digest = sha(PACKAGE_BYTES["hue_light.c4z"])
@@ -935,13 +1017,11 @@ class StartTest(DeployCase):
             'Error: verifying with issuer "sigstore.dev": certificate SAN '
             "https://github.com/octo/hue/.github/workflows/scorecard.yml@refs/heads/main does not match" % digest
         )
-        for extra in ((), ("--no-attestation",)):
-            with self.subTest(extra=extra):
-                code, out, err = self.run_main("start", *extra)
-                self.assertEqual(code, 1)
-                self.assertIn("hue_light.c4z: gh attestation verify refused it", err)
-                self.assertIn("the signer must be octo/hue/.github/workflows/release.yml", err)
-                self.assertIn("scorecard.yml", err)
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 1)
+        self.assertIn("hue_light.c4z: gh attestation verify refused it", err)
+        self.assertIn("the signer must be octo/hue/.github/workflows/release.yml", err)
+        self.assertIn("scorecard.yml", err)
         self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
         self.assertFalse(os.path.isfile(self.release_file("BRIEF.md")))
 
@@ -949,7 +1029,7 @@ class StartTest(DeployCase):
         for version in ("2.46.0", "2.101.0"):
             with self.subTest(version=version):
                 self.gh.version = version
-                code, out, err = self.run_main("start", "--no-attestation")
+                code, out, err = self.run_main("start")
                 self.assertEqual(code, 1)
                 self.assertIn("gh %s cannot check who signed the attestations" % version, err)
                 self.assertIn("needs gh 2.102.0 or newer", err)
@@ -959,16 +1039,13 @@ class StartTest(DeployCase):
         code, out, err = self.run_main("start")
         self.assertEqual(code, 0, err)
 
-    def test_start_without_any_attestation_verifies_nothing(self):
+    def test_start_without_any_attestation_is_refused(self):
         self.gh.attestations.clear()
-        self.gh.version = "2.46.0"  # too old to verify, and there is nothing to verify
-        code, out, err = self.run_main("start", "--no-attestation")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(self.gh.calls_matching("--version"), [])
+        code, out, err = self.run_main("start")
+        self.assertEqual(code, 1)
+        self.assertIn("no provenance attestation for hue_bridge.c4z, hue_light.c4z, hue_scene.c4z", err)
         self.assertEqual(self.gh.calls_matching("attestation"), [])
-        brief = self.read_brief()
-        self.assertEqual(brief.count("NO provenance attestation"), 3)
-        self.assertIn("No package carries an attestation, so nothing was verified (--no-attestation).", brief)
+        self.assertFalse(os.path.isfile(self.release_file("BRIEF.md")))
 
     def test_start_refuses_when_gh_verifies_nothing(self):
         digest = sha(PACKAGE_BYTES["hue_bridge.c4z"])
@@ -993,6 +1070,10 @@ class StartTest(DeployCase):
             verified_result(workflow=".github/workflows/Release.yml"),
             verified_result(workflow=".github/workflows/scorecard.yml"),
             verified_result(repo="octo/hue-fork"),
+            verified_result(ref="refs/heads/feature"),
+            verified_result(ref="refs/tags/v0.9"),
+            verified_result(ref="refs/tags/v1.0-beta.1"),
+            verified_result(ref="refs/heads/main/x"),
             {"verificationResult": {"signature": {}}},
             "not an object",
         ):
@@ -1002,7 +1083,7 @@ class StartTest(DeployCase):
                 self.assertEqual(code, 1)
                 self.assertIn("hue_scene.c4z: a verified attestation names the signer", err)
         self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
-        # A release cut from a pushed tag, and the owner's name in another case, are the same signer.
+        # A release cut from its pushed tag, and the owner's name in another case, are the same signer.
         self.gh.verify_output[digest] = json.dumps(
             [verified_result(ref="refs/tags/v1.0"), verified_result(repo="Octo/Hue")]
         )
@@ -1014,6 +1095,27 @@ class StartTest(DeployCase):
             "https://github.com/octo/hue/.github/workflows/release.yml@refs/tags/v1.0",
             self.read_brief(),
         )
+
+    def test_start_checks_the_commit_and_ref_gh_reports(self):
+        """I-2: a gh that ignored --source-digest still cannot pass another commit, nor a SAN whose
+        source ref differs from main and this tag."""
+        digest = sha(PACKAGE_BYTES["hue_bridge.c4z"])
+        mixed = verified_result()
+        mixed["verificationResult"]["signature"]["certificate"]["sourceRepositoryRef"] = "refs/heads/feature"
+        missing = verified_result()
+        del missing["verificationResult"]["signature"]["certificate"]["sourceRepositoryDigest"]
+        for result, shown in (
+            (verified_result(commit=OTHER_COMMIT), OTHER_COMMIT),
+            (mixed, "refs/heads/feature"),
+            (missing, "None"),
+        ):
+            with self.subTest(shown=shown):
+                self.gh.verify_output[digest] = json.dumps([result])
+                code, out, err = self.run_main("start")
+                self.assertEqual(code, 1)
+                self.assertIn("hue_bridge.c4z: a verified attestation was made from", err)
+                self.assertIn(shown, err)
+        self.assertEqual(self.gh.api_calls("POST", "deployments"), [])
 
     def test_start_fails_on_attestation_subject_mismatch(self):
         digest = sha(PACKAGE_BYTES["hue_light.c4z"])
@@ -1123,6 +1225,16 @@ class DoneTest(DeployCase):
         self.assertEqual(code, 1)
         self.assertIn("replaced", err)
 
+    def test_done_refuses_when_the_manifest_stopped_being_the_releases(self):
+        dep_id = self.start()
+        for manifest in (manifest_for(tag=None), manifest_for(dev=True)):
+            with self.subTest(manifest=manifest):
+                self.gh.assets["v1.0"]["manifest.json"] = json.dumps(manifest).encode()
+                code, out, err = self.run_main("done", "--devices", "5")
+                self.assertEqual(code, 1)
+                self.assertIn("the release v1.0 changed after start", err)
+        self.assertEqual(self.gh.statuses[dep_id][-1]["state"], "in_progress")
+
     def test_done_by_deployment_id(self):
         dep = self.gh.add_deployment("v1.0", 252, ["in_progress"])
         code, out, err = self.run_main("done", "--deployment", str(dep["id"]), "--devices", "4")
@@ -1181,6 +1293,7 @@ class RecordTest(DeployCase):
         self.assertEqual(self.gh.deployments, {})
 
     def test_record_with_no_manifest_flag(self):
+        """I-4: an out-of-band build is a development build, off the release even at its number."""
         self.write_house(build="247")
         code, out, err = self.run_main(
             "record",
@@ -1196,13 +1309,55 @@ class RecordTest(DeployCase):
             "--commit",
             OTHER_COMMIT,
         )
-        self.assertEqual(code, 0, err)
+        self.assertEqual(code, 3, err)
         dep = self.gh.deployments[max(self.gh.deployments)]
         self.assertEqual(dep["payload"]["build"], 247)
         self.assertEqual(dep["payload"]["packages"], {})
         self.assertEqual(dep["payload"]["commit"], OTHER_COMMIT)
         self.assertIs(dep["payload"]["recorded"], True)
-        self.assertIn("unverified", err)
+        self.assertIs(dep["payload"]["dev"], True)
+        self.assertIn("recording build 247 as a development build", err)
+        self.assertIn("observed  v1.0 development build 247", out)
+        self.assertIn("drift: desired build 247 (v1.0), observed development build 247 (v1.0)", out)
+        self.assertIn("development build 247-dev installed", self.gh.statuses[dep["id"]][-1]["description"])
+
+    def test_a_dev_build_with_the_releases_number_never_copies_its_hashes(self):
+        """I-4: a dev build of the release's commit has the release's build number; recorded with
+        --no-manifest it took the release's hashes and drift closed the deploy issue."""
+        issue = self.gh.add_issue("Deploy v1.0 (build 252) to the house")
+        for argv in (("--build", "252", "--no-manifest"), ("--build", "252-dev")):
+            with self.subTest(argv=argv):
+                code, out, err = self.run_main("record", "--tag", "v1.0", "--at", AT, "--note", "dev loop", *argv)
+                self.assertEqual(code, 3, err)
+                dep = self.gh.deployments[max(self.gh.deployments)]
+                self.assertEqual(dep["payload"]["build"], 252)
+                self.assertEqual(dep["payload"]["packages"], {})
+                self.assertIsNone(dep["payload"]["commit"])
+                self.assertIs(dep["payload"]["dev"], True)
+                self.assertIn("drift: desired build 252 (v1.0), observed development build 252 (v1.0)", out)
+                self.assertEqual(self.gh.issues[issue["number"]]["state"], "open")
+                self.assertEqual(3, self.run_main("status")[0])
+        self.assertEqual(self.gh.calls_matching("release"), [], "the release's manifest is not even read")
+        # A release install ends it: the observed state is the release again.
+        code, out, err = self.run_main("record", "--tag", "v1.0", "--build", "252", "--at", AT, "--note", "release")
+        self.assertEqual(code, 0, err)
+        self.assertIs(self.gh.deployments[max(self.gh.deployments)]["payload"]["dev"], False)
+        self.assertEqual(self.gh.issues[issue["number"]]["state"], "closed")
+
+    def test_record_refuses_a_manifest_that_is_not_a_releases(self):
+        self.gh.assets["v1.0"]["manifest.json"] = json.dumps(manifest_for(tag=None)).encode()
+        code, out, err = self.run_main("record", "--tag", "v1.0", "--build", "252", "--at", AT, "--note", "x")
+        self.assertEqual(code, 1)
+        self.assertIn("is not a release build: manifest.json names the tag null", err)
+        self.assertEqual(self.gh.deployments, {})
+
+    def test_record_build_forms(self):
+        for build in ("0", "-3", "252-DEV", "252dev", "252-dev-dev", "x", "252.0"):
+            with self.subTest(build=build):
+                code, out, err = self.run_main("record", "--tag", "v1.0", "--build", build, "--at", AT, "--note", "x")
+                self.assertEqual(code, 1)
+                self.assertIn("--build must be a positive integer, or N-dev", err)
+        self.assertEqual(self.gh.deployments, {})
 
     def test_record_without_a_manifest_in_the_release(self):
         self.gh.assets["v1.0"] = release_assets(with_manifest=False)
@@ -1212,7 +1367,7 @@ class RecordTest(DeployCase):
         code, out, err = self.run_main(
             "record", "--tag", "v1.0", "--build", "247", "--at", AT, "--note", "x", "--no-manifest"
         )
-        self.assertEqual(code, 3)  # recorded, but the house file wants 252: drift
+        self.assertEqual(code, 3)  # recorded as a development build: drift
         self.assertIsNone(self.gh.deployments[max(self.gh.deployments)]["payload"]["commit"])
 
     def test_record_rejects_bad_time_and_unknown_tag(self):
@@ -1263,6 +1418,21 @@ class StatusTest(DeployCase):
         self.assertIn("v1.0 build 252", out)
         self.gh.add_deployment("v1.0", 253, ["success", "inactive"])
         self.assertEqual(self.run_main("status")[0], 0)
+
+    def test_a_development_build_is_drift_whatever_its_number(self):
+        dep = self.gh.add_deployment("v1.0", 252, ["success"])
+        dep["payload"]["dev"] = True
+        code, out, err = self.run_main("status")
+        self.assertEqual(code, 3)
+        self.assertIn("observed  v1.0 development build 252, deployment", out)
+        code, out, err = self.run_main("drift", "--issue")
+        self.assertEqual(code, 3)
+        [issue] = [i for i in self.gh.issues.values() if i["state"] == "open"]
+        self.assertIn("a development build **252** (v1.0)", issue["body"])
+        for value in (False, None, "true", 1):
+            with self.subTest(dev=value):
+                dep["payload"]["dev"] = value
+                self.assertEqual(0, self.run_main("status")[0], "only dev: true marks a development build")
 
     def test_payload_as_string(self):
         dep = self.gh.add_deployment("v1.0", 252, ["success"])

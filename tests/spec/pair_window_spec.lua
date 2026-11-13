@@ -101,6 +101,127 @@ describe("bridge/pair_window.lua (#373)", function()
 		assert.is_false(state.pairing_active)
 	end)
 
+	it("stores the key encrypted, once its window has checked out", function()
+		w:open()
+		attempts[1].handlers.on_paired({ key = "abc123", bridge_id = PAIRED_ID, ip = IP, model = "BSB003" })
+		local saw_key
+		for _, args in ipairs(c4.calls_to("PersistSetValue")) do
+			if args[1] == "hue_app_key" then
+				saw_key = true
+				assert.equal("abc123", args[2])
+				assert.is_true(args[3], "key must be stored encrypted")
+			end
+		end
+		assert.is_true(saw_key)
+		local creds = require("bridge.credentials").load()
+		assert.same({ key = "abc123", bridge_id = PAIRED_ID, ip = IP }, creds)
+		assert.equal(1, #paired_with)
+	end)
+
+	-- Security review 2026-11-13, N-9 (#490): pairing.lua stored the key
+	-- before the window's checks, so a key request in flight at Forget
+	-- Pairing re-paired the driver, and one in flight at an address change
+	-- left a discarded pairing in the store for the next start.
+	describe("a result after the window closed (N-9)", function()
+		local KEY = { key = "abc123", bridge_id = PAIRED_ID, ip = IP, model = "BSB003" }
+
+		local function nothing_stored()
+			assert.same({}, c4.calls_to("PersistSetValue"))
+			assert.same({}, paired_with)
+		end
+
+		it("drops a key that arrives after Forget Pairing closed the window", function()
+			w:open()
+			w:close() -- Forget Pairing
+			statuses = {}
+			attempts[1].handlers.on_paired(KEY)
+			nothing_stored()
+			assert.same({}, statuses, "Status keeps what Forget Pairing wrote")
+			assert.truthy(table.concat(lines, "\n"):find("a key after the pairing window closed; dropped", 1, true))
+		end)
+
+		it("drops a key for an earlier address, storing nothing", function()
+			w:open()
+			state.address_gen = state.address_gen + 1
+			attempts[1].handlers.on_paired(KEY)
+			nothing_stored()
+		end)
+
+		it("drops a key of a window that another open() replaced, and keeps the new window", function()
+			w:open()
+			w:open()
+			attempts[1].handlers.on_paired(KEY)
+			nothing_stored()
+			assert.is_not_nil(state.pair_until, "the new window stays open")
+			attempts[2].handlers.on_paired(KEY)
+			assert.equal(1, #paired_with)
+		end)
+
+		it("drops a late error, link button answer or probe without a word in Status", function()
+			for _, handler in ipairs({ "on_error", "on_link_button", "on_probed" }) do
+				w:open()
+				w:close()
+				statuses, infos = {}, {}
+				attempts[#attempts].handlers[handler](handler == "on_error" and "late" or { model = "BSB003",
+					bridge_id = PAIRED_ID })
+				assert.same({}, statuses, handler)
+				assert.same({}, infos, handler)
+				assert.equal(0, #c4.active_timers(), handler)
+			end
+		end)
+	end)
+
+	-- The same with the real bridge/pairing.lua over the fake C4 (N-9): the
+	-- probe and the key request answered by the "bridge" after the change.
+	describe("with the real pairing module (N-9)", function()
+		local CONFIG = '{"name":"Hue","swversion":"1968096020","apiversion":"1.68.0","bridgeid":"001788FFFE123ABC",'
+			.. '"modelid":"BSB003"}'
+		local KEY_ANSWER = '[{"success":{"username":"abc123","clientkey":"DEADBEEF"}}]'
+
+		before_each(function()
+			for _, m in ipairs({ "bridge.pairing", "bridge.pair_window", "bridge.http" }) do package.loaded[m] = nil end
+			pair_window = require("bridge.pair_window")
+			w = pair_window.new(w.ctx)
+		end)
+
+		local function key_stored()
+			for _, args in ipairs(c4.calls_to("PersistSetValue")) do
+				if args[1] == "hue_app_key" then return true end
+			end
+			return false
+		end
+
+		for _, change in ipairs({
+			{ "Forget Pairing", function() w:close() end },
+			{ "an address change", function() state.address_gen = state.address_gen + 1 end },
+		}) do
+			it("stores no key that arrives after " .. change[1], function()
+				w:open()
+				c4.transfers[1]:respond(200, CONFIG)
+				assert.equal("https://" .. IP .. "/api", c4.transfers[2].url)
+				change[2]()
+				c4.transfers[2]:respond(200, KEY_ANSWER)
+				assert.is_false(key_stored())
+				assert.same({}, paired_with)
+			end)
+		end
+
+		it("stores the key that arrives while the window is open", function()
+			w:open()
+			c4.transfers[1]:respond(200, CONFIG)
+			c4.transfers[2]:respond(200, KEY_ANSWER)
+			assert.is_true(key_stored())
+			assert.equal(1, #paired_with)
+		end)
+	end)
+
+	it("cuts the error's text for Status (#489)", function()
+		w:open()
+		attempts[1].handlers.on_error(string.rep("x", 100000))
+		assert.is_true(#last_status() <= 256, #last_status() .. " bytes")
+		assert.equal("Pairing failed: xxx", last_status():sub(1, 19))
+	end)
+
 	it("says why pairing failed, and closes the window", function()
 		w:open()
 		attempts[1].handlers.on_error("the bridge did not answer")

@@ -214,6 +214,33 @@ describe("bridge.load_groups", function()
 			assert.is_nil(load_groups.dim_fields({ direction = "sideways" }))
 		end)
 
+		-- Security review 2026-11-13 C-3 (#486).
+		it("maps no number that is not finite", function()
+			assert.same({ on = true }, load_groups.set_fields({ on = "true", brightness = "nan", x = "inf", y = "-inf",
+				mirek = "nan", rate = "1e400" }))
+			assert.same({ dim = "stop" }, load_groups.dim_fields({ direction = "stop", level = "nan", duration = "inf" }))
+		end)
+
+		-- Security review 2026-11-13 D-3 (#488).
+		it("keeps the first 256 load groups of a HUE_LOAD_GROUPS and drops the rest with a warning", function()
+			assert.equal(256, load_groups.GROUPS_MAX)
+			local items = {}
+			for i = 1, 1000 do items[#items + 1] = tostring(5000 + i) .. ":0" end
+			items[#items + 1] = "5001:1" -- a repeat counts once
+			local wire = table.concat(items, ",")
+			local groups, dropped = load_groups.parse_groups(wire)
+			local kept = 0
+			for _ in pairs(groups) do kept = kept + 1 end
+			assert.equal(256, kept)
+			assert.equal(744, dropped)
+			assert.is_true(groups["5001"] and groups["5256"])
+			assert.is_nil(groups["5257"])
+			assert.same({ {}, 0 }, { load_groups.parse_groups(nil) })
+
+			lg:memberships(101, wire)
+			assert.is_true(saw("device 101 named 1000 load groups; the first 256 are kept, 744 dropped"))
+		end)
+
 		it("keys a class by the fields a PUT carries, rounded as commands.body rounds them (D8)", function()
 			local key = load_groups.class_key
 			assert.equal(key({ on = true, brightness = 40, rate = 0 }), key({ on = true, brightness = 40.001, rate = 0.2 }))
