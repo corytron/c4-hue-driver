@@ -94,6 +94,9 @@ of it is live.
   lifecycle base for the bridge's lights, scenes and zone lights
   (`bridge/owner.lua`, #56) and one keypad machine for the two device
   drivers (`common/device.lua`, #57), with no owner-visible change.
+- [`security-review-design.md`](security-review-design.md): the contract of
+  the security review of 2026-11-13 (#480): what is protected, from whom,
+  the four reviewers, and how findings are rated and disclosed.
 - [`security-fixes-design.md`](security-fixes-design.md): the fixes for the
   security review of 2026-10-25 (#217): the gate on keyed requests, the TLS
   verdict, the limit on open stream transfers, cleaned names, the
