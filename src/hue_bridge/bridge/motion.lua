@@ -107,6 +107,7 @@
 -- Persistence: the registry's mutators change memory only; the module marks
 -- itself dirty and saves once per batch, except during device creation.
 
+local num = require("common.num")
 local motion_model = require("bridge.motion_model")
 local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
@@ -270,11 +271,10 @@ local name_of = motion.name_of
 
 -- "14:02": a controller time of receipt as the device rows show it (R10).
 local function clock_of(ts)
-	ts = tonumber(ts)
-	if not ts or ts < 0 or ts >= 4102444800 then
+	if ts == nil then
 		return "?"
 	end
-	return os.date("%H:%M", ts)
+	return num.date("%H:%M", ts, "?") -- #487: common/num.lua's bounds
 end
 
 -- "07:02:41 UTC": a bridge time as the log shows it (R10; never compared
@@ -1017,14 +1017,20 @@ function motion:sensor_state(rid, entry)
 	end
 	-- The rows keep their last values whatever the motion's state; a reading
 	-- switched off in Hue, or flagged invalid, is not passed on (EC §6).
-	if ll and ll.enabled ~= false and ll.valid ~= false and ll.lux ~= nil then
-		out.lux = tostring(ll.lux)
+	-- Only finite readings in range go to the device, as the device itself
+	-- takes them: lux 0 to 100,000, -40 to 60 °C, a battery 0 to 100 %
+	-- (security review 2026-11-13 C-3, D-5, #486; common/num.lua).
+	local lux = ll and ll.enabled ~= false and ll.valid ~= false and num.within(ll.lux, 0, 100000) or nil
+	if lux then
+		out.lux = tostring(lux)
 	end
-	if t and t.enabled ~= false and t.valid ~= false and t.temperature ~= nil then
-		out.temperature = decimal(t.temperature)
+	local celsius = t and t.enabled ~= false and t.valid ~= false and num.within(t.temperature, -40, 60) or nil
+	if celsius then
+		out.temperature = decimal(celsius)
 	end
-	if p and p.battery_level ~= nil then
-		out.battery_level = tostring(p.battery_level)
+	local battery = p and num.within(p.battery_level, 0, 100) or nil
+	if battery then
+		out.battery_level = tostring(battery)
 	end
 	if p and p.battery_state ~= nil then
 		out.battery_state = p.battery_state

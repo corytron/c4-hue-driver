@@ -30,8 +30,11 @@ describe("bridge/identity.lua (#373)", function()
 		log.sink = function() end
 		c4 = fake.install_c4()
 		gets, tls_runs, pinned_before, remembered = {}, {}, false, false
+		package.loaded["bridge.http"] = nil
+		local real_http = require("bridge.http")
 		package.loaded["bridge.http"] = {
 			request = function(req, callback) gets[#gets + 1] = { req = req, callback = callback } end,
+			peer_text = real_http.peer_text, TEXT_ROW = real_http.TEXT_ROW, TEXT_LOG = real_http.TEXT_LOG,
 		}
 		package.loaded["bridge.tlscheck"] = {
 			run = function(ip, callback) tls_runs[#tls_runs + 1] = { ip = ip, callback = callback } end,
@@ -158,6 +161,26 @@ describe("bridge/identity.lua (#373)", function()
 			assert.same({ "stream=false" }, answers)
 		end)
 
+		-- Security review 2026-11-13, N-4 (#490): the rows were written from any
+		-- answer with an id, before the id was compared.
+		it("writes no row from another bridge's answer, nor its model (N-4)", function()
+			id:verify("stream", waiter("stream"))
+			local answer = config_answer(OTHER_ID, "BSB001")
+			answer.json.name = "Garage" .. string.rep(" ", 100000)
+			gets[1].callback(answer)
+			assert.same({}, infos, "Bridge Model, Name and Firmware untouched")
+			assert.same({ "Status: Bridge at " .. IP .. " reports ID " .. OTHER_ID .. ", expected " .. PAIRED_ID
+				.. "; nothing is sent until the address is corrected" }, rows)
+			assert.same({ "other " .. OTHER_ID }, away_calls)
+			assert.same({ "stream=false" }, answers)
+		end)
+
+		it("cuts a long model id in Status (#489)", function()
+			id:verify("stream", waiter("stream"))
+			gets[1].callback(config_answer(PAIRED_ID, "X" .. string.rep("y", 100000)))
+			assert.is_true(#rows[1] < 200, #rows[1] .. " bytes")
+		end)
+
 		it("refuses another bridge at the address, for good", function()
 			id:verify("stream", waiter("stream"))
 			gets[1].callback(config_answer(OTHER_ID))
@@ -206,6 +229,74 @@ describe("bridge/identity.lua (#373)", function()
 			assert.same({}, rows)
 			assert.same({}, away_calls)
 			assert.same({}, answers)
+		end)
+	end)
+
+	-- Security review 2026-11-13, N-6 (#490): a 401 or 403 on the stream
+	-- locked the key at once, whatever answered at the address.
+	describe("recheck: a 401 or 403 before the key is locked (N-6)", function()
+		before_each(function()
+			state.identity_ok, state.tls_verdict = true, "pinned"
+		end)
+
+		it("holds keyed requests, then asks unkeyed from a timer, and answers the paired bridge true", function()
+			local same
+			id:recheck(function(ok) same = ok end)
+			assert.is_nil(state.identity_ok, "nothing keyed meanwhile")
+			assert.equal(0, #gets, "not inside the transfer's callback")
+			c4.advance(1)
+			assert.equal(1, #gets)
+			assert.same({ ip = IP, path = "/api/0/config", timeout = 10 }, gets[1].req, "no key")
+			gets[1].callback(config_answer(PAIRED_ID))
+			assert.is_true(same)
+			assert.is_true(state.identity_ok)
+		end)
+
+		it("answers false for another bridge at the address, which then gets nothing keyed", function()
+			local same
+			id:recheck(function(ok) same = ok end)
+			c4.advance(1)
+			gets[1].callback(config_answer(OTHER_ID))
+			assert.is_false(same)
+			assert.is_false(state.identity_ok)
+			assert.same({}, infos)
+			assert.same({ "other " .. OTHER_ID }, away_calls)
+		end)
+
+		it("keeps the waiter while the bridge does not answer, and answers the key first", function()
+			local order = {}
+			id:recheck(function(ok) order[#order + 1] = "key=" .. tostring(ok) end)
+			c4.advance(1)
+			gets[1].callback({ ok = false, err = "timeout" })
+			id:verify("stream", function(ok) order[#order + 1] = "stream=" .. tostring(ok) end)
+			gets[2].callback(config_answer(PAIRED_ID))
+			assert.same({ "key=true", "stream=true" }, order)
+		end)
+
+		it("is answered by a check that starts before its timer, and starts no second one", function()
+			local same
+			id:recheck(function(ok) same = ok end)
+			id:verify("test", waiter("test"))
+			assert.equal(1, #gets)
+			gets[1].callback(config_answer(PAIRED_ID))
+			assert.is_true(same)
+			c4.advance(1)
+			assert.equal(1, #gets)
+			assert.same({ "test=true" }, answers)
+		end)
+
+		it("is dropped by an address change or a reset before its timer", function()
+			local same = "unanswered"
+			id:recheck(function(ok) same = ok end)
+			state.address_gen = 2
+			c4.advance(1)
+			assert.equal(0, #gets)
+			state.address_gen = 1
+			id:recheck(function(ok) same = ok end)
+			id:reset()
+			c4.advance(60 * S)
+			assert.equal(0, #gets)
+			assert.equal("unanswered", same)
 		end)
 	end)
 

@@ -15,6 +15,8 @@
 --   link.text(l, os.time())      -- "Hue Bridge not answering since 14:02"; nil while online
 --   link.clock(since_s, now_s)   -- "14:02" on the day of now_s, "10-26 14:02" on another day
 
+local num = require("common.num")
+
 local link = {}
 
 -- §6.1's reasons, each with the words of its §6.3 Status text: "Hue Bridge
@@ -33,13 +35,12 @@ local TEXTS = {
 local FALLBACK_REASON = "not_answering"
 
 -- `since` is epoch seconds as a decimal string (§6.1). Anything that is not a
--- positive, finite number before 2106 (where os.date may give up) is dropped:
--- the text then names no time.
-local SINCE_MAX = 4294967296
-
+-- positive, finite time os.date takes on every controller (common/num.lua's
+-- num.timestamp: before 2100; until #487 the bound was 2^32, 2106) is
+-- dropped: the text then names no time.
 local function seconds(value)
-	local n = tonumber(value)
-	if not n or n ~= n or n <= 0 or n >= SINCE_MAX then
+	local n = num.timestamp(value)
+	if not n or n <= 0 then
 		return nil
 	end
 	return math.floor(n)
@@ -69,14 +70,15 @@ end
 
 -- "14:02" when since_s falls on the controller's day of now_s (os.time() when
 -- nil), "10-26 14:02" otherwise: the rule of the bridge's away:clock
--- (src/hue_bridge/bridge/away.lua), in seconds (§6.3).
+-- (src/hue_bridge/bridge/away.lua), in seconds (§6.3). Both go through
+-- common/num.lua's num.date (#487): a time os.date cannot take reads "?",
+-- never an error.
 function link.clock(since_s, now_s)
-	local t = math.floor(since_s)
-	local now = math.floor(tonumber(now_s) or os.time())
-	if os.date("%Y-%m-%d", t) == os.date("%Y-%m-%d", now) then
-		return os.date("%H:%M", t)
+	local now = num.timestamp(now_s) or os.time()
+	if num.date("%Y-%m-%d", since_s) == num.date("%Y-%m-%d", now) then
+		return num.date("%H:%M", since_s)
 	end
-	return os.date("%m-%d %H:%M", t)
+	return num.date("%m-%d %H:%M", since_s)
 end
 
 -- §6.3's Status text for an offline link, computed from since at every call,

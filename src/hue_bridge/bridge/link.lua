@@ -78,6 +78,8 @@
 -- [verified: API 26.5_persistence, tables of strings and numbers], as
 -- bridge/away.lua uses them.
 
+local num = require("common.num")
+
 local link = {}
 link.__index = link
 
@@ -128,11 +130,12 @@ function link:clock(ms)
 	if self.ctx.clock then
 		return self.ctx.clock(ms)
 	end
-	local t = math.floor(ms / 1000)
-	if os.date("%Y-%m-%d", t) == os.date("%Y-%m-%d", math.floor(self.now() / 1000)) then
-		return os.date("%H:%M", t)
+	-- num.date (#487): a time os.date cannot take reads "?" instead of raising.
+	local t = num.finite(ms) and math.floor(ms / 1000) or -1
+	if num.date("%Y-%m-%d", t) == num.date("%Y-%m-%d", math.floor(self.now() / 1000)) then
+		return num.date("%H:%M", t)
 	end
-	return os.date("%m-%d %H:%M", t)
+	return num.date("%m-%d %H:%M", t)
 end
 
 local function duration(ms)
@@ -186,8 +189,10 @@ function link:load()
 	local ctx = self.ctx
 	local value = C4:PersistGetValue(link.KEY)
 	if value ~= nil then
-		local since = type(value) == "table" and tonumber(value.since) or nil
-		if since and since > 0 and since <= self.now() and type(value.reason) == "string" then
+		-- A stored time num.timestamp refuses is malformed (#487): `since` is in ms.
+		local since = type(value) == "table" and num.finite(value.since) or nil
+		if since and since > 0 and since <= self.now() and num.timestamp(since / 1000)
+				and type(value.reason) == "string" then
 			self.stored = { since = since, reason = value.reason }
 			-- Trouble seen before load() counts from the stored start too.
 			if self.since and not self.is_offline and since < self.since then

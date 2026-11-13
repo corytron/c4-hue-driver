@@ -293,6 +293,33 @@ local function action_problem(result)
 	return nil
 end
 
+-- What is wrong with a bridge command that only a signed dev loop command
+-- runs (#484, ledger.aliases' signed), on a fresh driver of `form` (default
+-- "dev"), or nil: the bridge handed the loop a handler of that dispatch name,
+-- and devloop.execute runs it without an error or an [ERROR] line.
+local function signed_problem(command, form)
+	return in_form(form or "dev", function()
+		-- The loop's state outlives a driver load: only this load's handlers count.
+		local loop = rawget(_G, "__DEVLOOP")
+		if type(loop) == "table" then loop.signed_commands = nil end
+		fresh("hue_bridge")
+		local key = (command:gsub("%s+", "_"))
+		loop = rawget(_G, "__DEVLOOP")
+		if type(loop) ~= "table" or type(loop.signed_commands) ~= "table"
+			or type(loop.signed_commands[key]) ~= "function" then
+			return "no signed handler " .. key
+		end
+		local errors, saved = {}, log.sink
+		log.sink = function(line)
+			if line:find("[ERROR]", 1, true) then errors[#errors + 1] = line end
+		end
+		local ok, err = pcall(require("common.devloop").execute, command, {})
+		log.sink = saved
+		if not ok or err ~= nil then return "signed: " .. tostring(err) end
+		return errors[1] and ("signed: logged " .. errors[1]) or nil
+	end)
+end
+
 -- Versions (the alias expiry) -------------------------------------------------
 
 local function xy(text)
@@ -716,9 +743,13 @@ describe("feature ledger (#334)", function()
 			assert.is_nil(unknown.reached)
 			assert.is_nil(unknown.by_name.reached)
 			assert.equal("Pair_Bridge", probe_action("dev", "hue_bridge", "Pair Bridge").reached)
-			-- The release form really is one: no bridge/devtools.lua, so no DEV-ONLY handler.
-			assert.equal("Check_CA_Pinning", probe_action("dev", "hue_bridge", "Check CA Pinning").reached)
-			assert.is_nil(probe_action("release", "hue_bridge", "Check CA Pinning").reached)
+			-- The release form really is one: no bridge/devtools.lua, so no
+			-- development handler (HUE_LOG is the one left in the dispatch table
+			-- since #484) and no signed one.
+			assert.equal("HUE_LOG", probe_action("dev", "hue_bridge", "HUE_LOG").reached)
+			assert.is_nil(probe_action("release", "hue_bridge", "HUE_LOG").reached)
+			assert.is_nil(signed_problem("Check CA Pinning"))
+			assert.is_not_nil(signed_problem("Check CA Pinning", "release"))
 			assert.is_nil(model("hue_bridge", "release").action_by_command["Check CA Pinning"])
 		end)
 
@@ -1022,6 +1053,13 @@ describe("feature ledger (#334)", function()
 						if result.reached or result.by_name.reached then
 							problems[#problems + 1] = "a dev command, but the release build answers it"
 						end
+					elseif alias.signed then
+						-- #484: signed dev loop commands only, never any driver's ExecuteCommand.
+						if result.reached or result.by_name.reached then
+							problems[#problems + 1] = "a signed command, but ExecuteCommand reaches it"
+						end
+						local why = signed_problem(alias.command)
+						if why then problems[#problems + 1] = why end
 					elseif not result.reached or not result.by_name.reached then
 						problems[#problems + 1] = form .. " build: reaches no handler"
 					elseif result.raised or result.by_name.raised or result.errors[1] or result.by_name.errors[1] then

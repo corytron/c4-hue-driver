@@ -261,6 +261,9 @@ describe("load groups on the bridge driver (#435)", function()
 
 	it("paces a load group's hold past the tenth lamp, its stops in the order of its starts", function()
 		start()
+		-- The light bucket's pacing, not the cap on keyed requests in flight
+		-- (bridge/http.lua MAX_KEYED, #489 N-8): every PUT at once.
+		package.loaded["bridge.http"].MAX_KEYED = math.huge
 		for i = 1, HALL_LAMPS do
 			member(hall_name(i), hall_rid(i), "4003:0")
 		end

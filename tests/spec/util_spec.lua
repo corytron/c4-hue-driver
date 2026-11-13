@@ -39,6 +39,54 @@ describe("bridge.util", function()
 		assert.equal("a b", util.sanitise("a,\nb"))
 	end)
 
+	-- Security review 2026-11-13 C-3 (#486).
+	it("positive takes no infinity", function()
+		assert.is_nil(util.positive("inf"))
+		assert.is_nil(util.positive("1e400"))
+		assert.is_nil(util.positive(math.huge))
+		assert.is_nil(util.positive("nan"))
+		assert.equal(1e15, util.positive("1e15"))
+	end)
+
+	-- Security review 2026-11-13 C-4 (#489).
+	describe("caller and peer text", function()
+		it("sanitise keeps at most 256 bytes, cut before a UTF-8 character", function()
+			assert.equal(256, util.ECHO_MAX)
+			assert.equal(("a"):rep(253) .. "...", util.sanitise(("a"):rep(1000000)))
+			local cut = util.sanitise("a" .. ("ü"):rep(200)) -- 1 + 400 bytes
+			assert.equal("a" .. ("ü"):rep(126) .. "...", cut, "253 bytes: the 127th ü would end at 255, the cut at 253")
+			assert.equal(("a b "):rep(3), util.sanitise(("a,b,"):rep(3)))
+		end)
+
+		-- util.echo is bridge/http.lua's http.peer_text, the one helper for it.
+		it("echo removes control characters and cuts at 256 bytes, or the given length, with ...", function()
+			assert.equal("light:01x", util.echo("light:01\nx"))
+			assert.equal("esc [31m bel ", util.echo("esc \27[31m bel \7"))
+			assert.equal("7", util.echo(7))
+			assert.equal("nil", util.echo(nil))
+			local long = util.echo(("y"):rep(200000))
+			assert.equal(256, #long)
+			assert.equal(("y"):rep(253) .. "...", long)
+			assert.equal(2000, #util.echo(("z"):rep(5000), util.LOG_MAX))
+			assert.equal("üü...", util.echo(("ü"):rep(10), 8), "never half a character: 7 bytes, not 8")
+		end)
+	end)
+
+	-- Security review 2026-11-13 #487: os.date raises on a time it cannot take.
+	it("dates read ? for a timestamp os.date cannot take", function()
+		for _, ts in ipairs({ "nan", "inf", 1e300, -1, "1e400", 4102444800, {} }) do
+			assert.equal("?", util.date_of(ts), tostring(ts))
+			assert.equal("?", util.short_date_of(ts), tostring(ts))
+		end
+		assert.equal(os.date("%Y-%m-%d", 1700000000), util.date_of(1700000000))
+		assert.equal(os.date("%m-%d", 1700000000), util.short_date_of("1700000000"))
+	end)
+
+	it("copy_caps keeps only finite numbers (#486)", function()
+		assert.same({ has_color = false, has_cct = true, min_dim = 1 },
+			util.copy_caps({ has_cct = true, mirek_min = "nan", mirek_max = 1 / 0, min_dim = "inf" }, 1))
+	end)
+
 	-- Security review 2026-10-25 finding 8 (docs/security-fixes-design.md §2).
 	describe("display_name", function()
 		local function utf8_whole(text)

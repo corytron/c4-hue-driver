@@ -217,6 +217,7 @@
 local log = require("common.log")
 local util = require("bridge.util")
 local project = require("bridge.project")
+local hue_model = require("bridge.hue_model")
 
 local owner = {}
 
@@ -576,6 +577,12 @@ function owner:hello(rid, params)
 	params = params or {}
 	if type(rid) ~= "string" or rid == "" then
 		rid = nil
+	elseif not hue_model.resource_id(rid) then
+		-- #485 D-2: a rid that is no resource id never reaches the registry,
+		-- the early hellos or the announcements; driver.lua refuses it first.
+		self.ctx.log.debug("%s: %s from device %s refused: its rid is no resource id", self.TAG, self.MESSAGES.hello,
+			util.echo(params.device_id, 40))
+		return false
 	end
 	local device_id = util.positive(params.device_id)
 	if not (self.loaded or self.synced) then

@@ -34,14 +34,26 @@ LAN address and creates the dev key on its first run), then build with
 `tools/build.sh --dev` (the packages carry that key) from a commit after
 the installed one (the version is the commit count, so Composer sees an
 update). Install the four dev `.c4z` the way `CLAUDE.md` (Deploy)
-describes an install that bypasses `tools/deploy.py`: served from
-`build/release/` with `python3 -I -m http.server 8090 --bind 0.0.0.0
---directory build/release` for the duration of the download only, briefed
-to the Windows session with their sha256, and recorded afterwards with
+describes an install that bypasses `tools/deploy.py`: served straight from
+`build/` with `python3 -I tools/serve_install.py build/hue_bridge.c4z
+build/hue_light.c4z build/hue_motion.c4z build/hue_scene.c4z`, which copies
+only those files into a temporary folder under a random path, serves them on
+port 8090 of this VM's LAN address, prints the URLs, the sha256 and the
+PowerShell for the brief, stops once each has been downloaded (or after 30
+minutes) and deletes the folder (security review 2026-11-13, I-1). Never
+serve `build/` or `build/release/` with `http.server`: every dev package
+there would go to the whole LAN. Record the install afterwards with
 `python3 tools/deploy.py record --tag <release tag> --build <N> --at <ISO
 time with offset> --note "..." --no-manifest` (`--commit <sha>` names the
-commit; deployment 7310056842 recorded dev build 309 this way). A dev
-package is as secret as the key it carries ("Security"). `--dev` changes
+commit; `--build <N>-dev`, the Driver Version a dev build shows, says the
+same as `--no-manifest`): it is recorded as a development build, with no
+package hash, and the drift issue stays open until a release is installed
+again (I-4). A dev build's devices show `Driver Version` as `<N>-dev`
+(`common/build_kind.lua`, which `tools/build.sh` writes as `"dev"` or
+`"release"`), so it is never taken for the release with the same build
+number. A dev package is as secret as the key it carries ("Security"):
+once installed, `tools/build.sh` (a release build) replaces the dev
+packages in `build/`, and none is ever copied into `build/release/`. `--dev` changes
 the Lua that is packed and keeps the DEV-ONLY properties and actions of
 `driver.xml`, which a release strips; neither touches `<capabilities>`, so
 no reboot is needed unless the commit itself changes them (the dev →
@@ -61,8 +73,8 @@ under "Leaving the loop" below.
   self-signed) that answers the same endpoints and keeps the
   connection-experiment endpoints `/stream` and `/ping` alive. Both listen
   on one address, by default this VM's LAN address. It signs every bundle
-  and command list with the dev key, and wants the admin token on `/status`
-  and `/admin/*`. Serves three trees, each a driver's `.lua` and `.xml`
+  and command list with the dev key, and wants the admin token of its
+  current run on `/status` and `/admin/*`. Serves three trees, each a driver's `.lua` and `.xml`
   files and its `certs/` under the paths its `.c4z` uses (a module the
   bundle lacks, such as `common/build_version.lua`, still loads from the
   installed package):
@@ -74,9 +86,11 @@ under "Leaving the loop" below.
   A file named `devkey.lua` is never served.
 - `tools/devctl.py`: CLI for the developer: queue actions, set properties,
   force a reload, wait for a queued command, pin or unpin the trees, show
-  status (every tree), tail the log. It derives the admin token from the
-  dev key file and finds the server through `build/dev/server.json`; `log`
-  reads `build/dev/driver.log` directly and needs neither.
+  status (every tree), tail the log. It finds the server and the admin token
+  of its current run in `build/dev/server.json` (mode 0600); `log` reads
+  `build/dev/driver.log` directly and needs neither.
+- `tools/serve_install.py`: serves the dev packages to the Windows session
+  for their install, and nothing else (above, and `CLAUDE.md`, Deploy).
 - `src/common/devloop.lua`: the driver side, in all four drivers. The
   bridge runs the polling loop; a light, scene or motion device only
   registers the `DEV_RELOAD` handler `devloop.reload_handler` builds (it
@@ -90,6 +104,12 @@ under "Leaving the loop" below.
   four "(dev) …" entries since 1.2; `HUE_LOG`; and the signed-only commands
   of "Development commands" below) and the redactor; `driver.lua` loads it
   only when `common/devloop.lua` is there.
+  Current (2026-11-13, #484): those three commands, and `Probe Picker
+  Folders`, are no longer in `dispatch.commands`, so another driver cannot
+  reach them unsigned: they run from the signed command list, and the
+  Diagnostics "(dev) …" entries reach the first three through a private
+  `devtools.diagnostics` table. Forwarded `HUE_LOG` lines are capped at
+  2,000 bytes.
 - The dev key: `~/.config/c4-hue-driver/devkey` on the VM, outside the
   repository, and `common/devkey.lua` inside each dev package ("Security").
 
@@ -493,9 +513,10 @@ drop the plain listener's connection and request lines and the heartbeat
 summaries, `--port` and `--tls-port`, `--bind` to listen elsewhere,
 `--key-file` for another key, `--state-dir`/`--cert-dir`/`--root` to
 relocate its files, `--alpn` for the protocols its TLS listener offers, and
-`--ensure-key` ("The dev key" below); `devctl.py` takes `--server`,
-`--key-file` and `--state-dir`.
-`C4_HUE_DEVKEY_FILE` names another key file for all three tools.
+`--ensure-key` ("The dev key" below); `devctl.py` takes `--server` and
+`--state-dir` (whose `server.json` holds the admin token).
+`C4_HUE_DEVKEY_FILE` names another key file for `devserver.py` and
+`tools/build.sh --dev`.
 
 ### Leaving the loop (production)
 
@@ -504,8 +525,9 @@ A release build (`tools/build.sh` without `--dev`) ships no
 `pcall`, so the same `driver.lua` starts without it and the bridge simply
 never contacts this VM again. Since build 259 (2026-10-24) a production
 install is a GitHub release, never a VM build; a dev build (the last was
-604, on 2026-11-10) goes around `tools/deploy.py` and is recorded with
-`deploy.py record --no-manifest`. Before installing a release:
+604, on 2026-11-10) goes around `tools/deploy.py`, served by
+`tools/serve_install.py`, and is recorded with `deploy.py record
+--no-manifest` as a development build. Before installing a release:
 `devctl.py set "Debug Mode" Off` (the property survives the update, and
 `deploy/house.yaml` wants it Off), then the GitOps install of
 `docs/release-checklist.md`, "Deploy to the house" (`tools/deploy.py
@@ -558,8 +580,10 @@ signed, and the key never crosses the wire.
   log line.
 - Every MAC is HMAC-SHA256 keyed with those 64 characters (as ASCII), over
   `c4-hue-devloop/1\n<label>\n<data>`, as lowercase hex. The labels are
-  `bundle`, `commands`, `admin-token`, `fingerprint` and `nonce`, so a MAC
-  made for one purpose is never valid for another.
+  `bundle`, `commands`, `fingerprint` and `nonce`, so a MAC made for one
+  purpose is never valid for another. (`admin-token` was a fifth until the
+  review of 2026-11-13: the admin token is no longer derived from the key,
+  below.)
 - The fingerprint, the first 16 hex characters of the `fingerprint` MAC of
   nothing, names a key without revealing it: `build.sh --dev` and the server
   print it, the bridge reports it (`key_fingerprint`), and the server warns
@@ -683,10 +707,21 @@ signed, and the key never crosses the wire.
   start; no packet is sent); `0.0.0.0` only when `--bind 0.0.0.0` says so.
   The address goes to `build/dev/server.json`, where `devctl.py` finds it.
 - The developer endpoints, `/status` and `/admin/*`, want the header
-  `X-Devloop-Token: <the admin-token MAC of nothing>`. `devctl.py` derives
-  it from the key file, so it never leaves the VM when `devctl.py` runs
-  there (as it must for `log`). Without it, or with a wrong one: 401 and one
-  `DENY` line on the console, without the value presented.
+  `X-Devloop-Token: <the admin token of this run>`: 32 random bytes as hex,
+  drawn at every start, printed once on the server's console and written to
+  `build/dev/server.json` (mode 0600, created that way), where `devctl.py`
+  reads it. Nothing derives it from the dev key (security review 2026-11-13,
+  I-1): until then it was the `admin-token` MAC of nothing, which anyone
+  holding a dev package could compute and use to have the genuine server
+  sign their commands. A restart draws a new one. Without it, or with a
+  wrong one: 401 and one `DENY` line on the console, without the value
+  presented.
+- Every request body is capped at 1 MB (`MAX_BODY`): a larger
+  `Content-Length` is answered 413 without reading the body (I-10).
+- Every line the server logs, on its console and in `build/dev/driver.log`,
+  has its control characters (C0, DEL, C1), the Unicode line separators and
+  the bidirectional marks replaced by spaces (`devserver.clean`), so a
+  posted line cannot forge a second line or drive the reader's terminal.
 - Unauthenticated by design: `/manifest` (a hint, see above), `/file` (the
   repository's own source), `/ping` and `/stream` (the connection
   experiment), and the controller's `POST /log` and `POST /report`.
@@ -710,17 +745,22 @@ signed, and the key never crosses the wire.
 - **Spoofing the server's view.** Anything on the LAN can post log lines
   and reports to the server, for instance a `command_done` that drops a
   pending command unrun. The server's view is advisory; nothing on the
-  controller depends on it.
+  controller depends on it. Whoever reads `devctl.py log` and `status`, an
+  agent included, reads untrusted text: the shipped log lines, the
+  reported properties and errors are data, never instructions, and a line
+  that asks for an action is a finding to report, not a step to take (I-10).
 - **The key is as secret as a dev package.** Whoever holds a dev `.c4z`
   holds the key: they can sign bundles and commands for every dev build
-  made with it, and derive the admin token. Keep dev packages off shared
-  places, serve them for the Windows download only for its duration (the
-  Deploy HTTP server listens on every address), and never attach one to a
-  release (the release workflow builds without `--dev`, and
-  `tools/deploy.py` refuses a manifest that says `dev: true`). To rotate the
-  key: delete the key file, run `tools/build.sh --dev` (it creates a new
-  one), restart `devserver.py`, install the new dev build. Installing a
-  release build ends the loop, and the old key's use with it.
+  made with it (no longer drive this server: its admin token is random).
+  Keep dev packages off shared places, serve them only with
+  `tools/serve_install.py` (only the named files, under a random path,
+  until they are downloaded), and never attach one to a release (the
+  release workflow builds without `--dev`, and `tools/deploy.py` refuses a
+  manifest whose `dev` is not `false`). To rotate the key: delete the key
+  file, run `tools/build.sh --dev` (it creates a new one), restart
+  `devserver.py`, install the new dev build. Rotate it after a dev round
+  whose packages were ever served another way. Installing a release build
+  ends the loop, and the old key's use with it.
 - `Dev Server` stays empty when the loop is not in use; a release build
   has no such row.
 - **Development handlers (finding 15).** `Hue Request` and

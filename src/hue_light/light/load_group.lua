@@ -159,6 +159,16 @@ load_group.DEFAULT_HOLD_MS = 5000
 -- characters, or the summary "3 load groups: Kitchen Group, …".
 load_group.TEXT_MAX = 75
 
+-- #488 (D-3, docs/security-fixes-2026-11-design.md): a light keeps at most
+-- MAX load groups, however they come (JOIN_GROUP, a learnt id, the
+-- persisted list), and learns an id from a group command only when it names
+-- a device (display_name, C4:GetDeviceDisplayName [verified: API
+-- 32_serial_network_device/_6-GetDeviceDisplayName]). Until then any
+-- positive id was learnt and persisted, and the list, its HUE_LOAD_GROUPS
+-- and its row's name lookups grew without bound. A JOIN_GROUP is the Load
+-- Group's own word and keeps E3's rule: an id whose name is not found stays.
+load_group.MAX = 32
+
 -- Helpers -------------------------------------------------------------------
 
 -- A finite number, or nil (tonumber accepts "inf" and "nan" through strtod).
@@ -417,10 +427,39 @@ function methods:load()
 			end
 		end
 	end
+	-- #488: a list stored before the cap keeps its first MAX ids.
+	local ids = self:ids()
+	if #ids > load_group.MAX then
+		for i = load_group.MAX + 1, #ids do
+			self.groups[ids[i]] = nil
+		end
+		self.log.warn("stored %s holds %d load groups; kept the first %d", load_group.KEY, #ids, load_group.MAX)
+		dirty = true
+	end
 	if dirty then
 		self:save()
 	end
 	return #self:ids()
+end
+
+-- #488: whether `id`, which the list lacks, may be added by `how` (the
+-- command, for the log): not while the list holds MAX, and with `named`
+-- (an id learnt from a group command) only when it names a device.
+function methods:admit(id, how, named)
+	local n = 0
+	for _ in pairs(self.groups) do
+		n = n + 1
+	end
+	if n >= load_group.MAX then
+		self.log.warn("%s: load group %s not added; this light keeps %d already, the most it keeps", tostring(how),
+			id, load_group.MAX)
+		return false
+	end
+	if named and not self:name_of(id) then
+		self.log.info("%s: load group %s not learnt: no device has that id", tostring(how), id)
+		return false
+	end
+	return true
 end
 
 -- E1, D16: JOIN_GROUP's flag is the group's word (1 true, else false).
@@ -432,6 +471,9 @@ function methods:join(id, sync)
 	sync = sync == true
 	local had = self.groups[id]
 	if had and had.sync == sync then
+		return false
+	end
+	if not had and not self:admit(id, "JOIN_GROUP") then
 		return false
 	end
 	self.groups[id] = { sync = sync }
@@ -468,6 +510,9 @@ function methods:set_sync(id, sync)
 	if had and had.sync == sync then
 		return false
 	end
+	if not had and not self:admit(id, "SET_GROUP_SYNC", true) then
+		return false
+	end
 	self.groups[id] = { sync = sync }
 	self:save()
 	self.log.info("load group %s: keep loads in sync %s%s", self:label(id), sync and "on" or "off",
@@ -478,7 +523,7 @@ end
 -- D6: a group command is proof of membership; false when the id is known.
 function methods:learn(id)
 	id = id_of(id)
-	if not id or self.groups[id] then
+	if not id or self.groups[id] or not self:admit(id, "a group command", true) then
 		return false
 	end
 	self.groups[id] = { sync = false }

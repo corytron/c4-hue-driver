@@ -462,6 +462,23 @@ describe("bridge/actions.lua", function()
 			end
 		end)
 
+		-- Security review 2026-11-13 C-4 (#489): Lua 5.1's %q let ESC and BEL
+		-- through and echoed any length.
+		it("echoes a value it does not offer without control characters, cut at 256 bytes", function()
+			local w = world()
+			w.a:run_add({ What = "bo\27[2Jgus\7\nforged" })
+			assert.same({ "Not added: \"bo[2Jgusforged\" is not something Add From Hue offers; open What again" },
+				w.said)
+			for _, run in ipairs({ "run_add", "run_link", "run_forget", "run_diagnostics" }) do
+				w = world()
+				local value = "x" .. ("\27"):rep(10) .. ("y"):rep(200000)
+				w.a[run](w.a, { What = value, Device = value, To = value, Confirm = "Yes, forget" })
+				local said = w.said[#w.said] or ""
+				assert.is_nil(said:find("%c"), run)
+				assert.truthy(#said < 400, run .. ": " .. #said .. " bytes")
+			end
+		end)
+
 		it("says Not paired (ctx.can) and touches nothing when the bridge is not paired", function()
 			local w = world({ paired = false })
 			w.a:run_add({ What = "light:L1" })

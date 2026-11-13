@@ -42,7 +42,7 @@ describe("bridge/bridges_found.lua (#373)", function()
 		bridges_found = require("bridge.bridges_found")
 		said, refreshed, addresses, pairs_run = {}, 0, {}, 0
 		finder = { calls = {}, nets = { "10.0.2" } }
-		function finder:find_all(done) self.calls[#self.calls + 1] = { kind = "all", done = done } end
+		function finder:find_all(done, want) self.calls[#self.calls + 1] = { kind = "all", done = done, want = want } end
 		function finder:find_subnet(done, around)
 			self.calls[#self.calls + 1] = { kind = "subnet", done = done, around = around }
 		end
@@ -203,6 +203,7 @@ describe("bridge/bridges_found.lua (#373)", function()
 			found:offer()
 			found:offer()
 			assert.equal(1, #finder.calls)
+			assert.equal(PAIRED_ID, finder.calls[1].want, "the paired bridge's answers first (N-3, #490)")
 			assert.equal(1, state.offer_gen)
 			state.address_gen = 2
 			found:offer()
@@ -294,6 +295,18 @@ describe("bridge/bridges_found.lua (#373)", function()
 						.. "here again",
 				}, said)
 			end)
+		end)
+
+		-- #489: the model id is the peer's text, of any length.
+		it("cuts a long model id in Last Action and in the summary", function()
+			found:on_pick(pick_label(item(OTHER_ID, "192.0.2.9", { model = "X" .. string.rep("y", 100000) .. "\nZ",
+				supported = false })))
+			assert.is_true(#said[1] < 200, #said[1] .. " bytes")
+			assert.is_nil(said[1]:find("\n", 1, true))
+			state.ip, state.creds, state.bridge_model = IP, { bridge_id = PAIRED_ID, key = "<key>" },
+				"BSB" .. string.rep("9", 100000)
+			found:show()
+			assert.is_true(#env.Properties["Bridges Found"] < 200, #env.Properties["Bridges Found"] .. " bytes")
 		end)
 
 		it("runs the searches the row offers, and snaps the row back to its summary", function()

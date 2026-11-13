@@ -17,6 +17,15 @@
 -- the same way (§4 finding 4). A result that comes back for an earlier
 -- Bridge IP Address is ignored, and closes the window.
 --
+-- The key is stored here, once the bridge issued it and only while its
+-- window is still open (security review 2026-11-13, N-9, #490): each open()
+-- is a window of its own, and a result for one that closed meanwhile
+-- (Forget Pairing, OnDriverDestroyed, an end of its own, another open()) is
+-- dropped, its key never stored and never handed on. bridge/pairing.lua
+-- used to store it before any of these checks, so a request in flight at
+-- Forget Pairing re-paired the driver, and one in flight at an address
+-- change left a pairing the driver had discarded to load at the next start.
+--
 -- ctx:
 --   state               the driver's state table; read: ip, address_gen,
 --                       creds, pick_id; written: pair_until (ms, the window's
@@ -25,13 +34,16 @@
 --   show_bridge_info(info)
 --                       the bridge's model, name and firmware rows, from
 --                       the probe before the key is asked for
---   on_paired(creds)    the key came: the window is closed already; what a
---                       new pairing means for the rest is the driver's
+--   on_paired(creds)    the key came and is stored (bridge/credentials.lua):
+--                       the window is closed already; what a new pairing
+--                       means for the rest is the driver's
 --   log
 --
 -- DriverWorks calls: C4:GetTime, C4:SetTimer.
 
 local config = require("bridge.config")
+local credentials = require("bridge.credentials")
+local http = require("bridge.http")
 local pairing = require("bridge.pairing")
 
 local pair_window = {}
@@ -41,7 +53,7 @@ pair_window.WINDOW_S = 120
 pair_window.RETRY_MS = 3000
 
 function pair_window.new(ctx)
-	return setmetatable({ ctx = ctx, timer = nil }, pair_window)
+	return setmetatable({ ctx = ctx, timer = nil, window = nil }, pair_window)
 end
 
 function pair_window:close()
@@ -50,6 +62,7 @@ function pair_window:close()
 		self.timer:Cancel()
 		self.timer = nil
 	end
+	self.window = nil
 	state.pair_until = nil
 	state.pairing_active = false
 	state.pair_expected_id = nil
@@ -62,7 +75,15 @@ function pair_window:attempt(first)
 		ctx.prop("Status", "Pairing: contacting bridge")
 	end
 	state.pairing_active = true
-	local gen = state.address_gen
+	local gen, window = state.address_gen, self.window
+	-- The window this attempt belongs to has closed (see the header): drop
+	-- the result, whatever it is, and touch nothing.
+	local function closed(what)
+		if self.window ~= window or window == nil then
+			ctx.log.info("pairing: %s after the pairing window closed; dropped", what)
+			return true
+		end
+	end
 	local function stale()
 		if gen ~= state.address_gen then
 			ctx.log.info("pairing result for an earlier bridge address ignored")
@@ -74,15 +95,15 @@ function pair_window:attempt(first)
 	local paired_id = stored_id or state.pair_expected_id
 	pairing.pair(state.ip, {
 		on_probed = function(info)
-			if stale() then return end
+			if closed("a probe answer") or stale() then return end
 			ctx.show_bridge_info(info)
 			if first then
-				ctx.prop("Status", string.format("Pairing: found %s %s, requesting key", config.model_label(info.model),
-					info.bridge_id))
+				ctx.prop("Status", string.format("Pairing: found %s %s, requesting key",
+					http.peer_text(config.model_label(info.model), 64), info.bridge_id))
 			end
 		end,
 		on_link_button = function()
-			if stale() then return end
+			if closed("a link button answer") or stale() then return end
 			local left = math.ceil(((state.pair_until or 0) - C4:GetTime()) / 1000)
 			if left <= 0 then
 				self:close()
@@ -99,14 +120,18 @@ function pair_window:attempt(first)
 			end)
 		end,
 		on_paired = function(creds)
+			if closed("a key") then return end -- not stored, not handed on (N-9)
 			self:close()
 			if stale() then return end
+			credentials.save(creds)
+			ctx.log.info("paired with bridge %s (%s)", tostring(creds.bridge_id), http.peer_text(creds.model, 32))
 			ctx.on_paired(creds)
 		end,
 		on_error = function(message)
+			if closed("an error") then return end
 			self:close()
 			if stale() then return end
-			ctx.prop("Status", "Pairing failed: " .. message)
+			ctx.prop("Status", http.peer_text("Pairing failed: " .. tostring(message), http.TEXT_ROW))
 		end,
 	}, paired_id, stored_id == nil and paired_id ~= nil)
 end
@@ -119,6 +144,7 @@ function pair_window:open()
 		return
 	end
 	self:close()
+	self.window = {} -- this window's own (see the header)
 	-- A bridge picked in Bridges Found (its pick sets it for this call only).
 	state.pair_expected_id = state.pick_id
 	state.pair_until = C4:GetTime() + pair_window.WINDOW_S * 1000

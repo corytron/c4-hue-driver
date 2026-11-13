@@ -199,14 +199,53 @@ describe("bridge.stream", function()
 		assert.truthy(seen.status[#seen.status]:find("Reconnecting in 2 s", 1, true))
 	end)
 
-	it("resets backoff once a connection is established", function()
+	-- #489 (N-7): not at the 200 any more, but once the owner's resync of
+	-- the connection succeeded (resynced), and only while it is still up.
+	it("resets backoff once a connection is established and its resync succeeded", function()
 		s:start()
 		c4.last_transfer():done(7, "Failed to connect")
 		c4.fire_timers()
 		c4.last_transfer():done(7, "Failed to connect")
 		c4.fire_timers()
-		open_ok()
+		local t = open_ok()
+		assert.equal(4, s.backoff, "a bare 200 keeps it")
+		s:resynced()
 		assert.equal(stream.BACKOFF_MIN, s.backoff)
+		t:done(28, "Operation timed out")
+		c4.fire_timers()
+		t = open_ok()
+		t:done(0, nil)
+		s:resynced() -- the resync of a transfer that has ended
+		assert.equal(4, s.backoff)
+	end)
+
+	-- Security review 2026-11-13, N-7 (#489): every 200 reset the backoff, so
+	-- a peer that answered 200 and ended the transfer got a keyed reconnect
+	-- every second, for ever.
+	it("does not reset the backoff on a 200 that ends at once (N-7)", function()
+		s:start()
+		local delays = {}
+		for _ = 1, 5 do
+			local t = open_ok()
+			t:done(0, nil)
+			delays[#delays + 1] = s.retry_timer.delay
+			c4.fire_timers()
+		end
+		assert.same({ 1000, 2000, 4000, 8000, 16000 }, delays)
+	end)
+
+	-- #489: the event id is the peer's text, up to a line long.
+	it("caps the event id and strips its control characters in the warning lines", function()
+		local lines = {}
+		log.sink = function(line) lines[#lines + 1] = line end
+		s:start()
+		open_ok():chunk("id: " .. string.rep("i", 100000) .. "\r[FORGED]\ndata: not json\n\n")
+		local warned
+		for _, line in ipairs(lines) do
+			if line:find("undecodable event", 1, true) then warned = line end
+		end
+		assert.is_true(#warned < 300, #warned .. " bytes")
+		assert.is_nil(warned:find("\r", 1, true))
 	end)
 
 	it("aborts on a non-200 response and reports it", function()
@@ -909,15 +948,20 @@ describe("bridge.stream", function()
 			assert.truthy(seen.status[#seen.status]:find("Reconnecting in 4 s", 1, true))
 			assert.equal(1, c4.fire_timers())
 
+			-- #489 (N-7): the event ends the hold, the resync after it resets the backoff.
 			local t = open_ok()
 			assert.equal(8, s.backoff, "still held after the 200")
+			s:resynced()
+			assert.equal(8, s.backoff, "and after a resync while the hold lasts")
 			t:chunk(event_text("2:0"))
-			assert.equal(stream.BACKOFF_MIN, s.backoff, "an event delivered normally ends the hold")
+			assert.is_false(s.hold_backoff, "an event delivered normally ends the hold")
+			s:resynced()
+			assert.equal(stream.BACKOFF_MIN, s.backoff)
 			t:done(28, "Operation timed out")
 			assert.truthy(seen.status[#seen.status]:find("Reconnecting in 1 s", 1, true))
 			assert.equal(1, c4.fire_timers())
 			open_ok()
-			assert.equal(stream.BACKOFF_MIN, s.backoff, "and a 200 resets it again")
+			assert.equal(2, s.backoff, "a 200 alone resets nothing")
 		end)
 	end)
 

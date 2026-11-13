@@ -91,7 +91,7 @@ end
 
 -- The LAN -----------------------------------------------------------------------------
 
--- lan.mdns: responders { id, model, ips, from (the sender, OS 4.x), garbage }
+-- lan.mdns: responders { id, model, ips, from (the sender, OS 4.x), garbage, qid (answers with that id) }
 -- lan.hue[ip]: what the identity check finds there { id, model, name }
 -- lan.tls[ip]: accepts 443, not a Signify chain; lan.hang[ip]: never answers
 -- lan.refuse[ip]: refuses 443; anything else is silent on 443
@@ -116,7 +116,7 @@ local function install_network()
 		local qid = data:byte(1) * 256 + data:byte(2)
 		for _, r in ipairs(lan.mdns) do
 			c4:SetTimer(1, function()
-				local bytes = r.garbage and "\0\1garbage" or answer(r, qid)
+				local bytes = r.garbage and "\0\1garbage" or answer(r, r.qid or qid)
 				env.ReceivedFromNetwork(binding, port, bytes, r.from)
 			end)
 		end
@@ -424,6 +424,70 @@ describe("bridge/discovery.lua (#334, D5 and D12)", function()
 			answers = run(function(done) d:find_all(done) end)
 			assert.truthy(answers[1][2].error:find("could not send the mDNS query", 1, true))
 			assert_clean()
+		end)
+
+		-- Security review 2026-11-13, N-3 (#490): answers were taken with any
+		-- query id and any address, so a LAN host could crowd out the paired
+		-- bridge and steer the identity check's connects, the internet's too.
+		describe("what an answer must be (N-3, #490)", function()
+			it("drops an answer whose id is not the query's", function()
+				bridge(BRIDGE_ID, BRIDGE_IP)
+				responder(BRIDGE_ID, { BRIDGE_IP }, { qid = 4242 })
+				local answers = run(function(done) d:find_all(done) end)
+				assert.same({}, answers[1][1])
+				assert.same({}, lan.identifies)
+				assert.equal(2, answers[1][2].mdns.rejected, "both answers, one per query")
+				assert.truthy(logged("to query"))
+				assert_clean()
+			end)
+
+			it("never checks an address outside the private, link-local and documentation networks", function()
+				-- Put together from octets: no address literal for the secrets check (.gitleaks.toml).
+				local public, shared = table.concat({ 8, 8, 8, 8 }, "."), table.concat({ 100, 64, 0, 9 }, ".")
+				bridge(BRIDGE_ID, BRIDGE_IP)
+				lan.hue[public] = lan.hue[BRIDGE_IP]
+				responder(BRIDGE_ID, { public, BRIDGE_IP }, { from = "1.2.3.4" })
+				responder(OTHER_ID, { shared }, { from = table.concat({ 203, 0, 114, 5 }, ".") })
+				local list = run(function(done) d:find_all(done) end)[1][1]
+				local checked = {}
+				for _, i in ipairs(lan.identifies) do checked[#checked + 1] = i.ip end
+				assert.same({ BRIDGE_IP }, checked)
+				assert.equal(1, #list)
+				assert.equal(BRIDGE_IP, list[1].ip)
+				assert_clean()
+			end)
+
+			local function flood(n)
+				for i = 1, n do
+					responder(string.format("0017880000%06x", i), { string.format("10.0.%d.%d", 3 + math.floor(i / 200),
+						1 + i % 200) })
+				end
+			end
+
+			it("takes the paired bridge's answer after a flood of others, past the 32-answer cap", function()
+				flood(40)
+				bridge(BRIDGE_ID, MOVED_IP)
+				responder(BRIDGE_ID, { MOVED_IP })
+				local answers = run(function(done) d:find_paired(BRIDGE_ID, BRIDGE_IP, done) end)
+				assert.same({ MOVED_IP, "mdns" }, { answers[1][1], answers[1][2] })
+				assert.same({}, lan.tcp.connects, "no sweep needed")
+				assert.equal(MOVED_IP, lan.identifies[1].ip)
+				assert_clean()
+			end)
+
+			it("takes and checks first the paired id find_all is given, and still caps the others", function()
+				flood(40)
+				bridge(BRIDGE_ID, MOVED_IP)
+				responder(BRIDGE_ID, { MOVED_IP })
+				local answers = run(function(done) d:find_all(done, BRIDGE_ID:upper()) end)
+				assert.equal(MOVED_IP, lan.identifies[1].ip, "checked first")
+				local ids = {}
+				for _, item in ipairs(answers[1][1]) do ids[#ids + 1] = item.id end
+				assert.same({ BRIDGE_ID }, ids)
+				assert.equal(80 + 2, answers[1][2].mdns.answers)
+				assert.equal(discovery.MAX_ANSWERS, answers[1][2].mdns.parsed, "32 of the others parsed")
+				assert_clean()
+			end)
 		end)
 
 		it("lists a first-generation bridge as not supported", function()
@@ -814,6 +878,21 @@ describe("bridge/discovery.lua (#334, D5 and D12)", function()
 			assert.is_nil(text:find("\195 ", 1, true), "never half a character")
 			assert.equal("Hue Bridge Pro - Kitchen and dining r - 10.0.2.143 - 123ABC", discovery.item_label({
 				id = BRIDGE_ID, name = "Kitchen and dining room bridge", model = "BSB003", ip = BRIDGE_IP }))
+		end)
+
+		-- Security review 2026-11-13, N-4 (#489): the name was trimmed whole
+		-- with "%s+$", quadratic in an inner run of blanks, and the name is
+		-- whatever the peer that answered /api/0/config says.
+		it("trims a long name in linear time, and cuts a long model id (N-4)", function()
+			local started = os.clock()
+			assert.equal("Hue Bridge Pro - a - 10.0.2.143 - 123ABC", discovery.item_label({ id = BRIDGE_ID,
+				name = "a" .. string.rep(" ", 16000) .. "b", model = "BSB003", ip = BRIDGE_IP }))
+			assert.equal("Hue Bridge Pro - 10.0.2.143 - 123ABC", discovery.item_label({ id = BRIDGE_ID,
+				name = string.rep(" \t", 300000), model = "BSB003", ip = BRIDGE_IP }))
+			local text = discovery.item_label({ id = BRIDGE_ID, name = "Up", model = "BSB" .. string.rep("9", 100000),
+				ip = BRIDGE_IP })
+			assert.is_true(#text <= discovery.ITEM_MAX, #text .. " bytes")
+			assert.is_true(os.clock() - started < 0.1, "took " .. (os.clock() - started) .. " s")
 		end)
 
 		it("strips control characters and survives missing fields", function()

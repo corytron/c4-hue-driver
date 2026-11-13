@@ -377,6 +377,115 @@ describe("bridge.http", function()
 		end)
 	end)
 
+	-- Security review 2026-11-13, N-8 (#489): nothing capped this driver's
+	-- C4:url transfers, so against a bridge that stopped answering a burst
+	-- of light commands held every one of Director's four slots.
+	describe("at most MAX_KEYED keyed requests in flight (N-8, #489)", function()
+		local function keyed(path, got, timeout)
+			return http.request({ ip = "10.0.2.143", key = "k", method = "PUT", path = path, body = { on = true },
+				timeout = timeout }, function(r) got[#got + 1] = path .. "=" .. tostring(r.ok) end)
+		end
+
+		it("starts three, queues the rest first in first out, and starts one per answer", function()
+			assert.equal(3, http.MAX_KEYED)
+			local got = {}
+			for i = 1, 10 do keyed("/clip/v2/resource/light/" .. i, got) end
+			assert.equal(3, #c4.transfers, "a burst of ten holds three of Director's four slots")
+			c4.transfers[2]:respond(200, "{}")
+			assert.same({ "/clip/v2/resource/light/2=true" }, got)
+			assert.equal(4, #c4.transfers)
+			assert.equal("https://10.0.2.143/clip/v2/resource/light/4", c4.transfers[4].url)
+			c4.transfers[1]:done(28, "Operation timed out")
+			c4.transfers[3]:respond(200, "{}")
+			assert.equal(6, #c4.transfers)
+			assert.equal("https://10.0.2.143/clip/v2/resource/light/6", c4.transfers[6].url)
+			for i = 4, 10 do
+				if c4.transfers[i] then c4.transfers[i]:respond(200, "{}") end
+			end
+			assert.equal(10, #c4.transfers)
+			assert.equal(10, #got, "every caller answered once")
+			assert.equal(0, #c4.active_timers(), "no reaper left once the queue is empty")
+		end)
+
+		it("does not queue unkeyed requests, nor count them", function()
+			local got = {}
+			for i = 1, 3 do keyed("/k/" .. i, got) end
+			http.request({ ip = "10.0.2.143", path = "/api/0/config" }, function() end)
+			assert.equal(4, #c4.transfers, "the identity check goes at once")
+			keyed("/k/4", got)
+			assert.equal(4, #c4.transfers)
+			c4.transfers[4]:respond(200, "{}")
+			assert.equal(4, #c4.transfers, "an unkeyed answer frees no keyed slot")
+		end)
+
+		it("frees the slot when the callback raises, and when a waiting request cannot start", function()
+			http.request({ ip = "10.0.2.143", key = "k", path = "/a" }, function() error("caller bug") end)
+			local got = {}
+			for i = 1, 3 do keyed("/b/" .. i, got) end
+			assert.equal(3, #c4.transfers)
+			assert.has_error(function() c4.transfers[1]:respond(200, "{}") end)
+			assert.equal(4, #c4.transfers, "the next one started before the callback ran")
+			c4.transfers[2]:respond(200, "{}")
+			c4.transfers[3]:respond(200, "{}")
+			c4.transfers[4]:respond(200, "{}")
+			assert.equal(3, #got)
+			-- A waiting request whose body cannot be encoded fails through its callback.
+			for i = 1, 3 do keyed("/c/" .. i, got) end
+			local failed
+			http.request({ ip = "10.0.2.143", key = "k", method = "PUT", path = "/d", body = { bad = true } },
+				function(r) failed = r end)
+			local encode = c4.JsonEncode
+			c4.JsonEncode = function(self, t, ...)
+				if type(t) == "table" and t.bad then error("cannot encode") end
+				return encode(self, t, ...)
+			end
+			c4.transfers[5]:respond(200, "{}")
+			c4.JsonEncode = encode
+			assert.is_false(failed.ok)
+			assert.truthy(failed.err:find("cannot encode", 1, true))
+			assert.equal(7, #c4.transfers, "its slot went to nobody: three in flight")
+		end)
+
+		it("frees a slot whose answer never came, its timeout and SLOT_GRACE_S later", function()
+			local got = {}
+			for i = 1, 3 do keyed("/x/" .. i, got, 10) end
+			keyed("/x/4", got)
+			assert.equal(3, #c4.transfers)
+			c4.advance((10 + http.SLOT_GRACE_S) * 1000 - 1)
+			assert.equal(3, #c4.transfers)
+			c4.advance(1)
+			assert.equal(4, #c4.transfers, "the lost answers' slots are freed")
+			c4.transfers[1]:respond(200, "{}") -- a late answer frees nothing twice
+			for i = 5, 7 do keyed("/y/" .. i, got) end
+			assert.equal(6, #c4.transfers)
+		end)
+
+		it("takes a waiting request out of the queue on Cancel(), never calling it back", function()
+			local got = {}
+			for i = 1, 3 do keyed("/z/" .. i, got) end
+			local handle = keyed("/z/4", got)
+			keyed("/z/5", got)
+			handle:Cancel()
+			c4.transfers[1]:respond(200, "{}")
+			assert.equal("https://10.0.2.143/z/5", c4.transfers[4].url)
+			assert.same({ "/z/1=true" }, got)
+		end)
+	end)
+
+	describe("peer_text (#489)", function()
+		it("cuts at max bytes before a character, marks the cut, and removes control characters", function()
+			assert.equal("bridge error 7: bad", http.peer_text("bridge error 7: bad"))
+			assert.equal("nil", http.peer_text(nil))
+			assert.equal("12", http.peer_text(12))
+			assert.equal("a[2Jb", http.peer_text("a\r\n\27[2Jb"), "ESC, CR and LF gone")
+			assert.equal("abcdefg...", http.peer_text(string.rep("abcdefghij", 3), 10))
+			assert.equal("aé...", http.peer_text("aéééééé", 7), "never half a character")
+			local long = http.peer_text(string.rep(" ", 1024 * 1024) .. "x")
+			assert.equal(http.TEXT_ROW, #long)
+			assert.equal(2000, http.TEXT_LOG)
+		end)
+	end)
+
 	it("calls back with ok=false when Director's done carries no responses or a response without a code", function()
 		local got
 		http.request({ ip = "192.0.2.10", path = "/x" }, function(r) got = r end)

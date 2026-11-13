@@ -18,6 +18,21 @@
 -- for their other targets, and the TLS self-check (bridge/tlscheck.lua),
 -- which swaps the bundle for a decoy. No keyed request does: bridge_request
 -- in hue_bridge/driver.lua clears req.tls.
+--
+-- At most MAX_KEYED keyed requests (those with req.key) are in flight at
+-- once; the rest wait, first in, first out (security review 2026-11-13,
+-- N-8, #489). Director runs at most four C4:url transfers at once,
+-- controller-wide [verified: hardware, docs/design.md "Concurrent
+-- transfers"], and against a bridge that has stopped answering every
+-- transfer holds its slot until its timeout: a burst of light commands
+-- would hold all four and stall every other driver's C4:url traffic. The
+-- event stream's C4:url transfers (http.stream) are not counted here: the
+-- stream caps its own (bridge/stream.lua, MAX_ABANDONED), and the default
+-- transport holds none (bridge/netstream.lua). Unkeyed requests (the
+-- identity check, pairing, discovery, the TLS self-check) are not queued.
+-- A slot is freed by the transfer's OnDone; one whose OnDone has not come
+-- SLOT_GRACE_S after the transfer's own timeout is freed all the same, so a
+-- lost callback cannot block keyed traffic for good.
 
 local log = require("common.log")
 
@@ -25,6 +40,44 @@ local http = {}
 
 http.DEFAULT_TIMEOUT = 15
 http.CONNECT_TIMEOUT = 5
+http.MAX_KEYED = 3        -- keyed requests in flight at once (see the header)
+http.SLOT_GRACE_S = 10    -- beyond a transfer's own timeout, before its slot is freed regardless
+
+-- The most bytes of peer text (see http.peer_text) in a Composer row,
+-- Status or Attention, and in a log line (security review 2026-11-13, #489).
+http.TEXT_ROW = 256
+http.TEXT_LOG = 2000
+
+-- A continuation byte of a UTF-8 character (0x80-0xBF).
+local function continuation(b)
+	return b ~= nil and b >= 0x80 and b <= 0xBF
+end
+
+-- Text a peer sent (the bridge, or whatever answers at its address: an
+-- error description, a model id, an event id), fit for a row or a log line:
+-- a non-string is its tostring, as the callers' own tostring was; at most
+-- `max` bytes (default TEXT_ROW), cut before a UTF-8 character (backing over
+-- at most three continuation bytes) and marked "..."; control characters
+-- removed (`%c`: a newline would forge a log line or garble a row). Only the
+-- first `max` bytes are read, so a megabyte costs no more than a short text
+-- (security review 2026-11-13, N-4 and C-4, #489).
+function http.peer_text(value, max)
+	max = math.max(4, math.floor(tonumber(max) or http.TEXT_ROW))
+	local text = type(value) == "string" and value or tostring(value)
+	local cut = #text > max
+	if cut then
+		local n = max - 3
+		for _ = 1, 3 do
+			if not continuation(text:byte(n + 1)) then
+				break
+			end
+			n = n - 1
+		end
+		text = text:sub(1, n)
+	end
+	text = text:gsub("%c", "")
+	return cut and (text .. "...") or text
+end
 
 -- Path inside the archive, see tools/gen_ca_bundle.sh.
 http.CA_BUNDLE = "certs/hue_ca_bundle.pem"
@@ -183,6 +236,119 @@ end
 -- err = "redirect refused (HTTP <3xx>)" }.
 -- Returns the C4LuaUrl transfer so callers can Cancel() it, or nil when the
 -- transfer could not be started (the callback has then already been called).
+-- A keyed request that has to wait (see the header) returns a handle whose
+-- Cancel() takes it out of the queue (its callback is then never called)
+-- or, once it has started, cancels its transfer.
+local send -- below
+
+-- Milliseconds (C4:GetTime, SDK 34_timer/_2-GetTime), else os.time().
+local function now_ms()
+	local ok, ms = pcall(function() return C4:GetTime() end)
+	if ok and type(ms) == "number" then
+		return ms
+	end
+	return os.time() * 1000
+end
+
+-- The keyed requests in flight and waiting. One set per runtime (the C4
+-- object): a spec installs a new fake runtime per test, and a transfer it
+-- left unanswered must not hold a slot in the next one. On a controller
+-- there is one.
+local queues = setmetatable({}, { __mode = "k" })
+
+local function keyed_queue()
+	local runtime = C4 or queues
+	local q = queues[runtime]
+	if not q then
+		q = { busy = {}, n = 0, waiting = {}, reaper = nil, pumping = false }
+		queues[runtime] = q
+	end
+	return q
+end
+
+local function release(q, slot)
+	if slot.released then
+		return
+	end
+	slot.released = true
+	q.busy[slot] = nil
+	q.n = q.n - 1
+end
+
+-- Free the slots whose OnDone is overdue (see the header).
+local function reap(q)
+	local now = now_ms()
+	for slot in pairs(q.busy) do
+		if slot.deadline <= now then
+			log.warn("%s %s: no end reported %d s after its timeout; its keyed request slot is freed", slot.method,
+				tostring(slot.path), http.SLOT_GRACE_S)
+			release(q, slot)
+		end
+	end
+end
+
+local pump -- below
+
+-- While requests wait: a timer for the earliest overdue slot.
+local function arm_reaper(q)
+	if q.reaper or #q.waiting == 0 then
+		return
+	end
+	local first
+	for slot in pairs(q.busy) do
+		if not first or slot.deadline < first then
+			first = slot.deadline
+		end
+	end
+	if not first then
+		return
+	end
+	local ok, timer = pcall(function()
+		return C4:SetTimer(math.max(1, first - now_ms()), function()
+			q.reaper = nil
+			reap(q)
+			pump(q)
+		end)
+	end)
+	q.reaper = ok and timer or nil
+end
+
+-- Start waiting requests while slots are free.
+pump = function(q)
+	if q.pumping then
+		return -- the loop below goes on
+	end
+	q.pumping = true
+	while q.n < http.MAX_KEYED and #q.waiting > 0 do
+		local entry = table.remove(q.waiting, 1)
+		local method, answered = entry.req.method or "GET", false
+		local ok, transfer = pcall(send, entry.req, function(result)
+			answered = true
+			return entry.callback(result)
+		end, q)
+		if ok then
+			entry.transfer = transfer
+		elseif answered then
+			log.warn("%s %s: its callback failed: %s", method, tostring(entry.req.path), tostring(transfer))
+		else
+			-- Its caller is answered, as for a transfer that could not start.
+			local err = "could not start transfer: " .. tostring(transfer)
+			failed(method, entry.req, err)
+			local fine, why = pcall(entry.callback, { ok = false, err = err })
+			if not fine then
+				log.warn("%s %s: its callback failed: %s", method, tostring(entry.req.path), tostring(why))
+			end
+		end
+	end
+	q.pumping = false
+	if #q.waiting == 0 and q.reaper then
+		pcall(function() q.reaper:Cancel() end)
+		q.reaper = nil
+	else
+		arm_reaper(q)
+	end
+end
+
 function http.request(req, callback)
 	local method = req.method or "GET"
 	if not valid_path(req.path) then
@@ -195,7 +361,65 @@ function http.request(req, callback)
 		callback({ ok = false, err = "no CA configuration" })
 		return nil
 	end
+	if not req.key then
+		return send(req, callback, nil)
+	end
+	local q = keyed_queue()
+	reap(q)
+	if q.n < http.MAX_KEYED and #q.waiting == 0 then
+		return send(req, callback, q)
+	end
+	local entry = { req = req, callback = callback }
+	q.waiting[#q.waiting + 1] = entry
+	log.debug("%s %s waits: %d keyed request(s) in flight, %d waiting", method, tostring(req.path), q.n, #q.waiting)
+	arm_reaper(q)
+	return {
+		Cancel = function(self)
+			if entry.transfer then
+				entry.transfer:Cancel()
+				return self
+			end
+			for i, e in ipairs(q.waiting) do
+				if e == entry then
+					table.remove(q.waiting, i)
+					break
+				end
+			end
+			return self
+		end,
+	}
+end
 
+-- One transfer, started now. `q`: the keyed queue whose slot it takes, or
+-- nil for an unkeyed request. The slot is freed before the callback runs,
+-- and the next waiting request started, so a callback that raises cannot
+-- leave the queue stuck; so is a request that raised while it was built
+-- (its slot freed, the raise passed on).
+local build -- below
+
+send = function(req, callback, q)
+	if not q then
+		return build(req, callback)
+	end
+	local slot = { method = req.method or "GET", path = req.path,
+		deadline = now_ms() + ((tonumber(req.timeout) or http.DEFAULT_TIMEOUT) + http.SLOT_GRACE_S) * 1000 }
+	q.busy[slot] = true
+	q.n = q.n + 1
+	local ok, transfer = pcall(build, req, function(result)
+		release(q, slot)
+		pump(q)
+		callback(result)
+	end)
+	if not ok then
+		release(q, slot)
+		pump(q)
+		error(transfer, 0)
+	end
+	return transfer
+end
+
+build = function(req, callback)
+	local method = req.method or "GET"
 	local url = http.url(req.ip, req.path)
 	-- encodeArrays = true is passed, but Director's JsonEncode was seen to
 	-- write Lua arrays as objects even so (docs/design.md, "C4:url

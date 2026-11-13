@@ -217,8 +217,10 @@ jobs:
           sudo apt-get install -y lua5.1
           luac5.1 -v
 
-      - name: Shell, Python, XML, PowerShell, workflow, desired-state, changelog and link checks
-        run: tools/check.sh --strict --only shell python-lint python-test xml powershell workflows house changelog links
+      # doc-tabs: nothing in a Documentation tab runs or fetches from outside the package
+      # (security review 2026-11-13, I-7).
+      - name: Shell, Python, XML, PowerShell, workflow, desired-state, changelog, link and Documentation tab checks
+        run: tools/check.sh --strict --only shell python-lint python-test xml powershell workflows house changelog links doc-tabs
 
   secrets:
     name: Secrets and private data

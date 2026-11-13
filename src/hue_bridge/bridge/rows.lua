@@ -110,8 +110,17 @@ function rows:stop()
 	end
 end
 
+-- At most ROW_MAX bytes per item (security review of 2026-11-13, C-4,
+-- #489): a name from the bridge, or a value a caller made up, cannot make a
+-- list row of any length. A cut never leaves half a UTF-8 character.
+rows.ROW_MAX = 256
+
 function rows.commaless(text)
-	return (tostring(text == nil and "" or text):gsub("%c", ""):gsub(",", "‚"))
+	local s = tostring(text == nil and "" or text):gsub("%c", ""):gsub(",", "‚")
+	if #s > rows.ROW_MAX then
+		s = s:sub(1, rows.ROW_MAX - 3):gsub("[\192-\255][\128-\191]*$", "") .. "..."
+	end
+	return s
 end
 
 -- A list property: the drop-down holds `items`, `value` is what the row

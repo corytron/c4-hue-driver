@@ -41,7 +41,14 @@
 
 local config = require("bridge.config")
 local discovery = require("bridge.discovery")
+local http = require("bridge.http")
 local rows = require("bridge.rows")
+
+-- A model id's label for a row or Last Action: the model id is the peer's
+-- text, of any length (security review 2026-11-13, #489).
+local function model_label(model)
+	return http.peer_text(config.model_label(model), 64)
+end
 
 local bridges_found = {}
 bridges_found.__index = bridges_found
@@ -100,7 +107,7 @@ function bridges_found:show()
 		if model == nil or model == "" then
 			model = state.creds.model
 		end
-		local label = config.model_label(model)
+		local label = model_label(model)
 		summary = label ~= "" and string.format("Paired with %s at %s", label, state.ip)
 			or string.format("Paired with the bridge at %s", state.ip)
 	elseif n > 0 then
@@ -145,7 +152,9 @@ function bridges_found:search(subnet, asked)
 	if subnet then
 		state.discovery:find_subnet(found, state.ip)
 	else
-		state.discovery:find_all(found)
+		-- The paired bridge's answers are taken first, past a flood of others
+		-- (heard_elsewhere; security review 2026-11-13, N-3, #490).
+		state.discovery:find_all(found, state.creds and state.creds.bridge_id or nil)
 	end
 end
 
@@ -212,7 +221,7 @@ function bridges_found:pick(item)
 	local ctx = self.ctx
 	local state = ctx.state
 	local paired_id = state.creds and state.creds.bridge_id or nil
-	local where = string.format("%s at %s", config.model_label(item.model), tostring(item.ip))
+	local where = string.format("%s at %s", model_label(item.model), tostring(item.ip))
 	if item.supported == false then
 		return ctx.last_action(where .. " is a first-generation bridge without the CLIP v2 API: this driver cannot use it")
 	end

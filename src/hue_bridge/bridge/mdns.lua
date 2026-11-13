@@ -37,8 +37,10 @@
 --                         host, port, ip (IPv4 of host or nil), ips } }
 --   mdns.read(data)       candidates, msg | nil, err (a query, not an
 --                         answer, is refused too)
+--   mdns.usable_address(ip)  true for an address a candidate may have
 
 local config = require("bridge.config")
+local sweep = require("bridge.sweep")
 
 local mdns = {}
 
@@ -263,11 +265,25 @@ function mdns.parse(data)
 	return nil, "not parsed: " .. tostring(result)
 end
 
--- An IPv4 address a bridge can have: not 0/8, loopback, multicast or reserved.
-local function host_address(ip)
-	local first = tonumber(ip:match("^(%d+)"))
-	return first ~= nil and first ~= 0 and first ~= 127 and first < 224
+-- An IPv4 address a bridge on the controller's network can have: a private
+-- network (RFC 1918: 10/8, 172.16/12, 192.168/16), link-local (169.254/16,
+-- RFC 3927), or one of the documentation networks (RFC 5737), which no
+-- host on the internet has and which the sweep searches too
+-- (bridge/sweep.lua searchable). Any other address, the internet's
+-- included, is never a candidate: the identity check would connect there
+-- (security review 2026-11-13, N-3, #490).
+function mdns.usable_address(ip)
+	if type(ip) ~= "string" or not config.parse_ipv4(ip) then
+		return false
+	end
+	if sweep.searchable(ip) then
+		return true
+	end
+	local a, b = ip:match("^(%d+)%.(%d+)%.")
+	return a == "169" and b == "254"
 end
+
+local host_address = mdns.usable_address
 
 -- The Hue service instances of one message, linked PTR -> SRV/TXT -> A.
 function mdns.candidates(msg)

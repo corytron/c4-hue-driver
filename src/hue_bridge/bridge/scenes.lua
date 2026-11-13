@@ -60,6 +60,7 @@
 -- the devices Forget Scene let go (FORGOTTEN_KEY), written first and only
 -- when they changed.
 
+local num = require("common.num")
 local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
 local groups = require("bridge.groups")
@@ -1854,7 +1855,7 @@ function scenes:entry_for_command(params, what)
 	end
 	local entry = self.registry[rid]
 	if not entry then
-		self.ctx.log.warn("scenes: %s for unregistered scene %s ignored", what, rid)
+		self.ctx.log.warn("scenes: %s for unregistered scene %s ignored", what, util.echo(rid, util.LOG_MAX))
 		return nil
 	end
 	return rid, entry
@@ -2109,7 +2110,7 @@ function scenes:send_recall(rid, entry, params)
 	local action = params.action
 	if not scenes.ACTIONS[action] then
 		if action ~= nil and action ~= "" then
-			self.ctx.log.warn("scenes: unknown recall action %s for %s; using active", tostring(action),
+			self.ctx.log.warn("scenes: unknown recall action %s for %s; using active", util.echo(action, util.LOG_MAX),
 				self:entry_label(rid, entry))
 		end
 		action = "active"
@@ -2119,16 +2120,16 @@ function scenes:send_recall(rid, entry, params)
 	if duration then
 		-- recall.duration in ms fades the scene in over it [verified: house
 		-- 2026-11-09, #421 S1; a keypad tap's ramp, S-D1]. Clamped as the dim
-		-- and level durations are: "1e400" is inf, which no JSON body can carry
-		-- (code analysis 2026-10-22, F12).
+		-- and level durations are; "1e400" is inf, which no JSON body can carry
+		-- (code analysis 2026-10-22, F12), and is no duration (#486).
 		body.recall.duration = math.floor(math.min(scenes.DIM_MAX_DURATION, duration))
 	end
-	local brightness = tonumber(params.brightness)
-	if brightness and brightness >= 1 and brightness <= 100 then
+	local brightness = num.within(params.brightness, 1, 100) -- #486: NaN fails it too
+	if brightness then
 		body.recall.dimming = { brightness = brightness }
 	elseif params.brightness ~= nil and params.brightness ~= "" then
-		self.ctx.log.warn("scenes: recall brightness %s for %s out of range (1-100); ignored", tostring(params.brightness),
-			self:entry_label(rid, entry))
+		self.ctx.log.warn("scenes: recall brightness %s for %s out of range (1-100); ignored",
+			util.echo(params.brightness, util.LOG_MAX), self:entry_label(rid, entry))
 	end
 	local scene = self.catalogue[rid]
 	-- A later recall or OFF of the same scene supersedes this one: its
@@ -2320,11 +2321,7 @@ end
 
 -- A tap stop's `level` (#421 S-D3): a number clamped to 0..100, else nil.
 local function stop_level(value)
-	local level = tonumber(value)
-	if not level or level ~= level then
-		return nil
-	end
-	return math.max(0, math.min(100, level))
+	return num.clamp(value, 0, 100) -- #486: infinity is no level either
 end
 
 -- HUE_SCENE_DIM { rid, device_id, direction = up | down | stop, duration?,
@@ -2357,7 +2354,7 @@ function scenes:dim(params)
 	local direction = params.direction
 	if direction ~= "up" and direction ~= "down" and direction ~= "stop" then
 		self.ctx.log.warn("scenes: dim of %s (device %d) ignored: unknown direction %s", self:entry_label(rid, entry),
-			entry.device_id, tostring(direction))
+			entry.device_id, util.echo(direction, util.LOG_MAX))
 		return false
 	end
 	local scene = self:record_of(rid)
@@ -2377,11 +2374,8 @@ function scenes:dim(params)
 		body = { dimming_delta = { action = "stop" } }
 		level = stop_level(params.level)
 	else
-		local duration = tonumber(params.duration)
-		if not duration or duration ~= duration then
-			duration = scenes.DIM_DEFAULT_DURATION
-		end
-		duration = math.floor(math.max(0, math.min(scenes.DIM_MAX_DURATION, duration)))
+		-- #486: a duration that is not a finite number is the default one.
+		local duration = math.floor(num.clamp(params.duration, 0, scenes.DIM_MAX_DURATION, scenes.DIM_DEFAULT_DURATION))
 		body = { dimming_delta = { action = direction, brightness_delta = 100 }, dynamics = { duration = duration } }
 	end
 	self.ctx.log.info("scenes: dim %s %s (device %d): grouped_light %s%s", self:entry_label(rid, entry), direction,
@@ -2411,13 +2405,12 @@ function scenes:level(params)
 	if not rid then
 		return false
 	end
-	local level = tonumber(params.level)
-	if not level or level ~= level then
+	local level = num.clamp(params.level, 1, 100) -- #486: NaN and infinity are no level
+	if not level then
 		self.ctx.log.warn("scenes: level of %s (device %d) ignored: bad level %s", self:entry_label(rid, entry),
-			entry.device_id, tostring(params.level))
+			entry.device_id, util.echo(params.level, util.LOG_MAX))
 		return false
 	end
-	level = math.max(1, math.min(100, level))
 	local scene = self:record_of(rid)
 	if entry.state == "gone" or not scene then
 		self.ctx.log.warn("scenes: level of %s (device %d) ignored: scene not on the bridge", self:entry_label(rid, entry),
@@ -2430,11 +2423,7 @@ function scenes:level(params)
 			self:entry_label(rid, entry), entry.device_id)
 		return false
 	end
-	local rate = tonumber(params.rate)
-	if not rate or rate ~= rate then
-		rate = 0
-	end
-	rate = math.floor(math.max(0, math.min(scenes.DIM_MAX_DURATION, rate)))
+	local rate = math.floor(num.clamp(params.rate, 0, scenes.DIM_MAX_DURATION, 0)) -- #486
 	-- A recall still waiting goes before the move, and first: a recall at a
 	-- level sets the level the move is measured from (#469 D6).
 	self:release_recalls()

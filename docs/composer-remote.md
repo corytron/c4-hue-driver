@@ -213,10 +213,16 @@ Yes for exactly those packages, #365), and reads back every device's
 (s)`, `Debug Mode`, `Status` and `Attention`; the coordinator records the
 result with `tools/deploy.py done` or `failed`. A dev build or a
 feature-branch test build is the exception (`CLAUDE.md`, Deploy): the
-coordinator serves the four `.c4z` from `build/release/` on port 8090
-(`python3 -I -m http.server 8090 --bind 0.0.0.0 --directory
-build/release`, stopped afterwards), puts their sha256 in the brief, and
-records the install with `tools/deploy.py record --no-manifest`.
+coordinator serves the packages to install on port 8090, puts their URLs
+and sha256 in the brief, stops the server once the session has fetched
+them, and records the install with `tools/deploy.py record --no-manifest`.
+A dev build's devices read back `Driver Version` as `<build>-dev` (#492).
+Since 2026-11-13 (#481) that server is `tools/serve_install.py`: it copies
+only the named packages into a fresh temporary folder under a random path,
+serves that folder until it is stopped, then deletes it, and prints the
+URLs and hashes for the brief. `build/release/` is never served whole
+again (until then the brief served it with `python3 -I -m http.server
+8090 --bind 0.0.0.0 --directory build/release`).
 
 The Composer checklist (`docs/composer-checklist.md`) remains the list of
 things to verify; its steps are briefs for the Windows session. The brief

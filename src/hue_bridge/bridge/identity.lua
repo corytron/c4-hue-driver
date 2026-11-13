@@ -11,16 +11,25 @@
 --   id:verify(purpose, callback(ok))
 --                     runs the check, or joins the one in flight; a retry
 --                     passes neither argument (below)
---   id:reset()        an address change or Forget Pairing: the waiters and
---                     the retry go
+--   id:recheck(callback(same))
+--                     a 401 or 403: the check again, before the driver
+--                     locks the key (below)
+--   id:reset()        an address change or Forget Pairing: the waiters, the
+--                     retry and a pending re-check go
 --   id:cancel_retry() OnDriverDestroyed
 --   identity.TLS_ATTENTION   the Attention text of a failed TLS self-check
 --
--- Who waits for the check, by purpose ("stream", "test"): one check answers
--- them all, so Test Connection never drops the stream's pending start and
--- two stream starts never queue twice (the later callback of a purpose
--- replaces the earlier). Kept across the 30 s retries; dropped at an address
--- change or Forget Pairing. `running` is the address generation whose check
+-- Who waits for the check, by purpose ("key", "stream", "test"): one check
+-- answers them all, so Test Connection never drops the stream's pending
+-- start and two stream starts never queue twice (the later callback of a
+-- purpose replaces the earlier). Kept across the 30 s retries; dropped at
+-- an address change or Forget Pairing. "key" is answered first, so a key
+-- lock is in place before a stream waiter starts anything.
+--
+-- Only an answer that reports the paired bridge id reaches the rows (Bridge
+-- Model, Name, Firmware): another bridge at the address used to rewrite
+-- them before its id was compared (security review 2026-11-13, N-4, #490).
+-- Peer text in Status is cut (http.peer_text). `running` is the address generation whose check
 -- is in flight (its GET or its TLS check). During a 30 s wait it is nil, so
 -- a new waiter (a Test Connection click) starts the check at once instead of
 -- waiting for the timer.
@@ -52,7 +61,7 @@ local identity = {}
 identity.__index = identity
 
 identity.RETRY_MS = 30000
-identity.PURPOSES = { "stream", "test" }
+identity.PURPOSES = { "key", "stream", "test" }
 
 -- The Attention text of a failed TLS self-check (issue #53).
 identity.TLS_ATTENTION = "TLS check failed: the controller accepted the bridge without its Signify roots; "
@@ -62,6 +71,7 @@ function identity.new(ctx)
 	return setmetatable({
 		ctx = ctx,
 		timer = nil,     -- the 30 s retry
+		recheck_timer = nil, -- recheck's 1 ms hop out of a transfer's callback
 		waiters = {},    -- purpose -> callback(ok)
 		running = nil,   -- the address generation whose check is in flight
 	}, identity)
@@ -87,6 +97,10 @@ end
 
 function identity:reset()
 	self:cancel_retry()
+	if self.recheck_timer then
+		self.recheck_timer:Cancel()
+		self.recheck_timer = nil
+	end
 	self.waiters = {}
 	self.running = nil
 end
@@ -185,19 +199,19 @@ function identity:verify(purpose, callback)
 		end
 		local cfg = r.ok and type(r.json) == "table" and r.json or nil
 		local reported = cfg and config.normalise_bridge_id(cfg.bridgeid) or nil
-		if cfg and reported then
+		if reported and reported == state.creds.bridge_id then
+			-- The paired bridge: its rows, then its model (N-4, #490: not before
+			-- the id matched).
 			ctx.show_bridge_info({ model = cfg.modelid, name = cfg.name, sw_version = cfg.swversion,
 				api_version = cfg.apiversion })
 			-- A model id this driver cannot use (none at all is let through).
 			if cfg.modelid and not config.model_supported(cfg.modelid) then
 				state.identity_ok = false
-				self:status(string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip,
-					config.model_label(cfg.modelid)))
-				ctx.log.warn("bridge at %s is %s: no request is sent", ip, config.model_label(cfg.modelid))
+				local label = http.peer_text(config.model_label(cfg.modelid), 64)
+				self:status(string.format("Bridge at %s is a %s: no CLIP v2 API; nothing is sent", ip, label))
+				ctx.log.warn("bridge at %s is %s: no request is sent", ip, label)
 				return self:answer(false)
 			end
-		end
-		if reported and reported == state.creds.bridge_id then
 			return self:tls_gate(gen, ip, function(trusted, retry)
 				if gen ~= state.address_gen then
 					return
@@ -224,11 +238,43 @@ function identity:verify(purpose, callback)
 			return self:answer(false)
 		end
 		self:status(string.format("Bridge at %s not reachable (%s); checking again in %d s", ip,
-			tostring(r.ok and "no bridge id in the answer" or r.err), identity.RETRY_MS / 1000))
-		ctx.log.warn("bridge identity check via %s failed: %s; again in %d s", ip, tostring(r.err),
-			identity.RETRY_MS / 1000)
+			http.peer_text(r.ok and "no bridge id in the answer" or r.err, 128), identity.RETRY_MS / 1000))
+		ctx.log.warn("bridge identity check via %s failed: %s; again in %d s", ip,
+			http.peer_text(r.err, http.TEXT_LOG), identity.RETRY_MS / 1000)
 		ctx.away:unreachable()
 		again()
+	end)
+end
+
+-- A 401 or 403 (security review 2026-11-13, N-6, #490): before the driver
+-- locks the key, the bridge at the address is asked for its id again,
+-- unkeyed. Another bridge there (one DHCP gave the address to, say) refuses
+-- a key it never issued; locking would show "key rejected" for a fault that
+-- is not the key's, and the background key re-check would send that bridge
+-- the key every hour. Meanwhile nothing keyed goes out (identity_ok is
+-- cleared until the check answers). The check starts from a 1 ms timer: a
+-- 401 or 403 arrives inside a C4:url or network callback, where no transfer
+-- may start (bridge/stream.lua, rule 1); a check already in flight for
+-- this address answers it as well. callback(same) is the "key" waiter:
+-- true once the paired bridge answered and the TLS gate passed; false for
+-- another bridge (Status says which, and away:other_bridge looks for the
+-- paired one) or a model without CLIP v2; an unreachable bridge is asked
+-- again every 30 s, the waiter kept. An address change or Forget Pairing
+-- (reset) drops it.
+function identity:recheck(callback)
+	local state = self.ctx.state
+	local gen = state.address_gen
+	state.identity_ok = nil
+	self.waiters.key = callback
+	if self.recheck_timer then
+		return -- the check starts in a moment
+	end
+	self.recheck_timer = C4:SetTimer(1, function()
+		self.recheck_timer = nil
+		if gen ~= state.address_gen or state.destroyed or not self.waiters.key then
+			return -- the address changed, the code was unloaded, or a check in flight answered it
+		end
+		self:verify()
 	end)
 end
 

@@ -42,6 +42,7 @@
 -- itself dirty and saves once per batch, except during device creation, where
 -- it saves right after the AddDevice.
 
+local num = require("common.num")
 local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
 local groups = require("bridge.groups")
@@ -1105,13 +1106,20 @@ function zone_lights:entry_for_command(params, what)
 	end
 	local entry = self.registry[rid]
 	if not entry then
-		self.ctx.log.warn("zone_lights: %s for unregistered group %s ignored", what, rid)
+		self.ctx.log.warn("zone_lights: %s for unregistered group %s ignored", what, util.echo(rid, util.LOG_MAX))
 		return nil
 	end
 	if entry.state == "gone" then
 		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: %s deleted in Hue since %s (Link or Forget "
 			.. "Device)", what, self:entry_label(rid, entry), entry.device_id, type_word(entry.group_type) or "group",
 			util.date_of(entry.gone_since))
+		return nil
+	end
+	-- HUE_SET and HUE_DIM act for linked entries only (#485 D-2): an unbound
+	-- device cannot reach the bridge, so a message in its name is not its own.
+	if entry.state ~= "linked" then
+		self.ctx.log.warn("zone_lights: %s for %s (device %d) ignored: the device is %s", what,
+			self:entry_label(rid, entry), entry.device_id, tostring(entry.state))
 		return nil
 	end
 	local grouped = self:grouped_light_of(rid)
@@ -1141,12 +1149,14 @@ function zone_lights:set(params)
 	if not rid then
 		return false
 	end
+	-- Finite numbers only, never NaN or infinity (#486); the group queue
+	-- clamps them into range (bridge/commands.lua).
 	local fields = {
-		brightness = tonumber(params.brightness),
-		x = tonumber(params.x),
-		y = tonumber(params.y),
-		mirek = tonumber(params.mirek),
-		rate = tonumber(params.rate),
+		brightness = num.finite(params.brightness),
+		x = num.finite(params.x),
+		y = num.finite(params.y),
+		mirek = num.finite(params.mirek),
+		rate = num.finite(params.rate),
 	}
 	if params.on == "true" or params.on == true then
 		fields.on = true
@@ -1194,19 +1204,17 @@ function zone_lights:dim(params)
 	local direction = params.direction
 	if direction ~= "up" and direction ~= "down" and direction ~= "stop" then
 		self.ctx.log.warn("zone_lights: HUE_DIM for %s (device %d) ignored: unknown direction %s",
-			self:entry_label(rid, entry), entry.device_id, tostring(direction))
+			self:entry_label(rid, entry), entry.device_id, util.echo(direction, util.LOG_MAX))
 		return false
 	end
 	local body, level
 	if direction == "stop" then
 		body = { dimming_delta = { action = "stop" } }
-		level = tonumber(params.level)
+		level = num.clamp(params.level, 0, 100) -- #486: no NaN or infinity as the fallback level
 	else
-		local duration = tonumber(params.duration)
-		if not duration or duration ~= duration then
-			duration = zone_lights.DIM_DEFAULT_DURATION
-		end
-		duration = math.floor(math.max(0, math.min(zone_lights.DIM_MAX_DURATION, duration)))
+		-- #486: a duration that is not a finite number is the default one.
+		local duration = num.clamp(params.duration, 0, zone_lights.DIM_MAX_DURATION, zone_lights.DIM_DEFAULT_DURATION)
+		duration = math.floor(duration)
 		body = { dimming_delta = { action = direction, brightness_delta = 100 }, dynamics = { duration = duration } }
 	end
 	self.ctx.log.info("zone_lights: HUE_DIM %s %s (device %d): grouped_light %s", self:entry_label(rid, entry), direction,

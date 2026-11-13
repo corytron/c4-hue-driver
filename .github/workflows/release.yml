@@ -10,14 +10,20 @@
 #   (later builds of a version move it, docs/release-checklist.md); a
 #   prerelease tag never moves: each beta gets a new number, and a run for a
 #   prerelease tag that exists already fails before building anything.
-# Two jobs, so that no third-party code runs where the write token or the
-# signing identity is (security review 2026-10-25, finding 11; section 5.4):
-# - build (contents: read, no id-token, no GH_TOKEN): lint and test with the
-#   pinned luarocks tools, build one package per src/<driver>/driver.xml with
-#   the pinned packager, check build/manifest.json against the packages, this
-#   commit and the tag, write SHA256SUMS.txt and the notes, and hand the
-#   packages, SHA256SUMS.txt, the manifest and the notes over as a workflow
-#   artifact;
+# Four jobs, so that no third-party code runs where the write token or the
+# signing identity is (security review 2026-10-25, finding 11; section 5.4),
+# and no luarocks code touches the tree that is packaged (security review
+# 2026-11-13, I-3: a rock is pinned by name and version, not by content):
+# - tag (contents: read): work out the tag and check that it is built from
+#   main, with git alone, before anything else runs;
+# - test (contents: read): lint and test with the pinned luarocks tools; it
+#   hands nothing on;
+# - build (contents: read, no id-token, no GH_TOKEN; after test): a fresh
+#   checkout on a fresh runner with no rock installed, build one package per
+#   src/<driver>/driver.xml with the pinned packager, check
+#   build/manifest.json against the packages, this commit and the tag, write
+#   SHA256SUMS.txt and the notes, and hand the packages, SHA256SUMS.txt, the
+#   manifest and the notes over as a workflow artifact;
 # - publish (contents: write, id-token: write, attestations: write; nothing
 #   but actions/* pinned by SHA, git, gh and short python3 steps of its own):
 #   check out this run's commit without credentials, download and re-check
@@ -59,22 +65,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    name: Lint, test and build the packages
+  tag:
+    name: Check the tag and that it is built from main
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     permissions:
       contents: read # check out the repository; this job can change nothing on GitHub
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
     steps:
       - name: Check out the repository with its full history and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The build number is the commit count; a shallow checkout would stamp 1.
           fetch-depth: 0
           persist-credentials: false
 
       # Runs before any third-party code: a refusal here ends the run, and
-      # the publish job needs this job.
+      # every other job needs this one.
       - name: Work out the tag and check that it is built from main
         id: tag
         env:
@@ -138,14 +146,29 @@ jobs:
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
           echo "Building $tag from $GITHUB_SHA"
 
+  # The luarocks tools run here and nowhere else: whatever a rock does to this
+  # runner's checkout, the build job below starts from a fresh one.
+  test:
+    name: Lint and test (Lua 5.1)
+    needs: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the repository; this job can change nothing on GitHub
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       # The same pinned rocks as ci.yml (the reasons, and how to move a pin,
       # are written there): every rock at an exact version, its dependencies
       # included, with --deps-mode=none so that luarocks fetches nothing this
-      # list does not name. dp3/driverpackager.py imports lxml.
-      - name: Install Lua 5.1, luarocks, the pinned rocks and lxml
+      # list does not name.
+      - name: Install Lua 5.1, luarocks and the pinned rocks
         run: |
           sudo apt-get update
-          sudo apt-get install -y lua5.1 liblua5.1-0-dev luarocks python3-lxml
+          sudo apt-get install -y lua5.1 liblua5.1-0-dev luarocks
           rock() { sudo luarocks --lua-version=5.1 install --deps-mode=none "$1" "$2"; }
           rock argparse 0.7.2-1
           rock luafilesystem 1.9.0-1
@@ -162,6 +185,29 @@ jobs:
 
       - name: Lint, test and Lua limits (luacheck, busted, luac5.1)
         run: tools/check.sh --strict --only lua-lint lua-test lua-limits
+
+  # Packaging, on a runner where no rock was ever installed (I-3): the
+  # distribution's lxml, the pinned packager and the repository's own tools.
+  build:
+    name: Build the packages
+    needs: [tag, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # check out the repository; this job can change nothing on GitHub
+    steps:
+      - name: Check out the repository with its full history and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build number is the commit count; a shallow checkout would stamp 1.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # dp3/driverpackager.py imports lxml; nothing else beyond the stdlib.
+      - name: Install the packager's Python dependency (lxml)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-lxml
 
       # The packager runs in Build, so it is pinned to a reviewed commit: the
       # same commit as in ci.yml, where how to move it is written.
@@ -184,7 +230,7 @@ jobs:
       # version the file does not name fails here, before any package is built.
       - name: Build
         env:
-          C4_HUE_RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          C4_HUE_RELEASE_TAG: ${{ needs.tag.outputs.tag }}
         run: DP3="$RUNNER_TEMP/drivers-driverpackager/dp3/driverpackager.py" tools/build.sh
 
       # docs/release-checklist.md, section 0: every package carries LICENSE and
@@ -197,7 +243,7 @@ jobs:
       - name: Check the packages, write SHA256SUMS.txt and check the manifest
         id: packages
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.tag.outputs.tag }}
         run: |
           python3 -I - "$TAG" <<'PY'
           import hashlib, json, os, re, subprocess, sys, zipfile
@@ -271,8 +317,8 @@ jobs:
       # section 3). A run whose Unreleased entry is empty fails here.
       - name: Write the release notes from CHANGELOG.md
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
-          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          PRERELEASE: ${{ needs.tag.outputs.prerelease }}
         run: |
           template=.github/release-notes.md
           if [[ "$PRERELEASE" == true ]]; then
@@ -286,7 +332,7 @@ jobs:
       - name: Hand the packages and the release files to the publish job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: hue-drivers-${{ steps.tag.outputs.tag }}-build
+          name: hue-drivers-${{ needs.tag.outputs.tag }}-build
           # The packages build/manifest.json names, one path a line.
           path: |
             ${{ steps.packages.outputs.paths }}

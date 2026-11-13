@@ -140,6 +140,22 @@ describe("bridge/away.lua (#373)", function()
 			local item = a:attention_items()[1]
 			assert.is_truthy(item:find("since " .. os.date("%m-%d %H:%M", math.floor(T0 / 1000)), 1, true), item)
 		end)
+
+		-- Security review 2026-11-13 (#487): os.date raises on a time it cannot take.
+		it("reads ? for a time os.date cannot take, and loads no stored move without one", function()
+			for _, ms in ipairs({ 0 / 0, math.huge, -math.huge, 1e300, -5000 }) do
+				assert.equal("?", a:clock(ms), tostring(ms))
+			end
+			for _, at in ipairs({ "nan", "1e400", 1e300, -1 }) do
+				c4.persist[away.MOVED_KEY] = { from = "192.0.2.140", to = IP, text = "moved", at = at }
+				state.moved = nil
+				a:load()
+				assert.is_nil(state.moved, tostring(at))
+			end
+			c4.persist[away.MOVED_KEY] = { from = "192.0.2.140", to = IP, text = "moved", at = T0 }
+			a:load()
+			assert.equal(T0, state.moved.at)
+		end)
 	end)
 
 	describe("the identity check's answers", function()

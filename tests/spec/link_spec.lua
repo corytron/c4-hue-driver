@@ -363,7 +363,9 @@ describe("bridge/link.lua (#428)", function()
 		it("deletes a malformed stored outage, and keeps a well-formed one", function()
 			local bad = { "x", 7, true, {}, { since = "abc", reason = "not_answering" }, { since = T0 },
 				{ reason = "not_answering" }, { since = -5, reason = "not_answering" },
-				{ since = T0 + MIN, reason = "not_answering" }, { since = T0 - MIN, reason = 4 } }
+				{ since = T0 + MIN, reason = "not_answering" }, { since = T0 - MIN, reason = 4 },
+				-- #487: no time os.date cannot take.
+				{ since = "nan", reason = "not_answering" }, { since = "-inf", reason = "not_answering" } }
 			for i, value in ipairs(bad) do
 				c4.persist.hue_bridge_link = value
 				l = new_link()

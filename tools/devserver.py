@@ -30,8 +30,16 @@ HMAC-SHA256 over "c4-hue-devloop/1\\n<label>\\n<data>". /bundle and /commands
 answer "<mac>\\n<payload>", signed under "bundle" and "commands" (the latter over
 the driver's nonce too); tools/build.sh --dev bakes the same key into the dev
 packages, which check every bundle and command list before using it. /status
-and /admin/* want the header X-Devloop-Token, the "admin-token" MAC of
-nothing, which tools/devctl.py derives from the key file.
+and /admin/* want the header X-Devloop-Token: a random admin token drawn at
+each start, independent of the dev key (security review 2026-11-13, I-1: a dev
+package holds the key, so a token derived from it let any holder drive this
+server). It is printed once at start and written to server.json (0600), where
+tools/devctl.py reads it.
+
+Every request body is capped at MAX_BODY bytes (413 above it), and every line
+this server logs, shipped driver log lines included, has its control
+characters replaced by spaces (clean()): what the driver ships is untrusted
+text that any host on the LAN can post (I-10).
 
 State lives under --state-dir (default build/dev, gitignored):
   driver.log     one "HH:MM:SS.mmm <line>" per shipped log line (echoed to
@@ -39,8 +47,9 @@ State lives under --state-dir (default build/dev, gitignored):
   reports.jsonl  one JSON object per /report, with "received" (unix time) added
   commands.json  {"next_id": N, "commands": [pending...], "done": [ids]}; loaded
                  at startup so ids keep increasing across restarts
-  server.json    {"url": ..., "tls_url": ..., "pid": ...} while the server runs;
-                 tools/devctl.py finds the server through it
+  server.json    {"url": ..., "tls_url": ..., "pid": ..., "started": ...,
+                 "admin_token": ...} while the server runs, mode 0600;
+                 tools/devctl.py finds the server and its token through it
 
 Console output: every connection open is logged with client address and, on
 TLS, protocol/cipher/ALPN; that is what the connection experiment reads off the
@@ -57,6 +66,7 @@ Standard library only.
 """
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -70,6 +80,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -86,8 +97,20 @@ def emit(text):
         sys.stdout.flush()
 
 
+# What no logged line carries: the C0 and C1 controls and DEL (a newline would forge a second
+# line, an escape sequence would drive the reader's terminal), the Unicode line and paragraph
+# separators, and the bidirectional marks and overrides that reorder what a reader sees.
+UNSAFE_TEXT = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def clean(text):
+    """One line of text safe to log: every unsafe character (UNSAFE_TEXT) becomes a space."""
+    return UNSAFE_TEXT.sub(" ", str(text))
+
+
 def log(msg):
-    emit(time.strftime("%H:%M:%S") + " " + msg)
+    """One console line; msg may hold text from a request, so it is cleaned."""
+    emit(time.strftime("%H:%M:%S") + " " + clean(msg))
 
 
 def fmt_ms(ms):
@@ -109,6 +132,8 @@ KEY_RE = re.compile(r"[0-9a-f]{64}")
 KEY_MODULE = "devkey.lua"  # what tools/build.sh --dev bakes into a package; never served
 DOMAIN = b"c4-hue-devloop/1\n"
 TOKEN_HEADER = "X-Devloop-Token"
+TOKEN_RE = re.compile(r"[0-9a-f]{64}")
+MAX_BODY = 1024 * 1024  # bytes a request body may have; /log and /report are open to the LAN
 NONCE_RE = re.compile(r"[0-9a-f]{16,64}")
 SIGNED_TYPE = "application/x-c4hue-signed"  # "<mac>\n<JSON payload>"
 
@@ -178,9 +203,10 @@ def fingerprint(key):
     return mac(key, "fingerprint", b"")[:16]
 
 
-def admin_token(key):
-    """What /status and /admin/* want in X-Devloop-Token."""
-    return mac(key, "admin-token", b"")
+def new_admin_token():
+    """What /status and /admin/* want in X-Devloop-Token: 32 random bytes as hex, drawn at each
+    start. Nothing derives it from the dev key, which every dev package carries."""
+    return secrets.token_hex(32)
 
 
 def envelope(key, label, payload_obj):
@@ -416,7 +442,7 @@ class State:
                     stamp = fmt_ms(time.time() * 1000)
             else:
                 text, stamp = str(item), fmt_ms(time.time() * 1000)
-            out.append("%s %s" % (stamp, text))
+            out.append("%s %s" % (stamp, clean(text)))
         with self.lock:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 for line in out:
@@ -465,8 +491,8 @@ class State:
         if report.get("sandbox") is not None:
             summary += " sandbox=%s" % json.dumps(report["sandbox"], separators=(",", ":"))
         if isinstance(report.get("error"), str):
-            summary += " error=%s" % report["error"].replace("\n", " ")[:300]
-        return summary
+            summary += " error=%s" % clean(report["error"])[:300]
+        return clean(summary)
 
     def status(self, local_version, local_light_version, local_scene_version=None):
         """/status. Beyond the fields in docs/dev-loop.md this adds:
@@ -676,33 +702,38 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def send_bad_request(self, message):
+    def send_bad_request(self, message, status=400):
         self.close_connection = True  # the body may not have been consumed
         raw = getattr(self, "_raw_body", b"")
         snippet = raw[:300].decode("utf-8", "replace")
         log(
-            "BAD   %s:%d  %s %s: %s body=%r"
-            % (self.client_address[0], self.client_address[1], self.command, self.path, message, snippet)
+            "BAD   %s:%d  %s %s: %d %s body=%r"
+            % (self.client_address[0], self.client_address[1], self.command, self.path, status, message, snippet)
         )
-        self.send_json({"error": message}, 400)
+        self.send_json({"error": message}, status)
 
     def read_json_body(self):
-        """Parse the JSON request body. Returns (obj, None) or (None, error_text)."""
+        """Parse the JSON request body. Returns (obj, None, None) or (None, error_text, status).
+        A body over MAX_BODY bytes is never read: 413, and the connection closes."""
         length = self.headers.get("Content-Length")
         if length is None:
-            return None, "Content-Length required"
+            return None, "Content-Length required", 400
         try:
             n = int(length)
         except ValueError:
-            return None, "bad Content-Length"
+            return None, "bad Content-Length", 400
+        if n < 0:
+            return None, "bad Content-Length", 400
+        if n > MAX_BODY:
+            return None, "body of %d bytes refused: at most %d" % (n, MAX_BODY), 413
         raw = self.rfile.read(n) if n > 0 else b""
         self._raw_body = raw  # kept so a rejection can be logged with context
         if not raw:
-            return None, "empty body"
+            return None, "empty body", 400
         try:
-            return json.loads(raw.decode("utf-8")), None
+            return json.loads(raw.decode("utf-8")), None, None
         except (UnicodeDecodeError, ValueError) as exc:
-            return None, "invalid JSON: %s" % exc
+            return None, "invalid JSON: %s" % exc, 400
 
     # -- dev-loop endpoints -------------------------------------------------
 
@@ -785,24 +816,24 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(status)
 
     def post_log(self, query):
-        body, err = self.read_json_body()
+        body, err, status = self.read_json_body()
         if err is None and isinstance(body, dict):
             body["lines"] = as_list(body.get("lines"))
         if err is None and not (isinstance(body, dict) and isinstance(body.get("lines"), list)):
             err = 'expected {"version": ..., "lines": [...]}'
         if err:
-            self.send_bad_request(err)
+            self.send_bad_request(err, status or 400)
             return
         self.server.state.touch(body.get("version"))
         self.server.state.add_log(body["lines"])
         self.send_no_content()
 
     def post_report(self, query):
-        body, err = self.read_json_body()
+        body, err, status = self.read_json_body()
         if err is None and not (isinstance(body, dict) and isinstance(body.get("event"), str)):
             err = 'expected {"version": ..., "event": ..., ...}'
         if err:
-            self.send_bad_request(err)
+            self.send_bad_request(err, status or 400)
             return
         self.server.state.touch(body.get("version"), body.get("light_version"), body.get("scene_version"))
         warning = self.server.state.note_fingerprint(body.get("key_fingerprint"), self.server.key_fingerprint)
@@ -814,11 +845,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_no_content()
 
     def post_enqueue(self, query):
-        body, err = self.read_json_body()
+        body, err, status = self.read_json_body()
         if err is None:
             command, err = validate_command(body)
         if err:
-            self.send_bad_request(err)
+            self.send_bad_request(err, status or 400)
             return
         command_id = self.server.state.enqueue(command)
         log("QUEUE #%d %s" % (command_id, json.dumps(command, separators=(",", ":"))))
@@ -886,12 +917,13 @@ class DevServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, trees, state, key, tls_context=None, quiet=False):
+    def __init__(self, address, trees, state, key, tls_context=None, quiet=False, admin_token=None):
         super().__init__(address, Handler)
         self.trees = trees  # {name: Tree}
         self.state = state
         self.key = key  # the dev key's 64 hex characters, as bytes
-        self.admin_token = admin_token(key)
+        # Both listeners of one run share one token (main); a server made alone draws its own.
+        self.admin_token = admin_token or new_admin_token()
         self.key_fingerprint = fingerprint(key)
         self.tls_context = tls_context
         self.quiet = quiet
@@ -916,7 +948,10 @@ class DevServer(ThreadingHTTPServer):
         if isinstance(exc, OSError):
             log("ERROR %s  %s: %s" % (where, exc.__class__.__name__, exc))
         else:
-            log("ERROR %s  unexpected exception:\n%s" % (where, traceback.format_exc()))
+            # One cleaned console line per line of the traceback: its text can quote the request.
+            log("ERROR %s  unexpected exception:" % where)
+            for line in traceback.format_exc().splitlines():
+                emit(clean(line))
 
 
 # ---------------------------------------------------------------------------
@@ -953,13 +988,19 @@ def ensure_cert(cert_dir):
     return crt, key
 
 
-def write_server_file(state_dir, url, tls_url):
-    """build/dev/server.json: where tools/devctl.py finds this server."""
+def write_server_file(state_dir, url, tls_url, token):
+    """build/dev/server.json: where tools/devctl.py finds this server and the run's admin token.
+    Mode 0600 from the moment it exists (mkstemp), then moved into place."""
     path = os.path.join(state_dir, "server.json")
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"url": url, "tls_url": tls_url, "pid": os.getpid(), "started": now()}, f)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=".server-", suffix=".json", dir=state_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"url": url, "tls_url": tls_url, "pid": os.getpid(), "started": now(), "admin_token": token}, f)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
     return path
 
 
@@ -1059,8 +1100,9 @@ def main(argv=None):
     ctx.load_cert_chain(crt, cert_key)
     ctx.set_alpn_protocols([p.strip() for p in args.alpn.split(",") if p.strip()])
 
-    plain = DevServer((bind, args.port), trees, state, key, quiet=args.quiet)
-    tls = DevServer((bind, args.tls_port), trees, state, key, tls_context=ctx, quiet=args.quiet)
+    token = new_admin_token()
+    plain = DevServer((bind, args.port), trees, state, key, quiet=args.quiet, admin_token=token)
+    tls = DevServer((bind, args.tls_port), trees, state, key, tls_context=ctx, quiet=args.quiet, admin_token=token)
     url = "http://%s:%d" % (url_host(bind), plain.server_address[1])
     tls_url = "https://%s:%d" % (url_host(bind), tls.server_address[1])
 
@@ -1074,7 +1116,9 @@ def main(argv=None):
     if bind == "0.0.0.0":
         log("WARNING listening on every address (--bind 0.0.0.0)")
     log("listening on %s and %s (Dev Server = %s:%d)" % (url, tls_url, url_host(bind), plain.server_address[1]))
-    server_file = write_server_file(state_dir, url, tls_url)
+    server_file = write_server_file(state_dir, url, tls_url, token)
+    # Printed this once, for whoever started the server; tools/devctl.py reads server.json.
+    log("admin token for this run: %s (in %s, mode 0600; a new one at every start)" % (token, server_file))
 
     # SIGTERM (pkill) ends the server like Ctrl-C, so server.json goes too.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))

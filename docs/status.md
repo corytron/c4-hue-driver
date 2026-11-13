@@ -216,12 +216,14 @@ into the brief). Builds that only change Lua or connections take effect at
 once.
 
 A dev build (`tools/build.sh --dev`, for the dev loop) or a feature-branch
-hardware test goes around the tool: it is served from `build/release/` with
-`python3 -I -m http.server 8090 --bind 0.0.0.0 --directory build/release`
-(stopped afterwards), briefed with its hashes and recorded afterwards with
-`deploy.py record --no-manifest`, so the drift issue shows the house off its
-desired state until a release is installed again; a release install ends the
-dev loop.
+hardware test goes around the tool: it is served with
+`python3 -I tools/serve_install.py <packages>`, which serves only those files
+from a random temporary path, prints their URLs and hashes for the brief and
+stops after the download (#481; `build/release/` is never served whole), and
+it is recorded afterwards with `deploy.py record --no-manifest`, which marks
+it a dev build, so the drift issue shows the house off its desired state until
+a release is installed again; a release install ends the dev loop. A dev build
+reads `<build>-dev` in Driver Version (#492).
 
 ## History
 

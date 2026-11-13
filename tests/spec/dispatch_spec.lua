@@ -41,4 +41,17 @@ describe("common.dispatch", function()
 		end)
 		assert.truthy(logged[1]:match("kaput"))
 	end)
+
+	-- #483 D-7: a driver says which binding each proxy command is taken on.
+	it("drops a proxy command its driver does not take on that binding, before any handler runs", function()
+		local dispatch = fresh_dispatch()
+		local seen = {}
+		dispatch.proxy["ON"] = function(binding) seen[#seen + 1] = binding end
+		dispatch.received_from_proxy(200, "ON", {})
+		assert.same({ 200 }, seen, "without a rule (the bridge) every binding is taken")
+		dispatch.proxy_binding_ok = function(binding) return binding == 5001 end
+		dispatch.received_from_proxy(200, "ON", {})
+		dispatch.received_from_proxy("5001", "ON", {})
+		assert.same({ 200, "5001" }, seen, "the rule reads the binding as a number")
+	end)
 end)

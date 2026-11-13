@@ -46,6 +46,7 @@
 -- the PUT queues) [security review 2026-10-24 finding 5, issue #45].
 
 local log = require("common.log")
+local num = require("common.num")
 
 local hue_model = {}
 
@@ -61,8 +62,10 @@ for _, name in ipairs(hue_model.STATE_FIELDS) do
 	STATE_SET[name] = true
 end
 
+-- A finite number, else nil: a decoder may turn "1e999" into infinity, and
+-- no level, colour or limit is one (security review 2026-11-13, #486).
 local function number(value)
-	if type(value) == "number" then
+	if type(value) == "number" and num.finite(value) then
 		return value
 	end
 	return nil
@@ -86,9 +89,13 @@ end
 -- A CLIP v2 resource id: letters, digits and "-" only, so nothing else can
 -- reach a request path ("?", "/", spaces, a table from a decoded JSON null);
 -- else nil. The bridge's ids are UUIDs [assumed: Signify's CLIP v2
--- reference, which gives every id as one].
+-- reference, which gives every id as one], 36 characters, so one longer
+-- than RID_MAX is refused too: a rid also goes into log lines, rows and the
+-- store, and every device message's rid passes here (#485 D-2).
+hue_model.RID_MAX = 64
+
 local function resource_id(value)
-	if type(value) == "string" and value:find("^[%w%-]+$") then
+	if type(value) == "string" and #value <= hue_model.RID_MAX and value:find("^[%w%-]+$") then
 		return value
 	end
 	return nil
@@ -1075,12 +1082,14 @@ function hue_model.group_configure_params(rid, entry, extra)
 		model = GROUP_MODEL[entry.group_type],
 		caps = { has_color = caps.has_color == true or caps.has_color == "true",
 			has_cct = caps.has_cct == true or caps.has_cct == "true",
-			mirek_min = tonumber(caps.mirek_min), mirek_max = tonumber(caps.mirek_max), min_dim = 1 },
+			mirek_min = num.finite(caps.mirek_min), mirek_max = num.finite(caps.mirek_max), min_dim = 1 },
 	})
 	params.kind = "group"
 	params.group_type = text(entry.group_type)
-	if entry.light_count ~= nil and tonumber(entry.light_count) then
-		params.light_count = string.format("%d", tonumber(entry.light_count))
+	-- A whole count: "%d" of infinity or NaN is undefined in C (#486).
+	local light_count = num.int(entry.light_count, 0)
+	if light_count then
+		params.light_count = string.format("%d", light_count)
 	end
 	params.no_lights = (entry.no_lights == true or entry.no_lights == "true") and "true" or "false"
 	if entry.name ~= nil and entry.name ~= "" then

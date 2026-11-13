@@ -40,10 +40,14 @@
 --                            docs/offline-design.md §6.6); `changed` says whether what the
 --                            device shows moves: offline, back online, or another reason or
 --                            since while offline. The default does nothing
+--   dev.greet()              the driver's hello to its bridge, when a configure that would
+--                            move the device to another rid did not answer one (#483, D-1;
+--                            "Trust between drivers" below); the default does nothing
 --
 -- The instance: devloop (the module; nil in release builds), flush_log(),
 -- prop(), notify(), device_id(), result(), bound_bridge(), proxy_id(),
--- send(), after_late_init(), late_init(), link (the bridge's link as
+-- send_to(), send(), init(), greeted(), addressed(), configure_ok(),
+-- after_late_init(), late_init(), link (the bridge's link as
 -- common/link.lua parsed it, nil until told), link_offline(), link_text(),
 -- binding_changed(),
 -- replay_bindings(), show_driver_version(), load_colors(), update_leds(),
@@ -58,11 +62,20 @@
 -- keypad setting it takes, UPDATE_BRIGHTNESS_RATE_DEFAULT and
 -- UPDATE_COLOR_RATE_DEFAULT (#430 D8), and DEV_RELOAD in dev builds.
 --
--- OnDriverLateInit in both drivers: load_settings() (the keypad settings
+-- OnDriverInit in every device driver calls init() (#492: the release
+-- build's checks). OnDriverLateInit in both drivers: load_settings() (the keypad settings
 -- and the default rates) and load_colors() with
 -- the persisted identity, read the binding (bound_bridge), then late_init()
 -- (the buffered bridge messages), greet, and replay_bindings() last;
 -- OnDriverDestroyed calls cancel_timers().
+--
+-- The security review of 2026-11-13 (docs/security-fixes-2026-11-design.md)
+-- added: the bridge messages a device takes and the binding each proxy
+-- command is taken on (#483, D-1 and D-7), the proxy's numbers checked
+-- through common/num.lua (#486, D-4), Director's log of the device's
+-- messages only in Debug Mode (#493, D-8), Debug Mode's own end after
+-- DEBUG_MS (#493, C-5), and the dev build's marks and the release build's
+-- checks (#492, I-4 to I-6).
 --
 -- The light's own button events (#432, docs/light-events-design.md §3.1):
 -- every press that reaches the device, by either route, tells the proxy
@@ -74,6 +87,7 @@
 local log = require("common.log")
 local dispatch = require("common.dispatch")
 local link = require("common.link")
+local num = require("common.num")
 
 local device = {}
 
@@ -206,6 +220,38 @@ local RATE_DEFAULTS = {
 -- The binding re-check's gaps: checks at 5, 15, 30 and 60 s after start.
 local RECHECK_MS = { 5000, 10000, 15000, 30000 }
 
+-- #483 (D-1, docs/security-fixes-2026-11-design.md "Trust between
+-- drivers"): Director tells ExecuteCommand nothing about the sender
+-- [verified: API 5_director_command/_1-ExecuteCommand], so any driver in the
+-- project can send a device the bridge's messages. A configure that moves
+-- a device with a rid to another rid (or names none) is taken only as the
+-- answer to the device's own hello: the first configure within GRANT_MS of
+-- it. One that arrives otherwise (the bridge's Link Device and its re-link
+-- by radio send one by themselves, bridge/owner.lua relink) is not taken;
+-- VERIFY_MS later the device says hello, and the bridge answers it with
+-- the rid it holds for this device id (owner:hello), which is then taken.
+-- The delay lets every message already queued behind the refused one
+-- arrive, and be refused, before the hello goes out.
+device.GRANT_MS = 30000
+device.VERIFY_MS = 500
+local GRANT_MS, VERIFY_MS = device.GRANT_MS, device.VERIFY_MS
+
+-- #483 D-7: the commands a keypad sends on a Button Link (200 to 202);
+-- their handlers check the link themselves (link_button). Every other proxy
+-- command is taken on the proxy's binding (5001) only, or on the binding a
+-- driver names for it (opts.proxy_bindings: the motion driver's
+-- GET_SENSOR_VALUE on 2).
+local LINK_COMMANDS = { DO_PUSH = true, DO_RELEASE = true, DO_CLICK = true, REQUEST_BUTTON_COLORS = true }
+
+-- #493 (C-5, D-8): Debug Mode turns itself Off DEBUG_MS after it was turned
+-- On, with a Last Action that says so. The end is persisted (controller ms,
+-- C4:GetTime [verified: API 34_timer/_2-GetTime, OS 3.2.3]) under DEBUG_KEY,
+-- so a restart keeps the time that was left.
+device.DEBUG_MS = 8 * 3600 * 1000
+local DEBUG_MS = device.DEBUG_MS
+local DEBUG_KEY = "debug_mode_until"
+device.DEBUG_OFF_TEXT = "Debug Mode turned itself Off after 8 hours"
+
 -- Parsing ------------------------------------------------------------------
 
 -- A string param, or nil when absent or empty (SendToDevice drops empty
@@ -243,6 +289,33 @@ local function color_key(button, which)
 	return string.format("button_%d_%s_color", button, which)
 end
 
+-- #486 D-4: a BUTTON_ACTION's BUTTON_ID or ACTION, a whole number 0 to 2
+-- [verified: LV2 cmds _1-BUTTONACTION.md: 0 top, 1 bottom, 2 toggle; 0
+-- release after a hold, 1 press, 2 release as a click]; nil for anything else.
+local function button_param(v)
+	local n = num.within(v, 0, 2)
+	if n and n == math.floor(n) then
+		return n
+	end
+	return nil
+end
+
+-- Builds (#492, I-4 to I-6) ---------------------------------------------------
+
+-- Which build this driver is, as tools/build.sh writes it into every
+-- package (common/build_kind.lua, "dev" or "release"; the version itself
+-- stays numeric): "dev", "release", or "source" for a driver run from src/
+-- without the module (the specs), or one with a value this code does not
+-- know. Every package carries that file, so a release installed over a dev
+-- build replaces it, whatever Director leaves of the dev build's others.
+function device.build_kind()
+	local ok, kind = pcall(require, "common.build_kind")
+	if ok and (kind == "dev" or kind == "release") then
+		return kind
+	end
+	return "source"
+end
+
 -- The instance ---------------------------------------------------------------
 
 function device.new(opts)
@@ -276,9 +349,42 @@ function device.new(opts)
 	-- bridge is known wait and go out from flush_log(), which the driver's
 	-- hello calls. Release builds leave log.sink alone and have no DEV_RELOAD.
 	dev.flush_log = function() end
+	local sink_before = log.sink -- what init() puts back in a release build that found the module (#492 I-6)
 	if devloop then
 		dev.flush_log = devloop.forward_logs(log, prefix, get_bridge, get_rid)
 		dispatch.commands["DEV_RELOAD"] = devloop.reload_handler(log, tree)
+	end
+
+	-- #492, from OnDriverInit (device.build_kind). A release build locks
+	-- Composer's Lua command window, belt and braces, since the SDK says it
+	-- is locked by default (I-5; FUND 6_Understanding .c4z
+	-- Drivers/_3-C4ALLOWEXECUTE.md; "can be invoked during OnDriverInit",
+	-- API 22_miscellaneous/_2-AllowExecute.md); a dev build keeps the
+	-- C4:AllowExecute(true) dp3 --allowexecute appends to its driver.lua
+	-- [verified: drivers-driverpackager README, -ae], and a driver that does
+	-- not say (the specs) is left as it is, as the bridge does. A release
+	-- build that finds the dev loop module (an earlier dev build's file
+	-- Director did not remove with the update) says so and does not use it:
+	-- no log forwarding, no DEV_RELOAD (I-6). Answers the kind.
+	function dev.init()
+		local kind = device.build_kind()
+		if kind ~= "release" then
+			return kind
+		end
+		if type(C4.AllowExecute) == "function" then
+			local ok, err = pcall(C4.AllowExecute, C4, false)
+			if not ok then
+				log.warn("C4:AllowExecute(false) failed: %s", tostring(err))
+			end
+		end
+		if devloop then
+			log.warn("this release build found the dev loop of an earlier dev build (common/devloop.lua); not used")
+			log.sink = sink_before
+			dispatch.commands["DEV_RELOAD"] = nil
+			devloop = nil
+			dev.devloop, dev.flush_log = nil, function() end
+		end
+		return kind
 	end
 
 	-- Properties and proxy notifies ----------------------------------------
@@ -355,10 +461,21 @@ function device.new(opts)
 	-- proxy waiting on its CHANGING (docs/code-analysis-2026-10-22.md item
 	-- 15). True when the call went through; false once the error is logged,
 	-- and the driver then reports the unchanged state.
+	--
+	-- #493 D-8: every message a device sends passes allowEmptyValues false
+	-- (the default) and logCommand only in Debug Mode, as the motion driver
+	-- and the bridge do: logCommand defaults to true, and false keeps the
+	-- message out of Director's log [verified: API
+	-- 32_serial_network_device/_19-SendToDevice]. send_to is the unprotected
+	-- call (a hello, a hidden alias); send the protected one.
+	function dev.send_to(target, command, params)
+		C4:SendToDevice(target, command, params, false, log.enabled("debug"))
+	end
+
 	function dev.send(command, params)
 		local target = get_bridge()
 		local ok, err = pcall(function()
-			C4:SendToDevice(target, command, params)
+			dev.send_to(target, command, params)
 		end)
 		if not ok then
 			log.error("%s to the bridge failed: %s", command, tostring(err))
@@ -372,11 +489,18 @@ function device.new(opts)
 	-- device created by AddDevice [hardware 2026-10-24, device 1166], so the
 	-- build's own stamp (common/build_version.lua, tools/build.sh) is the
 	-- fallback.
+	-- #492 I-4: a dev build reads "<build>-dev" (device.build_kind), so it is
+	-- never taken for the release of the same build number; a stamp that
+	-- says so already keeps its one suffix.
 	local build_version_ok, build_version = pcall(require, "common.build_version")
 	local function driver_version()
 		local v = C4:GetDriverConfigInfo("version")
 		if v == nil or tostring(v) == "" then
 			v = build_version_ok and tostring(build_version) or ""
+		end
+		v = tostring(v)
+		if v ~= "" and device.build_kind() == "dev" and not v:find("%-dev$") then
+			v = v .. "-dev"
 		end
 		return v
 	end
@@ -410,8 +534,67 @@ function device.new(opts)
 	end
 	dev.show_driver_version = show_driver_version
 
+	-- #493 (C-5): Debug Mode turns itself Off DEBUG_MS after it was turned
+	-- On. The end is persisted (DEBUG_KEY), so a restart in between keeps
+	-- the time that was left; one that finds it passed turns Debug Mode Off
+	-- at once. A stored end further off than DEBUG_MS (not one this code
+	-- wrote, or a clock set back) starts a fresh DEBUG_MS. Off by hand
+	-- forgets the end, so the next On starts a fresh one; On again while On
+	-- keeps the end it has. The timer looks at the clock when it fires, and
+	-- waits on for what is left when it fired early. The row goes Off with
+	-- UpdateProperty, which calls no OnPropertyChanged [verified: API
+	-- 24_properties/_5-UpdateProperty.md], so the level is set here too, and
+	-- Last Action says why. cancel_timers() stops the timer; the end stays.
+	local debug_timer = nil
+
+	local function cancel_debug_timer()
+		if debug_timer then
+			debug_timer:Cancel()
+			debug_timer = nil
+		end
+	end
+
+	local function forget_debug_end()
+		cancel_debug_timer()
+		-- One value: PersistGetValue returns none for a key never written (#298).
+		if (C4:PersistGetValue(DEBUG_KEY)) ~= nil then
+			C4:PersistDeleteValue(DEBUG_KEY)
+		end
+	end
+
+	local function debug_off()
+		forget_debug_end()
+		log.set_debug(false)
+		prop("Debug Mode", "Off")
+		dev.result(device.DEBUG_OFF_TEXT)
+	end
+
+	local function arm_debug_end(until_ms)
+		cancel_debug_timer()
+		local left = until_ms - now_ms()
+		if left <= 0 then
+			return debug_off()
+		end
+		debug_timer = C4:SetTimer(math.max(1, math.floor(left + 0.5)), function()
+			debug_timer = nil
+			arm_debug_end(until_ms)
+		end)
+	end
+
 	dispatch.properties["Debug_Mode"] = function(value)
-		log.set_debug(value == "On")
+		local on = value == "On"
+		log.set_debug(on)
+		if not on then
+			return forget_debug_end()
+		end
+		local now = now_ms()
+		local until_ms = num.within((C4:PersistGetValue(DEBUG_KEY)), nil, now + DEBUG_MS)
+		if not until_ms then
+			until_ms = now + DEBUG_MS
+			C4:PersistSetValue(DEBUG_KEY, until_ms)
+			log.debug("Debug Mode On until %s; it turns itself Off then", num.date("%Y-%m-%d %H:%M", until_ms / 1000))
+		end
+		arm_debug_end(until_ms)
 	end
 
 	-- Before late init --------------------------------------------------------
@@ -450,6 +633,83 @@ function device.new(opts)
 				log.error("buffered %s failed: %s", m.name, tostring(err))
 			end
 		end
+	end
+
+	-- Trust between drivers (#483, D-1) ----------------------------------------
+	-- Any driver in the project can send a device the bridge's messages (see
+	-- GRANT_MS above). Once the device has a rid, a state, group or forgotten
+	-- message must name it (addressed); every one the bridge sends does
+	-- (docs/lights-design.md, docs/scenes-design.md §2,
+	-- docs/motion-design.md §3). A configure that names another rid, or none,
+	-- is taken only as the first configure within GRANT_MS of the device's
+	-- own hello (configure_ok); otherwise the device asks the bridge with a
+	-- hello VERIFY_MS later (dev.greet), whose answer the bridge builds from
+	-- the rid it holds for this device id. That is how a Link Device re-link
+	-- reaches the device. A device without a rid takes every message, as
+	-- before: adoption and Link Devices by name configure it first. This
+	-- narrows what a hostile driver can do (no re-target by one message, no
+	-- state of another rid or of none), it does not authenticate the bridge:
+	-- one that wins the race between a hello and the bridge's answer is still
+	-- taken (SECURITY.md, the trust boundary).
+
+	function dev.greet() end
+
+	local grant_until = nil  -- controller ms until which the next configure may name another rid
+	local verify_timer = nil -- the hello that asks the bridge after a configure was not taken
+
+	local function cancel_verify()
+		if verify_timer then
+			verify_timer:Cancel()
+			verify_timer = nil
+		end
+	end
+
+	-- The driver said hello to its bridge (call it right after the send).
+	function dev.greeted()
+		cancel_verify()
+		grant_until = now_ms() + GRANT_MS
+	end
+
+	-- The rid a message names, as a string; nil for none.
+	local function named_rid(params)
+		local rid = type(params) == "table" and params.rid or nil
+		if rid == nil or rid == "" then
+			return nil
+		end
+		return tostring(rid)
+	end
+
+	-- True when a bridge message is this device's: any while the device has
+	-- no rid, else one that names it; with `optional` (HUE_BRIDGE_LINK, which
+	-- the bridge sends without a rid) one that names none is taken too. A
+	-- message for another rid, or none, is ignored with a debug line.
+	function dev.addressed(command, params, optional)
+		local ours, rid = get_rid(), named_rid(params)
+		if ours == nil or rid == ours or (optional and rid == nil) then
+			return true
+		end
+		log.debug("%s for %s ignored (ours is %s)", tostring(command), rid and ("rid " .. rid) or "no rid", ours)
+		return false
+	end
+
+	-- True when a configure may be applied. Every configure spends the grant
+	-- of the hello before it.
+	function dev.configure_ok(command, params)
+		local ours, rid = get_rid(), named_rid(params)
+		local granted = grant_until ~= nil and now_ms() <= grant_until
+		grant_until = nil
+		if ours == nil or rid == ours or granted then
+			return true
+		end
+		log.info("%s for %s ignored: ours is %s, and it does not answer this device's hello; asking the bridge",
+			tostring(command), rid and ("rid " .. rid) or "no rid", ours)
+		if not verify_timer then
+			verify_timer = C4:SetTimer(VERIFY_MS, function()
+				verify_timer = nil
+				dev.greet()
+			end)
+		end
+		return false
 	end
 
 	-- The bridge's link (#428) -----------------------------------------------
@@ -497,7 +757,12 @@ function device.new(opts)
 	-- A state this build does not know is ignored and logged once (§6.1).
 	local link_unknown_logged = false
 
+	-- #483 D-1: the bridge names no rid in HUE_BRIDGE_LINK (bridge/link.lua
+	-- params), so one without a rid is taken; one naming another rid is not.
 	dispatch.commands["HUE_BRIDGE_LINK"] = dev.after_late_init("HUE_BRIDGE_LINK", function(params)
+		if not dev.addressed("HUE_BRIDGE_LINK", params, true) then
+			return
+		end
 		local told = link.parse(params)
 		if not told then
 			if not link_unknown_logged then
@@ -1181,10 +1446,16 @@ function device.new(opts)
 		notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
 	end
 
+	-- #486 D-4: BUTTON_ID and ACTION each 0, 1 or 2 (button_param); any
+	-- other value is dropped with a warning, neither echoed nor acted on.
 	dispatch.proxy["BUTTON_ACTION"] = function(_, params)
-		local button, action = tonumber(params.BUTTON_ID), tonumber(params.ACTION)
-		if not button or not action then
+		if params.BUTTON_ID == nil or params.ACTION == nil then
 			return log.warn("BUTTON_ACTION without BUTTON_ID/ACTION")
+		end
+		local button, action = button_param(params.BUTTON_ID), button_param(params.ACTION)
+		if not button or not action then
+			return log.warn("BUTTON_ACTION with BUTTON_ID %s and ACTION %s ignored: each is 0, 1 or 2",
+				tostring(params.BUTTON_ID), tostring(params.ACTION))
 		end
 		notify("BUTTON_ACTION", { BUTTON_ID = button, ACTION = action })
 		-- #432 D5: the echo, unchanged, keeps the down mark, so a Button Link
@@ -1302,6 +1573,20 @@ function device.new(opts)
 		end
 	end
 
+	-- #483 D-7: the binding each proxy command is taken on (LINK_COMMANDS
+	-- above); dispatch drops the rest before any handler runs. A keypad bound
+	-- to a Button Link sends only the link commands there, and the proxy's
+	-- own commands come on its binding [verified: API 25_proxy/_5-ReceivedFromProxy:
+	-- the binding of the proxy that sent it; LV2 cmds _1-BUTTONACTION.md: the
+	-- proxy forwards BUTTON_ACTION to the driver].
+	local proxy_bindings = opts.proxy_bindings or {}
+	dispatch.proxy_binding_ok = function(binding, command)
+		if LINK_COMMANDS[command] then
+			return true
+		end
+		return binding == (proxy_bindings[command] or PROXY_BINDING)
+	end
+
 	-- Binding re-check ------------------------------------------------------
 	-- After a Director restart the binding to the bridge can be invisible to
 	-- GetBoundProviderDevice at late init although Composer shows it, and no
@@ -1361,6 +1646,8 @@ function device.new(opts)
 			version_timer = nil
 		end
 		dev.cancel_recheck()
+		cancel_verify() -- #483: a hello still to ask the bridge
+		cancel_debug_timer() -- #493: Debug Mode's end stays persisted for the next instance
 		for _, seq in pairs(taps) do
 			if seq.timer then
 				seq.timer:Cancel()
@@ -1390,7 +1677,7 @@ function device.new(opts)
 			return
 		end
 		local ok, err = pcall(function()
-			C4:SendToDevice(target, command, { rid = get_rid(), device_id = device_id() })
+			dev.send_to(target, command, { rid = get_rid(), device_id = device_id() })
 		end)
 		if ok then
 			log.debug("%s sent to bridge %d", command, target)

@@ -13,6 +13,11 @@ local dispatch = {
 	commands = {},
 	properties = {},
 	proxy = {},
+	-- #483 D-7: a driver whose proxy commands belong on one binding each
+	-- sets proxy_binding_ok(binding, command) (common/device.lua does, for
+	-- the device drivers): a command it refuses is dropped with a debug line
+	-- before any handler runs. nil (the bridge) takes every binding.
+	proxy_binding_ok = nil,
 }
 
 local function key(name)
@@ -52,6 +57,11 @@ end
 
 function dispatch.received_from_proxy(binding, command, params)
 	log.debug("ReceivedFromProxy %s %s", tostring(binding), tostring(command))
+	local accept = dispatch.proxy_binding_ok
+	if accept and not accept(tonumber(binding), command) then
+		log.debug("%s on binding %s ignored: not the binding it is taken on", tostring(command), tostring(binding))
+		return nil
+	end
 	return call("proxy", command, dispatch.proxy[command], binding, params or {})
 end
 

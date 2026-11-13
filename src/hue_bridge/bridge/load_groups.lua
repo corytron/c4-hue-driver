@@ -116,6 +116,7 @@
 -- when ctx.zone_lights knows the rid, else "light".
 
 local default_log = require("common.log")
+local num = require("common.num")
 
 local load_groups = {}
 load_groups.__index = load_groups
@@ -129,6 +130,10 @@ load_groups.MISS_LIMIT = 3      -- #435 D15, A8: timed-out batches in a row miss
 load_groups.PER_LIGHT_MAX = 10  -- #435 D9: lamps per batch that keep their urgency (group_hold's too)
 load_groups.COVER = true        -- #435 D8, owner's §10 Q1: whole Hue rooms and zones as one request (H3)
 load_groups.COVER_MIN = 2       -- #435 D8 b: the fewest lights a Hue room or zone needs to be a cover
+-- The most load groups one HUE_LOAD_GROUPS is taken with; the rest are
+-- dropped with a warning (security review 2026-11-13 D-3, #488). A light
+-- learns at most 32 (src/hue_light/light/load_group.lua).
+load_groups.GROUPS_MAX = 256
 
 -- [verified: API 34_timer/_1-SetTimer] as bridge/group_hold.lua.
 local function c4_timer(ms, fn)
@@ -208,7 +213,7 @@ end
 
 -- A positive integer device id, or nil.
 local function device_key(value)
-	local n = tonumber(value)
+	local n = num.finite(value)
 	if n and n > 0 and n == math.floor(n) then
 		return n
 	end
@@ -256,34 +261,43 @@ function load_groups.group_id(value)
 end
 
 -- HUE_LOAD_GROUPS' groups (§6.3), "1234:1,5678:0" or "none", as a set of
--- GROUP IDs. The sync flags are dropped (D13); a bad item is skipped.
+-- GROUP IDs, and how many more distinct ids the wire named than the
+-- GROUPS_MAX kept (#488): the first GROUPS_MAX are kept, the rest dropped.
+-- The sync flags are dropped (D13); a bad item is skipped.
 function load_groups.parse_groups(wire)
-	local out = {}
+	local out, kept, dropped, seen = {}, 0, 0, {}
 	if type(wire) == "number" then
 		wire = tostring(wire)
 	end
 	if type(wire) ~= "string" then
-		return out
+		return out, 0
 	end
 	for item in wire:gmatch("[^,]+") do
 		local id = load_groups.group_id(item:match("^([^:]*)"))
-		if id then
-			out[id] = true
+		if id and not seen[id] then
+			seen[id] = true
+			if kept < load_groups.GROUPS_MAX then
+				out[id] = true
+				kept = kept + 1
+			else
+				dropped = dropped + 1
+			end
 		end
 	end
-	return out
+	return out, dropped
 end
 
 -- HUE_SET params -> the light queue's fields, exactly as the driver's HUE_SET
 -- handler maps them (`urgent` included; #421 D12). The zone lights' own
 -- mapping (zone_lights:set) takes booleans for `on` too, and so does this.
+-- Numbers that are not finite are left out (#486; the queue drops them too).
 function load_groups.set_fields(params)
 	local fields = {
-		brightness = tonumber(params.brightness),
-		x = tonumber(params.x),
-		y = tonumber(params.y),
-		mirek = tonumber(params.mirek),
-		rate = tonumber(params.rate),
+		brightness = num.finite(params.brightness),
+		x = num.finite(params.x),
+		y = num.finite(params.y),
+		mirek = num.finite(params.mirek),
+		rate = num.finite(params.rate),
 		urgent = (params.urgent == "true" or params.urgent == true) or nil,
 	}
 	if params.on == "true" or params.on == true then
@@ -300,7 +314,7 @@ function load_groups.dim_fields(params)
 	if not DIRECTIONS[params.direction] then
 		return nil
 	end
-	return { dim = params.direction, rate = tonumber(params.duration), level = tonumber(params.level) }
+	return { dim = params.direction, rate = num.finite(params.duration), level = num.finite(params.level) }
 end
 
 -- D8: a set entry's class. The fields commands.body puts into a PUT, rounded
@@ -425,7 +439,11 @@ function load_groups:memberships(device_id, wire)
 		self.log.warn("load groups: HUE_LOAD_GROUPS without a device id ignored")
 		return false
 	end
-	local groups = load_groups.parse_groups(wire)
+	local groups, dropped = load_groups.parse_groups(wire)
+	if dropped > 0 then
+		self.log.warn("load groups: device %d named %d load groups; the first %d are kept, %d dropped", id,
+			load_groups.GROUPS_MAX + dropped, load_groups.GROUPS_MAX, dropped)
+	end
 	local old = self.groups_of[id] or {}
 	local touched = {}
 	for gid in pairs(old) do

@@ -28,6 +28,8 @@ local log = require("common.log")
 local dispatch = require("common.dispatch")
 local device = require("common.device")
 local link = require("common.link")
+-- #486, #487: every number and time from outside (docs/security-fixes-2026-11-design.md).
+local num = require("common.num")
 
 -- Binding IDs, see driver.xml: the contact proxy on 5001 and the bridge on 1
 -- (common/device.lua's), the temperature output on 2.
@@ -141,6 +143,20 @@ local CLOCK_FLOOR_MS = 1735689600000
 -- nor misses the Online at its end (#428 D14, OD E14 to E17).
 local VALUES_KEY = "motion_values"
 local NUMBER_VALUES = { "lux", "temp_c", "battery_level", "lux_fired", "temp_fired", "offline_since", "link_since" }
+
+-- #486 D-5: the readings taken, from the bridge and from the store: a
+-- light level 0 to 100 000 lux, a temperature -40 to 60 °C, a battery 0 to
+-- 100 %; anything else, NaN included, is dropped (until then NaN passed the
+-- range checks, and a NaN baseline silenced Light Level Changed for good).
+-- The times are num.timestamp's (#487 D-6). One range per NUMBER_VALUES field.
+local LUX_MAX = 100000
+local TEMP_MIN, TEMP_MAX = -40, 60
+local VALUE_RANGES = {
+	lux = { 0, LUX_MAX }, lux_fired = { 0, LUX_MAX },
+	temp_c = { TEMP_MIN, TEMP_MAX }, temp_fired = { TEMP_MIN, TEMP_MAX },
+	battery_level = { 0, 100 },
+	offline_since = { 0, num.TIME_MAX - 1 }, link_since = { 0, num.TIME_MAX - 1 },
+}
 local BOOL_VALUES = { "online", "enabled", "link_offline" }
 
 local st = {
@@ -199,6 +215,9 @@ local dev = device.new({
 	rid = function() return st.rid end,
 	noun = "motion sensor",
 	settings = {},
+	-- #483 D-7: a Temperature Display or thermostat asks on the output;
+	-- every other proxy command is taken on the contact proxy's 5001 only.
+	proxy_bindings = { GET_SENSOR_VALUE = TEMPERATURE_BINDING },
 })
 local prop, device_id, result = dev.prop, dev.device_id, dev.result
 local bound_bridge, after_late_init = dev.bound_bridge, dev.after_late_init
@@ -235,9 +254,10 @@ local function decimal(v, places)
 end
 
 -- The controller's "14:02" for an os.time() value: the rows show the time a
--- value arrived here (EC R10).
+-- value arrived here (EC R10). The value may come from the store, so through
+-- num.date (#487 D-6): a time os.date cannot take reads "?", never raises.
 local function clock(t)
-	return os.date("%H:%M", t)
+	return num.date("%H:%M", t)
 end
 
 -- The bridge's ISO 8601 change time as the controller shows it: "14:02"
@@ -248,13 +268,14 @@ local function bridge_time(iso)
 		return nil
 	end
 	local ok, _, epoch = pcall(C4.ParseIso8601DateTime, C4, iso)
-	if not ok or type(epoch) ~= "number" then
+	epoch = ok and num.timestamp(epoch) or nil -- #487 D-6: a time os.date takes
+	if not epoch then
 		return nil
 	end
 	if os.date("%Y-%m-%d", epoch) == os.date("%Y-%m-%d") then
-		return os.date("%H:%M", epoch)
+		return num.date("%H:%M", epoch)
 	end
-	return os.date("%m-%d %H:%M", epoch)
+	return num.date("%m-%d %H:%M", epoch)
 end
 
 -- Identity -------------------------------------------------------------------
@@ -494,7 +515,11 @@ local function load_values()
 		return
 	end
 	for _, field in ipairs(NUMBER_VALUES) do
-		pv[field] = tonumber(stored[field])
+		local range = VALUE_RANGES[field]
+		pv[field] = num.within(stored[field], range[1], range[2])
+		if stored[field] ~= nil and pv[field] == nil then
+			log.warn("stored %s %s is out of range; dropped", field, tostring(stored[field]))
+		end
 	end
 	for _, field in ipairs(BOOL_VALUES) do
 		if type(stored[field]) == "boolean" then
@@ -785,8 +810,8 @@ end
 -- Readings ---------------------------------------------------------------------
 
 local function take_lux(raw)
-	local lux = tonumber(raw)
-	if not lux or lux < 0 then
+	local lux = num.within(raw, 0, LUX_MAX)
+	if not lux then
 		return log.warn("HUE_MOTION_STATE lux %q ignored", tostring(raw))
 	elseif not has("light_level") then
 		return log.debug("lux %s ignored: no light level on this %s", tostring(raw), kind_label())
@@ -806,8 +831,8 @@ end
 -- A reading the bridge passes on while the sensor is offline is the last one
 -- it had: kept and shown as old, never put on the temperature output.
 local function take_temperature(raw)
-	local c = tonumber(raw)
-	if not c or c < -100 or c > 100 then
+	local c = num.within(raw, TEMP_MIN, TEMP_MAX)
+	if not c then
 		return log.warn("HUE_MOTION_STATE temperature %q ignored", tostring(raw))
 	elseif not has("temperature") then
 		return log.debug("temperature %s ignored: no temperature on this %s", tostring(raw), kind_label())
@@ -835,8 +860,8 @@ local function take_battery(level_raw, state_raw)
 		return log.debug("battery ignored: no battery on this %s", kind_label())
 	end
 	if level_raw ~= nil then
-		local level = tonumber(level_raw)
-		if level and level >= 0 and level <= 100 then
+		local level = num.within(level_raw, 0, 100)
+		if level then
 			pv.battery_level = level
 			dirty = true
 		else
@@ -1198,14 +1223,23 @@ end
 -- Announce ourselves; the bridge answers with HUE_MOTION_CONFIGURE and the
 -- state when it knows the rid. `hint` is the device id OnBindingChanged
 -- named, for when Director's lookup does not show the new binding yet.
+-- The first configure after it may move the device to another rid (#483
+-- D-1, dev.greeted); one that would without it makes the device ask again
+-- (dev.greet), through the bridge it has.
 local function hello(hint)
 	bridge = bound_bridge() or tonumber(hint)
 	if bridge then
 		cancel_give_up()
-		to_bridge("HUE_MOTION_HELLO", hello_params())
+		if to_bridge("HUE_MOTION_HELLO", hello_params()) then
+			dev.greeted()
+		end
 		dev.flush_log() -- dev builds: lines logged while the bridge was unknown
 	end
 	refresh_status()
+end
+
+function dev.greet()
+	hello(bridge)
 end
 
 -- Unbound from the bridge (an actual unbind, or still unbound after the
@@ -1253,8 +1287,14 @@ end
 -- sensor stay until the new one reports, Hue's state is not known yet, and
 -- a hold starts again (its record goes, #371 R10). It also ends a forgotten
 -- state. One configured as deleted in Hue is a deliberate end (EC §6).
+-- #483 D-1: one that would move the device to another rid is taken only as
+-- the answer to its hello (dev.configure_ok): until then any driver could
+-- silence a sensor for good with one configure naming another rid.
 dispatch.commands["HUE_MOTION_CONFIGURE"] = after_late_init("HUE_MOTION_CONFIGURE", function(params)
 	params = params or {}
+	if not dev.configure_ok("HUE_MOTION_CONFIGURE", params) then
+		return
+	end
 	local before_rid = st.rid
 	if text(params.rid) then
 		st.rid = params.rid
@@ -1321,10 +1361,13 @@ end
 -- level, temperature and battery are taken whatever the state: the bridge
 -- passes on only what Hue still reports, and while the sensor is offline the
 -- last values it had, shown as old.
+-- #483 D-1: once the device has a rid, a state that does not name it
+-- (another rid, or none) is not this device's (dev.addressed): before #483 a
+-- state without a rid was taken, so any driver could forge motion.
 dispatch.commands["HUE_MOTION_STATE"] = after_late_init("HUE_MOTION_STATE", function(params)
 	params = params or {}
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_MOTION_STATE for rid %s ignored (ours is %s)", tostring(params.rid), st.rid)
+	if not dev.addressed("HUE_MOTION_STATE", params) then
+		return
 	end
 	log.debug("state (%s)", tostring(params.reason))
 	state_seen = true
@@ -1371,6 +1414,10 @@ end)
 local link_unknown_logged = false
 
 dispatch.commands["HUE_BRIDGE_LINK"] = after_late_init("HUE_BRIDGE_LINK", function(params)
+	-- #483 D-1: the bridge names no rid in it; one naming another rid is not ours.
+	if not dev.addressed("HUE_BRIDGE_LINK", params, true) then
+		return
+	end
 	local told = link.parse(params)
 	if not told then
 		if not link_unknown_logged then
@@ -1388,8 +1435,8 @@ end)
 -- again and Link Device on the bridge can link it again.
 dispatch.commands["HUE_MOTION_FORGOTTEN"] = after_late_init("HUE_MOTION_FORGOTTEN", function(params)
 	params = params or {}
-	if st.rid and params.rid and params.rid ~= st.rid then
-		return log.warn("HUE_MOTION_FORGOTTEN for rid %s ignored (ours is %s)", tostring(params.rid), st.rid)
+	if not dev.addressed("HUE_MOTION_FORGOTTEN", params) then -- #483 D-1, as HUE_MOTION_STATE
+		return
 	end
 	st.forgotten = { name = text(params.name) or st.name }
 	deliberate_end("forgotten by the bridge")
@@ -1426,7 +1473,9 @@ dispatch.commands["Refresh_From_Bridge"] = alias("Refresh From Bridge", "Diagnos
 		refresh_status()
 		return result("Not sent: not bound to a Hue Bridge")
 	end
-	to_bridge("HUE_MOTION_HELLO", hello_params())
+	if to_bridge("HUE_MOTION_HELLO", hello_params()) then
+		dev.greeted() -- #483 D-1: a hello like any other
+	end
 	result("Asked the bridge for this device's state; its answer updates the rows")
 end)
 
@@ -1501,7 +1550,10 @@ end
 
 dispatch.install(_G)
 
+-- #492 (I-5, I-6): a release build locks Composer's Lua command window and
+-- refuses a dev loop left behind by an earlier dev build (common/device.lua).
 function OnDriverInit()
+	dev.init()
 	add_variables()
 end
 

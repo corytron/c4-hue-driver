@@ -1,7 +1,7 @@
 """Unit tests for tools/devserver.py and tools/devctl.py: the dev key, the
-signed answers, the admin token and the address to listen on
-(docs/dev-loop.md, "Security"). The server runs on 127.0.0.1, port 0, against
-a scratch tree; nothing else is contacted.
+signed answers, the admin token, the body cap, the cleaned log and the address
+to listen on (docs/dev-loop.md, "Security"). The server runs on 127.0.0.1,
+port 0, against a scratch tree; nothing else is contacted.
 
 Run: python3 -m unittest discover -s tools/tests -v
 """
@@ -9,6 +9,7 @@ Run: python3 -m unittest discover -s tools/tests -v
 import contextlib
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import os
@@ -35,9 +36,10 @@ TEST_FINGERPRINT = "eccabde32b59a017"
 OTHER_FINGERPRINT = "e51e5697944ce631"
 SHARED_PAYLOAD = b'{"files":{"driver.lua":"return 1"},"tree":"light","version":"v1"}'
 SHARED_BUNDLE_MAC = "ca15fb64cce6d849bd18e1f8b4f4303d5f45f1ca103867d4a8b7a55c8afe81c0"
-# The admin token derived as docs/dev-loop.md documents it (the "admin-token"
-# MAC of nothing), independently of devserver.admin_token.
-ADMIN_TOKEN = hmac.new(TEST_KEY, b"c4-hue-devloop/1\nadmin-token\n", hashlib.sha256).hexdigest()
+# The token the server derived from the key before the review of 2026-11-13
+# (the "admin-token" MAC of nothing): anyone holding a dev package could
+# compute it (I-1), so no server may accept it any more.
+KEY_DERIVED_TOKEN = hmac.new(TEST_KEY, b"c4-hue-devloop/1\nadmin-token\n", hashlib.sha256).hexdigest()
 NONCE = "0123456789abcdef0123456789abcdef"
 
 
@@ -84,7 +86,15 @@ class SigningTest(unittest.TestCase):
         self.assertEqual(SHARED_BUNDLE_MAC, devserver.mac(TEST_KEY, "bundle", SHARED_PAYLOAD))
         self.assertEqual(TEST_FINGERPRINT, devserver.fingerprint(TEST_KEY))
         self.assertEqual(OTHER_FINGERPRINT, devserver.fingerprint(OTHER_KEY))
-        self.assertEqual(ADMIN_TOKEN, devserver.admin_token(TEST_KEY))
+
+    def test_the_admin_token_is_random_and_owes_nothing_to_the_key(self):
+        """I-1: a dev package carries the key, so the token must not be a function of it."""
+        self.assertFalse(hasattr(devserver, "admin_token"), "no function derives a token from the key")
+        tokens = {devserver.new_admin_token() for _ in range(20)}
+        self.assertEqual(20, len(tokens))
+        for token in tokens:
+            self.assertRegex(token, r"^[0-9a-f]{64}$")
+        self.assertNotIn(KEY_DERIVED_TOKEN, tokens)
 
     def test_an_envelope_is_the_mac_a_newline_and_the_payload_it_covers(self):
         body = devserver.envelope(TEST_KEY, "bundle", {"tree": "light", "files": {"driver.lua": "x"}})
@@ -245,6 +255,7 @@ class LiveServer:
         trees = {name: devserver.Tree(self.root, name) for name in devserver.TREES}
         self.state = devserver.State(self.state_dir)
         self.server = devserver.DevServer(("127.0.0.1", 0), trees, self.state, key, quiet=True)
+        self.token = self.server.admin_token
         self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
         self.thread.start()
@@ -256,12 +267,12 @@ class LiveServer:
         self.patch.stop()
         self.dir.cleanup()
 
-    def request(self, method, path, body=None, token=None):
-        """(status, content type, body bytes)."""
+    def request(self, method, path, body=None, token=None, raw=None):
+        """(status, content type, body bytes). raw: the body's bytes as they are."""
         headers = {}
         if token is not None:
             headers["X-Devloop-Token"] = token
-        data = None
+        data = raw
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -294,23 +305,30 @@ class ServerTest(unittest.TestCase):
         self.assertIn("wrong admin token", denies[1])
         self.assertFalse(any(wrong in line for line in self.live.lines), "the value presented is not logged")
 
-        status, _, body = self.live.request("POST", "/admin/enqueue", command, token=ADMIN_TOKEN)
+        status, _, body = self.live.request("POST", "/admin/enqueue", command, token=self.live.token)
         self.assertEqual(200, status)
         self.assertEqual({"id": 1}, json.loads(body))
         for path in ("/admin/pin", "/admin/unpin"):
             self.assertEqual(401, self.live.request("POST", path)[0], path)
-            self.assertEqual(200, self.live.request("POST", path, token=ADMIN_TOKEN)[0], path)
+            self.assertEqual(200, self.live.request("POST", path, token=self.live.token)[0], path)
 
     def test_status_needs_the_token_and_names_the_key(self):
         self.assertEqual(401, self.live.request("GET", "/status")[0])
-        status, _, body = self.live.request("GET", "/status", token=ADMIN_TOKEN)
+        status, _, body = self.live.request("GET", "/status", token=self.live.token)
         self.assertEqual(200, status)
         st = json.loads(body)
         self.assertEqual(TEST_FINGERPRINT, st["key_fingerprint"])
         self.assertIsNone(st["driver_key_fingerprint"])
         self.assertFalse(st["driver_reported_key"])
         self.assertNotIn(TEST_KEY.decode(), body.decode())
-        self.assertNotIn(ADMIN_TOKEN, body.decode())
+        self.assertNotIn(self.live.token, body.decode())
+
+    def test_the_token_derived_from_the_key_is_refused(self):
+        """I-1: whoever holds a dev package can compute the old token; it opens nothing now."""
+        command = {"type": "reload"}
+        self.assertEqual(401, self.live.request("POST", "/admin/enqueue", command, token=KEY_DERIVED_TOKEN)[0])
+        self.assertEqual(401, self.live.request("GET", "/status", token=KEY_DERIVED_TOKEN)[0])
+        self.assertEqual([], self.live.state.commands)
 
     def test_the_driver_endpoints_need_no_token(self):
         self.assertEqual(200, self.live.request("GET", "/manifest")[0])
@@ -346,7 +364,7 @@ class ServerTest(unittest.TestCase):
 
     def test_commands_are_signed_together_with_the_nonce_asked_for(self):
         command = {"type": "set_property", "name": "Dev Server", "value": ""}
-        self.live.request("POST", "/admin/enqueue", command, token=ADMIN_TOKEN)
+        self.live.request("POST", "/admin/enqueue", command, token=self.live.token)
         status, ctype, body = self.live.request("GET", "/commands?after=0&nonce=" + NONCE)
         self.assertEqual(200, status)
         self.assertEqual(devserver.SIGNED_TYPE, ctype)
@@ -376,7 +394,9 @@ class ServerTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check(TEST_KEY, "bundle", body)
         check(OTHER_KEY, "bundle", body)
-        self.assertEqual(401, other.request("GET", "/status", token=ADMIN_TOKEN)[0], "a token is per key")
+        self.assertNotEqual(self.live.token, other.token)
+        self.assertEqual(401, other.request("GET", "/status", token=self.live.token)[0], "a token is per server")
+        self.assertEqual(200, other.request("GET", "/status", token=other.token)[0])
 
     def test_a_driver_with_another_key_is_warned_about_once(self):
         report = {"event": "startup", "key_fingerprint": OTHER_FINGERPRINT}
@@ -386,7 +406,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(1, len(warnings))
         self.assertIn(OTHER_FINGERPRINT, warnings[0])
         self.assertIn(TEST_FINGERPRINT, warnings[0])
-        st = json.loads(self.live.request("GET", "/status", token=ADMIN_TOKEN)[2])
+        st = json.loads(self.live.request("GET", "/status", token=self.live.token)[2])
         self.assertEqual(OTHER_FINGERPRINT, st["driver_key_fingerprint"])
 
         self.live.request("POST", "/report", dict(report, key_fingerprint=TEST_FINGERPRINT))
@@ -396,34 +416,107 @@ class ServerTest(unittest.TestCase):
         self.assertIn("no dev key", [line for line in self.live.lines if "WARNING" in line][-1])
 
     def test_server_json_says_where_the_server_is_and_goes_with_it(self):
-        path = devserver.write_server_file(self.live.state_dir, self.live.url, "https://127.0.0.1:1")
+        path = devserver.write_server_file(self.live.state_dir, self.live.url, "https://127.0.0.1:1", self.live.token)
         with open(path, encoding="utf-8") as f:
             saved = json.load(f)
         self.assertEqual(self.live.url, saved["url"])
-        self.assertNotIn(ADMIN_TOKEN, json.dumps(saved))
+        self.assertEqual(self.live.token, saved["admin_token"])
+        self.assertEqual(0o600, stat.S_IMODE(os.stat(path).st_mode), "the token's file is the owner's alone")
+        self.assertEqual(["server.json"], [n for n in os.listdir(self.live.state_dir) if "server" in n])
         with open(path, "w", encoding="utf-8") as f:
             json.dump(dict(saved, pid=saved["pid"] + 1), f)
         devserver.remove_server_file(path)
         self.assertTrue(os.path.exists(path), "another server's file is left alone")
-        devserver.write_server_file(self.live.state_dir, self.live.url, "https://127.0.0.1:1")
+        os.chmod(path, 0o644)
+        devserver.write_server_file(self.live.state_dir, self.live.url, "https://127.0.0.1:1", self.live.token)
+        self.assertEqual(0o600, stat.S_IMODE(os.stat(path).st_mode), "a file left 0644 is replaced, not reused")
         devserver.remove_server_file(path)
         self.assertFalse(os.path.exists(path))
+
+    def post_with_length(self, path, length, data=b""):
+        """A POST whose Content-Length is `length` whatever `data` holds: (status, decoded JSON reply)."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.live.server.server_address[1], timeout=10)
+        self.addCleanup(conn.close)
+        conn.putrequest("POST", path)
+        conn.putheader("Content-Length", str(length))
+        conn.endheaders()
+        if data:
+            conn.send(data)
+        resp = conn.getresponse()
+        return resp.status, json.loads(resp.read())
+
+    def test_a_body_over_one_megabyte_is_refused_unread(self):
+        """I-10: the open endpoints take at most MAX_BODY bytes; a larger Content-Length is a 413,
+        answered without waiting for the body."""
+        self.assertEqual(1024 * 1024, devserver.MAX_BODY)
+        for path in ("/log", "/report", "/admin/enqueue"):
+            with self.subTest(path=path):
+                headers = {"X-Devloop-Token": self.live.token} if path.startswith("/admin") else {}
+                conn = http.client.HTTPConnection("127.0.0.1", self.live.server.server_address[1], timeout=10)
+                self.addCleanup(conn.close)
+                conn.putrequest("POST", path)
+                for name, value in headers.items():
+                    conn.putheader(name, value)
+                conn.putheader("Content-Length", str(devserver.MAX_BODY + 1))
+                conn.endheaders()
+                conn.send(b"{")
+                resp = conn.getresponse()
+                self.assertEqual(413, resp.status)
+                self.assertIn("at most 1048576", json.loads(resp.read())["error"])
+        lines = {"version": "v", "lines": ["x" * 1000] * 1000}
+        self.assertLess(len(json.dumps(lines)), devserver.MAX_BODY)
+        self.assertEqual(204, self.live.request("POST", "/log", lines)[0], "a body within the cap is taken")
+        self.assertEqual([], self.live.state.commands)
+        self.assertFalse(os.path.exists(os.path.join(self.live.state_dir, "reports.jsonl")), "nothing was recorded")
+
+    def test_a_negative_content_length_is_a_400(self):
+        status, reply = self.post_with_length("/report", -5)
+        self.assertEqual(400, status)
+        self.assertIn("Content-Length", reply["error"])
+
+    def test_shipped_lines_and_reports_are_logged_without_control_characters(self):
+        """I-10: a posted line cannot forge a second line or drive the reader's terminal."""
+        evil = "fine\n12:00:00.000 devloop: forged\x1b[2J\r\x00\x7f\x85 ‮end"
+        self.assertEqual(204, self.live.request("POST", "/log", {"lines": [evil, {"t": 0, "line": evil}]})[0])
+        with open(os.path.join(self.live.state_dir, "driver.log"), encoding="utf-8") as f:
+            logged = f.read().split("\n")
+        self.assertEqual(3, len(logged), logged)  # two lines and the empty rest after the last newline
+        for line in logged[:2]:
+            self.assertTrue(line.endswith(" fine 12:00:00.000 devloop: forged [2J      end"), repr(line))
+        shown = [line for line in self.live.lines if line.startswith("LOG ")]
+        self.assertEqual(2, len(shown))
+        report = {"event": "start\nup\x1b]0;title\x07", "error": "boom\r\nREPORT faked", "key_fingerprint": "\x1b[31m"}
+        self.assertEqual(204, self.live.request("POST", "/report", report)[0])
+        for line in self.live.lines:
+            self.assertIsNone(devserver.UNSAFE_TEXT.search(line), repr(line))
+        self.assertTrue(any("REPORT start up ]0;title " in line for line in self.live.lines), self.live.lines)
+        self.assertTrue(any("error=boom  REPORT faked" in line for line in self.live.lines), self.live.lines)
+        self.assertTrue(any("WARNING" in line and " [31m" in line for line in self.live.lines), self.live.lines)
+
+    def test_clean(self):
+        self.assertEqual("a b c d", devserver.clean("a\nb\tc\x9bd"))
+        self.assertEqual(
+            "emoji \U0001f469‍\U0001f4bb and é stay", devserver.clean("emoji \U0001f469‍\U0001f4bb and é stay")
+        )
+        self.assertEqual("x y z", devserver.clean("x⁦y‮z"))
+        self.assertEqual("1", devserver.clean(1))
 
 
 class DevctlTest(unittest.TestCase):
     def setUp(self):
         self.live = LiveServer()
         self.addCleanup(self.live.close)
-        self.key_file = os.path.join(self.live.root, "devkey")
-        write_key(self.key_file)
-        devserver.write_server_file(self.live.state_dir, self.live.url, "https://127.0.0.1:1")
+        self.write_server_file()
 
-    def devctl(self, *argv, key_file=None):
+    def write_server_file(self, token=None, url=None):
+        return devserver.write_server_file(
+            self.live.state_dir, url or self.live.url, "https://127.0.0.1:1", token or self.live.token
+        )
+
+    def devctl(self, *argv):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = devctl.main(
-                ["--state-dir", self.live.state_dir, "--key-file", key_file or self.key_file] + list(argv)
-            )
+            code = devctl.main(["--state-dir", self.live.state_dir] + list(argv))
         return code, out.getvalue(), err.getvalue()
 
     def test_sends_the_token_and_finds_the_server_through_server_json(self):
@@ -445,41 +538,57 @@ class DevctlTest(unittest.TestCase):
         self.live.request("POST", "/report", {"event": "heartbeat"})
         self.assertIn("DRIVER HAS NONE", self.devctl("status")[1])
 
-    def test_another_key_is_refused_with_a_hint(self):
-        other = os.path.join(self.live.root, "other-key")
-        write_key(other, OTHER_KEY)
-        code, out, err = self.devctl("run", "Probe Call", key_file=other)
+    def test_a_stale_token_is_refused_with_a_hint(self):
+        """A server restarted since: server.json names another run's token."""
+        self.write_server_file(token=devserver.new_admin_token())
+        code, out, err = self.devctl("run", "Probe Call")
         self.assertEqual(1, code)
         self.assertEqual("", out)
         self.assertIn("refused the admin token", err)
         self.assertEqual([], self.live.state.commands)
 
-    def test_without_a_key_file_nothing_is_sent(self):
-        code, _, err = self.devctl("status", key_file=os.path.join(self.live.root, "missing"))
+    def test_the_dev_key_opens_nothing(self):
+        """I-1: devctl takes no key file any more, and the token derived from the key is refused."""
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            devctl.main(["--state-dir", self.live.state_dir, "--key-file", "/dev/null", "status"])
+        self.write_server_file(token=KEY_DERIVED_TOKEN)
+        code, _, err = self.devctl("status")
         self.assertEqual(1, code)
-        self.assertIn("no dev key at", err)
+        self.assertIn("refused the admin token", err)
+
+    def test_a_server_json_without_a_token_sends_nothing(self):
+        path = self.write_server_file()
+        with open(path, encoding="utf-8") as f:
+            saved = json.load(f)
+        for token in (None, "", "short", KEY_DERIVED_TOKEN.upper(), 42):
+            with self.subTest(token=token):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(dict(saved, admin_token=token), f)
+                code, _, err = self.devctl("status")
+                self.assertEqual(1, code)
+                self.assertIn("holds no admin token: restart tools/devserver.py", err)
 
     def test_without_server_json_it_says_so(self):
         os.remove(os.path.join(self.live.state_dir, "server.json"))
-        code, _, err = self.devctl("status")
-        self.assertEqual(1, code)
-        self.assertIn("is tools/devserver.py running?", err)
-        out, err2 = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err2):
-            code = devctl.main(
-                ["--server", self.live.url, "--state-dir", self.live.state_dir, "--key-file", self.key_file, "status"]
-            )
-        self.assertEqual(0, code, err2.getvalue())
+        for argv in (("status",), ("--server", self.live.url, "status")):
+            with self.subTest(argv=argv):
+                code, _, err = self.devctl(*argv)
+                self.assertEqual(1, code)
+                self.assertIn("is tools/devserver.py running?", err)
 
-    def test_log_reads_the_file_and_needs_no_key(self):
+    def test_server_overrides_the_address_only(self):
+        self.write_server_file(url="http://127.0.0.1:9")
+        code, _, err = self.devctl("--server", self.live.url, "status")
+        self.assertEqual(0, code, err)
+
+    def test_log_reads_the_file_and_needs_no_server(self):
+        os.remove(os.path.join(self.live.state_dir, "server.json"))
         path = os.path.join(self.live.state_dir, "driver.log")
         with open(path, "w", encoding="utf-8") as f:
             f.write("12:00:00.000 devloop: started\n")
         out, err = io.TextIOWrapper(io.BytesIO(), encoding="utf-8"), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = devctl.main(
-                ["--state-dir", self.live.state_dir, "--key-file", os.path.join(self.live.root, "none"), "log"]
-            )
+            code = devctl.main(["--state-dir", self.live.state_dir, "log"])
         out.flush()
         self.assertEqual(0, code, err.getvalue())
         self.assertEqual(b"12:00:00.000 devloop: started\n", out.buffer.getvalue())

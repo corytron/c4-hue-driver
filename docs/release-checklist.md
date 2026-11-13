@@ -59,10 +59,13 @@ findings as comments), and `docs/status.md` sums them up.
 
 Build the four `--dev` files with `tools/build.sh --dev` from the commit
 under test and install them through the Windows session the way `CLAUDE.md`
-(Deploy) describes for a dev build: served from `build/release/` on port
-8090, briefed with their sha256, recorded afterwards with `python3
-tools/deploy.py record ... --no-manifest` (`docs/dev-loop.md`, "Current
-state"). `tools/devserver.py` running, the bridge's `Dev Server` set to the
+(Deploy) describes for a dev build: served from `build/` by `python3 -I
+tools/serve_install.py <the four packages>` (only those files, under a
+random path, on port 8090 until each was downloaded; never `http.server`
+over `build/` or `build/release/`), briefed with the URLs and sha256 it
+prints, recorded afterwards with `python3 tools/deploy.py record ...
+--no-manifest` as a development build (`docs/dev-loop.md`, "Current
+state"). Every device's `Driver Version` reads `<N>-dev`. `tools/devserver.py` running, the bridge's `Dev Server` set to the
 `host:port` it prints, `tools/devctl.py status` shows the bridge polling.
 Then, through `tools/devctl.py run`, with the shipped log
 (`build/dev/driver.log`) as the evidence (`docs/dev-loop.md`); steps 2 to
@@ -283,8 +286,10 @@ the release waits.
    that fails earlier leaves the tag where it was). Pushing the tag by hand
    (`git tag -f -a vX.Y -m "X.Y" <commit on main>`, `git push --force origin
    vX.Y`) starts the same build; a tag that is not on `main` is refused.
-3. The workflow's build job lints, tests and builds with read-only access
-   and pinned tools (contract §5.4 and §5.5); its publish job, which runs no
+3. The workflow's test job lints and tests with the pinned luarocks tools,
+   and its build job, on a fresh runner where no rock was installed, builds
+   with read-only access and the pinned packager (contract §5.4 and §5.5;
+   security review 2026-11-13, I-3); its publish job, which runs no
    third-party code, checks what the build job handed over, signs the
    provenance and attaches to the release of the tag, creating it when
    missing, with the title and notes written from `CHANGELOG.md` (step 4):
@@ -339,24 +344,30 @@ automatic, since the controller has no install API. After the release exists:
    a `driver.xml` `<capabilities>` block, and `--supersede` when an earlier
    deployment is still in progress. It downloads `manifest.json`,
    `SHA256SUMS.txt` and the four packages from the release into
-   `build/release/<tag>/`, verifies every sha256 against both files, that
-   the manifest's build is the file's and its commit the tag's, and that
-   each package's provenance attestation verifies with `gh attestation
-   verify <file> --repo corytron/c4-hue-driver --signer-workflow
-   corytron/c4-hue-driver/.github/workflows/release.yml --format json`, so
-   the Release workflow and nothing else signed it, creates the Deployment
-   with status `in_progress`, and writes `build/release/<tag>/BRIEF.md`
-   (which names the signer and the gh that checked it) and
-   `deployment.json`. A build the release does not carry, a manifest that
-   says `dev: true`, a package whose attestation fails, and a deployment of
-   `house` still in progress (without `--supersede`) are refused. The check
+   `build/release/<tag>/`, verifies every sha256 against both files; that
+   the manifest names this tag, says `dev: false`, and carries the file's
+   build and the tag's commit; that the tag's commit is on `main` (GitHub's
+   compare of the commit with `main`); and that each package's provenance
+   attestation verifies with `gh attestation verify <file> --repo
+   corytron/c4-hue-driver --signer-workflow
+   corytron/c4-hue-driver/.github/workflows/release.yml --source-digest
+   <commit> --signer-digest <commit> --deny-self-hosted-runners --format
+   json`, its certificate naming `refs/heads/main` or `refs/tags/<tag>`, so
+   the Release workflow and nothing else signed it, from that commit and
+   nothing older (security review 2026-11-13, I-2: v1.6's attestation
+   names `refs/heads/main` and the manifest's commit). It then creates the
+   Deployment with status `in_progress`, and writes
+   `build/release/<tag>/BRIEF.md` (which names the signer and the gh that
+   checked it) and `deployment.json`. A build the release does not carry, a
+   manifest whose `tag` is not this tag or whose `dev` is not `false`, a
+   commit off `main`, a package without an attestation or whose attestation
+   fails, and a deployment of `house` still in progress (without
+   `--supersede`) are refused; `--no-attestation` is gone (I-9). The check
    needs gh 2.102.0 or newer (2.51.0 to 2.101.0 match only the start of the
    workflow path, GHSA-wjmr-j3rp-mh2g; Ubuntu's own gh 2.46 has no `gh
    attestation`), and `start` refuses an older one; since 2026-10-25 the VM
-   has GitHub's own apt package, gh 2.103.2. `--no-attestation` is only for
-   a release cut before attestations existed; it never passes an
-   attestation that fails. `--tag` names another release than
-   `deploy/house.yaml`'s.
+   has GitHub's own apt package, gh 2.103.2. `--tag` names another release
+   than `deploy/house.yaml`'s.
 4. **Send the brief.** `BRIEF.md` goes to the Windows Composer session as it
    is (`docs/composer-remote.md`): the four GitHub download URLs, each
    file's sha256, the PowerShell that fetches them into
@@ -368,7 +379,8 @@ automatic, since the controller has no install API. After the release exists:
    read back, the note, and the standing-approval sentence. It carries no
    LAN address and no bridge id.
 5. **What the Windows session reads back.** Every device's `Driver Version`
-   equals the build; on the bridge, `Stream Timeout (s)`, `Stream Watchdog
+   equals the build (a value ending in `-dev` is a development build, not
+   the release), and the bridge has no `Dev Server` row; on the bridge, `Stream Timeout (s)`, `Stream Watchdog
    (s)` and `Debug Mode` match `deploy/house.yaml`, and the `Status` and
    `Attention` texts; no `[ERROR]` line in a device's Lua tab during the
    install; and whether Composer asked "Restart Director?". If it did, the
@@ -395,11 +407,16 @@ automatic, since the controller has no install API. After the release exists:
 An install made any other way is recorded after the fact with `python3
 tools/deploy.py record --tag vX.Y --build N --at <ISO 8601 time with
 offset, such as 2026-10-24T21:04:00-04:00> --note "..."`, so that the
-observed state stays true. A build the release does not carry (a `--dev`
-build for the dev loop, a feature-branch build for a hardware test) also
-takes `--no-manifest`, and `--commit <sha>` names its commit; the drift
-issue then shows the house off its desired state until a release is
-installed again (`CLAUDE.md`, Deploy).
+observed state stays true. Without `--no-manifest` that is the release's
+own packages installed by hand: its manifest must carry build N. A build
+the release does not carry (a `--dev` build for the dev loop, a
+feature-branch build for a hardware test; served by
+`tools/serve_install.py`) takes `--no-manifest`, or `--build N-dev` as its
+devices show it, and `--commit <sha>` names its commit: it is recorded as a
+development build with no package hash, whatever its build number, and
+`status` and the drift issue show the house off its desired state until a
+release is installed again (`CLAUDE.md`, Deploy; security review
+2026-11-13, I-4).
 
 ## Prerelease
 

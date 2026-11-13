@@ -25,17 +25,20 @@ Subcommands (exit codes: 0 success or in sync, 1 error, 3 drift; a usage error e
       Schema and value checks of deploy/house.yaml (section 6). --online also downloads the
       release's manifest.json and fails when its build differs from the file's, or its packages
       from the file's drivers.
-  start [--tag TAG] [--supersede] [--note TEXT] [--no-attestation]
+  start [--tag TAG] [--supersede] [--note TEXT]
       Downloads manifest.json and SHA256SUMS.txt of the release, then every package the manifest
       names (deploy/house.yaml's drivers must be exactly those), into build/release/<tag>/ (a
-      fresh directory); verifies every sha256 against both files, that
-      manifest.build is deploy/house.yaml's build and manifest.commit the tag's commit, and that
-      each package's provenance attestation names it and was signed by the release workflow:
+      fresh directory); verifies every sha256 against both files; that the manifest names this
+      tag, says dev: false, carries deploy/house.yaml's build and the tag's commit; that the
+      tag's commit is on main (GitHub's compare of the commit with main: identical or ahead); and
+      that each package's provenance attestation names it and was made by the release workflow
+      from that very commit, run from main or from this tag (security review 2026-11-13, I-2):
       `gh attestation verify <file> --repo OWNER/NAME --signer-workflow
-      OWNER/NAME/.github/workflows/release.yml` (gh 2.102.0 or newer). --no-attestation accepts
-      a package that carries no attestation at all (a release cut before attestations existed);
-      an attestation that exists must verify. Refuses while a deployment of the environment is
-      still in progress unless --supersede marks it inactive.
+      OWNER/NAME/.github/workflows/release.yml --source-digest <commit> --signer-digest <commit>
+      --deny-self-hosted-runners` (gh 2.102.0 or newer), the certificate's ref then checked to be
+      refs/heads/main or refs/tags/<tag>. A package without an attestation is refused. Refuses
+      while a deployment of the environment is still in progress unless --supersede marks it
+      inactive.
       Then creates the GitHub Deployment with status in_progress, writes deployment.json and
       BRIEF.md next to the packages, and prints the brief's path and the deployment's URL.
   done [--devices N] [--note TEXT] [--deployment ID]
@@ -44,11 +47,16 @@ Subcommands (exit codes: 0 success or in sync, 1 error, 3 drift; a usage error e
   failed --note TEXT [--deployment ID]
       Status failure with the note; the open deploy issue gets the note as a comment and stays open.
   record --tag TAG --build N --at TIME --note TEXT [--no-manifest] [--commit SHA]
-      A success deployment for an install made without this tool (build 247, installed on
-      2026-10-24, and any out-of-band install): payload.recorded is true and the install time is
-      kept in the description and in payload.installed_at (GitHub sets created_at itself).
+      A success deployment for an install made without this tool: payload.recorded is true and the
+      install time is kept in the description and in payload.installed_at (GitHub sets created_at
+      itself). Without --no-manifest it is the release's own packages installed by hand: the
+      release's manifest must carry build N, and its hashes and commit are recorded. With
+      --no-manifest, or a --build that reads N-dev (the Driver Version a dev build shows), it is a
+      development or feature-branch build: payload.dev is true, no package hash is recorded, and
+      status and drift report the house off the release whatever its build number (I-4).
   status
-      Prints desired and observed; exit 0 when tag and build agree, 3 on drift.
+      Prints desired and observed; exit 0 when tag and build agree and the observed install is not
+      a development build, 3 on drift.
   drift [--issue]
       status plus the online manifest check; with --issue it keeps at most one open issue
       labelled "deploy": opened on drift, retitled when the desired state changes, closed when the
@@ -94,6 +102,10 @@ RELEASE_DIR = os.path.join(ROOT, "build", "release")
 # (GHSA-wjmr-j3rp-mh2g), older versions lack the option.
 SIGNER_WORKFLOW = ".github/workflows/release.yml"
 GH_MIN_FOR_VERIFY = (2, 102, 0)
+# The refs a release workflow run may have been started from (security review 2026-11-13, I-2):
+# "Run workflow" on main, or a pushed release tag (then refs/tags/<that tag>). Every release since
+# 2026-10-25 came from main; v1.6's attestation names refs/heads/main.
+MAIN_REF = "refs/heads/main"
 
 # Release tags v1.0 and prerelease tags v1.1-beta.1 (docs/prerelease-design.md, section 1): for
 # deploy/house.yaml's release, --tag and the deploy issue's title, always matched whole.
@@ -493,13 +505,24 @@ def verify_packages(directory, manifest):
     return hashes
 
 
+def identity_problems(manifest, tag):
+    """What makes a manifest not a release's own (security review 2026-11-13, I-9): it must name
+    exactly this tag and say dev: false. A VM build between releases names no tag (null), and a
+    hand-made manifest may leave dev out."""
+    problems = []
+    if manifest.get("dev") is not False:
+        problems.append(
+            "manifest.json says dev: %s, not false; only a release build is installed as the production driver"
+            % json.dumps(manifest.get("dev"))
+        )
+    if manifest.get("tag") != tag:
+        problems.append("manifest.json names the tag %s, not %s" % (json.dumps(manifest.get("tag")), tag))
+    return problems
+
+
 def check_manifest(manifest, tag, build, commit):
     """manifest.json against the tag, the desired build and the tag's commit."""
-    problems = []
-    if manifest.get("dev") is True:
-        problems.append("manifest.json says dev: true; a development build is never installed as the production driver")
-    if manifest.get("tag") not in (None, tag):
-        problems.append("manifest.json names the tag %s, not %s" % (manifest.get("tag"), tag))
+    problems = identity_problems(manifest, tag)
     if manifest["build"] != build:
         problems.append(
             "the release %s carries build %d but deploy/house.yaml says build %d: "
@@ -526,6 +549,23 @@ def tag_commit(repo, tag):
     if obj["type"] != "commit":
         raise DeployError("tag %s points at a %s, not a commit" % (tag, obj["type"]))
     return obj["sha"]
+
+
+def check_on_main(repo, commit):
+    """The tag's commit must be on main (security review 2026-11-13, I-2): GitHub's compare of the
+    commit with main says identical, or main ahead of it, with the commit as the merge base. So the
+    release workflow that ran from it is one that main reviewed; a tag pushed on a commit off main
+    is refused whatever the workflow file of that commit checks."""
+    data = api("repos/%s/compare/%s...main?per_page=1" % (repo, commit))
+    if not isinstance(data, dict):
+        raise DeployError("GitHub's compare of %s with main answered %r" % (commit, data))
+    status = data.get("status")
+    base = _field(data, "merge_base_commit", "sha")
+    if status not in ("identical", "ahead") or base != commit:
+        raise DeployError(
+            "the tag's commit %s is not on main (GitHub compares it with main as %r, merge base %s): a release is "
+            "built from main only" % (commit, status, base)
+        )
 
 
 def attestation_check(repo, name, digest):
@@ -581,8 +621,7 @@ def require_gh_for_verify():
             "gh %s cannot check who signed the attestations: `gh attestation verify --signer-workflow` needs gh "
             "%s or newer (2.51.0 to 2.101.0 match only the start of the workflow path, GHSA-wjmr-j3rp-mh2g; older "
             "versions lack the option). Install a current gh (https://github.com/cli/cli/releases) and run start "
-            "again; --no-attestation does not skip an attestation that exists"
-            % (".".join(map(str, version)), ".".join(map(str, GH_MIN_FOR_VERIFY)))
+            "again" % (".".join(map(str, version)), ".".join(map(str, GH_MIN_FOR_VERIFY)))
         )
     return ".".join(map(str, version))
 
@@ -596,13 +635,34 @@ def _field(data, *keys):
     return data
 
 
-def verify_attestation(repo, name, path):
+def verify_policy(repo, commit):
+    """The flags of `gh attestation verify` after the file (security review 2026-11-13, I-2): the
+    release workflow of `repo`, run from `commit` (the tag's, on main) as both the source and the
+    workflow file, on GitHub's own runners. The ref is checked afterwards (verify_attestation):
+    --source-ref takes one value, and a release may come from main or from its pushed tag."""
+    return [
+        "--repo",
+        repo,
+        "--signer-workflow",
+        signer_workflow(repo),
+        "--source-digest",
+        commit,
+        "--signer-digest",
+        commit,
+        "--deny-self-hosted-runners",
+        "--format",
+        "json",
+    ]
+
+
+def verify_attestation(repo, name, path, tag, commit):
     """`gh attestation verify` of one downloaded package: its attestations must verify through
-    Sigstore and name the release workflow of `repo` as their signer. Returns the signing
-    certificates' identities (the SANs, workflow@ref); raises DeployError when gh refuses, reports
-    nothing verified, or names another signer."""
+    Sigstore, name the release workflow of `repo` as their signer, and come from a run of that
+    workflow at `commit` started from main or from `tag`. Returns the signing certificates'
+    identities (the SANs, workflow@ref); raises DeployError when gh refuses, reports nothing
+    verified, or names another signer, commit or ref."""
     workflow = signer_workflow(repo)
-    args = ["attestation", "verify", path, "--repo", repo, "--signer-workflow", workflow, "--format", "json"]
+    args = ["attestation", "verify", path] + verify_policy(repo, commit)
     try:
         out = run_gh(args)
     except GhError as err:
@@ -617,18 +677,30 @@ def verify_attestation(repo, name, path):
         raise DeployError("%s: gh attestation verify printed something that is not JSON (%s)" % (name, err)) from err
     if not isinstance(results, list) or not results:
         raise DeployError("%s: gh attestation verify reported no verified attestation" % name)
-    # gh has checked this already; checked again so that a gh that matches loosely cannot pass a
-    # lookalike workflow. GitHub compares owner and name without case; the path is a file name.
+    # gh has checked these already; checked again so that a gh that matches loosely cannot pass a
+    # lookalike workflow, another commit or another ref. GitHub compares owner and name without
+    # case; the path is a file name, and the ref and the commit are compared exactly.
     host_repo = "https://github.com/%s/" % repo
+    refs = (MAIN_REF, "refs/tags/" + tag)
     signers = set()
     for result in results:
-        san = _field(result, "verificationResult", "signature", "certificate", "subjectAlternativeName")
+        certificate = _field(result, "verificationResult", "signature", "certificate")
+        san = _field(certificate, "subjectAlternativeName")
         if not (
             isinstance(san, str)
             and san[: len(host_repo)].lower() == host_repo.lower()
-            and san[len(host_repo) :].startswith(SIGNER_WORKFLOW + "@")
+            and san[len(host_repo) :] in ["%s@%s" % (SIGNER_WORKFLOW, ref) for ref in refs]
         ):
-            raise DeployError("%s: a verified attestation names the signer %r, not %s@<ref>" % (name, san, workflow))
+            raise DeployError(
+                "%s: a verified attestation names the signer %r, not %s@%s or @%s" % (name, san, workflow, *refs)
+            )
+        source_ref = _field(certificate, "sourceRepositoryRef")
+        source_digest = _field(certificate, "sourceRepositoryDigest")
+        if source_ref not in refs or source_digest != commit:
+            raise DeployError(
+                "%s: a verified attestation was made from %r at %r, not from %s or %s at %s"
+                % (name, source_ref, source_digest, MAIN_REF, refs[1], commit)
+            )
         signers.add(san)
     return sorted(signers)
 
@@ -694,6 +766,7 @@ class Deployments:
                 return {
                     "tag": payload.get("tag") or deployment.get("ref"),
                     "build": int(build) if _integer(str(build)) is not None else build,
+                    "dev": payload.get("dev") is True,
                     "deployment": deployment,
                     "status": status,
                 }
@@ -794,13 +867,18 @@ def issue_title(tag, build):
     return "Deploy %s (build %d) to the house" % (tag, build)
 
 
+def observed_build(observed):
+    """'build N', or 'development build N' for an install recorded as a dev build (I-4)."""
+    return "%sbuild %s" % ("development " if observed.get("dev") else "", observed["build"])
+
+
 def describe_observed(observed):
     if observed is None:
         return "none: no deployment of environment %s has been recorded as success" % ENVIRONMENT
     deployment, status = observed["deployment"], observed["status"]
-    return "%s build %s, deployment %s, success %s: %s" % (
+    return "%s %s, deployment %s, success %s: %s" % (
         observed["tag"],
-        observed["build"],
+        observed_build(observed),
         deployment.get("id"),
         status.get("created_at"),
         status.get("description") or "",
@@ -815,7 +893,8 @@ def issue_body(repo, tag, build, observed):
     if observed is None:
         seen = "no deployment of environment `%s` has been recorded as success yet." % ENVIRONMENT
     else:
-        seen = 'build **%s** (%s), recorded as success on %s by deployment %s (%s): "%s".' % (
+        seen = '%sbuild **%s** (%s), recorded as success on %s by deployment %s (%s): "%s".' % (
+            "a development " if observed.get("dev") else "",
             observed["build"],
             observed["tag"],
             observed["status"].get("created_at"),
@@ -859,9 +938,11 @@ def reconcile(repo, house, observed, with_issue):
     tag, build = desired(house)
     print("desired   %s build %d (deploy/house.yaml)" % (tag, build))
     print("observed  %s" % describe_observed(observed))
-    drift = observed is None or observed["build"] != build or observed["tag"] != tag
+    # A development build is off the release whatever its number (I-4): `record --no-manifest`
+    # marks it, and only a release install (start and done, or record with the manifest) ends it.
+    drift = observed is None or observed["build"] != build or observed["tag"] != tag or observed.get("dev")
     if drift:
-        seen = "none" if observed is None else "build %s (%s)" % (observed["build"], observed["tag"])
+        seen = "none" if observed is None else "%s (%s)" % (observed_build(observed), observed["tag"])
         print("drift: desired build %d (%s), observed %s" % (build, tag, seen))
     else:
         print("in sync: build %d (%s)" % (build, tag))
@@ -1027,8 +1108,10 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("")
     add(
         "- Every device's `Driver Version` = %d (every device of the drivers %s); name any device that shows "
-        "another value." % (build, listing(package_driver(name) for name in packages))
+        "another value. A value that ends in `-dev` (%d-dev) is a development build, not this release: report it."
+        % (build, listing(package_driver(name) for name in packages), build)
     )
+    add("- The bridge has no `Dev Server` row (only a development build has one); report it if it is there.")
     add(
         "- The bridge's `Stream Timeout (s)` = %s, `Stream Watchdog (s)` = %s and `Debug Mode` = %s "
         "(deploy/house.yaml); report a row that differs, do not change it."
@@ -1049,26 +1132,17 @@ def render_brief(repo, tag, build, commit, house, deployment, hashes, attestatio
     add("## 4. Provenance")
     add("")
     for name in packages:
-        found = attestations.get(name)
-        if found is None:
-            add(
-                "- %s: NO provenance attestation at GET repos/%s/attestations/sha256:%s (installed with "
-                "--no-attestation)." % (name, repo, hashes[name])
-            )
-        else:
-            add(
-                "- %s: provenance verified, signed by %s (%s)."
-                % (name, ", ".join(found.get("signers") or ["?"]), ", ".join(found["predicate_types"]))
-            )
-    if verified_with:
+        found = attestations[name]
         add(
-            "- Verified on the VM with gh %s: `gh attestation verify <file> --repo %s --signer-workflow %s` for each "
-            "package; a package that fails it is refused before the deployment exists."
-            % (verified_with, repo, signer_workflow(repo))
+            "- %s: provenance verified, signed by %s (%s)."
+            % (name, ", ".join(found.get("signers") or ["?"]), ", ".join(found["predicate_types"]))
         )
-    else:
-        add("- No package carries an attestation, so nothing was verified (--no-attestation).")
-    add("- Build %d, commit %s, release https://github.com/%s/releases/tag/%s." % (build, commit, repo, tag))
+    add(
+        "- Verified on the VM with gh %s: `gh attestation verify <file> %s` for each package, the certificate's "
+        "ref then checked to be %s or refs/tags/%s; a package that fails it is refused before the deployment "
+        "exists." % (verified_with, " ".join(verify_policy(repo, commit)[:-2]), MAIN_REF, tag)
+    )
+    add("- Build %d, commit %s, on main; release https://github.com/%s/releases/tag/%s." % (build, commit, repo, tag))
     return "\n".join(lines) + "\n"
 
 
@@ -1222,7 +1296,11 @@ def cmd_start(args):
     commit = tag_commit(repo, tag)
     check_manifest(manifest, tag, build, commit)
     print("verified build %d, commit %s: every sha256 matches SHA256SUMS.txt and manifest.json" % (build, commit))
+    check_on_main(repo, commit)
+    print("commit %s is on main" % commit)
 
+    # Every package carries an attestation (every release since attestations exist does), and every
+    # one must verify: who signed, from which commit and which ref (I-2, I-9).
     attestations = {}
     unattested = []
     for name in packages:
@@ -1235,24 +1313,15 @@ def cmd_start(args):
                 "attestation %s: %d, subject matches (%s)" % (name, found["count"], ", ".join(found["predicate_types"]))
             )
     if unattested:
-        if not args.no_attestation:
-            raise DeployError(
-                "no provenance attestation for %s (GET repos/%s/attestations/sha256:<digest>); a release cut by the "
-                "release workflow carries one; --no-attestation installs without" % (", ".join(unattested), repo)
-            )
-        print(
-            "warning: no provenance attestation for %s; continuing (--no-attestation)" % ", ".join(unattested),
-            file=sys.stderr,
+        raise DeployError(
+            "no provenance attestation for %s (GET repos/%s/attestations/sha256:<digest>); every release the "
+            "release workflow cuts carries one, so these are not its packages" % (", ".join(unattested), repo)
         )
-    # Who signed: an attestation that exists must verify, --no-attestation or not.
-    verified_with = None
-    attested = [name for name in packages if attestations[name] is not None]
-    if attested:
-        verified_with = require_gh_for_verify()
-        for name in attested:
-            signers = verify_attestation(repo, name, os.path.join(directory, name))
-            attestations[name]["signers"] = signers
-            print("attestation %s: verified (gh %s), signed by %s" % (name, verified_with, ", ".join(signers)))
+    verified_with = require_gh_for_verify()
+    for name in packages:
+        signers = verify_attestation(repo, name, os.path.join(directory, name), tag, commit)
+        attestations[name]["signers"] = signers
+        print("attestation %s: verified (gh %s), signed by %s" % (name, verified_with, ", ".join(signers)))
 
     if active:
         deployment, state = active
@@ -1303,6 +1372,9 @@ def cmd_done(args):
     manifest = fetch_manifest(repo, tag)
     if manifest is None:
         raise DeployError("the release %s carries no manifest.json any more; not recording success" % tag)
+    problems = identity_problems(manifest, tag)
+    if problems:
+        raise DeployError("the release %s changed after start: %s; not recording success" % (tag, "; ".join(problems)))
     if manifest["build"] != build:
         raise DeployError(
             "the release %s now carries build %d, but deployment %s recorded build %d: the assets changed after "
@@ -1348,12 +1420,20 @@ def cmd_failed(args):
     return EXIT_OK
 
 
+# --build as record takes it: the number, or the Driver Version a development build shows (I-4).
+RECORD_BUILD_RE = re.compile(r"([1-9][0-9]*)(-dev)?")
+
+
 def cmd_record(args):
     house = load_house(args.file)
     if not is_tag(args.tag):
         raise DeployError("--tag must look like %s, not %r" % (TAG_SHAPE, args.tag))
-    if args.build <= 0:
-        raise DeployError("--build must be a positive integer")
+    match = RECORD_BUILD_RE.fullmatch(args.build)
+    if not match:
+        raise DeployError("--build must be a positive integer, or N-dev for a development build, not %r" % args.build)
+    build = int(match.group(1))
+    # A development or feature-branch build: never the release's packages, whatever its number.
+    dev = args.no_manifest or match.group(2) is not None
     installed_at = parse_time(args.at)
     refuse_private(args.note, "--note")
     if args.commit and not COMMIT_RE.match(args.commit):
@@ -1362,41 +1442,39 @@ def cmd_record(args):
     deployments = Deployments(repo)
     tag_commit(repo, args.tag)  # the tag must exist: it is the deployment's ref
 
-    manifest = fetch_manifest(repo, args.tag)
     packages = {}
     commit = args.commit
-    if manifest is None:
-        if not args.no_manifest:
-            raise DeployError(
-                "the release %s carries no manifest.json; pass --no-manifest to record build %d on the operator's word"
-                % (args.tag, args.build)
-            )
+    if dev:
+        # Nothing of the release is copied: its hashes would make a dev build look like it (I-4).
         print(
-            "warning: the release %s has no manifest.json; recording build %d unverified" % (args.tag, args.build),
-            file=sys.stderr,
-        )
-    elif manifest["build"] != args.build:
-        if not args.no_manifest:
-            raise DeployError(
-                "the release %s carries build %d, not %d; pass --no-manifest to record an out-of-band build"
-                % (args.tag, manifest["build"], args.build)
-            )
-        print(
-            "warning: the release %s carries build %d; recording build %d unverified"
-            % (args.tag, manifest["build"], args.build),
+            "recording build %d as a development build (not the packages of %s): status and drift report the house "
+            "off the release until a release is installed" % (build, args.tag),
             file=sys.stderr,
         )
     else:
+        manifest = fetch_manifest(repo, args.tag)
+        if manifest is None:
+            raise DeployError(
+                "the release %s carries no manifest.json; record a build that is not the release's with --no-manifest"
+                % args.tag
+            )
+        problems = identity_problems(manifest, args.tag)
+        if problems:
+            raise DeployError("the release %s is not a release build: %s" % (args.tag, "; ".join(problems)))
+        if manifest["build"] != build:
+            raise DeployError(
+                "the release %s carries build %d, not %d; record an out-of-band build with --no-manifest"
+                % (args.tag, manifest["build"], build)
+            )
         packages = {name: manifest["packages"][name]["sha256"].lower() for name in manifest_packages(manifest)}
         commit = commit or manifest["commit"]
 
-    extra = {"recorded": True, "installed_at": installed_at}
-    deployment = deployments.create(args.tag, args.build, commit, packages, args.note, extra)
+    extra = {"recorded": True, "installed_at": installed_at, "dev": dev}
+    deployment = deployments.create(args.tag, build, commit, packages, args.note, extra)
     print("deployment %s created: %s" % (deployment["id"], deployment.get("url")))
+    kind = "development build %d-dev" % build if dev else "Driver Version %d" % build
     deployments.set_status(
-        deployment["id"],
-        "success",
-        "Recorded: Driver Version %d installed %s; %s" % (args.build, installed_at, args.note),
+        deployment["id"], "success", "Recorded: %s installed %s; %s" % (kind, installed_at, args.note)
     )
     print("deployment %s: success (recorded; installed %s)" % (deployment["id"], installed_at))
     return reconcile(repo, house, deployments.observed(), with_issue=True)
@@ -1447,12 +1525,6 @@ def parse_args(argv):
     p.add_argument("--tag", help="the release tag (default: release from deploy/house.yaml)")
     p.add_argument("--supersede", action="store_true", help="mark a deployment still in progress inactive and go on")
     p.add_argument("--note", help="quoted in the brief and kept in the deployment's payload")
-    p.add_argument(
-        "--no-attestation",
-        action="store_true",
-        help="accept packages that carry no provenance attestation (releases cut before attestations existed); "
-        "an attestation that exists must still verify",
-    )
     p.set_defaults(func=cmd_start)
 
     p = sub.add_parser("done", parents=[common], help="record success and close the deploy issue")
@@ -1476,11 +1548,17 @@ def parse_args(argv):
         "record", parents=[common], help="record an install made without this tool as a success deployment"
     )
     p.add_argument("--tag", required=True, help="the release tag the install came from")
-    p.add_argument("--build", required=True, type=int, help="the build number the devices show as Driver Version")
+    p.add_argument(
+        "--build",
+        required=True,
+        help="the build number the devices show as Driver Version (N, or N-dev for a development build)",
+    )
     p.add_argument("--at", required=True, metavar="TIME", help="when it was installed, ISO 8601 with offset")
     p.add_argument("--note", required=True, help="what was installed and how")
     p.add_argument(
-        "--no-manifest", action="store_true", help="record although the release has no manifest or another build"
+        "--no-manifest",
+        action="store_true",
+        help="a development or feature-branch build, not the release's packages: recorded as dev, off the release",
     )
     p.add_argument("--commit", help="the commit the build was made from (default: the manifest's, or none)")
     p.set_defaults(func=cmd_record)

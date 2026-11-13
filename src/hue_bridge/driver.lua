@@ -38,10 +38,32 @@ local netgate_mod = require("bridge.netgate")
 local pair_window_mod = require("bridge.pair_window")
 local load_groups_mod = require("bridge.load_groups")
 
+-- What kind of build this is (security review 2026-11-13 I-4 to I-6, #492):
+-- tools/build.sh writes common/build_kind.lua into every package, "dev" in a
+-- --dev build and "release" otherwise; the specs have none, and then `kind`
+-- is nil, neither. It is read afresh from the package: an answer cached in
+-- package.loaded could be an earlier install's, should Director keep a Lua
+-- state across an install. A release build never requires the dev loop, so
+-- whatever of the development surface such a state still holds stays unused,
+-- and OnDriverInit says so (I-6).
+local build = {
+	kind = (function()
+		package.loaded["common.build_kind"] = nil
+		local ok, kind = pcall(require, "common.build_kind")
+		return ok and (kind == "dev" or kind == "release") and kind or nil
+	end)(),
+	-- The modules only a dev build ships (tools/build.sh), as package.loaded names.
+	DEV_MODULES = { "common.devloop", "common.devkey", "bridge.devtools", "bridge.conntest", "bridge.pinning",
+		"bridge.probe12" },
+}
+
 -- Dev builds only (tools/build.sh --dev ships common/devloop.lua): the
 -- driver fetches its code from a server on the LAN and reloads itself.
 -- See docs/dev-loop.md. Release builds have no such module, so this is nil.
-local devloop_ok, devloop = pcall(require, "common.devloop")
+local devloop_ok, devloop = true, nil
+if build.kind ~= "release" then
+	devloop_ok, devloop = pcall(require, "common.devloop")
+end
 if not devloop_ok then
 	-- Absent in release builds (expected); anything else is a real error
 	-- that must be visible, since the loop is how the controller gets tested.
@@ -347,8 +369,7 @@ end
 -- request; the house Bridge Pro answers an unknown key with 403, verified
 -- 2026-10-25): stop the stream, say so, and answer every keyed request at
 -- once until Pair Bridge succeeds or the address changes (issue #44).
-local function key_rejected(code)
-	code = tonumber(code) or 403
+local function lock_key(code)
 	if state.key_rejected == code then
 		return
 	end
@@ -364,6 +385,21 @@ local function key_rejected(code)
 	if state.hk then
 		state.hk:poke("key_recheck", "error")
 	end
+end
+
+-- The key is locked only once the bridge at the address proved to be the
+-- paired one again, unkeyed (bridge/identity.lua recheck; #490, N-6):
+-- another bridge given the address refuses a key it never issued.
+local function key_rejected(code)
+	code = tonumber(code) or 403
+	if state.key_rejected == code then
+		return
+	end
+	state.identity:recheck(function(same)
+		if same then
+			lock_key(code)
+		end
+	end)
 end
 
 -- A 401/403 to a keyed module request is not proof that the key is gone:
@@ -935,7 +971,14 @@ local function new_stream()
 			-- rows are refreshed once, after the last of the three.
 			log.info("event stream connected; resyncing %d lights", state.lights:count())
 			state.motion:on_stream_state(true)
-			want_resync(state.away:connect_tier(), "connect")
+			-- The backoff goes back to its minimum only once this resync
+			-- succeeded, not at the bare 200 (#489, N-7).
+			local connected = state.stream
+			want_resync(state.away:connect_tier(), "connect", function(ok)
+				if ok and state.stream == connected then
+					connected:resynced()
+				end
+			end)
 		end,
 		on_container = function(container)
 			-- Fan-out only sends SendToDevice, which is safe inside a C4:url
@@ -985,16 +1028,19 @@ end
 -- Decision 3), from a /api/0/config answer or a pairing probe. The model is
 -- kept for Bridges Found too: a pairing made before 1.1 stored none, so the
 -- stored credentials alone left its summary "Paired with  at ..." (dev 467).
+-- Every text the bridge (or a peer at its address) gives goes through
+-- util.display_name: no control characters, at most 100 characters
+-- (security review 2026-10-25 finding 8; 2026-11-13 C-4, #489).
 local function show_bridge_info(info)
-	state.bridge_model = info.model
-	prop("Bridge Model", config.model_label(info.model))
+	state.bridge_model = info.model ~= nil and util.display_name(info.model) or nil
+	prop("Bridge Model", util.display_name(config.model_label(state.bridge_model)))
 	state.bridges_found:show() -- its summary names the model
 	prop("Bridge Name", util.display_name(info.name))
-	state.bridge_firmware = config.firmware_label(info.sw_version, info.api_version)
+	state.bridge_firmware = util.display_name(config.firmware_label(info.sw_version, info.api_version))
 	prop("Bridge Firmware", state.bridge_firmware)
 	if config.firmware_check(info.sw_version) == "old" then
-		log.warn("bridge firmware %s is older than %d: the CLIP v2 API may be missing", tostring(info.sw_version),
-			config.MIN_FIRMWARE)
+		log.warn("bridge firmware %s is older than %d: the CLIP v2 API may be missing",
+			util.echo(info.sw_version, util.LOG_MAX), config.MIN_FIRMWARE)
 	end
 end
 
@@ -1125,7 +1171,9 @@ local function show_driver_version(attempt)
 		version_timer = nil
 	end
 	local v = driver_version()
-	prop("Driver Version", v)
+	-- A dev build says so (#492 I-4): "<build>-dev"; the version itself stays
+	-- the number (driver_version, which the names migration also reads).
+	prop("Driver Version", (v ~= "" and build.kind == "dev") and (v .. "-dev") or v)
 	if v == "" and attempt < 3 then
 		version_timer = C4:SetTimer(5000 * attempt, function()
 			version_timer = nil
@@ -1134,9 +1182,7 @@ local function show_driver_version(attempt)
 	end
 end
 
-dispatch.properties["Debug_Mode"] = function(value)
-	log.set_debug(value == "On")
-end
+-- Debug Mode's handler is below, after Last Action (debug_mode, #493).
 
 dispatch.properties["Bridge_IP_Address"] = function(value)
 	local ip, err = config.parse_ipv4(value)
@@ -1278,33 +1324,43 @@ end
 -- The background key re-check (owner's answer D8): one keyed GET of the
 -- bridge resource, which any valid key may read, sent although the key is
 -- locked (the lock is what it tests), only after the identity check passed
--- (the task's guards). done(ok, text, cleared): cleared when this check
--- lifted the lock.
+-- (the task's guards), and once the bridge at the address showed the paired
+-- id again, unkeyed (identity:recheck; #490, N-6): a bridge that took the
+-- address since is never sent the key. done(ok, text, cleared): cleared
+-- when this check lifted the lock.
 local function recheck_key(done)
 	if not state.key_rejected then
 		return done(true, "the key is not rejected")
 	end
 	local gen, creds = state.address_gen, state.creds
-	http.request({ ip = state.ip, key = creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+	state.identity:recheck(function(same)
 		if gen ~= state.address_gen or creds ~= state.creds then
 			return done(false, "cancelled: the address or the pairing changed")
 		end
-		if r.code == 401 or r.code == 403 then
-			return done(false, string.format("the bridge still refuses the key (HTTP %d)", r.code))
-		elseif not r.ok then
-			return done(false, "no answer: " .. tostring(r.err))
+		if not same then
+			return done(false, "the bridge at the address is not the paired one; the key was not sent")
 		end
-		local item = r.json and r.json.data and r.json.data[1] or {}
-		local reported = config.normalise_bridge_id(item.bridge_id)
-		if reported and reported ~= creds.bridge_id then
-			return done(false, string.format("the bridge reports ID %s, expected %s", reported, creds.bridge_id))
-		end
-		if state.key_rejected then
-			log.warn("key re-check: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
-			key_accepted_again()
-			return done(true, "the bridge accepts the key again", true)
-		end
-		done(true, "the bridge accepts the key")
+		http.request({ ip = state.ip, key = creds.key, path = "/clip/v2/resource/bridge", timeout = 10 }, function(r)
+			if gen ~= state.address_gen or creds ~= state.creds then
+				return done(false, "cancelled: the address or the pairing changed")
+			end
+			if r.code == 401 or r.code == 403 then
+				return done(false, string.format("the bridge still refuses the key (HTTP %d)", r.code))
+			elseif not r.ok then
+				return done(false, "no answer: " .. tostring(r.err))
+			end
+			local item = r.json and r.json.data and r.json.data[1] or {}
+			local reported = config.normalise_bridge_id(item.bridge_id)
+			if reported and reported ~= creds.bridge_id then
+				return done(false, string.format("the bridge reports ID %s, expected %s", reported, creds.bridge_id))
+			end
+			if state.key_rejected then
+				log.warn("key re-check: the bridge accepts the key again; key-rejected lock cleared, stream restarting")
+				key_accepted_again()
+				return done(true, "the bridge accepts the key again", true)
+			end
+			done(true, "the bridge accepts the key")
+		end)
 	end)
 end
 
@@ -1376,6 +1432,72 @@ local function last_action(text)
 	log.always("%s", text)
 	last_action_rows:show(text)
 	refresh_lights_props()
+end
+
+-- Debug Mode turns itself Off 8 hours after it was turned On (security
+-- review 2026-11-13 C-5, #493): while On, every message to a device goes
+-- into Director's log with its parameters (device_send). The deadline, not a
+-- timer, is what is kept (C4:GetTime ms in the store), so a restart keeps
+-- the time that is left; one that passed meanwhile turns it Off at late
+-- init. Turning it Off clears the deadline, so On again starts 8 new hours.
+-- The timer is armed from late init on: C4:SetTimer may not be called in
+-- OnDriverInit [verified: API 34_timer/_1-SetTimer]. Writing the row with
+-- C4:UpdateProperty calls no OnPropertyChanged [verified: API
+-- 24_properties/_3-OnPropertyChanged].
+local debug_mode = {
+	MAX_MS = 8 * 3600 * 1000,
+	KEY = "debug_mode_until", -- as the devices keep theirs (src/common/device.lua)
+	OFF_TEXT = "Debug Mode turned itself Off after 8 hours", -- the devices' text too
+	timer = nil,
+	ready = false, -- late init has begun
+}
+
+function debug_mode.cancel()
+	if debug_mode.timer then
+		debug_mode.timer:Cancel()
+		debug_mode.timer = nil
+	end
+end
+
+function debug_mode.expire()
+	debug_mode.cancel()
+	C4:PersistDeleteValue(debug_mode.KEY)
+	log.set_debug(false)
+	prop("Debug Mode", "Off")
+	last_action(debug_mode.OFF_TEXT)
+end
+
+-- The stored deadline, or a new one 8 hours from now when there is none, it
+-- is no time (num.timestamp), or it lies further ahead than 8 hours (a clock
+-- set back); then the timer for what is left.
+function debug_mode.arm()
+	local num = require("common.num")
+	debug_mode.cancel()
+	local now = now_ms()
+	local deadline = num.finite(C4:PersistGetValue(debug_mode.KEY))
+	if not (deadline and num.timestamp(deadline / 1000)) or deadline - now > debug_mode.MAX_MS then
+		deadline = now + debug_mode.MAX_MS
+		C4:PersistSetValue(debug_mode.KEY, deadline)
+	end
+	if deadline - now < 1 then
+		return debug_mode.expire()
+	end
+	log.always("Debug Mode is On until %s, then turns itself Off", state.away:clock(deadline))
+	debug_mode.timer = C4:SetTimer(deadline - now, function()
+		debug_mode.timer = nil
+		debug_mode.expire()
+	end)
+end
+
+dispatch.properties["Debug_Mode"] = function(value)
+	local on = value == "On"
+	log.set_debug(on)
+	if not on then
+		debug_mode.cancel()
+		C4:PersistDeleteValue(debug_mode.KEY)
+	elseif debug_mode.ready then
+		debug_mode.arm()
+	end
 end
 
 -- The lists are read-only in Composer; should a pick still arrive, the row
@@ -1749,10 +1871,10 @@ end
 dispatch.commands["HUE_MOTION_HELLO"] = function(params)
 	params = params or {}
 	-- The link first, so the device knows before its state (#428 D4).
-	state.link:tell(tonumber(params.device_id))
+	state.link:tell(util.positive(params.device_id)) -- a finite id (#486)
 	if not state.motion:hello(params) then
 		log.debug("HUE_MOTION_HELLO from unregistered motion device %q (device %s)", tostring(params.rid),
-			tostring(params.device_id))
+			util.echo(params.device_id, 40))
 	end
 end
 
@@ -1836,10 +1958,10 @@ end
 dispatch.commands["HUE_SCENE_HELLO"] = function(params)
 	params = params or {}
 	-- The link first, so the device knows before its state (#428 D4).
-	state.link:tell(tonumber(params.device_id))
+	state.link:tell(util.positive(params.device_id)) -- a finite id (#486)
 	-- hello(rid, params): the rid is a separate argument, as for lights.
 	if not state.scenes:hello(params.rid or "", params) then
-		log.debug("HUE_SCENE_HELLO not answered for %q (device %s)", tostring(params.rid), tostring(params.device_id))
+		log.debug("HUE_SCENE_HELLO not answered for %q (device %s)", tostring(params.rid), util.echo(params.device_id, 40))
 	end
 end
 
@@ -1893,6 +2015,10 @@ end
 -- light's entry of an open batch alone, so a group request never lands after
 -- the light's own (D11). A tagged request the batching refuses (a GROUP ID
 -- that is no positive integer) is an untagged one.
+-- Only a linked light is set (#485 D-2, lights:linked_entry): a gone or
+-- unbound entry's device is not the one asking. Every number is a finite
+-- one (#486, common/num.lua); the queue clamps it into range
+-- (bridge/commands.lua).
 dispatch.commands["HUE_SET"] = function(params)
 	params = params or {}
 	local rid = params.rid
@@ -1903,26 +2029,20 @@ dispatch.commands["HUE_SET"] = function(params)
 		state.load_groups:release(rid)
 		return state.zone_lights:set(params)
 	end
-	if not rid or rid == "" or not state.lights:device_for(rid) then
-		log.warn("HUE_SET for unknown light %s", tostring(rid))
-		return
+	local linked, why = state.lights:linked_entry(rid)
+	if not linked then
+		return log.warn("HUE_SET for %s light %s", why, util.echo(rid, util.LOG_MAX))
 	end
-	local fields = {
-		brightness = tonumber(params.brightness),
-		x = tonumber(params.x),
-		y = tonumber(params.y),
-		mirek = tonumber(params.mirek),
-		rate = tonumber(params.rate),
-		-- A keypad tap's start, or a tap stop sent as a level, goes out at once,
-		-- past the request bucket (#421 D12, commands.urgent).
-		urgent = (params.urgent == "true" or params.urgent == true) or nil,
-	}
-	if params.on == "true" then fields.on = true elseif params.on == "false" then fields.on = false end
+	-- As bridge/load_groups.lua's set_fields maps them for a batch (#435):
+	-- finite numbers only, and `urgent` for a keypad tap's start, or a tap
+	-- stop sent as a level, which goes out at once, past the request bucket
+	-- (#421 D12, commands.urgent).
+	local fields = load_groups_mod.set_fields(params)
 	if log.enabled("info") then
 		log.info("HUE_SET %s: on=%s brightness=%s x=%s y=%s mirek=%s rate=%s%s%s", rid:sub(1, 8), tostring(fields.on),
 			tostring(fields.brightness), tostring(fields.x), tostring(fields.y), tostring(fields.mirek),
 			tostring(fields.rate), fields.urgent and " urgent" or "",
-			params.group ~= nil and (" group " .. tostring(params.group)) or "")
+			params.group ~= nil and (" group " .. util.echo(params.group, 40)) or "")
 	end
 	if params.group ~= nil and state.load_groups:command("set", params, "light") then
 		return
@@ -1947,25 +2067,25 @@ dispatch.commands["HUE_DIM"] = function(params)
 		state.load_groups:release(rid)
 		return state.zone_lights:dim(params)
 	end
-	if not rid or rid == "" or not state.lights:device_for(rid) then
-		log.warn("HUE_DIM for unknown light %s", tostring(rid))
-		return
+	local linked, why = state.lights:linked_entry(rid)
+	if not linked then
+		return log.warn("HUE_DIM for %s light %s", why, util.echo(rid, util.LOG_MAX))
 	end
 	local dir = params.direction
 	if dir ~= "up" and dir ~= "down" and dir ~= "stop" then
-		log.warn("HUE_DIM %s: unknown direction %s", rid:sub(1, 8), tostring(dir))
+		log.warn("HUE_DIM %s: unknown direction %s", rid:sub(1, 8), util.echo(dir, util.LOG_MAX))
 		return
 	end
 	if log.enabled("info") then
-		log.info("HUE_DIM %s: %s duration=%s level=%s%s", rid:sub(1, 8), dir, tostring(params.duration),
-			tostring(params.level), params.group ~= nil and (" group " .. tostring(params.group)) or "")
+		log.info("HUE_DIM %s: %s duration=%s level=%s%s", rid:sub(1, 8), dir, util.echo(params.duration, 40),
+			util.echo(params.level, 40), params.group ~= nil and (" group " .. util.echo(params.group, 40)) or "")
 	end
 	if params.group ~= nil and state.load_groups:command("dim", params, "light") then
 		return
 	end
 	state.load_groups:release(rid)
 	set_light_limits(rid)
-	state.queue:set(rid, { dim = dir, rate = tonumber(params.duration), level = tonumber(params.level) })
+	state.queue:set(rid, load_groups_mod.dim_fields(params))
 end
 
 -- From a light driver at its startup or binding: resend its configuration
@@ -1973,16 +2093,16 @@ end
 dispatch.commands["HUE_HELLO"] = function(params)
 	params = params or {}
 	-- The link first, so the device knows before its state (#428 D4).
-	state.link:tell(tonumber(params.device_id))
+	state.link:tell(util.positive(params.device_id)) -- a finite id (#486)
 	local rid = params.rid or ""
 	if params.kind == "group" then
 		if not state.zone_lights:hello(params) then
-			log.debug("HUE_HELLO from unregistered zone light %q (device %s)", tostring(rid), tostring(params.device_id))
+			log.debug("HUE_HELLO from unregistered zone light %q (device %s)", tostring(rid), util.echo(params.device_id, 40))
 		end
 		return
 	end
 	if not state.lights:hello(rid, params) then
-		log.debug("HUE_HELLO from unregistered light %q (device %s)", tostring(rid), tostring(params.device_id))
+		log.debug("HUE_HELLO from unregistered light %q (device %s)", tostring(rid), util.echo(params.device_id, 40))
 	end
 end
 
@@ -2210,6 +2330,33 @@ local function replay_early_commands()
 	end
 end
 
+-- Every rid a device sends passes hue_model.resource_id (letters, digits
+-- and "-", at most 64 bytes), or the message is refused with a debug line
+-- (security review 2026-11-13 D-2, #485): a rid ends up in the registry,
+-- in log lines and in the path of a keyed request
+-- (/clip/v2/resource/light/<rid>), and "x/../../grouped_light/<id>" would
+-- leave the light path. A message without a rid goes on as before: the
+-- handlers answer it by its device id, or not at all. (A function, so the
+-- main chunk keeps its locals: tools/lua_limits.py.)
+local function gate_device_rids()
+	local hue_model = require("bridge.hue_model")
+	for _, name in ipairs({ "HUE_HELLO", "HUE_SET", "HUE_DIM", "HUE_GOODBYE", "HUE_FORGET", "HUE_LOAD_GROUPS",
+		"HUE_SCENE_HELLO", "HUE_SCENE_RECALL", "HUE_SCENE_OFF", "HUE_SCENE_DIM", "HUE_SCENE_LEVEL",
+		"HUE_SCENE_GOODBYE", "HUE_SCENE_FORGET", "HUE_MOTION_HELLO", "HUE_MOTION_GOODBYE", "HUE_MOTION_FORGET" }) do
+		local handler = assert(dispatch.commands[name], name)
+		dispatch.commands[name] = function(params)
+			local rid = type(params) == "table" and params.rid or nil
+			if rid ~= nil and rid ~= "" and not hue_model.resource_id(rid) then
+				log.debug("%s from device %s refused: its rid is no resource id (%s)", name,
+					util.echo(params.device_id, 40), util.echo(rid, 80))
+				return
+			end
+			return handler(params)
+		end
+	end
+end
+gate_device_rids()
+
 log.set_prefix("Hue Bridge")
 dispatch.install(_G)
 
@@ -2242,10 +2389,11 @@ end
 
 local D = actions_mod.DIAGNOSTICS
 -- Diagnostics' entries; the dev ones run bridge/devtools.lua's handlers,
--- which exist in dev builds only (looked up when run).
+-- which exist in dev builds only (looked up when run), from its own table:
+-- they left dispatch.commands, where any driver could run them (#484 C-2).
 local function dev_command(key, params)
 	return function()
-		local fn = dispatch.commands[key]
+		local fn = devtools and type(devtools.diagnostics) == "table" and devtools.diagnostics[key] or nil
 		if fn then fn(params or {}) end
 	end
 end
@@ -2524,10 +2672,46 @@ local function start_housekeeping(dit)
 	end
 end
 
+-- Release builds lock Composer's Lua window (security review 2026-11-13
+-- I-5, #492): belt and braces, since the SDK says C4:AllowExecute defaults
+-- to false and may be called in OnDriverInit [verified: FUND 6_Understanding
+-- .c4z Drivers/_3-C4ALLOWEXECUTE.md; API 22_miscellaneous/_25.2-SafeUsageTable.md].
+-- A dev build keeps what its package set (dp3's --allowexecute appends
+-- C4:AllowExecute(true), tools/build.sh --dev). Then a release build warns
+-- of any piece of the development surface it finds loaded (I-6): Director
+-- kept the Lua state of an earlier, dev, install. This code uses none of it.
 function OnDriverInit()
+	if build.kind ~= "release" then
+		return
+	end
+	if type(C4.AllowExecute) == "function" then
+		local ok, err = pcall(C4.AllowExecute, C4, false)
+		if not ok then
+			log.warn("C4:AllowExecute(false) failed: %s", tostring(err))
+		end
+	end
+	local found = {}
+	for _, name in ipairs(build.DEV_MODULES) do
+		-- A module, not the light userdata a failed require can leave there.
+		local loaded = package.loaded[name]
+		if loaded ~= nil and type(loaded) ~= "userdata" then
+			found[#found + 1] = name
+		end
+	end
+	-- The loop keeps its state in the global table (src/common/devloop.lua).
+	local loop = _G["__DEVLOOP"]
+	if type(loop) == "table" and (loop.host ~= nil or loop.timer ~= nil) then
+		found[#found + 1] = "a running dev loop"
+	end
+	if #found > 0 then
+		log.warn("release build, but %s %s loaded: Director kept the Lua state of an earlier install, and this "
+			.. "build uses none of it; restart Director (or reboot the controller) to clear it", table.concat(found, ", "),
+			#found == 1 and "is" or "are")
+	end
 end
 
 function OnDriverLateInit(dit)
+	debug_mode.ready = true -- Debug Mode's timer may be armed from here (its replay below)
 	state.creds = credentials.load()
 	log.info("credentials at startup: %s", credentials.summary(state.creds))
 	state.away:load() -- the last good address and the last move, from the store
@@ -2790,6 +2974,7 @@ function OnDriverDestroyed()
 		version_timer:Cancel()
 		version_timer = nil
 	end
+	debug_mode.cancel() -- the deadline stays in the store for the next start (#493)
 	if state.stream then
 		state.stream:stop()
 	end

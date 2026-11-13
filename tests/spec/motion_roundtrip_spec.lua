@@ -551,6 +551,11 @@ describe("motion round trip", function()
 			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20; Hue gets the Composer name "
 				.. "Hallway sensor", text)
 			fake.pump()
+			-- #483 D-1: that configure came by itself, so the device leaves it and
+			-- asks the bridge with a hello, whose answer names the new sensor.
+			assert.equal(M.devices.hallway, sensor.C4.persist.hue_rid, "not taken by itself")
+			assert.equal(1, fire(sensor, 500))
+			fake.pump()
 			assert.equal(M.devices.porch, last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").rid)
 			assert.equal("Porch sensor", last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").name)
 			assert.equal(M.devices.porch, sensor.C4.persist.hue_rid)
@@ -587,6 +592,8 @@ describe("motion round trip", function()
 			bc4.sent = {}
 			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20; Hue gets the Composer name "
 				.. "Hallway sensor", action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch }))
+			fake.pump()
+			assert.equal(1, fire(sensor, 500), "#483 D-1: the device asks the bridge with a hello")
 			fake.pump()
 			assert.is_nil(last_sent(SENSOR_ID, "HUE_MOTION_CONFIGURE").hue_room, "the Porch sensor is in no Hue room")
 			assert.equal("", sensor.Properties["Hue Room"])

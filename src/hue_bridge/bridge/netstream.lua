@@ -13,9 +13,10 @@
 -- Transport is Web transfer. One GET kept open, its events parsed as they
 -- arrive and every Hue container handed to the owner; a reconnect with
 -- backoff whenever the stream ends; the watchdog for silence; on_connected
--- after every connect, so the owner can resync; a 401 or 403 stops the
--- stream for good and tells the owner once, through on_key_rejected (#44).
--- The status texts are stream.lua's.
+-- after every connect, so the owner can resync, and resynced() from the
+-- owner once that resync succeeded, which resets the backoff (#489); a 401
+-- or 403 stops the stream for good and tells the owner once, through
+-- on_key_rejected (#44). The status texts are stream.lua's.
 --
 -- How, with the SDK file that documents each call (API/ is
 -- ~/c4-tools/reference/docs-driverworks-api/source/includes/, 32/ its
@@ -135,11 +136,17 @@ netstream.BACKOFF_MAX = 60
 local owner = nil
 local retired = false
 
--- What the answer may hold back while it is incomplete: one line of the
--- head, the head as a whole, a chunk-size or trailer line. The SSE parser's
--- own line limit (bridge/sse.lua), so the framing never holds more than the
--- content it carries may.
+-- What the answer may hold back while it is incomplete: a chunk-size or
+-- trailer line. The SSE parser's own line limit (bridge/sse.lua), so the
+-- framing never holds more than the content it carries may.
 netstream.MAX_LINE = sse.MAX_LINE
+
+-- The answer's head as a whole (the status line and every header, interim
+-- answers included): a bridge's is a few hundred bytes [assumed: the
+-- spike's recorded answer, docs/raw-stream-design.md]. A longer one ends
+-- the connection (security review 2026-11-13, N-2, #489: up to 1 MB of head
+-- used to be read, and trimmed and joined in quadratic time).
+netstream.MAX_HEAD = 16 * 1024
 
 -- The tPortParams of NetPortOptions. Every key is one of 32/_25; the values
 -- are contract §0.2, plus KEEP_CONNECTION and DELIMITER from §2, which §0.2
@@ -184,6 +191,7 @@ end
 -- bytes as they arrive, split anywhere, and returns the items they
 -- complete, in order:
 --   { kind = "head", code = n, headers = { [lower-case name] = value }, problem = text|nil }
+--       headers: Transfer-Encoding and Content-Length only (KEPT)
 --       problem: a body this reader cannot decode (a transfer coding other
 --       than chunked, a malformed Content-Length); nothing follows it
 --   { kind = "body", data = bytes }      decoded body, any length
@@ -205,11 +213,15 @@ local function new_reader()
 		head_len = 0,       -- bytes of the head read so far
 		code = nil,
 		headers = {},
-		last_header = nil,  -- the header an obsolete folded line continues
+		pieces = {},        -- kept header -> its value's pieces, joined at the end of the head
+		last_header = nil,  -- the kept header an obsolete folded line continues (nil: a skipped one)
 		head = nil,         -- the head item, once the head is complete
 		need = nil,         -- bytes left of the current chunk, or of a Content-Length body
 	}, reader)
 end
+
+-- The reader on its own, for the specs.
+netstream.new_reader = new_reader
 
 function reader:fail(out, message)
 	self.phase = "failed"
@@ -221,9 +233,29 @@ function reader:until_close()
 	return self.phase == "body" and self.need == nil
 end
 
+-- `text` without its leading and trailing blanks (`%s`: space and bytes 9
+-- to 13), found from each end in one pass: the pattern "%s+$" takes time
+-- quadratic in an inner run of blanks (N-2, #489; util.display_name avoids
+-- it the same way).
 local function trim(text)
-	return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+	local first = text:find("%S")
+	if not first then
+		return ""
+	end
+	local last = #text
+	while last > first do
+		local b = text:byte(last)
+		if b ~= 32 and (b < 9 or b > 13) then
+			break
+		end
+		last = last - 1
+	end
+	return text:sub(first, last)
 end
+
+-- The headers the reader acts on. Every other header line is skipped
+-- unread: nothing trims or joins it (N-2, #489).
+local KEPT = { ["transfer-encoding"] = true, ["content-length"] = true }
 
 function reader:end_of_head(out)
 	local code = self.code
@@ -231,6 +263,10 @@ function reader:end_of_head(out)
 		self.phase = "status" -- an interim answer: the real one follows
 		return
 	end
+	for name, pieces in pairs(self.pieces) do
+		self.headers[name] = table.concat(pieces)
+	end
+	self.pieces = {}
 	local item = { kind = "head", code = code, headers = self.headers }
 	self.head = item
 	out[#out + 1] = item
@@ -281,7 +317,7 @@ function reader:line(text, out)
 			return self:fail(out, "malformed answer: status line")
 		end
 		self.code = tonumber(code)
-		self.headers, self.last_header = {}, nil
+		self.headers, self.pieces, self.last_header = {}, {}, nil
 		self.phase = "headers"
 	elseif phase == "headers" then
 		if text == "" then
@@ -289,20 +325,31 @@ function reader:line(text, out)
 		end
 		if text:find("^[ \t]") then
 			-- An obsolete folded line continues the header before it (RFC 9112 §5.2).
-			if self.last_header then
-				self.headers[self.last_header] = self.headers[self.last_header] .. " " .. trim(text)
+			local pieces = self.last_header and self.pieces[self.last_header]
+			if pieces then
+				pieces[#pieces + 1] = " "
+				pieces[#pieces + 1] = trim(text)
 			end
 			return
 		end
 		local name, value = text:match("^([^:%s]+)[ \t]*:(.*)$")
+		self.last_header = nil
 		if name then
 			name = name:lower()
-			value = trim(value)
-			local before = self.headers[name]
-			self.headers[name] = before and (before .. ", " .. value) or value
-			self.last_header = name
+			if KEPT[name] then
+				-- A repeated header joins the one before it with ", " (RFC 9110 §5.3).
+				local pieces = self.pieces[name]
+				if pieces then
+					pieces[#pieces + 1] = ", "
+				else
+					pieces = {}
+					self.pieces[name] = pieces
+				end
+				pieces[#pieces + 1] = trim(value)
+				self.last_header = name
+			end
 		end
-		-- A line that is no header is skipped.
+		-- A line that is no header, or a header the reader does not use, is skipped.
 	elseif phase == "size" then
 		local hex, rest = text:match("^[ \t]*(%x+)[ \t]*(.-)$")
 		if not hex or (rest ~= "" and rest:sub(1, 1) ~= ";") then
@@ -360,7 +407,7 @@ function reader:feed(data)
 			local in_head = phase == "status" or phase == "headers"
 			self.parts_len = self.parts_len + (last - pos + 1)
 			if self.parts_len > netstream.MAX_LINE
-				or (in_head and self.head_len + self.parts_len > netstream.MAX_LINE) then
+				or (in_head and self.head_len + self.parts_len > netstream.MAX_HEAD) then
 				self:fail(out, in_head and "oversized answer head" or "oversized line in stream")
 				break
 			end
@@ -462,7 +509,7 @@ function netstream.new(opts)
 		connected_timer = nil,      -- defers on_connected out of ReceivedFromNetwork
 		retry_timer = nil,
 		backoff = netstream.BACKOFF_MIN,
-		hold_backoff = false,       -- a malformed or oversized answer: keep the backoff (connected)
+		hold_backoff = false,       -- a malformed or oversized answer: resynced() keeps the backoff
 		stats = { containers = 0, events = 0, keepalives = 0, reconnects = 0,
 			last_event = nil, connected_since = nil, last_error = nil,
 			started = nil,          -- clock() of the first connect, kept across reconnects
@@ -844,16 +891,10 @@ function netstream:handle_head(item)
 	return true
 end
 
--- A 200: connected, as stream.lua's handle_headers.
+-- A 200: connected, as stream.lua's handle_headers. The backoff is not
+-- reset here: only resynced() resets it (see there).
 function netstream:connected()
 	self.state = "connected"
-	-- A connection resets the backoff, except after a malformed or oversized
-	-- answer: a peer that answers 200 and then overflows would be reconnected
-	-- every second otherwise. The doubled backoff stays until a connection
-	-- delivers an event normally (handle_body), as in stream.lua.
-	if not self.hold_backoff then
-		self.backoff = netstream.BACKOFF_MIN
-	end
 	self.stats.connected_since = clock()
 	self.stats.started = self.stats.started or self.stats.connected_since
 	self:arm_watchdog()
@@ -941,11 +982,23 @@ function netstream:handle_body(data)
 		self:fail("oversized line in stream", true)
 		return false
 	end
-	if normal > 0 and self.hold_backoff then
-		self.hold_backoff = false
-		self.backoff = netstream.BACKOFF_MIN
+	if normal > 0 then
+		self.hold_backoff = false -- resynced() may reset the backoff again
 	end
 	return true
+end
+
+-- The owner's resync after this connection's on_connected succeeded: the
+-- backoff goes back to BACKOFF_MIN, while the connection is still up and
+-- unless a malformed or oversized answer holds it (until a connection
+-- delivers an event normally). A bare 200 no longer resets it: a peer that
+-- answers 200 and closes was reconnected every second, with the key, and
+-- the resync and the identity re-check after an outage never ran (security
+-- review 2026-11-13, N-7, #489). As stream.lua's.
+function netstream:resynced()
+	if self.state == "connected" and not self.hold_backoff then
+		self.backoff = netstream.BACKOFF_MIN
+	end
 end
 
 -- Decode one event and hand its containers to the owner, as stream.lua's
@@ -955,9 +1008,11 @@ function netstream:handle_event(event)
 	self.stats.events = self.stats.events + 1
 	self.stats.last_event = clock()
 	local containers, err = http.decode(event.data)
+	-- The event id is the peer's text, up to a line long (#489): capped in every log line.
+	local id = http.peer_text(event.id, 64)
 	if type(containers) ~= "table" then
-		log.warn("event stream: undecodable event %s: %s", tostring(event.id),
-			tostring(err or ("a " .. type(containers) .. ", not a list")))
+		log.warn("event stream: undecodable event %s: %s", id,
+			http.peer_text(err or ("a " .. type(containers) .. ", not a list"), http.TEXT_LOG))
 		return false
 	end
 	local skipped = 0
@@ -973,7 +1028,8 @@ function netstream:handle_event(event)
 						types[#types + 1] = type(item) == "table" and tostring(item.type) or type(item)
 					end
 				end
-				log.debug("event %s %s: %s", tostring(event.id), tostring(container.type), table.concat(types, ","))
+				log.debug("event %s %s: %s", id, http.peer_text(container.type, 64),
+					http.peer_text(table.concat(types, ","), http.TEXT_LOG))
 			end
 			if self.opts.on_container then
 				self.opts.on_container(container, event)
@@ -981,7 +1037,7 @@ function netstream:handle_event(event)
 		end
 	end
 	if skipped > 0 then
-		log.warn("event stream: event %s: skipped %d container(s) that are not objects", tostring(event.id), skipped)
+		log.warn("event stream: event %s: skipped %d container(s) that are not objects", id, skipped)
 	end
 	if self.state == "connected" then
 		self:status(string.format("Connected since %s, %d containers, last %s",
@@ -991,8 +1047,8 @@ function netstream:handle_event(event)
 end
 
 -- The connection ended or failed for `reason`: give it up and reconnect
--- after the backoff. `hold` keeps the backoff from being reset by the next
--- 200 (see connected).
+-- after the backoff. `hold` keeps the backoff from being reset by a resync
+-- until a connection delivers an event normally (see resynced).
 function netstream:fail(reason, hold)
 	self.stats.last_error = reason
 	log.info("event stream ended: %s", reason)

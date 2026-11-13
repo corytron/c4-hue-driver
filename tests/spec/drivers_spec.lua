@@ -513,6 +513,119 @@ describe("Hue Bridge driver", function()
 		assert(ok, err)
 	end)
 
+	-- Security review 2026-11-13 I-4 to I-6 (#492): tools/build.sh writes
+	-- common/build_kind.lua, "dev" or "release", into every package; the
+	-- specs have none.
+	describe("build kind (#492)", function()
+		-- `fn()` with a package of that kind: common/build_kind.lua says it,
+		-- and a release package has no common/devloop.lua.
+		local function as_kind(kind, fn)
+			package.preload["common.build_kind"] = function() return kind end
+			if kind == "release" then
+				package.loaded["common.devloop"] = nil
+				package.preload["common.devloop"] = function() error("module 'common.devloop' not found") end
+			end
+			local ok, err = pcall(fn)
+			package.preload["common.build_kind"] = nil
+			package.loaded["common.build_kind"] = nil
+			if kind == "release" then
+				package.preload["common.devloop"] = nil
+				package.loaded["common.devloop"] = nil
+			end
+			assert(ok, err)
+		end
+
+		-- A loaded bridge whose C4:AllowExecute calls are recorded.
+		local function with_allow_execute()
+			local env, c4 = paired_driver()
+			local calls = {}
+			c4.AllowExecute = function(_, value) calls[#calls + 1] = value end
+			return env, c4, calls
+		end
+
+		it("a release build locks Composer's Lua window in OnDriverInit (I-5)", function()
+			as_kind("release", function()
+				local env, _, calls = with_allow_execute()
+				env.OnDriverInit("DIT_STARTUP")
+				assert.same({ false }, calls)
+			end)
+		end)
+
+		it("a dev build, or one that does not say, leaves the Lua window as its package set it (I-5)", function()
+			as_kind("dev", function()
+				local env, _, calls = with_allow_execute()
+				env.OnDriverInit("DIT_STARTUP")
+				assert.same({}, calls, "dp3's --allowexecute line stays in charge")
+			end)
+			local env, _, calls = with_allow_execute()
+			env.OnDriverInit("DIT_STARTUP")
+			assert.same({}, calls, "no common/build_kind.lua: not a release build")
+		end)
+
+		it("a dev build's Driver Version reads <build>-dev; a release build's, or one without a kind, the build (I-4)",
+			function()
+				as_kind("dev", function()
+					local env = paired_driver()
+					env.OnDriverLateInit("DIT_STARTUP")
+					assert.equal("1-dev", env.Properties["Driver Version"])
+				end)
+				as_kind("release", function()
+					local env = paired_driver()
+					env.OnDriverLateInit("DIT_STARTUP")
+					assert.equal("1", env.Properties["Driver Version"])
+				end)
+				local env, c4 = paired_driver()
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.equal("1", env.Properties["Driver Version"])
+				-- An empty version stays empty (its looks again follow), never "-dev".
+				as_kind("dev", function()
+					local env2, c42 = paired_driver()
+					c42.config_info.version = nil
+					env2.OnDriverLateInit("DIT_STARTUP")
+					assert.equal("", env2.Properties["Driver Version"])
+				end)
+				assert.is_not_nil(c4)
+			end)
+
+		it("a release build uses no dev module a kept Lua state still holds, and warns at init (I-6)", function()
+			local warned = {}
+			log.sink = function(line) if line:find("[WARN]", 1, true) then warned[#warned + 1] = line end end
+			local loop = rawget(_G, "__DEVLOOP")
+			local host = type(loop) == "table" and loop.host or nil
+			as_kind("release", function()
+				local env = paired_driver()
+				env.OnDriverInit("DIT_STARTUP")
+				assert.same({}, warned, "nothing of the dev surface: no warning")
+			end)
+			-- The same release package loaded again into a Lua state that kept an
+			-- earlier dev install's loop and key: its code requires neither (the
+			-- stale loop would raise if started) and warns.
+			local stale = { start = function() error("a release build started the dev loop") end, version = function() end }
+			local ok, err = pcall(as_kind, "release", function()
+				local env = paired_driver({ ["Dev Server"] = "192.0.2.7:8080" })
+				package.loaded["common.devloop"] = stale
+				package.loaded["common.devkey"] = "stale"
+				if type(loop) == "table" then loop.host = "192.0.2.7:8080" end
+				local chunk = assert(loadfile("src/hue_bridge/driver.lua"))
+				setfenv(chunk, env)
+				chunk()
+				env.OnDriverInit("DIT_STARTUP")
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.is_nil(package.loaded["bridge.devtools"], "no development handler installed")
+			end)
+			package.loaded["common.devkey"] = nil
+			package.loaded["common.devloop"] = nil
+			if type(loop) == "table" then loop.host = host end
+			assert(ok, err)
+			assert.equal(1, #warned)
+			assert.truthy(warned[1]:find("release build, but common.devloop, common.devkey", 1, true), warned[1])
+			assert.truthy(warned[1]:find("Director kept the Lua state of an earlier install", 1, true), warned[1])
+			if type(loop) == "table" then
+				assert.truthy(warned[1]:find("a running dev loop", 1, true), warned[1])
+			end
+		end)
+	end)
+
 	it("leaves the dev loop alone when Dev Server is empty", function()
 		local devloop = require("common.devloop")
 		local env = paired_driver()
@@ -526,14 +639,16 @@ describe("Hue Bridge driver", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Reload Credentials" })
+		-- #484 (C-2): a signed dev loop command or Diagnostics' (dev) entry,
+		-- no longer a plain ExecuteCommand.
+		signed("Reload Credentials")
 		assert.equal("Stored credentials readable and match memory", env.Properties["Status"])
 		local text = table.concat(lines, "\n")
 		assert.truthy(text:find("key present (6 chars)", 1, true))
 		assert.is_nil(text:find("abc123", 1, true), "the key itself is never logged")
 
 		c4.PersistGetValue = function() return nil end
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Reload Credentials" })
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:reload_credentials" })
 		assert.truthy(env.Properties["Status"]:find("NOT readable", 1, true))
 	end)
 
@@ -577,7 +692,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Check CA Pinning" })
+		signed("Check CA Pinning") -- #484 (C-2): signed only, or Diagnostics' (dev) entry
 		c4.last_transfer():respond(200, "<html>")
 		assert.equal(SHIPPED, c4.last_transfer().options.ssl_cabundle)
 		c4.last_transfer():done(60, "SSL peer certificate or SSH remote key was not OK")
@@ -590,7 +705,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Check CA Pinning" })
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:check_pinning" }) -- #484
 		c4.last_transfer():respond(200, "<html>")
 		c4.last_transfer():done(28, "Timeout was reached")
 		assert.equal("Pinning check inconclusive: example.com failed with the bundle for a reason other than its "
@@ -604,7 +719,8 @@ describe("Hue Bridge driver", function()
 		local own = c4.last_transfer()
 		assert.equal(STREAM_URL, own.url)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connection Test", Target = "Bridge" })
+		-- #484 (C-2): Diagnostics' (dev) entry, or a signed command; no plain ExecuteCommand.
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:connection_test:bridge" })
 		assert.is_true(own.cancelled, "driver's own stream stopped for the test")
 		local test_stream = c4.last_transfer()
 		assert.equal(DOTTED_STREAM_URL, test_stream.url, "the experiment deliberately shares the command queue")
@@ -631,11 +747,12 @@ describe("Hue Bridge driver", function()
 		local env, c4 = paired_driver()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connection Test", Target = "Diagnostic Server" })
+		-- #484 (C-2): signed only, or Diagnostics' (dev) entry.
+		signed("Connection Test", { Target = "Diagnostic Server" })
 		assert.truthy(env.Properties["Status"]:find("^Set the Diagnostic Server property"))
 
 		env.Properties["Diagnostic Server"] = " 192.0.2.7:8443 "
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connection Test", Target = "Diagnostic Server" })
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:connection_test:server" })
 		local t = c4.last_transfer()
 		assert.equal("https://192.0.2.7:8443/stream", t.url)
 		assert.is_false(t.options.ssl_verify_peer, "diagnostic server is self-signed")
@@ -882,6 +999,8 @@ describe("Hue Bridge driver", function()
 			local s = c4.last_transfer()
 			assert.equal(STREAM_URL, s.url)
 			s:respond(403, "<html>unauthorized</html>")
+			c4.advance(1) -- #490 (N-6): the bridge's identity again, unkeyed, before the lock
+			answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"])
 			assert.equal("Stopped: key rejected (HTTP 403)", env.Properties["Event Stream"])
 			local count = #c4.transfers
@@ -902,11 +1021,14 @@ describe("Hue Bridge driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			answer_check(c4)
 			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			c4.advance(1) -- #490 (N-6): the bridge's identity again, unkeyed, before the lock
+			answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"])
 			local count = #c4.transfers
 			c4.advance(299 * 1000)
 			assert.equal(count, #c4.transfers, "nothing before 5 minutes")
 			c4.advance(2000)
+			answer_identity(c4) -- #490 (N-6): and again before each re-check sends the key
 			local t = c4.last_transfer()
 			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
 			assert.equal("abc123", t.headers["hue-application-key"], "the re-check carries the key it tests")
@@ -916,6 +1038,7 @@ describe("Hue Bridge driver", function()
 			c4.advance(899 * 1000)
 			assert.equal(count, #c4.transfers, "the second check waits 15 minutes")
 			c4.advance(2000)
+			answer_identity(c4)
 			t = c4.last_transfer()
 			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
 			t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
@@ -925,14 +1048,51 @@ describe("Hue Bridge driver", function()
 			assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true), "the stream starts again")
 		end)
 
+		it("#490 (N-6): does not lock the key when another bridge answers at the address", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			c4.advance(1)
+			answer_identity(c4, "001788FFFE999999")
+			assert.truthy(env.Properties["Status"]:find("reports ID 001788fffe999999", 1, true), env.Properties["Status"])
+			local count = #c4.transfers
+			c4.advance(3600 * 1000)
+			for i = count + 1, #c4.transfers do
+				assert.is_nil(c4.transfers[i].headers["hue-application-key"], "nothing keyed to the other bridge")
+			end
+		end)
+
 		it("never re-checks a key that a re-check found refused at another bridge id", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")
 			answer_check(c4)
 			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			c4.advance(1) -- #490 (N-6)
+			answer_identity(c4)
 			c4.advance(301 * 1000)
+			answer_identity(c4)
 			c4.last_transfer():respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe999999"}]}')
 			assert.equal(KEY_STATUS, env.Properties["Status"], "a different bridge id does not lift the lock")
+		end)
+
+		-- #490 (N-6): the hourly re-check sends the key only to the paired bridge.
+		it("re-checks a rejected key only once the paired bridge answered at the address again, unkeyed", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			c4.advance(1)
+			answer_identity(c4)
+			assert.equal(KEY_STATUS, env.Properties["Status"])
+			local count = #c4.transfers
+			c4.advance(301 * 1000)
+			local t = c4.last_transfer()
+			assert.truthy(t.url:find("/api/0/config", 1, true), "first the identity, unkeyed")
+			answer_identity(c4, "001788FFFE999999")
+			for i = count + 1, #c4.transfers do
+				assert.is_nil(c4.transfers[i].headers["hue-application-key"], "the key never went to the other bridge")
+			end
 		end)
 
 		it("treats a keyed request answered 403 as a rejected key and starts no stream", function()
@@ -942,8 +1102,10 @@ describe("Hue Bridge driver", function()
 			local check = c4.last_transfer()
 			assert.equal(CHECK_URL, check.url)
 			check:respond(403, "<html>unauthorized</html>")
+			c4.advance(1) -- #490 (N-6)
+			local identity = answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"])
-			assert.equal(check, c4.last_transfer(), "no stream on a rejected key")
+			assert.equal(identity, c4.last_transfer(), "no stream on a rejected key")
 		end)
 
 		-- #246: the stream address self-check's 401 or 403 rebuilt the stream
@@ -958,6 +1120,8 @@ describe("Hue Bridge driver", function()
 					local check = c4.last_transfer()
 					assert.equal(CHECK_URL, check.url)
 					check:respond(code, "<html>unauthorized</html>")
+					c4.advance(1) -- #490 (N-6)
+					check = answer_identity(c4)
 					assert.equal(REJECTED, env.Properties["Event Stream"])
 					assert.equal(KEY_STATUS:gsub("403", tostring(code)), env.Properties["Status"])
 					c4.fire_timers() -- the rows' coalescing timer: nothing waiting overwrites it
@@ -972,6 +1136,7 @@ describe("Hue Bridge driver", function()
 
 					-- The re-check of D8 still runs 5 minutes later, and its 200 lifts the stop.
 					c4.advance(301 * 1000)
+					answer_identity(c4) -- #490 (N-6): the identity first, unkeyed
 					local t = c4.last_transfer()
 					assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
 					t:respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
@@ -1106,6 +1271,200 @@ describe("Hue Bridge driver", function()
 			for item in tostring(c4.property_lists["Lights"] or ""):gmatch("[^,]+") do
 				assert.is_nil(item:find("%c"), item)
 			end
+		end)
+	end)
+
+	-- docs/security-fixes-2026-11-design.md, the bridge's rows.
+	describe("security fixes of 2026-11-13 (#484 to #493)", function()
+		local LIGHT_URL = "https://192.0.2.10/clip/v2/resource/light/"
+		local CAPS = { has_color = true, has_cct = true, mirek_min = 153, mirek_max = 500, min_dim = 0.2 }
+
+		-- Paired, its identity and TLS checked, with two lights in the
+		-- registry: rid-1 linked (device 2004, bound) and rid-2 gone in Hue.
+		local function with_lights(extra)
+			local env, c4 = paired_driver(extra)
+			c4.persist.hue_lights = {
+				["rid-1"] = { device_id = 2004, name = "Desk Lamp", model = "Hue color lamp", caps = CAPS },
+				["rid-2"] = { device_id = 2006, name = "Old Lamp", model = "Hue color lamp", caps = CAPS, state = "gone",
+					gone_since = 1700000000 },
+			}
+			c4:Bind(2004, 5001, 2005, 5001, "LIGHT_V2")
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			return env, c4
+		end
+
+		-- The PUTs to the light path from transfer `from` on, as { rid, body, data }.
+		local function light_puts(c4, from)
+			local out = {}
+			for i = from or 1, #c4.transfers do
+				local t = c4.transfers[i]
+				if t.method == "PUT" and t.url:find(LIGHT_URL, 1, true) == 1 then
+					out[#out + 1] = { rid = t.url:sub(#LIGHT_URL + 1), body = c4:JsonDecode(t.data), data = t.data }
+				end
+			end
+			return out
+		end
+
+		it("refuses a device message whose rid is no resource id, before the registry or a request sees it (#485)",
+			function()
+				local env, c4 = with_lights()
+				local n, sent = #c4.transfers, #c4.sent
+				local bad = { "x/../../grouped_light/g1", "rid-1?x=1", "rid 1", "rid-1\n", ("a"):rep(65) }
+				for _, rid in ipairs(bad) do
+					for _, command in ipairs({ "HUE_HELLO", "HUE_SET", "HUE_DIM", "HUE_GOODBYE", "HUE_SCENE_RECALL",
+						"HUE_MOTION_HELLO", "HUE_LOAD_GROUPS" }) do
+						env.ExecuteCommand(command, { rid = rid, device_id = "2004", on = "true", direction = "up",
+							groups = "4001:0" })
+					end
+				end
+				c4.advance(1000)
+				assert.same({}, light_puts(c4, n + 1), "no request")
+				assert.equal(sent, #c4.sent, "no answer to any device")
+				for rid in pairs(c4.persist.hue_lights) do
+					assert.truthy(rid == "rid-1" or rid == "rid-2", rid)
+				end
+				assert.is_nil(c4.persist.hue_tombstones and next(c4.persist.hue_tombstones), "nothing tombstoned")
+
+				-- The same message with the light's own rid still works.
+				env.ExecuteCommand("HUE_SET", { rid = "rid-1", on = "true" })
+				c4.advance(100)
+				assert.equal(1, #light_puts(c4, n + 1))
+			end)
+
+		it("sets and dims linked lights only, never one gone in Hue (#485)", function()
+			local lines = {}
+			log.sink = function(line) lines[#lines + 1] = line end
+			local env, c4 = with_lights()
+			local n = #c4.transfers
+			env.ExecuteCommand("HUE_SET", { rid = "rid-2", on = "true" })
+			env.ExecuteCommand("HUE_DIM", { rid = "rid-2", direction = "up", duration = "5000" })
+			env.ExecuteCommand("HUE_SET", { rid = "rid-9", on = "true" })
+			c4.advance(1000)
+			assert.same({}, light_puts(c4, n + 1))
+			local text = table.concat(lines, "\n")
+			assert.truthy(text:find("HUE_SET for gone light rid-2", 1, true), text)
+			assert.truthy(text:find("HUE_DIM for gone light rid-2", 1, true), text)
+			assert.truthy(text:find("HUE_SET for unknown light rid-9", 1, true), text)
+		end)
+
+		it("sends no NaN, infinity or endless ramp in a light's PUT (#486)", function()
+			local env, c4 = with_lights()
+			local n = #c4.transfers
+			env.ExecuteCommand("HUE_SET", { rid = "rid-1", on = "true", brightness = "nan", x = "inf", y = "0.3",
+				mirek = "-inf", rate = "1e400" })
+			c4.advance(100)
+			local puts = light_puts(c4, n + 1)
+			assert.equal(1, #puts)
+			assert.same({ on = { on = true } }, puts[1].body, "every number that is not finite dropped")
+			assert.is_nil(puts[1].data:lower():find("nan", 1, true))
+			assert.is_nil(puts[1].data:lower():find("inf", 1, true))
+			c4.transfers[#c4.transfers]:respond(200, '{"errors":[],"data":[]}')
+
+			n = #c4.transfers
+			env.ExecuteCommand("HUE_SET", { rid = "rid-1", brightness = "50", rate = "1e15" })
+			c4.advance(100)
+			puts = light_puts(c4, n + 1)
+			assert.equal(6000000, puts[1].body.dynamics.duration, "a rate is at most 100 minutes, as the scenes'")
+			c4.transfers[#c4.transfers]:respond(200, '{"errors":[],"data":[]}')
+
+			n = #c4.transfers
+			env.ExecuteCommand("HUE_DIM", { rid = "rid-1", direction = "up", duration = "inf" })
+			c4.advance(100)
+			puts = light_puts(c4, n + 1)
+			assert.same({ dimming_delta = { action = "up", brightness_delta = 100 } }, puts[1].body,
+				"an infinite duration is no duration")
+		end)
+
+		it("shows the bridge's model and firmware without control characters, capped (#489)", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			local t = c4.last_transfer()
+			assert.truthy(t.url:find("/api/0/config", 1, true))
+			local junk = ("x"):rep(500)
+			t:respond(200, '{"bridgeid":"001788FFFE25B8F8","modelid":"BSB0\\u001b[31m03' .. junk .. '","name":"Hue",'
+				.. '"swversion":"1968096020\\u0007' .. junk .. '","apiversion":"1.68.0\\n"}')
+			for _, row in ipairs({ "Bridge Model", "Bridge Firmware" }) do
+				local value = env.Properties[row]
+				assert.is_nil(value:find("%c"), row .. ": " .. value)
+				assert.truthy(#value <= 100, row .. " is " .. #value .. " bytes")
+			end
+		end)
+
+		describe("Debug Mode turns itself Off after 8 hours (#493)", function()
+			local HOURS_8 = 8 * 3600 * 1000
+
+			-- The active timer armed for `delay` ms (Debug Mode's; no other timer
+			-- of the bridge runs that long).
+			local function debug_timer(c4, delay)
+				local found
+				for _, timer in ipairs(c4.active_timers()) do
+					if timer.delay == delay then found = timer end
+				end
+				return found
+			end
+
+			local function fire(timer)
+				timer.active = false
+				timer.callback(timer, 0)
+			end
+
+			after_each(function() log.set_debug(false) end)
+
+			it("keeps the deadline, turns itself Off with a Last Action, and On again starts 8 new hours", function()
+				local env, c4 = with_lights()
+				assert.is_nil(c4.persist.debug_mode_until)
+				env.Properties["Debug Mode"] = "On"
+				env.OnPropertyChanged("Debug Mode")
+				assert.is_true(log.enabled("debug"))
+				assert.equal(c4.now_ms + HOURS_8, c4.persist.debug_mode_until, "the deadline is what is kept")
+				local timer = debug_timer(c4, HOURS_8)
+				assert.is_not_nil(timer)
+
+				c4.now_ms = c4.now_ms + HOURS_8
+				fire(timer)
+				assert.equal("Off", env.Properties["Debug Mode"])
+				assert.is_false(log.enabled("debug"))
+				assert.is_nil(c4.persist.debug_mode_until)
+				assert.equal("Debug Mode turned itself Off after 8 hours", fake.last_action(env))
+
+				env.Properties["Debug Mode"] = "On"
+				env.OnPropertyChanged("Debug Mode")
+				assert.equal(c4.now_ms + HOURS_8, c4.persist.debug_mode_until)
+				env.Properties["Debug Mode"] = "Off"
+				env.OnPropertyChanged("Debug Mode")
+				assert.is_nil(c4.persist.debug_mode_until, "Off forgets the deadline")
+				assert.is_nil(debug_timer(c4, HOURS_8))
+			end)
+
+			it("keeps the time that is left across a restart", function()
+				local env, c4 = paired_driver({ ["Debug Mode"] = "On" })
+				c4.persist.debug_mode_until = c4.now_ms + 3600 * 1000
+				env.OnDriverLateInit("DIT_STARTUP")
+				assert.is_true(log.enabled("debug"))
+				assert.is_not_nil(debug_timer(c4, 3600 * 1000), "an hour was left")
+				assert.equal("On", env.Properties["Debug Mode"])
+			end)
+
+			it("turns itself Off at the start when its time ran out meanwhile; no time, or one too far, is 8 hours",
+				function()
+					for _, stored in ipairs({ "past", "nan", "1e400", "far" }) do
+						local env, c4 = paired_driver({ ["Debug Mode"] = "On" })
+						local value = ({ past = c4.now_ms - 1, nan = "nan", ["1e400"] = "1e400",
+							far = c4.now_ms + 100 * HOURS_8 })[stored]
+						c4.persist.debug_mode_until = value
+						env.OnDriverLateInit("DIT_STARTUP")
+						if stored == "past" then
+							assert.equal("Off", env.Properties["Debug Mode"], stored)
+							assert.is_false(log.enabled("debug"), stored)
+							assert.truthy(fake.last_action(env):find("^Debug Mode turned itself Off after 8 hours"), stored)
+						else
+							assert.equal(c4.now_ms + HOURS_8, c4.persist.debug_mode_until, stored)
+							assert.is_not_nil(debug_timer(c4, HOURS_8), stored)
+						end
+						log.set_debug(false)
+					end
+				end)
 		end)
 	end)
 
@@ -1313,6 +1672,8 @@ describe("Hue Bridge driver", function()
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh Scenes" })
 			c4.transfers[before + 1]:respond(403, "<html>forbidden</html>")
 			c4.last_transfer():respond(403, "<html>forbidden</html>")
+			c4.advance(1) -- #490 (N-6)
+			answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"], "the bridge resource refused too: locked")
 		end)
 
@@ -1321,6 +1682,8 @@ describe("Hue Bridge driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			answer_check(c4)
 			c4.last_transfer():respond(403, "<html>unauthorized</html>")
+			c4.advance(1) -- #490 (N-6)
+			answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"])
 			local count = #c4.transfers
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
@@ -1867,8 +2230,17 @@ describe("Hue Bridge driver", function()
 			local lines = {}
 			local env, c4 = house()
 			local w = world(c4)
-			local long = ("Garage White "):rep(39) .. "Garage White"
-			w.bodies = { light = (F.light:gsub("Garage White", long)), device = (F.device:gsub("Garage White", long)),
+			-- Three long names, each under the 256 bytes a name keeps in a row
+			-- (#489 C-4, util.sanitise), make the text longer than six rows.
+			local longs = { ["Garage White"] = ("Garage White "):rep(18) .. "Garage White",
+				["Hallway Ambiance"] = ("Hallway Ambiance "):rep(13) .. "Hallway Ambiance",
+				["Kitchen Strip"] = ("Kitchen Strip "):rep(16) .. "Kitchen Strip" }
+			local light, device = F.light, F.device
+			for name, long in pairs(longs) do
+				assert(#long < 256, name)
+				light, device = light:gsub(name, long), device:gsub(name, long)
+			end
+			w.bodies = { light = light, device = device,
 				zigbee_connectivity = F.zigbee_connectivity, room = F.room, zone = F.zone, bridge_home = F.bridge_home }
 			log.sink = function(line) lines[#lines + 1] = line end
 			env.OnDriverLateInit("DIT_STARTUP")
@@ -1880,7 +2252,9 @@ describe("Hue Bridge driver", function()
 				if line:find("Hue Bridge: Attention: 4 new lights on the bridge: ", 1, true) == 1 then full = line end
 			end
 			assert.truthy(full, "the whole Attention text in the Lua output")
-			assert.truthy(full:find(long, 1, true), full)
+			for _, long in pairs(longs) do
+				assert.truthy(full:find(long, 1, true), full)
+			end
 		end)
 
 		describe("Bridges Found", function()

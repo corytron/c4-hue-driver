@@ -1640,6 +1640,34 @@ describe("bridge.hue_model", function()
 			assert.is_nil(hue_model.resource_id(nil))
 		end)
 
+		-- Security review 2026-11-13 D-2 (#485): every device message's rid
+		-- passes here, and goes into log lines, rows and the store.
+		it("takes at most 64 bytes; a Hue id is a 36-character UUID", function()
+			assert.equal(64, hue_model.RID_MAX)
+			assert.equal(("a"):rep(64), hue_model.resource_id(("a"):rep(64)))
+			assert.is_nil(hue_model.resource_id(("a"):rep(65)))
+			assert.is_nil(hue_model.resource_id(("a"):rep(1000000)))
+		end)
+
+		-- Security review 2026-11-13 C-3 (#486): a decoder may make "1e999" infinite.
+		it("update() takes no level, colour or limit that is not finite", function()
+			local light = {}
+			hue_model.update(light, { dimming = { brightness = math.huge, min_dim_level = 0 / 0 },
+				color = { xy = { x = -math.huge, y = 0.3 } },
+				color_temperature = { mirek = math.huge, mirek_valid = true,
+					mirek_schema = { mirek_minimum = 0 / 0, mirek_maximum = math.huge } } })
+			assert.is_nil(light.brightness)
+			assert.is_nil(light.min_dim)
+			assert.is_nil(light.x)
+			assert.is_nil(light.mirek)
+			assert.is_nil(light.mirek_min)
+			assert.is_nil(light.mirek_max)
+			local params = hue_model.group_configure_params("g-1", { name = "Kitchen", group_type = "room",
+				light_count = math.huge, caps = { mirek_min = 0 / 0 } })
+			assert.is_nil(params.light_count, "no \"%d\" of infinity")
+			assert.is_nil(params.mirek_min)
+		end)
+
 		it("light() drops an item whose id is not a resource id, or no table", function()
 			local item = by_rid(items(F.light))[F.rids.living]
 			each_junk("light", function(id) assert.is_nil(hue_model.light(with_id(item, id))) end)

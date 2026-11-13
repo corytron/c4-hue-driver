@@ -137,6 +137,12 @@ conclusive answer.
   dispatch name, else the driver's `ExecuteCommand`
   (`src/common/devloop.lua:execute`,
   `src/hue_bridge/bridge/devtools.lua:install`).
+  Current (2026-11-13, #484): 1.2 had put `Connection Test`, `Reload
+  Credentials`, `Check CA Pinning` and `Probe Picker Folders` back in
+  `dispatch.commands` when it moved the dev actions into Diagnostics; the
+  security review of 2026-11-13 (C-2) found it, and they are signed-only
+  again, the first three also reachable from Diagnostics' "(dev)" entries
+  through a private table (`docs/security-fixes-2026-11-design.md`).
 - `Probe Call` refuses `PersistGetValue`, `PersistSetValue` and
   `PersistDeleteValue` (any `Persist*`) whose first argument names one of the
   credential store's names (read them from `bridge/credentials.lua`, do not
