@@ -14,6 +14,8 @@ follows it.
 
 ## Unreleased
 
+## 1.8 "B2EMO", build 644 (2026-11-13)
+
 ### Fixed
 - A Hue Scene that is on no longer shows 100 % for a few seconds after
   the driver reloads (an update or a controller restart): it shows the

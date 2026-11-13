@@ -9,7 +9,12 @@ present, this page and the code win. Brought up to date on 2026-11-13
 
 ## Now (2026-11-13)
 
-- **Latest release: 1.7 "Clem", build 636**, released 2026-11-13
+- **Latest release: 1.8 "B2EMO", build 644**, released 2026-11-13
+  ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.8),
+  #509): a Hue Scene that is on shows its last level after a reload instead of
+  100 until the bridge reports (#505). Lua only, no reboot. Its install on
+  the house is in progress (`deploy/house.yaml` names v1.8, build 644).
+- **Before it: 1.7 "Clem", build 636**, released 2026-11-13
   ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.7),
   #500): the fixes of the security review of 2026-11-13 (#480, PR #496,
   issues #481 to #493). What owners notice: Debug Mode turns itself Off
