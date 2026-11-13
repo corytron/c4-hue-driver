@@ -354,6 +354,8 @@ end
 
 local function load_held()
 	held_on = to_bool(C4:PersistGetValue("held_on")) == true
+	-- #505: the level shown after a reload until the bridge reports one.
+	st.level_saved = num.int(C4:PersistGetValue("last_level"), 1, 100)
 end
 
 -- A status from the bridge: an active one holds an ordinary scene on. (A
@@ -372,6 +374,32 @@ local function whole_percent(v)
 	return math.max(1, math.min(100, math.floor(v + 0.5)))
 end
 
+-- #505: the last level the bridge reported, saved when the level reports'
+-- window closes on a settled level (once per ramp, not once per report), so
+-- a reload shows it instead of 100 until the bridge answers.
+local function save_level()
+	local v = st.level and whole_percent(st.level) or nil
+	if v and v ~= st.level_saved then
+		st.level_saved = v
+		C4:PersistSetValue("last_level", v)
+	end
+end
+
+-- #505: a re-linked scene's saved level goes with its other state.
+local function forget_saved_level()
+	if st.level_saved ~= nil then
+		st.level_saved = nil
+		C4:PersistDeleteValue("last_level") -- an empty value would not remove it [verified: API 26.5]
+	end
+end
+
+-- The level shown while the scene is on: the bridge's last report, else the
+-- one saved before a reload (#505), else 100 (none ever known).
+local function shown_level()
+	local level = st.level or st.level_saved
+	return level and whole_percent(level) or 100
+end
+
 -- LIGHT_BRIGHTNESS_CURRENT: the group's level while the scene is on (100
 -- while none is known yet), 0 while off, nil until the bridge has reported
 -- (or a hold turned it on, or held_on came back from a restart). The room's
@@ -384,7 +412,7 @@ local function brightness()
 	if not effective_on() then
 		return 0
 	end
-	return st.level and whole_percent(st.level) or 100
+	return shown_level()
 end
 
 -- Keypad LEDs ----------------------------------------------------------------
@@ -418,7 +446,7 @@ local function keypad_level()
 	if on == nil then
 		return nil
 	end
-	return on and (st.level and whole_percent(st.level) or 100) or 0
+	return on and shown_level() or 0
 end
 
 -- The report_* functions return true when they had something to report.
@@ -473,6 +501,8 @@ local function open_level_window()
 		if w.dirty and brightness() ~= last_reported then
 			report_brightness()
 			open_level_window()
+		else
+			save_level() -- #505: the level has settled
 		end
 	end)
 	level_window = w
@@ -1451,6 +1481,7 @@ local function drop_scene_state(gone)
 		return
 	end
 	st.active, st.level = nil, nil
+	forget_saved_level()
 	if busy then
 		report_known(from)
 	end

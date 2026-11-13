@@ -2078,6 +2078,67 @@ describe("Hue Scene driver", function()
 				assert.same(leds(false), { all[4], all[5], all[6] })
 			end)
 
+			-- #505: after a reload the tile showed 100 until the bridge reported
+			-- the room's level (house, 2026-11-13: Shine read 100, then 17, 5 s
+			-- apart). The last level the bridge reported is saved once it has
+			-- settled, and shown until the bridge answers.
+			it("saves the bridge's level once it has settled, one write per ramp (#505)", function()
+				local env, c4 = known_scene("static")
+				group(env, { level = "50" })
+				assert.is_nil(c4.persist.last_level, "not while the level reports' window is open")
+				for _, level in ipairs({ "55", "61", "70" }) do
+					group(env, { level = level })
+				end
+				fire(c4, 1000) -- the window ends dirty: the latest goes out, a new window opens
+				assert.is_nil(c4.persist.last_level, "still moving")
+				fire(c4, 1000) -- quiet for a whole window: settled
+				assert.equal(70, c4.persist.last_level)
+				local writes = 0
+				for _, args in ipairs(c4.calls_to("PersistSetValue")) do
+					if args[1] == "last_level" then writes = writes + 1 end
+				end
+				assert.equal(1, writes, "one write for the whole ramp")
+			end)
+
+			it("shows the saved level after a reload instead of 100, until the bridge reports (#505)", function()
+				local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+				c4.persist.hue_rid = "s1"
+				c4.persist.held_on = true
+				c4.persist.last_level = 17
+				env.OnDriverLateInit("DIT_STARTUP")
+				configure(env)
+				state(env, "inactive", { reason = "hello" })
+				group(env, { on = "true", level = "17" })
+				assert.same({ 17 }, changed(c4), "never 100: the saved level, and the bridge's is the same")
+				group(env, { level = "30" })
+				assert.same({ 17, 30 }, changed(c4))
+			end)
+
+			it("ignores a saved level that is not a level, and shows 100 as before (#505)", function()
+				for _, bad in ipairs({ "x", 0, 250, "nan" }) do
+					local env, c4 = fake.load_driver("hue_scene", {}, { device_id = SCENE_ID })
+					c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
+					c4.persist.hue_rid = "s1"
+					c4.persist.held_on = true
+					c4.persist.last_level = bad
+					env.OnDriverLateInit("DIT_STARTUP")
+					configure(env)
+					state(env, "inactive", { reason = "hello" })
+					assert.same({ 100 }, changed(c4), tostring(bad))
+				end
+			end)
+
+			it("forgets the saved level when the device is linked to another scene (#505)", function()
+				local env, c4 = known_scene("static")
+				group(env, { level = "40" })
+				fire(c4, 1000)
+				assert.equal(40, c4.persist.last_level)
+				relink(env, c4, { rid = "s2" })
+				assert.is_nil(c4.persist.last_level)
+				assert.equal(1, #c4.calls_to("PersistDeleteValue"))
+			end)
+
 			it("is not set by a fallback's assumption: a later inactive report still turns the tile off", function()
 				local env, c4 = known_scene("inactive")
 				env.ReceivedFromProxy(5001, "ON", {})
