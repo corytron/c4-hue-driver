@@ -1,0 +1,51 @@
+-- common/num.lua: finite numbers, ranges and safe dates (#486, #487).
+package.path = "src/?.lua;" .. package.path
+local num = require("common.num")
+
+describe("common.num", function()
+	local nan, inf = 0 / 0, math.huge
+
+	it("finite takes numbers and numeric strings and refuses NaN, infinity and the rest", function()
+		assert.equal(3.5, num.finite(3.5))
+		assert.equal(42, num.finite("42"))
+		assert.is_nil(num.finite(nan))
+		assert.is_nil(num.finite(inf))
+		assert.is_nil(num.finite(-inf))
+		assert.is_nil(num.finite("nan"))
+		assert.is_nil(num.finite("inf"))
+		assert.is_nil(num.finite("x"))
+		assert.is_nil(num.finite({}))
+		assert.is_nil(num.finite(nil))
+	end)
+
+	it("within refuses out of range and returns the default", function()
+		assert.equal(5, num.within(5, 0, 10))
+		assert.equal(7, num.within(11, 0, 10, 7))
+		assert.is_nil(num.within(-1, 0, nil))
+		assert.equal(1e9, num.within(1e9, 0, nil))
+		assert.equal(2, num.within(nan, 0, 10, 2))
+	end)
+
+	it("clamp clamps finite numbers and defaults the rest", function()
+		assert.equal(10, num.clamp(99, 0, 10))
+		assert.equal(0, num.clamp(-3, 0, 10))
+		assert.equal(4, num.clamp(inf, 0, 10, 4))
+		assert.equal(4, num.clamp("nan", 0, 10, 4))
+	end)
+
+	it("int rounds, then checks the range", function()
+		assert.equal(3, num.int(2.6, 1, 3))
+		assert.is_nil(num.int(3.6, 1, 3))
+		assert.equal(1, num.int("1.2", 1, 3))
+		assert.equal(9, num.int(nan, 1, 3, 9))
+	end)
+
+	it("date formats a sane time and falls back on an absurd one", function()
+		assert.equal(os.date("%Y-%m-%d", 1792998000), num.date("%Y-%m-%d", 1792998000))
+		assert.equal("?", num.date("%Y-%m-%d", 1e300))
+		assert.equal("?", num.date("%Y-%m-%d", -5))
+		assert.equal("-", num.date("%H:%M", nan, "-"))
+		assert.equal("?", num.date("%H:%M", "x"))
+		assert.equal(os.date("%Y"), num.date("%Y"))
+	end)
+end)

@@ -199,6 +199,11 @@ where the code later moved on.
 - [`review-leftovers-design.md`](review-leftovers-design.md) (contract):
   the fixes for the open findings of the reviews of 2026-10-22 and
   2026-10-24 (#43–#65).
+- [`security-fixes-2026-11-design.md`](security-fixes-2026-11-design.md)
+  (contract): the fixes for the security review of 2026-11-13 (#481 to
+  #493): one number and date helper, trust between drivers, rid checks,
+  parser and transfer limits, discovery, provenance, the install server,
+  and Debug Mode turning itself off.
 - [`security-fixes-design.md`](security-fixes-design.md) (contract): the
   fixes for the security review of 2026-10-25 (#217): the gate on keyed
   requests, the TLS verdict, the limit on open stream transfers, cleaned
