@@ -185,6 +185,18 @@ where the code later moved on.
   controller's clock alone; the decisions R1–R12 and the corner cases
   L1–L27.
 
+### HDMI sync boxes (2.0)
+
+- [`hdmi-sync-design.md`](hdmi-sync-design.md) (contract, proposed, for the
+  owner's review): the 2.0 design: the Hue Sync Box driver as a Control4
+  HDMI switch, entertainment areas owned by the box, lights while their
+  lamps stream, pairing and identity, testing and the release train, and
+  the owner's questions (#514).
+- [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) (contract, proposed):
+  the box driver's `driver.xml`, the box's API as used and the state model,
+  the Lua modules, AV routing, the bridge ↔ box messages, the bridge's and
+  the light devices' changes, tests, build and release.
+
 ### Code health and security
 
 - [`driver-locals-design.md`](driver-locals-design.md) (contract, current
