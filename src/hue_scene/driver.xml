@@ -73,9 +73,24 @@
 				<readonly>false</readonly>
 				<tooltip>How Hue recalls the scene: as set in the Hue app, always static, or always the dynamic palette</tooltip>
 			</property>
-			<!-- What the tile and the keypad LEDs follow: the scene's room or zone
-			     lights as well as the scene, or the scene alone
-			     (docs/scene-led-design.md). -->
+			<!-- What a keypad bound to the scene treats as on (its LEDs, the toggle
+			     button, holds): the scene's room or zone lights as well as the
+			     scene, or the scene alone. The tile always follows the scene
+			     (docs/scene-tracking-design.md D9 to D12, #469). -->
+			<property>
+				<name>Keypad Follows</name>
+				<type>LIST</type>
+				<items>
+					<item>Room/zone lights</item>
+					<item>This scene</item>
+				</items>
+				<default>Room/zone lights</default>
+				<readonly>false</readonly>
+				<tooltip>What keypad buttons bound to this scene treat as on: any light of its room or zone, or this scene being active</tooltip>
+			</property>
+			<!-- Before #469: what Keypad Follows is now. Kept declared until 2.0 so
+			     its stored value can be copied once into Keypad Follows; hidden at
+			     late init and ignored (docs/scene-tracking-design.md D12). -->
 			<property>
 				<name>On State Follows</name>
 				<type>LIST</type>
@@ -85,7 +100,7 @@
 				</items>
 				<default>Room/zone lights</default>
 				<readonly>false</readonly>
-				<tooltip>What the tile and keypad LEDs show as on: the scene's room or zone lights being on, or this scene being active</tooltip>
+				<tooltip>Replaced by Keypad Follows; kept only to carry its value over</tooltip>
 			</property>
 			<property>
 				<name>Online</name>
