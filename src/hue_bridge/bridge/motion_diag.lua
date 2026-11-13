@@ -1520,7 +1520,7 @@ function motion_diag:run(cb)
 		local secs = math.floor((wait.at - now) / 1000 + 0.5)
 		local when = secs > 0 and string.format("start in %d seconds", secs) or "start now"
 		local ok, err = pcall(cb, true, self:scrub(string.format("Motion diagnostics %s: open this bridge's Lua tab "
-			.. "now. The pass and 10 minutes of events follow; copy them into the Beta feedback issue.", when), true))
+			.. "now. The pass and 10 minutes of events follow; copy them into a bug report.", when), true))
 		if not ok then
 			self:failed("run callback", err)
 		end
@@ -1603,8 +1603,8 @@ function motion_diag:end_capture(why)
 		table.remove(pieces)
 	end
 	cap.lines = cap.lines + self:write(pieces)
-	self:done(string.format("Motion diagnostics done: %s of events logged. Copy the Lua output into the Beta "
-		.. "feedback issue.", util.plural(cap.logged, "item")))
+	self:done(string.format("Motion diagnostics done: %s of events logged. Copy the Lua output into "
+		.. "a bug report.", util.plural(cap.logged, "item")))
 end
 
 -- Whether the capture runs; one that is past its time ends here (its timer

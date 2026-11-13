@@ -113,9 +113,9 @@ Items pane. Install all four from the same release.
 ### What it looks like in Composer Pro
 
 <!-- Pictures: the manual's (src/hue_bridge/www/img/), retaken with invented
-     names for #61 (docs/screenshots-plan.md). bridge-actions.png and
-     add-zone-light.png show the actions of 1.0 and stay out of this page
-     until they are retaken; never reference bridge-properties.png here
+     names for #61 (docs/screenshots-plan.md). The pictures of 1.0's actions,
+     which no page showed any more, were removed in #478; never reference
+     bridge-properties.png here
      (docs/licensing-research.md, P3). -->
 
 <img src="src/hue_bridge/www/img/light-properties.png" width="380" alt="A Hue Light device's Properties page"> <img src="src/hue_bridge/www/img/scene-properties.png" width="380" alt="A Hue Scene device's Properties page">

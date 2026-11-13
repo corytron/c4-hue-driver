@@ -375,6 +375,10 @@ is in the contracts, the issues and `status.md`.
 - [`reviews/diff-review-2026-10-25.md`](reviews/diff-review-2026-10-25.md):
   the read-only diff and efficiency review of the same branch against the
   refactor's rule that no owner-visible behaviour changes.
+- [`reviews/coherence-2026-11-13.md`](reviews/coherence-2026-11-13.md):
+  record. The documentation coherence review (#478): the contradictions,
+  stale statements and organisation fixed across the manuals, the front
+  page and `docs/`, and its follow-ups.
 - [`reviews/doc-accuracy-review-2026-10-25.md`](reviews/doc-accuracy-review-2026-10-25.md):
   the documentation accuracy pass (#231) at build 316, finding by finding,
   with the corrections applied under `doc-accuracy-design.md`.
