@@ -21,6 +21,37 @@ follows it.
   the same things, and no longer contradict each other or the drivers, for
   example on the number of drivers (four) and of the Hue Bridge's actions
   (ten) (#478).
+- Debug Mode turns itself back Off 8 hours after it was set to On, on the
+  Hue Bridge and on every Hue Light, Hue Scene and Hue Motion Sensor, and
+  that device's Last Action says so. A restart of the controller or the
+  driver keeps the time that is left; set it On again if support needs
+  more time (#493).
+- A development build shows `-dev` after the build number in Driver
+  Version, so it can no longer be mistaken for the release with the same
+  number (#492).
+- The Hue Bridge's manual and the project's security policy (SECURITY.md)
+  now say what another driver in the same Control4 project can do with
+  the Hue drivers (install only drivers you trust), and what the bridge's
+  automatic address follow-up relies on (#483, #491).
+
+### Fixed
+- Hardening from the security review of 2026-11-13: a Hue Light, Hue Scene
+  or Hue Motion Sensor ignores a message that names another Hue light,
+  scene or sensor than its own, and takes Control4's light and keypad
+  commands only on the connections meant for them. Numbers, dates, names
+  and identifiers that come from Hue, from Control4 or from another driver
+  are checked more strictly, and a value that does not fit is dropped
+  rather than passed on. Director no longer logs the messages between the
+  bridge and its devices unless Debug Mode is On (#483, #485, #486, #487,
+  #488, #493).
+- The search for bridges, the event stream and the requests to the bridge
+  have tighter limits: the search takes only answers from the local
+  network and looks for the paired bridge first, a bridge's details are
+  shown only once its identifier matches, an oversized event is dropped
+  and the bridge read again, a failing event stream keeps backing off
+  until the bridge has been read, and at most three requests to the bridge
+  run at once. The project's own install and release checks are stricter
+  too (#481, #482, #484, #489, #490).
 
 ## 1.6 "Kassa", build 624 (2026-11-13)
 

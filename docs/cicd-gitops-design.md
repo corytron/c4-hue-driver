@@ -89,6 +89,7 @@ parallel tool starts (default `nproc`; `JOBS=1` runs everything serially):
 | `house` | `python3 tools/deploy.py validate` (§6; offline: schema and value checks only) | `deploy/house.yaml` |
 | `changelog` | `python3 tools/changelog.py check --file CHANGELOG.md` | `CHANGELOG.md` against `docs/changelog-design.md` |
 | `links` | `python3 tools/check_links.py` | every link in every tracked Markdown file and in every driver's Documentation tab (`src/*/www/documentation.html`: three then, four since 1.1) resolves (files and heading anchors); `--unlinked` lists the documents `README.md` does not reach, for the owner's decision on what the front page links (never a failure) |
+| `doc-tabs` | `python3 tools/check_doc_tabs.py` (since 2026-11-13, #492; security review 2026-11-13, I-7), one process a file | every `src/*/www/*.html`: nothing runs or fetches from outside the package (no `script`, `iframe`, `frame`, `object`, `embed`, `applet`, `form`, `base` or `link` element, no meta refresh, no `on…=` attribute, no conditional comment; `src`, `srcset`, `background` and the other fetched addresses, and CSS `url()`, only relative paths inside `www/`; links only in-page, relative, `http`, `https` or `mailto`; no `@import`, `expression()` or `behavior`). `tools/build.sh` runs it again on each staged tab, the changelog filled in |
 
 `tools/setup-checks.sh` installs what the VM lacks into `~/.local/bin`
 without `sudo`. `ruff`, `zizmor` and `shellcheck-py` come from
@@ -135,8 +136,9 @@ Four jobs; **their `name:` strings are the required status checks on
    (§5.2) uploaded with the packages.
 3. `Tooling checks (shell, Python, XML, workflows)`: `tools/setup-checks.sh`
    then `tools/check.sh --strict --only shell python-lint python-test xml
-   powershell workflows house changelog links` (`changelog` since
-   2026-10-25, #255; `links` since 2026-10-25, #263). Needs `pwsh` (present on ubuntu-latest).
+   powershell workflows house changelog links doc-tabs` (`changelog` since
+   2026-10-25, #255; `links` since 2026-10-25, #263; `doc-tabs` since
+   2026-11-13, #492). Needs `pwsh` (present on ubuntu-latest).
 4. `Secrets and private data`: full-depth checkout, `tools/setup-checks.sh`,
    `tools/check.sh --strict --only secrets`.
 
@@ -315,6 +317,28 @@ by `release.yml` from this commit. What it can no longer do: push or move
 tags, replace the assets of any release, or sign provenance for files of its
 choosing.
 
+Current (2026-11-13, #492; security review 2026-11-13, I-3): four jobs. The
+luarocks tools, pinned by name and version but not by content, ran in the
+build job's checkout before the packager packed it; they now run in a job
+of their own, and the packaging job never installs them:
+
+- **tag** (`Check the tag and that it is built from main`; `contents:
+  read`): checkout and the tag check of §5.1, with `git` alone; its outputs
+  `tag` and `prerelease` feed the build job.
+- **test** (`Lint and test (Lua 5.1)`; `needs: tag`; `contents: read`): the
+  pinned rocks, `tools/check.sh --strict --only lua-lint lua-test
+  lua-limits`. It hands nothing on.
+- **build** (`Build the packages`; `needs: [tag, test]`; `contents: read`,
+  no `id-token`, no `GH_TOKEN`): a fresh full-depth checkout on a fresh
+  runner, `python3-lxml` from apt, the pinned packager, `tools/build.sh`,
+  the package and manifest checks, `SHA256SUMS.txt`, the notes and the
+  artifact, as before.
+- **publish**: unchanged (`needs: build`).
+
+What a compromised rock can still do: fail or falsify the tests. It can no
+longer touch what is packaged. The packager itself (§5.5) still runs where
+the packages are built.
+
 ### 5.5 Pinned build inputs
 
 Everything the CI and release jobs run is pinned, so that a new upstream
@@ -437,7 +461,8 @@ download`, and for provenance `gh attestation verify`, which needs gh
 repository from `gh repo view` or `--repo`. Subcommands:
 
 - `validate [--online]`: §6.
-- `start [--tag v1.0] [--supersede] [--note TEXT] [--no-attestation]`:
+- `start [--tag v1.0] [--supersede] [--note TEXT]` (`--no-attestation`
+  until 2026-11-13, below):
   resolves the tag (default `release:` from `house.yaml`), downloads
   `manifest.json`, `SHA256SUMS.txt` and the three packages from the
   release into `build/release/<tag>/`
@@ -506,6 +531,44 @@ session to install all four at once; it also tells it to answer Yes to
 packages, when the house runs a newer dev or feature-branch build (#365).
 `done` and `record` exit 3 too when drift remains after them.
 
+Current (2026-11-13, #482; security review 2026-11-13, I-2 and I-9): the
+provenance is tied to `main` and to the tag's commit, so neither a tag
+pushed on a commit off `main` (whose own `release.yml` may lack the check of
+§5.1) nor an older release's genuine packages swapped in under this tag's
+manifest pass `start`:
+
+- the manifest must name exactly this tag and say `dev: false` (a VM build
+  between releases names no tag; a hand-made manifest may leave `dev` out);
+  `done` checks the same before it records success;
+- the tag's commit must be on `main`: `GET
+  repos/{o}/{r}/compare/<commit>...main?per_page=1` answers `identical` or
+  `ahead`, with the commit as the merge base;
+- every package must carry an attestation (`--no-attestation` is removed:
+  every release since attestations exist carries them), and `gh
+  attestation verify <file> --repo <o>/<r> --signer-workflow
+  <o>/<r>/.github/workflows/release.yml --source-digest <commit>
+  --signer-digest <commit> --deny-self-hosted-runners --format json` must
+  pass (flags read from gh 2.103.2's `--help`). `--source-ref` is not
+  passed: it takes one value, and a release may come from "Run workflow" on
+  `main` (`refs/heads/main`, every release since 2026-10-25, v1.6 among
+  them) or from its pushed tag (`refs/tags/<tag>`). Instead `start` checks
+  each verified certificate itself: its SAN is
+  `https://github.com/<o>/<r>/.github/workflows/release.yml@` followed by
+  one of those two refs, its `sourceRepositoryRef` one of them, and its
+  `sourceRepositoryDigest` the commit. The brief prints the same command.
+
+Current (2026-11-13, #492; security review 2026-11-13, I-4): a development
+or feature-branch build is never recorded as the release.
+`record --no-manifest`, or `record --build N-dev` (the `Driver Version` a
+dev build shows, `<N>-dev`), records `payload.dev: true`, no package hash
+and only `--commit`'s commit, whatever N is; without either, `record` wants
+the release's manifest with this tag, `dev: false` and build N. `status` and
+`drift` count an observed deployment with `payload.dev: true` as drift
+(§7.1), and the brief has the session report a `Driver Version` ending in
+`-dev` and a `Dev Server` row on the bridge. Out-of-band packages reach the
+Windows VM through `tools/serve_install.py` (#481): only the named files,
+under a random path, until each was downloaded.
+
 Current (2026-10-25, build 316): `start` also refuses while a deployment
 is `queued` or has no status yet, and `deployment.json` also holds
 `commit`, `repo`, `environment`, `environment_page`, `packages` and
@@ -519,7 +582,9 @@ and runs the drift logic as `done` does (`tools/deploy.py:cmd_start`,
 
 Desired: `house.yaml` (`release`, `build`). Observed: the newest `success`
 deployment's payload (`tag`, `build`); none counts as drift. Drift when
-`build` differs or `tag` differs.
+`build` differs or `tag` differs, or (since 2026-11-13, #492) the payload
+says `dev: true`: a development build is off the release whatever its
+number, and the issue body calls it "a development build".
 
 With `--issue` (needs `issues: write`; in the workflow `GH_TOKEN` is
 `GITHUB_TOKEN`):
@@ -614,8 +679,11 @@ needed: `done --deployment ID` takes the id from the deployment list;
 `deploy.py` run from any branch or a dirty checkout → unaffected, it reads
 GitHub, not the tree (except `house.yaml`); a package whose attestation a
 workflow other than `release.yml` signed, or a `gh` too old to tell
-(before 2.102.0) → `start` refuses before the deployment exists, with or
-without `--no-attestation` (§7).
+(before 2.102.0) → `start` refuses before the deployment exists (§7); since
+2026-11-13 so do a package without an attestation, one attested from
+another commit or ref, and a tag whose commit is off `main`; a dev build
+recorded with the release's build number → `status` and drift still report
+it (§7.1).
 
 ## 10. Done when
 
