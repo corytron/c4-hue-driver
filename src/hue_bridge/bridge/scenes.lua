@@ -39,6 +39,14 @@
 -- app's trailing number (hue_model.base_name). A failed /smart_scene GET
 -- keeps the previous catalogue and changes nothing.
 --
+-- #469 (docs/scene-tracking-design.md): a scene that loses to another hears
+-- other_active from every scene whose room or zone shares a lamp with it
+-- (groups_overlap), on the event, from a recall's answer, at a resync and
+-- in a hello's answer (D7); a recall at a level is the group's assumed
+-- level until Hue reports (D6); a scene goes only into the Control4 room its
+-- group maps to, for an add (placement) and a re-link (room_refusal), and
+-- Link Devices matches a bare device's name among its room's scenes (S3).
+--
 -- Callback rules inherited from lights.lua: the GETs run serially, chained
 -- from http.request callbacks; on_container runs inside OnBodyChunk and only
 -- sends messages; every callback body is pcall-wrapped. The timers are a
@@ -562,13 +570,13 @@ function scenes:scenes_of_group(group_rid, smart)
 	return list
 end
 
--- The room an add goes to (owner: default_room, room_for_add): the mapping
--- of the scene's group ("not in a Hue room" for none or the bridge_home),
--- and the scene's name in the refusal.
+-- (owner hook of default_room and room_for_add) The group whose mapping
+-- places a scene: its room or zone, the bridge_home included since #469
+-- (P6). The scenes' own adds go through scenes:place (the rule of #469),
+-- not through these.
 function scenes:room_group_of(scene)
 	local group_rid = scene.group_rid
-	local _, gtype = self:group_info(group_rid, scene)
-	if not group_rid or gtype == "bridge_home" then
+	if not group_rid then
 		return nil, "not in a Hue room"
 	end
 	return group_rid, self:group_label(group_rid, scene)
@@ -931,6 +939,181 @@ function scenes:grouped_light_of(group_rid)
 	return group and group.grouped_light_rid or nil
 end
 
+-- Overlap (#469 D7, docs/scene-tracking-design.md) --------------------------------
+
+-- The lamps of a group, for D7's overlap test: { set = { [light rid] = true
+-- }, n, all, complete }. A zone's children are lights; a room's are devices,
+-- each with its light services in the lights' device cache (as
+-- zone_lights:member_lights reads them); the bridge_home holds every lamp
+-- (`all`). `complete` is false when the group is not cached, or one of a
+-- room's devices is not in the device cache. Memoised in `memo`, one table
+-- per event or per resync pass, so each group is read once a pass.
+function scenes:group_lamps(group_rid, memo)
+	local lamps = memo[group_rid]
+	if lamps then
+		return lamps
+	end
+	lamps = { set = {}, n = 0, all = false, complete = true }
+	memo[group_rid] = lamps
+	local group = self:groups():group(group_rid)
+	if not group then
+		lamps.complete = false
+		return lamps
+	elseif group.type == "bridge_home" then
+		lamps.all = true
+		return lamps
+	end
+	local l = self.ctx.lights
+	local devices = (l and l.devices) or {}
+	local rtypes = group.child_rtypes or {}
+	local function add(rid)
+		if not lamps.set[rid] then
+			lamps.set[rid] = true
+			lamps.n = lamps.n + 1
+		end
+	end
+	for _, child in ipairs(group.children or {}) do
+		if group.type == "zone" and rtypes[child] == "light" then
+			add(child)
+		elseif group.type == "room" and rtypes[child] == "device" then
+			local device = devices[child]
+			if device then
+				for _, rid in ipairs(device.light_rids or {}) do
+					add(rid)
+				end
+			else
+				lamps.complete = false
+			end
+		end
+	end
+	return lamps
+end
+
+-- Whether groups `a` and `b` share at least one lamp (D7): the same group
+-- always (today's rule, whatever is cached); the bridge_home any group but
+-- one known to hold no lamp (an empty zone); two rooms or zones when a lamp
+-- is in both. A lamp that is not known is never a shared one: no tile is
+-- ended on a guess.
+function scenes:groups_overlap(a, b, memo)
+	if a == nil or b == nil then
+		return false
+	elseif a == b then
+		return true
+	end
+	local la, lb = self:group_lamps(a, memo), self:group_lamps(b, memo)
+	if la.all or lb.all then
+		local other = la.all and lb or la
+		return other.all or not (other.complete and other.n == 0)
+	end
+	if lb.n < la.n then
+		la, lb = lb, la
+	end
+	for rid in pairs(la.set) do
+		if lb.set[rid] then
+			return true
+		end
+	end
+	return false
+end
+
+-- Whether the catalogue says scene `rid` (either kind) is active: a scene
+-- static or playing its dynamic palette, a time-based scene running.
+function scenes:is_active(rid)
+	local active = self:current_active(rid)
+	return active == "static" or active == "dynamic_palette" or active == "active"
+end
+
+-- The scenes active in the catalogues, registered or not: { { rid,
+-- group_rid, smart } }, rid order. A time-based scene counts only while its
+-- states are current (smart_fresh: a failed /smart_scene GET keeps an old
+-- state, docs/smart-scenes-design.md Decision 11).
+function scenes:active_scenes()
+	local out = {}
+	for rid, record in pairs(self.catalogue) do
+		if record.group_rid ~= nil and (record.active == "static" or record.active == "dynamic_palette") then
+			out[#out + 1] = { rid = rid, group_rid = record.group_rid, smart = false }
+		end
+	end
+	if self.smart_fresh then
+		for rid, record in pairs(self.smart_catalogue) do
+			if record.group_rid ~= nil and record.state == "active" then
+				out[#out + 1] = { rid = rid, group_rid = record.group_rid, smart = true }
+			end
+		end
+	end
+	table.sort(out, function(a, b) return a.rid < b.rid end)
+	return out
+end
+
+-- D7's third moment: the active scene (of `actives`, active_scenes()) that
+-- linked scene `rid` lost to, or nil. Nil while `rid` is active itself or
+-- its own status is not known (state_known; a time-based one's while its
+-- states are not current), or when no active scene of its group or of an
+-- overlapping one is there. Decision 10 of docs/smart-scenes-design.md
+-- holds as on the event: a time-based scene has not lost to the scene its
+-- current slot plays.
+function scenes:lost_to(rid, actives, memo)
+	local entry = self.registry[rid]
+	if not entry or entry.state ~= "linked" or not self:state_known(rid) or self:is_active(rid)
+		or (is_smart(entry) and not self.smart_fresh) then
+		return nil
+	end
+	local group_rid = self:group_rid_of(rid)
+	if group_rid == nil then
+		return nil
+	end
+	for _, a in ipairs(actives) do
+		if a.rid ~= rid and (a.smart or not self:slot_targets(rid, a.rid))
+			and self:groups_overlap(a.group_rid, group_rid, memo) then
+			return a.rid
+		end
+	end
+	return nil
+end
+
+-- HUE_SCENE_GROUP other_active to linked scene `rid`; `why` is the active
+-- scene's rid, for the debug line.
+function scenes:tell_other_active(rid, why)
+	local entry = self.registry[rid]
+	self.ctx.log.debug("scenes: %s (device %d): another scene is active (%s)", self:entry_label(rid, entry),
+		entry.device_id, tostring(why))
+	self.ctx.send(entry.device_id, "HUE_SCENE_GROUP", { rid = rid, other_active = "true" })
+end
+
+-- D7 at a hello: linked scene `rid` hears other_active when it lost (lost_to).
+-- True when told.
+function scenes:send_lost(rid)
+	local actives = self:active_scenes()
+	if #actives == 0 then
+		return false
+	end
+	local winner = self:lost_to(rid, actives, {})
+	if not winner then
+		return false
+	end
+	self:tell_other_active(rid, winner)
+	return true
+end
+
+-- D7 at a resync: every linked scene that lost hears other_active, in the
+-- registry's order; one pass, the groups' lamps read once. Returns the
+-- number told.
+function scenes:send_lost_all()
+	local actives = self:active_scenes()
+	if #actives == 0 then
+		return 0
+	end
+	local memo, sent = {}, 0
+	for _, rid in ipairs(self.reg:rids("linked")) do
+		local winner = self:lost_to(rid, actives, memo)
+		if winner then
+			self:tell_other_active(rid, winner)
+			sent = sent + 1
+		end
+	end
+	return sent
+end
+
 -- Whether a Hue scene is running on the room or zone whose grouped_light is
 -- `grouped_light_rid`, as the catalogues last heard: a time-based scene
 -- `active`, or a scene playing its dynamic palette (status.active
@@ -1051,6 +1234,29 @@ function scenes:send_group_all()
 	return sent
 end
 
+-- Assume grouped_light `grouped_rid` is at `level` until Hue reports one (a
+-- slider move, scenes:level; a recall at a level, #469 D6). The bridge's
+-- own level is kept aside the first time (level_before), so an undelivered
+-- PUT puts it back (restore_level).
+function scenes:assume_level(grouped_rid, level)
+	if self.level_before[grouped_rid] == nil then
+		self.level_before[grouped_rid] = { level = self.group_level[grouped_rid] }
+	end
+	self.group_level[grouped_rid] = level
+end
+
+-- A PUT that assumed a level did not land: the level Hue last reported comes
+-- back, if one was kept aside. True when it did.
+function scenes:restore_level(grouped_rid)
+	local before = self.level_before[grouped_rid]
+	if not before then
+		return false
+	end
+	self.group_level[grouped_rid] = before.level
+	self.level_before[grouped_rid] = nil
+	return true
+end
+
 -- #428 D8 (docs/offline-design.md §6.2): a PUT on grouped_light
 -- `grouped_rid` failed (the group queue's on_undelivered, after each failed
 -- attempt): a scene's OFF, a level move, a hold's step or stop. A level a
@@ -1063,11 +1269,7 @@ function scenes:undelivered_group(grouped_rid)
 	if type(grouped_rid) ~= "string" or grouped_rid == "" then
 		return 0
 	end
-	local before = self.level_before[grouped_rid]
-	if before then
-		self.group_level[grouped_rid] = before.level
-		self.level_before[grouped_rid] = nil
-	end
+	self:restore_level(grouped_rid)
 	local rids = self:linked_scenes_on(grouped_rid)
 	if #rids == 0 then
 		return 0
@@ -1137,20 +1339,24 @@ function scenes:slot_targets(rid, target_rid)
 end
 
 -- Scene `rid` became active (static / dynamic_palette), or time-based scene
--- `rid` became active: every other linked scene device of its group hears
+-- `rid` became active: every other linked scene device whose room or zone
+-- shares a lamp with its group (#469 D7, groups_overlap: its own group, an
+-- overlapping room or zone, every group for a whole-home scene) hears
 -- HUE_SCENE_GROUP other_active. For an ordinary scene a time-based device
 -- whose current slot targets it is left out: that scene starting is its
 -- schedule running (docs/smart-scenes-design.md Decision 10). `rid` need not
--- be imported (a scene recalled from the Hue app). Returns the number sent.
+-- be imported (a scene recalled from the Hue app). One pass over the
+-- registry, each group's lamps read once. Returns the number sent.
 function scenes:send_other_active(rid)
 	local group_rid = self:group_rid_of(rid)
 	if group_rid == nil then
 		return 0
 	end
 	local from_smart = is_smart(self:record_of(rid)) or is_smart(self.registry[rid])
+	local memo = {}
 	local others = self:rids_where(function(other, entry)
-		return other ~= rid and entry.state == "linked" and self:group_rid_of(other) == group_rid
-			and (from_smart or not self:slot_targets(other, rid))
+		return other ~= rid and entry.state == "linked" and (from_smart or not self:slot_targets(other, rid))
+			and self:groups_overlap(group_rid, self:group_rid_of(other), memo)
 	end)
 	for _, other in ipairs(others) do
 		self.ctx.send(self.registry[other].device_id, "HUE_SCENE_GROUP", { rid = other, other_active = "true" })
@@ -1175,11 +1381,15 @@ end
 
 -- configure_all and clear_conflicts_for are bridge/owner.lua's.
 
--- (owner hook) Configuration and, once something is known, the status and
--- the group's on/off and level.
+-- (owner hook) Configuration and, once something is known, the status,
+-- other_active when another scene of its group or of an overlapping one is
+-- active (#469 D7: a scene played while the device was away; before the
+-- group's report, so a held tile does not light first), and the group's
+-- on/off and level.
 function scenes:answer_hello(rid)
 	if self:state_known(rid) then
 		local answered = self:push(rid, "hello", true)
+		self:send_lost(rid)
 		self:send_group_known(rid)
 		return answered
 	end
@@ -1379,13 +1589,16 @@ function scenes:fanout(reason, with_configure)
 	return sent
 end
 
--- After a fetch has been absorbed: steps 1, 2 and 5, one save.
+-- After a fetch has been absorbed: steps 1, 2 and 5, then other_active to
+-- every linked scene that lost while the stream was down (#469 D7), then the
+-- groups' on/off and level; one save.
 function scenes:settle(reason, with_configure)
 	self.synced = true
 	self:reconcile(true)
 	self:reconcile_scenes()
 	self:refresh_group_names(false)
 	local sent = self:fanout(reason, with_configure)
+	self:send_lost_all()
 	self:send_group_all()
 	self:flush()
 	return sent
@@ -1848,13 +2061,16 @@ end
 -- the recall (a brightness 1-100 overrides the scene's as recall.dimming, a
 -- duration in ms is clamped to 0..DIM_MAX_DURATION); on success STATE with
 -- the state the action produces (reason "recall") so the device settles even
--- if the stream item is missed; on failure a warning and STATE with the
--- cached status (reason "undelivered", from a timer: undelivered_recall,
--- #428 D8). A recall within RECALL_WINDOW_MS of the scene's last recall
--- PUT waits for the window to end (open_recall_window), unless it is a
--- keypad tap's (urgent = "true", #421 S-D1: skip_recall_window). A
--- time-based scene is activated instead (scenes:activate). Returns true when
--- a PUT was started or waits to be.
+-- if the stream item is missed, and other_active to the scenes it took over
+-- from when the stream has not said so first (#469 D7); on failure a warning
+-- and STATE with the cached status (reason "undelivered", from a timer:
+-- undelivered_recall, #428 D8). A recall at a level makes that the group's
+-- assumed level until Hue reports one (#469 D6, send_recall). A recall
+-- within RECALL_WINDOW_MS of the scene's last recall PUT waits for the
+-- window to end (open_recall_window), unless it is a keypad tap's (urgent =
+-- "true", #421 S-D1: skip_recall_window). A time-based scene is activated
+-- instead (scenes:activate). Returns true when a PUT was started or waits
+-- to be.
 function scenes:recall(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_RECALL")
@@ -1919,6 +2135,16 @@ function scenes:send_recall(rid, entry, params)
 	-- callback must not report a state the owner has since changed [code
 	-- analysis 2026-10-22, F3].
 	local gen = self:next_recall_gen(rid)
+	-- #469 D6: Hue sets every lamp of the scene to the level asked for
+	-- [verified: #41], so that is the group's level from the PUT on, until
+	-- Hue reports one: a slider move that follows the switch (HUE_SCENE_LEVEL,
+	-- as soon as the device hears the scene is active) is measured from it,
+	-- not from the scene played before. The level Hue last reported is kept
+	-- aside for a recall that does not land.
+	local assumed = body.recall.dimming and self:grouped_light_of(self:group_rid_of(rid)) or nil
+	if assumed then
+		self:assume_level(assumed, body.recall.dimming.brightness)
+	end
 	self.ctx.log.info("scenes: recall %s as %s%s (device %d)", self:entry_label(rid, entry), action,
 		body.recall.dimming and (" at " .. tostring(body.recall.dimming.brightness) .. "%") or "", entry.device_id)
 	self.ctx.http({ path = scenes.SCENE_PATH .. "/" .. rid, method = "PUT", body = body }, function(r)
@@ -1931,14 +2157,24 @@ function scenes:send_recall(rid, entry, params)
 				if action == "active" then
 					resulting = (scene and scene.auto_dynamic) and "dynamic_palette" or "static"
 				end
+				local was = scene and scene.active
 				if scene then
 					scene.active = resulting
+				end
+				-- #469 D7: the bridge's event usually came first and told the
+				-- scenes this one took over from; when it has not (missed, or late),
+				-- this is where the scene becomes active. Once per activation.
+				if was ~= "static" and was ~= "dynamic_palette" then
+					self:send_other_active(rid)
 				end
 				self:send_state(rid, "recall", resulting)
 				return
 			end
 			self.ctx.log.warn("scenes: %s (device %d): Recall failed: %s", self:entry_label(rid, entry), entry.device_id,
 				failure_text(r, "scene gone?"))
+			if assumed then
+				self:restore_level(assumed)  -- #469 D6: the lamps did not move
+			end
 			self:undelivered_recall(rid, entry, gen)  -- #428 D8
 		end)
 	end)
@@ -2199,6 +2435,9 @@ function scenes:level(params)
 		rate = 0
 	end
 	rate = math.floor(math.max(0, math.min(scenes.DIM_MAX_DURATION, rate)))
+	-- A recall still waiting goes before the move, and first: a recall at a
+	-- level sets the level the move is measured from (#469 D6).
+	self:release_recalls()
 	local current = self.group_level[grouped]
 	local queued
 	if type(current) == "number" then
@@ -2208,7 +2447,6 @@ function scenes:level(params)
 				self:entry_label(rid, entry), entry.device_id, level_text(current))
 			return false
 		end
-		self:release_recalls()  -- a recall still waiting goes before the move
 		local action = difference > 0 and "up" or "down"
 		local delta = round2(math.abs(difference))
 		if self.ctx.log.enabled("info") then   -- a slider drag sends several of these a second
@@ -2224,7 +2462,6 @@ function scenes:level(params)
 				.. "over %d ms", level_text(level), self:entry_label(rid, entry), entry.device_id,
 				tostring(grouped):sub(1, 8), rate)
 		end
-		self:release_recalls()
 		queued = self.ctx.group_set(grouped, { brightness = level, rate = rate })
 	end
 	if queued ~= true then
@@ -2235,10 +2472,7 @@ function scenes:level(params)
 	-- before that report is measured from where the first one goes. The
 	-- bridge's own level is kept aside until then: a move that fails puts it
 	-- back (undelivered_group, #428 D9).
-	if self.level_before[grouped] == nil then
-		self.level_before[grouped] = { level = current }
-	end
-	self.group_level[grouped] = level
+	self:assume_level(grouped, level)
 	return true
 end
 
@@ -2254,11 +2488,237 @@ function scenes:next_recall_gen(rid)
 	return self.recall_gen[rid]
 end
 
+-- Rooms: where a scene may go (#469 Part 2, docs/scene-tracking-design.md) --------
+-- A scene goes only into the Control4 room its Hue room or zone maps to, "M"
+-- (O3, O4): an add with an explicit Room R is taken when R = M, a group with
+-- no usable mapping is refused, and a re-link to a scene of another group
+-- must find the device in M (O5). The whole home (bridge_home) is a group
+-- like any other: Set Room Mapping maps it (P6). Lights, zone lights and
+-- motion keep their explicit rooms (S7), so the rule lives here, not in
+-- bridge/owner.lua.
+
+-- How a group's mapping was made, as lights:mapping_how says ("name",
+-- "hand", "earlier", "none" or nil); nil without the lights.
+function scenes:group_mapping_how(group_rid)
+	local l = self.ctx.lights
+	if group_rid == nil or not l or type(l.mapping_how) ~= "function" then
+		return nil
+	end
+	return l:mapping_how(group_rid)
+end
+
+-- The state of a group's mapping for the rule; `rooms` are the project's
+-- (empty when unknown), `fallback` a record of the group (its scene):
+--   "mapped", room_id, room_name, trusted: M exists, or the project's rooms
+--     are unknown and the mapping is trusted as remembered (trusted true);
+--   "gone", room_id: M no longer exists (P4);
+--   "none": "(no mapping)" chosen with Set Room Mapping (P1);
+--   "unmapped": never mapped, or a name two Control4 rooms share (P1);
+--   "nogroup": no group, or one of a type the cache does not hold
+--     (hue_model keeps no type for it), which Set Room Mapping cannot map.
+function scenes:mapping_state(group_rid, rooms, fallback)
+	if group_rid == nil then
+		return "nogroup"
+	end
+	local mapping = self:room_mapping(group_rid)
+	if mapping and mapping.c4_room_id then
+		local id = mapping.c4_room_id
+		if rooms[id] then
+			return "mapped", id, rooms[id], false
+		elseif next(rooms) == nil then
+			return "mapped", id, mapping.c4_room_name or ("room " .. tostring(id)), true
+		end
+		return "gone", id
+	end
+	if self:group_mapping_how(group_rid) == "none" then
+		return "none"
+	end
+	local _, gtype, cached = self:group_info(group_rid, fallback)
+	if not cached and gtype == nil and fallback ~= nil then
+		return "nogroup"
+	end
+	return "unmapped"
+end
+
+-- How the rule's texts name a group: "Hue room Kitchen", "Hue zone Accent",
+-- "the whole home"; and, second, as Set Room Mapping's Hue Room list shows
+-- it: "Kitchen", "Accent (zone)", "(whole home)" (P6).
+function scenes:group_words(group_rid, fallback)
+	local name, gtype = self:group_info(group_rid, fallback)
+	if gtype == "bridge_home" then
+		return "the whole home", "(whole home)"
+	end
+	local shown = util.sanitise((name ~= nil and name ~= "") and name or tostring(group_rid))
+	if gtype == "zone" then
+		return "Hue zone " .. shown, shown .. " (zone)"
+	end
+	return "Hue room " .. shown, shown
+end
+
+-- The refusal for a group with no Control4 room to give (P1, P4): `state`
+-- mapping_state's, `verb` "added" or "linked", `subject` the scene's name
+-- (used for "nogroup" only). Each names its way out.
+function scenes:unplaced_text(state, group_rid, fallback, verb, subject)
+	local again = verb == "linked" and "link" or "add"
+	if state == "nogroup" then
+		return string.format("Not %s: %s belongs to no Hue room or zone that Set Room Mapping can map", verb,
+			subject or "the scene")
+	end
+	local words, listed = self:group_words(group_rid, fallback)
+	if state == "none" then
+		return string.format("Not %s: %s is set to (no mapping); map it to one Control4 room with Set Room Mapping, "
+			.. "then %s again", verb, words, again)
+	elseif state == "gone" then
+		return string.format("Not %s: %s maps to a Control4 room that no longer exists; map it again with Set Room "
+			.. "Mapping, then %s again", verb, words, again)
+	end
+	return string.format("Not %s: %s is not mapped to a Control4 room; map it with Set Room Mapping (Hue Room %s, "
+		.. "a Control4 room of your choice), then %s again", verb, words, listed, again)
+end
+
+-- The rule's Add columns for a scene of `group_rid`: `room_id` is the room
+-- picked under Room (nil: "(mapped room)"), `rooms` the project's,
+-- `fallback` a record of the group, `subject` the scene's name (nil: all
+-- scenes of the group). While the project's rooms are unknown the mapping
+-- is trusted and only R = M passes. Returns true, room_id, room_name or
+-- false and the refusal (P1, P2, P4).
+function scenes:place(group_rid, fallback, room_id, rooms, subject)
+	local state, mapped_id, mapped_name, trusted = self:mapping_state(group_rid, rooms, fallback)
+	if state ~= "mapped" then
+		return false, self:unplaced_text(state, group_rid, fallback, "added", subject)
+	end
+	local want = util.positive(room_id)
+	if want == nil or want == mapped_id then
+		return true, mapped_id, mapped_name
+	elseif trusted then
+		return false, "Not added: the project's rooms are not read yet; pick (mapped room), or try again in a minute"
+	elseif not rooms[want] then
+		return false, string.format("Not added: Control4 room %d no longer exists", want)
+	end
+	local words = self:group_words(group_rid, fallback)
+	local mapped, here = util.sanitise(mapped_name), util.sanitise(rooms[want])
+	if subject then
+		return false, string.format("Not added: %s belongs to %s, which maps to Control4 room %s, not %s; set Room to "
+			.. "(mapped room), or change the mapping with Set Room Mapping", subject, words, mapped, here)
+	end
+	return false, string.format("Not added: the scenes of %s go to Control4 room %s, its mapped room, not %s; set Room "
+		.. "to (mapped room), or change the mapping with Set Room Mapping", words, mapped, here)
+end
+
+-- (#469 interface) Where an add goes: scene `rid` (either kind), or all
+-- scenes of group `rid` (a Hue room, zone or the bridge_home), with
+-- `room_id` picked under Room (nil: "(mapped room)"). Returns true, room_id,
+-- room_name or false and the refusal. Add Scene and Add All Scenes Of Room
+-- call it themselves; bridge/actions.lua asks it before refusing a group add
+-- with an explicit Room (F2).
+function scenes:placement(rid, room_id)
+	if type(rid) ~= "string" or rid == "" then
+		return false, "Not added: pick a scene first"
+	end
+	local rooms = self.project:rooms()
+	local record = self:record_of(rid)
+	if record then
+		return self:place(record.group_rid, record, room_id, rooms, util.sanitise(name_of(record)))
+	elseif self:groups():group(rid) or self:room_mapping(rid) then
+		return self:place(rid, nil, room_id, rooms, nil)
+	end
+	return false, string.format("Not added: scene %s is not on the bridge (Diagnostics ▸ Read everything from the "
+		.. "bridge now, then try again)", rid)
+end
+
+-- (#469 interface, S1) Where the scenes of group `group_rid` go, as the scene
+-- folders show it: text (a Control4 room name, "(unmapped)", "(no mapping)"
+-- or "(Control4 room gone)"), room_id (nil when there is none) and sort_key
+-- (the room's name lower-cased, "~" for none, so those sort last). While the
+-- project's rooms are unknown, the room the mapping remembers. `rooms`
+-- (optional) spares the project lookup to a caller that has them.
+function scenes:group_target(group_rid, rooms)
+	local state, room_id, name = self:mapping_state(group_rid, rooms or self.project:rooms())
+	if state == "mapped" then
+		local text = util.sanitise(name)
+		return text, room_id, text:lower()
+	elseif state == "gone" then
+		return "(Control4 room gone)", nil, "~"
+	elseif state == "none" then
+		return "(no mapping)", nil, "~"
+	end
+	return "(unmapped)", nil, "~"
+end
+
+-- { [device_id] = { id, name } }: the Control4 room of each of `ids` that
+-- one GetDevices lookup names (the shape owner:room_marks reads). A device
+-- the lookup does not know, or a failed lookup, is left out: unknown is
+-- never a room.
+function scenes:device_rooms(ids)
+	local out = {}
+	if #ids == 0 then
+		return out
+	end
+	local list = {}
+	for i, id in ipairs(ids) do
+		list[i] = tostring(id)
+	end
+	local ok, raw = self.project:call("devices", { DeviceIds = table.concat(list, ",") })
+	if not ok or type(raw) ~= "table" then
+		return out
+	end
+	local rooms
+	for key, info in pairs(raw) do
+		local id = tonumber(key)
+		local room_id = type(info) == "table" and tonumber(info.roomId) or nil
+		if id and room_id then
+			local name = util.display_name(info.roomName)
+			if name == "" then
+				rooms = rooms or self.project:rooms()
+				name = rooms[room_id] or ("room " .. tostring(room_id))
+			end
+			out[id] = { id = room_id, name = name }
+		end
+	end
+	return out
+end
+
+-- P3 to P5: why device `device_id` may not be re-linked to scene `new_rid`
+-- for the room it sits in, or nil. Nil too for what owner.relink refuses in
+-- its own words (bad arguments, an unregistered device, a held or unknown
+-- scene), for a scene of the same group as the device's scene (P5:
+-- owner.same_group, a scene or group made again), and, with a log line,
+-- while the device's room is unknown (one GetDevices lookup).
+function scenes:room_refusal(device_id, new_rid)
+	local id = util.positive(device_id)
+	if not id or type(new_rid) ~= "string" or new_rid == "" or self.registry[new_rid] then
+		return nil
+	end
+	local old_rid, entry = self.reg:by_device(id)
+	local record = self:record_of(new_rid)
+	if not old_rid or not record or self:in_same_group(entry, record) then
+		return nil
+	end
+	local here = self:device_rooms({ id })[id]
+	if not here then
+		self.ctx.log.info("scenes: re-link of device %d to %s: its Control4 room is not known; the room check is "
+			.. "skipped", id, self:scene_label(record))
+		return nil
+	end
+	local scene_name = util.sanitise(name_of(record))
+	local state, mapped_id, mapped_name = self:mapping_state(record.group_rid, self.project:rooms(), record)
+	if state ~= "mapped" then
+		return self:unplaced_text(state, record.group_rid, record, "linked", scene_name)
+	elseif mapped_id == here.id then
+		return nil
+	end
+	local room = util.sanitise(here.name)
+	return string.format("Not linked: device %d is in %s; %s belongs to %s, which maps to %s; pick a scene of a Hue "
+		.. "room mapped to %s, or change the mapping with Set Room Mapping", id, room, scene_name,
+		(self:group_words(record.group_rid, record)), util.sanitise(mapped_name), room)
+end
+
 -- Actions (§4) -------------------------------------------------------------------
 
--- Add Scene: one AddDevice into room_id, or into the mapped room of the
--- scene's group when nil; refuses when neither exists. A tombstone for the
--- rid is cleared by the registry. done(ok, text).
+-- Add Scene: one AddDevice into the mapped room of the scene's group, when
+-- room_id is nil or that room (#469: placement's rule, P1, P2, P4; another
+-- room was taken until 1.6). A tombstone for the rid is cleared by the
+-- registry. done(ok, text).
 function scenes:add_scene(rid, room_id, done)
 	done = done or function() end
 	local busy = self:busy_text()
@@ -2282,15 +2742,15 @@ function scenes:add_scene(rid, room_id, done)
 			.. "from the bridge now, then try again)", tostring(rid)))
 		return false
 	end
-	local room_name
-	room_id, room_name = self:room_for_add(scene, room_id, self.project:rooms())
-	if not room_id then
-		done(false, room_name)
+	local label = util.sanitise(name_of(scene))
+	local placed, room_name
+	placed, room_id, room_name = self:place(scene.group_rid, scene, room_id, self.project:rooms(), label)
+	if not placed then
+		done(false, room_id)
 		return false
 	end
 
 	self.adding, self.adding_since = true, os.time()
-	local label = util.sanitise(name_of(scene))
 	self:create({ { record = scene, room_id = room_id, room_name = room_name } }, function(created, _, err)
 		self.adding = false
 		self:reconcile(true, owner.created_set(created))
@@ -2313,10 +2773,15 @@ end
 -- Add All Scenes Of Room: every unimported, non-tombstoned scene of the
 -- group into its mapped room, one AddDevice at a time, the time-based ones
 -- after the ordinary ones, each with its kind (docs/smart-scenes-design.md
--- Decision 9); tombstoned ones are listed. No GET first: the catalogues
--- follow the stream (Refresh Scenes exists for doubt). done(ok, text) once,
--- at the end.
-function scenes:add_all_of_group(group_rid, done)
+-- Decision 9); tombstoned ones are listed. `room_id` (optional, the Room
+-- picked) passes when it is the mapped room (#469 F2, placement's rule);
+-- add_all_of_group(group_rid, done) is the call before 1.6. The whole home
+-- is a group like any other (P6). No GET first: the catalogues follow the
+-- stream (Refresh Scenes exists for doubt). done(ok, text) once, at the end.
+function scenes:add_all_of_group(group_rid, room_id, done)
+	if done == nil and type(room_id) == "function" then
+		room_id, done = nil, room_id
+	end
 	done = done or function() end
 	local busy = self:busy_text()
 	if busy then
@@ -2344,13 +2809,12 @@ function scenes:add_all_of_group(group_rid, done)
 		done(false, string.format("Not added: %s has no scenes", label))
 		return false
 	end
-	local rooms = self.project:rooms()
-	local room_id, why = self:default_room(all[1], rooms)
-	if not room_id then
-		done(false, string.format("Not added: %s; Set Room Mapping first", why))
+	local placed, room_name
+	placed, room_id, room_name = self:place(group_rid, all[1], room_id, self.project:rooms(), nil)
+	if not placed then
+		done(false, room_id)
 		return false
 	end
-	local room_name = why
 	local jobs, deleted, imported, tombs = {}, {}, 0, self.reg:tombstones()
 	for _, scene in ipairs(all) do
 		local tomb = tombs[scene.rid]
@@ -2420,6 +2884,26 @@ function scenes:relink_fields(fields)
 	fields.kind = fields.kind or self.reg.CLEAR
 end
 
+-- Re-link Scene (Link Device ▸ To, and its first line's suggestions) with the
+-- room rule (#469 P3 to P5, room_refusal): a device linked to a scene of
+-- another group must sit in the Control4 room that group maps to; the
+-- refusal is the Last Action as it is. Exempt: a re-link to a scene of the
+-- same group (room_refusal), and an `internal` one (the re-link by radio of
+-- owner:auto_relink, which scenes do not use). Adoptions by a remembered rid
+-- (a hello, Link Devices by rid, a project restore, a binding made again) go
+-- through owner:adopt, never here, so the rule never judges them (P5). A
+-- busy module is refused by owner.relink first. The rest is owner.relink's.
+function scenes:relink(device_id, new_rid, internal)
+	if not internal and not self:busy_text() then
+		local refusal = self:room_refusal(device_id, new_rid)
+		if refusal then
+			self.ctx.log.info("scenes: %s", refusal)
+			return false, refusal
+		end
+	end
+	return owner.relink(self, device_id, new_rid, internal)
+end
+
 function scenes.relink_refusal(_self, _device_id, new_rid)
 	return string.format("Not re-linked: scene %s is not on the bridge (Diagnostics ▸ Read everything "
 		.. "from the bridge now, then try again)",
@@ -2443,10 +2927,31 @@ function scenes.told_name(_self, entry)
 	return is_smart(entry) and name_of(entry) or entry.name
 end
 
+-- Link Devices (Link Device's first line, owner:link_devices) with S3 of
+-- #469: a bare device's name match is narrowed to the scenes of the Hue
+-- rooms and zones mapped to the Control4 room it sits in ("Relax" is in
+-- every room), and the texts of a device with no match, or several, say so.
+-- While a device's room is unknown, today's rule. The narrowing lives on the
+-- instance for the length of the call: link_candidates looks the devices'
+-- rooms up (one GetDevices), link_hello names the device owner:link_devices
+-- is at, unimported_named filters by its room, and an instance copy of WORDS
+-- carries the texts.
+function scenes:link_devices(skip_ids)
+	self.WORDS = setmetatable({}, { __index = scenes.WORDS })
+	self.link_rooms, self.link_device = nil, nil
+	local ok, text = pcall(owner.link_devices, self, skip_ids)
+	self.WORDS, self.link_rooms, self.link_device = nil, nil, nil
+	if not ok then
+		error(text, 0)
+	end
+	return text
+end
+
 -- Link Devices' candidates: only hue_scene devices count. The bound set also
 -- holds the lights, so it is cut down to the project's hue_scene devices, or
 -- to the devices that said HUE_SCENE_HELLO when the project lookup is
--- unavailable. Returns the ids the registry lacks and how many there are.
+-- unavailable. Returns the ids the registry lacks and how many there are;
+-- their Control4 rooms are looked up for S3 (link_devices).
 function scenes:link_candidates(bound)
 	local present = self.project:devices_of(scenes.SCENE_DRIVER)
 	local ids, total = {}, 0
@@ -2460,12 +2965,27 @@ function scenes:link_candidates(bound)
 			end
 		end
 	end
+	self.link_rooms = self:device_rooms(ids)
 	return ids, total
 end
 
 -- A device Forget Scene let go is a candidate like any other (the owner's
--- click is the way back, #47 F8), by the rid it had.
+-- click is the way back, #47 F8), by the rid it had. S3: the device Link
+-- Devices is at now, whose room narrows the name match and its texts.
 function scenes:link_hello(id)
+	self.link_device = id
+	local words = rawget(self, "WORDS")
+	if words then
+		local room = self.link_rooms and self.link_rooms[id]
+		if room then
+			local here = util.sanitise(room.name)
+			words.link_none = "scene of a Hue room mapped to " .. here
+			words.link_many = "scenes of Hue rooms mapped to " .. here
+			words.link_hint = ", or move the device to its scene's mapped room,"
+		else
+			words.link_none, words.link_many, words.link_hint = nil, nil, nil
+		end
+	end
 	return self.announced[id] or self.forgotten[id] or {}
 end
 
@@ -2477,16 +2997,25 @@ end
 
 -- The unimported scenes of either kind whose Hue name, base name (a
 -- time-based one's) or creation name is wanted (keys of util.name_key, as
--- owner:match_unimported_by_name builds them).
+-- owner:match_unimported_by_name builds them). Inside Link Devices, for a
+-- device whose Control4 room is known, only the scenes of groups mapped to
+-- that room (#469 S3, link_devices).
 function scenes:unimported_named(wanted)
+	local room = self.link_device and self.link_rooms and self.link_rooms[self.link_device]
 	local out = {}
 	for _, scene in ipairs(self:unimported_scenes()) do
-		if wanted[util.name_key(scene.name)] or wanted[util.name_key(name_of(scene))]
-			or wanted[util.name_key(self:creation_name(scene))] then
+		if (wanted[util.name_key(scene.name)] or wanted[util.name_key(name_of(scene))]
+			or wanted[util.name_key(self:creation_name(scene))]) and (not room or self:mapped_to(scene.group_rid, room.id)) then
 			out[#out + 1] = scene
 		end
 	end
 	return out
+end
+
+-- Whether group `group_rid` is mapped to Control4 room `room_id`.
+function scenes:mapped_to(group_rid, room_id)
+	local mapping = group_rid and self:room_mapping(group_rid)
+	return mapping ~= nil and mapping.c4_room_id == room_id
 end
 
 -- The names trio is bridge/owner.lua's: expected_name is the creation name
@@ -2606,10 +3135,10 @@ function scenes:picker_scenes()
 end
 
 -- Add All Scenes Of Room's Hue Room: the groups that have scenes of either
--- kind, with their mapping and counts: "Kitchen → Kitchen (7 scenes)",
--- "Attic (zone) → (unmapped) (2 scenes, 1 imported)", "Downstairs (zone) →
--- (unmapped) (16 scenes, 2 time-based)" (docs/smart-scenes-design.md
--- Decision 8; imported counts both kinds).
+-- kind, with their target (group_target, #469) and counts: "Kitchen →
+-- Kitchen (7 scenes)", "Attic (zone) → (unmapped) (2 scenes, 1 imported)",
+-- "Downstairs (zone) → (no mapping) (16 scenes, 2 time-based)"
+-- (docs/smart-scenes-design.md Decision 8; imported counts both kinds).
 function scenes:picker_groups()
 	if not self.synced then
 		return util.empty_list("(no scenes fetched yet; Diagnostics ▸ Read everything from the bridge now)")
@@ -2636,17 +3165,7 @@ function scenes:picker_groups()
 	local list = {}
 	for group_rid, n in pairs(counts) do
 		local label = self:group_label(group_rid, records[group_rid])
-		local mapping = self:room_mapping(group_rid)
-		local target
-		if not mapping or not mapping.c4_room_id then
-			target = "(unmapped)"
-		elseif rooms[mapping.c4_room_id] then
-			target = rooms[mapping.c4_room_id]
-		elseif next(rooms) == nil then
-			target = mapping.c4_room_name or ("room " .. tostring(mapping.c4_room_id))
-		else
-			target = "(Control4 room gone)"
-		end
+		local target = self:group_target(group_rid, rooms)
 		local text = util.plural(n, "scene")
 		if (smart[group_rid] or 0) > 0 then
 			text = text .. string.format(", %d time-based", smart[group_rid])

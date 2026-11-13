@@ -488,6 +488,12 @@ local function new_lights()
 		skip_devices = function()
 			return state.zone_lights and state.zone_lights:device_ids() or {}
 		end,
+		-- The scenes, read live (created after the lights): Set Room Mapping
+		-- lists the whole home while it has scenes and counts scene devices
+		-- left in other rooms (docs/scene-tracking-design.md P6, S4, S5).
+		scenes = function()
+			return state.scenes
+		end,
 	})
 end
 

@@ -1820,6 +1820,166 @@ contract D7) before the release is built (contract §8.3).
      The tile animates to 80 without jumping back to the Hue level partway.
      - **Done:** open.
 
+## S. Scene tracking and scene rooms (#469)
+
+Written on 2026-11-12 from the contract (`docs/scene-tracking-design.md`,
+decisions D1 to D13, the room rule P1 to P6, the surfaces S1 to S8 and its
+"Checks on the house"), before the build; check every quoted text against
+the first build that brings it and paste what differs (the contract lets
+the builder shorten the refusal texts to fit a row). The owner's manual
+says the same in prose: the bridge's chapter 6 ("Scenes stay in their
+room"), 9.2 to 9.10 and chapter 11 ("Keypad Follows"), and the Hue
+Scene's own Documentation tab. Lua and properties only: no
+`<capabilities>` change, so no controller reboot [assumed: the new
+Keypad Follows row appears after "Add or Update Driver or Agent…", as
+Recall As did]. None of these steps blocks the release. The Windows
+session reads Composer, runs the bridge's actions, sets properties and
+`Debug Mode`, removes the one test connection and deletes the test device
+(standing approval: no need to ask); the owner moves sliders in the
+Control4 app on the iPhone and plays scenes in the Hue app where a step
+says so, and glances at the bedroom switch. Each step takes under a
+minute.
+
+Setup: two ordinary (not time-of-day) Hue Scene devices of one Control4
+room, called A and B below (paste which: on the house, two of the Master
+Bedroom's), the switch run as a 2-button keypad that is bound to a scene
+device of that room (the bedroom switch; paste which device), and a scene
+of the same Hue room that has no device (paste its name). `Debug Mode` On
+on the Hue Bridge and on A and B for steps 142 to 147, Off on all of them
+at the end (step 154). Steps 150 to 154 make one test scene device and
+remove it again.
+
+140. **Before the update: the old values** (contract D12). On every Hue
+     Scene device, read **On State Follows** and paste `<device>: <value>`
+     (`Room/zone lights` or `This scene`). Read only.
+     - **Done:** open.
+141. **Install, and Keypad Follows carries the value** (contract check 7;
+     D12). Install the build in place (step 1, or the deploy brief).
+     Composer should not ask "Restart Director?"; paste what it asks if it
+     does. On every Hue Scene device: **Driver Version** is the new build,
+     **Keypad Follows** sits below **Recall As** with the value step 140
+     read for **On State Follows**, and **On State Follows** is no longer
+     shown. Paste each device's **Keypad Follows**. If the row is missing,
+     select another device and come back once; if it is still missing,
+     paste the Properties page and stop here.
+     - **Done:** open.
+142. **The slider switches scenes** (contract check 1; D1, D4). In the
+     Control4 app, on the room's Lighting page, the owner taps A's tile on:
+     A reads on at the room's level and B reads 0. Then the owner drags B's
+     slider to about 40 %: within about a second the room's lamps take B's
+     look at 40 %, B reads about 40 and A reads 0. Then the owner taps A's
+     tile: A plays and reads on, and B goes to 0 (a tap arrives as ON or
+     TOGGLE, and both play a scene that is not active). Paste both tiles
+     after each move, and A's and B's Lua lines.
+     - **Done:** open.
+143. **A dim moves only its own tile** (contract check 3; T3, T4). With A
+     playing, the owner drags A's slider to about 60 % in the Control4
+     app: A reads about 60 and B stays at 0. Then the owner dims the room
+     to about 30 % in the Hue app: within a second or two A reads about 30
+     and B still reads 0. Paste both tiles.
+     - **Done:** open.
+144. **A scene with no device** (contract check 2; T8, D9). In the Hue
+     app the owner plays the room's scene that has no device: within a
+     second or two every scene tile of the room reads 0, and the bedroom
+     switch's LEDs stay lit (its device's **Keypad Follows** is
+     `Room/zone lights`; owner's glance). Paste the tiles and the bridge's
+     Lua lines of that moment.
+     - **Done:** open.
+145. **An overlapping zone's scene** (contract check 4; D7). Play A from
+     the Control4 app (it must be a scene of the Master Bedroom room).
+     Then in the Hue app the owner plays a scene of the Bedside Lights
+     zone, whose lamps belong to that room: within a second or two A's
+     tile goes to 0, although the zone is another Hue group. Paste A's
+     tile and the bridge's Lua lines of that moment.
+     - **Done:** open.
+146. **The resync puts the tiles right** (contract check 5; D7). Play A
+     from the Control4 app. On the bridge, **Diagnostics** ▸ `Stop the
+     event stream until the next start`: **Event Stream** reads
+     `Stopped`. In the Hue app the owner plays B (or the scene without a
+     device). Then **Diagnostics** ▸ `Reconnect the event stream`. Within
+     a few seconds of `Connected since …`, A reads 0, and B reads on if it
+     was B. Paste **Event Stream** and the tiles, and the bridge's Lua
+     lines from the reconnection.
+     - **Done:** open.
+147. **Keypad Follows chooses only the keypad** (D9, D12). While another
+     scene lights the room (after step 144 or 146), on the device the
+     bedroom switch is bound to, set **Keypad Follows** to `This scene`
+     and click Set: the switch's LEDs go off at once (owner's glance) and
+     the device's tile does not change. Set it back to the value step 141
+     read and click Set: the LEDs light again. Paste the row before and
+     after, and the device's Lua lines.
+     - **Done:** open.
+148. **The folders name their room** (S1, S4, P6). Read only. **Add From
+     Hue** ▸ **What** ▸ the scenes' folder: paste its lines. Each reads
+     `<Hue room> → <Control4 room>: <n> scenes`, sorted by Control4 room,
+     with those that have no room last (`… → (unmapped; Set Room Mapping
+     first): …`, `… → (no mapping): …`, `… → (Control4 room gone): …`)
+     and `(whole home) → (unmapped): …` if the bridge has scenes for the
+     whole home. Open the Master Bedroom's folder: its first line reads
+     `All <n> scenes of Master Bedroom into Master Bedroom`. Cancel. Then
+     **Set Room Mapping** ▸ **Hue Room**: paste the list; `(whole home)`
+     is in it when the bridge has such scenes, and unmapped lines carry
+     the offers of the manual's chapter 6 where they apply. Cancel.
+     - **Done:** open.
+149. **Refused in the wrong room** (contract check 6; P2, P1). **Add From
+     Hue**: **What** = a scene of the Master Bedroom's folder without a
+     device (paste which), **Room** = another room than the Master
+     Bedroom (the bridge's own room, say). OK: nothing is created, and
+     **Last Action** reads `Not added: <scene> belongs to Hue room Master
+     Bedroom, which maps to Control4 room Master Bedroom, not <room>; set
+     Room to (mapped room), or change the mapping with Set Room Mapping`.
+     If step 148 showed a folder without a room, open it (it has no `All
+     …` line), pick one of its scenes with **Room** `(mapped room)`, OK:
+     `Not added: Hue room <name> is not mapped to a Control4 room; map it
+     with Set Room Mapping (…), then add again`. Nothing changes.
+     - **Done:** open.
+150. **The mapped room picked by hand is accepted** (the contract's room
+     table, R = M). **Add From Hue**: the same scene as in step 149,
+     **Room** = the Master Bedroom picked as `<Floor> / Master Bedroom`,
+     not `(mapped room)`. OK: **Last Action** reads `Added <scene> to
+     Master Bedroom (device <id>)`. This is the test device of steps 151
+     to 154; paste its id.
+     - **Done:** open.
+151. **Optional: a drag stays free and marked** (S6). Drag the test
+     device to another room in the System Design tree (the bridge's room,
+     say), then **Diagnostics** ▸ `Read everything from the bridge now`.
+     The bridge's **Scenes** list has its line as `Master Bedroom: <scene>
+     → device <id> (in <room> instead of Master Bedroom)`, and the
+     device's **Status** still reads `Hue scene <scene> in Master
+     Bedroom` with **Online** `Online`. Paste both. If the drag does not
+     take, say so and go on with step 153.
+     - **Done:** open.
+152. **Optional, after step 151: the mapping's result counts it** (S5).
+     **Set Room Mapping**: **Hue Room** = the Master Bedroom's line,
+     **Control4 Room** = the Master Bedroom. OK: **Last Action** reads
+     `Mapped Master Bedroom → Master Bedroom; 1 scene device is in another
+     room (its row says where)`. The mapping stays the same; its line
+     in **Room Mappings** then reads `(by hand)` where it may have read
+     `(by name)` or `(before 1.2)`, which is harmless. Skip the step to
+     keep the old mark.
+     - **Done:** open.
+153. **Link Device refuses a scene of another room** (contract check 6;
+     P3, S2). In **Connections**, select the test device and remove its
+     **Hue Bridge** connection (the bridge counts it as unbound). **Link
+     Device** ▸ **Device**: paste the scene devices' lines; the test
+     device's line names the Control4 room it sits in, `Master Bedroom:
+     <scene> (device <id> in <room>…)`. Pick it, and under **To** a scene
+     of a Hue room that maps to another Control4 room than the one the
+     device sits in (the Kitchen's, say). OK: nothing is linked, and
+     **Last Action** reads `Not linked: device <id> is in <room>; <scene>
+     belongs to Hue room <Hue room>, which maps to <Control4 room>; pick a
+     scene of a Hue room mapped to <room>, or change the mapping with Set
+     Room Mapping`. Do not link the test device to another scene: the
+     link would rename that Hue scene to the device's name.
+     - **Done:** open.
+154. **Clean up.** **Forget Device**: **Device** = the test device,
+     **Confirm** = `Yes, forget`. OK: **Last Action** reads `Forgot
+     <scene> (device <id>): unbound and left in the project for you to
+     delete; the Hue scene is listed under Add From Hue again`. Delete the
+     device in Composer. Set `Debug Mode` Off on the bridge, A and B.
+     Paste the bridge's **Scenes** row.
+     - **Done:** open.
+
 ## What to paste back
 
 For each step: the property texts as shown, what the Navigator, keypad or

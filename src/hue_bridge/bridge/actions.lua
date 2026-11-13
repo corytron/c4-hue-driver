@@ -41,7 +41,8 @@
 --
 -- Values (stable, logged, never shown):
 --   folders  f:lights, f:groups, f:scenes, f:scenes:<group_rid> (in Add From
---            Hue a selectable folder: every scene of that room or zone), f:motion;
+--            Hue a selectable folder: every scene of that room or zone, into
+--            the room it maps to; not selectable when it maps to none, #469), f:motion;
 --            f:top, the labelled "Back to all folders" row: the top itself
 --   leaves   light:<rid>, group:<rid>, scene:<rid>, sensor:<rid>, area:<rid>,
 --            all:lights, all:motion (Import All New's two halves)
@@ -134,6 +135,8 @@ local FOLDER_KIND = { ["f:lights"] = "lights", ["f:groups"] = "zone_lights", ["f
 	["f:motion"] = "motion" }
 local LEAF_KIND = { light = "lights", group = "zone_lights", scene = "scenes", sensor = "motion", area = "motion" }
 local NO_GROUP = "?"   -- the scene folder of scenes whose group is not known
+local WHOLE_HOME = "(whole home)"  -- the bridge_home's scene folder (#469 S1; Set Room Mapping's own row, P6)
+local NO_ROOM_KEY = "~"            -- scenes:group_target's sort key of a group with no room: after every room
 
 local function str(value)
 	if value == nil then
@@ -282,44 +285,121 @@ local function motion_label(sensors, areas)
 	return string.format("Motion sensors (%d)", sensors)
 end
 
--- The unimported scenes by room or zone: { rid, label, items } sorted by
--- label, and how many scenes there are. Texts are the scenes' picker texts,
--- without the room's name in front (the folder says it).
+-- Where the scenes of a Hue room or zone go (scenes:group_target, #469 S1):
+-- { text, room_id, sort_key }, text a Control4 room name, "(unmapped)", "(no
+-- mapping)" or "(Control4 room gone)", room_id nil when there is no room,
+-- sort_key the room's name lowercased or "~". nil when the scenes module has
+-- no group_target (an older module) or it failed: the folder then reads as
+-- before 1.6. Takes the answer as a table or as three values. `rooms` (the
+-- project's rooms, optional) spares group_target one lookup per group.
+function actions:group_target(g, rooms)
+	local m = self:mod("scenes")
+	if g == NO_GROUP or not m or type(m.group_target) ~= "function" then
+		return nil
+	end
+	local ok, a, b, c = pcall(m.group_target, m, g, rooms)
+	if not ok then
+		self.log.warn("actions: scenes:group_target failed: %s", tostring(a))
+		return nil
+	end
+	if type(a) == "table" then
+		a, b, c = a.text, a.room_id, a.sort_key
+	end
+	local text = str(a)
+	if not text then
+		return nil
+	end
+	local room_id = util.positive(b)
+	return { text = util.sanitise(text), room_id = room_id,
+		sort_key = str(c) or (room_id and text:lower()) or NO_ROOM_KEY }
+end
+
+-- The project's rooms read once for a whole list (the scenes module's project
+-- calls, bridge/project.lua), or nil when they cannot be read.
+function actions:project_rooms()
+	local m = self:mod("scenes")
+	local p = m and m.project
+	if type(p) ~= "table" or type(p.rooms) ~= "function" then
+		return nil
+	end
+	local ok, rooms = pcall(p.rooms, p)
+	return ok and type(rooms) == "table" and rooms or nil
+end
+
+-- The unimported scenes by room or zone: { rid, label, items, target } sorted
+-- by the Control4 room their scenes go to (group_target's sort key; groups
+-- with no room last), then by label (#469 S1), and how many scenes there
+-- are. Texts are the scenes' picker texts, without the room's name in front
+-- (the folder says it). The whole home (bridge_home) is "(whole home)", and
+-- "the whole home" in a sentence (`noun`).
 function actions:scene_groups()
 	local items = self:entries("scenes", "picker_scenes")
-	local groups, by_rid = {}, {}
+	local groups, by_rid, rooms = {}, {}, nil
 	for _, e in ipairs(items) do
 		local record = self:call("scenes", "record_of", e.value)
 		local g = type(record) == "table" and str(record.group_rid) or NO_GROUP
 		local group = by_rid[g]
 		if not group then
 			local label = g ~= NO_GROUP and str(self:call("scenes", "group_label", g, record)) or nil
-			group = { rid = g, label = util.sanitise(label or "(no room or zone)"), items = {} }
+			label = util.sanitise(label or "(no room or zone)")
+			local home = type(record) == "table" and record.group_type == "bridge_home"
+			local shown = home and WHOLE_HOME or label
+			if rooms == nil and self:has("scenes", "group_target") then
+				rooms = self:project_rooms() or false
+			end
+			local target = self:group_target(g, rooms or nil)
+			group = { rid = g, label = shown, noun = home and "the whole home" or shown, heads = { label .. ": ",
+				shown .. ": " }, items = {}, target = target, key = target and target.sort_key or NO_ROOM_KEY,
+				label_key = shown:lower(), rank = target and target.room_id and 0 or 1 }
 			by_rid[g] = group
 			groups[#groups + 1] = group
 		end
-		local text, head = e.text, group.label .. ": "
-		if #text > #head and text:sub(1, #head) == head then
-			text = text:sub(#head + 1)
+		local text = e.text
+		for _, head in ipairs(group.heads) do
+			if #text > #head and text:sub(1, #head) == head then
+				text = text:sub(#head + 1)
+				break
+			end
 		end
 		group.items[#group.items + 1] = { text = text, value = "scene:" .. e.value }
 	end
+	-- The groups with a room first whatever their names' bytes ("~" sorts
+	-- before a UTF-8 "Ö"), then by the sort key and the label.
 	table.sort(groups, function(a, b)
-		local la, lb = a.label:lower(), b.label:lower()
-		if la ~= lb then
-			return la < lb
+		if a.rank ~= b.rank then
+			return a.rank < b.rank
+		end
+		if a.key ~= b.key then
+			return a.key < b.key
+		end
+		if a.label_key ~= b.label_key then
+			return a.label_key < b.label_key
 		end
 		return a.rid < b.rid
 	end)
 	return groups, #items, by_rid
 end
 
--- The scene folder rows: "Kitchen: 5 scenes", selectable in Add From Hue.
+-- What a scene folder says after its arrow: the target, with the way out
+-- for an unmapped group (#469 S1).
+local function target_text(target)
+	if target.text == "(unmapped)" then
+		return "(unmapped; Set Room Mapping first)"
+	end
+	return target.text
+end
+
+-- The scene folder rows: "Kitchen → Kitchen: 5 scenes" (#469 S1; "Kitchen:
+-- 5 scenes" without group_target), selectable in Add From Hue only when the
+-- group has a room to go to: picking an unmapped one would be refused (P1).
 local function scene_folders(groups, selectable)
 	local list = {}
 	for _, g in ipairs(groups) do
-		list[#list + 1] = folder(string.format("%s: %s", g.label, util.plural(#g.items, "scene")), "f:scenes:" .. g.rid,
-			selectable and g.rid ~= NO_GROUP)
+		local count = util.plural(#g.items, "scene")
+		local text = g.target and string.format("%s → %s: %s", g.label, target_text(g.target), count)
+			or string.format("%s: %s", g.label, count)
+		list[#list + 1] = folder(text, "f:scenes:" .. g.rid,
+			selectable and g.rid ~= NO_GROUP and (g.target == nil or g.target.room_id ~= nil))
 	end
 	return list
 end
@@ -450,9 +530,14 @@ function actions:add_folder(key)
 		if not group then
 			return { row("(no scene of this room or zone is left to add)") }, "f:scenes"
 		end
-		local list = {}
-		if g ~= NO_GROUP then
+		-- The All row names where they go (#469 S1); an unmapped folder has
+		-- none and only lists its scenes (picking one is refused with P1).
+		local list, target = {}, group.target
+		if g ~= NO_GROUP and not target then
 			list[1] = row(string.format("All scenes of %s not in Control4 yet", group.label), key)
+		elseif g ~= NO_GROUP and target.room_id then
+			list[1] = row(string.format("All %s of %s into %s", util.plural(#group.items, "scene"), group.noun,
+				target.text), key)
 		end
 		return append(list, group.items), "f:scenes"
 	end
@@ -606,6 +691,96 @@ local function by_kind(rows, kinds, empty)
 	return rows
 end
 
+-- The Control4 room each device sits in, { [device_id] = room name }: one
+-- GetDevices lookup, by scenes:device_rooms ({ [id] = { id, name } }), else
+-- through the scenes module's project calls (bridge/project.lua,
+-- pcall-wrapped there). Empty when the lookup fails or answers nothing:
+-- unknown names no room (#469 S2).
+function actions:device_rooms(ids)
+	local out = {}
+	if #ids == 0 then
+		return out
+	end
+	local m = self:mod("scenes")
+	if m and type(m.device_rooms) == "function" then
+		-- Not self:call: a failed lookup only names no room, it is no listing problem.
+		local ok, rooms = pcall(m.device_rooms, m, ids)
+		if not ok then
+			self.log.warn("actions: scenes:device_rooms failed: %s", tostring(rooms))
+		end
+		for id, room in pairs(ok and type(rooms) == "table" and rooms or {}) do
+			local name = type(room) == "table" and room.name or room
+			if tonumber(id) and type(name) == "string" and name ~= "" then
+				out[tonumber(id)] = util.sanitise(name)
+			end
+		end
+		return out
+	end
+	local p = m and m.project
+	if type(p) ~= "table" or type(p.call) ~= "function" then
+		return out
+	end
+	local ok, answered, raw = pcall(p.call, p, "devices", { DeviceIds = table.concat(ids, ",") })
+	if not ok or not answered or type(raw) ~= "table" then
+		return out
+	end
+	local rooms
+	for id, info in pairs(raw) do
+		local device_id = tonumber(id)
+		if device_id and type(info) == "table" then
+			local name = util.display_name(info.roomName)
+			local room_id = tonumber(info.roomId)
+			if name == "" and room_id then
+				if rooms == nil then
+					local got_rooms, list = pcall(p.rooms, p)
+					rooms = got_rooms and type(list) == "table" and list or {}
+				end
+				name = rooms[room_id] and tostring(rooms[room_id]) or ""
+			end
+			if name ~= "" then
+				out[device_id] = util.sanitise(name)
+			end
+		end
+	end
+	return out
+end
+
+-- " in Den" after the device's number in a row ("Kitchen: Concentrate
+-- (device 1241 in Den, gone since 10-21)"); the row as it is when it names
+-- no such device.
+local function with_room(text, id, room)
+	local key = "(device " .. tostring(id)
+	local s, e = text:find(key, 1, true)
+	while s do
+		if not text:sub(e + 1, e + 1):match("%d") then
+			return text:sub(1, e) .. " in " .. room .. text:sub(e + 1)
+		end
+		s, e = text:find(key, e + 1, true)
+	end
+	return text
+end
+
+-- Link Device's scene device rows name the device's Control4 room, so the
+-- dealer can pick a folder under To that goes there (#469 S2): one lookup
+-- for the whole list, when it is shown.
+function actions:scene_rooms(list)
+	local ids = {}
+	for _, e in ipairs(list) do
+		local id = id_of(e.value)
+		if id then
+			ids[#ids + 1] = tostring(id)
+		end
+	end
+	local rooms = self:device_rooms(ids)
+	for _, e in ipairs(list) do
+		local id = id_of(e.value)
+		if id and rooms[id] then
+			e.text = with_room(e.text, id, rooms[id])
+		end
+	end
+	return list
+end
+
 function actions:link_rows()
 	local suggestions, by_device = self:suggestions()
 	local top = #suggestions > 0
@@ -623,6 +798,20 @@ function actions:link_list(folder_value)
 		local key = key_of(folder_value)
 		local top, kinds = s:link_rows()
 		local kind = FOLDER_KIND[key]
+		-- The scene rows are shown in their folder, or at the top when they
+		-- are the only kind: only then are their rooms looked up.
+		local filled, scenes = 0, nil
+		for _, k in ipairs(kinds) do
+			if #k.list > 0 then
+				filled = filled + 1
+			end
+			if k.key == "scenes" then
+				scenes = k
+			end
+		end
+		if scenes and #scenes.list > 0 and (kind == "scenes" or (key == "" and filled == 1)) then
+			s:scene_rooms(scenes.list)
+		end
 		if kind then
 			for _, k in ipairs(kinds) do
 				if k.key == kind then
@@ -824,6 +1013,22 @@ local function not_ready(verb, key, say)
 	say(string.format("Not %s: the %s are not ready yet; try again in a minute", verb, KINDS[key].add:lower()))
 end
 
+-- "All scenes of <group>" (its selectable folder or its All row): every new
+-- scene of the group into the room it maps to, by add_all_of_group, which
+-- judges an explicit Room itself (scenes:placement, #469 F2, P1 to P4): the
+-- mapped room is accepted, another is refused naming both, a group with no
+-- room of its own is refused naming Set Room Mapping. Without group_target
+-- (an older scenes module) an explicit Room is refused as before.
+function actions:add_group(group, room_id, say)
+	if group == NO_GROUP or not self:has("scenes", "add_all_of_group") then
+		return say("Not added: open this folder and pick one scene")
+	end
+	if room_id and not self:group_target(group) then
+		return say("Not added: the scenes of a room or zone go into the room it maps to; set Room to (mapped room)")
+	end
+	return self:mod("scenes"):add_all_of_group(group, room_id, done_to(say, "Scenes added"))
+end
+
 function actions:run_add(params, say)
 	say = self:say(say)
 	self:guard("Add From Hue", say, function()
@@ -841,10 +1046,9 @@ function actions:run_add(params, say)
 		end
 		local bulk = what == "all:lights" and { "lights", "import_new", "lights" }
 			or what == "all:motion" and { "motion", "import_new", "motion sensors" } or nil
-		local group = what:match("^f:scenes:(.+)$")
-		if (bulk or group) and room_id then
+		if bulk and room_id then
 			return say(string.format("Not added: all new %s go each into the room its Hue room maps to; set Room to "
-				.. "(mapped room), or pick one", bulk and bulk[3] or "scenes of a room or zone"))
+				.. "(mapped room), or pick one", bulk[3]))
 		end
 		if bulk then
 			if not self:has(bulk[1], bulk[2]) then
@@ -852,11 +1056,9 @@ function actions:run_add(params, say)
 			end
 			return self:mod(bulk[1]):import_new(done_to(say, "Import finished"))
 		end
+		local group = what:match("^f:scenes:(.+)$")
 		if group then
-			if group == NO_GROUP or not self:has("scenes", "add_all_of_group") then
-				return say("Not added: open this folder and pick one scene")
-			end
-			return self:mod("scenes"):add_all_of_group(group, done_to(say, "Scenes added"))
+			return self:add_group(group, room_id, say)
 		end
 		local kind = FOLDER_KIND[what]
 		if kind then

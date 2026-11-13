@@ -180,7 +180,7 @@ function groups:room_of_device(device_rid)
 end
 
 -- Display label: "Kitchen" for a room, "Downstairs (zone)" for a zone,
--- "(all lights)" for the bridge_home, "(no room)" for nil or an unknown rid
+-- "(whole home)" for the bridge_home, "(no room)" for nil or an unknown rid
 -- (hue_model.group_label carries the wording).
 function groups:label(rid)
 	local group = self:group(rid)

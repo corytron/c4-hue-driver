@@ -13,10 +13,54 @@ listed.
 
 ## Unreleased
 
+### Added
+- Set Room Mapping can map the whole home, listed as `(whole home)` when
+  the bridge has scenes for all its lights, so those scenes can be added to
+  a Control4 room; lights never use that mapping. The whole home's scenes,
+  listed as `(all lights)` up to 1.5, are listed as `(whole home)` too. Room Mappings also offers
+  what the driver found for a Hue room without a mapping (the room its scene
+  devices sit in, the old mapping of a room deleted and made again), and Set
+  Room Mapping's result counts the devices that sit in other rooms. Nothing
+  is mapped or moved until you click (#469).
+
 ### Changed
 - Every release's notes now open with what its name means and how that
   ties to what the release changes; the published releases were updated
   the same way (#464).
+- Hue Scene tiles now show only their own scene: a scene's tile reads on,
+  at its room's level, only while that scene is the one playing, and 0
+  while another scene, a scene without a device or lamps turned on by hand
+  light the room. Its Light On and Light Off events in programming follow
+  the tile. Up to 1.5, by default, every scene tile of a room showed the
+  room's lights (#469).
+- Moving a Hue Scene's slider while another scene, or none, is playing
+  switches the room or zone to that scene at once, at the slider's level;
+  Toggle plays it too (#469).
+- On State Follows is renamed Keypad Follows and keeps the value it had. It
+  now decides only what a keypad bound to the scene treats as on (its LEDs,
+  the toggle button and holds): `Room/zone lights`, the default, keeps a
+  wall switch lit while any light of the room is on. The old row is hidden
+  (#469).
+- A Hue scene can now only be added, or linked with Link Device, in the
+  Control4 room its Hue room or zone maps to; a scene of a Hue room with no
+  mapping, or one mapped to a deleted Control4 room, is refused with a text
+  that names Set Room Mapping. Existing scene devices are not moved, and a
+  device dragged to another room in Composer keeps working, marked on its
+  line. Add From Hue's and Link Device's scene folders name the room their
+  scenes go to (#469).
+
+### Fixed
+- A Hue Scene whose scene was deleted in Hue no longer stays lit: its tile
+  reads 0 at once (#469).
+- A Hue Scene device linked to another scene no longer carries the old
+  scene's on state or level; it shows the new scene's once the bridge
+  reports it (#469).
+- A scene slider moved again right after switching to that scene is now
+  measured from the level just set, not from the room's earlier level
+  (#469).
+- A scene tile now goes off when a scene of an overlapping Hue room or
+  zone, or of the whole home, takes over its lamps, and the tiles are put
+  right after a restart or a reconnection to the bridge (#469).
 
 ## 1.5 "Kenari", build 609 (2026-11-10)
 

@@ -47,10 +47,11 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		return json.decode(text).data
 	end
 
-	local function answer_scene_gets()
+	-- The resync's three GETs, the scenes as `scene_body` (default F.scene).
+	local function answer_scene_gets(scene_body)
 		local t = bc4.last_transfer()
 		assert.equal("https://192.0.2.10/clip/v2/resource/scene", t.url)
-		fake.as(bridge, function() t:respond(200, F.scene) end)
+		fake.as(bridge, function() t:respond(200, scene_body or F.scene) end)
 		t = bc4.last_transfer()
 		assert.equal("https://192.0.2.10/clip/v2/resource/smart_scene", t.url)
 		fake.as(bridge, function() t:respond(200, F.smart_scene) end)
@@ -306,17 +307,87 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("4 scenes + 1 time-based on bridge, 1 imported, 4 new", S:summary())
 	end)
 
-	it("with On State Follows on the room's lights, the hello's group report shows the inactive scene on", function()
+	-- #469 D1, D9, D13: the tile follows the scene alone, so the room's lights
+	-- no longer turn it on (until 1.6 the lights mode showed the inactive
+	-- scene on here); a keypad bound to it follows the room's lights (Keypad
+	-- Follows "Room/zone lights", O1, departure D20).
+	it("with Keypad Follows on the room's lights, the hello's group report lights the keypad, not the tile", function()
 		S:resync()
 		answer_scene_gets()
 		S:add_scene(F.scene_rids.relax, nil, function() end)
 		fake.pair(bridge, scene, { light_id = SCENE_ID, bind = false })
+		-- On State Follows too, so before_each's "This scene" is not carried into Keypad Follows (D12).
 		scene.Properties["On State Follows"] = "Room/zone lights"
+		scene.Properties["Keypad Follows"] = "Room/zone lights"
 		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
 		fake.pump()
 		assert.equal("inactive", S:scene(F.scene_rids.relax).active)
-		local br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
-		assert.is_true(br[#br].LIGHT_BRIGHTNESS_CURRENT > 0, "the fixture's room is lit, so the device reads on")
+		assert.is_true(S.group_on[F.grouped_light_rids.living_room], "the fixture's room is lit")
+		for _, n in ipairs(proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")) do
+			assert.equal(0, n.LIGHT_BRIGHTNESS_CURRENT, "the room is lit, but this scene is not the one playing")
+		end
+		local leds = proxy_calls(scene, "MATCH_LED_STATE")
+		assert.is_true(#leds > 0)
+		assert.is_true(leds[#leds].STATE, "the keypad reads the room's lights on")
+	end)
+
+	-- #469 D7: the bridge tells a scene that another one took over, which
+	-- ends its held state, so its tile goes to 0: from Hue's event for a scene
+	-- of an overlapping zone (the groups' lamps known), and at a resync after
+	-- another scene played while the stream was down.
+	it("a scene of an overlapping zone, and a resync after another scene played, take a held scene's tile to 0",
+		function()
+		local function status(rid, active)
+			return '[{"creationtime":"2026-11-12T18:00:00Z","id":"9de116fc-0469-4a2b-8c3d-000000000469","type":"update",'
+				.. '"data":[{"id":"' .. rid .. '","type":"scene","status":{"active":"' .. active .. '"}}]}]'
+		end
+		local function tile()
+			local br = proxy_calls(scene, "LIGHT_BRIGHTNESS_CHANGED")
+			return br[#br] and br[#br].LIGHT_BRIGHTNESS_CURRENT
+		end
+		-- Play Relax from the tile and let Hue call it inactive (a lamp changed
+		-- by hand): held on, the tile lit.
+		local function play_and_hold()
+			bc4.fire_timers()  -- any recall window is over
+			fake.as(scene, scene.ReceivedFromProxy, 5001, "ON", {})
+			fake.pump()
+			local put = bc4.last_transfer()
+			fake.as(bridge, function()
+				put:respond(200, '{"data":[{"rid":"' .. F.scene_rids.relax .. '","rtype":"scene"}],"errors":[]}')
+			end)
+			fake.pump()
+			event(F.events.scene_inactive)
+			fake.pump()
+			scene.C4.fire_timers()  -- the one-a-second level throttle
+			assert.is_true((tile() or 0) > 0, "held on")
+		end
+
+		S:resync()
+		answer_scene_gets()
+		L:absorb({ device = decode_data(F.device) })  -- the lamps: Downstairs holds the Living Room Lamp
+		S:add_scene(F.scene_rids.relax, nil, function() end)
+		fake.pair(bridge, scene, { light_id = SCENE_ID, bind = false })
+		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+
+		play_and_hold()
+		bc4.sent = {}
+		event(status(F.scene_rids.bright, "static"))  -- a Downstairs scene played in the Hue app
+		assert.same({ rid = F.scene_rids.relax, other_active = "true" }, bc4.sent[1].params)
+		fake.pump()
+		scene.C4.fire_timers()
+		assert.equal(0, tile(), "another scene has the Living Room Lamp")
+
+		play_and_hold()
+		bc4.sent = {}
+		S:resync()
+		answer_scene_gets(F.scene:gsub('"active":"static"', '"active":"inactive"')
+			:gsub('("name":"Savanna sunset".-"active":)"inactive"', '%1"dynamic_palette"'))
+		assert.same({ "HUE_SCENE_STATE", "HUE_SCENE_GROUP", "HUE_SCENE_GROUP" }, messages_to(bc4, SCENE_ID))
+		assert.equal("true", bc4.sent[2].params.other_active)
+		fake.pump()
+		scene.C4.fire_timers()
+		assert.equal(0, tile(), "Savanna sunset played while the stream was down")
 	end)
 
 	it("a dynamic scene recalled from the proxy ends up dynamic_palette, and Recall As Static makes it static", function()
