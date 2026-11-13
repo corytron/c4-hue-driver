@@ -136,6 +136,10 @@ sends `MATCH_LED_STATE` false on the three links.
   (`src/hue_bridge/bridge/scenes.lua:on_grouped_light`, `absorb`).
 - `driver.xml` also declares `ramp_level` True; `SET_LEVEL` and
   `RAMP_TO_LEVEL` take the slider's path with `TIME` as the rate.
+  Current (2026-11-13, #478): `ramp_level` is no longer declared since
+  1.5, a deprecated flag (`docs/turn-on-design.md` D22); `SET_LEVEL` and
+  `RAMP_TO_LEVEL` still take the slider's path
+  (`src/hue_scene/driver.lua:set_target`).
 - A slider target while a recall or OFF is still on its way recalls at that
   level instead of moving the group (its level is in flux then); a recall
   from the slider settles on the bridge's `HUE_SCENE_STATE` or the recall's

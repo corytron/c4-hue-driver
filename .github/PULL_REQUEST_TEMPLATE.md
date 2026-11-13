@@ -2,7 +2,9 @@
 
 ## What
 
-<!-- The change in a sentence or two, and "Closes #N" for the issue it fixes. -->
+<!-- The change in a sentence or two. -->
+
+Closes #<!-- the issue this pull request fixes; open one first for anything bigger than a typo -->
 
 ## Why
 
@@ -12,11 +14,11 @@
 
 ## How it was tested
 
-- [ ] `tools/check.sh` passes: lint, specs, shell, Python, XML, workflows, secrets, the
-      house's desired state, the changelog and the links (CI runs the same script
-      with `--strict`)
+- [ ] `tools/check.sh` passes: every check CI runs (lint, specs, Lua limits, shell,
+      Python, XML, PowerShell, workflows, secrets, the house's desired state, the
+      changelog and the links; CI runs the same script with `--strict`)
 - [ ] A change of behaviour comes with a spec
-- [ ] `tools/build.sh` builds the three `.c4z` files
+- [ ] `tools/build.sh` builds the four `.c4z` files
 - [ ] On hardware: <!-- Control4 OS version, Composer Pro version, bridge model, what you
       clicked and what you saw; or "not run on a controller", which is fine if said -->
 
@@ -31,9 +33,10 @@
       CONTRIBUTING.md.
 - [ ] **No third-party text.** Nothing from Snap One's SDK repositories or documentation,
       nothing from Signify's login-walled developer pages.
-- [ ] **Manual.** `src/hue_bridge/www/documentation.html`, and the Hue Light or Hue Scene
-      page (`documentation.html` under `src/hue_light/www/` or `src/hue_scene/www/`), are
-      updated if a property text, a `Last Action` result or an `Attention` line changed.
+- [ ] **Manual.** `src/hue_bridge/www/documentation.html`, and the Hue Light, Hue Scene or
+      Hue Motion Sensor page (`documentation.html` under `src/hue_light/www/`,
+      `src/hue_scene/www/` or `src/hue_motion/www/`), are updated if behaviour, a property
+      text, a `Last Action` result or an `Attention` line changed.
 - [ ] **Changelog.** A change to what the drivers do or what their documentation says
       has a line under `## Unreleased` in `CHANGELOG.md`, written for the people who
       install and use the drivers, with the issue number (`docs/changelog-design.md`).

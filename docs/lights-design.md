@@ -25,6 +25,11 @@ after 5 minutes of bridge trouble and back at the first contact, and a
 command the bridge fails to deliver is answered with the bridge's state;
 [the offline contract](offline-design.md) has the rules, and dated notes
 below say where it changed this file.
+Current (2026-11-13, #478): the house has four Hue Light devices
+(`docs/status.md`). Since 1.2 (#334) the bridge's actions are merged:
+`Add Light` is Add From Hue, `Import All New Lights` is Import All New, and
+the Hue Light device has no actions; the old commands answer as hidden
+aliases until 2.0 (`docs/simplify-actions-design.md` §1.2).
 
 ## Roles
 

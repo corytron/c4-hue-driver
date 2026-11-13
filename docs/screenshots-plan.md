@@ -20,6 +20,10 @@ script relies on is either already used by `Composer.psm1` (finding elements,
 pickers, list-view reads, safe clicks, captures) or marked as an assumption
 in §5.
 
+**Current (2026-11-13, #478):** run the same day. PR #251 retook 21 pictures
+on build 329 and added the zone light's two; they shipped in build 349, the
+final 1.0 release, and #61 is closed.
+
 Scope: the 22 pictures the manual references today, plus the two that
 chapter 7 lacks (`add-zone-light.png`, `zone-light-properties.png`). Their
 first drafts exist only on the VM in `build/shots/img/` and show the street

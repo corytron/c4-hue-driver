@@ -1,6 +1,8 @@
 # Edge cases and lifecycle policy: Hue motion sensors and MotionAware areas
 
 > **Research (2026-10-26) for issue #268**, written before the contract (`docs/motion-design.md`) against `main` at release 1.0 (build 359); "today" and `[code: …]` mean that code. Read-only. It enumerates the lifecycle corner cases on both sides and recommends, per case, what is automatic, what is only offered and what is forbidden without a click. The owner's answers go into §9; until then the recommended defaults stand. It builds on the two research notes written at the same time: `docs/motion-control4-research.md` (C4R below; its recommended device is assumed throughout, §0.3) and `docs/motion-hue-research.md` (HR below).
+>
+> Current (2026-11-13, #478): the owner's answers went into the contract instead of §9: `docs/motion-design.md` §1, D3 to D9 for §9's questions 1 to 7. The feature shipped in 1.1.
 
 What the bridge driver and the motion devices do on their own, what they
 only offer, and what they never do without a click, for every event in the

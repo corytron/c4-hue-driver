@@ -1,35 +1,39 @@
 # Composer checklist
 
 What only Composer, a Navigator, a keypad or the Hue app can show, as steps
-for the owner. Every step describes what build 316 does (its texts checked
-against the code on 2026-10-25, issue #231); where build 316 differs from
-the build a step was first written for, a dated note says so. A **Done**
-line under a step says when it was checked on the house and what it
-showed, in the words of that day; **Open** means it has not been checked
-yet. What runs on the house and what is open overall is `docs/status.md`;
-the engineering record behind each result is `docs/design.md`.
+for the owner and the Windows session (`docs/composer-remote.md`). Each
+section was written for the build it names in its heading; sections A to K
+were checked against the code of build 316 on 2026-10-25 (issue #231), and
+each later section against the code of its own release. A **Done** line
+under a step says when it was checked on the house and what it showed, in
+the words of that day; **Open** means it has not been checked yet. Step
+numbers never change, because issues and Discussions cite them. What runs
+on the house and what is open overall is `docs/status.md`; the engineering
+record behind each result is `docs/design.md`.
 
-**Release 1.2 (#334) replaced the actions**: the Hue Bridge has 9 (Pair
-Bridge, Import All New, Add From Hue, Link Device, Forget Device, Resolve
-Names, Set Room Mapping, Diagnostics, Forget Pairing), the Hue Light and Hue
-Scene none, the Hue Motion Sensor one (Test Motion Programming), and much of
-what was a click is a background task. Section L holds the checks of 1.2 and
-the table of where each old action went. Release 1.5 adds a tenth bridge
-action, **Hue Automations** (#280, section N). The steps of sections A to K keep
-the action names of the build they were written for, as the record of what
-was checked; repeat one on 1.2 through the action that replaced it.
+**The actions today** (since 1.5): the Hue Bridge has ten (Pair Bridge,
+Import All New, Add From Hue, Link Device, Forget Device, Resolve Names,
+Set Room Mapping, Hue Automations, Diagnostics, Forget Pairing), the Hue
+Light and Hue Scene none, the Hue Motion Sensor one (Test Motion
+Programming). Release 1.2 (#334) cut the bridge's actions to nine and made
+much of what was a click a background task; section L holds its checks and
+the table of where each old action went. Release 1.5 added the tenth, Hue
+Automations (#280, section N). The steps of sections A to K keep the action
+names of the build they were written for, as the record of what was
+checked; repeat one today through the action that replaced it (section L's
+table).
 
 ## Before you start
 
-- **Release builds.** Release builds (no dev loop, no Lua command window)
-  ran on the house from build 116 (2026-10-22) to build 259 (2026-10-24).
-  Since build 259 (2026-10-24, 23:11) a release reaches the house from
-  GitHub (`docs/release-checklist.md`, "Deploy to the house"): `tools/deploy.py
+- **Release builds.** The house runs release builds (no dev loop, no Lua
+  command window); `docs/status.md` names the one installed now. Since
+  build 259 (2026-10-24, 23:11) a release reaches the house from GitHub
+  (`docs/release-checklist.md`, "Deploy to the house"): `tools/deploy.py
   start` writes the brief, and the Windows Claude session downloads the
   four files of the release from their GitHub URLs (checksums checked)
   and installs them (step 1). A development build goes on the house only
-  when the developer asks for a test (dev build 309 since 2026-10-25 03:24,
-  for issue #40), and a release replaces it afterwards (issue #228).
+  when the developer asks for a test (the last was dev build 604 on
+  2026-11-10), and a release replaces it afterwards.
 - **Capability changes need a reboot.** If an install makes Composer ask
   "Restart Director?", answer Yes, but it does not restart Director: the
   devices keep their old capabilities until you reboot the controller from
@@ -45,7 +49,10 @@ was checked; repeat one on 1.2 through the action that replaced it.
   stands for a value that varies. Where a step does not quote, paste what
   you see.
 
-The house on 2026-10-24: build 160 on all three drivers, paired with the Hue
+The house as it was when sections A to I were written (history; the house
+today is `docs/status.md`, "What runs on the house"):
+
+The house on 2026-10-24: build 160 on the three drivers of the time, paired with the Hue
 Bridge Pro; one Hue Scene device, "Shine" (device 1162, Master Bedroom, Hue
 scene Shine of the Master Bedroom room); **no Hue Light devices** (all 47
 deleted in Composer on 2026-10-22 and remembered as deleted); the "Bedside
@@ -84,7 +91,8 @@ device for a single lamp, and the switches bound as above.
    `Status` "Paired"; `Event Stream` "Connected since <HH:MM:SS>" (with ",
    <n> containers, last <HH:MM:SS>" once events arrive, and the reconnect
    count after a reconnect); `Attention` "None"; `Lights` "47 lights on
-   bridge, 0 imported, 0 new, 47 deleted" (the house today); `Scenes` "<n>
+   bridge, 0 imported, 0 new, 47 deleted" (the house on 2026-10-25; two
+   single lights were added back on 2026-10-26); `Scenes` "<n>
    scenes + <m> time-based on bridge, <k> imported, <w> new" (126 + 15 on
    the bridge and 2 imported on 2026-10-25); `Zone Lights` "7 zones + 16
    rooms on bridge, 2 imported, <w> new", <w> counting the zones and rooms
@@ -114,11 +122,12 @@ device for a single lamp, and the switches bound as above.
    created 47 devices one at a time, bound and registered; `Lights` ended
    "47 lights on bridge, 47 imported, 47 new". Since the import-ui build
    (2026-10-21) the actions are **Import All New Lights** (every new light
-   into its mapped room) and **Add Light** (one light, step 21). Today every
-   light is remembered as deleted, so Import All New Lights creates nothing
-   and answers "Added no lights; skipped 47 deleted in Composer (Add Light
-   re-creates one): <name> #<n> (deleted 2026-10-22), …"; bring a light back
-   with Add Light.
+   into its mapped room) and **Add Light** (one light, step 21); since 1.2
+   **Import All New** and **Add From Hue**. On 2026-10-25 every
+   light was remembered as deleted, so Import All New Lights created nothing
+   and answered "Added no lights; skipped 47 deleted in Composer (Add Light
+   re-creates one): <name> #<n> (deleted 2026-10-22), …"; a light comes back
+   with Add Light (Add From Hue since 1.2).
 4. After adding a light, open it in Composer:
    - Properties: `Status` "<Hue name> (<model>)", for example "Left Bedside
      Light (Hue color lamp)"; `Hue Light ID` "#<n> (<first 8 hex digits>…)";
@@ -201,10 +210,12 @@ installs a development build for a test (dev builds 276, 284 and 309 on
 pushes Lua to the bridge and its devices from the VM (`docs/dev-loop.md`),
 reads the bridge's log there, and runs the development commands (`Hue
 Request`, `Probe Call`, `Lights Report` and the other probes; since #217,
-2026-10-25, through signed dev-loop commands only) and the three DEV-ONLY
-actions Composer shows on a dev build (`Connection Test`, `Reload
-Credentials`, `Check CA Pinning`); a light's or scene's reload line appears
-only in its own Lua tab.
+2026-10-25, through signed dev-loop commands only) and the development
+entries Composer shows on a dev build (until 1.2 the actions `Connection
+Test`, `Reload Credentials` and `Check CA Pinning`; since 1.2 the four
+"(dev) …" entries of the Diagnostics list); a light's or scene's reload line
+appears only in its own Lua tab. The Hue Motion Sensor takes no code from
+the loop: a change to it needs a Composer install.
 
 - Stream address rotation, with `Event Stream Transport` = Web transfer
   only (since #317 the default network connection reads "<address>
@@ -1020,7 +1031,9 @@ forget or rename say so and undo what they did.
     release build and on a development build (whose four extra entries are
     in the Diagnostics list, step 84). A Hue Light's Actions tab (a zone
     light's too): **0**, empty. A Hue Scene's: **0**. A Hue Motion Sensor's:
-    **1**, Test Motion Programming. Paste each list.
+    **1**, Test Motion Programming. Paste each list. Since 1.5 (#280) the
+    bridge has **10**: Hue Automations sits between Set Room Mapping and
+    Diagnostics (section N).
     - **Done:** open.
 76. **Bridges Found** (manual chapter 4). Properties has a `Bridges Found`
     row right below `Bridge IP Address`. Expect the summary "Paired with Hue
@@ -1852,7 +1865,8 @@ remove it again.
 140. **Before the update: the old values** (contract D12). On every Hue
      Scene device, read **On State Follows** and paste `<device>: <value>`
      (`Room/zone lights` or `This scene`). Read only.
-     - **Done:** open.
+     - **Done: 2026-11-13, build 624, passed.** Shine and Golden hours both
+       read `Room/zone lights`.
 141. **Install, and Keypad Follows carries the value** (contract check 7;
      D12). Install the build in place (step 1, or the deploy brief).
      Composer should not ask "Restart Director?"; paste what it asks if it
@@ -1862,7 +1876,10 @@ remove it again.
      shown. Paste each device's **Keypad Follows**. If the row is missing,
      select another device and come back once; if it is still missing,
      paste the Properties page and stop here.
-     - **Done:** open.
+     - **Done: 2026-11-13, build 624, passed.** No "Restart Director?";
+       all eight devices at Driver Version 624; Keypad Follows reads
+       `Room/zone lights` on Shine and Golden hours, and On State Follows
+       is gone.
 142. **The slider switches scenes** (contract check 1; D1, D4). In the
      Control4 app, on the room's Lighting page, the owner taps A's tile on:
      A reads on at the room's level and B reads 0. Then the owner drags B's
@@ -1920,7 +1937,8 @@ remove it again.
      **Set Room Mapping** ▸ **Hue Room**: paste the list; `(whole home)`
      is in it when the bridge has such scenes, and unmapped lines carry
      the offers of the manual's chapter 6 where they apply. Cancel.
-     - **Done:** open.
+     - **Done: 2026-11-13, build 624, passed.** The scene folders name
+       their Control4 room as described.
 149. **Refused in the wrong room** (contract check 6; P2, P1). **Add From
      Hue**: **What** = a scene of the Master Bedroom's folder without a
      device (paste which), **Room** = another room than the Master
@@ -1932,7 +1950,8 @@ remove it again.
      …` line), pick one of its scenes with **Room** `(mapped room)`, OK:
      `Not added: Hue room <name> is not mapped to a Control4 room; map it
      with Set Room Mapping (…), then add again`. Nothing changes.
-     - **Done:** open.
+     - **Done: 2026-11-13, build 624, passed.** Both refusals read as
+       designed, and nothing was created.
 150. **The mapped room picked by hand is accepted** (the contract's room
      table, R = M). **Add From Hue**: the same scene as in step 149,
      **Room** = the Master Bedroom picked as `<Floor> / Master Bedroom`,

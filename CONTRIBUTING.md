@@ -2,8 +2,9 @@
 
 This is a personal project for one Control4 home, offered as is: there is no
 roadmap and no support obligation. Bug reports and pull requests are welcome
-all the same. This page says what a contribution has to respect; the
-[README](README.md) says what the driver does and how it is built and tested.
+all the same. This page says what a contribution has to respect and how it
+reaches `main`; the [README](README.md) says what the four drivers do and how
+they are built.
 
 ## License of contributions
 
@@ -69,21 +70,27 @@ optional.
   of behaviour comes with a spec; `busted tests` stays green.
 - **Four drivers, one build.** `tools/build.sh` stages `src/common/` into
   each driver (the bridge without `device.lua`; release builds without
-  `devloop.lua` and the bridge's development modules) and stamps all three
+  `devloop.lua` and the bridge's development modules) and stamps all four
   with the same build number (the commit count), so a change to a shared
-  module is a change to all three.
+  module is a change to every driver that uses it.
 - **Texts users read.** Property texts, `Last Action` results and `Attention`
   lines are part of the contract: the manual
-  (`src/hue_bridge/www/documentation.html`) and the Hue Light and Hue Scene
-  pages (`documentation.html` under `src/hue_light/www/` and
-  `src/hue_scene/www/`) quote them. A change to one changes those pages too,
-  and `docs/status.md` records what now runs.
+  (`src/hue_bridge/www/documentation.html`) and the Hue Light, Hue Scene and
+  Hue Motion Sensor pages (`documentation.html` under `src/hue_light/www/`,
+  `src/hue_scene/www/` and `src/hue_motion/www/`) quote them. A change to
+  one changes those pages too, and `docs/status.md` records what now runs.
 - **Automation needs a contract first.** Anything that acts on its own over
   the life of the system (importing, syncing names or rooms, creating or
   removing devices) starts with the lifecycle corner cases on both sides,
   written up under `docs/` with a decision per case: automatic, offered, or
-  forbidden without a click. The driver never creates, renames, moves or
-  deletes a Control4 device by itself; keep it that way.
+  forbidden without a click. The driver never creates, moves or deletes a
+  Control4 device by itself; keep it that way.
+- **Lighting behaves like Control4's own.** Lights, zone lights, scenes,
+  keypads and their LEDs work the way Control4's own dimmers and keypads do
+  and follow Control4's published guidance for them;
+  [`docs/c4-lighting-guidelines.md`](docs/c4-lighting-guidelines.md) is the
+  checklist. A departure is allowed only where Hue cannot do what Control4
+  expects, and is written down with its reason.
 - **Tooling.** Python under `tools/` is 3.12 or newer, standard library only
   (the one exception, the icon generator `make_icons.py`, needs Pillow),
   `ruff` clean under `ruff.toml` (`ruff check tools` and `ruff format --check
@@ -95,7 +102,7 @@ optional.
   and the least `permissions:` it needs.
 - **Commits.** Small, working steps with clear messages; one branch and one
   pull request per feature, linked to its issue (`Closes #N` in the pull
-  request) when there is one.
+  request; the checklist below says when an issue comes first).
 
 ## Checks
 
@@ -117,6 +124,7 @@ PSScriptAnalyzer for the `powershell` check.
 | --- | --- | --- |
 | `lua-lint` | `luacheck src tests tools` (through `tools/parallel.py luacheck`) | the drivers and the specs |
 | `lua-test` | `busted tests` (through `tools/parallel.py busted`) | the specs, against the fake DriverWorks runtime |
+| `lua-limits` | `python3 tools/lua_limits.py` (with `luac5.1`) | no function under `src/` above 180 locals or 50 upvalues, well inside Lua 5.1's limits |
 | `shell` | `shellcheck -S style tools/*.sh` | the shell scripts |
 | `python-lint` | `ruff check tools`, `ruff format --check tools` | the Python tooling |
 | `python-test` | `python3 -B -m unittest discover -s tools/tests` (through `tools/parallel.py unittest`) | the tooling's unit tests |
@@ -137,7 +145,7 @@ the number of cores); `JOBS=1` runs everything one at a time.
 names. A check whose tool is not installed is reported as `skip` and does
 not fail the run; CI runs the same script with `--strict`, where a skip is a
 failure, in four jobs whose names are the required checks on `main`: *Lint
-and test (Lua 5.1)* (`lua-lint`, `lua-test`), *Build the .c4z
+and test (Lua 5.1)* (`lua-lint`, `lua-test`, `lua-limits`), *Build the .c4z
 packages* (after the Lua job: `tools/build.sh`, then a check that every
 package carries `LICENSE` and `NOTICE` and that `build/manifest.json`
 describes them), *Tooling
@@ -156,8 +164,13 @@ pip enforces (`--require-hashes`).
   says `Closes #N`.
 - `tools/check.sh` passes (CI runs the same checks with `--strict`) and
   `tools/build.sh` builds the four `.c4z` files.
-- The manual, the Hue Light and Hue Scene pages and `docs/status.md` are
-  updated if behaviour or a text changed.
+- The manual, the Hue Light, Hue Scene and Hue Motion Sensor pages and
+  `docs/status.md` are updated if behaviour or a text changed.
+- A change to what the drivers do, or to what their documentation says, adds
+  a line under `## Unreleased` in `CHANGELOG.md`, written for the people who
+  install and use the drivers, with the issue number
+  ([`docs/changelog-design.md`](docs/changelog-design.md)); the Release
+  workflow writes the release notes from it.
 - A new document: if visitors of the project page would find it useful, the
   README links it; a design note goes in `docs/README.md`.
 - A change to a `driver.xml` `<capabilities>` block is called out in the PR
@@ -172,15 +185,13 @@ pip enforces (`--require-hashes`).
 
 Issues and pull requests carry the labels in `.github/labels.json`, which a
 workflow keeps in sync (it creates and updates labels and never deletes one).
-The issue forms set `bug` or `enhancement`; the maintainer adds the rest. The
-generated release notes group merged pull requests by label
-(`.github/release.yml`): `bug` under Fixed, `enhancement` under New and
-changed, `security` under Security, `documentation` under Documentation, `ci`
-and `release` under Tooling and CI; `dependencies` is left out. Three labels
-belong to automation: `deploy` marks the one issue the drift workflow keeps
-open while `deploy/house.yaml` and the recorded deployment differ,
-`security` also marks the one code scanning issue the triage workflow keeps
-(SECURITY.md), and `dependencies` marks Dependabot's pull requests.
+The issue forms set `bug`, `enhancement` or `beta-feedback`; the maintainer
+adds the rest. Three labels belong to automation: `deploy` marks the one
+issue the drift workflow keeps open while `deploy/house.yaml` and the
+recorded deployment differ, `security` also marks the one code scanning
+issue the triage workflow keeps (SECURITY.md), and `dependencies` marks
+Dependabot's pull requests. Labels sort issues and pull requests only: the
+release notes are written from `CHANGELOG.md`.
 
 A pull request is merged by the maintainer once the four checks are green,
 the branch is up to date with `main`, every review conversation is resolved
@@ -194,9 +205,10 @@ and nothing else is auto-merged.
 
 ## Reporting a problem
 
-Open a GitHub issue with the details the README asks for (Driver Version,
-Control4 OS version, bridge model, the property texts, the Lua output with
-private data replaced); the bug report form asks for each. Questions go to
+Open a GitHub issue with the bug report form, or the Beta feedback form for
+a prerelease; each asks for what is needed (Driver Version, Control4 OS
+version, bridge model, the property texts, the Lua output with private data
+replaced). Questions go to
 [Discussions](https://github.com/corytron/c4-hue-driver/discussions). For
 something security-sensitive, for example a way to read the stored
 application key, use GitHub's private vulnerability reporting on this

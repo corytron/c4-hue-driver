@@ -6,6 +6,12 @@ is not a feature contract: it plans verification. It has findings with
 citations, decisions, the checks, one ordered house round and the owner
 questions. No driver code is needed for the round itself (section 7).
 
+Current (2026-11-13, #478): the round ran in part on 2026-11-10, after the
+owner's reboot, on dev build 604 with no owner hands: #238 held, and #65
+read 82 reconnects in 24 h. The owner skipped the bedroom visit (B1 to B3)
+and #40's (a) and (b) ("assume they pass"), and all four issues were closed
+that day (`docs/status.md`).
+
 ## Contents
 
 - [Summary](#summary)

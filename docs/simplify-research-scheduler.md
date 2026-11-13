@@ -7,6 +7,12 @@ built. The owner's correction of 2026-11-04 applies throughout: Director's
 four-transfer limit sizes nothing below (principle 4); what still holds is
 Director's one `C4:url` transfer per host at a time.
 
+Current (2026-11-13, #478): built in 1.2 as `bridge/housekeeping.lua`
+([simplify-actions-design.md](simplify-actions-design.md) §2.1), with three
+amendments: the background tasks are always on (the owner's answer D4), the
+engine only reads, and the tasks themselves live in `bridge/tasks.lua`
+(since #373).
+
 ## 1. Findings
 
 1. **Today there is no engine, only three de-facto schedulers.** The

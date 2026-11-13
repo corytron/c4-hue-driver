@@ -118,3 +118,9 @@ watchdog's, waits while two stream transfers may be open
 (`stream.MAX_ABANDONED + 1`), with `Event Stream` reading
 `Waiting for an earlier stream transfer to close`
 (`bridge/stream.lua:connect`, `wait_for_close`; #217).
+
+Current (2026-11-13, #478): since #317 (1.1) the event stream uses a
+network connection by default (`Event Stream Transport` = `Network
+connection`, `bridge/netstream.lua`), which holds no `C4:url` transfer;
+this section applies only under `Web transfer`
+(`docs/raw-stream-design.md`).

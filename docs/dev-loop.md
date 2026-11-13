@@ -7,22 +7,25 @@ drivers' Lua and hands each tree to the bound devices running that driver,
 which reload themselves the same way. After one Composer install of a dev
 build, only `driver.xml` changes need Composer again (a capability change
 also needs the owner's controller reboot, `docs/composer-remote.md` rule 10).
+The Hue Motion Sensor is the exception: the server has no tree for it, so a
+change to `src/hue_motion` needs a Composer install; a dev build of it
+still forwards its log lines to the bridge (`HUE_LOG`).
 
 Dev builds only: `tools/build.sh --dev` includes `src/common/devloop.lua` in
-all three drivers, with the dev key baked in as `common/devkey.lua`, ships
+all four drivers, with the dev key baked in as `common/devkey.lua`, ships
 the bridge's development modules (`bridge/devtools.lua`,
-`bridge/conntest.lua`, `bridge/pinning.lua`), keeps the DEV-ONLY blocks of
-the bridge's `driver.xml` and allows Composer's Lua command window (dp3
-`--allowexecute`); release builds contain none of it. The controller acts
+`bridge/conntest.lua`, `bridge/pinning.lua`, `bridge/probe12.lua`), keeps
+the DEV-ONLY block of the bridge's `driver.xml` (the `Dev Server` and
+`Diagnostic Server` properties) and allows Composer's Lua command window
+(dp3 `--allowexecute`); release builds contain none of it. The controller acts
 only on what that key signed ("Security" below). The loop is inert until
 the bridge's `Dev Server` property holds a `host:port`. Light and scene
 devices have no such property: they only react to what the bridge forwards.
 
-**Current state (2026-10-25): in use for a hardware test.** The house ran
-release builds from 2026-10-22 (build 116) to 2026-10-24 (build 259); since
-2026-10-25 03:24 it runs dev build 309 for the checks of issue #40, and the
-release install of issue #228 ends the loop again. `docs/status.md`, "What
-runs on the house", is the authority on this. A release build carries no
+**Current state (2026-11-13): not in use.** The house runs release 1.6,
+build 624 (`docs/status.md`, "What runs on the house", is the authority on
+this). The loop last ran for the house round of 2026-11-10 (dev build 604),
+which the release install of 1.5 ended. A release build carries no
 `common/devloop.lua`, so nothing on the controller polls this VM and no
 property can turn the loop on.
 
@@ -30,7 +33,7 @@ To return to the loop: start `tools/devserver.py` (it listens on this VM's
 LAN address and creates the dev key on its first run), then build with
 `tools/build.sh --dev` (the packages carry that key) from a commit after
 the installed one (the version is the commit count, so Composer sees an
-update). Install the three dev `.c4z` the way `CLAUDE.md` (Deploy)
+update). Install the four dev `.c4z` the way `CLAUDE.md` (Deploy)
 describes an install that bypasses `tools/deploy.py`: served from
 `build/release/` with `python3 -I -m http.server 8090 --bind 0.0.0.0
 --directory build/release` for the duration of the download only, briefed
@@ -74,16 +77,19 @@ under "Leaving the loop" below.
   status (every tree), tail the log. It derives the admin token from the
   dev key file and finds the server through `build/dev/server.json`; `log`
   reads `build/dev/driver.log` directly and needs neither.
-- `src/common/devloop.lua`: the driver side, in all three drivers. The
-  bridge runs the polling loop; a light or scene device only registers the
-  `DEV_RELOAD` handler `devloop.reload_handler` builds (it calls
-  `devloop.apply_forwarded`, which applies only a bundle signed for its own
-  tree) and the `HUE_LOG` log sink of `devloop.forward_logs`
-  (`common/device.lua`).
+- `src/common/devloop.lua`: the driver side, in all four drivers. The
+  bridge runs the polling loop; a light, scene or motion device only
+  registers the `DEV_RELOAD` handler `devloop.reload_handler` builds (it
+  calls `devloop.apply_forwarded`, which applies only a bundle signed for
+  its own tree) and the `HUE_LOG` log sink of `devloop.forward_logs`
+  (`common/device.lua`). The bridge forwards only the light and scene trees
+  (`devloop.TREES`), so a motion device's handler never receives one.
 - `src/hue_bridge/bridge/devtools.lua`: the bridge's development handlers
-  (the `Dev Server` property, the three DEV-ONLY actions, `HUE_LOG`, and
-  the signed-only commands of "Development commands" below) and the
-  redactor; `driver.lua` loads it only when `common/devloop.lua` is there.
+  (the `Dev Server` property; the commands `Connection Test`, `Reload
+  Credentials` and `Check CA Pinning`, which the Diagnostics list offers as
+  four "(dev) …" entries since 1.2; `HUE_LOG`; and the signed-only commands
+  of "Development commands" below) and the redactor; `driver.lua` loads it
+  only when `common/devloop.lua` is there.
 - The dev key: `~/.config/c4-hue-driver/devkey` on the VM, outside the
   repository, and `common/devkey.lua` inside each dev package ("Security").
 
@@ -337,8 +343,10 @@ Without the token, or with a wrong one: 401.
   Call`, `Probe Project`, `Probe Errors`, `Probe Scenes`, `Proxy Command`,
   `Lights Report`, `Link Offline After` (#428), `Watch Events` (#432: logs
   which proxy events of a light fire, e.g. `Light=<device>
-  Events=5001-5015`; `Events=none` stops), and `Test Connection` with a
-  `Host`) are not in its
+  Events=5001-5015`; `Events=none` stops), the 1.2 probes of
+  `bridge/probe12.lua` (`Probe Discovery`, `Probe Names`, `Probe Names
+  Restore`, `Probe Picker`, `Probe Picker Folders`), and `Test Connection`
+  with a `Host`) are not in its
   dispatch table. `bridge/devtools.lua` hands them to
   `devloop.set_signed_commands(handlers)`, keyed by dispatch name, at every
   load of `driver.lua`, a reload's included; `devloop.execute(command,
@@ -495,21 +503,23 @@ A release build (`tools/build.sh` without `--dev`) ships no
 `common/devloop.lua` and no key; every driver requires the loop with
 `pcall`, so the same `driver.lua` starts without it and the bridge simply
 never contacts this VM again. Since build 259 (2026-10-24) a production
-install is a GitHub release, never a VM build; a dev build (such as 309, on
-the house since 2026-10-25) goes around `tools/deploy.py` and is recorded
-with `deploy.py record --no-manifest`. Before installing a release:
+install is a GitHub release, never a VM build; a dev build (the last was
+604, on 2026-11-10) goes around `tools/deploy.py` and is recorded with
+`deploy.py record --no-manifest`. Before installing a release:
 `devctl.py set "Debug Mode" Off` (the property survives the update, and
 `deploy/house.yaml` wants it Off), then the GitOps install of
 `docs/release-checklist.md`, "Deploy to the house" (`tools/deploy.py
 start`, its brief to the Windows session, `tools/deploy.py done`).
 `devctl.py status` then shows `last_seen` growing; stop `devserver.py`.
 A release's `driver.xml` has no DEV-ONLY block, so the `Dev Server` and
-`Diagnostic Server` rows and the `Connection Test`, `Reload Credentials`
-and `Check CA Pinning` actions leave Composer (release checklist §2, lines
-2 and 3). Done for the first time on 2026-10-22 (version 116 over dev
-build 84); the house then stayed on release builds until the dev builds of
-2026-10-25 (276, 284 and 309). Returning to the loop: "Current state" at
-the top.
+`Diagnostic Server` rows leave Composer, and the Diagnostics list loses its
+four "(dev) …" entries (release checklist §2, lines 2 and 3; before 1.2 the
+`Connection Test`, `Reload Credentials` and `Check CA Pinning` actions
+left the Actions tab). Done for the first time on 2026-10-22 (version 116
+over dev build 84); since then the house has run release builds, with dev
+builds only for hardware checks (276, 284 and 309 on 2026-10-25, the 1.2
+to 1.5 rounds up to 604 on 2026-11-10). Returning to the loop: "Current
+state" at the top.
 
 ## Security
 
@@ -536,7 +546,7 @@ signed, and the key never crosses the wire.
   --ensure-key` does only that and prints the path. A key file that group
   or others can read, or that is not 64 lowercase hex characters, is
   refused.
-- `tools/build.sh --dev` bakes it into each of the three dev packages as
+- `tools/build.sh --dev` bakes it into each of the four dev packages as
   `common/devkey.lua` (`return "<hex>"`), written into the stage only (umask
   077) and deleted from it once packed; the dev `.c4z` files are written
   0600. Every build refuses to run while a `src/common/devkey.lua` exists,
@@ -616,13 +626,16 @@ signed, and the key never crosses the wire.
   [verified: `5_director_command/_1-ExecuteCommand` in the DriverWorks API
   docs], so whatever sits in the bridge's dispatch table, any driver in the
   project can run with `C4:SendToDevice`. A dev build adds to that table
-  only what Composer itself sends, the actions of the DEV-ONLY block of
-  `src/hue_bridge/driver.xml` (`Connection Test`, `Reload Credentials`,
-  `Check CA Pinning`) and the `Dev Server` property, plus `HUE_LOG`
+  only what Composer itself sends: the `Dev Server` property of the
+  DEV-ONLY block of `src/hue_bridge/driver.xml`, and `Connection Test`,
+  `Reload Credentials`, `Check CA Pinning` and `Probe Picker Folders`
+  (actions of that block until 1.2; since then the Diagnostics list's
+  "(dev) …" entries and the 1.2 picker probe call them), plus `HUE_LOG`
   (`devtools.install`). The rest runs only for a signed `execute` command
   (above): `Hue Request`, `Probe Project`, `Probe Errors`, `Probe Scenes`,
   `Probe Call`, `Proxy Command`, `Lights Report`, `Link Offline After`,
-  `Watch Events` and `Test Connection`'s `Host` variant. Composer's `Test Connection` is the driver's own handler,
+  `Watch Events`, the other 1.2 probes and `Test Connection`'s `Host`
+  variant. Composer's `Test Connection` is the driver's own handler,
   which takes no parameters; another driver that sends it with a `Host`
   gets the dotted address.
 - **`HUE_LOG` stays reachable.** The light and scene devices send their log

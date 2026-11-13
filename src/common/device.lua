@@ -1,5 +1,6 @@
 -- The plumbing the Hue Light and Hue Scene drivers share around their
--- light_v2 proxy and their bridge binding: properties and proxy notifies, the
+-- light_v2 proxy and their bridge binding (the Hue Motion Sensor uses its
+-- bridge binding, properties and goodbye parts too): properties and proxy notifies, the
 -- bridge and proxy lookups, the Driver Version row, the buffer for bridge
 -- messages that arrive before late init, the keypad Button Links with their
 -- LEDs, button colours and press / click / release machine, the binding

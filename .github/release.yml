@@ -1,6 +1,7 @@
-# Categories of the generated release notes (gh release create --generate-notes
-# in .github/workflows/release.yml), by pull-request label; the labels are the
-# ones .github/labels.json defines. Dependabot's pin updates are left out.
+# Categories for GitHub's own "Generate release notes" button, by pull-request
+# label (the labels .github/labels.json defines); Dependabot's pin updates are
+# left out. The Release workflow does not use it: it writes every release's
+# notes from CHANGELOG.md (tools/changelog.py notes, docs/changelog-design.md).
 changelog:
   exclude:
     labels:

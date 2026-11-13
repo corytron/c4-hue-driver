@@ -11,9 +11,12 @@ Only the **latest release** on the
 supported: the four `.c4z` files attached to it, identified by the build
 number they show as **Driver Version** in Composer. Older builds get no
 fixes; update in place through Composer's *Add or Update Driver or Agent...*
-(see the README). Development builds (`tools/build.sh --dev`) are for the
-developer's own test system, carry the developer's dev-loop key, and are
-never supported as a production driver.
+([README, Updating](README.md#updating)). Prereleases for testers
+(`X.Y-beta.N`) are not supported versions: what you find in one goes to its
+Beta feedback form, or, when it is security-sensitive, privately as below.
+Development builds (`tools/build.sh --dev`) are for the developer's own test
+system, carry the developer's dev-loop key, and are never supported as a
+production driver.
 
 ## Reporting a vulnerability
 

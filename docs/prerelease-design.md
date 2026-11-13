@@ -5,6 +5,13 @@ sensor feature (#268) ships to a tester as a GitHub prerelease. It is the first 
 Release workflow, the changelog tool and the deploy tool cannot cut or
 install one today.
 
+Current (2026-11-13, #478): built. `v1.1-beta.1` to `v1.1-beta.8` were
+cut this way between 2026-10-26 and 2026-11-05, and the house ran betas
+1 to 4 and 6 to 8 through `deploy/house.yaml`; 1.1 itself followed on
+2026-11-05. No
+prerelease has been cut since. The working steps are
+`docs/release-checklist.md`, "Prerelease".
+
 ## 1. Versions and tags
 
 | Kind | Version | Tag | Tag moves? | On GitHub |
@@ -20,7 +27,7 @@ install one today.
 
 ## 2. The packages: one list
 
-The packages are named in one place: the directories `src/<name>/` that hold a `driver.xml`, sorted by name. Today they are `hue_bridge`, `hue_light` and `hue_scene`; #268 adds a fourth.
+The packages are named in one place: the directories `src/<name>/` that hold a `driver.xml`, sorted by name. When this was written they were `hue_bridge`, `hue_light` and `hue_scene`, and #268 was to add a fourth. Current (2026-11-13, #478): four since 1.1, `hue_bridge`, `hue_light`, `hue_motion` and `hue_scene`.
 - `tools/build.sh` builds exactly those (coordinator).
 - `build/manifest.json` lists them.
 - The Release workflow's checks (the file listing, `SHA256SUMS.txt`, the provenance subjects, the upload) take the list from the manifest, never a literal list. The manifest is itself checked against the `src/*/driver.xml` directories of the commit.
@@ -84,3 +91,4 @@ The packages are named in one place: the directories `src/<name>/` that hold a `
   - the package list read from a manifest with four packages.
 - `actionlint` and `zizmor` are clean.
 - Nothing is released by this PR. The first real run is `1.1-beta.1` after #268 merges.
+  Current (2026-11-13, #478): it ran on 2026-10-26 (build 376).

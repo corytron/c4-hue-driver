@@ -2,13 +2,17 @@
 
 Status: decided by the owner on 2026-11-05 (section 1.8); the build is 1.2.
 The two-way names (D6) and local discovery (D5) get their edge-case research before code.
+Current (2026-11-13, #478): released as 1.2 "Taramyn", build 488, on
+2026-11-05, with the nine bridge actions of 1.2 and the one motion action;
+1.5 added a tenth bridge action, Hue Automations (#280,
+[`hue-automation-audit-design.md`](hue-automation-audit-design.md) D20).
 
 ## 0. Contract of the research phase
 
 ### 0.1 Goal
 
-The Hue Bridge driver shows **32 actions** in Composer, the Hue Light 2, the
-Hue Motion 3 and the Hue Scene 2. The owner wants the drivers as simple to
+The Hue Bridge driver shows **32 actions** in Composer (29 in a release
+build, section 1.1), the Hue Light 2, the Hue Motion 3 and the Hue Scene 2. The owner wants the drivers as simple to
 use as an Apple product: few visible actions, sensible defaults, the driver
 looking after itself, and the installer clicking only where a choice is
 really theirs. Some actions should disappear in favour of periodic or
@@ -55,7 +59,9 @@ feature is reached, never whether it exists.
 
 ### 0.3 Inventory (generated from `src/*/driver.xml`, 2026-11-04)
 
-Hue Bridge, 32 actions (the command string equals the name):
+Hue Bridge, 32 actions (the command string equals the name; Connection
+Test, Reload Credentials and Check CA Pinning are in dev builds only, so a
+release build shows 29):
 
 | Family | Actions |
 | --- | --- |
@@ -186,7 +192,8 @@ answers in 1.7 come first.
   rejected key stays locked until someone clicks, and an IP change is never
   noticed (Status keeps saying Paired).
 - **Clicks per job barely drop; the number of things to learn does.** The
-  gain is 36 buttons down to 10, plus jobs the driver does for itself.
+  gain is 36 buttons down to 10, plus jobs the driver does for itself. (The
+  heading of 1.2 counts 39: these 36 and the three dev-only bridge actions.)
 - **Comparable products** merge by intent (one import, one inbox of finds),
   follow the bridge by its id when its address changes, keep the installer's
   names and rooms, and never auto-delete.

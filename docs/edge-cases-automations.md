@@ -1,6 +1,8 @@
 # Edge cases and lifecycle policy: the Hue automation audit
 
 > **Research (2026-10-26) for issue #280**, written before the contract, against `main` as of #270 (the house runs release 1.0, build 359) and the motion branch of #268 (`docs/motion-design.md`, `docs/edge-cases-motion.md`); "today" and `[code: …]` mean that code. Read-only. It enumerates the lifecycle corner cases on both sides and recommends, per case, what is automatic, what is only offered and what is forbidden without a click. The owner's answers go into §10; until then the recommended defaults stand. The Hue API side is researched at the same time in `docs/hue-automations-research.md` (HAR below), which had not appeared when this was written: every API fact not confirmed from a public source is marked [assumed], and HAR decides it.
+>
+> Current (2026-11-13, #478): no answers were written into §10. The contract `docs/hue-automation-audit-design.md` (2026-11-09) decided instead (its §3, and the owner's three answers in its §10), the audit shipped in 1.5 as the Hue Automations action, and the motion notes cited here merged with 1.1.
 
 What the bridge driver does on its own, what it only offers and what it
 never does without a click, for every event in the life of a Hue

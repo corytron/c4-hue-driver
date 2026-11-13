@@ -49,6 +49,12 @@ be, taps are counted per button in the 600 ms window and closed with
 declare `has_button_events` and `multi_click` (static: the same 1.5
 reboot). What a press does to the light or scene is unchanged. See "The
 light's own button events and Set All LEDs (#432)" at the end.
+Current (2026-11-13, #478, from #469, [the scene-tracking
+contract](scene-tracking-design.md)): a Hue Scene device's tile follows
+its own scene, and a bound keypad's LEDs, toggle button and holds follow
+the keypad's own state, which **Keypad Follows** (formerly On State
+Follows) chooses (D9 there). Where this file says a scene's LEDs follow
+its on state, read that state.
 
 ## What the proxy does [verified: BUTTON_ACTION command and notification]
 
