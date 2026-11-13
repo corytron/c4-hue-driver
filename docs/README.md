@@ -204,6 +204,9 @@ where the code later moved on.
   requests, the TLS verdict, the limit on open stream transfers, cleaned
   names, the development handlers, the two-job Release workflow and its
   pinned inputs.
+- [`security-review-design.md`](security-review-design.md) (contract): the
+  security review of 2026-11-13 (#480): what is protected, from whom, the
+  four reviewers, and how findings are rated and disclosed.
 
 ### Release, CI and documentation
 
@@ -372,6 +375,13 @@ is in the contracts, the issues and `status.md`.
   read-only security review of the review leftovers and the lifecycle
   refactor (PRs #214 and #216, build 292) and of the tooling: fourteen
   findings, fixed under `security-fixes-design.md` (#217).
+- [`reviews/security-2026-11-13.md`](reviews/security-2026-11-13.md)
+  (record): the security review of the driver source for running on and
+  installing on Control4 (#480): no Critical or High finding, two Medium,
+  and every finding mapped to its issue (#481 to #493). The reviewers'
+  reports on network trust, the bridge's controller surface and the device
+  drivers are beside it (`security-2026-11-13-network.md`, `-controller.md`,
+  `-devices.md`). The install report follows once the dev key is retired.
 - [`reviews/diff-review-2026-10-25.md`](reviews/diff-review-2026-10-25.md):
   the read-only diff and efficiency review of the same branch against the
   refactor's rule that no owner-visible behaviour changes.
