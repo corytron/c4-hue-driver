@@ -79,7 +79,8 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 | Sync | STRING | `Video, high, brightness 100 %` or `Off (passthrough)` or `Power save` | yes |
 | Bridge Link | STRING | `Hue Bridge 001788fffe123abc, connected` / `busy` / `invalid area` / `not linked` | yes |
 | HDMI 1 Sync Mode … HDMI 4 Sync Mode | LIST | Automatic, Video, Game, Music, Do not sync / Automatic (by the input's type; an audio-only route is Music; design 5.3, O5). HSB3 shows only HDMI 1 | no |
-| Day Starts, Evening Starts, Night Starts | STRING | `07:00`, `18:00`, `22:00` (24-hour; checked) | no |
+| Day Starts, Night Starts | STRING | `07:00`, `22:00` (24-hour; checked) | no |
+| Evening Starts | STRING | `-60` minutes from sunset (minutes, checked) | no |
 | Day Intensity, Evening Intensity, Night Intensity | LIST | Subtle, Moderate, High, Intense / High, Moderate, Subtle | no |
 | Day Brightness, Evening Brightness, Night Brightness | RANGED_INTEGER | 0–200 % / 100, 100, 70 | no |
 | At Room Off | LIST | Power save, Stop syncing and keep the picture / Power save (O6) | no |
@@ -224,6 +225,7 @@ does. Each module has its own spec.
 | `syncbox/link.lua` | The `HUE_SYNCBOX` binding (C5) |
 | `syncbox/programming.lua` | Commands, events, conditionals and variables (C1.6–C1.9) |
 | `syncbox/offers.lua` | The Sync Box Settings choices and Attention |
+| `syncbox/periods.lua` | The Day, Evening and Night periods: `periods.new(ctx)`, `p:current(now)`, `p:next_boundary(now)`, the sunset source (the Scheduler Agent's daily sunset entry if a driver hears it fire, else the sunset computed from the project's location; a clock time stands in when neither works); and the manual hold |
 
 **Moved into `src/common/`** before the box driver exists (beta stage 1):
 - `common/https.lua`: the bridge's HTTPS core, with its CA bundle, peer
@@ -288,8 +290,8 @@ The trust rules of #483 apply on both sides:
   `HUE_SYNCBOX` (design 4.2).
 - **After a sync ends (O11).**
   - The bridge keeps each streamed lamp's state from before the stream:
-    its last state reported before `mode` turned `streaming`, or the
-    command that arrived during the stream (design 6.3).
+    its last state reported before `mode` turned `streaming`. Commands that
+    arrived during the stream are not applied (design 6.3).
   - At the stream's end, a lamp whose end state differs is set back through
     the existing queues, coalesced per room or zone where every lamp of it
     goes to the same state.

@@ -188,15 +188,24 @@ above, the default), `Video`, `Game`, `Music`, or `Do not sync`. The dealer
 can override the guess per input.
 
 **Intensity and brightness follow the time of day.**
-- Three periods, **Day**, **Evening** and **Night**, each with a start time
-  and its own intensity and brightness (properties; proposed defaults: Day
-  from 07:00 at High and 100 %, Evening from 18:00 at Moderate and 100 %,
-  Night from 22:00 at Subtle and 70 %).
+- Three periods, **Day**, **Evening** and **Night**, each with its own
+  intensity and brightness (properties). Day and Night start at clock times
+  (proposed 07:00 and 22:00). **Evening starts 1 hour before the
+  controller's sunset**, with the offset as a property (the owner,
+  2026-11-13). Proposed levels: Day High and 100 %, Evening Moderate and
+  100 %, Night Subtle and 70 %.
+- How the driver learns the sunset time is a contract item (C1.4 and C3):
+  the SDK's Scheduler Agent has daily sunset entries
+  (`docs-driverworks-api/…/28_scheduler_agent_add_event/_9-AddDailySunsetOffsetEntry.md`).
+  Whether a driver hears its own entry fire, or must compute the sunset
+  from the project's location, is checked before beta stage 4. If neither
+  works, a clock time stands in, and the property says so.
 - The period's settings apply when sync starts, and again at each period
   boundary while syncing.
-- **A manual adjustment** (a Watch-menu button, a remote, a keypad,
-  programming) holds until the source changes or sync stops. The next
-  period boundary leaves it alone.
+- **A manual adjustment** (a Watch-menu button, a remote, a Halo button, a
+  keypad, programmed button presses) is never overridden by a period
+  boundary (the owner, 2026-11-13). It holds until the source changes or
+  sync stops.
 
 **When the box leaves the path:**
 
@@ -332,9 +341,9 @@ it started (O11).**
 - At the stream's end, wherever Hue's end state differs from that state, the
   bridge restores it, coalesced per room or zone where it can.
 - A Control4 command that came in during the stream, and was answered
-  without changing the lamp (O9), is what the lamp was "set to". It is
-  applied at the end instead of the older state. This is proposed: the
-  owner's words cover it, and the review can drop it.
+  without changing the lamp (O9), is not applied at the end: **the lamps go
+  back to their state from before the sync, nothing else** (the owner,
+  2026-11-13).
 - A Hue Bridge property, **After A Sync Ends**, chooses `Put the lights back`
   (the default) or `As Hue decides`. Hue's own "light state after
   streaming" setting is never written.
@@ -427,8 +436,13 @@ click.
 
 Pairing, real fixtures recorded from the box (which replace the
 hand-written ones), routing through the box, CEC fights, and power save.
-**The house has an 8K box (HSB2, O1).** These checks need the owner's hands
-for the button, and his word on where the box sits in the HDMI chain.
+**The house has an 8K box (HSB2, O1)** in the bedroom, wired sources → box
+→ AV receiver → TV. The box's HDMI output feeds the receiver's input, so in
+Composer the box's outputs 2000 and 4000 bind to the receiver, and the
+receiver to the TV. Music mode for an audio-only source works, because the
+audio passes through the box on its way to the receiver. `arcBypassMode`
+is for a box *behind* a receiver, so it does not apply here. These checks
+need the owner's hands for the button.
 
 ### 9.3 Releases
 
@@ -474,11 +488,10 @@ His answers, quoted where they changed the proposal:
 | O15 | The "until 2.0" promises | **Removed in 2.0 as announced** |
 | O16 | Adjusting from Navigators and remotes | **Several Watch-menu buttons:** Hue Sync, Sync Brighter, Sync Dimmer, Sync Intensity (5.6) |
 
-Still to settle, none of them blocking the contract:
-- **Where the house's box sits** in the HDMI chain (straight to the TV, or
-  behind an AV receiver) and which room it serves. This decides the first
-  hardware round.
-- **The time-of-day periods:** the proposed start times and levels of 5.3,
-  and whether Night should follow sunset rather than a clock time.
-- **Commands during a sync:** whether a Control4 command that arrived during
-  a sync is applied when it ends (proposed in 6.3).
+Settled the same day, after the first round:
+- **The house's box** is in the bedroom: sources → box → AV receiver → TV
+  (9.2).
+- **The periods:** Evening starts 1 hour before the controller's sunset; a
+  manual adjustment is never overridden by a period boundary (5.3).
+- **Commands during a sync** are not applied when it ends; the lamps go
+  back to their state from before the sync (6.3).
