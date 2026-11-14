@@ -185,6 +185,18 @@ where the code later moved on.
   controller's clock alone; the decisions R1–R12 and the corner cases
   L1–L27.
 
+### HDMI sync boxes (2.0)
+
+- [`hdmi-sync-design.md`](hdmi-sync-design.md) (contract, proposed, for the
+  owner's review): the 2.0 design: the Hue Sync Box driver as a Control4
+  HDMI switch, entertainment areas owned by the box, lights while their
+  lamps stream, pairing and identity, testing and the release train, and
+  the owner's questions (#514).
+- [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) (contract, proposed):
+  the box driver's `driver.xml`, the box's API as used and the state model,
+  the Lua modules, AV routing, the bridge ↔ box messages, the bridge's and
+  the light devices' changes, tests, build and release.
+
 ### Code health and security
 
 - [`driver-locals-design.md`](driver-locals-design.md) (contract, current
@@ -305,6 +317,31 @@ click. "Today" in them is the day they were written.
   before going public: what was in the repository and under whose terms,
   Snap One's and Signify's terms, the privacy findings, the license
   recommendation (Apache 2.0) and the publication checklist.
+
+### HDMI sync boxes and entertainment areas (2.0, #514)
+
+The research for 2.0, written on 2026-11-13 before its design.
+
+- [`syncbox-api-research.md`](syncbox-api-research.md) (record): the sync
+  devices (HSB1, HSB2, HSB3, the HSC001 camera) and their local API: TLS,
+  discovery, pairing, every resource and command, polling, what the box
+  does by itself.
+- [`entertainment-areas-research.md`](entertainment-areas-research.md)
+  (record): entertainment areas on the bridge, what happens to lamps while
+  a box streams, what this driver does with them today, and the mapping to
+  Control4.
+- [`syncbox-control4-research.md`](syncbox-control4-research.md) (record):
+  the box as a Control4 AV switch: connections, capabilities, routing and
+  sequencing, programming and Navigator.
+- [`edge-cases-syncbox.md`](edge-cases-syncbox.md) (record): 85 lifecycle
+  cases for boxes, areas and Control4, each automatic, offered or never
+  without a click.
+- [`syncbox-architecture-research.md`](syncbox-architecture-research.md)
+  (record): a fifth driver, networking and TLS on the controller, security,
+  codebase integration, testing and the 2.x release train.
+- [`syncbox-comparables-research.md`](syncbox-comparables-research.md)
+  (record): other Control4 drivers for the box, other ecosystems, Hue's own
+  Sync app, and the lessons.
 
 ### The research for 1.2's actions (#334)
 
