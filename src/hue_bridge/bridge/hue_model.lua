@@ -36,6 +36,8 @@
 --                                                        -- [verified: hardware 2026-10-24,
 --                                                        -- docs/smart-scenes-research.md §7];
 --                                                        -- no id_v1; image dropped at decode
+--   light.mode          "normal" | "streaming" (2.0, #514: the `streaming` field below)
+--   entertainment_configuration, entertainment   see "Entertainment areas" at the end
 -- Event-stream items have the same shapes with only the changed fields.
 -- A JSON null (mirek while mirek_valid is false) is treated like an absent
 -- field, whatever the decoder turns it into: only numbers count as numbers.
@@ -51,10 +53,12 @@ local num = require("common.num")
 local hue_model = {}
 
 -- Normalised-light fields that HUE_STATE may carry, in emission order.
-hue_model.STATE_FIELDS = { "on", "brightness", "x", "y", "mirek", "color_mode", "online" }
+-- `streaming` (2.0, #514, docs/hdmi-sync-stage1-design.md §4.1) goes out as
+-- "true" or "false", as `on` does.
+hue_model.STATE_FIELDS = { "on", "brightness", "x", "y", "mirek", "color_mode", "online", "streaming" }
 
 -- Every field update() can report as changed, in a stable order.
-local FIELD_ORDER = { "on", "brightness", "x", "y", "mirek", "color_mode", "online",
+local FIELD_ORDER = { "on", "brightness", "x", "y", "mirek", "color_mode", "online", "streaming",
 	"name", "archetype", "min_dim", "mirek_min", "mirek_max", "gamut" }
 
 local STATE_SET = {}
@@ -221,6 +225,18 @@ function hue_model.update(light, item)
 		end
 	end
 
+	-- The lamp's `mode`: "streaming" while it is part of an entertainment
+	-- stream, "normal" otherwise [verified: docs/entertainment-areas-research.md
+	-- §4.1, from public models]; an `update` event carries the change
+	-- [assumed, T1]. Any other value, or none, leaves `streaming` as it was.
+	if item.mode == "streaming" then
+		light.streaming = true
+		touched.streaming = true
+	elseif item.mode == "normal" then
+		light.streaming = false
+		touched.streaming = true
+	end
+
 	local mode = hue_model.color_mode(light)
 	if color_touched or mode ~= light.color_mode then
 		light.color_mode = mode
@@ -239,7 +255,9 @@ end
 -- One /clip/v2/resource/light item → the normalised light of the contract,
 -- or nil for an item that is not a table or whose id is not a resource id.
 -- `online` is not part of the resource; the registry owner sets it from
--- zigbee_connectivity (nil until known). `id_v1` ("/lights/12") and
+-- zigbee_connectivity (nil until known). `streaming` is true while the
+-- item's `mode` is "streaming", false while it is "normal", and absent for
+-- an item without either (2.0, #514). `id_v1` ("/lights/12") and
 -- `service_id` (0 for the only light of a device, 0/1/… on a multi-light
 -- device) are display and disambiguation data only; update() does not touch
 -- them, so an event never reports them as changed.
@@ -271,6 +289,7 @@ function hue_model.light(item)
 		mirek_min = nil,
 		mirek_max = nil,
 		color_mode = nil,
+		streaming = nil,
 	}
 	hue_model.update(light, item)
 	if light.name == nil then
@@ -1097,6 +1116,250 @@ function hue_model.group_configure_params(rid, entry, extra)
 	end
 	params.id_v1 = text(entry.id_v1)
 	return merge_extra(params, extra)
+end
+
+-- Entertainment areas -----------------------------------------------------------
+-- 2.0 beta stage 1 (#514, docs/hdmi-sync-stage1-design.md §4.1): the areas the
+-- bridge's lamps stream to, as plain records for bridge/entertainment.lua.
+-- Field names from docs/entertainment-areas-research.md §2.1 and §2.2, which
+-- took them from public models of the API, never from Signify's login-walled
+-- reference [verified: research §2]:
+--   entertainment_configuration { id, id_v1 ("/groups/N"), metadata{name},
+--                         configuration_type (screen | monitor | music | 3dspace | other),
+--                         status (active | inactive), active_streamer{rid, rtype "auth_v1"}
+--                         (present while active), stream_proxy, locations,
+--                         channels[{channel_id, position, members[{service{rid, rtype
+--                         "entertainment"}, index}]}], light_services[{rid, rtype "light"}]
+--                         (optional) }
+--   entertainment       { id, owner{rid, rtype "device"}, renderer, renderer_reference{rid,
+--                         rtype "light"}, proxy, equalizer, max_streams, segments }
+-- Which of light_services and the channels the house bridge fills is check
+-- T0; the shape of the update events that start and stop a stream is T1
+-- [assumed, T0 and T1]. Nothing here writes an area.
+--
+-- The area record:
+--   { id, id_v1, name, kind, status ("active" | "inactive"), streamer (auth_v1 rid | nil),
+--     lamps = { light rid... } (sorted), listed_lamps (the light rids of light_services,
+--     sorted; nil while the bridge lists none), channel_services (the entertainment rids
+--     of the channel members, sorted) }
+-- listed_lamps and channel_services are kept so that the lamps can be worked
+-- out again when the entertainment services change (area_lamps).
+
+-- The configuration types the research names; any other reads "other".
+local AREA_KINDS = { screen = true, monitor = true, music = true, ["3dspace"] = true, other = true }
+local AREA_STATUSES = { active = true, inactive = true }
+
+-- Every field area_update() can report as changed, in a stable order.
+local AREA_FIELD_ORDER = { "name", "kind", "status", "streamer", "lamps" }
+
+-- A Hue name capped as every name the bridge hands to Control4 is
+-- (bridge/util.lua util.display_name: control characters out, at most
+-- util.NAME_MAX characters), else nil (not a string, or nothing left to
+-- show). bridge.util is required at the first use, so that loading this
+-- module still loads common.log and common.num only.
+local display_name
+local function capped_name(value)
+	if type(value) ~= "string" then
+		return nil
+	end
+	display_name = display_name or require("bridge.util").display_name
+	local name = display_name(value)
+	return name ~= "" and name or nil
+end
+
+-- The resource ids of `refs` ({rid, rtype} tables) whose rtype is `rtype`
+-- or absent, sorted and each once; junk is skipped.
+local function ref_rids(refs, rtype)
+	local seen, out = {}, {}
+	for _, ref in ipairs(type(refs) == "table" and refs or {}) do
+		if type(ref) == "table" and (ref.rtype == nil or ref.rtype == rtype) then
+			local rid = resource_id(ref.rid)
+			if rid and not seen[rid] then
+				seen[rid] = true
+				out[#out + 1] = rid
+			end
+		end
+	end
+	table.sort(out)
+	return out
+end
+
+-- The entertainment services the channels' members name, sorted, each once:
+-- a gradient lamp's segments feed several channels through one service
+-- [verified: research §2.2].
+local function channel_services(channels)
+	local refs = {}
+	for _, channel in ipairs(type(channels) == "table" and channels or {}) do
+		if type(channel) == "table" then
+			for _, member in ipairs(type(channel.members) == "table" and channel.members or {}) do
+				if type(member) == "table" then
+					refs[#refs + 1] = member.service
+				end
+			end
+		end
+	end
+	return ref_rids(refs, "entertainment")
+end
+
+-- The light behind one /resource/entertainment item: its
+-- renderer_reference, or else the only light of its owner device in
+-- `devices` (devices() records, optional); nil for a service that renders
+-- nothing (the bridge's own is a proxy, not a renderer [verified: research
+-- §2.2]) or whose device has no light or several. The owner fallback is
+-- [assumed, T0]: the research documents both fields, not which the bridge
+-- leaves out.
+function hue_model.entertainment_light(item, devices)
+	if type(item) ~= "table" then
+		return nil
+	end
+	local ref = item.renderer_reference
+	if type(ref) == "table" and (ref.rtype == nil or ref.rtype == "light") and resource_id(ref.rid) then
+		return ref.rid
+	end
+	if item.renderer == false then
+		return nil
+	end
+	local owner = type(item.owner) == "table" and resource_id(item.owner.rid) or nil
+	local device = owner and type(devices) == "table" and devices[owner] or nil
+	local light_rids = type(device) == "table" and type(device.light_rids) == "table" and device.light_rids or {}
+	if #light_rids == 1 then
+		return resource_id(light_rids[1])
+	end
+	return nil
+end
+
+-- /clip/v2/resource/entertainment items → entertainment rid → light rid
+-- (entertainment_light), for the services that render a light. An item
+-- whose id is not a resource id is left out with one debug line; an item
+-- of another type is left out silently.
+function hue_model.entertainment_owners(items, devices)
+	local out = {}
+	for _, item in ipairs(type(items) == "table" and items or {}) do
+		if type(item) == "table" and (item.type == nil or item.type == "entertainment") then
+			local id = item_id(item, "entertainment")
+			local light = id and hue_model.entertainment_light(item, devices)
+			if light then
+				out[id] = light
+			end
+		end
+	end
+	return out
+end
+
+-- An area's lamps: its listed_lamps when the bridge lists any, else the
+-- lights behind its channel services through `owners` (entertainment rid →
+-- light rid, as entertainment_owners builds it), sorted, each once. The
+-- contract's order (light_services first) is kept although the research
+-- found one dump with both lists empty (§2.1): an empty light_services
+-- counts as missing.
+function hue_model.area_lamps(area, owners)
+	if type(area) ~= "table" then
+		return {}
+	end
+	if type(area.listed_lamps) == "table" and #area.listed_lamps > 0 then
+		local out = {}
+		for i, rid in ipairs(area.listed_lamps) do
+			out[i] = rid
+		end
+		return out
+	end
+	owners = type(owners) == "table" and owners or {}
+	local refs = {}
+	for _, service in ipairs(type(area.channel_services) == "table" and area.channel_services or {}) do
+		refs[#refs + 1] = { rid = owners[service] }
+	end
+	return ref_rids(refs, "light")
+end
+
+-- Merge an entertainment_configuration item (a GET's, a complete `add`, or
+-- an `update` carrying only what changed) into `area` in place and return
+-- the names of the fields whose value changed, in AREA_FIELD_ORDER (empty
+-- when nothing did). `owners` (optional) resolves the channels' lamps.
+-- `active_streamer` sets the streamer; an item that turns the area
+-- inactive without one clears it, since the bridge leaves it out while
+-- inactive [community: research §2.1, the emulators]. A status other than
+-- active or inactive, and every value of the wrong type (the controller
+-- decodes a JSON null as an empty table), is ignored like an absent field.
+function hue_model.area_update(area, item, owners)
+	if type(area) ~= "table" or type(item) ~= "table" then
+		return {}
+	end
+	local before = {}
+	for _, name in ipairs(AREA_FIELD_ORDER) do
+		before[name] = area[name]
+	end
+	if type(item.metadata) == "table" then
+		area.name = capped_name(item.metadata.name) or area.name
+	end
+	if type(item.configuration_type) == "string" then
+		area.kind = AREA_KINDS[item.configuration_type] and item.configuration_type or "other"
+	end
+	if AREA_STATUSES[item.status] then
+		area.status = item.status
+	end
+	if type(item.active_streamer) == "table" then
+		area.streamer = resource_id(item.active_streamer.rid)
+	elseif item.status == "inactive" then
+		area.streamer = nil
+	end
+	local members = false
+	if type(item.light_services) == "table" then
+		local listed = ref_rids(item.light_services, "light")
+		area.listed_lamps = #listed > 0 and listed or nil
+		members = true
+	end
+	if type(item.channels) == "table" then
+		area.channel_services = channel_services(item.channels)
+		members = true
+	end
+	if members then
+		area.lamps = hue_model.area_lamps(area, owners)
+	end
+	local changed = {}
+	for _, name in ipairs(AREA_FIELD_ORDER) do
+		local same
+		if name == "lamps" then
+			same = same_list(before.lamps, area.lamps)
+		else
+			same = before[name] == area[name]
+		end
+		if not same then
+			changed[#changed + 1] = name
+		end
+	end
+	return changed
+end
+
+-- One /clip/v2/resource/entertainment_configuration item (a GET's, or a
+-- complete `add` stream item) → the area record above, its lamps resolved
+-- through `owners` (optional) when the item lists no light_services. nil
+-- for an item of another type, not a table, or whose id is not a resource
+-- id. A nameless area gets a fallback name like light(); an area without a
+-- known status reads "inactive", one without a known type "other".
+function hue_model.entertainment_area(item, owners)
+	if type(item) ~= "table" or (item.type ~= nil and item.type ~= "entertainment_configuration") then
+		return nil
+	end
+	local id = item_id(item, "entertainment_configuration")
+	if id == nil then
+		return nil
+	end
+	local area = {
+		id = id,
+		id_v1 = text(item.id_v1),
+		name = nil,
+		kind = "other",
+		status = "inactive",
+		streamer = nil,
+		lamps = {},
+		listed_lamps = nil,
+		channel_services = {},
+	}
+	hue_model.area_update(area, item, owners)
+	if area.name == nil then
+		area.name = "Hue entertainment area " .. tostring(area.id_v1 or id)
+	end
+	return area
 end
 
 return hue_model

@@ -26,7 +26,10 @@
 --   a:diagnostics_list()        -> list         What of Diagnostics
 --   a:run_add(params)  a:run_link(params)  a:run_forget(params)
 --   a:run_names(params)  a:run_diagnostics(params)
---   a:run_alias(old_command, params)   a removed command (actions.ALIASES), true when known
+--
+-- The beta 8 commands these actions merged answered as hidden aliases until
+-- 2.0 and are gone since (docs/hdmi-sync-design.md §9.3 and §10 O15, #514):
+-- an old name such as Add Light is an unknown command, as any other is.
 --
 -- The list functions are CUSTOM_SELECT functions: Composer calls them with
 -- the folder value it is in ("" at the top) and takes `list, back`; an entry
@@ -54,7 +57,7 @@
 --   Names    names.lua's values; without names.lua the two bulk rows of
 --            actions.NAMES
 --   What     the keys of ctx.diagnostics (actions.DIAGNOSTICS names the ones
---            the aliases use)
+--            driver.lua defines)
 -- A folder whose list would be empty is left out; a picker with nothing to
 -- pick shows one explanatory row with value "" (Composer keeps OK disabled on
 -- it [hardware 2026-10-22, bridge/lights.lua picker_rooms]).
@@ -77,17 +80,17 @@ actions.CONFIRM_YES = "Yes, forget"
 actions.CONFIRM_ITEMS = { "No", "Yes, forget" }
 actions.NOT_CONFIRMED = "Not forgotten: choose Yes, forget"
 
--- The bulk rows of Resolve Names that the aliases send (names.lua answers
--- them; without names.lua this module answers the first and the third with
--- the modules' adopt_hue_names and accept_names).
+-- The bulk rows of Resolve Names (names.lua offers and answers the first two
+-- itself; without names.lua this module offers the first and the third and
+-- answers them with the modules' adopt_hue_names and accept_names).
 actions.NAMES = {
 	HUE_TO_COMPOSER = "names:hue_to_composer",
 	COMPOSER_TO_HUE = "names:composer_to_hue",
 	KEEP_COMPOSER = "names:keep_composer",
 }
 
--- The Diagnostics values the aliases send; driver.lua keys ctx.diagnostics
--- by them (the dev ones only in dev builds).
+-- The Diagnostics values; driver.lua keys ctx.diagnostics by them (the dev
+-- ones only in dev builds).
 actions.DIAGNOSTICS = {
 	TEST = "diag:test",
 	REFRESH = "diag:refresh",
@@ -1214,17 +1217,6 @@ function actions:run_link(params, say)
 	end)
 end
 
--- Today's Link Devices alone (the alias of "Link Devices"): no suggestion
--- is applied, as before 1.2.
-function actions:run_link_bound(_params, say)
-	say = self:say(say)
-	self:guard("Link Device", say, function()
-		if self:can() then
-			say(self:link_bound_text())
-		end
-	end)
-end
-
 function actions:run_forget(params, say)
 	say = self:say(say)
 	self:guard("Forget Device", say, function()
@@ -1303,23 +1295,6 @@ function actions:run_names(params, say)
 	end)
 end
 
--- The alias of "Accept Names As They Are": with names that follow each other
--- both ways there is nothing to accept (docs/simplify-research-names-sync.md,
--- Accept: its alias writes nothing); without bridge/names.lua, beta 8's accept.
-function actions:run_accept_names(_params, say)
-	say = self:say(say)
-	self:guard("Resolve Names", say, function()
-		if self:has("names", "resolve") then
-			local rows = self:entries("names", "resolve_rows")
-			return say(string.format("Nothing to accept: names follow each other between Composer and Hue by "
-				.. "themselves; %s", #rows > 0 and "the ones that cannot are in Resolve Names" or "every name agrees"))
-		end
-		if self:can() then
-			say(self:names_join("accept_names"))
-		end
-	end)
-end
-
 function actions:run_diagnostics(params, say)
 	say = self:say(say)
 	self:guard("Diagnostics", say, function()
@@ -1346,118 +1321,6 @@ function actions:run_diagnostics(params, say)
 			say(result)
 		end
 	end)
-end
-
--- Aliases ------------------------------------------------------------------------
-
--- Every command a beta 8 driver.xml had and 1.2 merged into these runners
--- answers until 2.0 (docs/simplify-research-compat.md §5.3 R2): the dev
--- loop, tools/regress.sh, older briefs and any C4:SendToDevice caller send
--- them by name, with their old parameters. A missing pick gets beta 8's
--- refusal (`needs`, `missing`); otherwise the Last Action is the new
--- runner's, which is the module's own text as before; the pointer to the
--- new action goes to the log only (as the child drivers' aliases do).
--- Kept as beta 8 had them, in driver.lua: Map Rooms By Name, Room Audit,
--- Refresh Scenes (the scene list alone, at once), and in dev builds
--- Connection Test, Reload Credentials, Check CA Pinning and Probe Picker
--- Folders.
-
-local function pre(prefix, value)
-	value = str(value)
-	return value and (prefix .. value) or nil
-end
-
--- A motion re-link target: a sensor or an area, as the motion pickers list it.
-local function motion_target(self, rid)
-	rid = str(rid)
-	if not rid then
-		return nil
-	end
-	for _, e in ipairs(self:entries("motion", "picker_areas")) do
-		if e.value == rid then
-			return "area:" .. rid
-		end
-	end
-	return "sensor:" .. rid
-end
-
-actions.ALIASES = {
-	["Add Light"] = { target = "Add From Hue", runner = "run_add", needs = { "Light" },
-		missing = "Not added: pick a light first",
-		params = function(p) return { What = pre("light:", p.Light), Room = p.Room } end },
-	["Import All New Lights"] = { target = "Import All New", runner = "run_add",
-		params = function() return { What = "all:lights" } end },
-	["Add Zone Light"] = { target = "Add From Hue", runner = "run_add", needs = { "Group" },
-		missing = "Not added: pick a zone or room first",
-		params = function(p) return { What = pre("group:", p.Group), Room = p.Room } end },
-	["Re-link Device To Light"] = { target = "Link Device", runner = "run_link", needs = { "Device", "Light" },
-		missing = "Not re-linked: pick a device and a light",
-		params = function(p) return { Device = pre("dev:", p.Device), To = pre("light:", p.Light) } end },
-	["Re-link Zone Light"] = { target = "Link Device", runner = "run_link", needs = { "Device", "Group" },
-		missing = "Not re-linked: pick a device and a zone or room",
-		params = function(p) return { Device = pre("dev:", p.Device), To = pre("group:", p.Group) } end },
-	["Link Devices"] = { target = "Link Device", runner = "run_link_bound" },
-	["Forget Light"] = { target = "Forget Device", runner = "run_forget", needs = { "Device" },
-		missing = "Not forgotten: pick a device first",
-		params = function(p) return { Device = pre("dev:", p.Device), Confirm = actions.CONFIRM_YES } end },
-	["Adopt Hue Names"] = { target = "Resolve Names", runner = "run_names",
-		params = function() return { Names = actions.NAMES.HUE_TO_COMPOSER } end },
-	["Accept Names As They Are"] = { target = "Resolve Names", runner = "run_accept_names" },
-	["Add Scene"] = { target = "Add From Hue", runner = "run_add", needs = { "Scene" },
-		missing = "Not added: pick a scene first",
-		params = function(p) return { What = pre("scene:", p.Scene), Room = p.Room } end },
-	["Add All Scenes Of Room"] = { target = "Add From Hue", runner = "run_add", needs = { "Hue Room" },
-		missing = "Not added: pick a Hue room first",
-		params = function(p) return { What = pre("f:scenes:", p["Hue Room"]) } end },
-	["Re-link Scene"] = { target = "Link Device", runner = "run_link", needs = { "Device", "Scene" },
-		missing = "Not re-linked: pick a device and a scene",
-		params = function(p) return { Device = pre("dev:", p.Device), To = pre("scene:", p.Scene) } end },
-	["Forget Scene"] = { target = "Forget Device", runner = "run_forget", needs = { "Device" },
-		missing = "Not forgotten: pick a device first",
-		params = function(p) return { Device = pre("dev:", p.Device), Confirm = actions.CONFIRM_YES } end },
-	["Add Motion Sensor"] = { target = "Add From Hue", runner = "run_add", needs = { "Sensor" },
-		missing = "Not added: pick a motion sensor first",
-		params = function(p) return { What = pre("sensor:", p.Sensor), Room = p.Room } end },
-	["Import All New Motion Sensors"] = { target = "Import All New", runner = "run_add",
-		params = function() return { What = "all:motion" } end },
-	["Add Motion Area"] = { target = "Add From Hue", runner = "run_add", needs = { "Area" },
-		missing = "Not added: pick a MotionAware area first",
-		params = function(p) return { What = pre("area:", p.Area), Room = p.Room } end },
-	["Re-link Motion Device"] = { target = "Link Device", runner = "run_link", needs = { "Device", "Target" },
-		missing = "Not re-linked: pick a device and a sensor or area",
-		params = function(p, self) return { Device = pre("dev:", p.Device), To = motion_target(self, p.Target) } end },
-	["Forget Motion Device"] = { target = "Forget Device", runner = "run_forget", needs = { "Device" },
-		missing = "Not forgotten: pick a device first",
-		params = function(p) return { Device = pre("dev:", p.Device), Confirm = actions.CONFIRM_YES } end },
-	["Test Connection"] = { target = "Diagnostics", runner = "run_diagnostics",
-		params = function() return { What = actions.DIAGNOSTICS.TEST } end },
-	["Refresh All"] = { target = "Diagnostics", runner = "run_diagnostics",
-		params = function() return { What = actions.DIAGNOSTICS.REFRESH } end },
-	["Connect Event Stream"] = { target = "Diagnostics", runner = "run_diagnostics",
-		params = function() return { What = actions.DIAGNOSTICS.CONNECT } end },
-	["Disconnect Event Stream"] = { target = "Diagnostics", runner = "run_diagnostics",
-		params = function() return { What = actions.DIAGNOSTICS.DISCONNECT } end },
-	["Log Motion Diagnostics"] = { target = "Diagnostics", runner = "run_diagnostics",
-		params = function() return { What = actions.DIAGNOSTICS.MOTION_LOG } end },
-}
-
-function actions:run_alias(old, params, say)
-	local alias = actions.ALIASES[old]
-	if not alias then
-		return false
-	end
-	self.log.always("actions: %s is now %s (an alias until 2.0)", old, alias.target)
-	local p = type(params) == "table" and params or {}
-	for _, name in ipairs(alias.needs or {}) do
-		if not selection(p, name) then
-			if self:can() then
-				self:say(say)(alias.missing)
-			end
-			return true
-		end
-	end
-	self[alias.runner](self, alias.params and alias.params(p, self) or {}, say)
-	return true
 end
 
 return actions

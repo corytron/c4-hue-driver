@@ -331,7 +331,7 @@ describe("bridge.zone_lights", function()
 				light_count = "2", no_lights = "false", hue_room = "Downstairs (zone)", id_v1 = "/groups/3", has_color = "true",
 				has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "1" }, c4.sent[1].params)
 			assert.same({ rid = DOWNSTAIRS, on = "true", brightness = "73.52", mirek = "366", color_mode = "ct", online = "true",
-				reason = "resync" }, c4.sent[2].params)
+				lamps = "2", streaming_lamps = "0", streaming = "false", reason = "resync" }, c4.sent[2].params)
 			for _, m in ipairs(c4.sent) do
 				for k, v in pairs(m.params) do
 					assert.equal("string", type(v), k)
@@ -353,7 +353,8 @@ describe("bridge.zone_lights", function()
 				light_count = "2", no_lights = "false", hue_room = "Living Room", id_v1 = "/groups/2", has_color = "true",
 				has_cct = "true", mirek_min = "153", mirek_max = "454", min_dim = "1" }, c4.sent[1].params)
 			assert.same({ rid = LIVING, on = "true", brightness = "56.84", mirek = "250", color_mode = "ct", online = "true",
-				reason = "resync" }, c4.sent[2].params, "the colour of the first lit member, Hallway Ambiance")
+				lamps = "2", streaming_lamps = "0", streaming = "false", reason = "resync" }, c4.sent[2].params,
+				"the colour of the first lit member, Hallway Ambiance")
 		end)
 
 		it("takes the action's own params, a white room shows no colour, an off group no colour either", function()
@@ -366,8 +367,8 @@ describe("bridge.zone_lights", function()
 			assert.equal("false", configure.has_cct)
 			assert.is_nil(configure.mirek_min)
 			assert.equal("1", configure.light_count)
-			assert.same({ rid = GARAGE, on = "false", brightness = "100", online = "true", reason = "resync" },
-				c4.sent[2].params)
+			assert.same({ rid = GARAGE, on = "false", brightness = "100", online = "true", lamps = "1", streaming_lamps = "0",
+				streaming = "false", reason = "resync" }, c4.sent[2].params)
 			Z:add({ Group = GARAGE, Room = tostring(LIVING_ROOM) }, done)
 			assert.same({ ok = false, text = "Not added: Garage (room) is already imported (device 2001)" }, last_result())
 		end)
@@ -426,7 +427,7 @@ describe("bridge.zone_lights", function()
 			resync()
 			assert.same({ "HUE_STATE@2001" }, commands_sent())
 			assert.same({ rid = DOWNSTAIRS, on = "true", brightness = "73.52", mirek = "366", color_mode = "ct", online = "true",
-				reason = "resync" }, c4.sent[1].params)
+				lamps = "2", streaming_lamps = "0", streaming = "false", reason = "resync" }, c4.sent[1].params)
 			c4.sent = {}
 			resync({ body = F.grouped_light:gsub('"brightness":73.52', '"brightness":20.5') })
 			assert.equal("20.5", c4.sent[1].params.brightness)
@@ -775,7 +776,8 @@ describe("bridge.zone_lights", function()
 			assert.equal("Upstairs", c4.sent[1].params.name, "the re-added zone's name")
 			assert.equal("1", c4.sent[1].params.light_count)
 			assert.same({ rid = DOWNSTAIRS, on = "true", brightness = "40.16", mirek = "250", color_mode = "ct", online = "true",
-				reason = "event" }, c4.sent[2].params, "Hallway Ambiance alone now")
+				lamps = "1", streaming_lamps = "0", streaming = "false", reason = "event" }, c4.sent[2].params,
+				"Hallway Ambiance alone now")
 			assert.is_true(saw_log("Downstairs (zone) (device 2001) is back on the bridge"))
 			assert.equal("Upstairs", Z:entry(DOWNSTAIRS).name)
 			assert.equal("1 zone light name differs from the Composer names: Downstairs is Upstairs in Hue "
@@ -845,6 +847,232 @@ describe("bridge.zone_lights", function()
 			assert.equal("Ground Floor", c4.persist.hue_zone_lights[DOWNSTAIRS].name)
 			assert.equal(0, #c4.renamed)
 			assert.is_true(saw_log("Downstairs was renamed to Ground Floor in Hue (Composer name unchanged)"))
+		end)
+	end)
+
+	-- #514 (docs/hdmi-sync-stage1-design.md §4.6): lamps that sync with the TV.
+	-- The fixture's Living Room holds Hallway Ambiance (on at 40.16, mirek 250)
+	-- and Living Room Lamp (on at 73.52, mirek 366), its grouped_light g002 on
+	-- at 56.84; Downstairs holds Garage White (off) and the Lamp.
+	describe("lamps that sync with the TV (#514)", function()
+		-- One update container with each named light's `mode` (no other field).
+		local function mode_container(keys, mode)
+			local items = {}
+			for i, key in ipairs(keys) do
+				items[i] = '{"id":"' .. F.rids[key] .. '","owner":{"rid":"' .. F.device_rids[key] .. '","rtype":"device"},'
+					.. '"mode":"' .. mode .. '","type":"light"}'
+			end
+			return C4:JsonDecode('[{"creationtime":"2026-11-14T20:00:00Z","id":"9de116fc-00e1-4a2b-8c3d-0000000000e1",'
+				.. '"type":"update","data":[' .. table.concat(items, ",") .. ']}]')[1]
+		end
+
+		-- As the coordinator runs a container: the lights' models take the
+		-- modes, the entertainment module's settle calls streaming_changed with
+		-- the lamps, then the zone lights' own pass. Returns what each sent.
+		local function stream(keys, mode)
+			local c = mode_container(keys, mode)
+			L:on_container(c)
+			local rids = {}
+			for i, key in ipairs(keys) do rids[i] = F.rids[key] end
+			local told = Z:streaming_changed(rids)
+			return told, Z:on_container(c)
+		end
+
+		-- A grouped_light update for the Living Room, as Hue reports the
+		-- group (its average still counts the streaming lamps' last state, T2).
+		local function living_group_event(on, brightness)
+			return '[{"creationtime":"2026-11-14T20:00:01Z","id":"9de116fc-00e2-4a2b-8c3d-0000000000e2","type":"update",'
+				.. '"data":[{"id":"' .. G_LIVING .. '","on":{"on":' .. tostring(on) .. '},"dimming":{"brightness":'
+				.. tostring(brightness) .. '},"type":"grouped_light"}]}]'
+		end
+
+		local function add_living()
+			resync()
+			Z:add(LIVING, nil, done)  -- device 2001
+			c4.sent = {}
+		end
+
+		it("carries the counts in every full state; with none streaming, Hue's own on and level as before", function()
+			add_living()
+			resync()
+			assert.same({ rid = LIVING, on = "true", brightness = "56.84", mirek = "250", color_mode = "ct", online = "true",
+				lamps = "2", streaming_lamps = "0", streaming = "false", reason = "resync" }, c4.sent[1].params)
+			c4.sent = {}
+			assert.equal(1, feed(living_group_event(true, 60)))
+			assert.same({ rid = LIVING, on = "true", brightness = "60", reason = "event" }, c4.sent[1].params,
+				"an event adds no streaming field while nothing streams")
+			c4.sent = {}
+			assert.equal(0, Z:streaming_changed({ F.rids.kitchen }), "the Kitchen Strip is in no group")
+			assert.same({}, c4.sent)
+		end)
+
+		it("takes on and brightness from the lamps that do not stream while some do", function()
+			add_living()
+			local told, more = stream({ "living" }, "streaming")
+			assert.equal(1, told)
+			assert.equal(0, more, "the zone lights' own pass has nothing left to tell")
+			assert.same({ { id = 2001, command = "HUE_STATE", params = { rid = LIVING, on = "true", brightness = "40.16",
+				mirek = "250", color_mode = "ct", online = "true", lamps = "2", streaming_lamps = "1", streaming = "false",
+				reason = "event" } } }, c4.sent, "Hallway Ambiance alone, not Hue's 56.84")
+
+			c4.sent = {}
+			assert.equal(1, feed(living_group_event(true, 60)))
+			assert.same({ rid = LIVING, on = "true", brightness = "40.16", reason = "event" }, c4.sent[1].params,
+				"the grouped_light's report is echoed with the lamps that do not stream")
+
+			c4.sent = {}
+			assert.equal(1, feed(light_event("hallway", '"dimming":{"brightness":20}')))
+			assert.same({ rid = LIVING, on = "true", brightness = "20", reason = "event" }, c4.sent[1].params,
+				"a lamp that does not stream moves the group")
+
+			c4.sent = {}
+			assert.equal(1, feed(light_event("hallway", '"on":{"on":false}')))
+			assert.same({ rid = LIVING, on = "false", reason = "event" }, c4.sent[1].params,
+				"off while the streaming lamp's last state is on; no lit lamp, no colour")
+			c4.sent = {}
+			assert.equal(0, feed(light_event("hallway", '"on":{"on":false}')), "nothing changed, nothing sent")
+		end)
+
+		it("averages the lit lamps that do not stream and takes their colour", function()
+			resync()
+			Z:add(DOWNSTAIRS, GARAGE_ROOM, done)  -- device 2001: Garage White (off) + the Lamp
+			Z:add(LIVING, nil, done)              -- device 2002
+			c4.sent = {}
+			assert.equal(1, (stream({ "hallway" }, "streaming")))
+			assert.same({ rid = LIVING, on = "true", brightness = "73.52", mirek = "366", color_mode = "ct", online = "true",
+				lamps = "2", streaming_lamps = "1", streaming = "false", reason = "event" }, sent_to(2002, "HUE_STATE")[1].params,
+				"the Lamp alone, with its own white point")
+			assert.same({}, sent_to(2001, "HUE_STATE"), "Downstairs holds no streaming lamp")
+
+			c4.sent = {}
+			assert.equal(2, (stream({ "living" }, "streaming")))
+			assert.same({ rid = DOWNSTAIRS, on = "false", online = "true", lamps = "2", streaming_lamps = "1",
+				streaming = "false", reason = "event" }, sent_to(2001, "HUE_STATE")[1].params,
+				"Garage White is off: the zone reads off though Hue reports it on at 73.52")
+			assert.equal("true", sent_to(2002, "HUE_STATE")[1].params.streaming, "every Living Room lamp streams now")
+
+			L.models[F.rids.garage].on = true
+			L.models[F.rids.garage].brightness = 33.336
+			c4.sent = {}
+			Z:streaming_changed({ F.rids.living })
+			assert.equal("33.34", sent_to(2001, "HUE_STATE")[1].params.brightness, "two decimals, as Hue's own")
+		end)
+
+		it("reads as the lamps while every one streams: streaming true, the label, and what Hue reports", function()
+			add_living()
+			assert.equal(1, (stream({ "living", "hallway" }, "streaming")))
+			assert.same({ rid = LIVING, on = "true", brightness = "56.84", mirek = "250", color_mode = "ct", online = "true",
+				lamps = "2", streaming_lamps = "2", streaming = "true", stream_label = "another app", reason = "event" },
+				c4.sent[1].params)
+			c4.sent = {}
+			assert.equal(1, feed(living_group_event(true, 60)))
+			assert.same({ rid = LIVING, on = "true", brightness = "60", reason = "event" }, c4.sent[1].params,
+				"the grouped_light's report as before")
+		end)
+
+		it("names the streamer from the entertainment module when it has one", function()
+			local asked = {}
+			Z = new_zone_lights({ entertainment = function()
+				return { stream_label = function(_, rid) asked[#asked + 1] = rid; return "Living Room TV" end }
+			end })
+			add_living()
+			stream({ "living", "hallway" }, "streaming")
+			assert.equal("Living Room TV", c4.sent[1].params.stream_label)
+			assert.same({ F.rids.hallway, F.rids.hallway }, asked,
+				"the group's first streaming lamp, once in streaming_changed and once in the event's own pass")
+
+			Z = new_zone_lights({ entertainment = { stream_label = function() error("boom") end } })
+			add_living()
+			Z:streaming_changed({ F.rids.living })
+			assert.equal("another app", c4.sent[1].params.stream_label, "a failing answer reads as another app")
+		end)
+
+		it("goes back to Hue's own state, streaming false, when the stream stops", function()
+			add_living()
+			stream({ "living", "hallway" }, "streaming")
+			c4.sent = {}
+			local told, more = stream({ "living", "hallway" }, "normal")
+			assert.equal(1, told)
+			assert.equal(0, more)
+			assert.same({ rid = LIVING, on = "true", brightness = "56.84", mirek = "250", color_mode = "ct", online = "true",
+				lamps = "2", streaming_lamps = "0", streaming = "false", reason = "event" }, c4.sent[1].params)
+			c4.sent = {}
+			assert.equal(1, feed(living_group_event(true, 60)))
+			assert.same({ rid = LIVING, on = "true", brightness = "60", reason = "event" }, c4.sent[1].params)
+		end)
+
+		it("tells the device from the event alone when streaming_changed did not run first", function()
+			add_living()
+			local c = mode_container({ "living" }, "streaming")
+			L:on_container(c)
+			assert.equal(1, Z:on_container(c))
+			assert.same({ rid = LIVING, on = "true", brightness = "40.16", lamps = "2", streaming_lamps = "1",
+				streaming = "false", reason = "event" }, c4.sent[1].params, "the colour is Hallway's already")
+			c4.sent = {}
+			c = mode_container({ "living" }, "normal")
+			L:on_container(c)
+			assert.equal(1, Z:on_container(c))
+			assert.same({ rid = LIVING, on = "true", brightness = "56.84", lamps = "2", streaming_lamps = "0",
+				streaming = "false", reason = "event" }, c4.sent[1].params, "Hue's own on and level again")
+		end)
+
+		it("re-sends only to linked devices whose group holds one of the lamps, from a list or a set", function()
+			resync()
+			Z:add(DOWNSTAIRS, GARAGE_ROOM, done)  -- device 2001: Garage White + the Lamp
+			Z:add(GARAGE, nil, done)              -- device 2002: Garage White
+			Z:add(LIVING, nil, done)              -- device 2003: Hallway + the Lamp
+			c4.sent = {}
+			L.models[F.rids.living].streaming = true
+			assert.equal(2, Z:streaming_changed({ [F.rids.living] = true }))
+			assert.same({ "HUE_STATE@2001", "HUE_STATE@2003" }, commands_sent())
+			c4.sent = {}
+			assert.equal(2, Z:streaming_changed({ F.rids.garage }))
+			assert.same({ "HUE_STATE@2001", "HUE_STATE@2002" }, commands_sent())
+			Z.reg:set_state(DOWNSTAIRS, "unbound")
+			c4.sent = {}
+			assert.equal(1, Z:streaming_changed({ F.rids.living }), "an unbound device hears nothing")
+			assert.same({ "HUE_STATE@2003" }, commands_sent())
+			c4.sent = {}
+			assert.equal(0, Z:streaming_changed({}))
+			assert.equal(0, Z:streaming_changed(nil))
+			assert.equal(0, Z:streaming_changed("garbage"))
+			assert.equal(0, Z:streaming_changed({ 42, false }))
+			assert.same({}, c4.sent)
+		end)
+
+		it("says nothing before the state is known", function()
+			Z:add(LIVING, LIVING_ROOM, done)
+			c4.sent = {}
+			L.models[F.rids.living].streaming = true
+			assert.equal(0, Z:streaming_changed({ F.rids.living }), "no GET yet")
+			assert.same({}, c4.sent)
+		end)
+
+		it("tells a hello and an undelivered answer mid-stream what streams", function()
+			add_living()
+			stream({ "living" }, "streaming")
+			c4.sent = {}
+			assert.is_true(Z:hello({ rid = LIVING, device_id = "2001", kind = "group" }))
+			local st = sent_to(2001, "HUE_STATE")[1].params
+			assert.same({ "hello", "40.16", "2", "1", "false" }, { st.reason, st.brightness, st.lamps, st.streaming_lamps,
+				st.streaming })
+			c4.sent = {}
+			assert.equal(1, Z:undelivered(G_LIVING))
+			st = c4.sent[1].params
+			assert.same({ "undelivered", "40.16", "1" }, { st.reason, st.brightness, st.streaming_lamps })
+		end)
+
+		it("follows Hue's rule: on if any is on, the average of the lit ones", function()
+			local rule = zone_lights.grouped_rule
+			assert.same({ true, 30 }, { rule({ { on = true, brightness = 20 }, { on = true, brightness = 40 },
+				{ on = false, brightness = 100 } }) })
+			assert.same({ false }, { rule({ { on = false, brightness = 100 }, {} }) })
+			assert.same({}, { rule({ {}, { brightness = 50 } }) }, "no lamp says on or off")
+			assert.same({ true }, { rule({ { on = true } }) }, "lit without a level: no brightness")
+			assert.same({ true, 100 }, { rule({ { on = true, brightness = 1 / 0 }, { on = true, brightness = 250 } }) },
+				"infinity is no level; out of range is clamped (#486)")
+			assert.same({ [F.rids.living] = true }, zone_lights.lamp_set({ F.rids.living, 7 }))
+			assert.same({ [F.rids.living] = true }, zone_lights.lamp_set({ [F.rids.living] = true, [F.rids.garage] = false }))
 		end)
 	end)
 
@@ -1289,8 +1517,8 @@ describe("bridge.zone_lights", function()
 			assert.same({ "HUE_CONFIGURE@2001", "HUE_STATE@2001" }, commands_sent())
 			assert.equal("Hue room", c4.sent[1].params.model)
 			assert.is_nil(c4.sent[1].params.state)
-			assert.same({ rid = GARAGE, on = "false", brightness = "100", online = "true", reason = "resync" },
-				c4.sent[2].params)
+			assert.same({ rid = GARAGE, on = "false", brightness = "100", online = "true", lamps = "1", streaming_lamps = "0",
+				streaming = "false", reason = "resync" }, c4.sent[2].params)
 			assert.equal(2001, c4.persist.hue_zone_lights[GARAGE].device_id)
 			assert.equal(0, #c4.renamed)
 			assert.equal("1 zone light name differs from the Composer names: Downstairs is Garage Lights in Hue "

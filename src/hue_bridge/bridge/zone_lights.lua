@@ -41,6 +41,17 @@
 -- Persistence: the registry's mutators change memory only; this module marks
 -- itself dirty and saves once per batch, except during device creation, where
 -- it saves right after the AddDevice.
+--
+-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.6, contracts C7): lamps
+-- that sync with the TV. A lamp streams while its model's `streaming` is
+-- true (the lights' models, from the light's `mode`). HUE_STATE carries
+-- `lamps` and `streaming_lamps`, and `streaming` "true" with `stream_label`
+-- while every lamp of the group streams ("false" otherwise). While some but
+-- not all stream, `on`, `brightness` and the colour come from the lamps that
+-- do not, by the rule Hue's grouped_light follows (grouped_rule below);
+-- while all stream, the group shows what Hue reports, as a light does (T2:
+-- Hue keeps reporting the state from before the stream).
+-- streaming_changed(rids) re-sends the state when lamps start or stop.
 
 local num = require("common.num")
 local hue_model = require("bridge.hue_model")
@@ -70,6 +81,9 @@ zone_lights.DIM_DEFAULT_DURATION = 5000
 zone_lights.GROUP_TYPES = { zone = true, room = true }
 -- Hellos kept before load(), as the lights' and the driver's early queues.
 zone_lights.EARLY_HELLOS_MAX = 200
+-- Who streams, when the entertainment module does not say (stage 1 of #514:
+-- always; stage 2 names the bound sync box).
+zone_lights.STREAM_LABEL = "another app"
 
 -- What bridge/owner.lua reads for this module: the log tag and the words its
 -- shared texts take here.
@@ -141,6 +155,8 @@ zone_lights.REFRESH_CLEARS = { "id_v1" }
 --   group_dim(grouped_light_rid, body, level)   the coalesced grouped_light dimming_delta PUT of driver.lua
 --                            (docs/keypad-design.md); `level` (number or nil) is the device's estimate sent
 --                            with a stop, for the queue's fallback should the bridge refuse it; true when queued
+--   entertainment            the bridge.entertainment instance, or a function returning it (optional): its
+--                            stream_label(light_rid) names who streams (#514); STREAM_LABEL without it
 function zone_lights.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "zone_lights.new: ctx.http is required")
@@ -170,6 +186,9 @@ function zone_lights.new(ctx)
 		last_configure = {},       -- rid → signature of the last HUE_CONFIGURE sent
 		color_sent = {},           -- rid → signature of the colour last sent in HUE_STATE ("" for none)
 		online_sent = {},          -- rid → the `online` text last sent
+		stream_sent = {},          -- rid → signature of the streaming fields last sent (absent or "0": none stream)
+		still_sent = {},           -- rid → signature of the on and brightness last sent from the lamps that do not
+		                           -- stream, while some do (#514)
 		announced = {},            -- device_id → { rid, name, kind, model } from HUE_HELLO (strings or nil), for Link Devices
 		conflicts = {},            -- rid → { holder = device_id, claimant = device_id }
 		early_hellos = {},         -- hellos received before load() (EARLY_HELLOS_MAX), answered after configure_all()
@@ -392,6 +411,130 @@ function zone_lights:lights_of_grouped_light(grouped_light_rid)
 	return {}
 end
 
+-- Lamps that sync with the TV (#514, docs/hdmi-sync-stage1-design.md §4.6) ------------
+
+-- Hue's grouped_light rule over some lamps' models (hue_model.grouped_light's
+-- header): on while any is on, off while every one that says is off, nil
+-- when none says; the brightness is the average of the lit ones' (two
+-- decimals; num.clamp, #486), nil while none is lit or none says.
+local function grouped_rule(models)
+	local on, sum, lit = nil, 0, 0
+	for _, model in ipairs(models) do
+		if model.on == true then
+			on = true
+			local brightness = num.clamp(model.brightness, 0, 100)
+			if brightness then
+				sum, lit = sum + brightness, lit + 1
+			end
+		elseif model.on == false and on == nil then
+			on = false
+		end
+	end
+	if lit == 0 then
+		return on, nil
+	end
+	return on, math.floor(sum / lit * 100 + 0.5) / 100
+end
+zone_lights.grouped_rule = grouped_rule
+
+-- The light rids the entertainment module names, as a list or as a set,
+-- into a set { [rid] = true }; anything else is left out.
+local function lamp_set(rids)
+	local set = {}
+	for k, v in pairs(type(rids) == "table" and rids or {}) do
+		if type(k) == "number" and type(v) == "string" then
+			set[v] = true
+		elseif type(k) == "string" and v then
+			set[k] = true
+		end
+	end
+	return set
+end
+zone_lights.lamp_set = lamp_set
+
+-- The entertainment module (ctx.entertainment: the instance, or a function
+-- returning it), or nil.
+function zone_lights:entertainment()
+	local e = self.ctx.entertainment
+	if type(e) == "function" then
+		e = e()
+	end
+	return type(e) == "table" and e or nil
+end
+
+-- Who streams to lamp `light_rid`: the entertainment module's stream_label,
+-- else STREAM_LABEL. A failing or empty answer reads as STREAM_LABEL.
+function zone_lights:stream_label(light_rid)
+	local e = self:entertainment()
+	if e and type(e.stream_label) == "function" then
+		local ok, label = pcall(e.stream_label, e, light_rid)
+		if ok and type(label) == "string" and label ~= "" then
+			return label
+		end
+	end
+	return zone_lights.STREAM_LABEL
+end
+
+-- What the lamps of registered group `rid` stream: { lamps (the members),
+-- streaming (how many of them stream), label (who streams to the first
+-- that does, nil while none), still (the models of the members that do not
+-- stream, in group order; members without a model are in neither) }.
+function zone_lights:stream_view(rid)
+	local group = self:group_of(rid)
+	local members = group and self:member_lights(group) or {}
+	local models = self:models()
+	local view = { lamps = #members, streaming = 0, label = nil, still = {} }
+	for _, light_rid in ipairs(members) do
+		local model = models[light_rid]
+		if model and model.streaming == true then
+			view.streaming = view.streaming + 1
+			view.label = view.label or self:stream_label(light_rid)
+		elseif model then
+			view.still[#view.still + 1] = model
+		end
+	end
+	return view
+end
+
+-- Some but not all of the group's lamps stream: its on, brightness and
+-- colour then come from the ones that do not.
+local function partial(view)
+	return view.streaming > 0 and view.streaming < view.lamps
+end
+
+-- The change detection's signature of the streaming fields (the strings
+-- HUE_STATE carries): "0" while no lamp streams, whatever the count of lamps.
+local function stream_signature(lamps, streaming_lamps, stream_label)
+	if streaming_lamps == "0" then
+		return "0"
+	end
+	return tostring(lamps) .. ":" .. tostring(streaming_lamps) .. ":" .. tostring(stream_label or "")
+end
+
+-- HUE_STATE's streaming fields for a stream_view: lamps, streaming_lamps,
+-- and streaming "true" with stream_label while every lamp streams, else
+-- streaming "false". The second value is their signature (stream_signature).
+local function stream_fields(view)
+	local fields = { lamps = tostring(view.lamps), streaming_lamps = tostring(view.streaming), streaming = "false" }
+	if view.lamps > 0 and view.streaming == view.lamps then
+		fields.streaming = "true"
+		fields.stream_label = view.label or zone_lights.STREAM_LABEL
+	end
+	return fields, stream_signature(fields.lamps, fields.streaming_lamps, fields.stream_label)
+end
+
+-- Whether the group of registered entry `rid` holds one of the lamps in
+-- `set` (lamp_set).
+function zone_lights:holds_any(rid, set)
+	local group = self:group_of(rid)
+	for _, light_rid in ipairs(group and self:member_lights(group) or {}) do
+		if set[light_rid] then
+			return true
+		end
+	end
+	return false
+end
+
 -- Labels ---------------------------------------------------------------------
 
 function zone_lights.entry_label(_self, _rid, entry)
@@ -491,13 +634,20 @@ function zone_lights.configure_params(_self, rid, entry)
 end
 
 -- The colour a registered group shows (Decision 8) and its signature for
--- change detection ("" when none).
-function zone_lights:color_of(rid)
+-- change detection ("" when none). Given a stream_view in which some but not
+-- all lamps stream, from the lamps that do not (#514).
+function zone_lights:color_of(rid, view)
 	local group = self:group_of(rid)
 	if not group then
 		return nil, ""
 	end
-	local color = hue_model.group_color(self:member_models(self:member_lights(group)))
+	local lamps
+	if view and partial(view) then
+		lamps = view.still
+	else
+		lamps = self:member_models(self:member_lights(group))
+	end
+	local color = hue_model.group_color(lamps)
 	if not color then
 		return nil, ""
 	end
@@ -526,11 +676,39 @@ function zone_lights:online_of(rid)
 	return nil
 end
 
+-- The on/off and brightness a group shows: while some but not all of its
+-- lamps stream (stream_view), those of the lamps that do not, by Hue's rule
+-- (grouped_rule), when one of them says; else the grouped_light's as Hue
+-- reports them. The third value is true in the first case (#514).
+function zone_lights:on_and_brightness(grouped, view)
+	if partial(view) then
+		local on, brightness = grouped_rule(view.still)
+		if on ~= nil then
+			return on, brightness, true
+		end
+	end
+	local st = self.group_state[grouped]
+	if not st then
+		return nil, nil, false
+	end
+	return st.on, st.brightness, false
+end
+
+-- The change detection's signature of an on/off and brightness taken from
+-- the lamps that do not stream (still_sent): booleans and numbers, or the
+-- strings HUE_STATE carries for them, read alike.
+local function still_signature(on, brightness)
+	return tostring(on) .. "|" .. tostring(brightness)
+end
+
 -- Full HUE_STATE params (§5): rid, on, brightness (the group's average as
 -- Hue reports it; the device rounds), x+y or mirek with color_mode, online,
--- reason. A gone group: online false alone; a group without lights: online
--- false and on false (Decision 11: the tile goes off). The second value is
--- the signature of the colour sent ("" for none), for the change detection.
+-- reason, and since #514 lamps, streaming_lamps, streaming and, while every
+-- lamp streams, stream_label (stream_fields; on, brightness and colour from
+-- the lamps that do not stream while some do). A gone group: online false
+-- alone; a group without lights: online false and on false (Decision 11: the
+-- tile goes off). The second value is the signature of the colour sent (""
+-- for none), for the change detection.
 function zone_lights:state_params(rid, reason)
 	local entry = self.registry[rid]
 	local params = { rid = rid, reason = reason or "event" }
@@ -545,22 +723,41 @@ function zone_lights:state_params(rid, reason)
 		return params, ""
 	end
 	params.online = "true"
-	local st = self.group_state[grouped]
-	if st then
-		if st.on ~= nil then
-			params.on = tostring(st.on)
-		end
-		if st.brightness ~= nil then
-			params.brightness = tostring(st.brightness)
-		end
+	local view = self:stream_view(rid)
+	local on, brightness = self:on_and_brightness(grouped, view)
+	if on ~= nil then
+		params.on = tostring(on)
 	end
-	local color, sig = self:color_of(rid)
+	if brightness ~= nil then
+		params.brightness = tostring(brightness)
+	end
+	local color, sig = self:color_of(rid, view)
 	if color then
 		for k, v in pairs(color) do
 			params[k] = tostring(v)
 		end
 	end
+	for k, v in pairs((stream_fields(view))) do
+		params[k] = v
+	end
 	return params, sig
+end
+
+-- What a full HUE_STATE told (state_params' params), for the change
+-- detection of events: the streaming fields' signature and, while some but
+-- not all lamps stream, the on/off and brightness (#514). A state without
+-- the streaming fields (gone, no lights) leaves both as they were.
+function zone_lights:note_stream(rid, params)
+	if params.streaming_lamps == nil then
+		return
+	end
+	local sig = stream_signature(params.lamps, params.streaming_lamps, params.stream_label)
+	self.stream_sent[rid] = sig
+	if sig ~= "0" and params.streaming == "false" then
+		self.still_sent[rid] = still_signature(params.on, params.brightness)
+	else
+		self.still_sent[rid] = nil
+	end
 end
 
 -- Whether the bridge knows enough to tell a registered group its state: gone
@@ -602,6 +799,7 @@ function zone_lights:send_state(rid, reason, fields)
 		local sig
 		params, sig = self:state_params(rid, reason)
 		self.color_sent[rid] = sig
+		self:note_stream(rid, params)
 	end
 	if params.online then
 		self.online_sent[rid] = params.online
@@ -630,6 +828,28 @@ function zone_lights:undelivered(grouped_rid)
 	for _, rid in ipairs(self.reg:rids()) do
 		if self.registry[rid].state == "linked" and self:grouped_light_of(rid) == grouped_rid
 			and self:send_state(rid, "undelivered") then
+			sent = sent + 1
+		end
+	end
+	return sent
+end
+
+-- #514 (docs/hdmi-sync-stage1-design.md §4.6): lamps `rids` (a list or a
+-- set of light rids) started or stopped streaming; the entertainment
+-- module's on_lamps_changed calls this once per settle, after the lights'
+-- models took the change. Every linked zone light whose group holds one of
+-- them, and whose state is known, hears its full state again (reason
+-- "event"): the counts, `streaming`, and on, brightness and colour from the
+-- lamps that do not stream while some do. Returns the number of devices told.
+function zone_lights:streaming_changed(rids)
+	local set = lamp_set(rids)
+	if next(set) == nil then
+		return 0
+	end
+	local sent = 0
+	for _, rid in ipairs(self.reg:rids()) do
+		if self.registry[rid].state == "linked" and self:holds_any(rid, set) and self:state_known(rid)
+			and self:send_state(rid, "event") then
 			sent = sent + 1
 		end
 	end
@@ -689,9 +909,11 @@ function zone_lights.adoptable_hello(_self, params)
 end
 
 -- What a deleted, forgotten or re-linked entry leaves behind besides its
--- configuration signature: the colour and online state last sent.
+-- configuration signature: the colour, online state and streaming fields
+-- last sent.
 function zone_lights:forget_sent(rid)
 	self.color_sent[rid], self.online_sent[rid] = nil, nil
+	self.stream_sent[rid], self.still_sent[rid] = nil, nil
 end
 
 -- HUE_HELLO { rid?, device_id, name?, kind? } from a group device (the
@@ -883,14 +1105,88 @@ function zone_lights:on_grouped_light_item(item, kind, carried)
 	carried[grouped] = fields
 end
 
+-- The on/off and level an event brings (event_fields) into `fields`: those
+-- a grouped_light item carried (`c`, its carried set), as Hue reports them;
+-- while some but not all of the group's lamps stream, those of the lamps
+-- that do not instead (on_and_brightness), when the item carried either or
+-- they differ from the last sent (a light item of a lamp that does not
+-- stream changes them too); and Hue's own again, both, once the device no
+-- longer shows those of the lamps that do not stream (#514).
+function zone_lights:on_fields(rid, grouped, view, c, fields)
+	local on, brightness, still = self:on_and_brightness(grouped, view)
+	if still then
+		local sig = still_signature(on, brightness)
+		if not (c and (c.on or c.brightness)) and sig == self.still_sent[rid] then
+			return
+		end
+		self.still_sent[rid] = sig
+		fields.on = tostring(on)
+		if brightness ~= nil then
+			fields.brightness = tostring(brightness)
+		end
+		return
+	end
+	local was_still = self.still_sent[rid] ~= nil
+	self.still_sent[rid] = nil
+	if c or was_still then
+		if (was_still or c.on) and on ~= nil then
+			fields.on = tostring(on)
+		end
+		if (was_still or c.brightness) and brightness ~= nil then
+			fields.brightness = tostring(brightness)
+		end
+	end
+end
+
+-- The STATE fields an event brings linked entry `rid` (refresh_all): the
+-- on/off and level (on_fields), the derived colour when it differs from the
+-- last sent, the streaming fields when they changed (#514), online when it
+-- flipped (on false with it when it went off).
+function zone_lights:event_fields(rid, carried)
+	local fields = {}
+	local grouped = self:grouped_light_of(rid)
+	local view = self:stream_view(rid)
+	if grouped then
+		self:on_fields(rid, grouped, view, carried[grouped], fields)
+	end
+	local color, sig = self:color_of(rid, view)
+	if not grouped then
+		color, sig = nil, ""
+	end
+	if sig ~= (self.color_sent[rid] or "") then
+		self.color_sent[rid] = sig
+		if color then
+			for k, v in pairs(color) do
+				fields[k] = tostring(v)
+			end
+		end
+	end
+	local streaming, stream_sig = stream_fields(view)
+	if stream_sig ~= (self.stream_sent[rid] or "0") then
+		self.stream_sent[rid] = stream_sig
+		for k, v in pairs(streaming) do
+			fields[k] = v
+		end
+	end
+	local online = self:online_of(rid)
+	if online and online ~= self.online_sent[rid] then
+		fields.online = online
+		if online == "false" then
+			fields.on = "false"
+		end
+	end
+	return fields
+end
+
 -- After a container touched something a group device shows: every
 -- registered, bound entry named in `touched` (a set of group rids; nil for
 -- all of them) is checked against the (already updated) group cache and
 -- models. Deleted in Hue → gone and told; back → linked and told in full;
 -- else a changed CONFIGURE (name, members, caps, no_lights) and one STATE
--- with what changed: the on/off and level a grouped_light item carried, the
--- derived colour when it differs from the last sent, online when it
--- flipped. Returns the number of messages sent.
+-- with what changed (event_fields): the on/off and level a grouped_light
+-- item carried, the derived colour when it differs from the last sent, the
+-- streaming fields when they changed, online when it flipped. Returns the
+-- number of messages sent.
 function zone_lights:refresh_all(carried, touched)
 	local sent = 0
 	if touched and next(touched) == nil then
@@ -927,37 +1223,7 @@ function zone_lights:refresh_all(carried, touched)
 					if self:configure_changed(rid) and self:send_configure(rid) then
 						sent = sent + 1
 					end
-					local fields = {}
-					local grouped = self:grouped_light_of(rid)
-					local c = grouped and carried[grouped] or nil
-					local st = grouped and self.group_state[grouped] or nil
-					if c and st then
-						if c.on and st.on ~= nil then
-							fields.on = tostring(st.on)
-						end
-						if c.brightness and st.brightness ~= nil then
-							fields.brightness = tostring(st.brightness)
-						end
-					end
-					local color, sig = self:color_of(rid)
-					if not grouped then
-						color, sig = nil, ""
-					end
-					if sig ~= (self.color_sent[rid] or "") then
-						self.color_sent[rid] = sig
-						if color then
-							for k, v in pairs(color) do
-								fields[k] = tostring(v)
-							end
-						end
-					end
-					local online = self:online_of(rid)
-					if online and online ~= self.online_sent[rid] then
-						fields.online = online
-						if online == "false" then
-							fields.on = "false"
-						end
-					end
+					local fields = self:event_fields(rid, carried)
 					if next(fields) and self:state_known(rid) and self:send_state(rid, "event", fields) then
 						sent = sent + 1
 					end

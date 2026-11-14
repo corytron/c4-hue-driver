@@ -253,16 +253,10 @@ describe("bridge/actions.lua", function()
 			assert.equal("Not forgotten: choose Yes, forget", actions.NOT_CONFIRMED)
 		end)
 
-		it("points every alias at a 1.2 bridge action and a runner", function()
-			local targets = { ["Import All New"] = true }
-			for _, action in ipairs(actions.ACTIONS) do targets[action.command] = true end
-			local n = 0
-			for old, alias in pairs(actions.ALIASES) do
-				n = n + 1
-				assert.is_true(targets[alias.target] == true, old .. " → " .. tostring(alias.target))
-				assert.is_function(actions[alias.runner], old)
+		it("keeps no alias table and no alias runner since 2.0 (#514, O15)", function()
+			for _, name in ipairs({ "ALIASES", "run_alias", "run_link_bound", "run_accept_names" }) do
+				assert.is_nil(actions[name], name)
 			end
-			assert.equal(23, n)
 		end)
 	end)
 
@@ -1105,107 +1099,76 @@ describe("bridge/actions.lua", function()
 		end)
 	end)
 
-	describe("aliases: beta 8's commands until 2.0 (run_alias)", function()
-		local function alias(old, params, opts)
-			local w = world(opts)
-			assert.is_true(w.a:run_alias(old, params))
-			return w
-		end
+	-- The 23 beta 8 commands 1.2 merged into these runners answered as hidden
+	-- aliases until 2.0 and are gone since (docs/hdmi-sync-design.md §9.3 and
+	-- §10 O15, #514; tests/fixtures/ledger.lua's removed list checks every
+	-- driver's): each, with the parameters beta 8 sent, goes down the
+	-- bridge's unknown-command path (common/dispatch.lua), as a name no
+	-- driver.xml ever had does.
+	describe("the beta 8 commands, gone in 2.0 (#514, O15)", function()
+		local OLD = {
+			{ "Add Light", { Light = "L1", Room = "7" } },
+			{ "Import All New Lights", {} },
+			{ "Add Zone Light", { Group = "G1", Room = "mapped" } },
+			{ "Re-link Device To Light", { Device = "1001", Light = "L2" } },
+			{ "Re-link Zone Light", { Device = "1101", Group = "G1" } },
+			{ "Link Devices", {} },
+			{ "Forget Light", { Device = "1002" } },
+			{ "Adopt Hue Names", {} },
+			{ "Accept Names As They Are", {} },
+			{ "Add Scene", { Scene = "S1", Room = "7" } },
+			{ "Add All Scenes Of Room", { ["Hue Room"] = "R1" } },
+			{ "Re-link Scene", { Device = "1201", Scene = "S2" } },
+			{ "Forget Scene", { Device = "1201" } },
+			{ "Add Motion Sensor", { Sensor = "M1" } },
+			{ "Import All New Motion Sensors", {} },
+			{ "Add Motion Area", { Area = "A1", Room = "7" } },
+			{ "Re-link Motion Device", { Device = "1301", Target = "A1" } },
+			{ "Forget Motion Device", { Device = "1301" } },
+			{ "Test Connection", {} },
+			{ "Refresh All", {} },
+			{ "Connect Event Stream", {} },
+			{ "Disconnect Event Stream", {} },
+			{ "Log Motion Diagnostics", {} },
+		}
 
-		it("maps each old command and its old params onto the new runner", function()
-			local cases = {
-				{ "Add Light", { Light = "L1", Room = "7" }, "lights:add_light", { "L1", 7 } },
-				{ "Import All New Lights", {}, "lights:import_new", {} },
-				{ "Add Zone Light", { Group = "G1", Room = "mapped" }, "zone_lights:add", { "G1" } },
-				{ "Re-link Device To Light", { Device = "1001", Light = "L2" }, "lights:relink", { 1001, "L2" } },
-				{ "Re-link Zone Light", { Device = "1101", Group = "G1" }, "zone_lights:relink", { 1101, "G1" } },
-				{ "Forget Light", { Device = "1002" }, "lights:forget", { 1002 } },
-				{ "Add Scene", { Scene = "S1", Room = "7" }, "scenes:add_scene", { "S1", 7 } },
-				{ "Add All Scenes Of Room", { ["Hue Room"] = "R1" }, "scenes:add_all_of_group", { "R1" } },
-				{ "Re-link Scene", { Device = "1201", Scene = "S2" }, "scenes:relink", { 1201, "S2" } },
-				{ "Forget Scene", { Device = "1201" }, "scenes:forget", { 1201 } },
-				{ "Add Motion Sensor", { Sensor = "M1" }, "motion:add", { "M1" } },
-				{ "Import All New Motion Sensors", {}, "motion:import_new", {} },
-				{ "Add Motion Area", { Area = "A1", Room = "7" }, "motion:add", { "A1", 7 } },
-				{ "Re-link Motion Device", { Device = "1301", Target = "A1" }, "motion:relink", { 1301, "A1" } },
-				{ "Re-link Motion Device", { Device = "1301", Target = "M1" }, "motion:relink", { 1301, "M1" } },
-				{ "Forget Motion Device", { Device = "1301" }, "motion:forget", { 1301 } },
-				{ "Adopt Hue Names", {}, "names:resolve", { actions.NAMES.HUE_TO_COMPOSER } },
-			}
-			for _, case in ipairs(cases) do
-				local w = alias(case[1], case[2])
-				assert.same({ case[3] }, w.acted(), case[1])
-				local args = w.of(case[3])[1]
-				for i, want in ipairs(case[4]) do assert.equal(want, args[i], case[1]) end
-				assert.equal(1, #w.said, case[1])
-				assert.is_nil(w.last():find(" is now ", 1, true), "the old Last Action, no pointer: " .. case[1])
-				assert.truthy(w.logs[1]:find("^always actions: " .. case[1]:gsub("%-", "%%-") .. " is now "), case[1])
-			end
-		end)
-
-		it("keeps beta 8's refusal of a missing pick, after the pairing check", function()
-			local cases = {
-				{ "Add Light", { Room = "7" }, "Not added: pick a light first" },
-				{ "Add Zone Light", {}, "Not added: pick a zone or room first" },
-				{ "Add Scene", { Scene = "" }, "Not added: pick a scene first" },
-				{ "Add All Scenes Of Room", {}, "Not added: pick a Hue room first" },
-				{ "Add Motion Sensor", {}, "Not added: pick a motion sensor first" },
-				{ "Add Motion Area", {}, "Not added: pick a MotionAware area first" },
-				{ "Re-link Device To Light", { Device = "1001" }, "Not re-linked: pick a device and a light" },
-				{ "Re-link Zone Light", { Group = "G1" }, "Not re-linked: pick a device and a zone or room" },
-				{ "Re-link Scene", {}, "Not re-linked: pick a device and a scene" },
-				{ "Re-link Motion Device", { Device = "1301" }, "Not re-linked: pick a device and a sensor or area" },
-				{ "Forget Light", {}, "Not forgotten: pick a device first" },
-				{ "Forget Scene", {}, "Not forgotten: pick a device first" },
-				{ "Forget Motion Device", {}, "Not forgotten: pick a device first" },
-			}
-			for _, case in ipairs(cases) do
-				local w = alias(case[1], case[2])
-				assert.same({ case[3] }, w.said, case[1])
-				assert.same({}, w.acted(), case[1])
-				w = alias(case[1], case[2], { paired = false })
-				assert.same({ "Not paired" }, w.said, case[1])
-			end
-		end)
-
-		it("Link Devices is today's Link Devices: no suggestion is applied", function()
-			local w = alias("Link Devices", {},
-				{ lights = { suggested = function() return { { device_id = 1001, rid = "L1" } } end } })
-			assert.same({ "lights:link_devices", "scenes:link_devices", "zone_lights:link_devices", "motion:link_devices" },
-				w.acted())
-		end)
-
-		it("Accept Names As They Are writes nothing once names follow each other; without names.lua it accepts", function()
-			local w = alias("Accept Names As They Are", {})
-			assert.same({}, w.acted())
-			assert.same({ "Nothing to accept: names follow each other between Composer and Hue by themselves; the ones "
-				.. "that cannot are in Resolve Names" }, w.said)
-			w = alias("Accept Names As They Are", {}, { names = false })
-			assert.same({ "lights:accept_names", "zone_lights:accept_names", "scenes:accept_names", "motion:accept_names" },
-				w.acted())
-		end)
-
-		it("sends the old diagnostics to their Diagnostics entries", function()
-			local D = actions.DIAGNOSTICS
-			local cases = { ["Test Connection"] = D.TEST, ["Refresh All"] = D.REFRESH,
-				["Connect Event Stream"] = D.CONNECT, ["Disconnect Event Stream"] = D.DISCONNECT,
-				["Log Motion Diagnostics"] = D.MOTION_LOG }
-			for old, value in pairs(cases) do
-				local ran = {}
-				local entries = {}
-				for _, v in pairs(D) do
-					entries[v] = { text = v, run = function() ran[#ran + 1] = v end }
+		it("an old action name such as Add Light is an unknown command, answered as any unknown command is", function()
+			local fake = require("helpers.fake_c4")
+			local env = fake.load_driver("hue_bridge", {}, { device_id = 15 })
+			fake.as(env, env.OnDriverInit, "DIT_ADDING")
+			fake.as(env, env.OnDriverLateInit, "DIT_ADDING")
+			-- What the bridge does with one command, clicked on the Actions tab
+			-- and sent by name (the dev loop, tools/regress.sh, C4:SendToDevice):
+			-- its log lines at debug level, the command's dispatch key made
+			-- <key>; the C4 calls it makes; the Last Action it leaves.
+			local function answer(command, params)
+				local key = (command:gsub("%s+", "_"))
+				local pattern = (key:gsub("%W", "%%%0"))
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = (line:gsub(pattern, "<key>")) end
+				log.set_debug(true)
+				env.C4.calls = {}
+				local clicked, by_name = { ACTION = command }, {}
+				for k, v in pairs(params or {}) do
+					clicked[k], by_name[k] = v, v
 				end
-				local w = alias(old, {}, { diagnostics = entries })
-				assert.same({ value }, ran, old)
-				assert.equal(1, #w.said)
+				local ok, err = pcall(function()
+					fake.as(env, env.ExecuteCommand, "LUA_ACTION", clicked)
+					fake.as(env, env.ExecuteCommand, command, by_name)
+				end)
+				log.set_debug(false)
+				assert(ok, err)
+				local calls = {}
+				for _, call in ipairs(env.C4.calls) do calls[#calls + 1] = call.name end
+				return { lines = lines, calls = calls, last_action = fake.last_action(env) }
 			end
-		end)
-
-		it("answers false for a command it does not know", function()
-			assert.is_false(world().a:run_alias("Pair Bridge", {}))
-			assert.is_false(world().a:run_alias("Map Rooms By Name", {}))
-			assert.is_false(world().a:run_alias("Refresh Scenes", {}), "beta 8's handler: the scenes alone, at once")
+			local unknown = answer("No Such Action")
+			assert.truthy(table.concat(unknown.lines, "\n"):find("no command handler for <key>", 1, true),
+				table.concat(unknown.lines, "\n"))
+			assert.same({}, unknown.calls)
+			for _, case in ipairs(OLD) do
+				assert.same(unknown, answer(case[1], case[2]), case[1])
+			end
 		end)
 	end)
 end)

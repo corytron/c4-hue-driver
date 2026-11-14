@@ -29,6 +29,17 @@ local function signed(command, params)
 	return require("common.devloop").execute(command, params)
 end
 
+-- One of Diagnostics' entries, as Composer sends the action (What is
+-- actions.DIAGNOSTICS' value): since 2.0 the only way to beta 8's Test
+-- Connection ("test"), Refresh All ("refresh") and Connect and Disconnect
+-- Event Stream ("connect", "disconnect"), whose old names no longer answer
+-- (O15, #514). `extra` adds parameters.
+local function diagnostics(env, what, extra)
+	local params = { ACTION = "Diagnostics", What = "diag:" .. what }
+	for k, v in pairs(extra or {}) do params[k] = v end
+	env.ExecuteCommand("LUA_ACTION", params)
+end
+
 local function paired_driver(extra)
 	-- The C4:url stream (Web transfer); the network-connection stream has its own specs.
 	local props = { ["Event Stream Transport"] = "Web transfer", ["Bridge IP Address"] = "192.0.2.10" }
@@ -282,8 +293,8 @@ describe("Hue Bridge driver", function()
 		-- and the third waits for one of them to close (security review
 		-- 2026-10-25, finding 5). The spelling moves on only for a transfer
 		-- that opens.
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+		diagnostics(env, "disconnect")
+		diagnostics(env, "connect")
 		assert.equal(second, c4.last_transfer(), "no third transfer while two may be open")
 		assert.equal("Waiting for an earlier stream transfer to close", env.Properties["Event Stream"])
 		assert.equal("192.000.02.10", c4.persist.hue_stream_spelling, "the spelling waits too")
@@ -335,8 +346,8 @@ describe("Hue Bridge driver", function()
 		assert.equal(3600, first.options.timeout, "still dual-queue: commands stay on the dotted address")
 		assert.equal("198.51.100.007 (own queue, the only spelling)", env.Properties["Stream Address"])
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+		diagnostics(env, "disconnect")
+		diagnostics(env, "connect")
 		assert.equal("https://198.51.100.007/eventstream/clip/v2", c4.last_transfer().url)
 	end)
 
@@ -417,7 +428,7 @@ describe("Hue Bridge driver", function()
 		-- A state change is never held back, and a value still waiting never
 		-- overwrites it; the count still lands.
 		event(4)
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
+		diagnostics(env, "disconnect")
 		assert.equal("Stopped", env.Properties["Event Stream"])
 		c4.fire_timers()
 		assert.equal("Stopped", env.Properties["Event Stream"])
@@ -504,8 +515,9 @@ describe("Hue Bridge driver", function()
 			assert.equal(transfers, #c4.transfers, "no dev action started a transfer")
 			assert.equal("Paired", env.Properties["Status"])
 
-			-- Test Connection stays, on the dotted address whatever Host says.
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection", Host = "192.00.2.10" })
+			-- Diagnostics' connection check stays, on the dotted address
+			-- whatever Host says.
+			diagnostics(env, "test", { Host = "192.00.2.10" })
 			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", c4.last_transfer().url)
 		end)
 		package.preload["common.devloop"] = nil
@@ -657,7 +669,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+		diagnostics(env, "test")
 		local t = c4.last_transfer()
 		assert.equal("https://192.0.2.10/clip/v2/resource/bridge", t.url)
 		t:respond(403, '{"errors":[{"description":"unauthorized"}]}')
@@ -682,7 +694,7 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		answer_check(c4)
 
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+		diagnostics(env, "test")
 		c4.last_transfer():respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe000000"}]}')
 		assert.truthy(env.Properties["Status"]:find("expected 001788fffe25b8f8", 1, true))
 	end)
@@ -829,15 +841,17 @@ describe("Hue Bridge driver", function()
 		env.OnDriverLateInit("DIT_STARTUP")
 		assert.equal(1, c4.property_attribs["Last Action (2)"], "continuation rows start hidden")
 		answer_check(c4)
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Link Devices" })
+		-- Link Device's top row: every bound device the bridge does not know
+		-- yet, one report per kind.
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Link Device", Device = "dev:suggested" })
 		local text = fake.last_action(env)
 		assert.truthy(text:find(" | Scenes: ", 1, true), text)
 		assert.is_true(#env.Properties["Last Action"] <= 72)
 		c4.fire_timers() -- the rows' visibility goes out as a batch after the texts
 		assert.equal(0, c4.property_attribs["Last Action (2)"])
 		assert.equal(1, c4.property_attribs["Last Action (5)"])
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Add Zone Light", Group = "", Room = "" })
-		assert.equal("Not added: pick a zone or room first", env.Properties["Last Action"])
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget Device", Device = "" })
+		assert.equal("Not forgotten: pick a device under Device first", env.Properties["Last Action"])
 		assert.equal("", env.Properties["Last Action (2)"], "a short text clears the rows")
 		c4.fire_timers() -- the rows' visibility goes out as a batch after the texts
 		assert.equal(1, c4.property_attribs["Last Action (2)"])
@@ -1510,7 +1524,7 @@ describe("Hue Bridge driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			local identity = c4.last_transfer()
 			assert.truthy(identity.url:find("/api/0/config", 1, true))
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			diagnostics(env, "test")
 			assert.equal("Testing: checking the bridge identity first", env.Properties["Status"])
 			assert.equal(identity, c4.last_transfer(), "the test joins the identity check in flight")
 			answer_identity(c4, "001788FFFE456DEF")
@@ -1522,7 +1536,7 @@ describe("Hue Bridge driver", function()
 		it("Test Connection sends the key once the identity check passes, and the stream's start is kept", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			diagnostics(env, "test")
 			answer_identity(c4)
 			local test = last_to(c4, TEST_URL)
 			assert.is_truthy(test, "the keyed test GET after the identity check")
@@ -1539,7 +1553,7 @@ describe("Hue Bridge driver", function()
 			decoy:respond(200, CONFIG)
 			assert.equal("TLS check failed: nothing is sent (see Attention)", env.Properties["Status"])
 			local count = #c4.transfers
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			diagnostics(env, "test")
 			assert.equal("Test refused: TLS check failed; nothing is sent (see Attention)", env.Properties["Status"])
 			assert.equal(count, #c4.transfers)
 			assert.same({}, keyed(c4))
@@ -1548,7 +1562,7 @@ describe("Hue Bridge driver", function()
 		it("keeps a failed TLS verdict through Connect Event Stream and a new pairing", function()
 			local env, c4, decoy = at_decoy()
 			decoy:respond(200, CONFIG)
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+			diagnostics(env, "connect")
 			assert.equal("Not connected: TLS check failed", env.Properties["Event Stream"])
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Pair Bridge" })
 			c4.last_transfer():respond(200, CONFIG)
@@ -1633,7 +1647,7 @@ describe("Hue Bridge driver", function()
 			answer_check(c4)
 			c4.last_transfer():done(28, "Timeout was reached") -- the stream never connects
 			local before = #c4.transfers
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh All" })
+			diagnostics(env, "refresh")
 			c4.advance(1) -- a click goes through the background engine at once
 			local paths = {}
 			for _ = 1, 30 do
@@ -1657,21 +1671,36 @@ describe("Hue Bridge driver", function()
 			local stream_t = c4.last_transfer()
 			stream_t:respond_headers(200, {})
 			local before = #c4.transfers
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh Scenes" })
+			-- The newest module GET of the resync chain not answered yet (the
+			-- chain reads on while the bridge resource is asked).
+			local function next_read()
+				for i = #c4.transfers, before + 1, -1 do
+					local t = c4.transfers[i]
+					if t.url ~= TEST_URL and t.url:find("/clip/v2/resource/", 1, true) and not t.answered then
+						return t
+					end
+				end
+			end
+			diagnostics(env, "refresh") -- Diagnostics' "Read everything from the bridge now"
+			c4.advance(100) -- the click's resync starts at the background engine's next ticks
 			local refused = c4.transfers[before + 1]
 			assert.is_truthy(refused, "a keyed module request")
+			refused.answered = true
 			refused:respond(403, "<html>forbidden</html>")
-			local confirm = c4.last_transfer()
-			assert.equal(TEST_URL, confirm.url, "one keyed GET of the bridge resource decides")
+			local confirm = last_to(c4, TEST_URL)
+			assert.is_truthy(confirm, "one keyed GET of the bridge resource decides")
 			assert.are_not.equal(KEY_STATUS, env.Properties["Status"], "not locked by one refusal")
 			confirm:respond(200, BRIDGE_OK)
 			assert.are_not.equal(KEY_STATUS, env.Properties["Status"])
 			assert.is_false(stream_t.cancelled == true, "the stream keeps running")
 
-			before = #c4.transfers
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Refresh Scenes" })
-			c4.transfers[before + 1]:respond(403, "<html>forbidden</html>")
-			c4.last_transfer():respond(403, "<html>forbidden</html>")
+			local second = next_read()
+			assert.is_truthy(second, "the chain's next keyed GET")
+			second.answered = true
+			second:respond(403, "<html>forbidden</html>")
+			local confirm_again = last_to(c4, TEST_URL)
+			assert.are_not.equal(confirm, confirm_again, "the bridge resource is asked again")
+			confirm_again:respond(403, "<html>forbidden</html>")
 			c4.advance(1) -- #490 (N-6)
 			answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"], "the bridge resource refused too: locked")
@@ -1686,11 +1715,11 @@ describe("Hue Bridge driver", function()
 			answer_identity(c4)
 			assert.equal(KEY_STATUS, env.Properties["Status"])
 			local count = #c4.transfers
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+			diagnostics(env, "connect")
 			assert.equal("Not connected: key rejected", env.Properties["Event Stream"])
 			assert.equal(count, #c4.transfers, "Connect Event Stream presents no rejected key")
 
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			diagnostics(env, "test")
 			local test = c4.last_transfer()
 			assert.equal(TEST_URL, test.url, "the test may send the key while locked")
 			test:respond(200, BRIDGE_OK)
@@ -1709,7 +1738,7 @@ describe("Hue Bridge driver", function()
 		it("drops a Test Connection that waited for the identity check of an earlier address", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Test Connection" })
+			diagnostics(env, "test")
 			env.Properties["Bridge IP Address"] = "192.0.2.11"
 			env.OnPropertyChanged("Bridge IP Address")
 			answer_identity(c4)
@@ -1995,7 +2024,7 @@ describe("Hue Bridge driver", function()
 			assert.equal("Paired", env.Properties["Status"])
 
 			-- A feed the owner disconnected stays off at a new address.
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Disconnect Event Stream" })
+			diagnostics(env, "disconnect")
 			set_address(env, "192.0.2.145")
 			identity(c4)
 			self_check(c4)
@@ -2911,25 +2940,119 @@ describe("Hue Bridge driver", function()
 			assert.has_no.errors(function()
 				env.ExecuteCommand("HUE_HELLO", { device_id = "2001" })
 				env.ExecuteCommand("HUE_SET", { rid = "l1", on = "true" })
-				env.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
+				env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:test" })
 			end)
 			assert.has_no.errors(function() env.OnDriverLateInit("DIT_STARTUP") end)
 		end)
 	end)
 	describe("zone lights wiring (docs/zone-light-design.md §8)", function()
-		it("answers the zone pickers, refuses an empty Add Zone Light, and keeps a group hello out of the lights", function()
+		it("answers the zone folders of Add From Hue and Link Device, refuses an empty Add From Hue, and keeps a group "
+			.. "hello out of the lights", function()
 			local env, c4 = paired_driver()
 			env.OnDriverLateInit("DIT_STARTUP")
-			assert.same({ { text = "(no zones or rooms on the bridge)", value = "" } }, env.ZoneGroupList())
-			assert.same({ { text = "(no zone light device is gone or unbound)", value = "" } }, env.RelinkZoneLightList())
+			-- Each folder's last row, under its Back row.
+			local add, link = env.AddFromHueList("f:groups"), env.LinkDeviceList("f:groups")
+			assert.same({ text = "(no zone or room is left to add)", value = "" }, add[#add])
+			assert.same({ text = "(no zone light device is gone or unbound)", value = "" }, link[#link])
 			assert.equal("0 imported", env.Properties["Zone Lights"])
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Add Zone Light", Group = "", Room = "" })
-			assert.equal("Not added: pick a zone or room first", fake.last_action(env))
+			env.ExecuteCommand("LUA_ACTION", { ACTION = "Add From Hue", What = "", Room = "" })
+			assert.equal("Not added: pick a light, zone, scene or motion sensor under What first", fake.last_action(env))
 			c4.sent = {}
 			env.ExecuteCommand("HUE_HELLO", { rid = "7d6c5b4a-0000-4000-8000-00000000z001", device_id = "77",
 				name = "Downstairs", kind = "group" })
 			assert.equal(0, #c4.sent, "an unknown, unbound zone light is neither adopted as a light nor answered")
 			assert.equal("0 imported", env.Properties["Lights"])
+		end)
+	end)
+
+	-- 1.2 merged 29 actions into ten (docs/simplify-actions-design.md); the
+	-- old commands answered as hidden aliases "until 2.0"
+	-- (docs/simplify-research-compat.md §5.3 R2), and 2.0 removes them, as
+	-- announced (O15, #514, docs/hdmi-sync-stage1-design.md §1). Their jobs
+	-- are the current actions': Add From Hue, Import All New, Link Device,
+	-- Forget Device, Resolve Names, Set Room Mapping and Diagnostics.
+	describe("the old commands are gone in 2.0 (O15, #514)", function()
+		local REMOVED = {
+			-- bridge/actions.lua's 23 aliases of 1.2 to 1.x.
+			"Add Light", "Import All New Lights", "Add Zone Light", "Re-link Device To Light", "Re-link Zone Light",
+			"Link Devices", "Forget Light", "Adopt Hue Names", "Accept Names As They Are", "Add Scene",
+			"Add All Scenes Of Room", "Re-link Scene", "Forget Scene", "Add Motion Sensor", "Import All New Motion Sensors",
+			"Add Motion Area", "Re-link Motion Device", "Forget Motion Device", "Test Connection", "Refresh All",
+			"Connect Event Stream", "Disconnect Event Stream", "Log Motion Diagnostics",
+			-- The beta 8 handlers that answered by themselves.
+			"Map Rooms By Name", "Room Audit", "Refresh Scenes",
+		}
+		-- Every parameter any of them took, so a handler left behind would act.
+		local OLD_PARAMS = { Light = "3f2b6a1e-0000-4000-8000-000000000001", Group = "3f2b6a1e-0000-4000-8000-000000000002",
+			Scene = "3f2b6a1e-0000-4000-8000-000000000003", Sensor = "3f2b6a1e-0000-4000-8000-000000000004",
+			Area = "3f2b6a1e-0000-4000-8000-000000000005", Target = "3f2b6a1e-0000-4000-8000-000000000004",
+			Device = "2001", Room = "", ["Hue Room"] = "3f2b6a1e-0000-4000-8000-000000000006" }
+
+		local function copy(value)
+			if type(value) ~= "table" then
+				return value
+			end
+			local out = {}
+			for k, v in pairs(value) do out[k] = copy(v) end
+			return out
+		end
+
+		it("answers none of the 26 old names, as a Composer action or a command: nothing runs, nothing changes",
+			function()
+				local env, c4 = paired_driver()
+				env.OnDriverLateInit("DIT_STARTUP")
+				answer_check(c4)
+				c4.fire_timers()
+				assert.equal(26, #REMOVED)
+				local dispatch = package.loaded["common.dispatch"]
+				local ran = {}
+				for key, fn in pairs(dispatch.commands) do
+					dispatch.commands[key] = function(...)
+						ran[#ran + 1] = key
+						return fn(...)
+					end
+				end
+				local lines = {}
+				log.set_debug(true)
+				log.sink = function(line) lines[#lines + 1] = line end
+				local props, persist = copy(env.Properties), copy(c4.persist)
+				local transfers, sent, timers = #c4.transfers, #c4.sent, #c4.active_timers()
+				for _, name in ipairs(REMOVED) do
+					local key = name:gsub("%s+", "_")
+					assert.is_nil(dispatch.commands[key], name .. ": still in dispatch.commands")
+					local action = copy(OLD_PARAMS)
+					action.ACTION = name
+					env.ExecuteCommand("LUA_ACTION", action)
+					env.ExecuteCommand(key, copy(OLD_PARAMS))
+				end
+				log.set_debug(false)
+				quiet()
+				assert.same({}, ran, "no handler ran")
+				assert.same(props, env.Properties, "no property changed")
+				assert.same(persist, c4.persist, "nothing stored")
+				assert.equal(transfers, #c4.transfers, "nothing sent to the bridge")
+				assert.equal(sent, #c4.sent, "nothing sent to a device")
+				assert.equal(timers, #c4.active_timers(), "nothing scheduled")
+				local text = table.concat(lines, "\n")
+				for _, name in ipairs(REMOVED) do
+					assert.truthy(text:find("no command handler for " .. name:gsub("%s+", "_"), 1, true), name)
+				end
+			end)
+
+		it("still runs their jobs through Diagnostics", function()
+			local env, c4 = paired_driver()
+			env.OnDriverLateInit("DIT_STARTUP")
+			answer_check(c4)
+			assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true))
+			diagnostics(env, "disconnect")
+			assert.equal("Stopped", env.Properties["Event Stream"])
+			diagnostics(env, "connect")
+			assert.truthy(c4.last_transfer().url:find("/eventstream/clip/v2", 1, true), "the stream starts again")
+			diagnostics(env, "test")
+			assert.equal("https://192.0.2.10/clip/v2/resource/bridge", c4.last_transfer().url)
+			assert.equal("Check the connection now: started (the result shows in Status)", fake.last_action(env))
+			c4.last_transfer():respond(200, '{"errors":[],"data":[{"id":"x","type":"bridge","bridge_id":"001788fffe25b8f8"}]}')
+			assert.truthy(env.Properties["Status"]:find("^Test OK: HTTP 200 via 192.0.2.10"), env.Properties["Status"])
 		end)
 	end)
 end)

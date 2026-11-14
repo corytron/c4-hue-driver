@@ -38,7 +38,7 @@ drivers, Signify's Hue developer docs (Core Concepts, Using HTTPS, Hue Bridge
 Discovery and the CLIP v2 API reference, as of 2025), or independent sources;
 **[assumed]** = not yet confirmed, to be tested on the real controller or bridge.
 
-## Overview (current, 2026-11-13, build 624)
+## Overview (current, 2026-11-13, build 624; 2.0 beta stage 1 added 2026-11-14)
 
 **Four drivers**, installed together from one release (`tools/build.sh`
 packs one `.c4z` per `src/<name>/driver.xml`):
@@ -83,17 +83,33 @@ packs one `.c4z` per `src/<name>/driver.xml`):
 - **Ten actions** on the bridge (`bridge/actions.lua`): Pair Bridge, Import
   All New, Add From Hue, Link Device, Forget Device, Resolve Names, Set
   Room Mapping, Hue Automations, Diagnostics, Forget Pairing. The 1.1
-  commands answer as hidden aliases until 2.0. The Hue Light and Hue Scene
-  have no actions; the motion device has Test Motion Programming.
+  commands, hidden aliases from 1.2 to 1.8, are gone since 2.0 (#514), as
+  announced: an old name is an unknown command (`tests/spec/ledger_spec.lua`
+  section 5). The Hue Light and Hue Scene have no actions; the motion
+  device has Test Motion Programming.
+- **Entertainment areas** (2.0 beta stage 1, #514,
+  `docs/hdmi-sync-design.md` §6): the bridge reads Hue's entertainment
+  areas and which lamps stream (`bridge/entertainment.lua`), lists them in
+  the Entertainment Areas row, and fires Sync Started and Sync Stopped for
+  any streamer. A light whose lamp syncs, or a zone light all of whose
+  lamps sync, says so and sends no command; a zone light or a scene with
+  some lamps syncing says how many and still reaches the others. When a
+  sync ends, the bridge puts the lamps back as they were before it (After
+  A Sync Ends). A driver for the Hue Play HDMI Sync Box comes in a later
+  2.0 beta.
 - **Modules.** `src/hue_bridge/bridge/` holds the bridge's modules (one
   lifecycle base, `owner.lua`, under `lights.lua`, `scenes.lua`,
-  `zone_lights.lua` and `motion.lua`; the command queues in
-  `commands.lua`; the registry in `registry.lua`); `src/hue_light/light/`
+  `zone_lights.lua` and `motion.lua`; `entertainment.lua` beside them; the
+  command queues in `commands.lua`; the registry in `registry.lua`);
+  `src/hue_light/light/`
   the light's state, turn-on, load group, capability and report-throttle
   logic;
   `src/common/` what every device driver shares (`device.lua`, the keypad
   machine and the proxy plumbing; `dispatch.lua`, `log.lua`, `link.lua`;
-  `devloop.lua` in dev builds only, `docs/dev-loop.md`). Lua 5.1 limits
+  `devloop.lua` in dev builds only, `docs/dev-loop.md`), and since 2.0 the
+  network code the bridge configures for itself (`https.lua`,
+  `tlscheck.lua`, `mdns.lua`; the bridge's own modules of those names are
+  thin wrappers). Lua 5.1 limits
   are checked by `tools/lua_limits.py` (`docs/driver-locals-design.md`).
 - **Where the detail is:** pairing and bridges
   `docs/bridge-compat-design.md`; import, rooms and lifecycle
@@ -105,8 +121,9 @@ packs one `.c4z` per `src/<name>/driver.xml`):
   `docs/scenes-design.md`, `docs/scene-dimmer-design.md`,
   `docs/smart-scenes-design.md`, `docs/scene-tracking-design.md`; motion
   `docs/motion-design.md`; outages `docs/offline-design.md`; Hue
-  automations `docs/hue-automation-audit-design.md`; the index of all of
-  them is `docs/README.md`.
+  automations `docs/hue-automation-audit-design.md`; entertainment areas
+  and sync boxes `docs/hdmi-sync-design.md`; the index of all of them is
+  `docs/README.md`.
 
 ## Targets
 
@@ -668,6 +685,8 @@ layout, the test harness) is `docs/lights-design.md`; this is the summary.
   **Link Device**, **Forget Device** and **Resolve Names**, and names sync
   both ways by themselves (`docs/simplify-actions-design.md`); the 1.1
   names answer as hidden aliases until 2.0.
+  Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those
+  aliases; the 1.1 names no longer answer.
 - **State fan-out and resync.** Each `light` item in a stream container
   becomes a `HUE_STATE` with just the changed fields; a `zigbee_connectivity`
   item maps device → light rids → `HUE_STATE` with `online` (`status ==

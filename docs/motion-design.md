@@ -114,6 +114,7 @@ BOOL Online, BOOL Enabled, BOOL Battery Low, NUMBER Light Level (0–100000), NU
 - **Refresh From Bridge:** sends `HUE_MOTION_HELLO`.
 - **Test: Motion** and **Test: No Motion:** send `OPENED` / `CLOSED` to the proxy, saying in Last Action that it is a test. They are for checking programming without a sensor, and are kept in the release build.
 - Current (2026-11-13, #478): since 1.2 (#334) the device has one action, **Test Motion Programming**, which sends the opposite of what the device shows and Hue's state again 30 s later; Refresh From Bridge is gone (the hello at start and the bridge's reads cover it), and the three old commands answer as hidden aliases until 2.0 (`docs/simplify-actions-design.md` §1.2; `src/hue_motion/driver.lua`).
+- Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those three hidden aliases; Test Motion Programming is the device's one command.
 
 ### 2.7 Behaviour
 
@@ -243,6 +244,7 @@ A bridge action, **Log Motion Diagnostics**, available in release builds. It run
 - **Properties:** one DYNAMIC_LIST row, **Motion Sensors**, after Zone Lights, for sensors and areas together.
 - **Shared actions:** the `HUE_MOTION_*` dispatch. Link Devices, Adopt Hue Names, Accept Names As They Are and the Attention list include the motion module.
 - Current (2026-11-13, #478): since 1.2 (#334) these are the merged bridge actions: Add From Hue (sensors and areas), Import All New (sensors, never areas), Link Device, Forget Device, Resolve Names, and Diagnostics ▸ "Log motion diagnostics (10 minutes)"; the old commands answer as hidden aliases until 2.0 (`docs/simplify-actions-design.md` §1.2).
+- Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those hidden aliases; the old commands no longer answer.
 - **Resync chain:** lights → scenes → zone lights → motion.
 - **Stream fan-out:** `on_container` calls `motion` and then `motion_diag`.
 

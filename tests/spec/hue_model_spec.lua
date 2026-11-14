@@ -2,6 +2,7 @@ local json = require("dkjson")
 local log = require("common.log")
 local hue_model = require("bridge.hue_model")
 local F = require("fixtures.hue_resources")
+local E = require("fixtures.hue_entertainment")
 
 -- Decode a fixture the way http.request does (dkjson, null → nil).
 local function decode(text)
@@ -99,7 +100,7 @@ describe("bridge.hue_model", function()
 			local l = hue_model.light(light_items[F.rids.living])
 			local expected = { rid = 1, id_v1 = 1, device_rid = 1, service_id = 1, name = 1, archetype = 1, on = 1,
 				brightness = 1, min_dim = 1, has_color = 1, x = 1, y = 1, gamut = 1, has_cct = 1, mirek = 1,
-				mirek_valid = 1, mirek_min = 1, mirek_max = 1, color_mode = 1 }
+				mirek_valid = 1, mirek_min = 1, mirek_max = 1, color_mode = 1, streaming = 1 }
 			for k in pairs(l) do
 				assert.truthy(expected[k], "unexpected field " .. k)
 			end
@@ -198,6 +199,55 @@ describe("bridge.hue_model", function()
 			local l = hue_model.light(light_items[F.rids.living])
 			assert.same({ "name" }, hue_model.update(l, { metadata = { name = "Lounge Lamp" } }))
 			assert.equal("Lounge Lamp", l.name)
+		end)
+	end)
+
+	-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.1): a lamp's `mode`
+	-- (docs/entertainment-areas-research.md §4.1) as the light's `streaming`.
+	describe("streaming (2.0, #514)", function()
+		it("reads mode normal as false and streaming as true, and leaves it absent without a mode", function()
+			assert.is_false(hue_model.light(light_items[F.rids.living]).streaming, "the fixture's lights are normal")
+			local item = by_rid(items(E.light))[E.rids.tv_left]
+			item.mode = "streaming"
+			assert.is_true(hue_model.light(item).streaming)
+			item.mode = nil
+			assert.is_nil(hue_model.light(item).streaming)
+		end)
+
+		it("reports streaming from a mode update, and keeps it through updates without one", function()
+			local l = hue_model.light(light_items[F.rids.living])
+			local event = decode(E.events.lamp_mode({ "tv_left" }, "streaming"))[1].data[1]
+			assert.same({ "streaming" }, hue_model.update(l, event))
+			assert.is_true(l.streaming)
+			assert.same({ "brightness" }, hue_model.update(l, decode(F.events.brightness)[1].data[1]))
+			assert.is_true(l.streaming, "kept like every other field")
+			assert.same({ "streaming" }, hue_model.update(l, { mode = "normal" }))
+			assert.is_false(l.streaming)
+		end)
+
+		it("reports streaming in its place, after online and before name", function()
+			local l = {}
+			assert.same({ "on", "streaming", "name" }, hue_model.update(l, { metadata = { name = "Lamp" },
+				mode = "normal", on = { on = true } }))
+		end)
+
+		it("ignores a mode it does not know, and a decoded null", function()
+			local l = hue_model.light(light_items[F.rids.living])
+			assert.same({}, hue_model.update(l, { mode = "party" }))
+			assert.same({}, hue_model.update(l, { mode = {} }))
+			assert.is_false(l.streaming)
+		end)
+
+		it("is the last of STATE_FIELDS, after online, and state_params sends it as a string", function()
+			assert.same({ "on", "brightness", "x", "y", "mirek", "color_mode", "online", "streaming" },
+				hue_model.STATE_FIELDS)
+			local l = hue_model.light(light_items[F.rids.living])
+			assert.same({ rid = F.rids.living, reason = "event", streaming = "false" },
+				hue_model.state_params(l, { "streaming" }, "event"))
+			l.streaming = true
+			local p = hue_model.state_params(l, nil, "resync")
+			assert.equal("true", p.streaming)
+			assert.is_true(hue_model.has_state(hue_model.state_params(l, { "streaming" }, "event")))
 		end)
 	end)
 
@@ -416,7 +466,7 @@ describe("bridge.hue_model", function()
 			local p = hue_model.state_params(l, nil, "resync")
 			assert_all_strings(p)
 			assert.same({ rid = F.rids.living, reason = "resync", on = "true", brightness = "73.52",
-				x = "0.4575", y = "0.4101", mirek = "366", color_mode = "ct", online = "true" }, p)
+				x = "0.4575", y = "0.4101", mirek = "366", color_mode = "ct", online = "true", streaming = "false" }, p)
 		end)
 
 		it("leaves out fields without a value", function()
@@ -427,7 +477,8 @@ describe("bridge.hue_model", function()
 			assert.is_nil(p.online)
 			assert.equal("xy", p.color_mode)
 			local white = hue_model.state_params(hue_model.light(light_items[F.rids.garage]), nil, "hello")
-			assert.same({ rid = F.rids.garage, reason = "hello", on = "false", brightness = "100" }, white)
+			assert.same({ rid = F.rids.garage, reason = "hello", on = "false", brightness = "100", streaming = "false" },
+				white)
 		end)
 
 		it("carries only the listed fields, ignoring names that are not state", function()
@@ -1589,6 +1640,229 @@ describe("bridge.hue_model", function()
 				has_color = "false", has_cct = "false", min_dim = "1" }, p)
 			assert.same({ rid = "z", kind = "group", no_lights = "false", has_color = "false", has_cct = "false",
 				min_dim = "1" }, hue_model.group_configure_params("z", nil))
+		end)
+	end)
+
+	-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.1): entertainment areas
+	-- from the hand-written fixture (tests/fixtures/hue_entertainment.lua).
+	describe("entertainment areas (2.0, #514)", function()
+		local devices, owners, configs
+
+		local function lamps(keys)
+			local out = {}
+			for i, key in ipairs(keys) do
+				out[i] = E.rids[key]
+			end
+			return out
+		end
+
+		local function config(key)
+			for _, item in ipairs(configs) do
+				if item.id == E.area_rids[key] then
+					return item
+				end
+			end
+		end
+
+		before_each(function()
+			devices = hue_model.devices(items(E.device))
+			owners = hue_model.entertainment_owners(items(E.entertainment), devices)
+			configs = items(E.configuration)
+		end)
+
+		describe("entertainment_owners() and entertainment_light()", function()
+			it("maps each renderer's service to its light, through the device when renderer_reference is missing", function()
+				local expected = {}
+				for _, key in ipairs(E.keys) do
+					expected[E.service_rids[key]] = E.rids[key]
+				end
+				assert.same(expected, owners)
+				assert.is_nil(owners[E.service_rids.bridge], "the bridge's service is a proxy, not a renderer")
+			end)
+
+			it("finds no light for a renderer whose device is unknown or has several lights", function()
+				local shelf = by_rid(items(E.entertainment))[E.service_rids.shelf]
+				assert.equal(E.rids.shelf, hue_model.entertainment_light(shelf, devices))
+				assert.is_nil(hue_model.entertainment_light(shelf, nil))
+				assert.is_nil(hue_model.entertainment_light(shelf, {}))
+				local two = { [E.device_rids.shelf] = { light_rids = { E.rids.shelf, E.rids.desk } } }
+				assert.is_nil(hue_model.entertainment_light(shelf, two))
+				shelf.renderer = false
+				assert.is_nil(hue_model.entertainment_light(shelf, devices), "renders nothing")
+			end)
+
+			it("takes a renderer_reference only when it names a light by a resource id", function()
+				local item = { id = "es-1", renderer = true, renderer_reference = { rid = "la-1", rtype = "light" } }
+				assert.equal("la-1", hue_model.entertainment_light(item))
+				item.renderer_reference = { rid = "la/1", rtype = "light" }
+				assert.is_nil(hue_model.entertainment_light(item))
+				item.renderer_reference = { rid = "dv-1", rtype = "device" }
+				assert.is_nil(hue_model.entertainment_light(item))
+				assert.is_nil(hue_model.entertainment_light(nil))
+			end)
+
+			it("leaves out items of another type, junk, and an id that is not a resource id", function()
+				local list = items(E.entertainment)
+				local bad = { id = "a/b", renderer_reference = list[1].renderer_reference }
+				local out = hue_model.entertainment_owners({ list[1], bad, { id = "x-1", type = "light" }, "junk", 7 }, devices)
+				assert.same({ [list[1].id] = E.rids.tv_strip }, out)
+				assert.same({}, hue_model.entertainment_owners(nil))
+			end)
+		end)
+
+		describe("entertainment_area()", function()
+			it("parses a screen area that lists its lamps in light_services", function()
+				local area = hue_model.entertainment_area(config("tv"), owners)
+				assert.equal(E.area_rids.tv, area.id)
+				assert.equal("/groups/200", area.id_v1)
+				assert.equal("Living Room TV", area.name)
+				assert.equal("screen", area.kind)
+				assert.equal("inactive", area.status)
+				assert.is_nil(area.streamer)
+				assert.same(lamps(E.tv_lamps), area.lamps, "sorted by rid")
+				assert.same(lamps(E.tv_lamps), area.listed_lamps)
+				assert.equal(5, #area.channel_services, "the strip's two segments share one service")
+			end)
+
+			it("finds a music area's lamps through its channels when light_services is missing", function()
+				local area = hue_model.entertainment_area(config("office"), owners)
+				assert.equal("Office", area.name)
+				assert.equal("music", area.kind)
+				assert.is_nil(area.listed_lamps)
+				assert.same(lamps(E.office_lamps), area.lamps)
+				assert.same({}, hue_model.entertainment_area(config("office")).lamps, "no lamp map, no lamps")
+			end)
+
+			it("counts an empty light_services as missing", function()
+				local item = config("office")
+				item.light_services = {}
+				local area = hue_model.entertainment_area(item, owners)
+				assert.is_nil(area.listed_lamps)
+				assert.same(lamps(E.office_lamps), area.lamps)
+			end)
+
+			it("has exactly the fields of the contract", function()
+				local area = hue_model.entertainment_area(config("tv"), owners)
+				local expected = { id = 1, id_v1 = 1, name = 1, kind = 1, status = 1, streamer = 1, lamps = 1,
+					listed_lamps = 1, channel_services = 1 }
+				for k in pairs(area) do
+					assert.truthy(expected[k], "unexpected field " .. k)
+				end
+			end)
+
+			it("reads an active area's streamer, and any unknown type as other", function()
+				local item = config("tv")
+				item.status = "active"
+				item.active_streamer = { rid = E.streamer, rtype = "auth_v1" }
+				item.configuration_type = "hologram"
+				local area = hue_model.entertainment_area(item, owners)
+				assert.equal("active", area.status)
+				assert.equal(E.streamer, area.streamer)
+				assert.equal("other", area.kind)
+				for _, kind in ipairs({ "screen", "monitor", "music", "3dspace", "other" }) do
+					item.configuration_type = kind
+					assert.equal(kind, hue_model.entertainment_area(item).kind)
+				end
+			end)
+
+			it("reads an area without a known status as inactive, without a type as other", function()
+				local area = hue_model.entertainment_area({ id = "ea-1", status = "paused", type = "entertainment_configuration" })
+				assert.equal("inactive", area.status)
+				assert.equal("other", area.kind)
+				assert.same({}, area.lamps)
+			end)
+
+			it("gives a nameless area a fallback name and caps a name like other names", function()
+				assert.equal("Hue entertainment area /groups/9",
+					hue_model.entertainment_area({ id = "ea-1", id_v1 = "/groups/9" }).name)
+				assert.equal("Hue entertainment area ea-2",
+					hue_model.entertainment_area({ id = "ea-2", metadata = { name = "\n\t" } }).name)
+				local util = require("bridge.util")
+				local long = hue_model.entertainment_area({ id = "ea-3", metadata = { name = "TV\r\n" .. ("x"):rep(500) } })
+				assert.equal(util.NAME_MAX, #long.name)
+				assert.equal("TV", long.name:sub(1, 2), "control characters removed")
+			end)
+
+			it("is nil for another type or junk, and drops an id that is not a resource id with one line", function()
+				local lines = {}
+				log.sink = function(line) lines[#lines + 1] = line end
+				log.set_debug(true)
+				assert.is_nil(hue_model.entertainment_area({ id = "x-1", type = "light" }))
+				assert.is_nil(hue_model.entertainment_area("junk"))
+				assert.equal(0, #lines)
+				assert.is_nil(hue_model.entertainment_area({ id = "a/b", type = "entertainment_configuration" }))
+				log.set_debug(false)
+				log.sink = print
+				assert.equal(1, #lines)
+				assert.truthy(lines[1]:find("dropped a entertainment_configuration item", 1, true), lines[1])
+			end)
+
+			it("parses the add item of an event", function()
+				local area = hue_model.entertainment_area(decode(E.events.desk_add)[1].data[1], owners)
+				assert.equal("Desk", area.name)
+				assert.equal("monitor", area.kind)
+				assert.same({ E.rids.desk }, area.lamps)
+			end)
+		end)
+
+		describe("area_update()", function()
+			local area
+
+			before_each(function()
+				area = hue_model.entertainment_area(config("tv"), owners)
+			end)
+
+			it("turns active with its streamer, then inactive without one", function()
+				local active = decode(E.events.area_status("tv", "active"))[1].data[1]
+				assert.same({ "status", "streamer" }, hue_model.area_update(area, active, owners))
+				assert.equal("active", area.status)
+				assert.equal(E.streamer, area.streamer)
+				assert.same({}, hue_model.area_update(area, active, owners), "the same values again change nothing")
+				local inactive = decode(E.events.area_status("tv", "inactive"))[1].data[1]
+				assert.same({ "status", "streamer" }, hue_model.area_update(area, inactive, owners))
+				assert.equal("inactive", area.status)
+				assert.is_nil(area.streamer)
+				assert.same(lamps(E.tv_lamps), area.lamps, "an update without members keeps the lamps")
+			end)
+
+			it("renames", function()
+				local office = hue_model.entertainment_area(config("office"), owners)
+				assert.same({ "name" }, hue_model.area_update(office, decode(E.events.office_rename)[1].data[1]))
+				assert.equal("Study", office.name)
+			end)
+
+			it("follows new channels and light_services", function()
+				local office = hue_model.entertainment_area(config("office"), owners)
+				local channels = { { channel_id = 0, members = { { service = { rid = E.service_rids.desk,
+					rtype = "entertainment" }, index = 0 } } } }
+				assert.same({ "lamps" }, hue_model.area_update(office, { channels = channels }, owners))
+				assert.same({ E.rids.desk }, office.lamps)
+				assert.same({ "lamps" }, hue_model.area_update(office,
+					{ light_services = { { rid = E.rids.shelf, rtype = "light" } } }, owners))
+				assert.same({ E.rids.shelf }, office.lamps, "a listed lamp wins over the channels")
+			end)
+
+			it("ignores values of the wrong type, decoded nulls, an unknown status and no item", function()
+				assert.same({}, hue_model.area_update(area, { metadata = {}, status = {}, configuration_type = {},
+					light_services = "x", channels = 7 }))
+				assert.same({}, hue_model.area_update(area, { status = "starting" }))
+				assert.same({}, hue_model.area_update(area, nil))
+				assert.same({}, hue_model.area_update(nil, { status = "active" }))
+				area.status, area.streamer = "active", E.streamer
+				assert.same({ "streamer" }, hue_model.area_update(area, { active_streamer = {} }), "a null streamer is none")
+			end)
+		end)
+
+		describe("area_lamps()", function()
+			it("copies the listed lamps, else maps the channel services through owners", function()
+				local tv = hue_model.entertainment_area(config("tv"), owners)
+				local out = hue_model.area_lamps(tv, {})
+				assert.same(tv.listed_lamps, out)
+				assert.is_false(out == tv.listed_lamps, "a copy")
+				local office = hue_model.entertainment_area(config("office"))
+				assert.same(lamps(E.office_lamps), hue_model.area_lamps(office, owners))
+				assert.same({}, hue_model.area_lamps(nil, owners))
+			end)
 		end)
 	end)
 

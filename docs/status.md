@@ -9,6 +9,14 @@ present, this page and the code win. Brought up to date on 2026-11-13
 
 ## Now (2026-11-13)
 
+- **2.0 "Luthen" beta stage 1 (#514) is built, not released**
+  (2026-11-14), on the branch `feat/hdmi-sync-stage1-514`: entertainment
+  areas on the bridge, lights that say when their lamps sync with a TV,
+  and the hidden 1.1 aliases and On State Follows removed as announced
+  (`docs/hdmi-sync-stage1-design.md`). The house runs 1.8. Checks T0 to
+  T9 (`docs/entertainment-areas-research.md` §4.5) wait for a sync on the
+  house; the Composer steps for an installed beta are
+  `docs/composer-checklist.md` section T.
 - **Latest release: 1.8 "B2EMO", build 644**, released 2026-11-13
   ([release](https://github.com/corytron/c4-hue-driver/releases/tag/v1.8),
   #509): a Hue Scene that is on shows its last level after a reload instead of
@@ -383,6 +391,8 @@ What 1.2 does:
   1.5 there are ten: Hue Automations sits between Set Room Mapping and
   Diagnostics. The light and scene devices have no actions; the old
   commands answer as hidden aliases until 2.0.
+  Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those hidden
+  aliases; the old commands no longer answer.
 - **By itself:** it reads the bridge in tiers, re-checks a rejected key,
   finds the bridge on the LAN (mDNS, then a bounded sweep, never the
   internet), maps rooms by exact name, and re-links a returned bulb by its

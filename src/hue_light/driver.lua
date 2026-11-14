@@ -16,7 +16,10 @@
 -- did not land in docs/offline-design.md, cited as #428 D<n>; Control4 load
 -- groups (the GROUP_* commands, the Load Groups row) in
 -- docs/load-groups-design.md, cited as #435 D<n>; the throttle of Hue-side
--- level reports in docs/light-events-design.md, cited as #433 D<n>.
+-- level reports in docs/light-events-design.md, cited as #433 D<n>; the
+-- lamps that follow a TV sync (an entertainment stream) in
+-- docs/hdmi-sync-stage1-design.md §5.1 and docs/hdmi-sync-design.md §6.3,
+-- cited as #514 with the owner's decisions O<n>.
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -85,9 +88,8 @@ local SETUP_LOG_MAX = 2000
 -- kind is part of it (docs/zone-light-design.md §2): a zone or room device
 -- persists "group" and the bridge routes its hello on it; a light persists
 -- none, as every light did before zone lights existed. So is a group's type
--- ("zone" / "room"): its texts, and the name Adopt Hue Name (a hidden
--- alias since 1.2) gives a room device, are right after a restart, before
--- the bridge configures it again (#234).
+-- ("zone" / "room"): its texts are right after a restart, before the bridge
+-- configures it again (#234).
 local PERSISTED = { rid = "hue_rid", name = "hue_name", model = "hue_model", kind = "hue_kind",
 	group_type = "hue_group_type" }
 
@@ -104,6 +106,11 @@ local GONE_REMEDY = "Link or Forget Device"
 
 -- The remedy for a bound device the bridge has not linked to a Hue light.
 local UNLINKED_REMEDY = "use Link Device on the Hue Bridge"
+
+-- #514: who streams to the lamp when the bridge names no one; the stage 1
+-- bridge says the same of every streamer (docs/hdmi-sync-stage1-design.md
+-- §1, §4.2).
+local STREAM_LABEL = "another app"
 
 local st = state.new()
 local bridge = nil           -- device id of the bound Hue Bridge driver, or nil
@@ -341,9 +348,77 @@ local function identity_status()
 	return string.format("%s (%s)", st.name, st.model or "unknown model")
 end
 
+-- While the TV syncs (#514) ------------------------------------------------
+-- A lamp in an entertainment stream (a TV sync: a sync box, Hue's own apps)
+-- follows the TV, not Hue's commands, and Hue goes on reporting its state
+-- from before the stream [assumed: check T2, docs/hdmi-sync-stage1-design.md
+-- §2]. The bridge says so in HUE_STATE: `streaming` ("true" / "false") and,
+-- while it is true, `stream_label` (who streams); a zone or room light's
+-- also carries `lamps` and `streaming_lamps`, and its `streaming` is true
+-- only while every lamp streams (§4.6). The cache keeps them beside the rest
+-- of the state: st.streaming (nil until told), st.stream_label, st.lamps and
+-- st.streaming_lamps (take_stream below). While the device syncs no command
+-- goes to the bridge (O9: the sync keeps running and the device says so),
+-- the proxy is answered with what the device knows, and the device stays
+-- online: the stream is no reason it cannot be reached (blocker() never
+-- names it).
+
+-- True while the lamp, or every lamp of a zone or room, follows the TV.
+local function syncing()
+	return st.streaming == true
+end
+
+-- What Status shows of a stream, nil for nothing: "Syncing with the TV
+-- (another app)" while the device syncs; "2 of 6 lamps syncing with the TV"
+-- for a zone or room light while some of its lamps do, whose commands go
+-- out as before (the other lamps obey).
+local function sync_status()
+	if syncing() then
+		return string.format("Syncing with the TV (%s)", st.stream_label or STREAM_LABEL)
+	end
+	local some, of = st.streaming_lamps, st.lamps
+	if state.is_group(st) and some and of and some > 0 and some < of then
+		return string.format("%d of %d lamps syncing with the TV", some, of)
+	end
+	return nil
+end
+
+-- Last Action for a command the stream kept from the bridge.
+local function not_changed()
+	local label = st.stream_label or STREAM_LABEL
+	if state.is_group(st) then
+		return string.format("Not changed: the lamps follow the TV while they sync (%s)", label)
+	end
+	return string.format("Not changed: the lamp follows the TV while it syncs (%s)", label)
+end
+
+-- `name` (a HUE_SET, a HUE_DIM) was not sent: logged, and Last Action says
+-- why. False, as a send that did not go through.
+local function refused(name)
+	local text = not_changed()
+	log.info("%s not sent: %s", name, text)
+	prop("Last Action", text)
+	return false
+end
+
+-- Every HUE_SET and HUE_DIM goes out through here; true when it went. While
+-- the device syncs none does (O9), and the caller takes the path of a send
+-- that fails (common/device.lua): the proxy hears its CHANGING closed by a
+-- CHANGED at the level the device knows, a colour target the colour it
+-- knows, and nothing is kept for later (the bridge refuses such a command
+-- too, §4.5).
+local function send_light(name, params)
+	if syncing() then
+		return refused(name)
+	end
+	return send(name, params)
+end
+
 -- While the bridge's link is offline Status names it, whatever Zigbee last
 -- said: that is not current then (#428 D6, §6.3), and the bridge's fix is
 -- the one to act on. A light the bridge has not linked yet keeps saying so.
+-- A device whose lamps follow the TV says so instead of its identity
+-- (#514), after every reason it cannot be reached.
 local function refresh_status()
 	if st.forgotten then
 		prop("Status", forgotten_status())
@@ -358,7 +433,7 @@ local function refresh_status()
 	elseif st.no_lights then
 		prop("Status", no_lights_text())
 	else
-		prop("Status", identity_status())
+		prop("Status", sync_status() or identity_status())
 	end
 	-- "" while nothing says either way: bound, but the bridge has not reported.
 	if not bridge or st.forgotten or st.gone or dev.link_offline() or st.no_lights or st.online == false then
@@ -917,11 +992,11 @@ local function stop_ramp(why, group)
 		local fields = c and state.color_fields(st, c.x, c.y, c.mode) or nil
 		local params, which = state.from_brightness_target(st, level, STOP_GLIDE_MS, { color = fields })
 		params.urgent, params.group = "true", group -- #421 D12; #435 D12
-		if send("HUE_SET", params) and which == "given" then
+		if send_light("HUE_SET", params) and which == "given" then
 			color_sent(c, STOP_GLIDE_MS, params)
 		end
 	else
-		send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level), group = group })
+		send_light("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level), group = group })
 	end
 	mem.preset = nil -- a stop is no preset
 	apply({ on = "true", brightness = tostring(level) })
@@ -970,8 +1045,9 @@ local function target_color(target, rate, was_lit)
 end
 
 -- True when the target went to the bridge. When the send fails
--- (common/device.lua logs why) nothing changed: the proxy hears CHANGED with
--- the level its CHANGING came from, and a colour kept for the next turn-on
+-- (common/device.lua logs why), or is not made because the device syncs with
+-- the TV (#514, send_light), nothing changed: the proxy hears CHANGED with the
+-- level its CHANGING came from, and a colour kept for the next turn-on
 -- keeps waiting for it. A running ramp is replaced (#421 D11): the CHANGING
 -- starts from its estimate, where the tile is. `opts`:
 --   urgent     a keypad tap (#421 D12): the HUE_SET goes past the bridge's
@@ -1028,7 +1104,7 @@ local function set_brightness(target, rate, opts)
 		params.urgent = "true"
 	end
 	params.group = opts.group
-	if not send("HUE_SET", params) then
+	if not send_light("HUE_SET", params) then
 		st.pending_color = stored
 		mem.preset = mark
 		brightness_changed(current)
@@ -1070,7 +1146,9 @@ end
 -- next turn-on sends by itself, blended for its level (D11). #486 D-4: x and
 -- y are taken in 0..1 only, the mode as 0 or 1 (else xy), the preset's id
 -- and origin as finite numbers; anything else is dropped, never sent ("nan"
--- went out as x = "nan").
+-- went out as x = "nan"). While the device syncs (#514, O9) nothing goes out
+-- and nothing waits for the next turn-on: the proxy hears the colour the
+-- light still shows, as for a send that fails.
 local function set_color(x, y, mode, rate, id, origin)
 	x, y, id, origin = num.within(x, 0, 1), num.within(y, 0, 1), num.finite(id), num.finite(origin)
 	if not (x and y) and id then
@@ -1096,9 +1174,13 @@ local function set_color(x, y, mode, rate, id, origin)
 		target.x, target.y, target.mode = blend.x, blend.y, blend.mode
 	end
 	color_changing(target, rate, state.color_fields(st, target.x, target.y, target.mode))
+	if syncing() then
+		refused("HUE_SET")
+		return report_color()
+	end
 	local params, why = state.from_color_target(st, target.x, target.y, target.mode, rate, { on_soon = soon })
 	if params then
-		if not send("HUE_SET", params) then
+		if not send_light("HUE_SET", params) then
 			-- Nothing reached the bridge (logged): the proxy hears the colour
 			-- the light still has, when one is known, as for an ignored target.
 			report_color()
@@ -1295,6 +1377,25 @@ local function report_known(from)
 	end
 end
 
+-- A ramp running or a target pending ends with the cached state, a report
+-- held back for it included, and the proxy hears it: nothing is assumed,
+-- since the command may not have landed. A hold's blend still waiting goes.
+-- When the bridge's link goes offline (#428 D5, dev.on_link), and when the
+-- lamp begins to follow the TV (#514, take_stream).
+local function drop_in_flight()
+	local pending = fallback.brightness
+	local moving, coloring = pending ~= nil or ramp ~= nil, fallback.color ~= nil
+	settle("brightness")
+	settle("color")
+	cancel_hold_color()
+	if moving then
+		report_known(pending and pending.from)
+	end
+	if coloring then
+		report_color()
+	end
+end
+
 -- #428 D8, D9 (§6.2): a HUE_STATE with reason "undelivered", the bridge's
 -- answer to a PUT for this light (a zone or room light: its grouped_light)
 -- that did not land, carrying what the bridge last knew (only the rid when
@@ -1333,28 +1434,16 @@ local function undelivered(params)
 end
 
 -- #428 D5, D6 (common/device.lua calls it at every HUE_BRIDGE_LINK). Going
--- offline, a ramp running or a target pending ends with the cached state,
--- a report held back for it included, and the proxy hears it: nothing is
--- assumed, since the command may not have landed. A hold's blend still
--- waiting goes. Either way ONLINE_CHANGED and Status follow (is_online,
--- blocker); back online, the resync that every stream connect runs brings
--- the state (D7). An unchanged link changes nothing.
+-- offline, what is in flight ends with the cached state (drop_in_flight).
+-- Either way ONLINE_CHANGED and Status follow (is_online, blocker); back
+-- online, the resync that every stream connect runs brings the state (D7).
+-- An unchanged link changes nothing.
 function dev.on_link(_, changed)
 	if not changed then
 		return
 	end
 	if dev.link_offline() then
-		local pending = fallback.brightness
-		local moving, coloring = pending ~= nil or ramp ~= nil, fallback.color ~= nil
-		settle("brightness")
-		settle("color")
-		cancel_hold_color()
-		if moving then
-			report_known(pending and pending.from)
-		end
-		if coloring then
-			report_color()
-		end
+		drop_in_flight()
 	end
 	report_online()
 	refresh_status()
@@ -1385,6 +1474,45 @@ local function report_level(reason, settled)
 	levels:report()
 end
 
+-- #514: a HUE_STATE's stream fields into the cache, before the rest of it.
+-- `streaming` absent leaves the stream as it was, except in a full state
+-- (a reason other than "event" and "undelivered", whose answer can be bare):
+-- there it means none, as the bridge leaves the field out while Hue reports
+-- no mode for the lamp (docs/hdmi-sync-stage1-design.md §4.1), and a bridge
+-- that predates 2.0 never sends it, so a device never goes on refusing
+-- commands on a word no bridge repeats. The label goes with the stream and
+-- is kept while it runs; the counts are whole numbers from 0 (#486,
+-- common/num.lua), one that is not leaves the count as it was. A stream
+-- that begins ends what is in flight (drop_in_flight): Hue no longer moves
+-- the lamp for Control4. Status follows whenever what it shows of the
+-- stream changes.
+local function take_stream(params)
+	local was, shown_before = syncing(), sync_status()
+	local streaming, reason = device.to_bool(params.streaming), params.reason
+	if streaming == nil and reason ~= nil and reason ~= "" and reason ~= "event" and reason ~= "undelivered" then
+		streaming = false
+	end
+	if streaming ~= nil then
+		st.streaming = streaming
+	end
+	if not syncing() then
+		st.stream_label = nil
+	else
+		st.stream_label = device.text(params.stream_label) or st.stream_label
+	end
+	st.lamps = num.int(params.lamps, 0, nil) or st.lamps
+	st.streaming_lamps = num.int(params.streaming_lamps, 0, nil) or st.streaming_lamps
+	if syncing() and not was then
+		log.info("syncing with the TV (%s): no command goes to the bridge until it ends", st.stream_label or STREAM_LABEL)
+		drop_in_flight()
+	elseif was and not syncing() then
+		log.info("the sync with the TV ended: commands go to the bridge again")
+	end
+	if sync_status() ~= shown_before then
+		refresh_status()
+	end
+end
+
 -- #483 D-1: once the device has a rid, a state that does not name it (another
 -- rid, or none) is not this device's (dev.addressed); before #483 one without
 -- a rid was taken, and one for another rid ignored with a warning.
@@ -1392,6 +1520,7 @@ dispatch.commands["HUE_STATE"] = after_late_init("HUE_STATE", function(params)
 	if not dev.addressed("HUE_STATE", params) then
 		return
 	end
+	take_stream(params)
 	if params.reason == "undelivered" then
 		return undelivered(params)
 	end
@@ -1442,60 +1571,11 @@ dispatch.commands["HUE_FORGOTTEN"] = after_late_init("HUE_FORGOTTEN", function(p
 	report_online()
 end)
 
--- Hidden aliases (LUA_ACTION or by name) ------------------------------------
 -- Since 1.2 the device has no actions (#334, docs/simplify-actions-design.md
 -- §1.2, D3): names follow Hue by themselves and the Hue Bridge's Resolve
--- Names settles what cannot, its Forget Device releases any device. The two
--- old commands still answer as they did, for the dev loop, older briefs and
--- any C4:SendToDevice caller, until 2.0 (§3.3; tests/fixtures/ledger.lua
--- lists them). Every call ends in Last Action and a log line, whatever
--- happened.
-
--- `fn` under the old command, saying in the log (Debug Mode) what replaced it.
-local function alias(old, now, fn)
-	return function(...)
-		log.info("%s is a hidden alias until 2.0; %s on the Hue Bridge does this now", old, now)
-		return fn(...)
-	end
-end
-
--- The Composer name the Hue name calls for: the Hue name itself, except that
--- a room device is "<Room> Lights", so the Lighting page of a Control4 room
--- does not list a light named like the room (docs/zone-light-design.md §5
--- Naming; the bridge's Attention and Resolve Names apply the same rule).
-local function expected_name()
-	if state.is_group(st) and st.group_type == "room" then
-		return st.name .. " Lights"
-	end
-	return st.name
-end
-
--- Rename our proxy (the device Composer shows) to the Hue name. Only ever
--- from this command: names belong to the owner (docs/import-design.md §7).
-dispatch.commands["Adopt_Hue_Name"] = alias("Adopt Hue Name", "Resolve Names", function()
-	if not st.name then
-		return result(string.format("Not renamed: no Hue name known yet (the bridge has not configured this %s)",
-			what()))
-	end
-	local id = proxy_id()
-	if not id then
-		return result("Not renamed: no light_v2 proxy is bound to binding 5001")
-	end
-	local name = expected_name()
-	C4:RenameDevice(id, name) -- [verified: API 22/_32]
-	result(string.format("Renamed device %d to %s", id, name))
-end)
-
--- Ask the bridge to Forget this light (or zone/room device); it answers
--- HUE_FORGOTTEN, which sets Status. The bridge finds the entry by rid or,
--- for a rid-less light, by device id.
-dispatch.commands["Forget_This_Light"] = alias("Forget This Light", "Forget Device", function()
-	if not bridge then
-		return result("Not sent: not bound to a Hue Bridge")
-	end
-	dev.send_to(bridge, "HUE_FORGET", { rid = st.rid, device_id = device_id() }) -- #493 D-8: logged only in Debug Mode
-	result(string.format("Asked the bridge to forget this %s; its answer sets Status", what()))
-end)
+-- Names settles what cannot, its Forget Device releases any device. The
+-- hidden aliases of 1.1's Adopt Hue Name and Forget This Light answered
+-- until 2.0, as announced, and are gone (#514, O15).
 
 -- Programming commands -------------------------------------------------------
 -- Raise Level By and Restore Saved Level (docs/relative-level-design.md,
@@ -1514,7 +1594,10 @@ end)
 -- (CHANGING, HUE_SET, the fallback), so the bridge queues, coalesces and
 -- rate-limits them as it does the slider. A device blocker() names (gone,
 -- unbound, forgotten, no Hue light assigned yet, a zone or room without
--- lights) refuses both and keeps what was saved. Like the bridge's
+-- lights) refuses both and keeps what was saved, and so does a device whose
+-- lamps follow the TV (#514, O9): Last Action then reads as for any light
+-- command the stream keeps from the bridge (not_changed), and nothing goes
+-- to the proxy, which sent nothing. Like the bridge's
 -- messages they wait for late init, before which UpdateProperty is not safe
 -- (after_late_init), and every outcome ends in Last Action and a log line
 -- (result).
@@ -1660,6 +1743,8 @@ dispatch.commands["Raise_Level_By"] = after_late_init("Raise Level By", function
 	why = why or blocker()
 	if why then
 		return result("Not raised: " .. why)
+	elseif syncing() then
+		return result(not_changed())
 	end
 	local now = level_now()
 	local restarted = nil
@@ -1716,6 +1801,8 @@ dispatch.commands["Restore_Saved_Level"] = after_late_init("Restore Saved Level"
 	why = why or blocker()
 	if why then
 		return result("Not restored: " .. why .. kept)
+	elseif syncing() then
+		return result(not_changed())
 	end
 	local now = level_now()
 	if now == nil then
@@ -2063,7 +2150,7 @@ local function start_ramp(h, up, from, alive, rate)
 	brightness_changing(from, to, duration, nil) -- a hold names no preset (#429 D7)
 	log.debug("hold: dim %s from %d, the tile over %d ms, Hue the whole range over %d ms", up and "up" or "down",
 		from, duration, full)
-	if not send("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
+	if not send_light("HUE_DIM", { rid = st.rid, direction = up and "up" or "down",
 		duration = string.format("%d", full), group = h.group }) then
 		h.timer:Cancel()
 		h.timer, h.ramping = nil, false
@@ -2130,7 +2217,7 @@ local function hold_color(estimate)
 			params[k] = v
 		end
 		log.debug("hold: the blend for %d %% follows the release", level)
-		if send("HUE_SET", params) then
+		if send_light("HUE_SET", params) then
 			color_sent(c, HOLD_COLOR_GLIDE_MS, params)
 		end
 	end)
@@ -2145,13 +2232,18 @@ end
 -- blend follows (hold_color). A load group's hold ends here too (#435 D12):
 -- `group` tags the stop when the group's own GROUP_STOP_RAMP ended it, so
 -- it batches with the other members' stops; the light's own stop of it
--- goes untagged (D11).
+-- goes untagged (D11). A hold whose lamp began to follow the TV before its
+-- release (#514) has no stop sent and nothing assumed: the proxy hears the
+-- level Hue last reported, which closes the hold's CHANGING.
 local function finish(h, group)
 	if not (h.ramping and bridge and st.rid) then
 		return
 	end
 	local level = math.floor(h.level + 0.5)
-	send("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level), group = group })
+	if not send_light("HUE_DIM", { rid = st.rid, direction = "stop", level = string.format("%d", level), group = group })
+		and syncing() then
+		return report_brightness()
+	end
 	arm("brightness", 0, function()
 		log.debug("dim stop unconfirmed after %d ms; assuming %d %%", FALLBACK_MS, level)
 		apply({ on = "true", brightness = tostring(level) })
@@ -2363,6 +2455,8 @@ OnBindingChanged = dev.binding_changed(function(idBinding, _, bound, otherDevice
 	else
 		bridge = nil
 		dev.link = nil -- the next bridge's hello answer says its own (#428 D4)
+		-- #514: and whether the lamps stream; this bridge's word goes with it.
+		st.streaming, st.stream_label, st.lamps, st.streaming_lamps = nil, nil, nil, nil
 		settle("brightness")
 		settle("color")
 		levels:close() -- #433 §6.5: the window's level came from the bridge just unbound

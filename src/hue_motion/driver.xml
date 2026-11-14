@@ -131,8 +131,7 @@
 		</properties>
 		<!-- One action since 1.2 (#334, docs/simplify-actions-design.md §1.2): a
 		     toggle that checks programming without a sensor, kept in release
-		     builds. Refresh From Bridge, Test Motion and Test No Motion still
-		     answer by command, as hidden aliases until 2.0 (§3.3). -->
+		     builds. -->
 		<actions>
 			<action>
 				<name>Test Motion Programming</name>

@@ -72,10 +72,10 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		now = T0
 
 		-- The scene driver first, then the bridge runtime (its globals stay in
-		-- place), then the project. On State Follows "This scene": the loop pins
+		-- place), then the project. Keypad Follows "This scene": the loop pins
 		-- the on rule, and the fixture's room is lit (the lights mode is pinned
 		-- in scene_driver_spec.lua, docs/scene-led-design.md).
-		scene = fake.load_driver("hue_scene", { ["On State Follows"] = "This scene" }, { device_id = SCENE_ID })
+		scene = fake.load_driver("hue_scene", { ["Keypad Follows"] = "This scene" }, { device_id = SCENE_ID })
 		local env
 		bc4, env = fake.install_c4()
 		bridge = env
@@ -325,8 +325,6 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		answer_scene_gets()
 		S:add_scene(F.scene_rids.relax, nil, function() end)
 		fake.pair(bridge, scene, { light_id = SCENE_ID, bind = false })
-		-- On State Follows too, so before_each's "This scene" is not carried into Keypad Follows (D12).
-		scene.Properties["On State Follows"] = "Room/zone lights"
 		scene.Properties["Keypad Follows"] = "Room/zone lights"
 		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
 		fake.pump()
@@ -432,9 +430,9 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		fake.pump()
 		assert.same({ recall = { action = "static" } }, json.decode(bc4.last_transfer().data))
 
-		-- Forget This Scene on the device: the bridge forgets, unbinds and answers
+		-- Forget Device on the bridge: the bridge forgets, unbinds and answers
 		-- HUE_SCENE_FORGOTTEN; the device stays with a Status that says what to do.
-		fake.as(scene, scene.ExecuteCommand, "LUA_ACTION", { ACTION = "Forget This Scene" })
+		fake.as(bridge, function() local _, text = S:forget(SCENE_ID); last_action = text end)
 		fake.pump()
 		assert.equal("Forgot Savanna sunset (device 2001): unbound and left in the project for you to delete; "
 			.. "the Hue scene is listed under Add From Hue again", last_action)
@@ -443,5 +441,45 @@ describe("scene round trip: add, hello, recall, event, off, deleted in Hue, dele
 		assert.equal("Forgotten by the bridge (was Hue scene Savanna sunset). Delete this device, "
 			.. "or bind it again and use Link Device on the Hue Bridge", scene.Properties["Status"])
 		assert.equal(F.scene_rids.savanna, S:picker_scenes()[#S:picker_scenes()].value, "listed under Add From Hue again")
+	end)
+
+	-- #514 (docs/hdmi-sync-stage1-design.md §4.6, §5.2): lamps of the scene's
+	-- room sync with the TV. The Living Room holds Hallway Ambiance and Living
+	-- Room Lamp.
+	it("tells the scene how many lamps of its room keep syncing with the TV, and when none does", function()
+		-- A container with the lamps' `mode`, as driver.lua runs it: the lights
+		-- take it, then the entertainment module's settle calls streaming_changed.
+		local function modes(keys, mode)
+			local items, rids = {}, {}
+			for i, key in ipairs(keys) do
+				rids[i] = F.rids[key]
+				items[i] = '{"id":"' .. F.rids[key] .. '","mode":"' .. mode .. '","type":"light"}'
+			end
+			fake.as(bridge, function()
+				local c = bridge.C4:JsonDecode('[{"creationtime":"2026-11-14T20:00:00Z",'
+					.. '"id":"9de116fc-00e1-4a2b-8c3d-0000000000e1","type":"update","data":[' .. table.concat(items, ",")
+					.. ']}]')[1]
+				L:on_container(c)
+				S:streaming_changed(rids)
+				S:on_container(c)
+			end)
+			fake.pump()
+		end
+
+		L:absorb({ light = decode_data(F.light), device = decode_data(F.device) })
+		S:resync()
+		answer_scene_gets()
+		S:add_scene(F.scene_rids.relax, nil, function() end)
+		fake.pair(bridge, scene, { light_id = SCENE_ID, bind = false })
+		fake.as(scene, scene.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		assert.equal("Hue scene Relax in Living Room", scene.Properties["Status"])
+
+		modes({ "living" }, "streaming")
+		assert.equal("Hue scene Relax in Living Room; 1 lamp keeps syncing with the TV", scene.Properties["Status"])
+		modes({ "hallway" }, "streaming")
+		assert.equal("Hue scene Relax in Living Room; 2 lamps keep syncing with the TV", scene.Properties["Status"])
+		modes({ "living", "hallway" }, "normal")
+		assert.equal("Hue scene Relax in Living Room", scene.Properties["Status"], "streaming_lamps 0 clears it")
 	end)
 end)

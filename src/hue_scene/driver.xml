@@ -88,20 +88,6 @@
 				<readonly>false</readonly>
 				<tooltip>What keypad buttons bound to this scene treat as on: any light of its room or zone, or this scene being active</tooltip>
 			</property>
-			<!-- Before #469: what Keypad Follows is now. Kept declared until 2.0 so
-			     its stored value can be copied once into Keypad Follows; hidden at
-			     late init and ignored (docs/scene-tracking-design.md D12). -->
-			<property>
-				<name>On State Follows</name>
-				<type>LIST</type>
-				<items>
-					<item>Room/zone lights</item>
-					<item>This scene</item>
-				</items>
-				<default>Room/zone lights</default>
-				<readonly>false</readonly>
-				<tooltip>Replaced by Keypad Follows; kept only to carry its value over</tooltip>
-			</property>
 			<property>
 				<name>Online</name>
 				<default></default>
@@ -117,8 +103,7 @@
 		</properties>
 		<!-- No actions since 1.2 (#334, docs/simplify-actions-design.md §1.2, D3):
 		     the Hue Bridge's Link Device, Forget Device and Resolve Names serve
-		     every device. Adopt Hue Name and Forget This Scene still answer by
-		     command, as hidden aliases until 2.0 (§3.3). -->
+		     every device. -->
 		<commands/>
 	</config>
 	<proxies>

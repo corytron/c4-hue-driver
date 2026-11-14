@@ -87,6 +87,18 @@ contract supersedes the switch of `docs/scenes-design.md` (§1, §3) and the
 | `HUE_SCENE_LEVEL` | scene → bridge | `rid`, `device_id`, `level` (1–100), `rate` (ms) | Move the scene's group to `level` while keeping its lights' differences: `dimming_delta` up/down with `brightness_delta = \|level − current\|` and `dynamics.duration = rate`, where current is the bridge's last known group level; nothing if the difference is under 0.5; when no level is known, an absolute grouped_light `dimming.brightness = level` with the rate instead. |
 | `HUE_SCENE_RECALL` | scene → bridge | `brightness`, `duration` (existing) | Used by the slider from off. |
 
+Current (2.0, #514, 2026-11-14; [`hdmi-sync-stage1-design.md`](hdmi-sync-stage1-design.md)
+§4.6, §5.2; [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) C7):
+`HUE_SCENE_GROUP` also carries `streaming_lamps`, how many lamps of the
+scene's group stream to a Hue entertainment area. While it is above 0, the
+group's `on` and `level` that Keypad Follows `Room/zone lights` reads come
+from the lamps that do not stream, by the rule Hue's grouped_light uses
+(on if any is on; level the average of those on), and the device's Status
+adds `; <n> lamps keep syncing with the TV` (`; 1 lamp keeps syncing with
+the TV` for one). Recall is unchanged. `sc:streaming_changed(rids)`
+re-sends `HUE_SCENE_GROUP` to the scenes of each group that holds one of
+those lamps.
+
 ## Bridge (`src/hue_bridge/bridge/scenes.lua`, bridge agent)
 
 - `group_level` is already kept (resync GET and grouped_light events).

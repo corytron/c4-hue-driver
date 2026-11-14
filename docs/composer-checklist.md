@@ -1862,6 +1862,15 @@ on the Hue Bridge and on A and B for steps 142 to 147, Off on all of them
 at the end (step 154). Steps 150 to 154 make one test scene device and
 remove it again.
 
+Current (2.0, #514, 2026-11-14): steps 140 and 141 are history for 1.6 to
+1.8. As announced, 2.0 removes the hidden On State Follows and the
+one-time copy of its value into Keypad Follows
+(`docs/scene-tracking-design.md` D12). A scene device updated from 1.5 or
+earlier straight to 2.0 reads Keypad Follows `Room/zone lights`, the
+default: set it to `This scene` by hand where On State Follows read that.
+The house's two scene devices carried their value on 2026-11-13 (step
+141).
+
 140. **Before the update: the old values** (contract D12). On every Hue
      Scene device, read **On State Follows** and paste `<device>: <value>`
      (`Room/zone lights` or `This scene`). Read only.
@@ -1997,6 +2006,157 @@ remove it again.
      delete; the Hue scene is listed under Add From Hue again`. Delete the
      device in Composer. Set `Debug Mode` Off on the bridge, A and B.
      Paste the bridge's **Scenes** row.
+     - **Done:** open.
+
+## T. 2.0 beta stage 1: entertainment areas and syncing (#514)
+
+Written on 2026-11-14 from the stage 1 contract
+(`docs/hdmi-sync-stage1-design.md` §4.3, §4.4, §5.1 and §5.2; the design
+is `docs/hdmi-sync-design.md` §6), before any stage 1 build was installed;
+check every quoted text against the first stage 1 build on the house and
+paste what differs. The owner's manual says the same in prose: the
+bridge's chapter 16 ("Entertainment areas and syncing") and "While the TV
+syncs" on the Hue Light's and the Hue Scene's own Documentation tabs. Lua,
+properties and events only: no `<capabilities>` change, so no controller
+reboot [assumed: the new rows and events appear after "Add or Update
+Driver or Agent…", as Keypad Follows did in step 141]. These steps are
+not the research's checks T0 to T9
+(`docs/entertainment-areas-research.md` §4.5), which run through the dev
+loop or a probe before stage 1 merges; a step that leans on one names it.
+None of these steps blocks the beta. The Windows session reads Composer,
+sets properties and `Debug Mode`, and adds and removes the optional test
+programming and the test device (standing approval: no need to ask); the
+owner starts and stops the syncs, uses the Control4 app on the iPhone and
+watches the lamps. Each step takes under a minute.
+
+**Which steps need a sync.** Steps 155 to 158 and 165 need none. Steps
+159 to 164 need a sync to an entertainment area: the bedroom's Hue Play
+HDMI Sync Box 8K syncing a source, or Hue's Sync app on a computer or a
+phone syncing to an area. Stage 1 calls every streamer `another app`, the
+box included.
+
+Setup: one entertainment area whose lamps have Control4 devices (step 156
+lists the areas; paste which): a Hue Light device for one of its lamps, a
+zone light whose lamps all belong to the area, a zone light with only some
+of its lamps in it (often the whole Hue room), and a Hue Scene device of
+the Hue room or zone that holds those lamps (paste which). Where the house
+has no such device, skip that part of the step and say so. If no Hue
+Light device stands for a lamp of the area, add one before step 159 with
+**Add From Hue** (the lamp, **Room** `(mapped room)`) and paste its id;
+step 165 removes it. `Debug Mode` On on the Hue Bridge and the devices
+used for steps 159 to 164, Off on all of them at the end (step 165).
+
+155. **Install: no reboot, two new rows** (contract §4.4). Install the
+     stage 1 build in place (step 1, or the brief). Composer should not
+     ask "Restart Director?"; paste what it asks if it does. On every Hue
+     device **Driver Version** is the new build. On the Hue Bridge,
+     **Entertainment Areas** (read-only) and **After A Sync Ends** are
+     shown after **Hue Automations**. Paste both rows. If a row is
+     missing, select another device and come back once; if it is still
+     missing, paste the Properties page and stop here.
+     - **Done:** open.
+156. **The Entertainment Areas row reads the areas** (§4.4; check T0). No
+     sync running. Read only. The row lists every entertainment area of
+     the bridge by name, sorted by name, each with its number of lamps,
+     for example `Living Room TV (5 lamps) | Office (3 lamps)`, or reads
+     `None` when the bridge has no area. The owner compares the names and
+     lamp counts with the areas the Hue app shows. Paste the row, and say
+     which area steps 159 to 164 use.
+     - **Done:** open.
+157. **After A Sync Ends shows its two values** (§4.4, O11). No sync
+     needed. The row reads `Put the lights back`, the default. Open its
+     list: it holds `Put the lights back` and `As Hue decides`, nothing
+     else. Cancel. Paste the row and the list.
+     - **Done:** open.
+158. **Sync Started and Sync Stopped in Programming** (§4.4, O10). No
+     sync needed. In Programming, select the Hue Bridge device: its events
+     are **Sync Started** and **Sync Stopped**, in that order (paste the
+     list in Composer's own words). Optional, to see them fire in steps
+     159 and 163: under Sync Started add one action that is easy to see
+     and moves no lamp of the area (a light of another room on, say), and
+     under Sync Stopped its opposite; paste what was added. Step 165
+     removes it.
+     - **Done:** open.
+159. **A sync starts** (needs a sync; §4.4, O10; check T1). The owner
+     starts a sync to the area of step 156 and says when and with what
+     (the sync box, or Hue's Sync app on a computer or phone). Within a
+     second or two the bridge's **Last Action** reads `Sync started:
+     <area>`, and **Entertainment Areas** shows that area as `<area> (<n>
+     lamps, syncing: another app)`. If step 158 added test programming,
+     its Sync Started action ran. Paste both rows and the bridge's Lua
+     lines of that moment.
+     - **Done:** open.
+160. **A light whose lamp syncs** (needs a sync; §5.1; check T2).
+     With the sync running, on the Hue Light device of a lamp in the area:
+     **Status** reads `Syncing with the TV (another app)` and **Online**
+     stays `Online`. The owner taps its tile, then drags its slider, in
+     the Control4 app: the lamp keeps following the TV, the tile goes back
+     at once to what it showed, and the device's **Last Action** reads
+     `Not changed: the lamp follows the TV while it syncs (another app)`.
+     The bridge's Lua output has no `PUT` for that lamp. Paste the
+     device's **Status**, **Online** and **Last Action**, the tile before
+     and after, and the Lua lines of the device and the bridge.
+     - **Done:** open.
+161. **Zone lights while their lamps sync** (needs a sync; §5.1; check
+     T4). With the sync running:
+     - On the zone light whose lamps all sync: **Status** reads `Syncing
+       with the TV (another app)`. The owner taps its tile: the lamps keep
+       following the TV, the tile goes back at once, and **Last Action**
+       reads `Not changed: the lamps follow the TV while they sync
+       (another app)`.
+     - On the zone light with only some of its lamps in the area:
+       **Status** reads `<k> of <n> lamps syncing with the TV`. Its tile
+       shows the lamps that do not sync: on while any of them is on, at
+       the average level of those that are on. The owner drags its slider
+       to about 30 %: those lamps go to about 30 %, and the syncing lamps
+       keep following the TV.
+
+     Paste each zone light's **Status**, **Last Action** and tile.
+     - **Done:** open.
+162. **A scene whose lamps sync** (needs a sync; §5.2; check T5). With
+     the sync running, on the Hue Scene device of the Hue room or zone
+     that holds the syncing lamps (Shine or Golden hours, if they are in
+     the Master Bedroom): **Status** ends with `; <n> lamps keep syncing
+     with the TV`, or `; 1 lamp keeps syncing with the TV` for one.
+     Optional: the owner plays the scene from the Control4 app; the lamps
+     that do not sync take it, and the syncing lamps keep following the
+     TV. Paste **Status**, and what the lamps did if the scene was played.
+     - **Done:** open.
+163. **The sync stops, and the lamps go back** (needs the sync of step
+     159 to stop; §4.3, §4.4, O11; check T7). **After A Sync Ends** reads
+     `Put the lights back`. The owner notes how the area's lamps were
+     before step 159, then stops the sync at its source and says when.
+     Within a second or two the bridge's **Last Action** reads `Sync
+     stopped: <area>`, and **Entertainment Areas** reads `<area> (<n>
+     lamps)` again. Hue then applies its own setting for the area (paste
+     what the Hue app says it is). A few seconds after the last lamp has
+     left the sync, every lamp of the area whose state differs from the
+     one it had before the sync is set back to it, and **Last Action**
+     reads `Lights put back after the sync: <area> (<n> lamps)`; when
+     every lamp already matched, no such line follows. Commands sent
+     during the sync are not applied now. Lamps outside the area keep
+     what steps 161 and 162 gave them. Every device's **Status** returns
+     to its usual text. Paste the bridge's Lua lines from the stop to the
+     put-back (they keep both texts once **Last Action** has moved on),
+     what the lamps did (owner), each device's **Status**, and whether
+     the Sync Stopped action of step 158 ran.
+     - **Done:** open.
+164. **Optional: As Hue decides** (needs a sync; §4.3). Set **After A
+     Sync Ends** to `As Hue decides` and click Set. The owner starts a
+     sync to the same area, waits a few seconds and stops it: **Last
+     Action** reads `Sync started: <area>`, then `Sync stopped: <area>`,
+     and no `Lights put back …` line follows; the bridge's Lua output
+     reads `entertainment: After A Sync Ends is As Hue decides: the lamps
+     of <area> stay as Hue leaves them`, and the lamps stay as Hue's own
+     setting leaves them. Set **After A Sync Ends** back to `Put the
+     lights back`. Paste the Lua lines.
+     - **Done:** open.
+165. **Clean up.** No sync needed. Remove the test programming of step
+     158, if any. If the setup added a test light device, **Forget
+     Device** it (**Confirm** `Yes, forget`) and delete it in Composer.
+     **After A Sync Ends** reads `Put the lights back`. Set `Debug Mode`
+     Off on the bridge and the devices used. Paste the bridge's
+     **Entertainment Areas** and **After A Sync Ends** rows.
      - **Done:** open.
 
 ## What to paste back

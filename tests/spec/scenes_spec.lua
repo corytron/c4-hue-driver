@@ -1367,10 +1367,12 @@ describe("bridge.scenes", function()
 			add_three()
 			resync({ grouped = grouped_lights({ living_room = true, garage = false }) })
 			assert.same({
-				{ id = 2001, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.relax, on = "true", level = "50" } },
-				{ id = 2002, command = "HUE_SCENE_GROUP", params = { rid = F.scene_rids.savanna, on = "true", level = "50" } },
+				{ id = 2001, command = "HUE_SCENE_GROUP",
+					params = { rid = F.scene_rids.relax, on = "true", level = "50", streaming_lamps = "0" } },
+				{ id = 2002, command = "HUE_SCENE_GROUP",
+					params = { rid = F.scene_rids.savanna, on = "true", level = "50", streaming_lamps = "0" } },
 				{ id = 2003, command = "HUE_SCENE_GROUP",
-					params = { rid = F.scene_rids.concentrate, on = "false", level = "50" } },
+					params = { rid = F.scene_rids.concentrate, on = "false", level = "50", streaming_lamps = "0" } },
 			}, groups_sent())
 			c4.sent = {}
 			resync({ grouped = grouped_lights({ living_room = true, garage = false }) })
@@ -1431,13 +1433,14 @@ describe("bridge.scenes", function()
 				{ living_room = "56.6949", garage = "100.0" }) })
 			local sent = groups_sent()
 			assert.equal(3, #sent)
-			assert.same({ rid = F.scene_rids.relax, on = "true", level = "56.69" }, sent[1].params)
-			assert.same({ rid = F.scene_rids.concentrate, on = "true", level = "100" }, sent[3].params)
+			assert.same({ rid = F.scene_rids.relax, on = "true", level = "56.69", streaming_lamps = "0" }, sent[1].params)
+			assert.same({ rid = F.scene_rids.concentrate, on = "true", level = "100", streaming_lamps = "0" }, sent[3].params)
 			c4.sent = {}
 			resync({ grouped = grouped_lights({ living_room = true, garage = true }, { living_room = "33.5", garage = false }) })
 			sent = groups_sent()
-			assert.same({ rid = F.scene_rids.relax, on = "true", level = "33.5" }, sent[1].params)
-			assert.same({ rid = F.scene_rids.concentrate, on = "true" }, sent[3].params, "no dimming, no level")
+			assert.same({ rid = F.scene_rids.relax, on = "true", level = "33.5", streaming_lamps = "0" }, sent[1].params)
+			assert.same({ rid = F.scene_rids.concentrate, on = "true", streaming_lamps = "0" }, sent[3].params,
+				"no dimming, no level")
 			assert.is_nil(S.group_level[F.grouped_light_rids.garage])
 		end)
 
@@ -2027,9 +2030,10 @@ describe("bridge.scenes", function()
 				assert.equal(2, S:undelivered_group(G_LIVING))
 				assert.same({
 					{ id = 2001, command = "HUE_SCENE_GROUP",
-						params = { rid = RELAX, on = "true", level = "50", reason = "undelivered" } },
+						params = { rid = RELAX, on = "true", level = "50", streaming_lamps = "0", reason = "undelivered" } },
 					{ id = 2002, command = "HUE_SCENE_GROUP",
-						params = { rid = F.scene_rids.savanna, on = "true", level = "50", reason = "undelivered" } },
+						params = { rid = F.scene_rids.savanna, on = "true", level = "50", streaming_lamps = "0",
+							reason = "undelivered" } },
 				}, c4.sent, "the Garage's scene hears nothing")
 			end)
 
@@ -2038,7 +2042,8 @@ describe("bridge.scenes", function()
 				assert.is_true(S:off({ rid = RELAX }))
 				c4.sent = {}
 				assert.equal(1, S:undelivered_group(G_LIVING))
-				assert.same({ rid = RELAX, on = "true", level = "50", reason = "undelivered" }, c4.sent[1].params)
+				assert.same({ rid = RELAX, on = "true", level = "50", streaming_lamps = "0", reason = "undelivered" },
+					c4.sent[1].params)
 			end)
 
 			it("puts back the level a failed slider move assumed, and measures the next move from it", function()
@@ -2048,7 +2053,8 @@ describe("bridge.scenes", function()
 				c4.sent = {}
 				S:undelivered_group(G_LIVING)
 				assert.equal(50, S.group_level[G_LIVING])
-				assert.same({ rid = RELAX, on = "true", level = "50", reason = "undelivered" }, c4.sent[1].params)
+				assert.same({ rid = RELAX, on = "true", level = "50", streaming_lamps = "0", reason = "undelivered" },
+					c4.sent[1].params)
 				assert.is_true(S:level({ rid = RELAX, level = "60", rate = "0" }))
 				assert.same({ action = "up", brightness_delta = 10 }, dims[2].body.dimming_delta, "from 50, not from 75")
 				-- The level sent is the group's last sent: Hue reporting the same adds nothing.
@@ -2103,7 +2109,8 @@ describe("bridge.scenes", function()
 				assert.same({ "HUE_SCENE_STATE@2001" }, commands_sent(), "inactive at once, as before")
 				c4.fire_timers_of(commands.DEBOUNCE_MS)
 				assert.same({ "HUE_SCENE_STATE@2001", "HUE_SCENE_GROUP@2001" }, commands_sent())
-				assert.same({ rid = RELAX, on = "true", level = "50", reason = "undelivered" }, c4.sent[2].params)
+				assert.same({ rid = RELAX, on = "true", level = "50", streaming_lamps = "0", reason = "undelivered" },
+					c4.sent[2].params)
 				q:stop()
 			end)
 		end)
@@ -2894,7 +2901,8 @@ describe("bridge.scenes", function()
 				add_living()
 				resync_smart({ grouped = grouped_lights({ living_room = true }) })
 				assert.same({ { id = 2001, command = "HUE_SCENE_GROUP",
-					params = { rid = SMART.living, on = "true", level = "50" } } }, sent_to(2001, "HUE_SCENE_GROUP"))
+					params = { rid = SMART.living, on = "true", level = "50", streaming_lamps = "0" } } },
+					sent_to(2001, "HUE_SCENE_GROUP"))
 				c4.sent = {}
 				assert.equal(1, S:on_container(container(grouped_light_event("living_room", nil, 80))))
 				assert.same({ rid = SMART.living, level = "80" }, c4.sent[1].params)
@@ -3420,7 +3428,7 @@ describe("bridge.scenes", function()
 				assert.same({ "HUE_SCENE_STATE", "HUE_SCENE_GROUP", "HUE_SCENE_GROUP" },
 					{ sent_to(2004)[1].command, sent_to(2004)[2].command, sent_to(2004)[3].command })
 				assert.equal("true", sent_to(2004)[2].params.other_active, "before the group's on and level")
-				assert.same({ rid = BRIGHT, on = "true", level = "50" }, sent_to(2004)[3].params)
+				assert.same({ rid = BRIGHT, on = "true", level = "50", streaming_lamps = "0" }, sent_to(2004)[3].params)
 				c4.sent = {}
 				with_lamps()
 				resync()
@@ -3461,7 +3469,7 @@ describe("bridge.scenes", function()
 				assert.same({ "HUE_SCENE_CONFIGURE@2004", "HUE_SCENE_STATE@2004", "HUE_SCENE_GROUP@2004",
 					"HUE_SCENE_GROUP@2004" }, commands_sent())
 				assert.same({ rid = BRIGHT, other_active = "true" }, c4.sent[3].params)
-				assert.same({ rid = BRIGHT, on = "true", level = "50" }, c4.sent[4].params)
+				assert.same({ rid = BRIGHT, on = "true", level = "50", streaming_lamps = "0" }, c4.sent[4].params)
 				c4.sent = {}
 				assert.is_true(S:hello(NIGHTLIGHT, { device_id = "2005" }))
 				assert.same({}, told(), "the active scene itself")
@@ -3723,6 +3731,176 @@ describe("bridge.scenes", function()
 				assert.is_nil(rawget(S, "WORDS"), "the words are the module's again")
 				assert.equal("Hue scene", S.WORDS.link_none)
 			end)
+		end)
+	end)
+
+	-- #514 (docs/hdmi-sync-stage1-design.md §4.6): lamps that sync with the TV.
+	-- The fixture's Living Room holds Hallway Ambiance (on at 40.16) and Living
+	-- Room Lamp (on at 73.52); the GET answers its grouped_light on at 50. The
+	-- Garage holds Garage White.
+	describe("lamps that sync with the TV (#514)", function()
+		local RELAX, SAVANNA, G_LIVING = F.scene_rids.relax, F.scene_rids.savanna, F.grouped_light_rids.living_room
+
+		-- Relax (2001) and Savanna sunset (2002) in the Living Room, Concentrate
+		-- (2003) in the Garage; the lights' models and devices filled (the
+		-- scenes read their `streaming` and the rooms' lamps).
+		local function add_three()
+			resync({ grouped = grouped_lights({ living_room = true, garage = false }) })
+			S:add_all_of_group(F.group_rids.living_room, done)
+			S:add_scene(F.scene_rids.concentrate, nil, done)
+			L:absorb({ light = decode_data(F.light), device = decode_data(F.device) })
+			c4.sent = {}
+		end
+
+		-- One update container with each named light's `mode` (no other field).
+		local function mode_container(keys, mode)
+			local items = {}
+			for i, key in ipairs(keys) do
+				items[i] = '{"id":"' .. F.rids[key] .. '","owner":{"rid":"' .. F.device_rids[key] .. '","rtype":"device"},'
+					.. '"mode":"' .. mode .. '","type":"light"}'
+			end
+			return container('[{"creationtime":"2026-11-14T20:00:00Z","id":"9de116fc-00e1-4a2b-8c3d-0000000000e1",'
+				.. '"type":"update","data":[' .. table.concat(items, ",") .. ']}]')
+		end
+
+		-- As the coordinator runs a container: the lights' models take the
+		-- modes, the entertainment module's settle calls streaming_changed,
+		-- then the scenes' own pass. Returns what streaming_changed sent.
+		local function stream(keys, mode)
+			local c = mode_container(keys, mode)
+			L:on_container(c)
+			local rids = {}
+			for i, key in ipairs(keys) do rids[i] = F.rids[key] end
+			local told = S:streaming_changed(rids)
+			assert.equal(0, S:on_container(c), "a light item is the lights' and streaming_changed's")
+			return told
+		end
+
+		-- A light item, then the Living Room's grouped_light as Hue reports it
+		-- (its average still counts a streaming lamp's last state, T2).
+		local function lamp_then_group(key, body, on, level)
+			L:on_container(container('[{"creationtime":"2026-11-14T20:00:01Z","id":"9de116fc-00e2-4a2b-8c3d-0000000000e2",'
+				.. '"type":"update","data":[{"id":"' .. F.rids[key] .. '",' .. body .. ',"type":"light"}]}]'))
+			return S:on_container(container(grouped_light_event("living_room", on, level)))
+		end
+
+		-- The HUE_SCENE_GROUP params scene device `id` heard, other_active left out
+		-- (the lamps the devices bring make the Downstairs zone overlap the room, #469 D7).
+		local function group_params(id)
+			local out = {}
+			for _, m in ipairs(sent_to(id, "HUE_SCENE_GROUP")) do
+				if m.params.other_active == nil then out[#out + 1] = m.params end
+			end
+			return out
+		end
+
+		it("tells the scenes of the lamps' groups the count, and on and level from the lamps that do not stream", function()
+			add_three()
+			assert.equal(2, stream({ "living" }, "streaming"))
+			assert.same({ { rid = RELAX, on = "true", level = "40.16", streaming_lamps = "1" } }, group_params(2001),
+				"Hallway Ambiance alone, not Hue's 50")
+			assert.same({ { rid = SAVANNA, on = "true", level = "40.16", streaming_lamps = "1" } }, group_params(2002))
+			assert.same({}, group_params(2003), "the Garage holds no streaming lamp")
+
+			c4.sent = {}
+			assert.equal(0, S:on_container(container(grouped_light_event("living_room", true, 60))),
+				"Hue's own level moved with nothing the scenes show")
+			assert.equal(2, lamp_then_group("hallway", '"dimming":{"brightness":20}', nil, 46.76))
+			assert.same({ { rid = RELAX, on = "true", level = "20", streaming_lamps = "1" } }, group_params(2001))
+
+			c4.sent = {}
+			assert.equal(2, lamp_then_group("hallway", '"on":{"on":false}', nil, 73.52))
+			assert.same({ { rid = RELAX, on = "false", streaming_lamps = "1" } }, group_params(2001),
+				"off for Keypad Follows, though the streaming lamp's last state is on")
+		end)
+
+		it("keeps Hue's own on and level while every lamp streams, and says so on a stop with 0", function()
+			add_three()
+			assert.equal(2, stream({ "living", "hallway" }, "streaming"))
+			assert.same({ { rid = RELAX, on = "true", level = "50", streaming_lamps = "2" } }, group_params(2001))
+			c4.sent = {}
+			assert.equal(2, S:on_container(container(grouped_light_event("living_room", nil, 61))))
+			assert.same({ { rid = RELAX, on = "true", level = "61", streaming_lamps = "2" } }, group_params(2001))
+
+			c4.sent = {}
+			assert.equal(2, stream({ "living", "hallway" }, "normal"))
+			assert.same({ { rid = RELAX, on = "true", level = "61", streaming_lamps = "0" } }, group_params(2001))
+			assert.is_nil(S.stream_sent[G_LIVING])
+			c4.sent = {}
+			assert.equal(2, S:on_container(container(grouped_light_event("living_room", nil, 30))))
+			assert.same({ { rid = RELAX, level = "30" } }, group_params(2001), "as before the stream")
+		end)
+
+		it("tells the next group report streaming_lamps 0 when the stop came without streaming_changed", function()
+			add_three()
+			stream({ "living" }, "streaming")
+			L:on_container(mode_container({ "living" }, "normal"))
+			c4.sent = {}
+			assert.equal(2, S:on_container(container(grouped_light_event("living_room", nil, 50))))
+			assert.same({ { rid = RELAX, on = "true", level = "50", streaming_lamps = "0" } }, group_params(2001))
+			c4.sent = {}
+			assert.equal(0, S:on_container(container(grouped_light_event("living_room", nil, 50))), "then as before")
+		end)
+
+		it("carries streaming_lamps, 0 included, in a hello's answer, a resync and an undelivered answer", function()
+			add_three()
+			stream({ "living" }, "streaming")
+			c4.sent = {}
+			assert.is_true(S:hello(RELAX, { device_id = "2001" }))
+			assert.same({ { rid = RELAX, on = "true", level = "40.16", streaming_lamps = "1" } }, group_params(2001))
+			c4.sent = {}
+			assert.equal(2, S:undelivered_group(G_LIVING))
+			assert.same({ { rid = RELAX, on = "true", level = "40.16", streaming_lamps = "1", reason = "undelivered" } },
+				group_params(2001))
+			c4.sent = {}
+			S:resync(done)
+			answer_gets({ grouped = grouped_lights({ living_room = true, garage = false }) })
+			assert.same({ { rid = RELAX, on = "true", level = "40.16", streaming_lamps = "1" } }, group_params(2001))
+			assert.same({ { rid = F.scene_rids.concentrate, on = "false", level = "50", streaming_lamps = "0" } },
+				group_params(2003))
+		end)
+
+		it("measures a slider move from the level of the lamps that do not stream", function()
+			add_three()
+			stream({ "living" }, "streaming")
+			assert.is_true(S:level({ rid = RELAX, device_id = "2001", level = "60", rate = "0" }))
+			assert.same({ action = "up", brightness_delta = 19.84 }, dims[1].body.dimming_delta,
+				"from Hallway Ambiance's 40.16; from Hue's 50 it would have been 10")
+			assert.is_true(S:level({ rid = RELAX, device_id = "2001", level = "70", rate = "0" }))
+			assert.same({ action = "up", brightness_delta = 10 }, dims[2].body.dimming_delta,
+				"from the first move's target until Hue reports")
+		end)
+
+		it("re-sends only to linked scenes whose group holds one of the lamps, from a list or a set", function()
+			add_three()
+			L.models[F.rids.garage].streaming = true
+			assert.equal(1, S:streaming_changed({ [F.rids.garage] = true }))
+			assert.same({ "HUE_SCENE_GROUP@2003" }, commands_sent())
+			assert.same({ rid = F.scene_rids.concentrate, on = "false", level = "50", streaming_lamps = "1" },
+				c4.sent[1].params, "every Garage lamp streams: Hue's own report")
+			S.reg:set_state(SAVANNA, "unbound")
+			L.models[F.rids.living].streaming = true
+			c4.sent = {}
+			assert.equal(1, S:streaming_changed({ F.rids.living, F.rids.kitchen }))
+			assert.same({ "HUE_SCENE_GROUP@2001" }, commands_sent(), "an unbound device hears nothing")
+			c4.sent = {}
+			assert.equal(0, S:streaming_changed({ F.rids.kitchen }), "the Kitchen Strip is in no room")
+			assert.equal(0, S:streaming_changed({}))
+			assert.equal(0, S:streaming_changed(nil))
+			assert.equal(0, S:streaming_changed("garbage"))
+			assert.same({}, c4.sent)
+		end)
+
+		it("counts every lamp for the whole home", function()
+			add_three()
+			L.models[F.rids.kitchen].streaming = true
+			L.models[F.rids.living].streaming = true
+			local view = S:group_stream(F.group_rids.home, {})
+			assert.equal(2, view.streaming)
+			assert.equal(2, #view.still)
+			assert.is_true(S:group_holds(F.group_rids.home, { [F.rids.kitchen] = true }, {}))
+			assert.is_false(S:group_holds(F.group_rids.living_room, { [F.rids.kitchen] = true }, {}))
+			assert.is_false(S:group_holds(nil, { [F.rids.kitchen] = true }, {}))
 		end)
 	end)
 

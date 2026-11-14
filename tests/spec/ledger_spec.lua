@@ -29,9 +29,11 @@
 -- 4. Every alias reaches a handler, stays out of driver.xml and expires: the
 --    spec fails once the code's version line reaches the alias's expiry. A
 --    dev alias answers in dev builds only. Every command an earlier
---    driver.xml had is an action or an alias, and bridge/actions.lua's
---    aliases are the ledger's.
--- 5. Pending: background tasks never create, rename, bind or delete a device
+--    driver.xml had is an action, an alias or a removed command.
+-- 5. Every removed command (ledger.removed; the 1.2 aliases since 2.0, #514,
+--    O15) is an unknown command in both builds, clicked or sent by name, as a
+--    name no driver.xml ever had; what does its job is still an action.
+-- 6. Pending: background tasks never create, rename, bind or delete a device
 --    on their own over a simulated week.
 
 local fake = require("helpers.fake_c4")
@@ -564,6 +566,13 @@ local function find_alias(command, driver)
 	return nil
 end
 
+local function find_removed(command, driver)
+	for _, gone in ipairs(LEDGER.removed or {}) do
+		if gone.command == command and alias_driver(gone) == driver then return gone end
+	end
+	return nil
+end
+
 -- Checks one path against the drivers; adds what is wrong to `problems`.
 local resolvers = {}
 
@@ -742,15 +751,19 @@ describe("feature ledger (#334)", function()
 			local unknown = probe_action("dev", "hue_bridge", "No Such Action")
 			assert.is_nil(unknown.reached)
 			assert.is_nil(unknown.by_name.reached)
+			-- What section 5 asks of a removed command: no row either.
+			assert.equal(0, unknown.rows)
+			assert.equal(0, unknown.by_name.rows)
 			assert.equal("Pair_Bridge", probe_action("dev", "hue_bridge", "Pair Bridge").reached)
 			-- The release form really is one: no bridge/devtools.lua, so no
 			-- development handler (HUE_LOG is the one left in the dispatch table
 			-- since #484) and no signed one.
 			assert.equal("HUE_LOG", probe_action("dev", "hue_bridge", "HUE_LOG").reached)
 			assert.is_nil(probe_action("release", "hue_bridge", "HUE_LOG").reached)
-			assert.is_nil(signed_problem("Check CA Pinning"))
-			assert.is_not_nil(signed_problem("Check CA Pinning", "release"))
-			assert.is_nil(model("hue_bridge", "release").action_by_command["Check CA Pinning"])
+			-- A signed dev loop command that never was an action (bridge/devtools.lua).
+			assert.is_nil(signed_problem("Lights Report"))
+			assert.is_not_nil(signed_problem("Lights Report", "release"))
+			assert.is_nil(model("hue_bridge", "release").action_by_command["Lights Report"])
 		end)
 
 		for _, form in ipairs(FORMS) do
@@ -1009,27 +1022,15 @@ describe("feature ledger (#334)", function()
 			assert.same({}, problems)
 		end)
 
-		it("keeps every command an earlier driver.xml had: still an action, or an alias", function()
+		it("keeps every command an earlier driver.xml had: still an action, an alias, or removed by a decision",
+			function()
 			local problems = {}
 			for _, driver in ipairs(DRIVERS) do
 				for _, command in ipairs(LEDGER.earlier_commands[driver] or {}) do
-					if not model(driver, "dev").action_by_command[command] and not find_alias(command, driver) then
+					if not model(driver, "dev").action_by_command[command] and not find_alias(command, driver)
+						and not find_removed(command, driver) then
 						problems[#problems + 1] = driver .. ": " .. command
 					end
-				end
-			end
-			assert.same({}, problems)
-		end)
-
-		it("lists bridge/actions.lua's aliases, each with the same target", function()
-			local problems = {}
-			for command, alias in pairs(ACTIONS.ALIASES) do
-				local listed = find_alias(command, "hue_bridge")
-				if not listed then
-					problems[#problems + 1] = command .. ": not in ledger.aliases"
-				elseif listed.target ~= alias.target then
-					problems[#problems + 1] = string.format("%s: the ledger says %s, bridge/actions.lua %s", command,
-						tostring(listed.target), tostring(alias.target))
 				end
 			end
 			assert.same({}, problems)
@@ -1069,15 +1070,81 @@ describe("feature ledger (#334)", function()
 				local line, expires = version_line(), xy(alias.expires)
 				if expires and at_least(line, expires) then
 					problems[#problems + 1] = string.format("expired: the code is at %d.%d and the alias was kept "
-						.. "until %s; remove it (and say so in CHANGELOG.md) or move its expiry", line[1], line[2],
-						alias.expires)
+						.. "until %s; remove it, moving its row to ledger.removed (and say so in CHANGELOG.md), or "
+						.. "move its expiry", line[1], line[2], alias.expires)
 				end
 				assert.same({}, problems)
 			end)
 		end
 	end)
 
-	describe("5. background tasks (bridge/housekeeping.lua, docs/simplify-actions-design.md §1.3)", function()
+	describe("5. removed commands (ledger.removed)", function()
+		it("each has a command, a target, a known driver and a removal X.Y this code has reached, once, and is no "
+			.. "alias", function()
+			local problems = {}
+			local line = version_line()
+			for i, gone in ipairs(LEDGER.removed or {}) do
+				local label = "removed " .. i .. " (" .. tostring(gone.command) .. ")"
+				for _, name in ipairs({ "command", "target" }) do
+					if type(gone[name]) ~= "string" or gone[name] == "" then
+						problems[#problems + 1] = label .. ": no " .. name
+					end
+				end
+				local removed = xy(gone.removed)
+				if not removed then
+					problems[#problems + 1] = label .. ": removed is not X.Y"
+				elseif not at_least(line, removed) then
+					problems[#problems + 1] = string.format("%s: removed in %s, but the code is at %d.%d", label,
+						gone.removed, line[1], line[2])
+				end
+				if not IS_DRIVER[alias_driver(gone)] or not IS_DRIVER[gone.target_driver or alias_driver(gone)] then
+					problems[#problems + 1] = label .. ": names no driver of src/"
+				end
+				if find_removed(gone.command, alias_driver(gone)) ~= gone then
+					problems[#problems + 1] = label .. ": listed twice"
+				end
+				if find_alias(gone.command, alias_driver(gone)) then
+					problems[#problems + 1] = label .. ": still listed in ledger.aliases"
+				end
+			end
+			assert.same({}, problems)
+		end)
+
+		for _, gone in ipairs(LEDGER.removed or {}) do
+			local driver = alias_driver(gone)
+			local target_driver = gone.target_driver or driver
+			it(string.format("%s (%s) is an unknown command since %s; %s (%s) does its job", tostring(gone.command),
+				driver, tostring(gone.removed), tostring(gone.target), target_driver), function()
+				local problems = {}
+				if model(driver, "dev").action_by_command[gone.command] then
+					problems[#problems + 1] = "still an action of driver.xml"
+				end
+				if not model(target_driver, "dev").action_by_command[gone.target] then
+					problems[#problems + 1] = "its target is not an action of " .. target_driver .. "'s driver.xml"
+				end
+				-- As "No Such Action" is answered (section 1's own check): no
+				-- handler, no raise, no [ERROR] line, no row.
+				for _, form in ipairs(FORMS) do
+					local result = probe_action(form, driver, gone.command)
+					for _, how in ipairs({ "clicked", "sent by name" }) do
+						local got = how == "clicked" and result or result.by_name
+						if got.reached then
+							problems[#problems + 1] = string.format("%s build, %s: reaches the handler %s", form, how,
+								got.reached)
+						elseif got.raised or got.errors[1] then
+							problems[#problems + 1] = string.format("%s build, %s: %s", form, how,
+								tostring(got.raised or got.errors[1]))
+						elseif got.rows > 0 then
+							problems[#problems + 1] = string.format("%s build, %s: wrote %d rows", form, how, got.rows)
+						end
+					end
+				end
+				assert.same({}, problems)
+			end)
+		end
+	end)
+
+	describe("6. background tasks (bridge/housekeeping.lua, docs/simplify-actions-design.md §1.3)", function()
 		pending("never create, rename, bind or delete a device on their own over a simulated week: run the engine "
 			.. "on a fake clock over tests/fixtures/hue_resources.lua (new lights, name differences, unmapped rooms, "
 			.. "gone and unbound devices, tombstones, forgotten devices, every setting at its default) and assert "
