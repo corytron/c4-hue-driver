@@ -1657,10 +1657,11 @@ describe("Hue Motion driver", function()
 				name = "Hallway sensor", kind = "sensor", model = "Hue motion sensor (SML003)" }, allow_empty = false,
 				log_command = false }, sends[1])
 
-			-- Debug Mode asks Director to log the message.
+			-- Debug Mode asks Director to log the message (the hello at a new
+			-- binding; Refresh From Bridge sent one too until 2.0, #514 O15).
 			env.Properties["Debug Mode"] = "On"
 			env.OnPropertyChanged("Debug Mode")
-			action(env, "Refresh From Bridge")
+			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
 			local hellos = {}
 			for _, m in ipairs(sends) do
 				if m.command == "HUE_MOTION_HELLO" then hellos[#hellos + 1] = m end
@@ -1686,8 +1687,6 @@ describe("Hue Motion driver", function()
 			assert.equal("No", env.Properties["Online"])
 			assert.same({ 5 }, c4.events_fired)
 			assert.equal("VALUE_UNAVAILABLE", output(c4)[2][1])
-			action(env, "Refresh From Bridge")
-			assert.equal("Not sent: not bound to a Hue Bridge", env.Properties["Last Action"])
 
 			-- Bound again (another bridge): it greets that one and waits for its state.
 			clear(c4)
@@ -1846,91 +1845,51 @@ describe("Hue Motion driver", function()
 		end)
 	end)
 
-	describe("hidden aliases until 2.0 (docs/simplify-actions-design.md §3.3)", function()
-		it("Refresh From Bridge still asks the bridge again", function()
+	-- One action since 1.2 (#334). The hidden aliases of the three it replaced
+	-- answered until 2.0 (docs/simplify-actions-design.md §3.3); 2.0 removed
+	-- them as announced (#514, O15).
+	describe("the hidden aliases are gone (2.0, #514, O15)", function()
+		local OLD = { "Refresh From Bridge", "Test Motion", "Test No Motion" }
+
+		it("Refresh From Bridge, Test Motion and Test No Motion do nothing, by LUA_ACTION or by name", function()
 			local env, c4 = known()
-			action(env, "Refresh From Bridge")
-			local hello = messages(c4, "HUE_MOTION_HELLO")
-			assert.equal(1, #hello)
-			assert.equal(RID, hello[1].params.rid)
-			assert.equal("Asked the bridge for this device's state; its answer updates the rows",
-				env.Properties["Last Action"])
-			env.ExecuteCommand("Refresh From Bridge", {})
-			assert.equal(2, #messages(c4, "HUE_MOTION_HELLO"), "sent by name too")
+			env.Properties["Last Action"] = ""
+			for _, old in ipairs(OLD) do
+				action(env, old)
+				env.ExecuteCommand(old, {})
+				env.ExecuteCommand((old:gsub(" ", "_")), {})
+			end
+			assert.same({}, c4.sent, "until 2.0 Refresh From Bridge said hello again")
+			assert.same({}, contact(c4), "until 2.0 Test Motion opened the sensor, Test No Motion closed it")
+			assert.equal(0, count_timers(c4, 30000), "no test runs")
+			assert.equal("", env.Properties["Last Action"])
+			assert.equal(SENSOR_STATUS, env.Properties["Status"])
 		end)
 
-		it("says in the log, in Debug Mode, what does the job now", function()
+		it("leave only the dispatcher's debug line for an unknown command", function()
 			local env = known()
 			local lines = {}
 			log.sink = function(line) lines[#lines + 1] = line end
 			env.Properties["Debug Mode"] = "On"
 			env.OnPropertyChanged("Debug Mode")
-			action(env, "Test Motion")
+			for _, old in ipairs(OLD) do
+				action(env, old)
+			end
 			quiet()
 			log.set_debug(false)
-			local said = false
-			for _, line in ipairs(lines) do
-				said = said or line:find("Test Motion is a hidden alias until 2.0; Test Motion Programming does this now",
-					1, true) ~= nil
+			local text = table.concat(lines, "\n")
+			for _, old in ipairs(OLD) do
+				assert.truthy(text:find("no command handler for " .. old:gsub(" ", "_"), 1, true), old)
 			end
-			assert.is_true(said)
+			assert.is_nil(text:find("hidden alias", 1, true))
 		end)
 
-		it("Test Motion opens the sensor, and Hue's state comes back after 30 s", function()
-			local env, c4 = known()
-			action(env, "Test Motion")
-			assert.same({ "OPENED" }, contact(c4))
-			assert.equal("Test: motion sent; Hue's state returns within 30 s", env.Properties["Last Action"])
-			assert.equal(1, fire(c4, 30000))
-			assert.same({ "OPENED", "CLOSED" }, contact(c4))
-		end)
-
-		it("Test No Motion closes the sensor, and the next reading puts Hue's state back at once", function()
-			local env, c4 = known({ motion = "true" })
-			action(env, "Test No Motion")
-			assert.same({ "CLOSED" }, contact(c4))
-			assert.equal("Test: no motion sent; Hue's state returns within 30 s", env.Properties["Last Action"])
-			state(env, { motion = "true" })
-			assert.same({ "CLOSED", "OPENED" }, contact(c4))
-			assert.equal(0, count_timers(c4, 30000))
-		end)
-
-		it("Test Motion and Test No Motion send what they name, whatever the sensor shows", function()
-			local env, c4 = known({ motion = "true" })
-			action(env, "Test Motion")
-			action(env, "Test No Motion")
-			action(env, "Test No Motion")
-			assert.same({ "OPENED", "CLOSED", "CLOSED" }, contact(c4), "no toggle: each sends its own state")
-			assert.equal(1, count_timers(c4, 30000))
-		end)
-
-		it("works without any sensor: the state before the test comes back", function()
-			local env, c4 = load_motion({ bind = false, dit = "DIT_ADDING" })
-			action(env, "Test Motion")
-			fire(c4, 30000)
-			action(env, "Test No Motion")
-			fire(c4, 30000)
-			assert.same({ "OPENED", "CLOSED", "CLOSED" }, contact(c4))
-			env.ReceivedFromProxy(5001, "GET_STATE", {})
-			assert.same({ "OPENED", "CLOSED", "CLOSED", "STATE_CLOSED" }, contact(c4))
-		end)
-
-		it("puts back Hue's held state after a test during a hold", function()
-			local env, c4 = known({ props = { [HOLD] = "10" }, motion = "true" })
-			state(env, { motion = "false" })
-			action(env, "Test Motion")
-			assert.same({ "OPENED" }, contact(c4))
-			-- The hold ends during the test: nothing yet, the test's own end puts Hue's state back.
-			assert.equal(1, fire(c4, 10000))
-			assert.same({ "OPENED" }, contact(c4))
-			assert.equal(1, fire(c4, 30000))
-			assert.same({ "OPENED", "CLOSED" }, contact(c4))
-
-			-- A hold only the test showed is no hold: Hue's next no motion closes at once.
-			action(env, "Test Motion")
-			state(env, { motion = "false", reason = "check" })
-			assert.same({ "OPENED", "CLOSED", "OPENED", "CLOSED" }, contact(c4))
-			assert.equal(0, count_timers(c4, 10000))
+		it("are named nowhere in driver.xml", function()
+			local xml = assert(io.open("src/hue_motion/driver.xml")):read("*a")
+			for _, old in ipairs({ "Refresh From Bridge", "Test No Motion" }) do
+				assert.is_nil(xml:find(old, 1, true), old)
+			end
+			assert.is_nil(xml:find("until 2.0", 1, true))
 		end)
 	end)
 

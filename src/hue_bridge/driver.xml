@@ -218,6 +218,27 @@
 				<readonly>false</readonly>
 				<tooltip>Open the list to read every Hue automation and how it meets Control4</tooltip>
 			</property>
+			<!-- docs/hdmi-sync-stage1-design.md §4.4 (#514): the Hue entertainment
+				 areas, their lamps, and which of them sync now (bridge/entertainment.lua). -->
+			<property>
+				<name>Entertainment Areas</name>
+				<default>None</default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<!-- O11: when a sync ends, put its lamps back as they were before it
+				 started, or leave them as Hue's own setting leaves them. -->
+			<property>
+				<name>After A Sync Ends</name>
+				<type>LIST</type>
+				<items>
+					<item>Put the lights back</item>
+					<item>As Hue decides</item>
+				</items>
+				<default>Put the lights back</default>
+				<readonly>false</readonly>
+				<tooltip>When a TV or music sync ends, put its lamps back as they were before it started, or leave them as Hue leaves them</tooltip>
+			</property>
 			<property>
 				<name>Stream Address</name>
 				<default></default>
@@ -286,8 +307,9 @@
 			<!-- The actions: the nine of 1.2 (#334, docs/simplify-actions-design.md §3.3) and Hue Automations, the tenth, since 1.5 (#280).
 			     The pickers are CUSTOM_SELECT lists built on demand by the named Lua
 			     functions (bridge/actions.lua); the merged ones open on folders, and
-			     a pick returns the entry's value under the param name. Every command
-			     these replaced still answers as a hidden alias until 2.0. -->
+			     a pick returns the entry's value under the param name. The hidden
+			     aliases of the commands these replaced were removed in 2.0, as
+			     announced (#514, O15). -->
 			<action>
 				<name>Pair Bridge</name>
 				<command>Pair Bridge</command>
@@ -424,7 +446,23 @@
 		<proxy name="Hue Bridge">hue_bridge</proxy>
 	</proxies>
 	<combo>true</combo>
-	<events/>
+	<!-- docs/hdmi-sync-stage1-design.md §4.4 (#514, O10): any streamer, a sync
+	     box or Hue's own Sync apps, starting or stopping on an entertainment
+	     area; the area is in Last Action. Ids are fixed once released. -->
+	<events>
+		<event>
+			<id>1</id>
+			<name>Sync Started</name>
+			<description>When an entertainment area of NAME starts syncing</description>
+			<sort_order>1</sort_order>
+		</event>
+		<event>
+			<id>2</id>
+			<name>Sync Stopped</name>
+			<description>When an entertainment area of NAME stops syncing</description>
+			<sort_order>2</sort_order>
+		</event>
+	</events>
 	<connections>
 		<connection>
 			<id>1</id>

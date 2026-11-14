@@ -215,6 +215,10 @@ conclusive answer.
   then 15 min, an hour and hourly (`bridge/tasks.lua` `key_recheck`,
   `hue_bridge/driver.lua:recheck_key`; `docs/simplify-actions-design.md`
   §1.8 D8).
+  Current (2.0, #514, 2026-11-14): as announced, 2.0 removes the hidden
+  alias; Diagnostics ▸ "Check the connection now" is the action that runs
+  the test (a dev build's loop keeps a signed `Test Connection` of its own,
+  `bridge/devtools.lua`).
 - **Fan-out** (finding 6): `on_container` returns at once for a non-table.
 - **Names** (finding 8): `Bridge Name` shows `util.display_name(name)`.
 - **Release stage assertion**: `tools/build.sh` also refuses `conntest.lua`

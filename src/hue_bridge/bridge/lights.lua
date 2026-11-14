@@ -34,6 +34,10 @@
 -- container), except during device creation, where it saves after every
 -- AddDevice so a failure half-way never leaves a created device unregistered
 -- (which the next import would double).
+--
+-- Since 2.0 (#514) a lamp can stream (an entertainment area syncs it with a
+-- TV): the section "Lamps that stream" below has the rules
+-- (docs/hdmi-sync-stage1-design.md §4.5).
 
 local hue_model = require("bridge.hue_model")
 local registry = require("bridge.registry")
@@ -173,6 +177,14 @@ lights.RESOURCES = {
 --                            scenes_of_group for the whole home's row and the
 --                            scene devices of a group (#469 P6, S4, S5).
 --                            Optional: without it those are left out.
+--   entertainment            the bridge.entertainment instance, or a function
+--                            returning it, read at each use (2.0, #514;
+--                            docs/hdmi-sync-stage1-design.md §4.2, §4.5): told
+--                            of every change of a lamp's `streaming`
+--                            (lamp_mode) before that lamp's HUE_STATE, settled
+--                            once per event container and per fetch (settle),
+--                            and asked for the stream label (stream_label).
+--                            Optional: without it none of those calls happen.
 function lights.new(ctx)
 	ctx = ctx or {}
 	assert(type(ctx.http) == "function", "lights.new: ctx.http is required")
@@ -723,9 +735,13 @@ function lights:fetch_all(done)
 end
 
 -- Offline bookkeeping for the Attention nag: first seen offline → stamped;
--- back online → cleared.
+-- back online → cleared. While the lamp streams the clock does not run
+-- (#514, §4.5): it is cleared, and stamped afresh when the stream has ended
+-- and Hue still reports the lamp offline.
 function lights:track_offline(rid, model)
-	if model.online == false then
+	if model.streaming == true then
+		self.offline_since[rid] = nil
+	elseif model.online == false then
 		self.offline_since[rid] = self.offline_since[rid] or self.ctx.now()
 	elseif model.online == true then
 		self.offline_since[rid] = nil
@@ -736,13 +752,15 @@ end
 -- apply the connectivity to the models, and refresh the registry's cached
 -- identity fields (name, model, caps, device_rid, mac_address, service_id,
 -- id_v1, device_name). No state changes here: those are the reconciliation
--- steps the caller runs next.
+-- steps the caller runs next. Every lamp whose `streaming` changed is
+-- reported to the entertainment module here (fetched_streaming, #514), so
+-- before the fan-out sends its HUE_STATE.
 function lights:absorb(res)
-	local models = {}
+	local previous, models = self.models, {}
 	for _, item in ipairs(res.light or {}) do
 		local model = hue_model.light(item)  -- nil for junk, an id that is not a resource id included
 		if model then
-			local old = self.models[model.rid]
+			local old = previous[model.rid]
 			if old then
 				model.online = old.online
 			end
@@ -767,6 +785,7 @@ function lights:absorb(res)
 			end
 		end
 	end
+	self:fetched_streaming(previous)
 	for rid, model in pairs(models) do
 		self:track_offline(rid, model)
 	end
@@ -848,13 +867,14 @@ end
 
 -- send_configure and configure_changed are bridge/owner.lua's (through tell()).
 
--- Full HUE_STATE to a registered light that has a model.
+-- Full HUE_STATE to a registered light that has a model (with the #514
+-- rules of state_message while it streams).
 function lights:send_state(rid, reason)
 	local entry, model = self.registry[rid], self.models[rid]
 	if not entry or not model then
 		return false
 	end
-	self:tell(entry.device_id, "HUE_STATE", hue_model.state_params(model, nil, reason))
+	self:tell(entry.device_id, "HUE_STATE", self:state_message(model, nil, reason))
 	return true
 end
 
@@ -894,6 +914,148 @@ function lights:announce_gone(rid, reason)
 	self:send_configure(rid)
 	self:tell(entry.device_id, "HUE_STATE", { rid = rid, online = "false", reason = reason or "event" })
 	return true
+end
+
+-- Lamps that stream (2.0, #514) -------------------------------------------------
+--
+-- docs/hdmi-sync-stage1-design.md §4.5 and docs/hdmi-sync-contracts.md C7.
+-- hue_model reads a lamp's `mode` into the model's `streaming`: true for
+-- "streaming", false for "normal", absent otherwise (§4.1) [verified: the
+-- field and its two values, docs/entertainment-areas-research.md §4.1;
+-- assumed, T1: a real bridge flips it with an event update]. nil and false
+-- both mean "not streaming", so only a change between streaming and not
+-- counts. Every lamp counts, imported or not: the restore and the zone
+-- lights' counts cover the lamps Control4 has no device for.
+-- While a lamp streams, Hue keeps reporting its state from before the stream
+-- [assumed, T2], so its device keeps showing that. Its device is never told
+-- offline (one user saw a synced lamp reported not connected, research §4.1
+-- [community, one report]): HUE_STATE leaves out an online "false" while the
+-- lamp streams, carries `online` again with the change that ends the stream,
+-- and the Attention nag's offline clock does not run (track_offline).
+
+-- A shallow copy of a model, for lamp_mode's `before`.
+local function model_copy(model)
+	local out = {}
+	for k, v in pairs(model) do
+		out[k] = v
+	end
+	return out
+end
+
+-- The entertainment module (ctx.entertainment, the instance or a function
+-- returning it), or nil.
+function lights:entertainment()
+	local e = self.ctx.entertainment
+	if type(e) == "function" then
+		local ok, value = pcall(e)
+		e = ok and value or nil
+	end
+	return type(e) == "table" and e or nil
+end
+
+-- True while Hue reports the lamp streaming: driver.lua's guard, which does
+-- not queue a HUE_SET or HUE_DIM for such a lamp (§4.5, O9).
+function lights:is_streaming(rid)
+	local model = rid ~= nil and self.models[rid] or nil
+	return model ~= nil and model.streaming == true
+end
+
+-- The lamp's `streaming` against `before`, its model before the change (nil
+-- at first sight, which reads as "not streaming"). On a change the
+-- entertainment module hears ent:lamp_mode(rid, streaming, copy of before)
+-- (pcall-wrapped); the caller sends the lamp's HUE_STATE after this. True
+-- when it changed, with or without the module.
+function lights:streaming_changed(rid, before)
+	local was, now = before ~= nil and before.streaming == true, self:is_streaming(rid)
+	if was == now then
+		return false
+	end
+	self.ctx.log.debug("lights: %s %s", tostring(rid), now and "streams" or "no longer streams")
+	local ent = self:entertainment()
+	if ent and type(ent.lamp_mode) == "function" then
+		self:protect("entertainment lamp_mode", ent.lamp_mode, ent, rid, now, before and model_copy(before) or nil)
+	end
+	return true
+end
+
+-- After a fetch replaced the models (`previous` are the ones it replaced):
+-- streaming_changed for every lamp of either, in rid order. A lamp gone from
+-- the bridge while it streamed reads as no longer streaming.
+function lights:fetched_streaming(previous)
+	if not self:entertainment() then
+		return
+	end
+	local rids = {}
+	for rid in pairs(self.models) do
+		rids[#rids + 1] = rid
+	end
+	for rid in pairs(previous) do
+		if not self.models[rid] then
+			rids[#rids + 1] = rid
+		end
+	end
+	table.sort(rids)
+	for _, rid in ipairs(rids) do
+		self:streaming_changed(rid, previous[rid])
+	end
+end
+
+-- The entertainment module's settle (once per event container and per
+-- fetch, after their HUE_STATEs): it hands the lamps whose streaming changed
+-- on to the zone lights and the scenes.
+function lights:settle_streaming()
+	local ent = self:entertainment()
+	if ent and type(ent.settle) == "function" then
+		self:protect("entertainment settle", ent.settle, ent)
+	end
+end
+
+-- Who streams to the lamp, as its device shows it ("another app" in stage
+-- 1), from ent:stream_label: a display name, or nil.
+function lights:stream_label(rid)
+	local ent = self:entertainment()
+	if not ent or type(ent.stream_label) ~= "function" then
+		return nil
+	end
+	local ok, label = pcall(ent.stream_label, ent, rid)
+	if not ok then
+		self.ctx.log.warn("lights: entertainment stream_label failed: %s", tostring(label))
+		return nil
+	end
+	return owner.shown(label)
+end
+
+-- HUE_STATE params for a lamp: hue_model.state_params(model, fields, reason)
+-- (`streaming` among them once it is in hue_model.STATE_FIELDS, §4.1), then,
+-- while the lamp streams, no online "false" and, next to streaming "true",
+-- the stream label.
+function lights:state_message(model, fields, reason)
+	local params = hue_model.state_params(model, fields, reason)
+	if model.streaming == true then
+		if params.online == "false" then
+			params.online = nil
+		end
+		if params.streaming == "true" then
+			params.stream_label = self:stream_label(model.rid)
+		end
+	end
+	return params
+end
+
+-- An event's changed fields with `streaming` and `online` added: the change
+-- of a lamp's streaming always tells its device both (online is held back
+-- while it streams, so the end of a stream brings Hue's last report of it).
+local function with_stream_fields(changed)
+	local out = {}
+	for i, name in ipairs(changed) do
+		out[i] = name
+	end
+	for _, name in ipairs({ "streaming", "online" }) do
+		if not has_field(out, name) then
+			out[#out + 1] = name
+		end
+	end
+	return out
 end
 
 -- configure_all (HUE_CONFIGURE to every registered, bound light from the
@@ -1179,9 +1341,10 @@ function lights:auto_map_rooms(authoritative)
 end
 
 -- After a full fetch has been absorbed: steps 1, 2, 3, 4 and 5 in order, one
--- save. Returns the number of HUE_STATE messages the fan-out sent. Import All
--- New passes `relinked`, a list: D7's re-links go there instead of into a
--- Last Action of their own (owner:auto_relink).
+-- save, then the entertainment module's settle (#514: the fetch's lamp_mode
+-- calls came from absorb). Returns the number of HUE_STATE messages the
+-- fan-out sent. Import All New passes `relinked`, a list: D7's re-links go
+-- there instead of into a Last Action of their own (owner:auto_relink).
 function lights:settle(reason, with_configure, relinked)
 	self.synced = true
 	self:reconcile(true)
@@ -1192,6 +1355,7 @@ function lights:settle(reason, with_configure, relinked)
 	self:auto_map_rooms(true)
 	local sent = self:fanout(reason, with_configure)
 	self:flush()
+	self:settle_streaming()
 	return sent
 end
 
@@ -1218,6 +1382,7 @@ function lights:on_light_item(item, kind)
 			fresh.online = model.online
 		end
 		self.models[rid] = fresh
+		self:streaming_changed(rid, model)  -- #514: before the push's HUE_STATE
 		self:track_offline(rid, fresh)
 		if entry then
 			-- A gone light is back (re-added in the Hue app with the same rid).
@@ -1242,6 +1407,7 @@ function lights:on_light_item(item, kind)
 	elseif kind == "delete" then
 		self.models[rid] = nil
 		self.offline_since[rid] = nil
+		self:streaming_changed(rid, model)  -- #514: a lamp deleted while it streamed no longer streams
 		if entry and entry.state == "linked" then
 			-- [Q 11] gone at once, not at the next full GET.
 			if self.reg:set_state(rid, "gone") then
@@ -1259,7 +1425,15 @@ function lights:on_light_item(item, kind)
 	if not model then
 		return 0
 	end
+	-- #514: the model as it was when the item carries `mode` (the only source
+	-- of `streaming`, §4.1), so a stream's start hands over the state from
+	-- before it; the change is reported before the HUE_STATE below.
+	local before = item.mode ~= nil and model_copy(model) or nil
 	local changed = hue_model.update(model, item)
+	if before ~= nil and self:streaming_changed(rid, before) then
+		changed = with_stream_fields(changed)
+		self:track_offline(rid, model)
+	end
 	local renamed = entry ~= nil and has_field(changed, "name") and self:take_name(entry, model)
 	if renamed then
 		self:mark()
@@ -1274,7 +1448,7 @@ function lights:on_light_item(item, kind)
 	if renamed and self:configure_changed(rid) and self:send_configure(rid) then
 		sent = 1
 	end
-	local params = hue_model.state_params(model, changed, "event")
+	local params = self:state_message(model, changed, "event")
 	if hue_model.has_state(params) then
 		self:tell(entry.device_id, "HUE_STATE", params)
 		sent = sent + 1
@@ -1283,7 +1457,9 @@ function lights:on_light_item(item, kind)
 end
 
 -- A zigbee_connectivity item: online for the device's lights (and its MAC,
--- when the item carries it). Returns the number of messages sent.
+-- when the item carries it). Returns the number of messages sent. A lamp
+-- that streams keeps Hue's report in its model, but its device does not hear
+-- an offline (state_message, #514): it hears it when the stream ends.
 function lights:on_connectivity_item(item)
 	local conn = hue_model.connectivity(item)
 	if conn.device_rid and conn.mac_address then
@@ -1301,8 +1477,14 @@ function lights:on_connectivity_item(item)
 			self:track_offline(rid, model)
 		end
 		if entry and model and entry.state ~= "unbound" then
-			self:tell(entry.device_id, "HUE_STATE", hue_model.state_params(model, { "online" }, "event"))
-			sent = sent + 1
+			local params = self:state_message(model, { "online" }, "event")
+			if hue_model.has_state(params) then
+				self:tell(entry.device_id, "HUE_STATE", params)
+				sent = sent + 1
+			else
+				self.ctx.log.info("lights: %s (device %s) is reported not connected while it streams; its device "
+					.. "stays online until the stream ends", self:entry_label(rid, entry), tostring(entry.device_id))
+			end
 		end
 	end
 	return sent
@@ -1402,10 +1584,13 @@ end
 
 -- The body under pcall so that an error escaping a container (nothing up
 -- the chain catches it) cannot leave the skip-set cache set for the hellos
--- and forgets that follow (docs/reviews/diff-review-2026-10-24.md).
+-- and forgets that follow (docs/reviews/diff-review-2026-10-24.md). The
+-- entertainment module settles once per container, after its HUE_STATEs, an
+-- error included (the lamps it was told of must not wait for the next one).
 function lights:on_container(container)
 	local ok, result = pcall(on_container_body, self, container)
 	self.skip_cache = nil
+	self:settle_streaming()
 	if not ok then
 		error(result, 0)
 	end

@@ -4,13 +4,21 @@
 # --dev build on the house, prints each action's Status and Last Action, and
 # scans the shipped log for errors. Needs tools/devserver.py running and the
 # dev bridge polling it (devctl.py status). Creates nothing, deletes nothing,
-# and renames nothing unless --with-renames is given (#344).
+# and renames nothing unless --with-renames is given (#344). The actions are
+# 1.2's merged ones with their parameters (docs/simplify-actions-design.md
+# §3.3): the old command names answered as hidden aliases until 2.0 removed
+# them (#514, docs/hdmi-sync-design.md §10 O15). Link Device's top row
+# (dev:suggested), like Link Devices before it, registers a bound device the
+# bridge lacks, and also re-links a device with a suggested match, as the
+# owner's click on that row would.
 #
 # Usage: tools/regress.sh [--with-renames] [--server http://127.0.0.1:8080]
-#   --with-renames  also run Adopt Hue Names and Accept Names As They Are,
-#                   which change the live project: the first renames every
-#                   device whose Composer name differs from its Hue name, the
-#                   second accepts the differences. Off by default.
+#   --with-renames  also run Resolve Names' "Hue names to Composer"
+#                   (names:hue_to_composer, Adopt Hue Names until 1.2) and its
+#                   names:keep_composer row (Accept Names As They Are), which
+#                   change the live project: the first renames every device
+#                   whose Composer name differs from its Hue name. Off by
+#                   default.
 #   --server URL    passed on to tools/devctl.py (default: build/dev/server.json)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -68,32 +76,44 @@ settle() { # settle <pattern> <seconds>
 	echo "(no match in the shipped log after $2 tries)"; return 1
 }
 
-say "Test Connection"
-run_action "Test Connection" >/dev/null
+# Diagnostics' "Check the connection now" (Test Connection until 1.2, its
+# alias until 2.0): the check logs "Test Connection via <host>: ...".
+say "Diagnostics: Check the connection now"
+run_action "Diagnostics" "What=diag:test" >/dev/null
 out="$(settle "Test Connection via .*: (OK|.*) after [0-9]+ s" 20)"; echo "$out"
-expect "Test Connection via .*: OK after" "$out" "Test Connection answers OK"
+expect "Test Connection via .*: OK after" "$out" "the connection check answers OK"
 
-say "Refresh Scenes"
-run_action "Refresh Scenes" >/dev/null
-out="$(settle "Scenes refreshed|Scene refresh failed" 30)"; echo "$out"
-expect "Scenes refreshed: [0-9]+ \+ [0-9]+ time-based on bridge" "$out" "Refresh Scenes reports the counts"
+# Diagnostics' "Read everything from the bridge now" (Refresh All; the
+# scenes alone were Refresh Scenes, both aliases until 2.0): the full read,
+# whose Last Action carries the scene counts.
+say "Diagnostics: Read everything from the bridge now"
+run_action "Diagnostics" "What=diag:refresh" >/dev/null
+out="$(settle "Refreshed from the bridge: |Read everything from the bridge: " 30)"; echo "$out"
+expect "Refreshed from the bridge: .*Scenes: [0-9]+ scenes? \+ [0-9?]+ time-based on bridge" "$out" \
+	"the full read reports the scene counts"
 
-say "Room Audit"
-out="$(run_action "Room Audit")"; echo "$out" | grep -E "Last Action" | head -2
-expect "linked light|not in the room|No linked|nothing to audit|audit" "$out" "Room Audit reports"
+# Room Audit (an alias from 1.2) went in 2.0 with nothing to click in its
+# place: since 1.2 the pickers' rows mark a device whose Hue room and Control4
+# room differ, on every read (docs/simplify-actions-design.md §1.3).
 
-say "Link Devices"
-out="$(run_action "Link Devices")"; echo "$out" | grep -E "Last Action" | head -2
-expect "registered|Linked|No .* devices|bound" "$out" "Link Devices reports"
+# Link Device's top row, every bound device the bridge does not know yet
+# (Link Devices until 1.2, its alias until 2.0).
+say "Link Device: every bound device the bridge does not know yet"
+out="$(run_action "Link Device" "Device=dev:suggested")"; echo "$out" | grep -E "Last Action" | head -2
+expect "registered|Linked|No .* devices|bound" "$out" "Link Device reports"
 
-say "Adopt Hue Names / Accept Names As They Are"
+say "Resolve Names: Hue names to Composer / keep the Composer names"
 if [[ "$with_renames" == yes ]]; then
-	out="$(run_action "Adopt Hue Names")"; echo "$out" | grep -E "Last Action" | head -2
-	expect "names|Renamed|differ" "$out" "Adopt Hue Names reports"
-	out="$(run_action "Accept Names As They Are")"; echo "$out" | grep -E "Last Action" | head -2
-	expect "names|Accepted|differ" "$out" "Accept Names reports"
+	# Adopt Hue Names until 1.2, its alias until 2.0.
+	out="$(run_action "Resolve Names" "Names=names:hue_to_composer")"; echo "$out" | grep -E "Last Action" | head -2
+	expect "names|Names|Renamed|differ" "$out" "Hue names to Composer reports"
+	# Accept Names As They Are until 1.2, its alias until 2.0. With
+	# bridge/names.lua (every build since 1.2) the names follow each other by
+	# themselves and Resolve Names answers this row with a refusal.
+	out="$(run_action "Resolve Names" "Names=names:keep_composer")"; echo "$out" | grep -E "Last Action" | head -2
+	expect "names|Names|Accepted|differ" "$out" "keep the Composer names reports"
 else
-	echo "SKIP  Adopt Hue Names and Accept Names As They Are: they act on the device names of the live project (--with-renames runs them)"
+	echo "SKIP  Resolve Names: it acts on the device names of the live project (--with-renames runs it)"
 fi
 
 say "Lights Report (dev action: the summaries in the log)"

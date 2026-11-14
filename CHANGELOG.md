@@ -14,6 +14,44 @@ follows it.
 
 ## Unreleased
 
+### Added
+- The Hue Bridge lists Hue's entertainment areas, the lamps the Hue app
+  sets up for light sync with a TV, a PC screen or music, on a new
+  Entertainment Areas row: each area with the number of its lamps, and
+  which areas something syncs to, for example `Living Room TV (5 lamps,
+  syncing: another app) | Office (3 lamps)`. Two new events on the Hue
+  Bridge, Sync Started and Sync Stopped, let programming act when a sync
+  to an area starts or stops, whatever runs it (a Hue Play HDMI Sync Box
+  or one of Hue's Sync apps); Last Action names the area (#514).
+- A new Hue Bridge property, After A Sync Ends. With `Put the lights
+  back`, the default, the bridge sets the lamps of an area back to the
+  state they had just before a sync, a few seconds after it ends, wherever
+  Hue's own end state differs; with `As Hue decides` it leaves them as
+  Hue's own setting for the area leaves them. Hue's setting is never
+  changed, and commands sent to the lamps during the sync are not applied
+  afterwards: the lamps go back to their state from before the sync
+  (#514).
+
+### Changed
+- Hue Lights, zone lights and Hue Scenes say when their lamps sync with a
+  TV. A Hue Light whose lamp syncs keeps the state from before the sync,
+  reads `Syncing with the TV (another app)` in Status and never goes
+  offline because of it; a command to it is no longer shown as done but
+  is answered at once with the state the light shows, and Last Action
+  says why. A zone light whose lamps all sync does the same; one with only
+  some lamps syncing reads, for example, `2 of 6 lamps syncing with the
+  TV`, and shows and controls the others. A Hue Scene's Status adds how
+  many lamps keep syncing, and Keypad Follows `Room/zone lights` counts
+  only the lamps that do not (#514).
+- As announced in the manual, the hidden 1.1 action names and the Hue
+  Scene's hidden On State Follows property are removed. A script or tool
+  that still calls an action by its 1.1 name gets no answer: only the ten
+  actions of the Hue Bridge and the Hue Motion Sensor's Test Motion
+  Programming answer, under their own names. An update straight from 1.5
+  or earlier no longer copies On State Follows into Keypad Follows: set
+  Keypad Follows again on a scene whose On State Follows read `This
+  scene` (#514).
+
 ## 1.8 "B2EMO", build 644 (2026-11-13)
 
 ### Fixed

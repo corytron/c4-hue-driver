@@ -177,6 +177,16 @@ Defaults taken from the research, not asked:
   [verified: API `24_properties/_4-SetPropertyAttribs.md`,
   `_5-UpdateProperty.md`, `_3-OnPropertyChanged.md`; the scene driver
   already hides Recall As this way]
+
+  Current (2.0, #514, 2026-11-14): as announced, 2.0 removes On State
+  Follows from `driver.xml`, together with this migration (the late-init
+  copy into Keypad Follows and the `keypad_follows_migrated` flag) and
+  their specs, in the commit that names 2.0 (O15 of
+  [`hdmi-sync-design.md`](hdmi-sync-design.md);
+  [`hdmi-sync-stage1-design.md`](hdmi-sync-stage1-design.md) §5.2). A
+  device updated straight from 1.5 or earlier keeps Keypad Follows at its
+  default, `Room/zone lights`; the manuals say to set it again where On
+  State Follows read `This scene`.
 - **D13. The lights mode no longer turns the tile on** when the room comes
   on. The `group_known()` branches of the `HUE_SCENE_GROUP` handler and of
   `brightness()` go. The LEDs still update on a group change when
@@ -366,6 +376,11 @@ The owner's rule (#422) and [`c4-lighting-guidelines.md`](c4-lighting-guidelines
   (`on`, `level`, `other_active`), `HUE_SCENE_STATE`, `HUE_SCENE_RECALL`
   and `HUE_SCENE_LEVEL` keep their parameters. The bridge only sends
   `other_active` in more cases (D7).
+  Current (2.0, #514, 2026-11-14): `HUE_SCENE_GROUP` also carries
+  `streaming_lamps`, and while it is above 0 its `on` and `level` (what
+  D9's Keypad Follows `Room/zone lights` reads) come from the lamps that
+  do not stream to a Hue entertainment area
+  ([`scene-dimmer-design.md`](scene-dimmer-design.md), "Messages").
 
 ## Install
 

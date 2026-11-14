@@ -36,8 +36,8 @@ local function stub_attribs(c4)
 	end
 end
 
--- The SetPropertyAttribs calls for one property, in order. Since #469 (D12)
--- late init also hides On State Follows, so the cases of one row ask by name.
+-- The SetPropertyAttribs calls for one property, in order, so the cases of
+-- one row ask by name (#469 D12 hid On State Follows too, until 2.0).
 local function attribs_of(c4, name)
 	local out = {}
 	for _, args in ipairs(c4.calls_to("SetPropertyAttribs")) do
@@ -331,8 +331,8 @@ describe("Hue Scene driver", function()
 			c4.calls = {}
 			configure(env)
 
-			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active",
-				keypad_follows_migrated = true }, c4.persist, "the flag: #469 D12's migration ran at late init")
+			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active" }, c4.persist,
+				"no keypad_follows_migrated: #469 D12's copy of On State Follows went in 2.0 (#514, O15)")
 			assert.equal("#AbCdEf (s1)", env.Properties["Hue Scene ID"], "a rid without dashes is shown whole")
 			assert.equal("Relax", env.Properties["Hue Scene"])
 			assert.equal("Kitchen", env.Properties["Hue Room"])
@@ -763,8 +763,7 @@ describe("Hue Scene driver", function()
 			assert.equal(0, #c4.calls_to("SendToProxy"), "not even CHANGING")
 			assert.equal(0, #c4.active_timers())
 			assert.equal(FORGOTTEN, env.Properties["Status"])
-			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active", held_on = true,
-				keypad_follows_migrated = true }, -- #469 D12, set at late init
+			assert.same({ hue_rid = "s1", hue_name = "Relax", hue_kind = "scene", recall_as = "active", held_on = true },
 				c4.persist, "the identity stays, so binding the device again lets the bridge adopt it")
 		end)
 
@@ -1098,84 +1097,48 @@ describe("Hue Scene driver", function()
 		end)
 	end)
 
-	describe("hidden aliases until 2.0 (no actions since 1.2, docs/simplify-actions-design.md §3.3)", function()
-		-- The light_v2 proxy the fake's project gave this device: the consumer
-		-- of the protocol driver's binding 5001, as on the controller.
-		local function proxy_of(id)
-			return assert(fake.project.devices[id].proxy_id, "the fake registers a proxy per loaded device")
-		end
+	-- No actions since 1.2 (#334, docs/simplify-actions-design.md §1.2, D3).
+	-- The hidden aliases Adopt Hue Name and Forget This Scene answered until
+	-- 2.0 (§3.3); 2.0 removed them as announced (#514, O15).
+	describe("the hidden aliases are gone (2.0, #514, O15)", function()
+		local OLD = { "Adopt Hue Name", "Forget This Scene" }
 
-		it("Adopt Hue Name and Forget This Scene answer sent by name too, as the dev loop sends them", function()
+		it("Adopt Hue Name and Forget This Scene do nothing, by LUA_ACTION or by name", function()
 			local env, c4 = known_scene()
-			env.ExecuteCommand("Adopt Hue Name", {})
-			assert.same({ { proxy_of(SCENE_ID), "Relax" } }, c4.calls_to("RenameDevice"))
-			env.ExecuteCommand("Forget This Scene", {})
-			assert.equal(1, #messages(c4, "HUE_SCENE_FORGET"))
+			env.Properties["Last Action"] = ""
+			for _, old in ipairs(OLD) do
+				env.ExecuteCommand("LUA_ACTION", { ACTION = old })
+				env.ExecuteCommand(old, {})
+				env.ExecuteCommand((old:gsub(" ", "_")), {})
+			end
+			assert.same({}, c4.calls_to("RenameDevice"), "until 2.0 Adopt Hue Name renamed the proxy")
+			assert.same({}, c4.sent, "until 2.0 Forget This Scene sent HUE_SCENE_FORGET")
+			assert.equal("", env.Properties["Last Action"])
+			assert.equal(LINKED_STATUS, env.Properties["Status"])
 		end)
 
-		it("say in the log, in Debug Mode, which action of the Hue Bridge does the job now", function()
+		it("leave only the dispatcher's debug line for an unknown command", function()
 			local env = known_scene()
 			local lines = {}
 			log.set_debug(true)
 			log.sink = function(line) lines[#lines + 1] = line end
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Scene" })
+			for _, old in ipairs(OLD) do
+				env.ExecuteCommand("LUA_ACTION", { ACTION = old })
+			end
 			log.set_debug(false)
-			log.sink = function() end
+			quiet()
 			local text = table.concat(lines, "\n")
-			assert.truthy(text:find("Adopt Hue Name is a hidden alias until 2.0; Resolve Names on the Hue Bridge "
-				.. "does this now", 1, true))
-			assert.truthy(text:find("Forget This Scene is a hidden alias until 2.0; Forget Device on the Hue Bridge "
-				.. "does this now", 1, true))
+			assert.truthy(text:find("no command handler for Adopt_Hue_Name", 1, true), text)
+			assert.truthy(text:find("no command handler for Forget_This_Scene", 1, true), text)
+			assert.is_nil(text:find("hidden alias", 1, true))
 		end)
 
-		it("Adopt Hue Name renames the proxy device, not the protocol driver", function()
-			local env, c4 = known_scene()
-			local proxy_id = proxy_of(SCENE_ID)
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.same({ { proxy_id, "Relax" } }, c4.calls_to("RenameDevice"))
-			assert.equal("Relax", fake.project.devices[proxy_id].name)
-			assert.equal("Hue Scene", fake.project.devices[SCENE_ID].name, "the protocol driver keeps its name")
-			assert.equal(string.format("Renamed device %d to Relax", proxy_id), fake.last_action(env))
-		end)
-
-		it("Adopt Hue Name gives a zone scene the zone's name in front, as the bridge does at creation", function()
-			local env, c4 = known_scene()
-			configure(env, { group_name = "Downstairs", group_type = "zone" })
-			c4.calls = {}
-			local proxy_id = proxy_of(SCENE_ID)
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.same({ { proxy_id, "Downstairs Relax" } }, c4.calls_to("RenameDevice"))
-			assert.equal(string.format("Renamed device %d to Downstairs Relax", proxy_id), fake.last_action(env))
-		end)
-
-		it("Adopt Hue Name refuses without a Hue name or without a proxy", function()
-			local env, c4 = load_scene({ rid = "s1" })
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.equal(0, #c4.calls_to("RenameDevice"))
-			assert.truthy(fake.last_action(env):find("^Not renamed: no Hue name known yet"))
-
-			env, c4 = known_scene()
-			c4.GetBoundConsumerDevices = function() return nil end -- nothing bound, as documented
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.equal(0, #c4.calls_to("RenameDevice"))
-			assert.equal("Not renamed: no light_v2 proxy is bound to binding 5001", fake.last_action(env))
-		end)
-
-		it("Forget This Scene asks the bridge with HUE_SCENE_FORGET", function()
-			local env, c4 = known_scene()
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Scene" })
-			assert.same({ { id = BRIDGE_ID, command = "HUE_SCENE_FORGET", params = { rid = "s1", device_id = "2061" } } },
-				messages(c4, "HUE_SCENE_FORGET"))
-			assert.equal("Asked the bridge to forget this scene; its answer sets Status", fake.last_action(env))
-			assert.equal(LINKED_STATUS, env.Properties["Status"], "Status waits for HUE_SCENE_FORGOTTEN")
-		end)
-
-		it("Forget This Scene refuses when no bridge is bound", function()
-			local env, c4 = load_scene({ bind = false, rid = "s1" })
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Scene" })
-			assert.equal(0, #c4.sent)
-			assert.equal("Not sent: not bound to a Hue Bridge", fake.last_action(env))
+		it("are named nowhere in driver.xml", function()
+			local xml = assert(io.open("src/hue_scene/driver.xml")):read("*a")
+			for _, old in ipairs(OLD) do
+				assert.is_nil(xml:find(old, 1, true), old)
+			end
+			assert.is_nil(xml:find("until 2.0", 1, true))
 		end)
 	end)
 
@@ -2488,11 +2451,17 @@ describe("Hue Scene driver", function()
 			assert.same({}, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"), "the tile: nothing known yet")
 		end)
 
-		describe("the rename from On State Follows (D12)", function()
+		-- #469 D12 kept On State Follows declared, hidden, until 2.0, and copied a
+		-- stored "This scene" into Keypad Follows once at late init (flag
+		-- keypad_follows_migrated). 2.0 removed the property and the copy as
+		-- announced (#514, O15).
+		describe("On State Follows is gone (2.0, #514, O15)", function()
 			-- The hue_scene runtime as Director starts it after the update: the
-			-- property values `props`, PersistData `persist`, bound, rid s1.
-			local function updated(props, persist)
+			-- property values `props`, PersistData `persist`, bound, rid s1;
+			-- `stale` values go into Properties without driver.xml declaring them.
+			local function updated(props, persist, stale)
 				local env, c4 = fake.load_driver("hue_scene", props, { device_id = SCENE_ID })
+				for k, v in pairs(stale or {}) do env.Properties[k] = v end
 				stub_attribs(c4)
 				c4:Bind(BRIDGE_ID, 1, SCENE_ID, 1, "HUE_BRIDGE")
 				c4.persist.hue_rid = "s1"
@@ -2518,49 +2487,40 @@ describe("Hue Scene driver", function()
 				return states[#states]
 			end
 
-			it("copies a stored This scene into Keypad Follows once, applies it, and sets the flag", function()
-				local env, c4 = updated({ ["On State Follows"] = "This scene" })
-				assert.same({ "This scene" }, keypad_writes(c4))
-				assert.equal("This scene", env.Properties["Keypad Follows"])
-				assert.is_true(c4.persist.keypad_follows_migrated)
-				assert.is_false(keypad_reads(env, c4), "applied at once: UpdateProperty calls no OnPropertyChanged")
+			it("is no longer declared; Keypad Follows is, with its two items and default", function()
+				local props = fake.declared_properties("hue_scene")
+				assert.is_nil(props["On State Follows"], "declared, hidden, until 2.0")
+				assert.equal("Room/zone lights", props["Keypad Follows"])
+				local xml = io.open("src/hue_scene/driver.xml"):read("*a")
+				assert.is_nil(xml:find("On State Follows", 1, true))
+				local body = xml:match("<name>Keypad Follows</name>(.-)</property>")
+				assert.truthy(body and body:find("<item>Room/zone lights</item>", 1, true))
+				assert.truthy(body:find("<item>This scene</item>", 1, true))
 			end)
 
-			it("never overwrites a later choice: once the flag is set, nothing is copied", function()
-				local env, c4 = updated({ ["On State Follows"] = "This scene", ["Keypad Follows"] = "Room/zone lights" },
-					{ keypad_follows_migrated = true })
+			it("late init neither hides it, copies it nor sets the old flag", function()
+				local env, c4 = updated({})
+				assert.same({}, attribs_of(c4, "On State Follows"), "until 2.0 hidden at every late init")
 				assert.same({}, keypad_writes(c4))
-				assert.equal("Room/zone lights", env.Properties["Keypad Follows"])
-				assert.is_true(keypad_reads(env, c4), "the dealer's choice: the room's lights")
-			end)
-
-			it("copies nothing when the old value is the default, and still sets the flag", function()
-				local env, c4 = updated({ ["Keypad Follows"] = "This scene" })
-				assert.same({}, keypad_writes(c4))
-				assert.equal("This scene", env.Properties["Keypad Follows"], "a value set already stays")
-				assert.is_true(c4.persist.keypad_follows_migrated)
-				env, c4 = updated({})
-				assert.same({}, keypad_writes(c4))
+				assert.is_nil(c4.persist.keypad_follows_migrated, "until 2.0 set at the first late init")
 				assert.is_true(keypad_reads(env, c4), "the default: the room's lights")
 			end)
 
-			it("hides On State Follows at every late init; a change to it does nothing", function()
-				local env, c4 = updated({}, { keypad_follows_migrated = true })
-				assert.same({ { "On State Follows", 1 } }, attribs_of(c4, "On State Follows"))
-				env.Properties["On State Follows"] = "This scene"
+			it("a stale value Director still hands over is ignored, at late init and as a change", function()
+				local env, c4 = updated({}, nil, { ["On State Follows"] = "This scene" })
+				assert.same({}, keypad_writes(c4), "until 2.0 the first late init copied it into Keypad Follows")
+				assert.is_nil(c4.persist.keypad_follows_migrated)
 				env.OnPropertyChanged("On State Follows")
 				assert.same({}, keypad_writes(c4))
 				assert.is_true(keypad_reads(env, c4), "still the room's lights")
 			end)
 
-			it("declares Keypad Follows with the same items and default, and keeps On State Follows until 2.0", function()
-				local props = fake.declared_properties("hue_scene")
-				assert.equal("Room/zone lights", props["Keypad Follows"])
-				assert.equal("Room/zone lights", props["On State Follows"])
-				local xml = io.open("src/hue_scene/driver.xml"):read("*a")
-				local body = xml:match("<name>Keypad Follows</name>(.-)</property>")
-				assert.truthy(body and body:find("<item>Room/zone lights</item>", 1, true))
-				assert.truthy(body:find("<item>This scene</item>", 1, true))
+			it("a device that ran the copy keeps its Keypad Follows; the old flag is left as it is", function()
+				local env, c4 = updated({ ["Keypad Follows"] = "This scene" }, { keypad_follows_migrated = true })
+				assert.same({}, keypad_writes(c4))
+				assert.equal("This scene", env.Properties["Keypad Follows"])
+				assert.is_true(c4.persist.keypad_follows_migrated)
+				assert.is_false(keypad_reads(env, c4), "this scene alone")
 			end)
 		end)
 	end)
@@ -3597,23 +3557,6 @@ describe("Hue Scene driver", function()
 				assert.equal("Scene deleted in Hue; ON does nothing; Link or Forget Device", env.Properties["Status"])
 			end)
 		end)
-
-		describe("Adopt Hue Name, a hidden alias (Decision 7)", function()
-			it("names a zone's time-based scene after the zone and the scene without the app's number", function()
-				local env, c4 = smart_scene()
-				local proxy_id = fake.project.devices[SCENE_ID].proxy_id
-				env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-				assert.same({ { proxy_id, "Downstairs Golden hours" } }, c4.calls_to("RenameDevice"))
-			end)
-
-			it("names a room's after the scene alone, and leaves a name without a number as it is", function()
-				local env, c4 = smart_scene()
-				configure(env, smart_with({ name = "Natural light", group_name = "Living Room", group_type = "room" }))
-				local proxy_id = fake.project.devices[SCENE_ID].proxy_id
-				env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-				assert.same({ { proxy_id, "Natural light" } }, c4.calls_to("RenameDevice"))
-			end)
-		end)
 	end)
 
 	describe("tap ramps and tap stops (#421, docs/tap-stop-design.md §10.1)", function()
@@ -4564,10 +4507,138 @@ describe("Hue Scene driver", function()
 		it("sends its messages to the bridge with logCommand only in Debug Mode (#493 D-8)", function()
 			local env, c4 = known_scene("inactive")
 			env.ReceivedFromProxy(5001, "ON", {})
-			env.ExecuteCommand("Forget_This_Scene", {})
-			assert.same({ "HUE_SCENE_RECALL", "HUE_SCENE_FORGET" }, { c4.sent[1].command, c4.sent[2].command })
+			env.ReceivedFromProxy(5001, "OFF", {}) -- Forget This Scene was the second until 2.0 (#514, O15)
+			assert.same({ "HUE_SCENE_RECALL", "HUE_SCENE_OFF" }, { c4.sent[1].command, c4.sent[2].command })
 			assert.is_false(c4.sent[1].log_command)
 			assert.is_false(c4.sent[2].log_command)
+		end)
+	end)
+
+	-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.6, §5.2; the design's 6.3):
+	-- HUE_SCENE_GROUP's streaming_lamps counts the lamps of the scene's room or
+	-- zone that stream to a TV. The device keeps the count and says it in
+	-- Status; the on state and level the bridge sends with it come from the
+	-- lamps that do not stream, and the device shows them as sent. Recall is
+	-- unchanged.
+	describe("while lamps of its room or zone sync with the TV (2.0, #514)", function()
+		local function group(env, params)
+			params.rid = params.rid or "s1"
+			env.ExecuteCommand("HUE_SCENE_GROUP", params)
+		end
+
+		-- LINKED_STATUS with what a count of `n` adds.
+		local function syncing(n)
+			if n == 1 then
+				return LINKED_STATUS .. "; 1 lamp keeps syncing with the TV"
+			end
+			return string.format("%s; %d lamps keep syncing with the TV", LINKED_STATUS, n)
+		end
+
+		it("adds how many lamps keep syncing to Status while the count is above 0, and drops it at 0", function()
+			local env = known_scene("static")
+			group(env, { streaming_lamps = "2" })
+			assert.equal("Hue scene Relax in Kitchen; 2 lamps keep syncing with the TV", env.Properties["Status"])
+			group(env, { streaming_lamps = "1" })
+			assert.equal("Hue scene Relax in Kitchen; 1 lamp keeps syncing with the TV", env.Properties["Status"])
+			group(env, { streaming_lamps = "0" })
+			assert.equal("Hue scene Relax in Kitchen", env.Properties["Status"])
+		end)
+
+		it("keeps the count through group messages without it and through a configure of the same scene", function()
+			local env = known_scene("static")
+			group(env, { streaming_lamps = "3", on = "true", level = "40" })
+			group(env, { on = "true", level = "55" })
+			group(env, { other_active = "true" })
+			group(env, { on = "false", reason = "undelivered" })
+			configure(env)
+			assert.equal(syncing(3), env.Properties["Status"])
+		end)
+
+		it("takes the count from the bridge's undelivered answer too", function()
+			local env = known_scene("static")
+			group(env, { streaming_lamps = "1", on = "true", level = "40", reason = "undelivered" })
+			assert.equal(syncing(1), env.Properties["Status"])
+		end)
+
+		it("takes only a whole count from 0 to 1000 (#486), and only in its own scene's messages (#483 D-1)", function()
+			local env = known_scene("static")
+			group(env, { streaming_lamps = "2" })
+			for _, bad in ipairs({ "nan", "inf", "-inf", "-1", "1001", "1e300", "two", "" }) do
+				group(env, { streaming_lamps = bad })
+				assert.equal(syncing(2), env.Properties["Status"], bad)
+			end
+			group(env, { rid = "s9", streaming_lamps = "5" })
+			assert.equal(syncing(2), env.Properties["Status"], "another scene's group message")
+			group(env, { streaming_lamps = "1000" })
+			assert.equal(syncing(1000), env.Properties["Status"])
+		end)
+
+		it("adds it to a time-based scene's Status too", function()
+			local env = smart_scene("active")
+			group(env, { streaming_lamps = "4" })
+			assert.equal(SMART_STATUS .. "; now Shine (from sunset); 4 lamps keep syncing with the TV",
+				env.Properties["Status"])
+			group(env, { streaming_lamps = "0" })
+			assert.equal(SMART_STATUS .. "; now Shine (from sunset)", env.Properties["Status"])
+		end)
+
+		it("shows the level and on state sent with the count as it always does", function()
+			local env, c4 = known_scene("static")
+			group(env, { streaming_lamps = "2", on = "true", level = "40" })
+			assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			assert.equal(syncing(2), env.Properties["Status"])
+		end)
+
+		it("recalls, and moves its level, exactly as with no lamp syncing", function()
+			-- The same steps on two devices; one hears that 2 lamps keep syncing.
+			local function run(count)
+				local env, c4 = known_scene("inactive")
+				group(env, { streaming_lamps = count, on = "true", level = "40" })
+				c4.calls, c4.sent = {}, {}
+				env.ReceivedFromProxy(5001, "ON", {})
+				state(env, "static", { reason = "recall" })
+				env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "60", RATE = "0" })
+				return c4.sent, c4.calls_to("SendToProxy")
+			end
+			local sent_none, proxy_none = run("0")
+			local sent_two, proxy_two = run("2")
+			assert.same(sent_none, sent_two)
+			assert.same(proxy_none, proxy_two)
+			assert.same({ rid = "s1", action = "active" }, sent_two[1].params)
+		end)
+
+		it("shows it once the bridge has configured the scene", function()
+			local env = load_scene({ rid = "s1", name = "Relax" })
+			group(env, { streaming_lamps = "2" })
+			assert.equal("Relax", env.Properties["Status"], "the persisted name, until the bridge configures it")
+			configure(env)
+			assert.equal(syncing(2), env.Properties["Status"])
+		end)
+
+		it("forgets the count with the group when the device is linked to another scene", function()
+			local env, c4 = known_scene("static")
+			group(env, { streaming_lamps = "2" })
+			assert.equal(syncing(2), env.Properties["Status"])
+			relink(env, c4, { rid = "s2" }) -- #483 D-1: through the device's hello
+			assert.equal(LINKED_STATUS, env.Properties["Status"])
+		end)
+
+		it("gives way to the bridge's link offline, a scene deleted in Hue and a forgotten one", function()
+			local env = known_scene("static")
+			group(env, { streaming_lamps = "2" })
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "offline", reason = "not_answering",
+				since = tostring(os.time() - 120) })
+			assert.truthy(env.Properties["Status"]:find("^Hue Bridge not answering since "), env.Properties["Status"])
+			env.ExecuteCommand("HUE_BRIDGE_LINK", { state = "online" })
+			assert.equal(syncing(2), env.Properties["Status"], "the count known, until the bridge's resync sends one")
+			configure(env, { state = "gone" })
+			assert.equal("Scene deleted in Hue; ON does nothing; Link or Forget Device", env.Properties["Status"])
+
+			env = known_scene("static")
+			group(env, { streaming_lamps = "2" })
+			env.ExecuteCommand("HUE_SCENE_FORGOTTEN", { rid = "s1", name = "Relax" })
+			assert.equal("Forgotten by the bridge (was Hue scene Relax). Delete this device, or bind it again and use "
+				.. "Link Device on the Hue Bridge", env.Properties["Status"])
 		end)
 	end)
 end)

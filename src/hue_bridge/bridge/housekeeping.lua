@@ -110,9 +110,10 @@
 --  * Budgets: job.http refuses a request beyond the run's budget; optional
 --    runs (unless a click asked) count against HOUR_BUDGET requests in any
 --    rolling hour (job.charge's too), and one starts only when its whole
---    budget fits. HOUR_BUDGET is 100, not the research's 60: the contract
+--    budget fits. HOUR_BUDGET is 110, not the research's 60: the contract
 --    keeps the stream-down read every 10 minutes (§1.3, §4 finding 7), six
---    quick reads of 15 GETs an hour on a Bridge Pro, and the sixth starts
+--    quick reads of 16 GETs an hour on a Bridge Pro (15 until 2.0 read the
+--    entertainment areas, #514; HOUR_BUDGET was 100), and the sixth starts
 --    only when its budget of 25 fits beside the five before it.
 --  * User first: each request waits while ctx.user_active(quiet_ms) is true,
 --    looking again every GATE_POLL_MS, and goes after GATE_MAX_MS whatever,
@@ -162,7 +163,7 @@ housekeeping.STORE_NAME = "hue_housekeeping"
 housekeeping.STORE_VERSION = 1
 housekeeping.MAX_ARM_MS = 3600000       -- one arm of the alarm, at most an hour
 housekeeping.HOUR_MS = 3600000
-housekeeping.HOUR_BUDGET = 100          -- optional requests in any rolling hour (see "Budgets" above)
+housekeeping.HOUR_BUDGET = 110          -- optional requests in any rolling hour (see "Budgets" above)
 housekeeping.OPTIONAL_GAP_MS = 30000    -- from the end of any run to the next optional start
 housekeeping.GATE_POLL_MS = 250         -- the user gate looks again this often
 housekeeping.GATE_MAX_MS = 10000        -- and lets a request go after this long

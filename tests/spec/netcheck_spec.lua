@@ -1038,8 +1038,12 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 	it("holds the stream until the check answers, and no probe carries the key", function()
 		local env, c4 = at_decoy(paired_bridge())
 		assert.equal("Paired", env.Properties["Status"], "keyed C4:url requests are not held")
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
-		assert.same({ 6100 }, probe_ids(c4), "Connect Event Stream joins the check")
+		-- Diagnostics' "Reconnect the event stream" (Connect Event Stream until
+		-- 1.2, its alias until 2.0).
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:connect" })
+		assert.equal("Reconnect the event stream: started (the result shows in Event Stream)", fake.last_action(env),
+			"the click ran")
+		assert.same({ 6100 }, probe_ids(c4), "a reconnect joins the check")
 		decoy_silent(c4)
 		c4.net_status(6101, PORT, "ONLINE")
 		assert.same({ PROBE_REQUEST }, sent_on(c4, 6101))
@@ -1133,7 +1137,11 @@ describe("Hue Bridge driver: the network connection's TLS check (#317)", functio
 		-- For the rest of the run: no second check, still no network connection.
 		env.Properties["Event Stream Transport"] = "Network connection"
 		env.OnPropertyChanged("Event Stream Transport")
-		env.ExecuteCommand("LUA_ACTION", { ACTION = "Connect Event Stream" })
+		-- Diagnostics' "Reconnect the event stream" (Connect Event Stream until
+		-- 1.2, its alias until 2.0).
+		env.ExecuteCommand("LUA_ACTION", { ACTION = "Diagnostics", What = "diag:connect" })
+		assert.equal("Reconnect the event stream: started (the result shows in Event Stream)", fake.last_action(env),
+			"the click ran")
 		wait_gap(c4)
 		assert.same({ 6100 }, probe_ids(c4))
 		assert.is_false(stream_created(c4))

@@ -18,6 +18,9 @@ actions and `Link Devices` are Link Device, `Forget Light` is Forget
 Device, Adopt Hue Names and Accept Names As They Are are Resolve Names, and
 `Room Audit` is a mark on the list rows; the old commands answer as hidden
 aliases until 2.0 (`docs/simplify-actions-design.md` §1.2, §1.3).
+Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those hidden
+aliases, the Hue Light device's `Adopt Hue Name` and `Forget This Light`
+among them (`docs/hdmi-sync-stage1-design.md` §5.1, §5.3).
 
 ## 1. Problem
 
@@ -251,6 +254,22 @@ usually mapped by `Map Rooms By Name`).
 | `HUE_DIM` | device → bridge | unchanged; group queue (`dim`, `rate`, `level`), Decision 6. Current (1.3, #249): through `bridge/group_hold.lua`, to the lit member lights or as timed group steps (`docs/group-hold-design.md`) |
 | `HUE_GOODBYE`, `HUE_FORGET` | device → bridge | unchanged; routed by `device_id` (zone-light registry first, then lights) |
 | `HUE_FORGOTTEN` | bridge → device | unchanged; `name` = the group's name |
+
+Current (2.0, #514, 2026-11-14; [`hdmi-sync-stage1-design.md`](hdmi-sync-stage1-design.md)
+§4.6, §5.1; [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) C7): a
+group's `HUE_STATE` also carries `lamps`, the count of the group's lamps,
+and `streaming_lamps`, how many of them stream to a Hue entertainment
+area. When all of them stream it carries `streaming` "true" and
+`stream_label`, as a light's does ([`lights-design.md`](lights-design.md),
+"Messages"); otherwise `streaming` "false". While 0 < `streaming_lamps` <
+`lamps`, `on` and `brightness` come from the lamps that do not stream, by
+the rule Hue's grouped_light uses (on if any is on; brightness the average
+of those on). `zl:streaming_changed(rids)` re-sends the state of every
+zone light that holds one of those lamps. The device: with every lamp
+streaming it behaves as a light whose lamp streams, with Last Action `Not
+changed: the lamps follow the TV while they sync (<stream_label>)`; with
+some streaming, Status reads `<streaming_lamps> of <lamps> lamps syncing
+with the TV` and commands go out as before.
 
 ### Naming
 

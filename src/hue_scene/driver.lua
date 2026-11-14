@@ -69,8 +69,15 @@ local DEFAULT_RECALL = "active"
 
 -- Keypad Follows property values (#469 D9, D12; On State Follows before,
 -- docs/scene-led-design.md): the room or zone's lights (the default) or this
--- scene alone (the on rule).
+-- scene alone (the on rule). The hidden On State Follows, kept until 2.0 only
+-- to carry its value over once, went in 2.0 (#514, O15).
 local FOLLOW_LIGHTS, FOLLOW_SCENE = "Room/zone lights", "This scene"
+
+-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §5.2): the most lamps a
+-- HUE_SCENE_GROUP streaming_lamps count can name, far above any bridge's
+-- light limit (the Bridge Pro's hard limit is 186, docs/edge-cases-hue.md);
+-- a count beyond it is no count.
+local MAX_STREAMING_LAMPS = 1000
 
 -- The device's kinds (docs/smart-scenes-design.md, Decision 1): an ordinary
 -- Hue scene, or a time-based one (CLIP v2 smart_scene). The configure names
@@ -109,6 +116,10 @@ local st = {
 	-- scene: level_seq then, and the controller ms after which a target no
 	-- longer waits for that recall's first level report (awaiting_level).
 	recall_wait = nil,
+	-- 2.0 (#514, §5.2): how many lamps of the scene's room or zone keep
+	-- syncing with the TV, from HUE_SCENE_GROUP streaming_lamps; 0 until the
+	-- bridge says more. Not persisted: the hello's answer carries it again.
+	streaming_lamps = 0,
 }
 local recall_action = DEFAULT_RECALL
 -- The on rule (docs/scene-dimmer-design.md, Behaviour): set whenever the scene
@@ -160,8 +171,8 @@ local dev = device.new({
 	-- driver.xml declares click_rates (#430 D21) and hold_rates
 	settings = { "click_up", "click_down", "hold_up", "hold_down" },
 })
-local prop, notify, device_id, result = dev.prop, dev.notify, dev.device_id, dev.result
-local bound_bridge, proxy_id, after_late_init = dev.bound_bridge, dev.proxy_id, dev.after_late_init
+local prop, notify, device_id = dev.prop, dev.notify, dev.device_id
+local bound_bridge, after_late_init = dev.bound_bridge, dev.after_late_init
 local update_leds, LINK_BUTTON, send = dev.update_leds, device.LINK_BUTTON, dev.send
 
 -- Parsing ------------------------------------------------------------------
@@ -287,8 +298,24 @@ local function smart_status()
 	return string.format("%s; now %s%s", head, st.slot_name, from)
 end
 
+-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §5.2): what a linked scene's
+-- Status adds while lamps of its room or zone stream to a TV (an
+-- entertainment area), "" while none does. Recall is unchanged: Hue leaves
+-- the streaming lamps to the stream.
+local function syncing_text()
+	local n = st.streaming_lamps
+	if n == 1 then
+		return "; 1 lamp keeps syncing with the TV"
+	elseif n > 1 then
+		return string.format("; %d lamps keep syncing with the TV", n)
+	end
+	return ""
+end
+
 -- While the bridge's link is offline Status names it (#428 D5, §6.3); a
--- scene the bridge has not linked yet keeps saying it waits.
+-- scene the bridge has not linked yet keeps saying it waits. A linked
+-- scene's Status says when lamps of its group keep syncing with the TV
+-- (syncing_text).
 local function refresh_status()
 	if st.forgotten then
 		prop("Status", forgotten_status())
@@ -299,9 +326,9 @@ local function refresh_status()
 	elseif st.rid and dev.link_offline() then
 		prop("Status", dev.link_text())
 	elseif st.configured and st.name and is_smart() then
-		prop("Status", smart_status())
+		prop("Status", smart_status() .. syncing_text())
 	elseif st.configured and st.name then
-		prop("Status", string.format("Hue scene %s in %s", st.name, group_label() or "(no room)"))
+		prop("Status", string.format("Hue scene %s in %s%s", st.name, group_label() or "(no room)", syncing_text()))
 	elseif st.rid and st.name then
 		prop("Status", st.name) -- the persisted copy, until the bridge answers
 	else
@@ -1346,13 +1373,6 @@ end
 
 dispatch.properties["Keypad_Follows"] = take_keypad_follows
 
--- #469 D12: On State Follows stays declared, hidden, until 2.0, only so its
--- stored value can be carried into Keypad Follows once (migrate_keypad_follows
--- below); a change to it does nothing.
-dispatch.properties["On_State_Follows"] = function()
-	log.debug("On State Follows is replaced by Keypad Follows; ignored")
-end
-
 -- Show or hide a property row [verified: API 24_properties/_4,
 -- SetPropertyAttribs(name, 1) hides and is not for OnDriverInit; 0 shows, as
 -- in Snap One's drivers-common-public SetPropertyVisible]. Every controller
@@ -1386,26 +1406,6 @@ local function apply_recall_as()
 	if set_hidden("Recall As", hide) then
 		log.debug("Recall As %s", hide and "hidden (time-based scene)" or "shown")
 	end
-end
-
--- #469 D12, at every late init after the properties are replayed: On State
--- Follows is hidden, and once (PersistData keypad_follows_migrated) a stored
--- "This scene" is carried into Keypad Follows. UpdateProperty does not call
--- OnPropertyChanged [verified: API 24_properties/_5-UpdateProperty.md,
--- _3-OnPropertyChanged.md], so the value is applied here too. Once the flag
--- is set a dealer's later choice of Keypad Follows is never overwritten; a
--- device whose old value is the default has nothing to carry over.
-local function migrate_keypad_follows()
-	set_hidden("On State Follows", true)
-	if to_bool(C4:PersistGetValue("keypad_follows_migrated")) == true then
-		return
-	end
-	if Properties["On State Follows"] == FOLLOW_SCENE then
-		C4:UpdateProperty("Keypad Follows", FOLLOW_SCENE)
-		take_keypad_follows(FOLLOW_SCENE)
-		log.info("Keypad Follows set to %q, the value On State Follows had", FOLLOW_SCENE)
-	end
-	C4:PersistSetValue("keypad_follows_migrated", true)
 end
 
 -- From the bridge (ExecuteCommand) -------------------------------------------
@@ -1475,6 +1475,7 @@ local function drop_scene_state(gone)
 	set_held(false)
 	off_unheld = false
 	group_on = nil
+	st.streaming_lamps = 0 -- 2.0 (#514): the old group's count, like its on/off
 	st.recall_wait = nil
 	if gone then
 		st.active = "inactive"
@@ -1708,6 +1709,23 @@ dispatch.commands["HUE_SCENE_STATE"] = after_late_init("HUE_SCENE_STATE", functi
 	end
 end)
 
+-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.6, §5.2): HUE_SCENE_GROUP's
+-- streaming_lamps, how many lamps of the scene's room or zone stream to a TV.
+-- A whole number 0..MAX_STREAMING_LAMPS (#486, common/num.lua); anything
+-- else, or no such key (the messages that carry only other_active, a bridge
+-- before 2.0), leaves the count known as it is. A change shows in Status at
+-- once. The on state and level the same message carries are the bridge's,
+-- from the lamps that do not stream; the device shows what it is sent.
+local function take_streaming(value)
+	local n = num.int(value, 0, MAX_STREAMING_LAMPS)
+	if n == nil or n == st.streaming_lamps then
+		return
+	end
+	st.streaming_lamps = n
+	log.debug("lamps of the group syncing with the TV: %d", n)
+	refresh_status()
+end
+
 -- The scene's room/zone (docs/keypad-design.md and docs/scene-dimmer-design.md,
 -- Messages): its grouped_light's level, its on/off, or another scene of the
 -- group became active; every key optional. A level is cached and, while the
@@ -1721,7 +1739,9 @@ end)
 -- the report leaves (#421 D10, hold_group). The answer to a group command
 -- that did not land (the optional reason "undelivered", #428 D8) settles
 -- at once (group_undelivered); any other report of the group means an
--- instant off's held state has nothing more to wait for.
+-- instant off's held state has nothing more to wait for. Since 2.0 (#514)
+-- the count of the group's lamps that stream to a TV comes with it
+-- (take_streaming), first, whatever else the message says.
 dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", function(params)
 	params = params or {}
 	-- #483 D-1: the bridge names the scene's own rid in every group message
@@ -1729,6 +1749,7 @@ dispatch.commands["HUE_SCENE_GROUP"] = after_late_init("HUE_SCENE_GROUP", functi
 	if not dev.addressed("HUE_SCENE_GROUP", params) then
 		return
 	end
+	take_streaming(params.streaming_lamps)
 	-- #486: a finite level, clamped to 0..100; anything else is no level.
 	local level = num.clamp(params.level, 0, 100)
 	local lit = level and level > 0 and math.min(level, 100) or nil
@@ -1830,55 +1851,12 @@ dispatch.commands["HUE_SCENE_FORGOTTEN"] = after_late_init("HUE_SCENE_FORGOTTEN"
 	report_online()
 end)
 
--- Hidden aliases (LUA_ACTION or by name) ------------------------------------
--- Since 1.2 the device has no actions (#334, docs/simplify-actions-design.md
--- §1.2, D3): names follow Hue by themselves and the Hue Bridge's Resolve
--- Names settles what cannot, its Forget Device releases any device. The two
--- old commands still answer as they did, for the dev loop, older briefs and
--- any C4:SendToDevice caller, until 2.0 (§3.3; tests/fixtures/ledger.lua
--- lists them). Every call ends in Last Action and a log line, whatever
--- happened.
-
--- `fn` under the old command, saying in the log (Debug Mode) what replaced it.
-local function alias(old, now, fn)
-	return function(...)
-		log.info("%s is a hidden alias until 2.0; %s on the Hue Bridge does this now", old, now)
-		return fn(...)
-	end
-end
-
--- Rename our proxy (the device Composer shows) to the Hue scene name. Only
--- ever from this command: names belong to the owner (docs/import-design.md §7).
-dispatch.commands["Adopt_Hue_Name"] = alias("Adopt Hue Name", "Resolve Names", function()
-	if not st.name then
-		return result("Not renamed: no Hue name known yet (the bridge has not configured this scene)")
-	end
-	local id = proxy_id()
-	if not id then
-		return result("Not renamed: no light_v2 proxy is bound to binding 5001")
-	end
-	-- The name the bridge gives a scene device at creation (docs/scenes-design.md
-	-- §1): the scene's own name in a room, the zone's name in front for a zone;
-	-- a time-based scene's without the app's number (docs/smart-scenes-design.md,
-	-- Decision 7).
-	local name = is_smart() and base_name(st.name) or st.name
-	if st.group_type == "zone" and st.group_name then
-		name = st.group_name .. " " .. name
-	end
-	C4:RenameDevice(id, name) -- [verified: API 22/_32]
-	result(string.format("Renamed device %d to %s", id, name))
-end)
-
--- Ask the bridge to Forget this scene; it answers HUE_SCENE_FORGOTTEN, which
--- sets Status. The bridge finds the entry by rid or, for a rid-less device,
--- by device id.
-dispatch.commands["Forget_This_Scene"] = alias("Forget This Scene", "Forget Device", function()
-	if not bridge then
-		return result("Not sent: not bound to a Hue Bridge")
-	end
-	dev.send_to(bridge, "HUE_SCENE_FORGET", { rid = st.rid, device_id = device_id() }) -- #493 D-8
-	result("Asked the bridge to forget this scene; its answer sets Status")
-end)
+-- No commands of its own: since 1.2 the device has no actions (#334,
+-- docs/simplify-actions-design.md §1.2, D3), names follow Hue by themselves,
+-- the Hue Bridge's Resolve Names settles what cannot and its Forget Device
+-- releases any device. The hidden aliases Adopt Hue Name and Forget This
+-- Scene, kept until 2.0 (§3.3), went in 2.0 (#514, O15); a call by either
+-- name is now an unknown command (common.dispatch logs it at debug).
 
 -- From the proxy (ReceivedFromProxy) ------------------------------------------
 -- Commands without a handler are logged at debug by common.dispatch.
@@ -2250,7 +2228,6 @@ function OnDriverLateInit()
 	dev.load_colors()
 	load_held()
 	dispatch.replay_properties(Properties)
-	migrate_keypad_follows() -- #469 D12: after the replay, which applied the stored Keypad Follows
 	dev.show_driver_version(1)
 	prop("Hue Scene ID", scene_id_label())
 	prop("Hue Scene", st.name)

@@ -811,74 +811,20 @@ describe("Hue Light driver", function()
 		end)
 	end)
 
-	describe("hidden aliases until 2.0 (no actions since 1.2, docs/simplify-actions-design.md §3.3)", function()
-		-- The light_v2 proxy the fake's project gave this light: the consumer of
-		-- the protocol driver's binding 5001, as on the controller.
-		local function proxy_of(light_id)
-			return assert(fake.project.devices[light_id].proxy_id, "the fake registers a proxy per loaded light")
-		end
-
-		it("Adopt Hue Name and Forget This Light answer sent by name too, as the dev loop sends them", function()
+	describe("the 1.1 aliases are gone (2.0, #514, O15)", function()
+		-- Adopt Hue Name and Forget This Light answered as hidden aliases from
+		-- 1.2 until 2.0 (docs/simplify-actions-design.md §3.3); the Hue
+		-- Bridge's Resolve Names and Forget Device do their jobs.
+		it("Adopt Hue Name and Forget This Light do nothing, sent by name or as LUA_ACTION", function()
 			local env, c4 = lit_light()
 			env.ExecuteCommand("Adopt Hue Name", {})
-			assert.same({ { proxy_of(LIGHT_ID), "Desk" } }, c4.calls_to("RenameDevice"))
 			env.ExecuteCommand("Forget This Light", {})
-			assert.equal(1, #messages(c4, "HUE_FORGET"))
-		end)
-
-		it("say in the log, in Debug Mode, which action of the Hue Bridge does the job now", function()
-			local env = lit_light()
-			local lines = {}
-			log.set_debug(true)
-			log.sink = function(line) lines[#lines + 1] = line end
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
-			log.set_debug(false)
-			log.sink = function() end
-			local text = table.concat(lines, "\n")
-			assert.truthy(text:find("Adopt Hue Name is a hidden alias until 2.0; Resolve Names on the Hue Bridge "
-				.. "does this now", 1, true))
-			assert.truthy(text:find("Forget This Light is a hidden alias until 2.0; Forget Device on the Hue Bridge "
-				.. "does this now", 1, true))
-		end)
-
-		it("Adopt Hue Name renames the proxy device, not the protocol driver", function()
-			local env, c4 = lit_light()
-			local proxy_id = proxy_of(LIGHT_ID)
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.same({ { proxy_id, "Desk" } }, c4.calls_to("RenameDevice"))
-			assert.equal("Desk", fake.project.devices[proxy_id].name)
-			assert.equal("Hue Light", fake.project.devices[LIGHT_ID].name, "the protocol driver keeps its name")
-			assert.equal(string.format("Renamed device %d to Desk", proxy_id), fake.last_action(env))
-		end)
-
-		it("Adopt Hue Name refuses without a Hue name or without a proxy", function()
-			local env, c4 = load_light({ rid = "l1" })
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
 			assert.equal(0, #c4.calls_to("RenameDevice"))
-			assert.truthy(fake.last_action(env):find("^Not renamed: no Hue name known yet"))
-
-			env, c4 = lit_light()
-			c4.GetBoundConsumerDevices = function() return nil end -- nothing bound, as documented
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.equal(0, #c4.calls_to("RenameDevice"))
-			assert.equal("Not renamed: no light_v2 proxy is bound to binding 5001", fake.last_action(env))
-		end)
-
-		it("Forget This Light asks the bridge with HUE_FORGET", function()
-			local env, c4 = lit_light()
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
-			assert.same({ { id = BRIDGE_ID, command = "HUE_FORGET", params = { rid = "l1", device_id = "2001" } } },
-				messages(c4, "HUE_FORGET"))
-			assert.equal("Asked the bridge to forget this light; its answer sets Status", fake.last_action(env))
-			assert.equal("Desk (Hue color lamp)", env.Properties["Status"], "Status waits for HUE_FORGOTTEN")
-		end)
-
-		it("Forget This Light refuses when no bridge is bound", function()
-			local env, c4 = load_light({ bind = false, rid = "l1" })
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
-			assert.equal(0, #c4.sent)
-			assert.equal("Not sent: not bound to a Hue Bridge", fake.last_action(env))
+			assert.equal(0, #c4.sent, "no HUE_FORGET, nothing else")
+			assert.equal("", fake.last_action(env))
+			assert.equal("Desk (Hue color lamp)", env.Properties["Status"])
 		end)
 	end)
 
@@ -2946,10 +2892,6 @@ describe("Hue Light driver", function()
 			return text
 		end
 
-		local function proxy_of(light_id)
-			return assert(fake.project.devices[light_id].proxy_id, "the fake registers a proxy per loaded light")
-		end
-
 		local NO_LIGHTS = "Hue zone Bedside Lights has no lights; nothing to control"
 
 		after_each(function() log.set_debug(false) end)
@@ -3011,10 +2953,9 @@ describe("Hue Light driver", function()
 		end)
 
 		-- Issue #234: the group type was not persisted, so after a restart a
-		-- room device spoke of a "group light", and Adopt Hue Name (a hidden
-		-- alias since 1.2) gave it the room's bare name, until the bridge
-		-- configured it again.
-		it("persists the group type, so after a restart its texts and Adopt Hue Name need no configure (#234)", function()
+		-- room device spoke of a "group light" until the bridge configured it
+		-- again.
+		it("persists the group type, so after a restart its texts need no configure (#234)", function()
 			local first, c4 = load_light({ rid = ROOM_RID })
 			configure_group(first, ROOM)
 			assert.equal("room", c4.persist.hue_group_type)
@@ -3026,10 +2967,8 @@ describe("Hue Light driver", function()
 			env.OnDriverLateInit("DIT_STARTUP")
 			assert.equal(1, #messages(c42, "HUE_HELLO"), "greeted; the bridge has not answered yet")
 			assert.equal("Hue room Master Bedroom", env.Properties["Status"])
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.same({ { proxy_of(LIGHT_ID), "Master Bedroom Lights" } }, c42.calls_to("RenameDevice"))
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
-			assert.equal("Asked the bridge to forget this room light; its answer sets Status", fake.last_action(env))
+			env.ExecuteCommand("Raise Level By", {})
+			assert.equal("Not raised: the room light's level is not known yet", fake.last_action(env))
 		end)
 
 		it("applies a configure buffered before late init, and the hello carries the kind it delivered", function()
@@ -3317,30 +3256,13 @@ describe("Hue Light driver", function()
 			end
 		end)
 
-		it("Adopt Hue Name and Forget This Light (hidden aliases) speak of the zone or room", function()
+		it("a zone or room device answers neither 1.1 alias either (2.0, #514, O15)", function()
 			local env, c4 = lit_zone()
-			local proxy_id = proxy_of(LIGHT_ID)
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.same({ { proxy_id, "Bedside Lights" } }, c4.calls_to("RenameDevice"), "a zone's name verbatim")
 			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
-			assert.same({ rid = ZONE_RID, device_id = "2001" }, messages(c4, "HUE_FORGET")[1].params)
-			assert.equal("Asked the bridge to forget this zone light; its answer sets Status", fake.last_action(env))
-
-			env, c4 = load_light({ rid = ROOM_RID })
-			configure_group(env, ROOM)
-			proxy_id = proxy_of(LIGHT_ID)
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.same({ { proxy_id, "Master Bedroom Lights" } }, c4.calls_to("RenameDevice"),
-				"a room device is <Room> Lights (contract §5 Naming)")
-			assert.equal(string.format("Renamed device %d to Master Bedroom Lights", proxy_id), fake.last_action(env))
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Forget This Light" })
-			assert.equal("Asked the bridge to forget this room light; its answer sets Status", fake.last_action(env))
-
-			env = load_light({ rid = ZONE_RID })
-			configure_group(env, ZONE, nil, { "name" })
-			env.ExecuteCommand("LUA_ACTION", { ACTION = "Adopt Hue Name" })
-			assert.equal("Not renamed: no Hue name known yet (the bridge has not configured this zone light)",
-				fake.last_action(env))
+			assert.equal(0, #c4.calls_to("RenameDevice"))
+			assert.equal(0, #c4.sent)
+			assert.equal("", fake.last_action(env))
 		end)
 	end)
 
@@ -4554,13 +4476,13 @@ describe("Hue Light driver", function()
 			env.OnBindingChanged(1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
 			configure(env)
 			env.ReceivedFromProxy(5001, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "20", RATE = "0" })
-			env.ExecuteCommand("Forget_This_Light", {})
 			for _, m in ipairs(sends) do
 				assert.is_false(m.log_command, m.command)
 				assert.is_false(m.allow_empty, m.command)
 			end
-			assert.same({ "HUE_HELLO", "HUE_LOAD_GROUPS", "HUE_SET", "HUE_FORGET" },
-				{ sends[1].command, sends[2].command, sends[3].command, sends[4].command })
+			assert.same({ "HUE_HELLO", "HUE_LOAD_GROUPS", "HUE_SET" },
+				{ sends[1].command, sends[2].command, sends[3].command })
+			assert.equal(3, #sends)
 		end)
 
 		it("locks Composer's Lua window at init in a release build (#492 I-5)", function()

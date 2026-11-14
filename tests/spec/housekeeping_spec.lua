@@ -303,7 +303,8 @@ describe("bridge.housekeeping", function()
 		-- bridge_request, not job.http; job.charge counts each one as job.http
 		-- would, so they are not outside the hourly budget.
 		it("counts job.charge's requests against the run's budget and the rolling hour, as job.http's", function()
-			-- Six reads an hour (every 10 minutes), 15 requests each, budget 25,
+			-- Six reads an hour (every 10 minutes), 16 requests each (the quick
+			-- read on a Bridge Pro since 2.0, #514), budget 25,
 			-- sent by another path than job.http and charged one by one: the
 			-- driver's stream-down read. They all fit the hour.
 			local charged, answers = {}, {}
@@ -312,12 +313,12 @@ describe("bridge.housekeeping", function()
 					name = "down_read", class = "optional", interval_s = 600, budget = 25, guards = {},
 					run = function(job, done)
 						runs[#runs + 1] = { name = "down_read", at = c4.now_ms, trigger = job.trigger }
-						for _ = 1, 15 do
+						for _ = 1, 16 do
 							local refusal = job.charge()
 							answers[#answers + 1] = refusal or "sent"
 							if not refusal then charged[#charged + 1] = c4.now_ms end
 						end
-						done(true, "15 read")
+						done(true, "16 read")
 					end,
 				})
 			end
@@ -333,8 +334,8 @@ describe("bridge.housekeeping", function()
 			for _, a in ipairs(answers) do
 				assert.equal("sent", a)
 			end
-			assert.equal(90, hk:info("down_read").hour_used, "six reads of 15 in the last hour")
-			assert.equal(15, reports[#reports].requests, "the report counts the charged requests")
+			assert.equal(96, hk:info("down_read").hour_used, "six reads of 16 in the last hour")
+			assert.equal(16, reports[#reports].requests, "the report counts the charged requests")
 
 			-- Beside a task that reads through job.http, both together stay
 			-- within the hour's budget.

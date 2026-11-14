@@ -419,4 +419,52 @@ describe("zone light round trip: add, hello, on, hold, off, deleted in Hue, re-l
 		assert.equal(153, set_mirek(100))
 		assert.equal(300, set_mirek(300))
 	end)
+
+	-- #514 (docs/hdmi-sync-stage1-design.md §4.6, §5.1): the zone's lamps sync
+	-- with the TV. Downstairs holds Garage White (off) and Living Room Lamp
+	-- (on at 73.52, Hue's grouped_light on at 73.52).
+	it("shows the lamps that sync with the TV: some, then all, then none", function()
+		-- A container with the lamps' `mode`, as driver.lua runs it: the lights
+		-- take it, the entertainment module's settle calls streaming_changed,
+		-- then the zone lights' own pass.
+		local function modes(keys, mode)
+			local items, rids = {}, {}
+			for i, key in ipairs(keys) do
+				rids[i] = F.rids[key]
+				items[i] = '{"id":"' .. F.rids[key] .. '","mode":"' .. mode .. '","type":"light"}'
+			end
+			fake.as(bridge, function()
+				local c = bridge.C4:JsonDecode('[{"creationtime":"2026-11-14T20:00:00Z",'
+					.. '"id":"9de116fc-00e1-4a2b-8c3d-0000000000e1","type":"update","data":[' .. table.concat(items, ",")
+					.. ']}]')[1]
+				L:on_container(c)
+				Z:streaming_changed(rids)
+				Z:on_container(c)
+			end)
+			fake.pump()
+		end
+
+		Z:resync()
+		answer_grouped_light_get()
+		Z:add(F.group_rids.downstairs, nil, function() end)
+		fake.pair(bridge, light, { light_id = DEVICE_ID, bind = false })
+		fake.as(light, light.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		assert.equal("Hue zone Downstairs (2 lights)", light.Properties["Status"])
+
+		light.C4.calls = {}
+		modes({ "living" }, "streaming")
+		assert.equal("1 of 2 lamps syncing with the TV", light.Properties["Status"])
+		local br = proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED")
+		assert.equal(0, br[#br].LIGHT_BRIGHTNESS_CURRENT, "Garage White, the lamp that does not stream, is off")
+
+		light.C4.calls = {}
+		modes({ "garage" }, "streaming")
+		assert.equal("Syncing with the TV (another app)", light.Properties["Status"])
+		br = proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED")
+		assert.equal(74, br[#br].LIGHT_BRIGHTNESS_CURRENT, "every lamp streams: the level Hue reports")
+
+		modes({ "living", "garage" }, "normal")
+		assert.equal("Hue zone Downstairs (2 lights)", light.Properties["Status"])
+	end)
 end)

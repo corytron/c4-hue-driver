@@ -8,13 +8,17 @@
 -- bridge/motion_diag.lua, for which their own specs stand in: the actions
 -- with the pickers' values, the HUE_MOTION_* dispatch, the stream fan-out,
 -- the rows and Attention, the shared actions and the diagnostics' secrets.
+-- The actions are 1.2's merged ones (Add From Hue, Link Device, Forget
+-- Device, Resolve Names, Diagnostics), with their pickers' Motion folder: the
+-- motion commands of 1.1 they replaced answered as hidden aliases until 2.0
+-- removed them (#514, docs/hdmi-sync-design.md §10 O15).
 --
 -- The bridge is tests/fixtures/hue_motion.lua (docs/motion-hue-research.md
 -- §5) on a Hue Bridge Pro: the Hallway sensor (SML003, Hue room Hallway),
 -- the Porch sensor (SML002, in no room) and the Kitchen motion area. Its
 -- Hue rooms Hallway and Kitchen meet Control4 rooms of the same names, so
--- the first resync's Map Rooms By Name maps them. Addresses, ids and the
--- key are the documented placeholders.
+-- the first resync maps them by name (Map Rooms By Name's job, automatic
+-- since 1.2). Addresses, ids and the key are the documented placeholders.
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -31,14 +35,17 @@ local APP_KEY = "zzzz0000zzzz0000"
 -- The controller's clock (C4:GetTime, ms) at the start: 07:10:00Z on 2026-10-26.
 local START_MS = 1792998600000
 local HOLD_TIME = "Occupancy Hold Time (s)"
+local CONFIRM_YES = "Yes, forget"      -- bridge/actions.lua CONFIRM_YES, Forget Device's Confirm
 
 -- The GETs of a resync after the stream connects, in order: the lights' six,
 -- the scenes' three (the zone lights take the scenes' grouped_light items),
--- then the motion module's eight (docs/motion-design.md §4.2).
+-- the motion module's eight (docs/motion-design.md §4.2), the entertainment
+-- areas' two (2.0, #514: docs/hdmi-sync-stage1-design.md §4.2), then the Hue
+-- automation audit's two.
 local CHAIN = { "light", "device", "zigbee_connectivity", "room", "zone", "bridge_home", "scene", "smart_scene",
 	"grouped_light", "motion", "light_level", "temperature", "device_power", "zigbee_connectivity",
-	"motion_area_configuration", "convenience_area_motion", "security_area_motion", "behavior_instance",
-	"behavior_script" }
+	"motion_area_configuration", "convenience_area_motion", "security_area_motion", "entertainment_configuration",
+	"entertainment", "behavior_instance", "behavior_script" }
 
 local BODIES = {
 	light = M.light, device = M.device, zigbee_connectivity = M.zigbee_connectivity, room = M.room, zone = M.zone,
@@ -46,6 +53,8 @@ local BODIES = {
 	motion = M.motion_body, light_level = M.light_level_body, temperature = M.temperature_body,
 	device_power = M.device_power_body, motion_area_configuration = M.motion_area_configuration,
 	convenience_area_motion = M.convenience_area_motion, security_area_motion = M.security_area_motion,
+	-- No entertainment areas on this bridge (2.0, #514): this spec is not about them.
+	entertainment_configuration = M.empty, entertainment = M.empty,
 	-- The Hue automation audit reads last (#280 D18); none on this bridge.
 	behavior_instance = M.empty, behavior_script = M.empty,
 }
@@ -182,12 +191,14 @@ describe("motion round trip", function()
 		end
 	end
 
-	-- The entry of a bridge picker (CUSTOM_SELECT list function) whose text starts with `prefix`.
-	local function pick(list_fn, prefix)
-		for _, entry in ipairs(fake.custom_select(bridge, list_fn)) do
+	-- The entry of a bridge picker (CUSTOM_SELECT list function) whose text
+	-- starts with `prefix`, in `folder` when given (as Composer opens one:
+	-- the merged actions' pickers keep the motion things in "f:motion").
+	local function pick(list_fn, prefix, folder)
+		for _, entry in ipairs(fake.custom_select(bridge, list_fn, folder)) do
 			if entry.text:sub(1, #prefix) == prefix then return entry end
 		end
-		error("no entry starting with " .. prefix .. " in " .. list_fn)
+		error("no entry starting with " .. prefix .. " in " .. list_fn .. (folder and " " .. folder or ""))
 	end
 
 	-- RoomList's value for a Control4 room.
@@ -207,10 +218,11 @@ describe("motion round trip", function()
 		return fake.pump()
 	end
 
-	-- Add Motion Sensor for the Hallway sensor into its mapped room, and the
-	-- device live, with the recordings cleared.
+	-- Add From Hue for the Hallway sensor into its mapped room (Add Motion
+	-- Sensor until 1.2, its alias until 2.0), and the device live, with the
+	-- recordings cleared.
 	local function add_sensor()
-		local text = action("Add Motion Sensor", { Sensor = pick("MotionSensorList", "Hallway sensor").value,
+		local text = action("Add From Hue", { What = pick("AddFromHueList", "Hallway sensor", "f:motion").value,
 			Room = pick("RoomList", "(mapped room)").value })
 		assert.equal("Added Hallway sensor to Hallway (device 2001)", text)
 		go_live(sensor, SENSOR_ID)
@@ -282,10 +294,11 @@ describe("motion round trip", function()
 			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 3 new",
 				bridge.Properties["Motion Sensors"])
 
-			-- Add Motion Sensor: one AddDevice of hue_motion.c4z into the room
-			-- the Hue room Hallway maps to, bound to the bridge's binding 1,
-			-- then told its configuration and state.
-			local text = action("Add Motion Sensor", { Sensor = pick("MotionSensorList", "Hallway sensor").value,
+			-- Add From Hue with the Hallway sensor (Add Motion Sensor, which it
+			-- replaced in 1.2; the alias went in 2.0): one AddDevice of
+			-- hue_motion.c4z into the room the Hue room Hallway maps to, bound
+			-- to the bridge's binding 1, then told its configuration and state.
+			local text = action("Add From Hue", { What = pick("AddFromHueList", "Hallway sensor", "f:motion").value,
 				Room = pick("RoomList", "(mapped room)").value })
 			assert.equal("Added Hallway sensor to Hallway (device 2001)", text)
 			assert.same({ { id = SENSOR_ID, driver = "hue_motion.c4z", room = HALLWAY, name = "Hallway sensor" } },
@@ -330,9 +343,11 @@ describe("motion round trip", function()
 			assert.equal(1, stream(M.events.e2))
 			assert.same({ "OPENED", "CLOSED" }, contact(sensor))
 
-			-- Add Motion Area with the Kitchen room picked: the second device.
+			-- Add From Hue with the Kitchen motion area and the Kitchen room
+			-- picked (Add Motion Area until 1.2, its alias until 2.0): the
+			-- second device.
 			bc4.sent = {}
-			text = action("Add Motion Area", { Area = pick("MotionAreaList", "Kitchen motion area").value,
+			text = action("Add From Hue", { What = pick("AddFromHueList", "Kitchen motion area", "f:motion").value,
 				Room = room_value(KITCHEN) })
 			assert.equal("Added Kitchen motion area to Kitchen (device 2002)", text)
 			assert.same({ id = AREA_ID, driver = "hue_motion.c4z", room = KITCHEN, name = "Kitchen motion area" },
@@ -417,10 +432,11 @@ describe("motion round trip", function()
 				.. "(device 2001, since " .. os.date("%Y-%m-%d") .. ") (Link or Forget Device)", 1,
 				true), fake.attention(bridge))
 
-			-- Once: the device asking again (Refresh From Bridge) hears the
-			-- same end, and its proxy hears nothing more.
+			-- Once: the device asking again (a re-bind's hello; the hidden
+			-- Refresh From Bridge alias went in 2.0, #514 O15) hears the same
+			-- end, and its proxy hears nothing more.
 			bc4.sent = {}
-			fake.as(sensor, sensor.ExecuteCommand, "LUA_ACTION", { ACTION = "Refresh From Bridge" })
+			fake.as(sensor, sensor.OnBindingChanged, 1, "HUE_BRIDGE", true, BRIDGE_ID, 1)
 			fake.pump()
 			assert.same({ "HUE_BRIDGE_LINK", "HUE_MOTION_CONFIGURE", "HUE_MOTION_STATE" }, messages_to(SENSOR_ID))
 			assert.equal("deleted", last_sent(SENSOR_ID, "HUE_MOTION_STATE").ended)
@@ -460,15 +476,18 @@ describe("motion round trip", function()
 				bridge.Properties["Motion Sensors"])
 		end)
 
-		it("#325: Import All New Motion Sensors, the bulk add's one name, imports every new sensor in a mapped room",
+		it("#325: the bulk add of motion sensors, under one name, imports every new sensor in a mapped room",
 			function()
-			-- Since 1.2 a hidden alias of Import All New (docs/simplify-actions-design.md §3.3).
+			-- Import All New Motion Sensors was a hidden alias of Import All New
+			-- from 1.2 (docs/simplify-actions-design.md §3.3) until 2.0 removed
+			-- it; its half of the job is Add From Hue's "All new motion sensors"
+			-- row (all:motion).
 			local xml = assert(io.open("src/hue_bridge/driver.xml")):read("*a")
 			assert.truthy(xml:find("<action>%s*<name>Import All New</name>%s*<command>Import All New</command>"))
 			assert.is_nil(xml:find("Add All New Motion Sensors", 1, true), "the old name is gone")
 			assert.equal("Added 1 new motion sensor: Hallway sensor #12 to Hallway (device 2001); skipped 1 with no mapped "
 				.. "room (Set Room Mapping or Add From Hue): Porch sensor #20 (no Hue room); not included: 1 new "
-				.. "motion area (Add From Hue adds areas one at a time)", action("Import All New Motion Sensors"))
+				.. "motion area (Add From Hue adds areas one at a time)", action("Add From Hue", { What = "all:motion" }))
 			assert.same({ { id = SENSOR_ID, driver = "hue_motion.c4z", room = HALLWAY, name = "Hallway sensor" } },
 				bc4.added)
 		end)
@@ -505,7 +524,9 @@ describe("motion round trip", function()
 			assert.equal("9 % (low)", sensor.Properties["Battery"])
 			assert.same({ 3 }, sensor.C4.events_fired, "Battery Low")
 			assert.equal("1", sensor.C4.variables["Battery Low"].value)
-			action("Accept Names As They Are")
+			-- Any action (Resolve Names, which replaced Accept Names As They Are
+			-- in 1.2; the alias went in 2.0).
+			action("Resolve Names", { Names = "names:keep_composer" })
 			assert.truthy(fake.attention(bridge):find("1 motion sensor battery low: Hallway sensor 9 %", 1, true),
 				fake.attention(bridge))
 		end)
@@ -529,15 +550,17 @@ describe("motion round trip", function()
 			assert.equal(summary, bridge.Properties["Motion Sensors"])
 		end)
 
-		it("re-links a gone sensor's device to a sensor only (D4); Forget Motion Device lets it go", function()
+		it("re-links a gone sensor's device to a sensor only (D4); Forget Device lets it go", function()
 			add_sensor()
 			stream(hallway_deleted())
 
-			-- Re-link's pickers: the gone device, and every sensor and area as the target.
-			local device = pick("RelinkMotionDeviceList", "Hallway sensor (motion sensor, device 2001, gone since ")
-			assert.equal("2001", device.value)
-			local text = action("Re-link Motion Device", { Device = device.value,
-				Target = pick("MotionTargetList", "Kitchen motion area").value })
+			-- Link Device (Re-link Motion Device until 1.2, its alias until
+			-- 2.0), its pickers' Motion folders: the gone device, and every
+			-- sensor and area as the target.
+			local device = pick("LinkDeviceList", "Hallway sensor (motion sensor, device 2001, gone since ", "f:motion")
+			assert.equal("dev:2001", device.value)
+			local text = action("Link Device", { Device = device.value,
+				To = pick("LinkTargetList", "Kitchen motion area", "f:motion").value })
 			assert.equal("Not re-linked: device 2001 is a motion sensor; pick a sensor", text)
 			assert.equal(SENSOR_ID, bc4.persist.hue_motion[M.devices.hallway].device_id, "nothing changed")
 
@@ -545,8 +568,8 @@ describe("motion round trip", function()
 			-- and its Composer name, and hears the new sensor.
 			bc4.sent = {}
 			sensor.C4.calls = {}
-			text = action("Re-link Motion Device", { Device = device.value,
-				Target = pick("MotionTargetList", "Porch sensor").value })
+			text = action("Link Device", { Device = device.value,
+				To = pick("LinkTargetList", "Porch sensor", "f:motion").value })
 			-- Since 1.2 the Hue thing takes the Composer name (names N16, #334).
 			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20; Hue gets the Composer name "
 				.. "Hallway sensor", text)
@@ -565,10 +588,12 @@ describe("motion round trip", function()
 			assert.equal("Hallway sensor", fake.project.devices[SENSOR_ID].name, "the Composer name is the owner's")
 			assert.equal(1, #bc4.bindings)
 
-			-- Forget Motion Device: the device is unbound and told; it stays in
-			-- the project, and the sensor is listed under Add From Hue again.
-			local forget = pick("ForgetMotionDeviceList", "Porch sensor (motion sensor, device 2001)")
-			text = action("Forget Motion Device", { Device = forget.value })
+			-- Forget Device (Forget Motion Device until 1.2, its alias until
+			-- 2.0, which confirmed by itself): the device is unbound and told;
+			-- it stays in the project, and the sensor is listed under Add From
+			-- Hue again.
+			local forget = pick("ForgetDeviceList", "Porch sensor (motion sensor, device 2001)", "f:motion")
+			text = action("Forget Device", { Device = forget.value, Confirm = CONFIRM_YES })
 			assert.equal("Forgot Porch sensor (device 2001): unbound and left in the project for you to delete; the Hue "
 				.. "motion sensor is listed under Add From Hue again", text)
 			fake.pump()
@@ -581,9 +606,10 @@ describe("motion round trip", function()
 			assert.same({}, contact(sensor))
 			assert.equal("1 sensor + 1 area on bridge‚ 0 imported‚ 2 new",
 				bridge.Properties["Motion Sensors"])
-			assert.equal(M.devices.porch, pick("MotionSensorList", "Porch sensor").value)
+			assert.equal("sensor:" .. M.devices.porch, pick("AddFromHueList", "Porch sensor", "f:motion").value)
+			-- The folder's first row is its way back; the second says it is empty.
 			assert.equal("(no motion device is gone or unbound)",
-				fake.custom_select(bridge, "RelinkMotionDeviceList")[1].text)
+				fake.custom_select(bridge, "LinkDeviceList", "f:motion")[2].text)
 		end)
 
 		it("tells a re-linked device its new sensor's Hue room: none for the Porch sensor", function()
@@ -591,7 +617,7 @@ describe("motion round trip", function()
 			stream(hallway_deleted())
 			bc4.sent = {}
 			assert.equal("Re-linked device 2001 (was Hallway sensor) to Porch sensor #20; Hue gets the Composer name "
-				.. "Hallway sensor", action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch }))
+				.. "Hallway sensor", action("Link Device", { Device = "dev:2001", To = "sensor:" .. M.devices.porch }))
 			fake.pump()
 			assert.equal(1, fire(sensor, 500), "#483 D-1: the device asks the bridge with a hello")
 			fake.pump()
@@ -600,20 +626,22 @@ describe("motion round trip", function()
 			assert.equal("Hue motion sensor Porch sensor", sensor.Properties["Status"])
 		end)
 
-		it("gives a re-linked device's Hue sensor the Composer name; Adopt Hue Names then has nothing to do (1.2)",
-			function()
+		it("gives a re-linked device's Hue sensor the Composer name; Hue names to Composer then has nothing to do "
+			.. "(1.2)", function()
 			add_sensor()
 			stream(hallway_deleted())
-			action("Re-link Motion Device", { Device = "2001", Target = M.devices.porch })
+			action("Link Device", { Device = "dev:2001", To = "sensor:" .. M.devices.porch })
 			-- Names N16 (#334): the device and its name are Control4's, so the
 			-- Hue sensor is renamed, not the Composer device.
 			assert.is_nil(fake.attention(bridge):find("differ", 1, true), fake.attention(bridge))
-			local text = action("Adopt Hue Names")
+			-- Resolve Names' Hue names to Composer (Adopt Hue Names until 1.2,
+			-- its alias until 2.0).
+			local text = action("Resolve Names", { Names = "names:hue_to_composer" })
 			assert.truthy(text:find("No names wait for Resolve Names", 1, true), text)
 			assert.same({}, bc4.renamed, "no Composer rename")
 		end)
 
-		it("links a device bound by hand to the Hue sensor of its Composer name with Link Devices", function()
+		it("links a device bound by hand to the Hue sensor of its Composer name with Link Device", function()
 			-- A Hue Motion Sensor the dealer added from Composer's driver
 			-- search, named Porch sensor and bound to the bridge: its hello has
 			-- no rid, so nothing adopts it.
@@ -627,8 +655,10 @@ describe("motion round trip", function()
 			assert.equal("Bound; waiting for the bridge", area.Properties["Status"])
 			assert.is_nil((bc4.persist.hue_motion or {})[M.devices.porch])
 
+			-- Link Device's top row, every bound device the bridge does not know
+			-- yet (Link Devices until 1.2, its alias until 2.0).
 			bc4.sent = {}
-			local text = action("Link Devices")
+			local text = action("Link Device", { Device = "dev:suggested" })
 			assert.truthy(text:find("Motion: Linked 1 motion device: Porch sensor (device 2002) to Porch sensor #20 by "
 				.. "name", 1, true), text)
 			fake.pump()
@@ -638,8 +668,8 @@ describe("motion round trip", function()
 			assert.same({ "STATE_CLOSED" }, contact(area))
 		end)
 
-		it("tombstones a device deleted in Composer (HUE_MOTION_GOODBYE); Add Motion Sensor lists it last and adds "
-			.. "it again", function()
+		it("tombstones a device deleted in Composer (HUE_MOTION_GOODBYE); Add From Hue lists it last of the sensors "
+			.. "and adds it again", function()
 			add_sensor()
 			fake.delete_device(SENSOR_ID)
 			assert.is_nil(bc4.persist.hue_motion[M.devices.hallway])
@@ -648,16 +678,21 @@ describe("motion round trip", function()
 			assert.equal("2 sensors + 1 area on bridge‚ 0 imported‚ 2 new‚ 1 deleted",
 				bridge.Properties["Motion Sensors"])
 
-			local list = fake.custom_select(bridge, "MotionSensorList")
+			-- Add From Hue's Motion folder (Add Motion Sensor's list until 1.2,
+			-- its alias until 2.0): the sensors, then the areas.
+			local list = {}
+			for _, entry in ipairs(fake.custom_select(bridge, "AddFromHueList", "f:motion")) do
+				if entry.value:find("^sensor:") then list[#list + 1] = entry end
+			end
 			assert.same({ text = "Hallway sensor [Hallway] #12 (deleted from Composer " .. os.date("%Y-%m-%d") .. ")",
-				value = M.devices.hallway }, list[#list])
-			assert.equal("Added Hallway sensor to Hallway (device 2002)", action("Add Motion Sensor",
-				{ Sensor = list[#list].value, Room = "mapped" }))
+				value = "sensor:" .. M.devices.hallway }, list[#list])
+			assert.equal("Added Hallway sensor to Hallway (device 2002)", action("Add From Hue",
+				{ What = list[#list].value, Room = "mapped" }))
 			assert.is_nil(bc4.persist.hue_motion_tombstones[M.devices.hallway])
 			assert.equal(2002, bc4.persist.hue_motion[M.devices.hallway].device_id)
 		end)
 
-		it("runs Log Motion Diagnostics 20 s after the click, then captures events, and logs nothing that "
+		it("runs the motion diagnostics 20 s after the click, then captures events, and logs nothing that "
 			.. "identifies the house", function()
 			-- The bridge's answers for the pass. The Hallway sensor's product
 			-- data echoes the application key, the bridge's address and its id,
@@ -683,8 +718,11 @@ describe("motion round trip", function()
 			-- The click answers at once; nothing is fetched for 20 s (time to
 			-- open the bridge's Lua tab).
 			local first, transfers = #logged + 1, #bc4.transfers
+			-- Diagnostics' "Log motion diagnostics (10 minutes)" (Log Motion
+			-- Diagnostics until 1.2, its alias until 2.0).
 			assert.equal("Motion diagnostics start in 20 seconds: open this bridge's Lua tab now. The pass and 10 "
-				.. "minutes of events follow; copy them into a bug report.", action("Log Motion Diagnostics"))
+				.. "minutes of events follow; copy them into a bug report.",
+				action("Diagnostics", { What = "diag:motion_log" }))
 			assert.equal(transfers, #bc4.transfers, "nothing fetched before the 20 s are up")
 
 			-- 20 s later the pass: one GET at a time (each answered before the
@@ -767,9 +805,11 @@ describe("motion round trip", function()
 			.. "their state", function()
 			add_sensor()
 
-			-- The stream goes down: after the minute's grace the device says its
-			-- motion is not current, and its contact stays as it is (EC §6, D3).
-			action("Disconnect Event Stream")
+			-- The stream goes down (Diagnostics' "Stop the event stream until the
+			-- next start", Disconnect Event Stream until 1.2, its alias until
+			-- 2.0): after the minute's grace the device says its motion is not
+			-- current, and its contact stays as it is (EC §6, D3).
+			action("Diagnostics", { What = "diag:disconnect" })
 			assert.equal(1, fire(bridge, 60000), "the bridge-away grace")
 			fake.pump()
 			assert.truthy(sensor.Properties["Status"]:find("^Bridge not answering since %d%d:%d%d; motion not current$"),
@@ -781,7 +821,9 @@ describe("motion round trip", function()
 			-- GET has its answer, then its full state.
 			bridge.Properties["Debug Mode"] = "On"
 			fake.as(bridge, bridge.OnPropertyChanged, "Debug Mode")
-			action("Connect Event Stream")
+			-- Diagnostics' "Reconnect the event stream" (Connect Event Stream
+			-- until 1.2, its alias until 2.0).
+			action("Diagnostics", { What = "diag:connect" })
 			stream_t = bc4.last_transfer()
 			assert.truthy(stream_t.url:find("/eventstream/clip/v2$"), stream_t.url)
 			fake.as(bridge, function() stream_t:respond_headers(200, {}) end)
@@ -791,8 +833,9 @@ describe("motion round trip", function()
 			local order, motion_read = {}, false
 			for kind in answer_next, BODIES do
 				order[#order + 1] = kind
-				-- The motion resync's last GET is security_area_motion; the Hue
-				-- automation audit's reads follow it (#280 D18).
+				-- The motion resync's last GET is security_area_motion; the
+				-- entertainment areas' (2.0, #514) and the Hue automation
+				-- audit's reads follow it (#280 D18).
 				motion_read = motion_read or kind == "security_area_motion"
 				if not motion_read then
 					assert.same({}, messages_to(SENSOR_ID), "a message to the device after GET " .. kind)

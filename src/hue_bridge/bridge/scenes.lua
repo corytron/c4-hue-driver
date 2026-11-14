@@ -59,6 +59,19 @@
 -- it saves after every AddDevice. Beside the registry's two keys it persists
 -- the devices Forget Scene let go (FORGOTTEN_KEY), written first and only
 -- when they changed.
+--
+-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.6, contracts C7): lamps
+-- that sync with the TV. A lamp streams while its model's `streaming` is
+-- true (the lights' models, from the light's `mode`). Every HUE_SCENE_GROUP
+-- built from the group's state (a resync, a hello's answer, an undelivered
+-- PUT, streaming_changed) carries `streaming_lamps`, the count of the
+-- group's lamps that stream, "0" included: the scene device keeps the last
+-- count it heard and does not persist it. While it is above 0, `on` and
+-- `level` (what Keypad Follows "Room/zone lights" reads) are those of the
+-- lamps that do not stream, by the rule Hue's grouped_light follows
+-- (zone_lights.grouped_rule), a grouped_light event tells them with the
+-- count, and a slider move is measured from that level.
+-- streaming_changed(rids) re-sends HUE_SCENE_GROUP when lamps start or stop.
 
 local num = require("common.num")
 local hue_model = require("bridge.hue_model")
@@ -67,6 +80,7 @@ local groups = require("bridge.groups")
 local util = require("bridge.util")
 local project = require("bridge.project")
 local owner = require("bridge.owner")
+local zone_lights = require("bridge.zone_lights")  -- its grouped_rule and lamp_set (#514)
 
 local scenes = {}
 scenes.__index = scenes
@@ -172,7 +186,7 @@ scenes.REFRESH_CLEARS = { "id_v1" }
 --   now, log                 os.time / common.log look-alikes
 --   project                  the project calls of docs/import-design.md §13 (defaults: bridge.project)
 --   lights                   the bridge.lights instance: its live `groups` cache, `reg:room_mapping()`,
---                            `groups_loaded`
+--                            `groups_loaded`, `devices`, and `models` (each lamp's `streaming`, #514)
 --   group_off(grouped_light_rid, opts?)   the coalesced grouped_light off of driver.lua (§5); opts, given
 --                            only for a timed or urgent off, is { rate = ms?, urgent = true? }: the
 --                            fade-out time (dynamics.duration) and a keypad tap's urgency (#421 S-D6)
@@ -221,6 +235,8 @@ function scenes.new(ctx)
 		level_before = {},         -- grouped_light rid → { level = group_level before a slider move assumed its
 		                           -- target }, until the bridge reports a level again (#428 D9)
 		level_sent = {},           -- grouped_light rid → the HUE_SCENE_GROUP level text last sent to its scenes
+		stream_sent = {},          -- grouped_light rid → signature of the on, level and streaming_lamps last sent
+		                           -- to its scenes while some of its lamps stream (#514)
 		last_configure = {},       -- rid → signature of the last HUE_SCENE_CONFIGURE sent
 		recall_gen = {},           -- rid → generation of the latest recall or off (still_current)
 		recall_windows = {},       -- rid → { timer, params?, device_id? } for RECALL_WINDOW_MS after a recall PUT;
@@ -1017,6 +1033,76 @@ function scenes:groups_overlap(a, b, memo)
 	return false
 end
 
+-- Lamps that sync with the TV (#514, docs/hdmi-sync-stage1-design.md §4.6) ------------
+
+-- rid → normalised light, the lights' live models (their `streaming`).
+function scenes:models()
+	local l = self.ctx.lights
+	return (l and l.models) or {}
+end
+
+-- One lamp's model into a group_stream view: counted when it streams, kept
+-- among the lamps that do not otherwise. A lamp without a model is in neither.
+local function take_lamp(view, model)
+	if type(model) ~= "table" then
+		return
+	end
+	if model.streaming == true then
+		view.streaming = view.streaming + 1
+	else
+		view.still[#view.still + 1] = model
+	end
+end
+
+-- What the lamps of group `group_rid` stream: { streaming (how many),
+-- still (the models of the lamps that do not) }. The lamps are group_lamps'
+-- (memoised in `memo`); the bridge_home's are every lamp the lights know.
+function scenes:group_stream(group_rid, memo)
+	local view = { streaming = 0, still = {} }
+	if group_rid == nil then
+		return view
+	end
+	local models = self:models()
+	local lamps = self:group_lamps(group_rid, memo or {})
+	if lamps.all then
+		for _, model in pairs(models) do
+			take_lamp(view, model)
+		end
+	else
+		for rid in pairs(lamps.set) do
+			take_lamp(view, models[rid])
+		end
+	end
+	return view
+end
+
+-- Whether group `group_rid` holds one of the lamps in `set` (a non-empty
+-- zone_lights.lamp_set); the bridge_home holds them all.
+function scenes:group_holds(group_rid, set, memo)
+	if group_rid == nil then
+		return false
+	end
+	local lamps = self:group_lamps(group_rid, memo)
+	if lamps.all then
+		return true
+	end
+	for rid in pairs(set) do
+		if lamps.set[rid] then
+			return true
+		end
+	end
+	return false
+end
+
+-- The change detection's signature of HUE_SCENE_GROUP fields while some of
+-- the group's lamps stream (stream_sent); nil while none does.
+local function stream_signature(fields)
+	if fields.streaming_lamps == nil or fields.streaming_lamps == "0" then
+		return nil
+	end
+	return tostring(fields.on) .. "|" .. tostring(fields.level) .. "|" .. fields.streaming_lamps
+end
+
 -- Whether the catalogue says scene `rid` (either kind) is active: a scene
 -- static or playing its dynamic palette, a time-based scene running.
 function scenes:is_active(rid)
@@ -1199,14 +1285,28 @@ function scenes:send_group_for(grouped_rid, fields, rids)
 	return sent
 end
 
--- What a resync tells the scenes of grouped_light `grouped_rid`: its on/off
--- and its level, each when known; nil when neither is.
-function scenes:group_fields(grouped_rid)
+-- What a resync tells the scenes of grouped_light `grouped_rid` (of group
+-- `group_rid`; group_lamps memoised in `memo`): its on/off and its level,
+-- each when known, and streaming_lamps, the count of its lamps that stream
+-- ("0" included, #514); nil when neither on/off nor level is known and no
+-- lamp streams. While some lamps stream, the on/off and level are those of
+-- the lamps that do not, by Hue's rule (zone_lights.grouped_rule), when one
+-- of them says; with every lamp streaming, Hue's own report stays (as on a
+-- zone light whose lamps all stream: T2, Hue keeps reporting their state
+-- from before the stream).
+function scenes:group_fields(grouped_rid, group_rid, memo)
 	local on, level = self.group_on[grouped_rid], self.group_level[grouped_rid]
-	if on == nil and level == nil then
+	local view = self:group_stream(group_rid, memo)
+	if view.streaming > 0 then
+		local still_on, still_level = zone_lights.grouped_rule(view.still)
+		if still_on ~= nil then
+			on, level = still_on, still_level
+		end
+	end
+	if on == nil and level == nil and view.streaming == 0 then
 		return nil
 	end
-	local fields = {}
+	local fields = { streaming_lamps = tostring(view.streaming) }
 	if on ~= nil then
 		fields.on = on and "true" or "false"
 	end
@@ -1216,22 +1316,38 @@ function scenes:group_fields(grouped_rid)
 	return fields
 end
 
--- After a resync: every linked scene whose group's on/off or level is known
--- hears them, changed or not; the levels sent become the groups' last sent.
+-- `fields` went to the scenes of grouped_light `grouped_rid`: their level
+-- is the group's last sent, and their stream signature too (#514).
+function scenes:note_group(grouped_rid, fields)
+	if fields.level then
+		self.level_sent[grouped_rid] = fields.level
+	end
+	self.stream_sent[grouped_rid] = stream_signature(fields)
+end
+
+-- After a resync: every linked scene whose group's on/off or level is known,
+-- or whose group has a lamp that streams, hears them, changed or not; the
+-- levels sent become the groups' last sent. Each group's fields are built
+-- once a pass.
 function scenes:send_group_all()
-	local sent, level_sent = 0, {}
+	local sent, memo, built = 0, {}, {}
+	self.level_sent, self.stream_sent = {}, {}
 	for _, rid in ipairs(self.reg:rids()) do
 		local entry = self.registry[rid]
 		if entry.state == "linked" then
-			local grouped = self:grouped_light_of(self:group_rid_of(rid))
-			local fields = grouped and self:group_fields(grouped)
+			local group_rid = self:group_rid_of(rid)
+			local grouped = self:grouped_light_of(group_rid)
+			local fields = grouped and built[grouped]
+			if grouped and fields == nil then
+				fields = self:group_fields(grouped, group_rid, memo) or false
+				built[grouped] = fields
+			end
 			if fields and self:send_group(rid, fields) then
 				sent = sent + 1
-				level_sent[grouped] = fields.level
+				self:note_group(grouped, fields)
 			end
 		end
 	end
-	self.level_sent = level_sent
 	return sent
 end
 
@@ -1244,6 +1360,27 @@ function scenes:assume_level(grouped_rid, level)
 		self.level_before[grouped_rid] = { level = self.group_level[grouped_rid] }
 	end
 	self.group_level[grouped_rid] = level
+end
+
+-- The level a slider move on grouped_light `grouped_rid` (of group
+-- `group_rid`) is measured from: the level a move or a recall assumed while
+-- Hue has not reported since (level_before); else, while some of the group's
+-- lamps stream, the level of the lamps that do not (what the device shows,
+-- group_fields; nil while none of them is lit), since only they follow the
+-- move (#514); else the group's level as Hue reports it.
+function scenes:move_base(grouped_rid, group_rid)
+	local level = self.group_level[grouped_rid]
+	if self.level_before[grouped_rid] ~= nil then
+		return level
+	end
+	local view = self:group_stream(group_rid, {})
+	if view.streaming > 0 then
+		local still_on, still_level = zone_lights.grouped_rule(view.still)
+		if still_on ~= nil then
+			return still_level
+		end
+	end
+	return level
 end
 
 -- A PUT that assumed a level did not land: the level Hue last reported comes
@@ -1263,9 +1400,10 @@ end
 -- attempt): a scene's OFF, a level move, a hold's step or stop. A level a
 -- slider move assumed goes back to the bridge's (level_before), so the next
 -- move is measured from where the lamps are; then every linked scene on that
--- group hears HUE_SCENE_GROUP with the cached on and level, each when known,
--- and reason "undelivered", so it settles its target with them (D9; with
--- neither known it still settles). Returns the number of scenes told.
+-- group hears HUE_SCENE_GROUP with the cached on and level, each when known
+-- (group_fields, with streaming_lamps), and reason "undelivered", so it
+-- settles its target with them (D9; with neither known it still settles).
+-- Returns the number of scenes told.
 function scenes:undelivered_group(grouped_rid)
 	if type(grouped_rid) ~= "string" or grouped_rid == "" then
 		return 0
@@ -1275,21 +1413,48 @@ function scenes:undelivered_group(grouped_rid)
 	if #rids == 0 then
 		return 0
 	end
-	local fields = self:group_fields(grouped_rid) or {}
+	local fields = self:group_fields(grouped_rid, self:group_rid_of(rids[1]), {}) or {}
 	fields.reason = "undelivered"
 	local sent = self:send_group_for(grouped_rid, fields, rids)
-	if sent > 0 and fields.level then
-		self.level_sent[grouped_rid] = fields.level
+	if sent > 0 then
+		self:note_group(grouped_rid, fields)
+	end
+	return sent
+end
+
+-- A grouped_light item of grouped_light `grouped_rid` whose scenes are
+-- `rids` (linked_scenes_on, not empty), while some lamps of their group
+-- stream (#514): they hear group_fields (on and level from the lamps that do
+-- not stream, streaming_lamps) when those differ from the last sent; Hue's
+-- own on and level count the streaming lamps' state from before the stream.
+-- The first item after the last lamp stopped, should streaming_changed not
+-- have told them, brings the whole fields again with streaming_lamps "0".
+-- nil when none of the group's lamps streams nor did at the last message
+-- (the caller goes on as before), else the number of messages sent.
+function scenes:stream_group_event(grouped_rid, rids)
+	local fields = self:group_fields(grouped_rid, self:group_rid_of(rids[1]), {})
+	local sig = fields and stream_signature(fields)
+	if not sig and self.stream_sent[grouped_rid] == nil then
+		return nil
+	end
+	if sig and sig == self.stream_sent[grouped_rid] then
+		return 0
+	end
+	fields = fields or { streaming_lamps = "0" }
+	local sent = self:send_group_for(grouped_rid, fields, rids)
+	if sent > 0 then
+		self:note_group(grouped_rid, fields)
 	end
 	return sent
 end
 
 -- A grouped_light item from the stream: the scenes of its group hear what
 -- changed, in one HUE_SCENE_GROUP each: `on` when the on/off changed,
--- `level` when it differs from the last level sent to the group. The group's
--- on/off and level are kept whatever the group; a group no linked scene is
--- on (most of a house's) costs no level text and no sort (R8). Returns the
--- number of messages sent.
+-- `level` when it differs from the last level sent to the group (while some
+-- of the group's lamps stream, stream_group_event instead, #514). The
+-- group's on/off and level are kept whatever the group; a group no linked
+-- scene is on (most of a house's) costs no level text and no sort (R8).
+-- Returns the number of messages sent.
 function scenes:on_grouped_light(item)
 	local grouped = item.id
 	local level = type(item.dimming) == "table" and item.dimming.brightness or nil
@@ -1311,6 +1476,10 @@ function scenes:on_grouped_light(item)
 	local rids = self:linked_scenes_on(grouped)
 	if #rids == 0 then
 		return 0
+	end
+	local streamed = self:stream_group_event(grouped, rids)
+	if streamed then
+		return streamed
 	end
 	if level ~= nil then
 		local text = level_text(level)
@@ -1398,15 +1567,48 @@ function scenes:answer_hello(rid)
 end
 
 -- A device that says hello between resyncs (added, re-linked, restarted)
--- hears its group's on/off and level at once instead of at the next change.
+-- hears its group's on/off and level at once instead of at the next change,
+-- and how many of its lamps stream (group_fields, #514).
 function scenes:send_group_known(rid)
 	local entry = self.registry[rid]
 	if not entry or entry.state ~= "linked" then
 		return false
 	end
-	local grouped = self:grouped_light_of(self:group_rid_of(rid))
-	local fields = grouped and self:group_fields(grouped)
+	local group_rid = self:group_rid_of(rid)
+	local grouped = self:grouped_light_of(group_rid)
+	local fields = grouped and self:group_fields(grouped, group_rid, {})
 	return fields ~= nil and self:send_group(rid, fields) or false
+end
+
+-- #514 (docs/hdmi-sync-stage1-design.md §4.6): lamps `rids` (a list or a
+-- set of light rids) started or stopped streaming; the entertainment
+-- module's on_lamps_changed calls this once per settle, after the lights'
+-- models took the change. Every linked scene whose room or zone holds one
+-- of them (a whole-home scene: any) hears HUE_SCENE_GROUP again
+-- (group_fields: streaming_lamps, "0" once none streams, and on and level
+-- from the lamps that do not stream while some do). Each group's fields are
+-- built once. Returns the number of messages sent.
+function scenes:streaming_changed(rids)
+	local set = zone_lights.lamp_set(rids)
+	if next(set) == nil then
+		return 0
+	end
+	local sent, memo, built = 0, {}, {}
+	for _, rid in ipairs(self.reg:rids("linked")) do
+		local group_rid = self:group_rid_of(rid)
+		local grouped = self:grouped_light_of(group_rid)
+		if grouped and (built[grouped] or self:group_holds(group_rid, set, memo)) then
+			local fields = built[grouped] or self:group_fields(grouped, group_rid, memo) or { streaming_lamps = "0" }
+			built[grouped] = fields
+			if self:send_group(rid, fields) then
+				sent = sent + 1
+			end
+		end
+	end
+	for grouped, fields in pairs(built) do
+		self:note_group(grouped, fields)
+	end
+	return sent
 end
 
 -- adopt and hello (HUE_SCENE_HELLO { rid?, device_id, name?, kind? }: the
@@ -1827,6 +2029,7 @@ function scenes:on_container(container)
 					self.group_level[item.id] = nil
 					self.level_before[item.id] = nil
 					self.level_sent[item.id] = nil
+					self.stream_sent[item.id] = nil
 				else
 					sent = sent + self:on_grouped_light(item)
 				end
@@ -2398,7 +2601,9 @@ end
 -- brightness through ctx.group_set instead. No STATE is sent (the level
 -- reports follow from the stream). The same for a time-based scene (the next
 -- time slot's look replaces the level when it starts; Decisions 4 and 6 of
--- docs/smart-scenes-design.md). Returns true when queued.
+-- docs/smart-scenes-design.md). While some of the group's lamps stream, the
+-- move is measured from the level of the lamps that do not (move_base, #514).
+-- Returns true when queued.
 function scenes:level(params)
 	params = params or {}
 	local rid, entry = self:entry_for_command(params, "HUE_SCENE_LEVEL")
@@ -2427,7 +2632,7 @@ function scenes:level(params)
 	-- A recall still waiting goes before the move, and first: a recall at a
 	-- level sets the level the move is measured from (#469 D6).
 	self:release_recalls()
-	local current = self.group_level[grouped]
+	local current = self:move_base(grouped, scene.group_rid)
 	local queued
 	if type(current) == "number" then
 		local difference = level - current

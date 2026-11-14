@@ -463,13 +463,17 @@ address>:8080)`, the last part being the bridge's `Dev Server` value.
 URL` overrides it.
 
 `tools/regress.sh [--server URL]` runs the scripted part of
-`docs/release-checklist.md` §1 through `devctl.py`: `Test Connection`,
-`Refresh Scenes`, `Room Audit`, `Link Devices` and `Lights Report`, then a
-scan of the shipped log for errors, and exits with the number of failed
-checks. `Adopt Hue Names` and `Accept Names As They Are` run only with
+`docs/release-checklist.md` §1 through `devctl.py`: Diagnostics' connection
+check (`diag:test`) and read of everything (`diag:refresh`), `Link Device`
+with `dev:suggested`, and `Lights Report`, then a scan of the shipped log for
+errors, and exits with the number of failed checks. Two `Resolve Names` runs
+(`names:hue_to_composer`, `names:keep_composer`) come only with
 `--with-renames` (#344), since the first renames every device whose Composer
-name differs. It creates and deletes nothing, but `Link Devices` registers a
-bound device the bridge lacks, as that action always does.
+name differs. It creates and deletes nothing, but `Link Device` with
+`dev:suggested` registers a bound device the bridge lacks and re-links every
+device with a suggested match. (Until 2.0 it ran the 1.1 names, `Test
+Connection`, `Refresh Scenes`, `Room Audit`, `Link Devices`, `Adopt Hue Names`
+and `Accept Names As They Are`, which 2.0 removed, #514.)
 
 Pin while several agents edit `src/` at once: the controller then only
 reloads to states the coordinator has checked (`tools/check.sh --only

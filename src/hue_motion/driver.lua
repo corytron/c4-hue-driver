@@ -48,9 +48,8 @@ local KINDS = { [KIND_SENSOR] = true, [KIND_AREA] = true }
 -- Occupancy Hold Time (s): the property's range (D10, driver.xml).
 local HOLD_MAX_S = 3600
 
--- After a test (Test Motion Programming, or the older Test Motion and Test No
--- Motion), Hue's state comes back with the next reading or after this long,
--- whichever comes first (EC R12).
+-- After a test (Test Motion Programming), Hue's state comes back with the
+-- next reading or after this long, whichever comes first (EC R12).
 local TEST_MS = 30000
 
 -- A device that finds itself unbound at late init changes nothing while the
@@ -1448,44 +1447,16 @@ end)
 
 -- Composer actions (LUA_ACTION) ------------------------------------------------------
 -- Every click ends in Last Action and a log line, whatever happened. One
--- action since 1.2 (#334); the three it replaced still answer by command as
--- hidden aliases until 2.0 (docs/simplify-actions-design.md §3.3;
--- tests/fixtures/ledger.lua lists them), for the dev loop, older briefs and
--- any C4:SendToDevice caller.
+-- action since 1.2 (#334). The hidden aliases of the three it replaced
+-- (Refresh From Bridge, Test Motion, Test No Motion), kept until 2.0
+-- (docs/simplify-actions-design.md §3.3), went in 2.0 (#514, O15): the hello
+-- at every start and bind and the bridge's own reads bring the state without
+-- a click (§1.2), and a call by an old name is now an unknown command
+-- (common.dispatch logs it at debug).
 
 dispatch.commands["Test_Motion_Programming"] = function()
 	toggle_test()
 end
-
--- `fn` under an old command, saying in the log (Debug Mode) what replaced it.
-local function alias(old, now, fn)
-	return function(...)
-		log.info("%s is a hidden alias until 2.0; %s does this now", old, now)
-		return fn(...)
-	end
-end
-
--- The hello at every start and bind, and the bridge's own reads (its
--- resyncs, Diagnostics), bring the state without a click (§1.2).
-dispatch.commands["Refresh_From_Bridge"] = alias("Refresh From Bridge", "Diagnostics on the Hue Bridge", function()
-	bridge = bound_bridge() or bridge
-	if not bridge then
-		refresh_status()
-		return result("Not sent: not bound to a Hue Bridge")
-	end
-	if to_bridge("HUE_MOTION_HELLO", hello_params()) then
-		dev.greeted() -- #483 D-1: a hello like any other
-	end
-	result("Asked the bridge for this device's state; its answer updates the rows")
-end)
-
-dispatch.commands["Test_Motion"] = alias("Test Motion", "Test Motion Programming", function()
-	run_test(true)
-end)
-
-dispatch.commands["Test_No_Motion"] = alias("Test No Motion", "Test Motion Programming", function()
-	run_test(false)
-end)
 
 -- From the proxies (ReceivedFromProxy) -------------------------------------------------
 -- Commands without a handler are logged at debug by common.dispatch.

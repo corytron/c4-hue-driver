@@ -530,7 +530,35 @@ local function new_lights()
 		scenes = function()
 			return state.scenes
 		end,
+		-- The entertainment areas, read live (created after the lights): a
+		-- lamp's streaming mode and its label (docs/hdmi-sync-stage1-design.md §4.5).
+		entertainment = function()
+			return state.entertainment
+		end,
 	})
+end
+
+-- Restore fields for the light queue from a CLIP v2 light PUT body (the
+-- entertainment module's put_back, docs/hdmi-sync-stage1-design.md §4.3):
+-- the queue takes the fields HUE_SET sends, never a body.
+local function restore_fields(body)
+	local fields = {}
+	if type(body) ~= "table" then
+		return fields
+	end
+	if type(body.on) == "table" then
+		fields.on = body.on.on
+	end
+	if type(body.dimming) == "table" then
+		fields.brightness = body.dimming.brightness
+	end
+	if type(body.color) == "table" and type(body.color.xy) == "table" then
+		fields.x, fields.y = body.color.xy.x, body.color.xy.y
+	end
+	if type(body.color_temperature) == "table" then
+		fields.mirek = body.color_temperature.mirek
+	end
+	return fields
 end
 
 -- The grouped_light hooks the scenes and the zone lights share: every
@@ -624,17 +652,6 @@ local function zone_light_device(device_id)
 	return id ~= nil and state.zone_lights:device_ids()[id] == true
 end
 
--- The light devices' ids as a set, for the zone lights' Link Devices.
-local function light_device_ids()
-	local set = {}
-	for _, entry in pairs(state.lights.registry) do
-		if entry.device_id then
-			set[entry.device_id] = true
-		end
-	end
-	return set
-end
-
 local function is_zone_light_rid(rid)
 	return rid ~= nil and rid ~= "" and state.zone_lights:is_group(rid) == true
 end
@@ -717,6 +734,9 @@ local attention_rows = rows:wrapped("Attention", {
 local function refresh_lights_props()
 	if not state.zone_lights then
 		return -- before late init created the modules
+	end
+	if state.entertainment then
+		prop("Entertainment Areas", state.entertainment:row())
 	end
 	-- The audit's view is computed from the devices, never stored (#280 D19).
 	if state.automations then
@@ -823,16 +843,21 @@ local function resync_all(done, tier)
 				note("zone light", zok, zerr, zsent)
 				state.motion:resync(function(mok, merr, msent)
 					note("motion", mok, merr, msent)
-					-- The Hue automations last: the full tier reads them, the
-					-- quick tier answers at once (#280 D18).
-					state.automations:resync(function(aok, aerr, asent)
-						if tier ~= "quick" then
-							note("automation", aok, aerr, asent)
-						end
-						refresh_lights_props()
-						if done then
-							done(failures)
-						end
+					-- The entertainment areas in both tiers: a sync may have
+					-- started or stopped while the stream was down (#514).
+					state.entertainment:fetch_all(function(eok)
+						note("entertainment area", eok, "the areas could not be read", 0)
+						-- The Hue automations last: the full tier reads them, the
+						-- quick tier answers at once (#280 D18).
+						state.automations:resync(function(aok, aerr, asent)
+							if tier ~= "quick" then
+								note("automation", aok, aerr, asent)
+							end
+							refresh_lights_props()
+							if done then
+								done(failures)
+							end
+						end, tier)
 					end, tier)
 				end)
 			end, grouped)
@@ -989,6 +1014,10 @@ local function new_stream()
 				return
 			end
 			state.lights:on_container(container)
+			state.entertainment:on_container(container)
+			-- An area added, renamed or deleted changes the row with no lamp
+			-- changing its mode (rows:prop writes only a changed value).
+			prop("Entertainment Areas", state.entertainment:row())
 			state.scenes:on_container(container)
 			state.zone_lights:on_container(container)
 			state.motion:on_container(container)
@@ -1414,7 +1443,16 @@ local function test_connection(host)
 	end)
 end
 
-dispatch.commands["Test_Connection"] = function()
+-- What Diagnostics' first five entries run (actions.DIAGNOSTICS: TEST,
+-- REFRESH, CONNECT, DISCONNECT, MOTION_LOG), each defined with its topic
+-- below. They were beta 8's Test Connection, Refresh All, Connect and
+-- Disconnect Event Stream and Log Motion Diagnostics, whose names answered
+-- as hidden aliases until 2.0; 2.0 removes them, as announced (O15, #514,
+-- docs/hdmi-sync-stage1-design.md §1), so they left dispatch.commands. One
+-- table, so the main chunk keeps its locals (tools/lua_limits.py).
+local diagnose = {}
+
+function diagnose.test()
 	test_connection(state.ip)
 end
 
@@ -1489,6 +1527,11 @@ function debug_mode.arm()
 	end)
 end
 
+-- After A Sync Ends (O11) is read when a sync ends; nothing to do now.
+dispatch.properties["After_A_Sync_Ends"] = function(value)
+	log.info("After A Sync Ends: %s", util.echo(value, 40))
+end
+
 dispatch.properties["Debug_Mode"] = function(value)
 	local on = value == "On"
 	log.set_debug(on)
@@ -1548,116 +1591,12 @@ local function picker(module, method, ...)
 	return { { text = "(not ready yet; open the list again)", value = "" } }
 end
 
-function HueLightList() return picker(state.lights, "picker_lights") end
--- RoomList (Add From Hue's Room) is defined with the 1.2 actions below.
-function RelinkDeviceList() return picker(state.lights, "picker_relink_devices") end
--- ForgetDeviceList is defined with the zone lights' pickers below: it joins
--- the lights' and the zone lights' devices.
+-- Set Room Mapping's two pickers (driver.xml). The other actions' pickers
+-- (AddFromHueList, RoomList, LinkDeviceList, LinkTargetList,
+-- ForgetDeviceList, ResolveNamesList, DiagnosticsList) are defined with the
+-- 1.2 actions below.
 function HueRoomList() return picker(state.lights, "picker_hue_rooms") end
 function MappingTargetList() return picker(state.lights, "picker_rooms", "mapping") end
-
--- Scenes (docs/scenes-design.md §5): the same shapes against state.scenes.
-function SceneList() return picker(state.scenes, "picker_scenes") end
-function SceneGroupList() return picker(state.scenes, "picker_groups") end
-function RelinkSceneList() return picker(state.scenes, "picker_relink_devices") end
-function ForgetSceneList() return picker(state.scenes, "picker_forget_devices") end
-
-local function join_texts(lights_text, scenes_text, zone_lights_text, motion_text)
-	local text = tostring(lights_text)
-	if scenes_text ~= nil and scenes_text ~= "" then
-		text = text .. " | Scenes: " .. tostring(scenes_text)
-	end
-	if zone_lights_text ~= nil and zone_lights_text ~= "" then
-		text = text .. " | Zone lights: " .. tostring(zone_lights_text)
-	end
-	if motion_text ~= nil and motion_text ~= "" then
-		text = text .. " | Motion: " .. tostring(motion_text)
-	end
-	return text
-end
-
--- Zone lights (docs/zone-light-design.md §8): the same shapes against
--- state.zone_lights. Two pickers as one: real entries of both, or whichever
--- has them, or the first's placeholder.
-local function join_pickers(first, second)
-	local function real(list)
-		return type(list) == "table" and #list > 0 and list[1].value ~= ""
-	end
-	if not real(second) then
-		return first
-	elseif not real(first) then
-		return second
-	end
-	local out = {}
-	for _, entry in ipairs(first) do out[#out + 1] = entry end
-	for _, entry in ipairs(second) do out[#out + 1] = entry end
-	return out
-end
-
-function ZoneGroupList() return picker(state.zone_lights, "picker_groups") end
-function RelinkZoneLightList()
-	local list = picker(state.zone_lights, "picker_relink_devices")
-	if #list == 0 then
-		return { { text = "(no zone light device is gone or unbound)", value = "" } }
-	end
-	return list
-end
--- ForgetDeviceList (Forget Device's Device) is defined with the 1.2 actions below.
-
-dispatch.commands["Add_Light"] = function(params)
-	if not can() then return end
-	local rid = selection(params, "Light")
-	if not rid then
-		return last_action("Not added: pick a light first")
-	end
-	state.lights:add_light(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
-end
-
-dispatch.commands["Import_All_New_Lights"] = function()
-	if can() then
-		state.lights:import_new(function(_, text) last_action(text) end)
-	end
-end
-
-dispatch.commands["Re-link_Device_To_Light"] = function(params)
-	if not can() then return end
-	local device, rid = tonumber(selection(params, "Device")), selection(params, "Light")
-	if not device or not rid then
-		return last_action("Not re-linked: pick a device and a light")
-	end
-	local _, text = state.lights:relink(device, rid)
-	last_action(text)
-end
-
-dispatch.commands["Link_Devices"] = function()
-	if can() then
-		-- Zone-light devices run the light driver too: each module skips the
-		-- other's devices.
-		last_action(join_texts(state.lights:link_devices(state.zone_lights:device_ids()), state.scenes:link_devices(),
-			state.zone_lights:link_devices(light_device_ids()), state.motion:link_devices()))
-	end
-end
-
-dispatch.commands["Forget_Light"] = function(params)
-	if not can() then return end
-	local device = tonumber(selection(params, "Device"))
-	if not device then
-		return last_action("Not forgotten: pick a device first")
-	end
-	if zone_light_device(device) then
-		local _, text = state.zone_lights:forget(device)
-		-- A stale light entry for the same device (an older bridge adopted
-		-- the zone light's hello as a light) is dropped too; the lights
-		-- module neither unbinds nor messages a device it knows is foreign.
-		if light_device_ids()[device] then
-			local _, stale = state.lights:forget(device)
-			text = tostring(text) .. " | " .. tostring(stale)
-		end
-		return last_action(text)
-	end
-	local _, text = state.lights:forget(device)
-	last_action(text)
-end
 
 -- Entries created before proxy ids were recorded get theirs from the proxy's
 -- binding: the light_v2 proxy is the bound consumer of the protocol driver's
@@ -1680,7 +1619,7 @@ local function fill_proxy_ids()
 	end
 	-- The motion devices too: the contact proxy is the consumer of 5001 the
 	-- same way (docs/motion-design.md §2.1); one adopted through a hello or
-	-- Link Devices has no proxy id yet.
+	-- Link Device has no proxy id yet.
 	local motion_filled = 0
 	for _, entry in pairs(state.motion and state.motion.registry or {}) do
 		if type(entry) == "table" and not entry.proxy_id and entry.device_id then
@@ -1698,21 +1637,6 @@ local function fill_proxy_ids()
 	return filled + motion_filled
 end
 
-dispatch.commands["Adopt_Hue_Names"] = function()
-	if can() then
-		fill_proxy_ids()
-		last_action(join_texts(state.lights:adopt_hue_names(), state.scenes:adopt_hue_names(),
-			state.zone_lights:adopt_hue_names(), state.motion:adopt_hue_names()))
-	end
-end
-
-dispatch.commands["Accept_Names_As_They_Are"] = function()
-	if can() then
-		last_action(join_texts(state.lights:accept_names(), state.scenes:accept_names(),
-			state.zone_lights:accept_names(), state.motion:accept_names()))
-	end
-end
-
 dispatch.commands["Set_Room_Mapping"] = function(params)
 	if not can() then return end
 	local group, target = selection(params, "Hue Room"), selection(params, "Room")
@@ -1728,27 +1652,6 @@ dispatch.commands["Set_Room_Mapping"] = function(params)
 	end
 	local _, text = state.lights:set_room_mapping(group, room_id)
 	last_action(text)
-end
-
-dispatch.commands["Map_Rooms_By_Name"] = function()
-	if can() then last_action(state.lights:map_rooms_by_name()) end
-end
-
--- The zone-light devices for the Room Audit: each with the zone/room it
--- stands for, audited against that group's mapping like a light.
-local function zone_audit_entries()
-	local entries = {}
-	for _, rid in ipairs(state.zone_lights:registered_rids() or {}) do
-		local entry = state.zone_lights:entry(rid)
-		if type(entry) == "table" and entry.device_id then
-			entries[#entries + 1] = { device_id = entry.device_id, name = entry.name, group_rid = rid }
-		end
-	end
-	return entries
-end
-
-dispatch.commands["Room_Audit"] = function()
-	if can() then last_action(state.lights:room_audit(zone_audit_entries())) end
 end
 
 -- From a light (or zone light) being deleted in Composer (docs/import-design.md §4).
@@ -1778,92 +1681,10 @@ dispatch.commands["HUE_FORGET"] = function(params)
 	end
 end
 
--- Zone light actions (docs/zone-light-design.md §8) --------------------------
+-- Motion (docs/motion-design.md §4.4) ----------------------------------------
 
-dispatch.commands["Add_Zone_Light"] = function(params)
-	if not can() then return end
-	local rid = selection(params, "Group")
-	if not rid then
-		return last_action("Not added: pick a zone or room first")
-	end
-	state.zone_lights:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
-end
-
-dispatch.commands["Re-link_Zone_Light"] = function(params)
-	if not can() then return end
-	local device, rid = tonumber(selection(params, "Device")), selection(params, "Group")
-	if not device or not rid then
-		return last_action("Not re-linked: pick a device and a zone or room")
-	end
-	local _, text = state.zone_lights:relink(device, rid)
-	last_action(text)
-end
-
--- Motion actions (docs/motion-design.md §4.4) --------------------------------
-
-function MotionSensorList() return picker(state.motion, "picker_sensors") end
-function MotionAreaList() return picker(state.motion, "picker_areas") end
--- Re-link takes a sensor or an area; the module refuses a change of kind (D4).
-function MotionTargetList()
-	return join_pickers(picker(state.motion, "picker_sensors"), picker(state.motion, "picker_areas"))
-end
-function RelinkMotionDeviceList()
-	local list = picker(state.motion, "picker_relink_devices")
-	if #list == 0 then
-		return { { text = "(no motion device is gone or unbound)", value = "" } }
-	end
-	return list
-end
-function ForgetMotionDeviceList() return picker(state.motion, "picker_forget_devices") end
-
-dispatch.commands["Add_Motion_Sensor"] = function(params)
-	if not can() then return end
-	local rid = selection(params, "Sensor")
-	if not rid then
-		return last_action("Not added: pick a motion sensor first")
-	end
-	state.motion:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
-end
-
--- Every new sensor into the room its Hue room maps to; the rest listed (#319;
--- Add All New Motion Sensors until #325).
-dispatch.commands["Import_All_New_Motion_Sensors"] = function()
-	if can() then
-		state.motion:import_new(function(_, text) last_action(text) end)
-	end
-end
-
-dispatch.commands["Add_Motion_Area"] = function(params)
-	if not can() then return end
-	local rid = selection(params, "Area")
-	if not rid then
-		return last_action("Not added: pick a MotionAware area first")
-	end
-	state.motion:add(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
-end
-
-dispatch.commands["Re-link_Motion_Device"] = function(params)
-	if not can() then return end
-	local device, rid = tonumber(selection(params, "Device")), selection(params, "Target")
-	if not device or not rid then
-		return last_action("Not re-linked: pick a device and a sensor or area")
-	end
-	local _, text = state.motion:relink(device, rid)
-	last_action(text)
-end
-
-dispatch.commands["Forget_Motion_Device"] = function(params)
-	if not can() then return end
-	local device = tonumber(selection(params, "Device"))
-	if not device then
-		return last_action("Not forgotten: pick a device first")
-	end
-	local _, text = state.motion:forget(device)
-	last_action(text)
-	refresh_lights_props()
-end
-
-dispatch.commands["Log_Motion_Diagnostics"] = function()
+-- Diagnostics' "Log motion diagnostics (10 minutes)".
+function diagnose.motion_log()
 	if not can() then return end
 	state.motion_diag:run(function(_, text) last_action(text) end)
 end
@@ -1889,48 +1710,9 @@ dispatch.commands["HUE_MOTION_FORGET"] = function(params)
 	refresh_lights_props()
 end
 
--- Scene actions (docs/scenes-design.md §5) ----------------------------------
-
-dispatch.commands["Add_Scene"] = function(params)
-	if not can() then return end
-	local rid = selection(params, "Scene")
-	if not rid then
-		return last_action("Not added: pick a scene first")
-	end
-	state.scenes:add_scene(rid, tonumber(selection(params, "Room")), function(_, text) last_action(text) end)
-end
-
-dispatch.commands["Add_All_Scenes_Of_Room"] = function(params)
-	if not can() then return end
-	local group = selection(params, "Hue Room")
-	if not group then
-		return last_action("Not added: pick a Hue room first")
-	end
-	state.scenes:add_all_of_group(group, function(_, text) last_action(text) end)
-end
-
-dispatch.commands["Re-link_Scene"] = function(params)
-	if not can() then return end
-	local device, rid = tonumber(selection(params, "Device")), selection(params, "Scene")
-	if not device or not rid then
-		return last_action("Not re-linked: pick a device and a scene")
-	end
-	local _, text = state.scenes:relink(device, rid)
-	last_action(text)
-end
-
-dispatch.commands["Forget_Scene"] = function(params)
-	if not can() then return end
-	local device = tonumber(selection(params, "Device"))
-	if not device then
-		return last_action("Not forgotten: pick a device first")
-	end
-	local _, text = state.scenes:forget(device)
-	last_action(text)
-end
-
--- Refresh All (#324): every list read from the bridge now, stream or not.
-dispatch.commands["Refresh_All"] = function()
+-- Diagnostics' "Read everything from the bridge now" (Refresh All, #324):
+-- every list read from the bridge now, stream or not.
+function diagnose.refresh()
 	if not can() then return end
 	want_resync("full", "click", function(ok, text)
 		if ok then
@@ -1943,16 +1725,7 @@ dispatch.commands["Refresh_All"] = function()
 	end)
 end
 
-dispatch.commands["Refresh_Scenes"] = function()
-	if not can() then return end
-	state.scenes:resync(function(ok, err)
-		if ok then
-			last_action("Scenes refreshed: " .. tostring(state.scenes:summary()))
-		else
-			last_action("Scene refresh failed: " .. tostring(err))
-		end
-	end)
-end
+-- Scenes (docs/scenes-design.md) ---------------------------------------------
 
 -- Messages from scene devices (docs/scenes-design.md §2).
 dispatch.commands["HUE_SCENE_HELLO"] = function(params)
@@ -2033,6 +1806,13 @@ dispatch.commands["HUE_SET"] = function(params)
 	if not linked then
 		return log.warn("HUE_SET for %s light %s", why, util.echo(rid, util.LOG_MAX))
 	end
+	-- A lamp that syncs with the TV keeps following it (O9): the device
+	-- answers its proxy itself; the bridge sends nothing and answers with the
+	-- state it knows (docs/hdmi-sync-stage1-design.md §4.5).
+	if state.lights:is_streaming(rid) then
+		log.info("HUE_SET for %s: the lamp syncs with the TV; not sent", rid:sub(1, 8))
+		return state.lights:send_state(rid, "streaming")
+	end
 	-- As bridge/load_groups.lua's set_fields maps them for a batch (#435):
 	-- finite numbers only, and `urgent` for a keypad tap's start, or a tap
 	-- stop sent as a level, which goes out at once, past the request bucket
@@ -2070,6 +1850,13 @@ dispatch.commands["HUE_DIM"] = function(params)
 	local linked, why = state.lights:linked_entry(rid)
 	if not linked then
 		return log.warn("HUE_DIM for %s light %s", why, util.echo(rid, util.LOG_MAX))
+	end
+	-- A lamp that syncs with the TV keeps following it (O9): the device
+	-- answers its proxy itself; the bridge sends nothing and answers with the
+	-- state it knows (docs/hdmi-sync-stage1-design.md §4.5).
+	if state.lights:is_streaming(rid) then
+		log.info("HUE_DIM for %s: the lamp syncs with the TV; not sent", rid:sub(1, 8))
+		return state.lights:send_state(rid, "streaming")
 	end
 	local dir = params.direction
 	if dir ~= "up" and dir ~= "down" and dir ~= "stop" then
@@ -2116,7 +1903,9 @@ dispatch.commands["HUE_LOAD_GROUPS"] = function(params)
 	state.load_groups:memberships(tonumber(params.device_id), params.groups)
 end
 
-dispatch.commands["Connect_Event_Stream"] = function()
+-- Diagnostics' "Reconnect the event stream" and "Stop the event stream until
+-- the next start".
+function diagnose.connect()
 	if not connection() then
 		prop("Event Stream", "Not paired")
 		return
@@ -2132,7 +1921,7 @@ dispatch.commands["Connect_Event_Stream"] = function()
 	state.stream:start()
 end
 
-dispatch.commands["Disconnect_Event_Stream"] = function()
+function diagnose.disconnect()
 	state.outage_restart = nil -- an outage check in flight does not start it again
 	state.stream:stop()
 end
@@ -2379,18 +2168,12 @@ end
 
 -- The merged actions of 1.2 (bridge/actions.lua, docs/simplify-actions-design.md §3.3, §3.4) ----------
 
--- The beta 8 handlers the new actions run (Diagnostics' entries, Import All
--- New), taken before the aliases below take their keys over.
-local beta8 = {}
-for _, key in ipairs({ "Test_Connection", "Refresh_All", "Connect_Event_Stream", "Disconnect_Event_Stream",
-	"Log_Motion_Diagnostics" }) do
-	beta8[key] = dispatch.commands[key]
-end
-
 local D = actions_mod.DIAGNOSTICS
--- Diagnostics' entries; the dev ones run bridge/devtools.lua's handlers,
--- which exist in dev builds only (looked up when run), from its own table:
--- they left dispatch.commands, where any driver could run them (#484 C-2).
+-- Diagnostics' entries: the first five run the `diagnose` functions above,
+-- which no command name reaches since 2.0 (O15). The dev ones run
+-- bridge/devtools.lua's handlers, which exist in dev builds only (looked up
+-- when run), from its own table: they left dispatch.commands, where any
+-- driver could run them (#484 C-2).
 local function dev_command(key, params)
 	return function()
 		local fn = devtools and type(devtools.diagnostics) == "table" and devtools.diagnostics[key] or nil
@@ -2399,14 +2182,14 @@ local function dev_command(key, params)
 end
 local diagnostics = {
 	[D.TEST] = { order = 1, text = "Check the connection now", shows = "Status",
-		run = function() beta8.Test_Connection() end },
-	[D.REFRESH] = { order = 2, text = "Read everything from the bridge now", run = function() beta8.Refresh_All() end },
+		run = function() diagnose.test() end },
+	[D.REFRESH] = { order = 2, text = "Read everything from the bridge now", run = function() diagnose.refresh() end },
 	[D.CONNECT] = { order = 3, text = "Reconnect the event stream", shows = "Event Stream",
-		run = function() beta8.Connect_Event_Stream() end },
+		run = function() diagnose.connect() end },
 	[D.DISCONNECT] = { order = 4, text = "Stop the event stream until the next start", shows = "Event Stream",
-		run = function() beta8.Disconnect_Event_Stream() end },
+		run = function() diagnose.disconnect() end },
 	[D.MOTION_LOG] = { order = 5, text = "Log motion diagnostics (10 minutes)",
-		run = function() beta8.Log_Motion_Diagnostics() end },
+		run = function() diagnose.motion_log() end },
 	[D.CONNECTION_TEST_BRIDGE] = { order = 6, dev = true, text = "(dev) Connection experiment: the bridge",
 		run = dev_command("Connection_Test", { Target = "Bridge" }) },
 	[D.CONNECTION_TEST_SERVER] = { order = 7, dev = true, text = "(dev) Connection experiment: the diagnostic server",
@@ -2617,11 +2400,6 @@ dispatch.commands["Set_Room_Mapping"] = function(params)
 	return set_room_mapping(params)
 end
 
--- Every beta 8 command merged into bridge/actions.lua answers until 2.0.
-for old in pairs(actions_mod.ALIASES) do
-	dispatch.commands[(old:gsub("%s+", "_"))] = function(params) state.actions:run_alias(old, params) end
-end
-
 -- Bridges Found (owner's answer D5; discovery research §2.4): the bridges
 -- that answered on the local network, never the internet, as a list row
 -- (bridge/bridges_found.lua). A pick sets Bridge IP Address and runs Pair
@@ -2710,6 +2488,48 @@ function OnDriverInit()
 	end
 end
 
+-- Entertainment areas (docs/hdmi-sync-stage1-design.md §4, #514): the areas
+-- and which of their lamps stream, the Sync Started and Sync Stopped events
+-- for any streamer (O10), and the lamps put back after a sync (O11). Built
+-- in a function so the main chunk keeps its locals.
+local function new_entertainment()
+	local entertainment_mod = require("bridge.entertainment")
+	return entertainment_mod.new(module_ctx({
+		lights = function() return state.lights end,
+		on_stream = function(area, started)
+			last_action(started and entertainment_mod.started_text(area) or entertainment_mod.stopped_text(area))
+			C4:FireEventByID(started and 1 or 2) -- [verified: API 7/_4; not in OnDriverInit]
+		end,
+		-- Each module on its own: one that raises leaves the others told.
+		on_lamps_changed = function(rids)
+			for _, name in ipairs({ "zone_lights", "scenes" }) do
+				local module = state[name]
+				if module then
+					local ok, err = pcall(module.streaming_changed, module, rids)
+					if not ok then
+						log.warn("%s: streaming_changed failed: %s", name, tostring(err))
+					end
+				end
+			end
+			refresh_lights_props()
+		end,
+		after_sync = function()
+			return Properties["After A Sync Ends"] == "As Hue decides" and "As Hue decides" or "Put the lights back"
+		end,
+		-- Through the light queue, as HUE_SET's fields; false when there is none.
+		put_back = function(rid, body)
+			if not state.queue then
+				return false
+			end
+			state.queue:set(rid, restore_fields(body))
+			return true
+		end,
+		on_restored = function(area, count)
+			last_action(entertainment_mod.restored_text(area, count))
+		end,
+	}))
+end
+
 function OnDriverLateInit(dit)
 	debug_mode.ready = true -- Debug Mode's timer may be armed from here (its replay below)
 	state.creds = credentials.load()
@@ -2740,6 +2560,10 @@ function OnDriverLateInit(dit)
 			if not state.queue then
 				return false
 			end
+			-- A member lamp that syncs with the TV is left out (O9, #514).
+			if state.lights and state.lights:is_streaming(light_rid) then
+				return true
+			end
 			state.queue:set(light_rid, fields)
 			return true
 		end,
@@ -2767,6 +2591,10 @@ function OnDriverLateInit(dit)
 		light_set = function(light_rid, fields)
 			if not state.queue then
 				return false
+			end
+			-- A member lamp that syncs with the TV is left out (O9, #514).
+			if state.lights and state.lights:is_streaming(light_rid) then
+				return true
 			end
 			set_light_limits(light_rid)
 			state.queue:set(light_rid, fields)
@@ -2833,7 +2661,10 @@ function OnDriverLateInit(dit)
 	state.scenes:load()
 	state.scenes:configure_all()
 	state.scenes:reconcile()
-	state.zone_lights = zone_lights_mod.new(module_ctx({ groups = state.lights.groups }))
+	state.zone_lights = zone_lights_mod.new(module_ctx({ groups = state.lights.groups,
+		-- Who streams, for a zone light whose lamps all sync (#514): read live,
+		-- since the areas are created after the zone lights.
+		entertainment = function() return state.entertainment end }))
 	state.zone_lights:load()
 	state.zone_lights:configure_all()
 	state.zone_lights:reconcile()
@@ -2841,6 +2672,7 @@ function OnDriverLateInit(dit)
 	state.motion:load()
 	state.motion:configure_all()
 	state.motion:reconcile()
+	state.entertainment = new_entertainment()
 	state.automations = new_automations()
 	state.automations:load()
 	-- The diagnostics' output goes into public issues: everything that
@@ -2957,6 +2789,9 @@ function OnDriverDestroyed()
 	end
 	if state.discovery then
 		state.discovery:stop()
+	end
+	if state.entertainment then
+		state.entertainment:stop() -- its restore timers (#514)
 	end
 	state.bridges_found:stop()
 	rows:stop()

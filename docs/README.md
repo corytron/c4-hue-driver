@@ -187,15 +187,19 @@ where the code later moved on.
 
 ### HDMI sync boxes (2.0)
 
-- [`hdmi-sync-design.md`](hdmi-sync-design.md) (contract, proposed, for the
-  owner's review): the 2.0 design: the Hue Sync Box driver as a Control4
-  HDMI switch, entertainment areas owned by the box, lights while their
-  lamps stream, pairing and identity, testing and the release train, and
-  the owner's questions (#514).
-- [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) (contract, proposed):
+- [`hdmi-sync-design.md`](hdmi-sync-design.md) (contract, reviewed with the
+  owner on 2026-11-13): the 2.0 design: the Hue Sync Box driver as a
+  Control4 HDMI switch, entertainment areas owned by the box, lights while
+  their lamps stream, pairing and identity, testing and the release train,
+  and the owner's decisions O1 to O16 (#514).
+- [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) (contract, reviewed):
   the box driver's `driver.xml`, the box's API as used and the state model,
   the Lua modules, AV routing, the bridge ↔ box messages, the bridge's and
   the light devices' changes, tests, build and release.
+- [`hdmi-sync-stage1-design.md`](hdmi-sync-stage1-design.md) (contract):
+  beta stage 1: the shared network code in `src/common/`, entertainment
+  areas on the Hue Bridge, lights while their lamps stream and the restore
+  after a sync, and the removal of the "until 2.0" aliases.
 
 ### Code health and security
 

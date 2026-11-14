@@ -70,16 +70,23 @@ state"). Every device's `Driver Version` reads `<N>-dev`. `tools/devserver.py` r
 Then, through `tools/devctl.py run`, with the shipped log
 (`build/dev/driver.log`) as the evidence (`docs/dev-loop.md`); steps 2 to
 4 and the log scan of step 9 are scripted as `tools/regress.sh`. Since 1.2
-(#334) the steps name the 1.2 actions; every removed action's command
-string (`Test Connection`, `Refresh Scenes`, `Room Audit`, `Link Devices`,
-`Add Light`, …) still answers as a hidden alias until 2.0, so a script that
-calls the old names keeps working, and step 11 checks that it does:
+(#334) the steps name the 1.2 actions. The command strings of the actions
+1.2 removed (`Refresh Scenes`, `Room Audit`, `Link Devices`, `Add Light`,
+…) answered as hidden aliases up to 1.8; 2.0 (#514) removed them as
+announced, so a script must call the actions by their 1.2 names, and step
+11 checks that the old names no longer answer:
 
 1. Startup: the log shows the resync (`event stream connected; resyncing
-   <n> lights`, then `resync done`, `scene resync done` and `zone light
-   resync done`; with the bridge's `Debug Mode` On also each GET: light,
-   device, zigbee_connectivity, room, zone and bridge_home, then scene,
-   smart_scene and one grouped_light), the stream on its network connection
+   <n> lights`, then `light resync done`, `scene resync done`, `zone light
+   resync done`, `motion resync done`, `entertainment area resync done`
+   and `automation resync done`, each with its count of state messages;
+   with the bridge's `Debug Mode` On also each GET: light, device,
+   zigbee_connectivity, room, zone and bridge_home; scene, smart_scene and
+   one grouped_light; motion, light_level, temperature, device_power,
+   zigbee_connectivity and, on a Bridge Pro, the three MotionAware area
+   types; entertainment_configuration and entertainment (since 2.0, #514);
+   behavior_instance, and behavior_script when the scripts are read), the
+   stream on its network connection
    (`event stream: connecting to <address> (network connection, binding
    6001)`; only on Web transfer the padded spelling, `stream will use
    <spelling>, rotating over <k> spelling(s); self-check via <spelling>
@@ -96,7 +103,7 @@ calls the old names keeps working, and step 11 checks that it does:
 4. The background tasks of 1.2 in the log (with `Debug Mode` On): one line
    per run, "housekeeping: <task> (<trigger>): OK: <what it did>; <n>
    requests, <s> s" (for example "housekeeping: stream_down_read (timer):
-   OK: quick resync; 15 requests, 2.1 s"; "failed: …" for a failed run,
+   OK: quick resync; 16 requests, 2.1 s"; "failed: …" for a failed run,
    logged whatever Debug Mode says), the reads behind the stream, the
    mapping of rooms by name, the room marks on the list rows;
    nothing created, renamed, bound or moved by them. The pickers of `Add
@@ -144,15 +151,21 @@ calls the old names keeps working, and step 11 checks that it does:
     quiet: no safety read in the first five minutes after a start (plus up
     to a minute of jitter; a minute after a driver update), and none while
     the stream is up and the last read is younger than 6 hours. (The
-    engine's hourly budget of 100 optional requests counts the safety
+    engine's hourly budget of 110 optional requests counts the safety
     reads and the reads every 10 minutes while the stream is down, a quick
-    read being 15 requests on the Bridge Pro; the resync at every connect
+    read being 16 requests on the Bridge Pro and a full one 20, or 21 when
+    it also reads the Hue automations' scripts; the resync at every connect
     is essential and not counted.) Memory is not measured: nothing in
     the drivers or the dev loop reports the Lua memory.
-11. The old command strings (1.2, #334): `tools/devctl.py run "Test
-    Connection"`, `"Refresh Scenes"` and `"Room Audit"` answer as before
-    (the ledger spec, `tests/spec/ledger_spec.lua`, checks every alias on
-    the VM); none of them shows on the Actions tab.
+11. The old command strings no longer answer (2.0, #514):
+    `tools/devctl.py run "Refresh Scenes"`, `"Room Audit"` and `"Link
+    Devices"` change nothing (no row, no `Status` or `Last Action`), and
+    with `Debug Mode` On the log shows `no command handler for
+    Refresh_Scenes` (and so on) and no error line. The ledger spec
+    (`tests/spec/ledger_spec.lua`, section 5) checks every removed command
+    on the VM. None of them shows on the Actions tab. (`Test Connection`
+    is no test of this: a dev build's loop keeps it as a signed command of
+    its own, `bridge/devtools.lua`.)
 
 ## 2. Release build on the house (Windows session, Composer)
 

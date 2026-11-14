@@ -77,6 +77,8 @@ local BODIES = {
 	scene = F.scene, smart_scene = F.smart_scene, grouped_light = F.grouped_light,
 	motion = M.motion_body, light_level = M.light_level_body, temperature = M.temperature_body,
 	device_power = M.device_power_body,
+	-- No entertainment areas (2.0, #514): this spec is not about them.
+	entertainment_configuration = EMPTY, entertainment = EMPTY,
 }
 
 -- "14:02" when `since_s` is on today's date, "10-26 14:02" otherwise: the
@@ -292,13 +294,15 @@ describe("offline round trip (#428)", function()
 		for _, env in ipairs(devices) do
 			fake.pair(bridge, env, { light_id = env.C4.device_id, bind = false })
 		end
+		-- Each through Add From Hue (2.0 removed the 1.1 names Add Light, Add
+		-- Zone Light, Add Scene and Add Motion Sensor, O15, #514).
 		assert.equal("Added Living Room Lamp #1 to Living Room (device 2001)",
-			action("Add Light", { Light = F.rids.living, Room = "" }))
-		assert.truthy(action("Add Zone Light", { Group = F.group_rids.downstairs, Room = tostring(LIVING_ROOM) })
-			:find("(device 2002)", 1, true), fake.last_action(bridge))
-		assert.equal("Added Relax to Living Room (device 2003)", action("Add Scene", { Scene = F.scene_rids.relax,
-			Room = "" }))
-		assert.truthy(action("Add Motion Sensor", { Sensor = M.devices.hallway, Room = tostring(LIVING_ROOM) })
+			action("Add From Hue", { What = "light:" .. F.rids.living, Room = "" }))
+		assert.truthy(action("Add From Hue", { What = "group:" .. F.group_rids.downstairs,
+			Room = tostring(LIVING_ROOM) }):find("(device 2002)", 1, true), fake.last_action(bridge))
+		assert.equal("Added Relax to Living Room (device 2003)", action("Add From Hue",
+			{ What = "scene:" .. F.scene_rids.relax, Room = "" }))
+		assert.truthy(action("Add From Hue", { What = "sensor:" .. M.devices.hallway, Room = tostring(LIVING_ROOM) })
 			:find("(device 2004)", 1, true), fake.last_action(bridge))
 
 		for _, env in ipairs(devices) do
@@ -613,9 +617,10 @@ describe("offline round trip (#428)", function()
 		local t0 = unplug()
 		offline_from(t0)
 
-		-- The motion device asks again (Refresh From Bridge): the link comes
-		-- first, and the Offline event does not fire again.
-		fake.as(sensor, sensor.ExecuteCommand, "LUA_ACTION", { ACTION = "Refresh From Bridge" })
+		-- The motion device asks again: the link comes first, and the Offline
+		-- event does not fire again. A re-bind sends its HUE_MOTION_HELLO (the
+		-- hidden Refresh From Bridge that sent the same went in 2.0, O15, #514).
+		fake.as(sensor, sensor.OnBindingChanged, 1, "HUE_BRIDGE", true, bc4.device_id, 1)
 		settle()
 		local to_sensor = messages_to(SENSOR_ID)
 		assert.equal("HUE_BRIDGE_LINK", to_sensor[1], table.concat(to_sensor, " "))

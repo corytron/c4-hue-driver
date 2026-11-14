@@ -316,12 +316,13 @@ describe("bridge.lights", function()
 			assert.same({ rid = F.rids.living, name = "Living Room Lamp", model = "Hue color lamp",
 				has_color = "true", has_cct = "true", mirek_min = "153", mirek_max = "500", min_dim = "0.2",
 				hue_room = "Living Room", id_v1 = "/lights/1" }, sent_to(ID.living, "HUE_CONFIGURE")[1].params)
+			-- The fixture's lights carry mode "normal": streaming "false" (#514).
 			assert.same({ rid = F.rids.living, reason = "resync", on = "true", brightness = "73.52",
-				x = "0.4575", y = "0.4101", mirek = "366", color_mode = "ct", online = "true" },
+				x = "0.4575", y = "0.4101", mirek = "366", color_mode = "ct", online = "true", streaming = "false" },
 				sent_to(ID.living, "HUE_STATE")[1].params)
 			-- Garage White has a connectivity issue: offline, and no colour fields.
-			assert.same({ rid = F.rids.garage, reason = "resync", on = "false", brightness = "100", online = "false" },
-				sent_to(ID.garage, "HUE_STATE")[1].params)
+			assert.same({ rid = F.rids.garage, reason = "resync", on = "false", brightness = "100", online = "false",
+				streaming = "false" }, sent_to(ID.garage, "HUE_STATE")[1].params)
 			-- Kitchen Strip is in no room: no hue_room param at all.
 			assert.is_nil(sent_to(ID.kitchen, "HUE_CONFIGURE")[1].params.hue_room)
 			assert.equal("/lights/2", sent_to(ID.kitchen, "HUE_CONFIGURE")[1].params.id_v1)

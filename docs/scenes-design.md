@@ -38,6 +38,9 @@ Scene device has no actions (`Adopt Hue Name` and `Forget This Scene` are
 gone); the old commands answer as hidden aliases until 2.0
 (`docs/simplify-actions-design.md` §1.2). The `Scenes` row reads as
 `docs/list-rows-design.md` §2 says.
+Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those hidden
+aliases, the scene device's `Adopt Hue Name` and `Forget This Scene`
+included; the old commands no longer answer.
 
 ## 1. Decisions (all approved defaults)
 

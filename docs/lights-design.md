@@ -30,6 +30,11 @@ Current (2026-11-13, #478): the house has four Hue Light devices
 `Add Light` is Add From Hue, `Import All New Lights` is Import All New, and
 the Hue Light device has no actions; the old commands answer as hidden
 aliases until 2.0 (`docs/simplify-actions-design.md` §1.2).
+Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those hidden
+aliases: only the bridge's ten actions answer, and the Hue Light device
+answers none (`docs/hdmi-sync-stage1-design.md` §5.1, §5.3). A light whose
+lamp streams to a Hue entertainment area says so and sends no commands;
+the message fields are under "Messages" below.
 
 ## Roles
 
@@ -90,6 +95,24 @@ sends the cached state with it (`lights:undelivered`; a bare
 `{ rid, reason }` when it has no model), and for a zone or room light
 after a failed grouped_light PUT (`zone_lights:undelivered`).
 
+Current (2.0, #514, 2026-11-14; [`hdmi-sync-stage1-design.md`](hdmi-sync-stage1-design.md)
+§4.5, §5.1; [`hdmi-sync-contracts.md`](hdmi-sync-contracts.md) C7):
+`HUE_STATE` gains `streaming` ("true"/"false": the light's CLIP v2 `mode`
+is `streaming` or `normal`; absent while the bridge has no mode for it)
+and, while `streaming` is "true", `stream_label`, who streams (`another
+app` until the sync box driver of beta stage 2 names its box). The light
+device keeps both with the rest of the state. While `streaming` is "true"
+its Status reads `Syncing with the TV (<stream_label>)`, it never goes
+offline because of the stream, and a light command (on, off, level, ramp,
+toggle, colour, colour temperature, a keypad tap or hold) is not sent: the
+proxy gets CHANGING then CHANGED at the level the device knows, and Last
+Action reads `Not changed: the lamp follows the TV while it syncs
+(<stream_label>)`. The bridge does not queue `HUE_SET` or `HUE_DIM` for a
+streaming lamp either (`lights:is_streaming`); it logs `HUE_SET for
+<rid8>: the lamp syncs with the TV; not sent` and answers the device with
+its full state. A zone or room light's `lamps` and `streaming_lamps` are
+in [`zone-light-design.md`](zone-light-design.md) §5.
+
 `ExecuteCommand` does not tell the receiver who sent a message, so `rid` is
 in every message and the bridge maps rid → deviceId through its registry.
 
@@ -125,6 +148,12 @@ light_rids, zigbee_rid } from `/clip/v2/resource/device`;
 Current (2026-10-25, build 316): a light, device, group or scene item whose
 `id` is not a resource id (letters, digits and hyphens) is dropped with one
 debug line (`bridge/hue_model.lua:light`, `devices`; #45).
+Current (2.0, #514, 2026-11-14): the normalised light gains `streaming`,
+`true` while the item's `mode` is `"streaming"`, `false` for `"normal"`,
+absent otherwise, kept through updates like every other field;
+`hue_model.STATE_FIELDS` lists it after `online`
+(`docs/hdmi-sync-stage1-design.md` §4.1; the field names in
+`docs/entertainment-areas-research.md` 4.1).
 
 Registry, persisted with `C4:PersistSetValue("hue_lights", table)` (tables
 allowed) [verified: API 26.5]: `{ [rid] = { device_id = N, name = "...",

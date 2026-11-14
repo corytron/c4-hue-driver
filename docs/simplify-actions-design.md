@@ -278,6 +278,8 @@ setting, **Background Tasks** On (default) / Off, where Off is exactly beta
    driver.
 3. The housekeeping engine with a fake clock in the specs.
 4. The merged actions, with every old command as a hidden alias until 2.0.
+   Current (2.0, #514, 2026-11-14): as announced, 2.0 removes the aliases
+   (`tests/fixtures/ledger.lua`, `ledger.removed`).
 5. Rows, Attention wrapping, manuals, checklists, screenshots, CHANGELOG.
 
 Before that, in 1.1 beta 8 (small fixes found by the research): Import All
@@ -485,6 +487,10 @@ Every removed action's command string stays a **hidden alias** in
 Hue Light and Hue Scene: no actions; their old commands stay aliases. Hue
 Motion: one action, **Test Motion Programming**; Test: Motion, Test: No
 Motion and Refresh From Bridge stay aliases.
+Current (2.0, #514, 2026-11-14): as announced, 2.0 removes all 37 hidden
+aliases, the device drivers' included; each old command string is now an
+unknown command (`tests/fixtures/ledger.lua`, `ledger.removed`;
+`tests/spec/ledger_spec.lua` section 5).
 
 ### 3.4 Interfaces
 

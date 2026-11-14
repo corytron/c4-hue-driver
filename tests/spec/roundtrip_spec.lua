@@ -1,9 +1,10 @@
 -- End to end on the two-driver harness: the bridge's first resync maps the
--- Hue rooms to the Control4 rooms by name, Import All New Lights creates the
+-- Hue rooms to the Control4 rooms by name, Import All New creates the
 -- fixture lights in their mapped rooms, one of them is a loaded Hue Light
 -- driver, a slider move from the proxy becomes one coalesced PUT whose stream
 -- event closes the loop, and deleting the light in Composer leaves a
--- tombstone that Add Light clears.
+-- tombstone that Add From Hue clears. (2.0 removed the 1.1 command names
+-- Import All New Lights, Add Light and Room Audit, O15, #514.)
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -14,7 +15,7 @@ local CHECK_URL = "https://192.00.02.10/clip/v2/resource/bridge"
 local STREAM_URL = "https://192.000.002.10/eventstream/clip/v2"
 local GARAGE_ROOM, LIVING_ROOM = 8, 7
 
--- Import All New Lights creates the lights with a mapped Hue room in name
+-- Import All New creates the lights with a mapped Hue room in name
 -- order: Garage White (2001), Hallway Ambiance (2002), Living Room Lamp (2003).
 local LIVING_ID = 2003
 
@@ -40,13 +41,15 @@ end
 -- a connect the scenes (scene, smart_scene, grouped_light) and the zone
 -- lights (grouped_light) follow the lights; they get empty catalogues here,
 -- since this is the lights' loop (scene_roundtrip_spec and
--- zone_light_roundtrip_spec have theirs).
+-- zone_light_roundtrip_spec have theirs). So do the entertainment areas
+-- (2.0, #514), read later in the chain.
 local EMPTY = '{"errors":[],"data":[]}'
 local function answer_resource_gets(bridge, from_index)
 	local c4 = bridge.C4
 	local bodies = { light = F.light, device = F.device, zigbee_connectivity = F.zigbee_connectivity,
 		room = F.room, zone = F.zone, bridge_home = F.bridge_home,
-		scene = EMPTY, smart_scene = EMPTY, grouped_light = EMPTY }
+		scene = EMPTY, smart_scene = EMPTY, grouped_light = EMPTY,
+		entertainment_configuration = EMPTY, entertainment = EMPTY }
 	local answered, progress = 0, true
 	while progress do
 		progress = false
@@ -142,10 +145,12 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal("done", bc4.persist.hue_rooms_automapped)
 		assert.truthy(fake.attention(bridge):find("^4 new lights on the bridge: "))
 
-		-- Import All New Lights: six GETs, three AddDevice calls in name order
-		-- into the mapped rooms, each bound and told its configuration and
-		-- state; Kitchen Strip (no Hue room) is skipped and listed.
-		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Import All New Lights" })
+		-- Import All New: six GETs, three AddDevice calls in name order into
+		-- the mapped rooms, each bound and told its configuration and state;
+		-- Kitchen Strip (no Hue room) is skipped and listed. Its motion half
+		-- follows in Last Action after " | Motion: " (this harness leaves the
+		-- motion reads unanswered, so it says busy).
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Import All New" })
 		assert.equal(6, answer_resource_gets(bridge, 1))
 		assert.equal(3, #bc4.added)
 		assert.equal("Garage White", bc4.added[1].name)
@@ -160,7 +165,8 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		local added = "Added 3 new lights: Garage White #4 to Garage (device 2001), Hallway Ambiance #3 to Living Room "
 			.. "(device 2002), Living Room Lamp #1 to Living Room (device 2003)"
 		local skipped = "skipped 1 with no mapped room (Set Room Mapping or Add From Hue): Kitchen Strip #2 (no Hue room)"
-		assert.equal(added .. "; " .. skipped, fake.last_action(bridge))
+		local imported = fake.last_action(bridge)
+		assert.equal(added .. "; " .. skipped, imported:match("^(.-) | Motion: "), imported)
 		assert.is_true(#bridge.Properties["Last Action"] <= 72, "the row itself fits the column")
 		fire_fast_timers(bridge, 400) -- the rows' visibility batch
 		assert.equal(0, bc4.property_attribs["Last Action (2)"], "a continuation row shown")
@@ -280,11 +286,8 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.equal(1, fake.pump(), "one HUE_CONFIGURE to the living room lamp")
 		assert.equal("Garage", light.Properties["Hue Room"])
 		assert.equal(LIVING_ROOM, fake.project.devices[LIVING_ID].room_id, "the Control4 room is the owner's")
-		-- (The swapped event also left Hallway Ambiance's device in no room, so
-		-- two lights have a mapped Hue room to audit.)
-		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
-		assert.equal("1 of 2 are not in the room their Hue room maps to: Lamp is in Living Room; Hue says "
-			.. "Garage → drag it to Garage in Composer if you want it there", fake.last_action(bridge))
+		-- (Room Audit, which listed such a light on a click, went in 2.0; the
+		-- mark on its Lights line is pinned by the last test below.)
 
 		-- #308, as seen on the house: the lamp goes off (Hue keeps its 50 %),
 		-- a turn-on at 30 % follows, and the bridge's first event after it
@@ -338,20 +341,27 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 			proxy_calls(light, "LIGHT_BRIGHTNESS_CHANGED"))
 
 		-- Composer deletes the lamp: HUE_GOODBYE tombstones the entry, the
-		-- binding goes, and Import All New Lights would skip it; Add Light
+		-- binding goes, and Import All New would skip it; Add From Hue
 		-- re-creates it in its mapped room and clears the tombstone.
 		fake.delete_device(LIVING_ID)
 		assert.is_nil(bc4.persist.hue_lights[F.rids.living])
 		assert.equal("Living Room Lamp", bc4.persist.hue_tombstones[F.rids.living].name)
 		assert.equal("4 lights on bridge‚ 2 imported‚ 1 new‚ 1 deleted", bridge.Properties["Lights"])
-		local list = fake.custom_select(bridge, "HueLightList")
+		-- Add From Hue's lights folder (the old HueLightList picker went with
+		-- the 1.1 commands in 2.0, #514 O15): its light rows, Back left out.
+		local list = {}
+		for _, row in ipairs(fake.custom_select(bridge, "AddFromHueList", "f:lights")) do
+			if type(row.value) == "string" and row.value:find("^light:") then
+				list[#list + 1] = row
+			end
+		end
 		assert.equal(2, #list)
-		assert.equal(F.rids.kitchen, list[1].value)
-		assert.truthy(list[2].text:find("^Living Room Lamp %[Garage%] #1 %(deleted from Composer "))
-		assert.equal(F.rids.living, list[2].value)
+		assert.equal("light:" .. F.rids.kitchen, list[1].value)
+		assert.truthy(list[2].text:find("^Living Room Lamp %[Garage%] #1 %(deleted from Composer "), list[2].text)
+		assert.equal("light:" .. F.rids.living, list[2].value)
 		assert.equal("(mapped room)", fake.custom_select(bridge, "RoomList")[1].text)
 
-		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Add Light", Light = F.rids.living, Room = "" })
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Add From Hue", What = "light:" .. F.rids.living, Room = "" })
 		assert.equal("Added Living Room Lamp #1 to Garage (device 2004)", fake.last_action(bridge))
 		assert.equal(GARAGE_ROOM, bc4.added[4].room, "the mapped room of its new Hue room")
 		assert.is_nil(bc4.persist.hue_tombstones[F.rids.living])
@@ -362,8 +372,9 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 	-- 1.2 (#334, docs/simplify-actions-design.md §1.3): what Room Audit listed
 	-- on a click is a mark on the device's line of the Lights drop-down; the
 	-- rows are refreshed every five minutes, so a move in Composer shows up
-	-- within that, and nothing is ever moved back.
-	it("marks a light moved to another Control4 room on its Lights line; Room Audit still lists it", function()
+	-- within that, and nothing is ever moved back. (Room Audit's own name
+	-- went in 2.0, O15, #514.)
+	it("marks a light moved to another Control4 room on its Lights line", function()
 		local bc4 = bridge.C4
 		bc4.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8"}')
 		bc4.last_transfer():respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
@@ -382,8 +393,51 @@ describe("round trip: map, import, state, command, event, delete, re-add", funct
 		assert.truthy(bc4.property_lists["Lights"]:find(",Garage: Garage White → device 2001 (in Living Room instead of "
 			.. "Garage),", 1, true), bc4.property_lists["Lights"])
 		assert.equal(LIVING_ROOM, fake.project.devices[2001].room_id, "nothing moved back")
-		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Room Audit" })
-		assert.equal("1 of 3 are not in the room their Hue room maps to: Garage White is in Living Room; Hue says Garage → "
-			.. "drag it to Garage in Composer if you want it there", fake.last_action(bridge))
+	end)
+
+	-- 2.0 (#514, docs/hdmi-sync-stage1-design.md §4.5): while a lamp syncs
+	-- with a TV, Hue may report it not connected (one report,
+	-- docs/entertainment-areas-research.md §4.1). Its device stays online
+	-- through the stream and hears the report when the stream ends.
+	it("keeps a streaming lamp's device online until its stream ends (#514)", function()
+		local bc4 = bridge.C4
+		bc4.last_transfer():respond(200, '{"bridgeid":"001788FFFE25B8F8"}')
+		bc4.last_transfer():respond(200, '{"data":[{"bridge_id":"001788fffe25b8f8"}]}')
+		local stream_t = bc4.last_transfer()
+		stream_t:respond_headers(200, {})
+		bc4.advance(2500)
+		answer_resource_gets(bridge, 1)
+		bridge.ExecuteCommand("LUA_ACTION", { ACTION = "Import All New" })
+		answer_resource_gets(bridge, 1)
+		fake.pair(bridge, light, { light_id = LIVING_ID, bind = false })
+		fake.as(light, light.OnDriverLateInit, "DIT_STARTUP")
+		fake.pump()
+		assert.equal("Online", light.Properties["Online"])
+
+		local function event(id, item)
+			local ev = json.encode({ { creationtime = "2026-11-14T20:00:00Z", id = "evt-" .. id, type = "update",
+				data = { item } } })
+			fake.as(bridge, function() stream_t:chunk("id: " .. id .. ":0\ndata: " .. ev .. "\n\n") end)
+			return fake.pump()
+		end
+		local function offline_reports()
+			local n = 0
+			for _, p in ipairs(proxy_calls(light, "ONLINE_CHANGED")) do
+				if tostring(p.STATE) == "false" then n = n + 1 end
+			end
+			return n
+		end
+		local radio = { id = F.zigbee_rids.living, type = "zigbee_connectivity",
+			owner = { rid = F.device_rids.living, rtype = "device" }, status = "connectivity_issue" }
+
+		light.C4.calls = {}
+		assert.equal(1, event(21, { id = F.rids.living, type = "light", mode = "streaming" }))
+		assert.equal(0, event(22, radio), "the not-connected report is held back while the lamp streams")
+		assert.equal("Online", light.Properties["Online"])
+		assert.equal(0, offline_reports())
+
+		assert.equal(1, event(23, { id = F.rids.living, type = "light", mode = "normal" }))
+		assert.equal("Offline", light.Properties["Online"], "Hue's report, once the stream has ended")
+		assert.equal(1, offline_reports())
 	end)
 end)

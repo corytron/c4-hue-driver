@@ -119,16 +119,19 @@ local BODIES = {
 	scene = EMPTY, smart_scene = EMPTY, grouped_light = EMPTY,
 	motion = EMPTY, light_level = EMPTY, temperature = EMPTY, device_power = EMPTY,
 	motion_area_configuration = EMPTY, convenience_area_motion = EMPTY, security_area_motion = EMPTY,
+	-- No entertainment areas on this bridge (2.0, #514): this spec is not about them.
+	entertainment_configuration = EMPTY, entertainment = EMPTY,
 	behavior_instance = A.get_instances(), behavior_script = A.get_scripts(),
 }
 
 -- The GETs of a full resync after the stream connects, in order: the lights'
--- six, the scenes' three, the motion module's eight, then the audit's two
--- (the contract D18: last, full tier only).
+-- six, the scenes' three, the motion module's eight, the entertainment
+-- areas' two (2.0, #514: docs/hdmi-sync-stage1-design.md §4.2), then the
+-- audit's two (the contract D18: last, full tier only).
 local CHAIN = { "light", "device", "zigbee_connectivity", "room", "zone", "bridge_home", "scene", "smart_scene",
 	"grouped_light", "motion", "light_level", "temperature", "device_power", "zigbee_connectivity",
-	"motion_area_configuration", "convenience_area_motion", "security_area_motion", "behavior_instance",
-	"behavior_script" }
+	"motion_area_configuration", "convenience_area_motion", "security_area_motion", "entertainment_configuration",
+	"entertainment", "behavior_instance", "behavior_script" }
 
 -- One instance as GET behavior_instance/<rid> answers it, `enabled` as given.
 local function instance_body(key, enabled)
@@ -539,11 +542,14 @@ describe("Hue automation audit round trip", function()
 		fake.as(bridge, function() stream_t:respond_headers(200, {}) end)
 		bc4.advance(2500)
 		-- The lights' six, no scene catalogue (the zone lights read
-		-- grouped_light themselves), the motion module's eight, and nothing of
-		-- the audit's (D18: the stream keeps its cache current).
+		-- grouped_light themselves), the motion module's eight, the
+		-- entertainment areas without their lamp services (a quick read after
+		-- a full one, 2.0, #514), and nothing of the audit's (D18: the stream
+		-- keeps its cache current).
 		assert.same({ "light", "device", "zigbee_connectivity", "room", "zone", "bridge_home", "grouped_light", "motion",
 			"light_level", "temperature", "device_power", "zigbee_connectivity", "motion_area_configuration",
-			"convenience_area_motion", "security_area_motion" }, answer_gets(BODIES))
+			"convenience_area_motion", "security_area_motion", "entertainment_configuration" },
+			answer_gets(BODIES))
 		assert.equal(1, #logged_since(first, "scene resync skipped (quick resync)"), "the quick tier ran")
 		assert.same({}, logged_since(first, "automation resync"), "the quick tier reports no audit read")
 		for _, kind in ipairs(sent_since(transfers + 1)) do

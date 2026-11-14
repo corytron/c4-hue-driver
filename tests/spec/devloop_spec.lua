@@ -2503,9 +2503,11 @@ describe("bridge/devtools.lua development requests", function()
 		assert.equal(sent, #c4.sent, "no proxy command, no probe message")
 		assert.equal(logged, #lines, "no handler ran")
 
-		-- Test Connection with a Host from anywhere but the loop is Composer's
-		-- action, on the dotted address.
-		action("Test Connection", { Host = "10.000.2.143" })
+		-- The connection check with a Host from anywhere but the loop is
+		-- Composer's action, on the dotted address: Diagnostics' "Check the
+		-- connection now", which replaced Test Connection in 1.2 (the alias
+		-- went in 2.0; the signed Test Connection below is the dev loop's own).
+		action("Diagnostics", { What = "diag:test", Host = "10.000.2.143" })
 		assert.equal("https://" .. IP .. "/clip/v2/resource/bridge", c4.last_transfer().url)
 		c4.last_transfer():respond(200, BRIDGE_RESOURCE)
 

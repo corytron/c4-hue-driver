@@ -300,6 +300,8 @@ Current (2026-11-05, release 1.2, #334): the bridge's 29 actions became 9
 stay hidden aliases until 2.0). The rows of this contract that change:
 Current (2026-11-13, #478): ten since 1.5, which added Hue Automations
 (#280, `docs/hue-automation-audit-design.md` D20).
+Current (2.0, #514, 2026-11-14): as announced, 2.0 removes those hidden
+aliases; the old command strings no longer answer.
 
 | Action (1.2) | Params | Does |
 | --- | --- | --- |

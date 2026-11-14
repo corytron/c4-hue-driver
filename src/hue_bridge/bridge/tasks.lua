@@ -56,9 +56,10 @@ local tasks = {}
 
 -- The guards of the safety reads.
 tasks.SAFETY_GUARDS = { "paired", "identity_ok", "key_ok", "not_pairing", "stream_up", "modules_idle" }
--- The most GETs one background read may make: the full chain is 17 on a
--- Bridge Pro and 15 on a v2, the quick one 2 fewer; the rest is room for a
--- module that reads one type more. A run starts only when its whole budget
+-- The most GETs one background read may make: the full chain is 20 on a
+-- Bridge Pro and 18 on a v2 (one more each when it reads the automation
+-- scripts), the quick one 16 and 14 (2.0 added the entertainment areas,
+-- #514); the rest is room for a module that reads one type more. A run starts only when its whole budget
 -- fits in the hour.
 tasks.READ_BUDGET = 25
 
