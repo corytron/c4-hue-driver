@@ -52,6 +52,15 @@ follows it.
   Keypad Follows again on a scene whose On State Follows read `This
   scene` (#514).
 
+### Fixed
+- A Hue Light, zone light or room light that turns off no longer shows a
+  huge negative number (Composer shows -1.07967e+09) as its brightness target
+  while it fades out, nor as its Brightness Percent for a moment when the
+  fade ends. Programming that fades a light to off showed it, for example
+  a Restore Saved Level back to off. Since 1.5 the driver named Control4's
+  Off preset when a light turned off, and the light's proxy took a wrong
+  level from it; an off now names no preset (#527).
+
 ## 1.8 "B2EMO", build 644 (2026-11-13)
 
 ### Fixed

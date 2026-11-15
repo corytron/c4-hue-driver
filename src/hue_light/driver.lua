@@ -469,7 +469,8 @@ local levels
 -- #429 D7: the brightness notifies name presets, so the proxy can move the
 -- light when a preset's level changes (the Daylight Agent) [verified: LV2
 -- notif _10.2-LIGHTBRIGHTNESSCHANGED.md, _10.3-LIGHTBRIGHTNESSCHANGING.md].
--- CHANGING names the preset it goes to, when it goes to one; CHANGING and
+-- CHANGING names the preset it goes to, when it goes to one, but never at
+-- an off (#527: the proxy took the Off preset's id as a junk target); CHANGING and
 -- CHANGED name the preset last targeted while the light sits at it (within
 -- a point, as Hue reports its Zigbee level). A level away from it, or a
 -- target that names none, forgets it.
@@ -1053,8 +1054,8 @@ end
 --   urgent     a keypad tap (#421 D12): the HUE_SET goes past the bridge's
 --              request bucket
 --   tap        marks the ramp a tap's, for the log
---   preset_id  the brightness preset the target is (#429 D7); an off names
---              the Off preset by itself when its id is known
+--   preset_id  the brightness preset the target is (#429 D7); an off
+--              names none (#527)
 --   native     a zone or room light's Previous turn-on: on without a
 --              brightness, so Hue brings every lamp back at its own level;
 --              `target` is only what the proxy is told (#429 D6), and no
@@ -1092,10 +1093,14 @@ local function set_brightness(target, rate, opts)
 		or nil
 	local c = target_color(target, rate, was_lit)
 	local fields = c and state.color_fields(st, c.x, c.y, c.mode) or nil
-	local preset_id = opts.preset_id
-	if target <= 0 and preset_id == nil then
-		preset_id = turnon.off_preset_id(modes)
-	end
+	-- #527: an off names no brightness preset, whether the command carried
+	-- one or the Off preset's id is known. The light_v2 proxy takes the Off
+	-- preset for its target in place of LIGHT_BRIGHTNESS_TARGET: on the
+	-- house the target variables read -1.07967e+09 while the off ramped,
+	-- and so did Brightness Percent at its end until the CHANGED 0 came,
+	-- 210 times from 1.5 (build 609) on. Without an id it takes the 0. An
+	-- off has nothing for the proxy to follow (D7): its level never moves.
+	local preset_id = target > 0 and opts.preset_id or nil
 	local mark = mem.preset
 	brightness_changing(current, target, rate, preset_id)
 	local stored = st.pending_color
