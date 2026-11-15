@@ -403,8 +403,9 @@ function turnon.is_previous_preset(t, id)
 	return id ~= nil and id == t.presets.previous_id
 end
 
--- The learned "Off" brightness preset id, for an off's CHANGING (D7); nil
--- until the proxy named it: only learned ids and On = 1 are ever sent.
+-- The learned "Off" brightness preset id; nil until the proxy named it.
+-- Never sent since #527: the proxy took it for an off's target and showed
+-- a junk level (src/hue_light/driver.lua set_brightness).
 function turnon.off_preset_id(t)
 	return t.presets.off_id
 end

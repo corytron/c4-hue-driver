@@ -3487,11 +3487,44 @@ describe("Hue Light driver", function()
 
 				c4.calls = {}
 				proxy(env, "OFF")
-				assert.equal(OFF_PRESET, notifies(c4, "LIGHT_BRIGHTNESS_CHANGING")[1].LIGHT_BRIGHTNESS_TARGET_PRESET_ID,
-					"an off names the Off preset once its id is known")
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 0 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "an off names no preset, the Off preset's id known (#527)")
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
-				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_CURRENT_PRESET_ID = OFF_PRESET } },
-					notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+			end)
+
+			-- #527: the proxy took the Off preset's id for the target, so the
+			-- house's target variables, and Brightness Percent at the ramp's
+			-- end, read -1.07967e+09 on every off from 1.5 on.
+			it("an off names no preset, whatever the command carries (#527)", function()
+				local env, c4 = dark_light()
+				brightness_preset(env, "Off", OFF_PRESET, 0)
+				env.ExecuteCommand("Raise Level By", { Points = "30", ["Ramp (ms)"] = "1000" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "30.04" })
+				c4.advance(1100)
+				c4.calls = {}
+				env.ExecuteCommand("Restore Saved Level", { ["Ramp (ms)"] = "1000" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 30, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 1000 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "the Stairwell's restore to off")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				c4.advance(1100)
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
+
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40" })
+				c4.advance(1100)
+				c4.calls = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "750",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = tostring(OFF_PRESET) })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 40, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 750 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "nor the id an off carries")
+				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "false" })
+				c4.advance(1000)
+				c4.calls = {}
+				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "0", RATE = "750",
+					LIGHT_BRIGHTNESS_TARGET_PRESET_ID = tostring(OFF_PRESET) })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 0, RATE = 750 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"), "nor an off of a light that is off")
 			end)
 
 			it("UPDATE_BRIGHTNESS_PRESET for the On preset changes the tap level and sends no PRESET_LEVEL", function()
