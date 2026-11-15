@@ -3510,7 +3510,11 @@ describe("Hue Light driver", function()
 				c4.advance(1100)
 				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0 } }, notifies(c4, "LIGHT_BRIGHTNESS_CHANGED"))
 
+				c4.calls = {}
 				proxy(env, "SET_BRIGHTNESS_TARGET", { LIGHT_BRIGHTNESS_TARGET = "40", RATE = "0" })
+				assert.same({ { LIGHT_BRIGHTNESS_CURRENT = 0, LIGHT_BRIGHTNESS_TARGET = 40, RATE = 0 } },
+					notifies(c4, "LIGHT_BRIGHTNESS_CHANGING"),
+					"nor does the next turn-on start at the Off preset (the house's current -1.22144e+09)")
 				env.ExecuteCommand("HUE_STATE", { rid = "l1", on = "true", brightness = "40" })
 				c4.advance(1100)
 				c4.calls = {}
