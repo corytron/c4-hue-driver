@@ -97,13 +97,14 @@ be added.
 | At Room Off | LIST | Power save, Stop syncing and keep the picture / Power save (O6) | no |
 | When The Source Leaves The Box | LIST | Stop syncing and keep the picture, Power save / Stop syncing and keep the picture (O6) | no |
 | Input Switching | STRING | what the box does by itself: `By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2` | yes |
+| Periods | STRING | the current period and the sunset's source, e.g. `Day until 18:00. No location is set in the project: 19:00 stands in for sunset` (stage 4, #568) | yes |
 
 ### C1.5 Actions
 
 | Action | Parameters | Does |
 |---|---|---|
 | Pair Sync Box | Box (DYNAMIC_LIST: the Sync Boxes Found, or "Type an address"), Address (STRING) | Identity check, then a 2-minute window for the button |
-| Sync Box Settings | What (DYNAMIC_LIST: Let Control4 choose inputs; Restore the box's input switching) | The offers (design 5.4) |
+| Sync Box Settings | What (CUSTOM_SELECT, as Pair Sync Box: Let Control4 choose inputs; Restore the box's input switching; the wiring choices and their Restore; the name choices while the names differ) | The offers (design 5.4, 5.8; stage 4) |
 | Diagnostics | What (LIST: Check the box now; Read everything from the box now; Show the box's raw state in the Lua output) | As the bridge's Diagnostics |
 | Forget Pairing | Confirm (LIST: No, Yes) | Deletes the registration; keeps the device |
 
@@ -238,6 +239,14 @@ does. Each module has its own spec.
 | `syncbox/offers.lua` | The Sync Box Settings choices and Attention |
 | `syncbox/periods.lua` | The Day, Evening and Night periods: `periods.new(ctx)`, `p:current(now)`, `p:next_boundary(now)`, the sunset source (the Scheduler Agent's daily sunset entry if a driver hears it fire, else the sunset computed from the project's location; a clock time stands in when neither works); and the manual hold |
 
+**Sunset source, decided in stage 4 (#568):** computed on the controller from
+`C4:GetProjectProperty("Latitude"/"Longitude")` (the location Director uses
+for its own sunrise and sunset) with the standard solar formulas; the
+Scheduler Agent's sunset entries are for Composer programming and call no
+driver back. Without a usable location, 19:00 stands in and the row says why.
+The Periods row shows today's sunset, which roughly locates the house: treat
+it as private in public reports.
+
 **Moved into `src/common/`** before the box driver exists (beta stage 1):
 - `common/https.lua`: the bridge's HTTPS core, with its CA bundle, peer
   text and transfer caps as parameters;
@@ -279,6 +288,9 @@ names a box only when exactly one bound box of this bridge has the area.
 | `HUE_SYNCBOX_AREA` | bridge → box | `id`, `status` (`active`/`inactive`), `streamer` (`this_box`/`other`/`none`) | A stream starts or stops on any area. The box reads its own state at once; nothing else changes |
 | `HUE_SYNCBOX_STOP_AREA` | box → bridge | `area_id` | When the box reports the bridge busy as it starts syncing (O12, automatic): the bridge PUTs `action: stop` on the area with its own key (check T6), then the box starts its sync and fires Sync Taken Over |
 | `HUE_SYNCBOX_GOODBYE` | box → bridge | `device_id`, `box_id` | Unbind or removal |
+| `HUE_SYNCBOX_STATE` | box → bridge | `device_id`, `box_id`, `bridge_id`, `area_id`, `syncing` | Stage 4 (#568): the box's sync state changed, or it got an AREA; the stream label and W10's guard read it. HELLO carries `syncing` too |
+| `HUE_SYNCBOX_STOPPED` | bridge → box | `area_id`, `ok`, `reason` (`stopped`, `another_box`, `no_area`, `not_linked`, `failed`, `busy`), `by`, `detail` | Stage 4: the answer to a `STOP_AREA` |
+| `HUE_SYNCBOX_ASK_HELLO` | bridge → box | none | Stage 4: to a device bound on connection 2 the bridge has no hello from (each resync, at most once per device per run, and on binding); the box answers with HELLO, `syncing` included. Only a hint |
 
 The trust rules of #483 apply on both sides:
 - A box acts on bridge messages only as hints.
@@ -314,7 +326,9 @@ The trust rules of #483 apply on both sides:
   - Check T7 settles when Hue's own end state lands, so the restore comes
     after it.
 - **Never written:** areas, and their "light state after streaming"
-  setting. A stream is stopped only through `STOP_AREA` (O12).
+  setting. A stream is stopped only through `STOP_AREA` (O12), which writes
+  only `{"action": "stop"}` to the area, and never for a stream a bound box of
+  this project reports (W10; a 3 s grace when two boxes start together).
 
 ## C7. Lights, zone lights and scenes while lamps stream
 

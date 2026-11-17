@@ -230,8 +230,11 @@ local function send(driver_run, how, name, binding, params)
 	for _, call in ipairs(env.C4.calls) do
 		if call.name == "UpdateProperty" then rows = rows + 1 end
 	end
+	-- A false answer is an answer (a conditional that is not met): keep it (#568).
+	local answer = nil
+	if ok then answer = value end
 	return { reached = list[from], raised = (not ok) and tostring(value) or nil, errors = errors, rows = rows,
-		value = ok and value or nil }
+		value = answer }
 end
 
 local function params_text(params)

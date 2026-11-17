@@ -26,11 +26,12 @@
 		<script jit="1" file="driver.lua"/>
 		<documentation file="www/documentation.html"/>
 		<!-- The rows of docs/hdmi-sync-stage2-design.md §5 (contracts C1.4, the
-		     stage 2 rows), in that order, then the routing settings of stage 3
-		     (docs/hdmi-sync-stage3-design.md §5). Every stage 2 row but Debug
-		     Mode is read-only; the periods and Entertainment Area come with
-		     stage 4. A long Last Action continues on the rows (2) to (6),
-		     word-wrapped, the unused ones hidden (as the bridge's). -->
+		     stage 2 rows), in that order, with stage 4's Entertainment Area after
+		     Bridge Link, then the routing settings of stage 3
+		     (docs/hdmi-sync-stage3-design.md §5) and the periods of stage 4
+		     (docs/hdmi-sync-stage4-design.md §1.3). Every stage 2 row but Debug
+		     Mode is read-only. A long Last Action continues on the rows (2) to
+		     (6), word-wrapped, the unused ones hidden (as the bridge's). -->
 		<properties>
 			<property>
 				<name>Driver Version</name>
@@ -128,7 +129,7 @@
 				<readonly>true</readonly>
 			</property>
 			<!-- O17, design 5.8: the box's own setting (arcBypassMode, soloMode),
-			     shown; changed only by a click in a later stage. -->
+			     shown; changed only by a click (Sync Box Settings). -->
 			<property>
 				<name>Wiring</name>
 				<default></default>
@@ -153,6 +154,22 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- Stage 4 (docs/hdmi-sync-stage4-design.md §1.5; contracts C1.4): the
+			     box's areas by name, from its hue.groups; a pick writes hueTarget.
+			     Built at run time with C4:UpdatePropertyList, as Follow Room
+			     [verified: API 24_properties/_6-UpdatePropertyList.md; FUND
+			     15_composerpro_interface_into_the_sdk/_2-DYNAMICLISTPROPERTIES.md].
+			     A re-created area's same-name successor is offered once, never
+			     picked by itself (design 8). -->
+			<property>
+				<name>Entertainment Area</name>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
+				<tooltip>The Hue entertainment area this box syncs to, from the box's own list; pick one, then click Set</tooltip>
+			</property>
+			<!-- Stage 4 (§1.4, design 5.4, O4, O18): what the box does by itself, and
+			     Attention while Control4 routes through the box and the box
+			     switches inputs by itself; Sync Box Settings turns it off. -->
 			<property>
 				<name>Input Switching</name>
 				<default></default>
@@ -249,6 +266,108 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- Stage 4 (docs/hdmi-sync-stage4-design.md §1.3, §4; contracts C1.4;
+			     design 5.3): Day, Evening and Night, each with its intensity and
+			     brightness, applied when sync starts and at each boundary while
+			     syncing; a manual change holds until the source changes or sync
+			     stops. Day and Night start at clock times (24-hour, checked),
+			     Evening at an offset in minutes from the controller's sunset
+			     (checked). Periods (read-only) says which period runs now, when
+			     each starts today and where the sunset comes from, or that a clock
+			     time stands in for it. -->
+			<property>
+				<name>Periods</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Day Starts</name>
+				<default>07:00</default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+				<tooltip>When Day starts, 24-hour (07:00)</tooltip>
+			</property>
+			<property>
+				<name>Evening Starts</name>
+				<default>-60</default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+				<tooltip>When Evening starts, in minutes from the controller's sunset (-60: an hour before sunset)</tooltip>
+			</property>
+			<property>
+				<name>Night Starts</name>
+				<default>22:00</default>
+				<type>STRING</type>
+				<readonly>false</readonly>
+				<tooltip>When Night starts, 24-hour (22:00)</tooltip>
+			</property>
+			<property>
+				<name>Day Intensity</name>
+				<type>LIST</type>
+				<items>
+					<item>Subtle</item>
+					<item>Moderate</item>
+					<item>High</item>
+					<item>Intense</item>
+				</items>
+				<default>High</default>
+				<readonly>false</readonly>
+				<tooltip>The sync intensity during the Day</tooltip>
+			</property>
+			<property>
+				<name>Evening Intensity</name>
+				<type>LIST</type>
+				<items>
+					<item>Subtle</item>
+					<item>Moderate</item>
+					<item>High</item>
+					<item>Intense</item>
+				</items>
+				<default>Moderate</default>
+				<readonly>false</readonly>
+				<tooltip>The sync intensity during the Evening</tooltip>
+			</property>
+			<property>
+				<name>Night Intensity</name>
+				<type>LIST</type>
+				<items>
+					<item>Subtle</item>
+					<item>Moderate</item>
+					<item>High</item>
+					<item>Intense</item>
+				</items>
+				<default>Subtle</default>
+				<readonly>false</readonly>
+				<tooltip>The sync intensity during the Night</tooltip>
+			</property>
+			<property>
+				<name>Day Brightness</name>
+				<type>RANGED_INTEGER</type>
+				<minimum>0</minimum>
+				<maximum>200</maximum>
+				<default>100</default>
+				<readonly>false</readonly>
+				<tooltip>The sync brightness during the Day, in %: 100 leaves the picture's brightness as it is</tooltip>
+			</property>
+			<property>
+				<name>Evening Brightness</name>
+				<type>RANGED_INTEGER</type>
+				<minimum>0</minimum>
+				<maximum>200</maximum>
+				<default>100</default>
+				<readonly>false</readonly>
+				<tooltip>The sync brightness during the Evening, in %: 100 leaves the picture's brightness as it is</tooltip>
+			</property>
+			<property>
+				<name>Night Brightness</name>
+				<type>RANGED_INTEGER</type>
+				<minimum>0</minimum>
+				<maximum>200</maximum>
+				<default>70</default>
+				<readonly>false</readonly>
+				<tooltip>The sync brightness during the Night, in %: 100 leaves the picture's brightness as it is</tooltip>
+			</property>
 			<!-- Contracts C1.4, O6: what Room Off (OFF) and a source that no longer
 			     passes the box (DISCONNECT_OUTPUT, or the followed room choosing
 			     one) do to the box. -->
@@ -276,12 +395,15 @@
 			</property>
 		</properties>
 		<!-- The actions of stage 2 (docs/hdmi-sync-stage2-design.md §5, contracts
-		     C1.5) and Set Source Sync Mode of stage 3
-		     (docs/hdmi-sync-stage3-design.md §5); Sync Box Settings comes with
-		     the offers of stage 4. Box and Source are CUSTOM_SELECT lists built
-		     on demand by SyncBoxList and SourceList in driver.lua [verified:
-		     FUND 12.3_custom_select_implementation/_1-Overview.md, _2-CUSTOMSELECTLIST.md];
-		     Address is a STRING [verified: FUND 9_commands/_1-COMMANDS.md]. -->
+		     C1.5), Set Source Sync Mode of stage 3
+		     (docs/hdmi-sync-stage3-design.md §5) and Sync Box Settings of stage 4
+		     (docs/hdmi-sync-stage4-design.md §1.4). Box, What and Source are
+		     CUSTOM_SELECT lists built on demand by SyncBoxList,
+		     SyncBoxSettingsList and SourceList in driver.lua [verified: FUND
+		     12.3_custom_select_implementation/_1-Overview.md: "available for both
+		     actions and commands", _2-CUSTOMSELECTLIST.md]: contracts C1.5's
+		     DYNAMIC_LIST, in the form this driver's pickers take; Address is a
+		     STRING [verified: FUND 9_commands/_1-COMMANDS.md]. -->
 		<actions>
 			<action>
 				<name>Pair Sync Box</name>
@@ -298,13 +420,28 @@
 					</param>
 				</params>
 			</action>
+			<!-- Design 5.4, O4, O18: the box's own input switching and CEC power
+			     behaviours turned off with one click while Control4 routes through
+			     the box, and restored exactly as they were with another; never
+			     changed by themselves (syncbox/offers.lua). -->
+			<action>
+				<name>Sync Box Settings</name>
+				<command>Sync Box Settings</command>
+				<sort_order>2</sort_order>
+				<params>
+					<param>
+						<name>What</name>
+						<type>CUSTOM_SELECT:SyncBoxSettingsList</type>
+					</param>
+				</params>
+			</action>
 			<!-- Research §7.2: the sync mode of one source behind a receiver or on a
 			     second output; the sources are those found upstream of the box and
 			     those seen in the followed room. -->
 			<action>
 				<name>Set Source Sync Mode</name>
 				<command>Set Source Sync Mode</command>
-				<sort_order>2</sort_order>
+				<sort_order>3</sort_order>
 				<params>
 					<param>
 						<name>Source</name>
@@ -327,7 +464,7 @@
 			<action>
 				<name>Diagnostics</name>
 				<command>Diagnostics</command>
-				<sort_order>3</sort_order>
+				<sort_order>4</sort_order>
 				<params>
 					<param>
 						<name>What</name>
@@ -344,7 +481,7 @@
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
-				<sort_order>4</sort_order>
+				<sort_order>5</sort_order>
 				<params>
 					<param>
 						<name>Confirm</name>
@@ -358,10 +495,379 @@
 				</params>
 			</action>
 		</actions>
-		<!-- No programming commands, events, conditionals or variables before
-		     stage 4 (docs/hdmi-sync-stage2-design.md §5). -->
-		<commands/>
+		<!-- Contracts C1.6 (docs/hdmi-sync-stage4-design.md §1.1, §3): programming
+		     refers to a command by its name, so names and parameters never change
+		     once released [verified: FUND 14_updating_released_drivers/_2];
+		     sort_order zero-based on every command [verified: FUND 9_commands/
+		     _1-COMMANDS.md]. Area is a DYNAMIC_LIST, answered by
+		     GetCommandParamList in driver.lua (OS 3.3.0, this driver's minimum)
+		     [verified: FUND 9/_1, "Dynamic List type for Commands"]. Apply Sync
+		     Settings sends every field it is given in one PUT, the mode before
+		     the intensity (contracts C1.6): Leave leaves that field as the box
+		     has it, so each field is optional; Brightness goes in steps of 10
+		     there (Set Brightness takes any whole number). -->
+		<commands>
+			<command>
+				<name>Start Sync</name>
+				<description>Start syncing NAME, with the period's intensity and brightness</description>
+				<sort_order>0</sort_order>
+			</command>
+			<command>
+				<name>Stop Sync</name>
+				<description>Stop syncing NAME and keep the picture</description>
+				<sort_order>1</sort_order>
+			</command>
+			<command>
+				<name>Toggle Sync</name>
+				<description>Start or stop syncing NAME</description>
+				<sort_order>2</sort_order>
+			</command>
+			<command>
+				<name>Set Sync Mode</name>
+				<description>Sync NAME to PARAM1</description>
+				<sort_order>3</sort_order>
+				<params>
+					<param>
+						<name>Mode</name>
+						<type>LIST</type>
+						<items>
+							<item>Video</item>
+							<item>Music</item>
+							<item>Game</item>
+						</items>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Set Intensity</name>
+				<description>Set the sync intensity of NAME to PARAM1</description>
+				<sort_order>4</sort_order>
+				<params>
+					<param>
+						<name>Intensity</name>
+						<type>LIST</type>
+						<items>
+							<item>Subtle</item>
+							<item>Moderate</item>
+							<item>High</item>
+							<item>Intense</item>
+						</items>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Next Intensity</name>
+				<description>Step the sync intensity of NAME to the next one (Subtle, Moderate, High, Intense, Subtle)</description>
+				<sort_order>5</sort_order>
+			</command>
+			<command>
+				<name>Set Brightness</name>
+				<description>Set the sync brightness of NAME to PARAM1 % (100 % leaves the picture's brightness as it is)</description>
+				<sort_order>6</sort_order>
+				<params>
+					<param>
+						<name>Brightness</name>
+						<type>RANGED_INTEGER</type>
+						<minimum>0</minimum>
+						<maximum>200</maximum>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Adjust Brightness</name>
+				<description>Change the sync brightness of NAME by PARAM1 points</description>
+				<sort_order>7</sort_order>
+				<params>
+					<param>
+						<name>Step</name>
+						<type>RANGED_INTEGER</type>
+						<minimum>-200</minimum>
+						<maximum>200</maximum>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Set Entertainment Area</name>
+				<description>Sync NAME to the entertainment area PARAM1</description>
+				<sort_order>8</sort_order>
+				<params>
+					<param>
+						<name>Area</name>
+						<type>DYNAMIC_LIST</type>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Apply Sync Settings</name>
+				<description>Apply to NAME at once: mode PARAM1, intensity PARAM2, brightness PARAM3, area PARAM4, sync PARAM5</description>
+				<sort_order>9</sort_order>
+				<params>
+					<param>
+						<name>Mode</name>
+						<type>LIST</type>
+						<items>
+							<item>Leave</item>
+							<item>Video</item>
+							<item>Music</item>
+							<item>Game</item>
+						</items>
+					</param>
+					<param>
+						<name>Intensity</name>
+						<type>LIST</type>
+						<items>
+							<item>Leave</item>
+							<item>Subtle</item>
+							<item>Moderate</item>
+							<item>High</item>
+							<item>Intense</item>
+						</items>
+					</param>
+					<param>
+						<name>Brightness</name>
+						<type>LIST</type>
+						<items>
+							<item>Leave</item>
+							<item>0 %</item>
+							<item>10 %</item>
+							<item>20 %</item>
+							<item>30 %</item>
+							<item>40 %</item>
+							<item>50 %</item>
+							<item>60 %</item>
+							<item>70 %</item>
+							<item>80 %</item>
+							<item>90 %</item>
+							<item>100 %</item>
+							<item>110 %</item>
+							<item>120 %</item>
+							<item>130 %</item>
+							<item>140 %</item>
+							<item>150 %</item>
+							<item>160 %</item>
+							<item>170 %</item>
+							<item>180 %</item>
+							<item>190 %</item>
+							<item>200 %</item>
+						</items>
+					</param>
+					<param>
+						<name>Area</name>
+						<type>DYNAMIC_LIST</type>
+					</param>
+					<param>
+						<name>Start</name>
+						<type>LIST</type>
+						<items>
+							<item>Leave</item>
+							<item>Start</item>
+							<item>Stop</item>
+						</items>
+					</param>
+				</params>
+			</command>
+			<command>
+				<name>Power Save</name>
+				<description>Put NAME in power save</description>
+				<sort_order>10</sort_order>
+			</command>
+			<command>
+				<name>Wake</name>
+				<description>Wake NAME from power save</description>
+				<sort_order>11</sort_order>
+			</command>
+			<command>
+				<name>Select HDMI Input</name>
+				<description>Switch NAME to PARAM1 (the Control4 room does not follow: its sources stay as Control4 routed them)</description>
+				<sort_order>12</sort_order>
+				<params>
+					<param>
+						<name>Input</name>
+						<type>LIST</type>
+						<items>
+							<item>HDMI 1</item>
+							<item>HDMI 2</item>
+							<item>HDMI 3</item>
+							<item>HDMI 4</item>
+						</items>
+					</param>
+				</params>
+			</command>
+		</commands>
 	</config>
+	<!-- Contracts C1.7: ids fixed forever, never renumbered or removed
+	     [verified: FUND 14_updating_released_drivers/_2]; fired with
+	     C4:FireEventByID [verified: API 7_event/_4-FireEventByID.md], each after
+	     the variable that reports its change is set, and none at start for a
+	     value that did not change (design 5.5). sort_order (OS 3.3.0+)
+	     [verified: FUND 12.5_Events/_10-SORTINGEVENTSINCOMPOSERPRO.md]. Under
+	     <devicedata> [verified: XML 40_events_xml/_5-events.md]. -->
+	<events>
+		<event>
+			<id>1</id>
+			<name>Sync Started</name>
+			<description>When NAME starts syncing</description>
+			<sort_order>0</sort_order>
+		</event>
+		<event>
+			<id>2</id>
+			<name>Sync Stopped</name>
+			<description>When NAME stops syncing</description>
+			<sort_order>1</sort_order>
+		</event>
+		<event>
+			<id>3</id>
+			<name>Sync Mode Changed</name>
+			<description>When the sync mode of NAME changes</description>
+			<sort_order>2</sort_order>
+		</event>
+		<event>
+			<id>4</id>
+			<name>Intensity Changed</name>
+			<description>When the sync intensity of NAME changes</description>
+			<sort_order>3</sort_order>
+		</event>
+		<event>
+			<id>5</id>
+			<name>Brightness Changed</name>
+			<description>When the sync brightness of NAME changes</description>
+			<sort_order>4</sort_order>
+		</event>
+		<event>
+			<id>6</id>
+			<name>HDMI Input Changed</name>
+			<description>When NAME switches to another HDMI input, whoever switched it</description>
+			<sort_order>5</sort_order>
+		</event>
+		<event>
+			<id>7</id>
+			<name>Entertainment Area Changed</name>
+			<description>When NAME syncs to another entertainment area</description>
+			<sort_order>6</sort_order>
+		</event>
+		<event>
+			<id>8</id>
+			<name>Sync Taken Over</name>
+			<description>When NAME takes over the entertainment area from another app's sync</description>
+			<sort_order>7</sort_order>
+		</event>
+		<event>
+			<id>9</id>
+			<name>Powered On</name>
+			<description>When NAME wakes from power save</description>
+			<sort_order>8</sort_order>
+		</event>
+		<event>
+			<id>10</id>
+			<name>Power Save</name>
+			<description>When NAME goes to power save</description>
+			<sort_order>9</sort_order>
+		</event>
+		<event>
+			<id>11</id>
+			<name>Online</name>
+			<description>When NAME answers again after being offline</description>
+			<sort_order>10</sort_order>
+		</event>
+		<event>
+			<id>12</id>
+			<name>Offline</name>
+			<description>When NAME goes offline</description>
+			<sort_order>11</sort_order>
+		</event>
+	</events>
+	<!-- Contracts C1.8: TestCondition in driver.lua answers each by its name
+	     [verified: FUND 10_conditionals/_4-USINGTHETESTCONDITIONFUNCTION.md],
+	     from the variables of C1.9; ids and names fixed forever, as the
+	     events'. The condition statement is the contract's name. A LIST's
+	     VALUE is the item picked, a NUMBER's the whole number typed with its
+	     LOGIC [verified: FUND 10/_4, 10/_5, 10/_7, 10/_8]; sort_order (OS
+	     3.2.0+) [verified: FUND 10/_11]. Under <devicedata> [verified: XML
+	     25_conditionals_xml/_5-conditionals.md]. -->
+	<conditionals>
+		<conditional>
+			<id>0</id>
+			<name>BOOL_SYNC_ACTIVE</name>
+			<type>BOOL</type>
+			<condition_statement>Sync Active</condition_statement>
+			<description>NAME Sync Active is STRING</description>
+			<true_text>True</true_text>
+			<false_text>False</false_text>
+			<sort_order>0</sort_order>
+		</conditional>
+		<conditional>
+			<id>1</id>
+			<name>LIST_SYNC_MODE</name>
+			<type>LIST</type>
+			<condition_statement>Sync Mode</condition_statement>
+			<description>NAME Sync Mode is LOGIC STRING</description>
+			<items>
+				<item>Video</item>
+				<item>Music</item>
+				<item>Game</item>
+				<item>Off</item>
+			</items>
+			<sort_order>1</sort_order>
+		</conditional>
+		<conditional>
+			<id>2</id>
+			<name>LIST_INTENSITY</name>
+			<type>LIST</type>
+			<condition_statement>Intensity</condition_statement>
+			<description>NAME Intensity is LOGIC STRING</description>
+			<items>
+				<item>Subtle</item>
+				<item>Moderate</item>
+				<item>High</item>
+				<item>Intense</item>
+			</items>
+			<sort_order>2</sort_order>
+		</conditional>
+		<conditional>
+			<id>3</id>
+			<name>LIST_HDMI_INPUT</name>
+			<type>LIST</type>
+			<condition_statement>HDMI Input</condition_statement>
+			<description>NAME HDMI Input is LOGIC STRING</description>
+			<items>
+				<item>HDMI 1</item>
+				<item>HDMI 2</item>
+				<item>HDMI 3</item>
+				<item>HDMI 4</item>
+			</items>
+			<sort_order>3</sort_order>
+		</conditional>
+		<conditional>
+			<id>4</id>
+			<name>NUMBER_BRIGHTNESS</name>
+			<type>NUMBER</type>
+			<condition_statement>Brightness</condition_statement>
+			<description>NAME Brightness is LOGIC INTEGER %</description>
+			<minimum>0</minimum>
+			<maximum>200</maximum>
+			<sort_order>4</sort_order>
+		</conditional>
+		<conditional>
+			<id>5</id>
+			<name>BOOL_POWERED_ON</name>
+			<type>BOOL</type>
+			<condition_statement>Powered On</condition_statement>
+			<description>NAME Powered On is STRING</description>
+			<true_text>True</true_text>
+			<false_text>False</false_text>
+			<sort_order>5</sort_order>
+		</conditional>
+		<conditional>
+			<id>6</id>
+			<name>BOOL_ONLINE</name>
+			<type>BOOL</type>
+			<condition_statement>Online</condition_statement>
+			<description>NAME Online is STRING</description>
+			<true_text>True</true_text>
+			<false_text>False</false_text>
+			<sort_order>6</sort_order>
+		</conditional>
+	</conditionals>
 	<!-- Contracts C1.1, frozen for good from the first release: a driver may
 	     never add, remove or change a proxy once released [verified: FUND
 	     14_updating_released_drivers/_2]. The AV switch is the primary proxy
@@ -369,7 +875,8 @@
 	     the four UI Buttons follow, each its own device with its own name
 	     [verified: FUND 8_proxies_and_proxy_types/_1-SINGLEANDMULTIPROXIES.md;
 	     UIB 103_ui_button_proxy_overview/_1-UIBUTTONPROXYOVERVIEW.md]. The
-	     buttons show their proxy's default icon [verified: FUND 19/_1]. -->
+	     buttons' Navigator icons are the navigator_display_option capabilities
+	     below (stage 4). -->
 	<proxies qty="5">
 		<proxy proxybindingid="5001" name="Hue Sync Box" primary="True" image_source="c4z" small_image="images/devices_sm/hue_syncbox_16.png" large_image="images/devices_lg/hue_syncbox_32.png">avswitch</proxy>
 		<proxy proxybindingid="5002" name="Hue Sync">uibutton</proxy>
@@ -378,7 +885,8 @@
 		<proxy proxybindingid="5005" name="Sync Intensity">uibutton</proxy>
 	</proxies>
 	<!-- Contracts C1.3, frozen before the first release: a change needs the
-	     controller rebooted from System Manager. The counts match the
+	     controller rebooted from System Manager; stage 4's navigator icons
+	     (below, after the AV switch's) are the last one. The counts match the
 	     connections [verified: PP 6_audio_video_switch_capabilities/_1, _2,
 	     _21, _22]; the box switches audio and video together and converts
 	     nothing [verified: PP 6/_3, 6/_4, 6/_5, 6/_20]; no volume, mute, tone
@@ -412,6 +920,115 @@
 		<has_discrete_loudness_control>False</has_discrete_loudness_control>
 		<has_audio_signal_sense>False</has_audio_signal_sense>
 		<has_video_signal_sense>False</has_video_signal_sense>
+		<!-- Stage 4 (docs/hdmi-sync-stage4-design.md §1.2; contracts C1.3): the UI
+		     Buttons' Navigator icons, the 2.0 frame's last capability change (a
+		     controller reboot from System Manager, then final). One
+		     navigator_display_option per button, by its proxy binding: a default
+		     icon, and for Hue Sync and Sync Intensity one state per value, which
+		     driver.lua picks with ICON_CHANGED {icon = state id,
+		     icon_description} sent to the button's binding (an empty icon shows
+		     the default) [verified: UIB 104_ui_button_proxy_capabilities/
+		     _1-UIBUTTONCAPABILITIES.md (the element, display_icons, Icon with
+		     width and height, state id; 300, 90 and 70 px for a proxy other than
+		     the Media Service Proxy), UIB 106_ui_button_protocol_notifications/
+		     _1-ICONCHANGED.md]. Each set also has 512 and 1024 px, which the
+		     mobile app takes on high-resolution screens: Snap One's icon
+		     guidance asks for 70, 90, 300, 512 and 1024 px for every driver
+		     with display_icons, Experience Buttons through the UI Button proxy
+		     included, and its UI Button sample declares the five for its
+		     default icon and for each state [verified: SDK
+		     github.com/snap-one/docs-driverworks icon_templates/OS3/README.md,
+		     "Icon Sizing Requirements"; sample_drivers/uibutton_remote_icons/
+		     driver.xml]. Added in this beta with the rest, so the frame's one
+		     capability change carries them all. controller://driver/<driver
+		     file name>/ is the package's www/ [verified: UIB 104/_1,
+		     web_view_url: "the driver name MUST be the same as the driver's
+		     filename"], so the files are www/icons/<name>_<size>.png
+		     (tools/make_icons.py). That a button with a default icon and no
+		     state takes the same element is [assumed: the SDK's examples all
+		     have states]. -->
+		<navigator_display_option proxybindingid="5002">
+			<display_icons>
+				<!-- Hue Sync: the default icon -->
+				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/sync_300.png</Icon>
+				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/sync_90.png</Icon>
+				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/sync_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/sync_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/sync_1024.png</Icon>
+				<state id="sync_on">
+					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/sync_on_300.png</Icon>
+					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/sync_on_90.png</Icon>
+					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/sync_on_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/sync_on_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/sync_on_1024.png</Icon>
+				</state>
+				<state id="sync_off">
+					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/sync_off_300.png</Icon>
+					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/sync_off_90.png</Icon>
+					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/sync_off_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/sync_off_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/sync_off_1024.png</Icon>
+				</state>
+			</display_icons>
+		</navigator_display_option>
+		<navigator_display_option proxybindingid="5003">
+			<display_icons>
+				<!-- Sync Brighter: the default icon -->
+				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/brighter_300.png</Icon>
+				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/brighter_90.png</Icon>
+				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/brighter_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/brighter_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/brighter_1024.png</Icon>
+			</display_icons>
+		</navigator_display_option>
+		<navigator_display_option proxybindingid="5004">
+			<display_icons>
+				<!-- Sync Dimmer: the default icon -->
+				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/dimmer_300.png</Icon>
+				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/dimmer_90.png</Icon>
+				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/dimmer_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/dimmer_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/dimmer_1024.png</Icon>
+			</display_icons>
+		</navigator_display_option>
+		<navigator_display_option proxybindingid="5005">
+			<display_icons>
+				<!-- Sync Intensity: the default icon -->
+				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_300.png</Icon>
+				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_90.png</Icon>
+				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_1024.png</Icon>
+				<state id="intensity_subtle">
+					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_subtle_300.png</Icon>
+					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_subtle_90.png</Icon>
+					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_subtle_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_subtle_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_subtle_1024.png</Icon>
+				</state>
+				<state id="intensity_moderate">
+					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_moderate_300.png</Icon>
+					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_moderate_90.png</Icon>
+					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_moderate_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_moderate_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_moderate_1024.png</Icon>
+				</state>
+				<state id="intensity_high">
+					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_high_300.png</Icon>
+					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_high_90.png</Icon>
+					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_high_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_high_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_high_1024.png</Icon>
+				</state>
+				<state id="intensity_intense">
+					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_intense_300.png</Icon>
+					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_intense_90.png</Icon>
+					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_intense_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_intense_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_intense_1024.png</Icon>
+				</state>
+			</display_icons>
+		</navigator_display_option>
 	</capabilities>
 	<!-- Contracts C1.2, fixed for good once released: connections may only be
 	     added [verified: FUND 14/_2]. Binding ids in their ranges (video in

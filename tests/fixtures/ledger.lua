@@ -936,7 +936,7 @@ ledger.rows = {
 	{
 		id = "E12",
 		capability = "The sync box device is an AV switch with four UI Buttons and its HDMI connections; every "
-			.. "proxy command is logged with every parameter; the UI Buttons answer Not done until stage 4",
+			.. "proxy command is logged with every parameter",
 		gate = { "proxy" },
 		paths = {
 			{ proxy = "avswitch", driver = "hue_syncbox" },
@@ -953,7 +953,7 @@ ledger.rows = {
 			{ proxy_command = "BINDING_CHANGE_ACTION", binding = 5001, driver = "hue_syncbox" },
 			{ proxy_command = "SELECT", binding = 5002, driver = "hue_syncbox" },
 			{ auto = "a proxy command", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
-				test = "logs every proxy command with every parameter, and answers a UI Button press Not done" } },
+				test = "logs every proxy command with every parameter, and takes a UI Button press as its command" } },
 		},
 	},
 	{
@@ -965,6 +965,12 @@ ledger.rows = {
 			{ connection = "Hue Bridge", id = 1, driver = "hue_syncbox" },
 			{ message = "HUE_SYNCBOX_CONFIGURE", driver = "hue_syncbox" },
 			{ message = "HUE_SYNCBOX_AREA", driver = "hue_syncbox" },
+			-- Stage 4 (#568, §6): the take-over's answer, and the bridge's request
+			-- for a hello after its restart.
+			{ message = "HUE_SYNCBOX_STOPPED", driver = "hue_syncbox" },
+			{ message = "HUE_SYNCBOX_ASK_HELLO", driver = "hue_syncbox" },
+			{ auto = "an AREA, the bridge's ASK_HELLO", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "says its sync state after an AREA, and hello again when the bridge asks for it" } },
 			{ auto = "a bridge hint", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
 				test = "reads the box at once on an AREA and marks a CONFIGURE that names another bridge" } },
 			{ auto = "late init and a binding", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
@@ -1078,6 +1084,165 @@ ledger.rows = {
 		},
 	},
 
+	-- 2.0 beta stage 4 (#568, docs/hdmi-sync-stage4-design.md; contracts C1.4 to C1.9; design 5.3 to 5.6, 7.3, 8).
+	{
+		id = "E21",
+		capability = "Program the sync box: start, stop or toggle sync, its mode, intensity (set or next) and "
+			.. "brightness (set or adjust), its entertainment area, several at once in one write, power save, wake, "
+			.. "and an HDMI input the room does not follow",
+		gate = { "prog" },
+		paths = {
+			{ command = "Start Sync", driver = "hue_syncbox" },
+			{ command = "Stop Sync", driver = "hue_syncbox" },
+			{ command = "Toggle Sync", driver = "hue_syncbox" },
+			{ command = "Set Sync Mode", params = { "Mode" }, driver = "hue_syncbox" },
+			{ command = "Set Intensity", params = { "Intensity" }, driver = "hue_syncbox" },
+			{ command = "Next Intensity", driver = "hue_syncbox" },
+			{ command = "Set Brightness", params = { "Brightness" }, driver = "hue_syncbox" },
+			{ command = "Adjust Brightness", params = { "Step" }, driver = "hue_syncbox" },
+			{ command = "Set Entertainment Area", params = { "Area" }, driver = "hue_syncbox" },
+			{ command = "Apply Sync Settings", params = { "Mode", "Intensity", "Brightness", "Area", "Start" },
+				driver = "hue_syncbox" },
+			{ command = "Power Save", driver = "hue_syncbox" },
+			{ command = "Wake", driver = "hue_syncbox" },
+			{ command = "Select HDMI Input", params = { "Input" }, driver = "hue_syncbox" },
+			{ auto = "a programming command", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "runs the commands through the box's one queue: Apply Sync Settings as one PUT, the area by name" } },
+		},
+	},
+	{
+		id = "E22",
+		capability = "The sync box's events, conditionals and variables: sync started or stopped, mode, intensity, "
+			.. "brightness, HDMI input and area changed, sync taken over, powered on, power save, online, offline; "
+			.. "each variable set before its event, none fired at a restart for a value that did not change",
+		gate = { "prog", "auto" },
+		paths = {
+			{ event = "Sync Started", id = 1, driver = "hue_syncbox" },
+			{ event = "Sync Stopped", id = 2, driver = "hue_syncbox" },
+			{ event = "Sync Mode Changed", id = 3, driver = "hue_syncbox" },
+			{ event = "Intensity Changed", id = 4, driver = "hue_syncbox" },
+			{ event = "Brightness Changed", id = 5, driver = "hue_syncbox" },
+			{ event = "HDMI Input Changed", id = 6, driver = "hue_syncbox" },
+			{ event = "Entertainment Area Changed", id = 7, driver = "hue_syncbox" },
+			{ event = "Sync Taken Over", id = 8, driver = "hue_syncbox" },
+			{ event = "Powered On", id = 9, driver = "hue_syncbox" },
+			{ event = "Power Save", id = 10, driver = "hue_syncbox" },
+			{ event = "Online", id = 11, driver = "hue_syncbox" },
+			{ event = "Offline", id = 12, driver = "hue_syncbox" },
+			-- LIST_SYNC_MODE (1), LIST_INTENSITY (2), LIST_HDMI_INPUT (3) and
+			-- NUMBER_BRIGHTNESS (4) answer false to the probe's VALUE "0" on a
+			-- fresh driver, which ledger_spec.lua's send() keeps as nil (`ok and
+			-- value or nil`); they join here once it keeps a false. The driver
+			-- spec checks all seven ("answers the conditionals of C1.8").
+			{ conditional = "BOOL_SYNC_ACTIVE", id = 0, driver = "hue_syncbox" },
+			{ conditional = "BOOL_POWERED_ON", id = 5, driver = "hue_syncbox" },
+			{ conditional = "BOOL_ONLINE", id = 6, driver = "hue_syncbox" },
+			{ auto = "TestCondition", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "answers the conditionals of C1.8 from the variables" } },
+			{ auto = "every read of the box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "sets each variable before the event that reports its change, and fires none again at a restart" } },
+			{ auto = "the first read", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "adds the nine variables in C1.9's order in OnDriverInit, and takes the first read as a baseline" } },
+			{ auto = "an outage", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "fires Offline after 5 minutes without an answer and Online when the box answers again" } },
+		},
+	},
+	{
+		id = "E23",
+		capability = "The Watch-menu buttons: Hue Sync toggles sync, Sync Brighter and Sync Dimmer step the "
+			.. "brightness by 10 points, Sync Intensity steps the intensity; Hue Sync's and Sync Intensity's icons "
+			.. "show the state",
+		gate = { "proxy" },
+		paths = {
+			{ proxy_command = "SELECT", binding = 5002, driver = "hue_syncbox" },
+			{ proxy_command = "SELECT", binding = 5003, driver = "hue_syncbox" },
+			{ proxy_command = "SELECT", binding = 5004, driver = "hue_syncbox" },
+			{ proxy_command = "SELECT", binding = 5005, driver = "hue_syncbox" },
+			{ auto = "a press, a read", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "toggles sync, steps the brightness by 10 and the intensity by one, and shows the state in the icons" } },
+		},
+	},
+	{
+		id = "E24",
+		capability = "The periods: Day, Evening (from the controller's sunset) and Night, each with its intensity "
+			.. "and brightness, applied at sync start and at each boundary while syncing; a manual change holds until "
+			.. "the source changes or sync stops",
+		gate = { "prop", "auto" },
+		paths = {
+			{ property = "Periods", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Day Starts", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Evening Starts", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Night Starts", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Day Intensity", type = "LIST", items = { "Subtle", "Moderate", "High", "Intense" },
+				driver = "hue_syncbox" },
+			{ property = "Evening Intensity", type = "LIST", items = { "Subtle", "Moderate", "High", "Intense" },
+				driver = "hue_syncbox" },
+			{ property = "Night Intensity", type = "LIST", items = { "Subtle", "Moderate", "High", "Intense" },
+				driver = "hue_syncbox" },
+			{ property = "Day Brightness", type = "RANGED_INTEGER", driver = "hue_syncbox" },
+			{ property = "Evening Brightness", type = "RANGED_INTEGER", driver = "hue_syncbox" },
+			{ property = "Night Brightness", type = "RANGED_INTEGER", driver = "hue_syncbox" },
+			{ auto = "a sync start, a boundary", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "applies the period at sync start and at each boundary while syncing; a manual change holds" } },
+		},
+	},
+	{
+		id = "E25",
+		capability = "The sync box's own input switching and CEC power save shown, on Attention while Control4 "
+			.. "routes through it, turned off and restored only by a click; the box's name offered both ways while "
+			.. "the names wait for one",
+		gate = { "offered", "click" },
+		paths = {
+			{ action = "Sync Box Settings", params = { "What" }, driver = "hue_syncbox" },
+			{ action = "Sync Box Settings", params = { "What" }, pick = { What = "inputs:control4" },
+				driver = "hue_syncbox" },
+			{ action = "Sync Box Settings", params = { "What" }, pick = { What = "inputs:restore" },
+				driver = "hue_syncbox" },
+			{ property = "Input Switching", type = "STRING", driver = "hue_syncbox" },
+			{ auto = "every read while Control4 routes through the box", proof = {
+				spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "puts the box's own input switching on Attention while Control4 routes through it" } },
+		},
+	},
+	{
+		id = "E26",
+		capability = "The sync box's entertainment area: picked from the box's areas by name, or by programming; "
+			.. "an area deleted in Hue said, its same-name successor offered once, never picked by itself",
+		gate = { "prop", "prog", "auto" },
+		paths = {
+			{ property = "Entertainment Area", type = "DYNAMIC_LIST", driver = "hue_syncbox" },
+			{ command = "Set Entertainment Area", params = { "Area" }, driver = "hue_syncbox" },
+			{ auto = "a pick", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "lists the box's areas by name and writes hueTarget on a pick, firing Entertainment Area Changed" } },
+			{ auto = "an area made anew in Hue", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "says an area deleted in Hue, and offers its same-name successor without picking it" } },
+		},
+	},
+	{
+		id = "E27",
+		capability = "The sync box's name both ways: a rename in Composer renames the box, a rename in the Hue "
+			.. "Sync app renames the device, with the loop guards of 1.2",
+		gate = { "auto" },
+		paths = {
+			{ auto = "a rename on either side", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "renames the box after a rename in Composer, and the device after a rename in the Hue Sync app" } },
+		},
+	},
+	{
+		id = "E28",
+		capability = "Take over another app's sync: a sync start refused with code 16 has the Hue Bridge stop the "
+			.. "area's stream, then syncs and fires Sync Taken Over; never from another box of this project (W10)",
+		gate = { "auto" },
+		paths = {
+			{ message = "HUE_SYNCBOX_STOPPED", driver = "hue_syncbox" },
+			{ event = "Sync Taken Over", id = 8, driver = "hue_syncbox" },
+			{ auto = "code 16 at a sync start", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "asks the bridge to stop another app's stream on code 16, then syncs and fires Sync Taken Over" } },
+			{ auto = "another box of this project streams", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "takes nothing from another box of this project (W10) and says which box streams" } },
+		},
+	},
+
 	-- Every driver ---------------------------------------------------------------
 	{
 		id = "G1",
@@ -1162,11 +1327,12 @@ ledger.actions = {
 	hue_motion = {
 		{ command = "Test Motion Programming" },
 	},
-	-- 2.0 beta stage 2 (#534, docs/hdmi-sync-stage2-design.md §5), and Set
-	-- Source Sync Mode of stage 3 (#557, docs/hdmi-sync-stage3-design.md §5);
-	-- Sync Box Settings comes with stage 4 (contracts C1.5).
+	-- 2.0 beta stage 2 (#534, docs/hdmi-sync-stage2-design.md §5), Set Source
+	-- Sync Mode of stage 3 (#557, docs/hdmi-sync-stage3-design.md §5) and Sync
+	-- Box Settings of stage 4 (#568, contracts C1.5).
 	hue_syncbox = {
 		{ command = "Pair Sync Box", params = { "Box", "Address" } },
+		{ command = "Sync Box Settings", params = { "What" } },
 		{ command = "Set Source Sync Mode", params = { "Source", "Mode" } },
 		{ command = "Diagnostics", params = { "What" } },
 		{ command = "Forget Pairing", params = { "Confirm" } },

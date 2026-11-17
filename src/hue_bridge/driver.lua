@@ -1718,6 +1718,18 @@ dispatch.commands["HUE_SYNCBOX_GOODBYE"] = function(params)
 	if state.syncboxes then state.syncboxes:goodbye(params) end
 end
 
+-- A box's sync state (stage 4, #568): which bound box streams, for the stream
+-- label (contracts C7) and research W10's guard.
+dispatch.commands["HUE_SYNCBOX_STATE"] = function(params)
+	if state.syncboxes then state.syncboxes:state(params) end
+end
+
+-- The take-over (O12, contracts C5): the bridge stops an area's stream with its
+-- own key for a bound box, never for one a box of this project syncs to (W10).
+dispatch.commands["HUE_SYNCBOX_STOP_AREA"] = function(params)
+	if state.syncboxes then state.syncboxes:stop_area(params) end
+end
+
 dispatch.commands["HUE_MOTION_FORGET"] = function(params)
 	local _, text = state.motion:forget_request(params or {})
 	last_action(text)
@@ -2109,7 +2121,7 @@ end
 -- names no group tells a bridge that has just started nothing, and is
 -- dropped quietly rather than taking a hello's place.
 local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true, HUE_LOAD_GROUPS = true,
-	HUE_SYNCBOX_HELLO = true }
+	HUE_SYNCBOX_HELLO = true, HUE_SYNCBOX_STATE = true }
 local EARLY_MAX = 200
 local early_commands = {}
 local execute_command = dispatch.execute_command
@@ -2528,6 +2540,10 @@ local function new_syncboxes()
 			local proxy = type(consumers) == "table" and next(consumers) or nil
 			return C4:GetDeviceDisplayName(proxy or device_id) -- [verified: docs/design.md "Project APIs"]
 		end,
+		-- The take-over's PUT through the bridge's own request path and key (stage 4, O12).
+		http = bridge_request,
+		set_timer = function(delay_ms, fn) return C4:SetTimer(delay_ms, fn) end, -- [verified: API 34/_1]
+		on_stopped = function(text) last_action(text) end,
 		-- Who streams changed: the lamps' devices and zone lights hear the new label, and the row.
 		on_labels_changed = function(rids)
 			if state.lights then
@@ -2859,6 +2875,9 @@ function OnDriverDestroyed()
 	end
 	if state.entertainment then
 		state.entertainment:stop() -- its restore timers (#514)
+	end
+	if state.syncboxes then
+		state.syncboxes:stop() -- its take-overs waiting (#568)
 	end
 	state.bridges_found:stop()
 	rows:stop()

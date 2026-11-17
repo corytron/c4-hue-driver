@@ -8,9 +8,11 @@
 #
 # Usage: tools/e2e_syncbox.sh [--only SUITE[,SUITE...]] [--trace] [--keep]
 #   --only   run only these suites of tests/e2e/syncbox_e2e.lua: pinning,
-#            flows, faults, devhooks, models, and routing (#557), which is
+#            flows, faults, devhooks, models; routing (#557), which is
 #            routing-inline, routing-onein, routing-receiver, routing-second
-#            and routing-faults, each also by its own name (default all)
+#            and routing-faults; and stage4 (#568), which is programming,
+#            buttons, periods, offers, area-name and takeover; each also by
+#            its own name (default all)
 #   --trace  print every HTTPS exchange of the transport
 #   --keep   keep the temporary directory (the fakes' logs, the drivers')
 #
@@ -29,11 +31,14 @@
 #      0A1B2C3D4E63); each routing suite (#557) with its box: routing-inline
 #      HSB2 0A1B2C3D4E64, routing-onein HSB3 0A1B2C3D4E67, routing-receiver
 #      HSB2_behind_receiver 0A1B2C3D4E65, routing-second HSB2_second_output
-#      0A1B2C3D4E66, routing-faults HSB2 0A1B2C3D4E68. One fake per group
-#      keeps a busy group from slowing another's answers past the scaled
-#      timeouts;
-#   3. lua5.1 tests/e2e/syncbox_e2e.lua with that environment (E2E_*), once
-#      per group, the groups at the same time. Each group's PASS/FAIL/SKIP
+#      0A1B2C3D4E66, routing-faults HSB2 0A1B2C3D4E68; and each suite of
+#      stage 4 (#568) with its HSB2: programming 0A1B2C3D4E69, buttons
+#      0A1B2C3D4E6A, periods 0A1B2C3D4E6B, offers 0A1B2C3D4E6C, area-name
+#      0A1B2C3D4E6D, takeover 0A1B2C3D4E6E. One fake per group keeps a busy
+#      group from slowing another's answers past the scaled timeouts;
+#   3. lua5.1 tests/e2e/syncbox_e2e.lua with that environment (E2E_*) and
+#      TZ=UTC (the periods suite's clock times), once per group, the groups
+#      at the same time. Each group's PASS/FAIL/SKIP
 #      lines and summary are printed in that order once all have ended,
 #      then a total;
 #   4. the fakes stopped (also on failure or interruption).
@@ -138,7 +143,7 @@ cp src/hue_syncbox/certs/decoy.pem "$WORK/archive/certs/decoy.pem"
 # its own (tools/fakebox.py serve, its state directory, every port the
 # system's pick), so that no fake serves two groups at once.
 SUITE_GROUPS=("pinning,flows,faults,devhooks,models" routing-inline routing-onein routing-receiver routing-second
-	routing-faults)
+	routing-faults programming buttons periods offers area-name takeover)
 GROUP_BOXES=(
 	"HSB2:0A1B2C3D4E5F HSB2:0A1B2C3D4E60 HSB1:0A1B2C3D4E61 HSB3:0A1B2C3D4E62 HSB3_standalone:0A1B2C3D4E63"
 	"HSB2:0A1B2C3D4E64"
@@ -146,8 +151,16 @@ GROUP_BOXES=(
 	"HSB2_behind_receiver:0A1B2C3D4E65"
 	"HSB2_second_output:0A1B2C3D4E66"
 	"HSB2:0A1B2C3D4E68"
+	"HSB2:0A1B2C3D4E69"
+	"HSB2:0A1B2C3D4E6A"
+	"HSB2:0A1B2C3D4E6B"
+	"HSB2:0A1B2C3D4E6C"
+	"HSB2:0A1B2C3D4E6D"
+	"HSB2:0A1B2C3D4E6E"
 )
-ROUTING_NAMES=("" inline onein receiver second faults)
+# The name each group's own box goes by in E2E_ROUTING (none for the first).
+ROUTING_NAMES=("" inline onein receiver second faults programming buttons periods offers area takeover)
+STAGE4_SUITES=" programming buttons periods offers area-name takeover "
 
 # The suites of a group that --only names ("routing" names every routing-*).
 wanted_in() {
@@ -161,7 +174,8 @@ wanted_in() {
 		fi
 		IFS=',' read -r -a items <<<"$ONLY"
 		for item in "${items[@]}"; do
-			if [[ "$item" == "$suite" || ("$item" == routing && "$suite" == routing-*) ]]; then
+			if [[ "$item" == "$suite" || ("$item" == routing && "$suite" == routing-*) ||
+				("$item" == stage4 && "$STAGE4_SUITES" == *" $suite "*) ]]; then
 				out+="${out:+,}$suite"
 				break
 			fi
@@ -274,6 +288,7 @@ run_group() {
 		E2E_TRACE="$TRACE" \
 		E2E_LOG="$WORK/driver-$n.log" \
 		TMPDIR="$WORK" \
+		TZ=UTC \
 		lua5.1 tests/e2e/syncbox_e2e.lua >"$WORK/out-$n.txt" 2>&1
 	echo "$?" >"$WORK/exit-$n"
 }

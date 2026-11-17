@@ -661,6 +661,20 @@ local function new_c4(env)
 		c4.persist[name] = nil
 	end
 
+	-- Project properties [verified: API 24_properties/_2-GetProjectProperty,
+	-- OS 3.0.0]: the value a spec put in c4.project_properties under the
+	-- name asked for (exactly as asked: "Latitude" and "latitude" are two
+	-- names here), nil for one never set. What Director answers for an unset
+	-- location, and the values' form, are not documented [assumed: decimal
+	-- degrees as text, north and east positive]; the Sync Box driver's
+	-- sunset (syncbox/periods.lua) reads Latitude and Longitude. Placeholders
+	-- only: never a house's own location.
+	c4.project_properties = {}
+	function c4:GetProjectProperty(name)
+		record("GetProjectProperty", name)
+		return c4.project_properties[name]
+	end
+
 	-- File API: one name -> contents table per alias directory, with the
 	-- File API's current directory selectable through FileSetDir, as on the
 	-- controller. c4.files is the SANDBOX directory for convenience. Handles

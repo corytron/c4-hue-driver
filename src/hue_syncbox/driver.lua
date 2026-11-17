@@ -21,9 +21,21 @@
 -- mode behind a receiver (syncbox/sources.lua). The box's own wiring row
 -- (state.wiring: in line, behind a receiver, second output) says which path
 -- is live, and a change of it at run time switches the path (W §5 W22).
--- The UI Buttons still answer `Not done: ...` until stage 4. Every command
--- the proxies send is logged at debug with all its parameters first, for
--- the routing probes of #531 (P9 to P11).
+-- Every command the proxies send is logged at debug with all its
+-- parameters first, for the routing probes of #531 (P9 to P11).
+--
+-- Stage 4 (#568, docs/hdmi-sync-stage4-design.md, "S4" below, §7; C1.4 to
+-- C1.9) adds programming (syncbox/programming.lua: the commands, events,
+-- conditionals and variables, set from every read), the four UI Buttons
+-- (SELECT on 5002 to 5005 as programming's commands; Hue Sync's and Sync
+-- Intensity's icons follow the box), the periods (syncbox/periods.lua: the
+-- period's intensity and brightness at every sync start and at each
+-- boundary while syncing, a manual change held), the offers
+-- (syncbox/offers.lua: Sync Box Settings, Input Switching on Attention),
+-- the Entertainment Area (syncbox/areas.lua), the box's name both ways
+-- (syncbox/names.lua) and the take-over (O12): a sync start refused with
+-- code 16 has the Hue Bridge stop the area's stream (C5 STOP_AREA), unless
+-- another box of this project streams there (W10), then starts again.
 --
 -- The box's token never leaves syncbox/store.lua and syncbox/client.lua: no
 -- log line, row, Last Action or message here carries it (S2 §3.1), and the
@@ -42,6 +54,7 @@
 -- luacheck: globals OnDriverInit OnDriverLateInit OnDriverDestroyed OnDriverRemovedFromProject
 -- luacheck: globals OnBindingChanged ReceivedFromProxy ReceivedFromNetwork OnConnectionStatusChanged SyncBoxList
 -- luacheck: globals OnWatchedVariableChanged OnSystemEvent SourceList
+-- luacheck: globals TestCondition GetCommandParamList SyncBoxSettingsList
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -67,6 +80,12 @@ local mod = {
 	room = require("syncbox.room"),
 	sources = require("syncbox.sources"),
 	follow = require("syncbox.follow"),
+	-- Stage 4 (#568, docs/hdmi-sync-stage4-design.md, "S4" below: §3 to §5).
+	programming = require("syncbox.programming"),
+	periods = require("syncbox.periods"),
+	offers = require("syncbox.offers"),
+	areas = require("syncbox.areas"),
+	names = require("syncbox.names"),
 }
 
 -- Dev builds only (#547, docs/fakebox-design.md §7): syncbox/devhooks.lua
@@ -86,9 +105,6 @@ local K = {
 	PROXY_AV = 5001,
 	UI_BUTTONS = { [5002] = "Hue Sync", [5003] = "Sync Brighter", [5004] = "Sync Dimmer", [5005] = "Sync Intensity" },
 	BRIDGE_BINDING = device.BRIDGE_BINDING,
-	-- What a UI Button press gets until the buttons come (stage 4; S3 §1
-	-- routes the AV switch only).
-	NOT_YET = "Not done: the Hue Sync buttons come in a later 2.0 beta",
 	-- S2 §4 step 2: the countdown in Status while the button window is open.
 	TICK_MS = 10000,
 	WINDOW_S = mod.pairing.WINDOW_S,
@@ -149,6 +165,40 @@ local K = {
 	-- W20: the rooms' paths are read this long after a SET_INPUT, once
 	-- Director has set them [assumed: P9 measures the order].
 	PATH_OFFER_MS = 2000,
+	-- Stage 4 ------------------------------------------------------------------
+	-- The UI Buttons' icon states (driver.xml's navigator_display_option, by
+	-- the button's binding): programming.lua's icon_state to the state id,
+	-- and the words the List Navigator shows in its place [verified: UIB
+	-- 106_ui_button_protocol_notifications/_1-ICONCHANGED.md].
+	ICONS = {
+		[5002] = { button = "Hue Sync", on = "sync_on", off = "sync_off" },
+		[5005] = { button = "Sync Intensity", subtle = "intensity_subtle", moderate = "intensity_moderate",
+			high = "intensity_high", intense = "intensity_intense" },
+	},
+	ICON_WORDS = { sync_on = "Hue Sync is on", sync_off = "Hue Sync is off",
+		intensity_subtle = "Sync intensity Subtle", intensity_moderate = "Sync intensity Moderate",
+		intensity_high = "Sync intensity High", intensity_intense = "Sync intensity Intense" },
+	-- The period rows (contracts C1.4; syncbox/periods.lua's PROPERTIES).
+	PERIODS = "Periods",
+	-- The take-over (O12): after the bridge's STOPPED the sync start goes
+	-- again at the first read that no longer shows the bridge busy, or this
+	-- long after at the latest; no STOPPED within TAKE_WAIT_MS ends it (the
+	-- bridge's worst case: 3 s of grace and its 15 s request timeout).
+	TAKE_RETRY_MS = 3000,
+	TAKE_WAIT_MS = 20000,
+	TAKE_WORDS = {
+		another_box = "%s syncs to %s, and two sync boxes of this project never take a stream from each other",
+		no_area = "the Hue Bridge has no entertainment area %s",
+		not_linked = "the box is linked to another Hue Bridge than the one bound in Control4",
+		failed = "the Hue Bridge could not stop the other app's stream",
+		busy = "the Hue Bridge is busy stopping other streams",
+		no_bridge = "no Hue Bridge is bound in Control4 to stop the other app's stream",
+		again = "the box was still busy after the Hue Bridge stopped the other app's stream",
+		no_answer = "the Hue Bridge did not answer the request to stop the other app's stream",
+	},
+	ENTERTAINMENT_AREA = "Entertainment Area",
+	-- names.lua's check for a Composer rename whose event was missed.
+	NAMES_TICK_MS = 300000,
 }
 
 -- "HDMI 1 Sync Mode" ... "HDMI 4 Sync Mode".
@@ -165,7 +215,7 @@ end
 -- docs/syncbox-control4-research.md §1.3]. Volume, tone and key commands
 -- have no handler (C4: ignored; the capabilities say none): the debug line
 -- every command gets is all. The UI Buttons' SELECT [verified: UIB
--- 107_ui_button_proxy_commands/_1-SELECT.md] is answered with K.NOT_YET.
+-- 107_ui_button_proxy_commands/_1-SELECT.md] is programming's (stage 4).
 local AV_COMMANDS = { "ON", "OFF", "SET_INPUT", "DISCONNECT_OUTPUT", "CONNECT_OUTPUT", "SET_OUTPUT_INPUT",
 	"PULSE_INPUT", "BINDING_CHANGE_ACTION", "GET_AUDIO_INPUTS", "SET_ROOM_BINDING_NAME", "IS_AV_OUTPUT_TO_INPUT_VALID" }
 
@@ -200,6 +250,15 @@ local st = {
 	path_offered = nil,  -- W20: the room last offered in Last Action
 	source_offers = {},  -- W21: sources.lua's offers, for the Source list
 	offers_said = {},    -- W21: "<from>><to>" said in Last Action
+	-- Stage 4
+	icons = {},          -- binding -> the icon state last sent (ICON_CHANGED)
+	take = nil,          -- the take-over under way: { area, fields, tag, cb, phase }
+	taken_over = nil,    -- its write landed: Sync Taken Over after the read's variables
+	peer = nil,          -- W10: { area, by }, another box of this project streams there
+	attention = nil,     -- the Attention last said in Last Action (offers, names)
+	routed = false,      -- Control4 routes through the box (not on a second output)
+	area_sent = nil,     -- Entertainment Area's list and value as last sent
+	bridge_areas = nil,  -- the bridge's CONFIGURE areas (their rooms, for the list's order)
 }
 
 -- The settings rows as Composer last set them (dispatch.properties below).
@@ -210,6 +269,10 @@ local m = {}
 
 -- Stage 3's routing, the wiring and Follow Room (below, after the rows).
 local route, fr, vis = {}, {}, {}
+
+-- Stage 4's parts (below, after the sources): programming and the buttons,
+-- the take-over, the periods, the offers with the area and the name.
+local prg, tko, per, ofr = {}, {}, {}, {}
 
 -- The plumbing (common/device.lua) ---------------------------------------------------
 
@@ -289,6 +352,7 @@ local function set_offline(since_ms)
 	st.offline_since, st.online = since_ms, false
 	C4:PersistSetValue(K.OFFLINE_KEY, since_ms)
 	log.warn("offline: %s has not answered since %s", tostring(st.address), clock(since_ms))
+	prg.online(false) -- ONLINE, then the Offline event (C1.7, C1.9)
 end
 
 -- No outage any more (an answer, or Forget Pairing); true when there was one.
@@ -305,6 +369,7 @@ local function set_online()
 	st.online = true
 	if clear_offline() then
 		log.info("online: %s answers again", tostring(st.address))
+		prg.online(true) -- ONLINE, then the Online event (C1.7, C1.9)
 	end
 end
 
@@ -498,9 +563,16 @@ local function status_text()
 		return d.refusal
 	end
 	-- Behind a receiver and on a second output, the room it follows (W1,
-	-- W2, W4, W16); in line nothing more.
-	local note = fr.note()
-	return note and (d.sync .. "; " .. note) or d.sync
+	-- W2, W4, W16); in line nothing more. Stage 4: an area gone in Hue,
+	-- invalid or not chosen (areas.lua, design 8), and what waits for a
+	-- person (ofr.attention_note).
+	local words = d.sync
+	for _, note in ipairs({ fr.note() or false, ofr.area_note() or false, ofr.attention_note() or false }) do
+		if note then
+			words = words .. "; " .. note
+		end
+	end
+	return words
 end
 
 local function refresh_status()
@@ -576,8 +648,10 @@ local function refresh_box_rows()
 		if st.link_match == false then
 			link_text = link_text .. " (not the Hue Bridge bound in Control4)"
 		end
+		-- Input Switching: the offers' row, with Attention while Control4
+		-- routes through a box that switches inputs by itself (S4 §1.4).
 		texts = { Wiring = d.wiring, Sync = d.sync, Inputs = d.inputs, ["Bridge Link"] = link_text,
-			["Input Switching"] = d.input_switching }
+			["Input Switching"] = ofr.switching_row(d.input_switching) }
 	else
 		for name, value in pairs(saved.rows or {}) do
 			texts[name] = value
@@ -931,6 +1005,7 @@ function route.set_wiring(wiring)
 	st.wiring = wiring
 	C4:PersistSetValue(K.WIRING_KEY, wiring)
 	if from then
+		tko.cancel(nil, "cancelled")
 		call(m.queue, "clear")
 		call(m.av, "reset")
 		local words = { in_line = "Control4 routes through the box and each input sets its sync mode",
@@ -941,6 +1016,7 @@ function route.set_wiring(wiring)
 	end
 	fr.apply(from ~= nil and wiring == "second_output" and not st.followed)
 	vis.update()
+	ofr.check_routed()
 	refresh_status()
 end
 
@@ -964,6 +1040,9 @@ function route.room_change(state, prev)
 		return
 	end
 	route.saw(state)
+	-- S4 §1.3: the room's new source ends a manual hold before the writes
+	-- it brings take the period's settings.
+	per.source_changed(state, prev)
 	call(m.follow, "changed", state, prev)
 	if route.wiring() == "behind_receiver" then
 		call(m.av, "room_changed", state, prev)
@@ -1023,6 +1102,7 @@ end
 -- Forget Pairing: nothing waits for the forgotten box, no room is followed,
 -- and the next box's first read is no wiring change (W22).
 function route.forget()
+	tko.cancel(nil, "cancelled")
 	call(m.queue, "clear")
 	call(m.av, "reset")
 	st.wiring = nil
@@ -1095,11 +1175,13 @@ end
 local function link_ids()
 	local model = st.model or {}
 	local bridge_id = type(model.bridge) == "table" and model.bridge.id or nil
-	return st.box_id, bridge_id, model.area
+	return st.box_id, bridge_id, model.area, model.syncing
 end
 
 -- HELLO at late init, on binding and after pairing (C5); after a read, only
--- when the box's bridge or area changed (link:update).
+-- when the box's bridge or area changed (link:update), else STATE when its
+-- sync state changed or the bridge's AREA asked for it (S4 §6: the bridge
+-- knows which bound box streams, W10).
 local function hello(force)
 	if not (m.link and st.bridge and st.box_id) then
 		return
@@ -1257,6 +1339,829 @@ function follow(address)
 	last_action(string.format("%s moved to %s; address updated", paired_label(), address))
 end
 
+-- Stage 4: programming and the UI Buttons (S4 §3, §7; C1.6 to C1.9) ------------------------
+-- syncbox/programming.lua owns the commands, the variables, their events
+-- and the conditionals; the driver hands it every read and every press.
+
+-- Made in OnDriverInit, where its nine variables are added (C1.9); the parts
+-- late init builds (the take-over's view of the queue, the periods, the
+-- areas) are handed over as functions. PersistData without the encrypted
+-- flag (#547).
+function prg.build()
+	m.programming = mod.programming.new({
+		queue = function() return m.tq end,
+		model_now = route.model,
+		periods = function() return m.periods end,
+		period = per.settings,
+		areas = ofr.programming_areas,
+		last_action = last_action,
+		changed = function() prg.icons() end,
+		log = log,
+		persist_get = function(name) return C4:PersistGetValue(name) end,
+		persist_set = function(name, value) return C4:PersistSetValue(name, value) end,
+	})
+	m.programming:init()
+end
+
+-- ONLINE and the Online and Offline events (C1.7, C1.9): the box answers
+-- again, or the 5-minute rule fired.
+function prg.online(flag)
+	if not st.late then
+		return
+	end
+	local ok, err = pcall(call, m.programming, "online", flag)
+	if not ok then
+		log.error("programming: ONLINE failed: %s", tostring(err))
+	end
+end
+
+-- The UI Buttons' icons (S4 §1.2): Hue Sync on or off, Sync Intensity the
+-- intensity now, from programming's variables (persisted, so a start shows
+-- the last state before the box answers). ICON_CHANGED to the button's
+-- binding with a state of driver.xml's navigator_display_option [verified:
+-- UIB 106_ui_button_protocol_notifications/_1-ICONCHANGED.md; API
+-- 25_proxy/_6-SendToProxy.md: not in OnDriverInit, a NOTIFY for a binding of
+-- 1000 or more]; sent when it changes, and at every late init (`force`).
+function prg.icons(force)
+	if not (st.late and m.programming) then
+		return
+	end
+	for binding, spec in pairs(K.ICONS) do
+		local state = call(m.programming, "icon_state", spec.button)
+		local id = state and spec[state]
+		if id and (force or st.icons[binding] ~= id) then
+			st.icons[binding] = id
+			log.debug("-> %s ICON_CHANGED %s", spec.button, id)
+			C4:SendToProxy(binding, "ICON_CHANGED", { icon = id, icon_description = K.ICON_WORDS[id] })
+		end
+	end
+end
+
+-- A press on 5002 to 5005 (C1.1; design 5.6): programming's button, whose
+-- outcome Last Action says once the queue answers.
+function prg.select(binding)
+	local name = K.UI_BUTTONS[binding]
+	if not (name and m.programming) then
+		return
+	end
+	log.info("%s pressed", name)
+	local ok, why = m.programming:button(name)
+	if not ok then
+		log.debug("%s: %s", name, tostring(why))
+	end
+end
+
+-- Every good read (poll.on_state, after the routing): the variables, then
+-- their events (C1.9: set before the event); Sync Taken Over once the
+-- take-over's write landed; the icons, the offers, the area and the name.
+function prg.on_read(model, before)
+	call(m.programming, "observe", model, before, "read")
+	local taken = st.taken_over
+	st.taken_over = nil
+	if taken then
+		call(m.programming, "observe", model, nil, "takeover")
+	end
+	prg.icons()
+	tko.on_read(model)
+	per.row()
+	ofr.on_read(model, before)
+end
+
+-- Programming's commands (C1.6), sent by Director by name; one that comes
+-- before late init waits for it, in order (common/device.lua).
+for _, name in ipairs(mod.programming.COMMANDS) do
+	local handler = after_late_init(name, function(params)
+		m.programming:command(name, params)
+	end)
+	dispatch.commands[(name:gsub("%s+", "_"))] = function(params)
+		handler(type(params) == "table" and params or {})
+	end
+end
+
+-- The conditionals (C1.8) [verified: FUND 10_conditionals/
+-- _4-USINGTHETESTCONDITIONFUNCTION.md: a boolean, from the <name>].
+function TestCondition(name, params)
+	if not m.programming then
+		return false
+	end
+	local ok, result = pcall(m.programming.test, m.programming, name, params)
+	if not ok then
+		log.error("TestCondition %s failed: %s", tostring(name), tostring(result))
+		return false
+	end
+	return result == true
+end
+
+-- The DYNAMIC_LIST parameters of the commands (Set Entertainment Area's
+-- and Apply Sync Settings' Area) [verified: FUND 9_commands/_1-COMMANDS.md,
+-- GetCommandParamList, OS 3.3.0].
+function GetCommandParamList(commandName, paramName)
+	if not m.programming then
+		return {}
+	end
+	local ok, list = pcall(m.programming.param_list, m.programming, commandName, paramName)
+	if not ok or type(list) ~= "table" then
+		log.warn("GetCommandParamList %s/%s: %s", tostring(commandName), tostring(paramName), tostring(list))
+		return {}
+	end
+	return list
+end
+
+-- The take-over (S4 §1.6; O12; design 7.3; C5 STOP_AREA) -----------------------------------
+-- Every writer's q:set goes through here. A write that starts a sync and
+-- ends busy (code 16: another app streams to the box's area, SB91) is held
+-- while the Hue Bridge is asked to stop that stream (link:stop_area); once
+-- it answers that it did, the same write goes again, at the first read that
+-- no longer shows the box busy or TAKE_RETRY_MS later, and when it lands
+-- Sync Taken Over fires (after the read's variables) and Last Action says
+-- whose sync it replaced. The bridge refuses when another box of this
+-- project streams there (W10): Last Action names that box, nothing is
+-- taken, and Follow Room sends no sync start while it does
+-- (tko.peer_syncing). One take-over at a time; a newer write ends it (the
+-- box does what was asked last); a retry that is busy again ends it. The
+-- writer hears its write's outcome once: ok when the take-over landed it,
+-- "cancelled" when Last Action already said why not (its own words would
+-- only repeat "busy"), "busy" when no bridge could be asked.
+
+local function starts_sync(fields)
+	return fields.syncActive == true or fields.mode == "video" or fields.mode == "game" or fields.mode == "music"
+end
+
+-- The queue as every writer sees it: q:set through tko.set, the rest the
+-- queue's own.
+function tko.wrap(q)
+	return setmetatable({
+		set = function(_, fields, tag, cb)
+			return tko.set(q, fields, tag, cb)
+		end,
+	}, {
+		__index = function(_, key)
+			local v = q[key]
+			if type(v) == "function" then
+				return function(_, ...)
+					return v(q, ...)
+				end
+			end
+			return v
+		end,
+	})
+end
+
+function tko.set(q, fields, tag, cb)
+	if st.take and st.take.phase ~= "retrying" then
+		tko.cancel(st.take, "superseded")
+	end
+	if type(fields) == "table" then
+		fields = per.fill(fields, tag)
+	end
+	local original = cb or q.on_done
+	return q:set(fields, tag, function(t, ok, model, why, detail)
+		if ok ~= true and why == "busy" and type(fields) == "table" and starts_sync(fields) then
+			return tko.busy(fields, t, original, model, detail)
+		end
+		if type(original) == "function" then
+			return original(t, ok, model, why, detail)
+		end
+	end)
+end
+
+-- A writer's callback, once (a retry that lands after the take-over was
+-- ended answers nobody), under pcall.
+local function answer(t, ok, model, why, detail)
+	local cb = t.cb
+	t.cb = nil
+	if type(cb) == "function" then
+		local fine, err = pcall(cb, t.tag, ok, model, why, detail)
+		if not fine then
+			log.warn("take-over: a writer's callback failed: %s", tostring(err))
+		end
+	end
+end
+
+-- The area a write syncs to: its own hueTarget, else the box's.
+local function area_label(id)
+	for _, a in ipairs(st.model and type(st.model.areas) == "table" and st.model.areas or {}) do
+		if a.id == id and a.name then
+			return https.peer_text(a.name, 64)
+		end
+	end
+	return "the box's entertainment area"
+end
+
+function tko.busy(fields, tag, cb, model, detail)
+	local t = { fields = fields, tag = tag, cb = cb }
+	model = model or st.model or {}
+	t.area = fields.hueTarget or model.area
+	if st.take and st.take.area == t.area and st.take.phase ~= "retrying" then
+		-- A second sync start busy on the same area while the bridge is asked:
+		-- the later one is what the box is to do.
+		answer(st.take, false, model, "superseded")
+		st.take.fields, st.take.tag, st.take.cb = fields, tag, cb
+		return
+	end
+	local _, bridge_id = link_ids()
+	if not (t.area and st.bridge and m.link and m.link:stop_area(t.area, st.box_id, bridge_id)) then
+		log.info("take-over: %s", K.TAKE_WORDS.no_bridge)
+		return answer(t, false, model, "busy", detail)
+	end
+	tko.cancel(st.take, "superseded")
+	t.phase = "asking"
+	st.take = t
+	log.info("take-over: the box is busy; the Hue Bridge is asked to stop the stream on %s (O12)", area_label(t.area))
+	arm("take", K.TAKE_WAIT_MS, function()
+		tko.finish(t, K.TAKE_WORDS.no_answer)
+	end)
+end
+
+-- The take-over ends without a sync: Last Action says why (`words`), the
+-- writer hears "cancelled".
+function tko.finish(t, words)
+	if st.take ~= t then
+		return
+	end
+	st.take = nil
+	disarm("take")
+	last_action("Not syncing: " .. words)
+	answer(t, false, st.model, "cancelled")
+end
+
+-- A newer write, a wiring change or Forget Pairing: the writer hears `why`.
+function tko.cancel(t, why)
+	t = t or st.take
+	if not t or st.take ~= t then
+		return
+	end
+	st.take = nil
+	disarm("take")
+	log.debug("take-over ended: %s", tostring(why))
+	answer(t, false, st.model, why or "cancelled")
+end
+
+-- The bridge's STOPPED (link.lua's { area_id, ok, reason, by, detail }).
+function tko.stopped(msg)
+	local t = st.take
+	if not (t and t.phase == "asking" and msg.area_id == t.area) then
+		return log.debug("STOPPED for %s: no take-over asked it", tostring(msg.area_id))
+	end
+	if msg.ok then
+		t.phase = "waiting"
+		log.info("take-over: the Hue Bridge stopped the stream on %s", area_label(t.area))
+		arm("take", K.TAKE_RETRY_MS, tko.retry)
+		if trusted() and not st.trouble then
+			m.poller:soon("take-over")
+		end
+		return
+	end
+	local words
+	if msg.reason == "another_box" then
+		st.peer = { area = t.area, by = msg.by or "another sync box" }
+		words = string.format(K.TAKE_WORDS.another_box, st.peer.by, area_label(t.area))
+	elseif msg.reason == "no_area" then
+		words = string.format(K.TAKE_WORDS.no_area, area_label(t.area))
+	else
+		words = K.TAKE_WORDS[msg.reason] or K.TAKE_WORDS.failed
+		if msg.detail and msg.reason == "failed" then
+			words = words .. " (" .. msg.detail .. ")"
+		end
+	end
+	tko.finish(t, words)
+end
+
+-- The write again, once.
+function tko.retry()
+	local t = st.take
+	if not (t and t.phase == "waiting") then
+		return
+	end
+	t.phase = "retrying"
+	disarm("take")
+	local ok, err = pcall(m.queue.set, m.queue, t.fields, t.tag, function(_, fine, model, why, detail)
+		if st.take ~= t then
+			return answer(t, fine, model, why, detail) -- ended meanwhile: its writer has heard already
+		end
+		st.take = nil
+		if fine == true then
+			st.taken_over = t -- Sync Taken Over after the read's variables (prg.on_read)
+			answer(t, true, model, why, detail)
+			last_action(string.format("Sync taken over: %s took %s over from another app's sync", paired_label(),
+				area_label(t.area)))
+		elseif why == "busy" then
+			tko.finish_retry(t, model)
+		else
+			answer(t, fine, model, why, detail)
+		end
+	end)
+	if not ok then
+		st.take = nil
+		log.warn("take-over: the write could not go again: %s", tostring(err))
+		answer(t, false, st.model, "not sent", tostring(err))
+	end
+end
+
+function tko.finish_retry(t, model)
+	last_action("Not syncing: " .. K.TAKE_WORDS.again)
+	answer(t, false, model, "cancelled")
+end
+
+-- Every read: a box no longer busy after the bridge's STOPPED gets the write
+-- at once; another box of this project that no longer streams is no peer.
+function tko.on_read(model)
+	local state = type(model.bridge) == "table" and model.bridge.state or nil
+	if st.take and st.take.phase == "waiting" and state ~= "busy" then
+		tko.retry()
+	end
+	if st.peer and state ~= "busy" then
+		st.peer = nil
+	end
+end
+
+-- Follow Room's guard (follow.lua's peer_syncing): the other box's name
+-- while it streams to this box's area (W10).
+function tko.peer_syncing()
+	local area = st.model and st.model.area
+	return st.peer and st.peer.area == area and st.peer.by or nil
+end
+
+-- The periods (S4 §1.3, §4; design 5.3; C1.4) ----------------------------------------------
+-- syncbox/periods.lua knows Day, Evening and Night, their settings and the
+-- holds; the driver hands it the rows and applies a boundary while the box
+-- syncs. The settings rows are read at every use (periods.from_properties).
+
+local PERIOD_ROWS = { "Day Starts", "Evening Starts", "Night Starts", "Day Intensity", "Evening Intensity",
+	"Night Intensity", "Day Brightness", "Evening Brightness", "Night Brightness" }
+
+function per.props()
+	local out = {}
+	for _, name in ipairs(PERIOD_ROWS) do
+		out[name] = cfg[name]
+	end
+	return out
+end
+
+function per.build(timer)
+	m.periods = mod.periods.new({
+		timer = timer, now = now_ms, log = log,
+		settings = function()
+			return (mod.periods.from_properties(per.props()))
+		end,
+		on_boundary = per.boundary,
+		persist_get = function(name) return C4:PersistGetValue(name) end,
+		persist_set = function(name, value) return C4:PersistSetValue(name, value) end,
+	})
+end
+
+-- The period's settings for a sync in `mode` (programming's `period`), the
+-- held fields left out; nil before late init.
+function per.settings(mode)
+	if not m.periods then
+		return nil
+	end
+	local ok, s = pcall(m.periods.settings_for, m.periods, nil, mode)
+	if not ok then
+		log.warn("periods: %s", tostring(s))
+		return nil
+	end
+	return s
+end
+
+-- av.lua's `period(n, mode)`: a route that syncs HDMI n. Another input, or
+-- a box that does not sync, is a new source: a manual hold ends first
+-- (design 5.3).
+function per.av_settings(n, mode)
+	local model = st.model
+	if not (model and model.syncing and model.input == n) then
+		per.release("source")
+	end
+	return per.settings(mode)
+end
+
+-- Follow Room's sync starts (second output) take the period's settings
+-- here, as av.lua's and programming.lua's do in their own writes.
+function per.fill(fields, tag)
+	if not (starts_sync(fields) and mod.follow.owns(tag)) or fields.intensity or fields.brightness then
+		return fields
+	end
+	local s = per.settings(fields.mode or (st.model and st.model.mode)) or {}
+	if s.intensity == nil and s.brightness == nil then
+		return fields
+	end
+	local out = {}
+	for k, v in pairs(fields) do
+		out[k] = v
+	end
+	out.intensity, out.brightness = s.intensity, s.brightness
+	return out
+end
+
+function per.release(reason)
+	if m.periods then
+		local ok, err = pcall(m.periods.release, m.periods, reason)
+		if not ok then
+			log.warn("periods: the release failed: %s", tostring(err))
+		end
+	end
+end
+
+-- The followed room chose another source (behind a receiver, a second
+-- output): a manual hold ends before the writes the change brings.
+function per.source_changed(state, prev)
+	if type(state) == "table" and type(prev) == "table"
+		and (state.selected ~= prev.selected or state.kind ~= prev.kind) then
+		per.release("source")
+	end
+end
+
+-- A boundary while running (periods.lua's on_boundary): the new period's
+-- settings while the box syncs, what differs from the box and is not held.
+function per.boundary(period, _, why)
+	per.row()
+	local model = st.model
+	if not (st.paired and m.tq and model and model.syncing) then
+		return
+	end
+	local ok, fields = pcall(m.periods.settings_for, m.periods, period, model.mode)
+	if not ok or type(fields) ~= "table" then
+		return log.warn("periods: the settings of %s: %s", tostring(period), tostring(fields))
+	end
+	if fields.intensity == model.intensity then
+		fields.intensity = nil
+	end
+	if fields.brightness == model.brightness then
+		fields.brightness = nil
+	end
+	if next(fields) == nil then
+		return log.debug("periods: %s (%s): nothing to change", tostring(period), tostring(why))
+	end
+	local label = mod.periods.LABELS[period] or tostring(period)
+	local parts = {}
+	if fields.intensity then
+		parts[#parts + 1] = "intensity " .. fields.intensity
+	end
+	if fields.brightness then
+		parts[#parts + 1] = string.format("brightness %d %%", fields.brightness)
+	end
+	m.tq:set(fields, { kind = "period", period = period }, function(_, landed, _, reason)
+		if landed == true then
+			last_action(string.format("%s: %s", label, table.concat(parts, ", ")))
+		elseif reason ~= "superseded" and reason ~= "cancelled" then
+			last_action(string.format("%s: the period's settings did not reach the box (%s)", label,
+				tostring(reason)))
+		end
+	end)
+end
+
+-- The Periods row: the period now and until when, a hold, where the sunset
+-- comes from (or that a clock time stands in for it, S4 §2).
+function per.row()
+	if not (st.late and m.periods) then
+		return
+	end
+	local ok, now_text = pcall(m.periods.describe, m.periods)
+	local fine, source = pcall(function() return (m.periods.sunset.source(now_ms())) end)
+	if not ok then
+		return log.warn("periods: %s", tostring(now_text))
+	end
+	row(K.PERIODS, fine and type(source) == "string" and (now_text .. ". " .. source) or now_text)
+end
+
+-- A period row set in Composer: what it refused, in Last Action; the
+-- boundaries armed again (periods.lua's refresh).
+for _, name in ipairs(PERIOD_ROWS) do
+	dispatch.properties[(name:gsub("%s+", "_"))] = function(value)
+		local before = cfg[name]
+		cfg[name] = text(value)
+		if not (st.late and m.periods) or before == cfg[name] then
+			return
+		end
+		local _, problems = mod.periods.from_properties(per.props())
+		for _, p in ipairs(problems or {}) do
+			if p.property == name then
+				last_action(p.text)
+			end
+		end
+		log.info("%s: %s", name, tostring(cfg[name]))
+		pcall(m.periods.refresh, m.periods)
+		per.row()
+	end
+end
+
+-- The offers, the area and the name (S4 §1.4, §1.5, §1.7; §5) ------------------------------
+-- syncbox/offers.lua (the box's own input switching and CEC behaviours),
+-- syncbox/areas.lua (Entertainment Area) and syncbox/names.lua (the box's
+-- name both ways): each sees every good read and writes only on a click or
+-- by the rules its header gives.
+
+function ofr.build(timer)
+	local persist_get = function(name) return C4:PersistGetValue(name) end
+	local persist_set = function(name, value) return C4:PersistSetValue(name, value) end
+	m.offers = mod.offers.new({ client = m.client, poller = m.poller, now = now_ms, log = log,
+		persist_get = persist_get, persist_set = persist_set,
+		persist_delete = function(name) return C4:PersistDeleteValue(name) end,
+	})
+	m.areas = mod.areas.new({ queue = m.tq, log = log, persist_get = persist_get, persist_set = persist_set })
+	-- The device's Composer name is the AV switch proxy's: Composer renames
+	-- the proxy [verified: API 32_serial_network_device/_6-GetDeviceDisplayName.md;
+	-- API 22_miscellaneous/_32-RenameDevice.md: the proxy's id, never from
+	-- OnDriverInit; docs/simplify-research-names-sync.md §3.1].
+	m.names = mod.names.new({ client = m.client, poller = m.poller, timer = timer, now = now_ms, log = log,
+		persist_get = persist_get, persist_set = persist_set, last_action = ofr.names_said,
+		display_name = function()
+			local id = route.proxy_id()
+			local ok, name = pcall(C4.GetDeviceDisplayName, C4, id)
+			return id and ok and type(name) == "string" and name or nil
+		end,
+		rename_device = function(name)
+			local id = route.proxy_id()
+			if id then
+				C4:RenameDevice(id, name)
+			end
+		end,
+	})
+end
+
+-- What names.lua says: in Last Action, but for its first look (names that
+-- differ at the first read after pairing or after this build's install),
+-- which no person's act caused: Status carries it as Attention, so Pair
+-- Sync Box's own result stays in Last Action (S2 §4).
+function ofr.names_said(words)
+	local held = m.names and call(m.names, "held")
+	if type(held) == "table" and held.held == "first" then
+		return log.info("%s", words)
+	end
+	last_action(words)
+end
+
+-- Control4 routes through the box in line and behind a receiver; on a
+-- receiver's second output it does not (design 5.8). Attention follows it.
+function ofr.check_routed()
+	local routed = st.paired and route.wiring() ~= "second_output" or false
+	if routed ~= st.routed then
+		st.routed = routed
+		refresh_box_rows()
+		ofr.attention()
+	end
+end
+
+-- The Input Switching row (S4 §7: "Input Switching on Attention"): the
+-- offers' Attention while Control4 routes through a box that switches
+-- inputs by itself, else what the box does by itself (offers.lua's row;
+-- before it is built, the state's text). Status points at it.
+function ofr.switching_row(fallback)
+	if not m.offers then
+		return fallback
+	end
+	local attention = call(m.offers, "attention", st.routed)
+	if attention then
+		return "Attention: " .. attention
+	end
+	return call(m.offers, "row") or fallback
+end
+
+-- What waits for a person (the offers' input switching while Control4
+-- routes through the box, the names' click): the box driver has no
+-- Attention row of its own, so Status ends with it (the input switching's
+-- in short: its whole text is Input Switching's), and the log has it once
+-- when it starts. Last Action stays the actions' and the outcomes'.
+function ofr.attention_text()
+	local texts = {}
+	for _, t in ipairs({ m.offers and call(m.offers, "attention", st.routed) or false,
+		m.names and call(m.names, "attention") or false }) do
+		if t then
+			texts[#texts + 1] = t
+		end
+	end
+	return #texts > 0 and table.concat(texts, "; ") or nil
+end
+
+function ofr.attention_note()
+	local parts = {}
+	if m.offers and call(m.offers, "attention", st.routed) then
+		parts[#parts + 1] = "the box switches inputs by itself (see Input Switching)"
+	end
+	local names = m.names and call(m.names, "attention") or nil
+	if names then
+		parts[#parts + 1] = names
+	end
+	return #parts > 0 and ("Attention: " .. table.concat(parts, "; ")) or nil
+end
+
+function ofr.attention()
+	local attention = ofr.attention_text()
+	if attention and attention ~= st.attention then
+		log.warn("Attention: %s", attention)
+	end
+	st.attention = attention
+end
+
+-- The Entertainment Area drop-down: the box's areas by name, those whose
+-- lamps sit in this device's room first (the bridge's CONFIGURE says which:
+-- design 6.1, offered first, never chosen), and the box's area now; sent
+-- when it changed (as Follow Room's).
+function ofr.area_list()
+	if not (st.late and m.areas) then
+		return
+	end
+	local first = {}
+	local ok_room, room = pcall(C4.GetDeviceDisplayName, C4, fr.own_room())
+	for _, a in ipairs(st.bridge_areas or {}) do
+		for _, name in ipairs(type(a.rooms) == "table" and a.rooms or {}) do
+			if ok_room and name == room then
+				first[a.id] = true
+			end
+		end
+	end
+	local ok, items, value = pcall(m.areas.items, m.areas, first)
+	if not ok or type(items) ~= "table" then
+		return log.warn("Entertainment Area: the list could not be built: %s", tostring(items))
+	end
+	local joined = table.concat(items, ",")
+	value = tostring(value or "")
+	if joined .. "\n" .. value == st.area_sent then
+		return
+	end
+	st.area_sent = joined .. "\n" .. value
+	pcall(C4.UpdatePropertyList, C4, K.ENTERTAINMENT_AREA, joined, value)
+	rows[K.ENTERTAINMENT_AREA] = value
+	prop(K.ENTERTAINMENT_AREA, value)
+end
+
+-- A pick in Entertainment Area: one hueTarget write (areas.lua), its outcome
+-- in Last Action. Late init's replay of the row changes nothing.
+dispatch.properties["Entertainment_Area"] = function(value)
+	if not (st.late and m.areas) then
+		return
+	end
+	value = text(value) or ""
+	if value == rows[K.ENTERTAINMENT_AREA] then
+		return
+	end
+	if not st.paired then
+		st.area_sent = nil
+		ofr.area_list()
+		return last_action("Entertainment Area: not paired; run Pair Sync Box first")
+	end
+	local ok, why = m.areas:choose(value, function(_, words)
+		last_action(words)
+		st.area_sent = nil
+		ofr.area_list()
+	end)
+	if not ok then
+		st.area_sent = nil
+		ofr.area_list()
+		last_action(tostring(why or "Entertainment Area: not set"))
+	end
+end
+
+-- What Status adds about the area while it is not a usable one (gone in
+-- Hue, invalid, none chosen): areas.lua's words; nil otherwise.
+function ofr.area_note()
+	if not (st.paired and m.areas and st.model) then
+		return nil
+	end
+	local ok, a = pcall(m.areas.status, m.areas)
+	if ok and type(a) == "table" and (a.how == "gone" or a.how == "invalid" or a.how == "none") then
+		return a.text
+	end
+	return nil
+end
+
+-- Programming's view of the areas (programming.lua's `areas`): C1.6's Area
+-- is a DYNAMIC_LIST of the box's area names (GetCommandParamList), so a
+-- value is a name; areas.lua resolves ids (it follows the re-points of a
+-- gone area). A name one of the box's areas has now resolves to its id; any
+-- other value goes to areas.lua as it is (an id from an older line).
+ofr.programming_areas = {}
+
+function ofr.programming_areas.names()
+	local out, seen = {}, {}
+	for _, a in ipairs(st.model and type(st.model.areas) == "table" and st.model.areas or {}) do
+		if a.name and not seen[a.name] then
+			seen[a.name] = true
+			out[#out + 1] = a.name
+		end
+	end
+	return out
+end
+
+function ofr.programming_areas.resolve(_, value)
+	if not m.areas then
+		return nil, "the areas are not read yet"
+	end
+	local found
+	for _, a in ipairs(st.model and type(st.model.areas) == "table" and st.model.areas or {}) do
+		if a.name == value then
+			if found then
+				return nil, string.format("two entertainment areas are named %s; rename one in the Hue app",
+					https.peer_text(tostring(value), 64))
+			end
+			found = a.id
+		end
+	end
+	return m.areas:resolve(found or value)
+end
+
+function ofr.on_read(model)
+	call(m.offers, "observe", model)
+	local said = call(m.areas, "observe", model)
+	if said then
+		last_action(said)
+	end
+	call(m.names, "observe", model)
+	ofr.check_routed()
+	ofr.attention()
+	ofr.area_list()
+end
+
+-- Sync Box Settings (C1.5; design 5.4, 5.8): offers.lua's choices, then
+-- names.lua's while the names wait for a click; one write at most, its
+-- outcome in Last Action.
+function ofr.settings(params)
+	local value = text(params.What)
+	if not st.paired then
+		return last_action("Sync Box Settings: not paired; run Pair Sync Box first")
+	end
+	if not value then
+		return last_action(string.format("Sync Box Settings: pick one under What (%s; %s)", mod.offers.LABEL_LET,
+			mod.offers.LABEL_RESTORE))
+	end
+	local function done(_, words)
+		last_action(words)
+		refresh_box_rows()
+		ofr.attention()
+	end
+	if m.offers:choose(value, done) or m.names:choose(value, done) then
+		return
+	end
+	last_action("Sync Box Settings: that choice is not offered any more; open the What list again")
+end
+
+-- The What picker [verified: FUND 12.3_custom_select_implementation/
+-- _2-CUSTOMSELECTLIST.md]: offers.lua's choices with what each does now,
+-- then names.lua's.
+function SyncBoxSettingsList()
+	if not (st.late and m.offers) then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	local list = {}
+	for _, module in ipairs({ m.offers, m.names }) do
+		local ok, items = pcall(module.choices, module)
+		if ok and type(items) == "table" then
+			for _, item in ipairs(items) do
+				list[#list + 1] = item
+			end
+		elseif not ok then
+			log.warn("the Sync Box Settings list could not be built: %s", tostring(items))
+		end
+	end
+	if #list == 0 then
+		list[1] = { text = "(nothing to offer; see the Lua output)", value = "" }
+	end
+	return list
+end
+
+-- A rename in Composer (OnItemNameChanged) and the 5-minute tick for one
+-- whose event was missed (names.lua's on_composer_rename and check).
+function ofr.renamed()
+	call(m.names, "on_composer_rename")
+end
+
+function ofr.tick()
+	arm("names", K.NAMES_TICK_MS, function()
+		if st.paired then
+			call(m.names, "check")
+		end
+		ofr.tick()
+	end)
+end
+
+-- Late init: the periods armed (no timer in OnDriverInit), the icons and
+-- rows from what was kept, Control4's routing looked up.
+function prg.start()
+	st.icons, st.take, st.taken_over, st.peer, st.attention = {}, nil, nil, nil, nil
+	if m.periods then
+		local ok, err = pcall(m.periods.start, m.periods)
+		if not ok then
+			log.error("periods: start failed: %s", tostring(err))
+		end
+	end
+	st.area_sent, st.routed = nil, false
+	per.row()
+	if st.paired then
+		prg.icons(true) -- a box never paired has no state to show yet
+	end
+	ofr.check_routed()
+	ofr.area_list()
+	ofr.tick()
+end
+
+-- OnDriverDestroyed: no timer, no callback.
+function prg.stop()
+	st.take = nil
+	for _, module in ipairs({ m.periods, m.offers, m.names }) do
+		pcall(call, module, "stop")
+	end
+end
+
 -- The poller's callbacks (S2 §3.6) -------------------------------------------------------
 
 local poll = {}
@@ -1288,6 +2193,12 @@ function poll.on_state(model, changes)
 	local ok, err = pcall(route.on_read, model)
 	if not ok then
 		log.error("routing after a read failed: %s", tostring(err))
+	end
+	-- Stage 4: the variables and their events, the take-over, the offers,
+	-- the area and the name.
+	ok, err = pcall(prg.on_read, model, before)
+	if not ok then
+		log.error("programming after a read failed: %s", tostring(err))
 	end
 	refresh()
 end
@@ -1711,7 +2622,8 @@ end
 -- Composer actions (LUA_ACTION): every click ends in Last Action. Before
 -- late init the modules do not exist yet.
 for command, run in pairs({ Pair_Sync_Box = actions.pair, Forget_Pairing = actions.forget,
-	Diagnostics = actions.diagnostics, Set_Source_Sync_Mode = actions.source_mode }) do
+	Diagnostics = actions.diagnostics, Set_Source_Sync_Mode = actions.source_mode,
+	Sync_Box_Settings = ofr.settings }) do
 	dispatch.commands[command] = function(params)
 		if not st.late then
 			return last_action("Not done: the driver is still starting; try again in a moment")
@@ -1783,11 +2695,21 @@ dispatch.proxy_binding_ok = function(binding, command)
 	return binding == K.PROXY_AV
 end
 
--- A UI Button press: nothing to the box, no notify, Last Action says why
--- (the buttons come with stage 4).
-dispatch.proxy["SELECT"] = function(binding)
-	log.debug("SELECT on %s: not done in this beta", K.UI_BUTTONS[tonumber(binding)] or tostring(binding))
-	last_action(K.NOT_YET)
+-- A UI Button press (S4 §1.2, design 5.6): the button's command through
+-- programming (Hue Sync toggles sync, Sync Brighter and Sync Dimmer step
+-- the brightness by 10 points, Sync Intensity steps the intensity), whose
+-- outcome ends in Last Action; the icons follow the next read. One that
+-- comes before late init waits for it (common/device.lua).
+local select_button = after_late_init("SELECT", function(params)
+	prg.select(params.binding)
+end)
+dispatch.proxy["SELECT"] = function(binding, params)
+	local p = {}
+	for k, v in pairs(type(params) == "table" and params or {}) do
+		p[k] = v
+	end
+	p.binding = tonumber(binding)
+	select_button(p)
 end
 
 -- The AV switch's commands go to syncbox/av.lua (C4). One that comes before
@@ -1817,19 +2739,33 @@ local function from_bridge(command)
 				log.info("the Hue Bridge says this box is %slinked to it", msg.match and "" or "not ")
 			end
 			st.link_match = msg.match
+			st.bridge_areas = msg.areas
 			refresh_box_rows()
+			ofr.area_list()
 		elseif msg.kind == "area" then
 			-- The box reads its own state at once; nothing else changes (C5).
 			log.debug("area %s %s (%s): reading the box", msg.id, msg.status, msg.streamer)
 			if trusted() and not st.trouble then
 				m.poller:soon("bridge hint")
 			end
+		elseif msg.kind == "stopped" then
+			-- The answer to the take-over's STOP_AREA (S4 §6).
+			tko.stopped(msg)
+		elseif msg.kind == "ask_hello" then
+			-- The bridge does not know this box (it restarted): hello again.
+			hello(true)
 		end
 	end)
 end
 
-dispatch.commands["HUE_SYNCBOX_CONFIGURE"] = from_bridge("HUE_SYNCBOX_CONFIGURE")
-dispatch.commands["HUE_SYNCBOX_AREA"] = from_bridge("HUE_SYNCBOX_AREA")
+-- The bridge's messages link.lua reads (C5; stage 4 adds STOPPED, and the
+-- bridge's request for a hello after its restart when link.lua names one).
+for _, name in ipairs({ "CONFIGURE", "AREA", "STOPPED", "ASK_HELLO" }) do
+	local command = mod.link[name]
+	if type(command) == "string" then
+		dispatch.commands[command] = from_bridge(command)
+	end
+end
 
 -- Discovery's network connection (UDP mDNS) ----------------------------------------------
 -- syncbox/discovery.lua owns its binding (6008); whatever it does not take
@@ -1891,6 +2827,8 @@ end
 -- refuses a dev loop left behind by an earlier dev build (common/device.lua).
 function OnDriverInit()
 	dev.init()
+	-- C1.9: the nine variables, in their order, in OnDriverInit.
+	prg.build()
 end
 
 -- The modules, built once per start with what they need from the driver
@@ -1941,6 +2879,9 @@ local function build()
 		return probe:check(address, nil, cb)
 	end })
 	route.build(timer)
+	-- Stage 4 (S4 §4, §5).
+	per.build(timer)
+	ofr.build(timer)
 	return creds
 end
 
@@ -1956,6 +2897,9 @@ end
 function route.build(timer)
 	m.queue = mod.queue.new({ client = m.client, poller = m.poller, timer = timer, now = now_ms, log = log,
 		on_done = route.on_done })
+	-- Every writer (av.lua, follow.lua, programming.lua, the periods) goes
+	-- through the take-over's view of the queue (S4 §1.6, below).
+	m.tq = tko.wrap(m.queue)
 	m.sources = mod.sources.new({
 		get_devices = function(filter) return C4:GetDevices(filter) end,
 		display_name = function(id) return C4:GetDeviceDisplayName(id) end,
@@ -1983,12 +2927,12 @@ function route.build(timer)
 		persist_set = function(name, value) return C4:PersistSetValue(name, value) end,
 		log = log,
 	})
-	m.av = mod.av.new({ queue = m.queue, state_now = route.model, wiring_now = route.wiring, sources = m.sources,
+	m.av = mod.av.new({ queue = m.tq, state_now = route.model, wiring_now = route.wiring, sources = m.sources,
 		room = m.room, notify = route.notify, last_action = last_action, properties = route.setting, timer = timer,
-		now = now_ms, log = log })
+		now = now_ms, log = log, period = per.av_settings })
 	m.follow = mod.follow.new({
-		queue = m.queue, sources = m.sources, box_id = route.proxy_id, wiring = route.follow_wiring,
-		model = route.model, log = log,
+		queue = m.tq, sources = m.sources, box_id = route.proxy_id, wiring = route.follow_wiring,
+		model = route.model, log = log, peer_syncing = tko.peer_syncing,
 		online = function() return st.online ~= false and not st.offline_since end,
 		settings = function()
 			return { at_room_off = route.setting(K.ROOM_OFF), source_leaves = route.setting(K.LEAVES) }
@@ -2029,17 +2973,21 @@ end
 -- OnPIP, Director's "Refresh Navigator" event, fires when bindings, device
 -- names or media change [verified: API 7_event/_1-RegisteringforSystemEvents.md,
 -- _5.5-RegisterSystemEvent.md: C4:RegisterSystemEvent(C4SystemEvents["OnPIP"], 0);
--- _4.2-OnSystemEvent.md]. It is the only system event this driver
--- registers, so every OnSystemEvent is one. A runtime without the table
--- (the specs) goes without it, as the bridge does.
+-- _4.2-OnSystemEvent.md]. Stage 4 registers OnItemNameChanged too, a
+-- rename in Composer (API 7/_1; the bridge's driver.lua reads its name in
+-- the event's data [hardware 2026-10-22]), for the box's name both ways
+-- (S4 §1.7). A runtime without the table (the specs) goes without them, as
+-- the bridge does.
 function route.register_pip()
 	if type(C4SystemEvents) ~= "table" or type(C4.RegisterSystemEvent) ~= "function" then
 		return log.debug("system events unavailable in this runtime")
 	end
-	local id = C4SystemEvents["OnPIP"]
-	local ok, err = pcall(C4.RegisterSystemEvent, C4, id, 0)
-	if not (id and ok) then
-		log.warn("RegisterSystemEvent OnPIP: %s", tostring(id and err or "no such event"))
+	for _, name in ipairs({ "OnPIP", "OnItemNameChanged" }) do
+		local id = C4SystemEvents[name]
+		local ok, err = pcall(C4.RegisterSystemEvent, C4, id, 0)
+		if not (id and ok) then
+			log.warn("RegisterSystemEvent %s: %s", name, tostring(id and err or "no such event"))
+		end
 	end
 end
 
@@ -2049,6 +2997,10 @@ end
 function OnSystemEvent(data)
 	if not st.late or st.destroyed then
 		return
+	end
+	if type(data) == "string" and data:find("OnItemNameChanged", 1, true) then
+		log.debug("OnSystemEvent (OnItemNameChanged): %s", https.peer_text(data, 200))
+		return ofr.renamed()
 	end
 	log.debug("OnSystemEvent (OnPIP): %s", https.peer_text(tostring(data), 200))
 	call(m.room, "retry")
@@ -2092,6 +3044,7 @@ function OnDriverLateInit()
 	end
 	st.bridge = dev.bound_bridge()
 	route.start()
+	prg.start()
 	dev.late_init()
 	-- EC C14: nothing is sent to the box at start but the identity check and,
 	-- once it passed, the reads.
@@ -2146,10 +3099,12 @@ function OnDriverDestroyed()
 	if m.discovery then
 		m.discovery:stop()
 	end
-	-- Stage 3: no write waits, no room is listened to.
+	-- Stage 3: no write waits, no room is listened to; stage 4: no period
+	-- timer, no take-over, no offer's PUT heard.
 	for _, module in ipairs({ m.queue, m.av, m.follow, m.room }) do
 		pcall(call, module, "stop")
 	end
+	prg.stop()
 	if m.client then
 		m.client:cancel_all()
 	end

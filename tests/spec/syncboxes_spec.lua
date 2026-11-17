@@ -1,7 +1,9 @@
 -- bridge/syncboxes.lua (2.0 beta stage 2, #534): the Hue Sync Box devices
 -- bound on the bridge's "Hue Sync Boxes" connection, and the messages of
--- contracts C5 the bridge sends them (docs/hdmi-sync-stage2-design.md §6).
--- Placeholders only: bridge 001788fffe123abc, box 0A1B2C3D4E5F.
+-- contracts C5 the bridge sends them (docs/hdmi-sync-stage2-design.md §6);
+-- stage 4 (#568, docs/hdmi-sync-stage4-design.md §6): each box's sync state,
+-- the label it gives, and the take-over (STOP_AREA, O12) with research W10's
+-- guard. Placeholders only: bridge 001788fffe123abc, box 0A1B2C3D4E5F.
 
 local json = require("dkjson")
 local log = require("common.log")
@@ -46,9 +48,14 @@ describe("bridge.syncboxes", function()
 		return syncboxes.new(deps)
 	end
 
-	local function hello(device_id, box_id, bridge_id, area_id)
+	local function hello(device_id, box_id, bridge_id, area_id, syncing)
 		return s:hello({ device_id = device_id and tostring(device_id) or nil, box_id = box_id, bridge_id = bridge_id,
-			area_id = area_id })
+			area_id = area_id, syncing = syncing })
+	end
+
+	local function state(device_id, box_id, bridge_id, area_id, syncing)
+		return s:state({ device_id = device_id and tostring(device_id) or nil, box_id = box_id, bridge_id = bridge_id,
+			area_id = area_id, syncing = syncing })
 	end
 
 	local function of(command)
@@ -76,9 +83,17 @@ describe("bridge.syncboxes", function()
 		return false
 	end
 
-	-- Bound through OnBindingChanged, as Director reports a new binding.
+	-- Bound through OnBindingChanged, as Director reports a new binding. A
+	-- device without a hello is asked for one (the cases of "asking for
+	-- hellos" below): at most that one ASK_HELLO, set aside here.
 	local function bind(id)
+		local before = #sent
 		assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, id))
+		if #sent > before and sent[#sent].command == "HUE_SYNCBOX_ASK_HELLO" then
+			assert.equal(before + 1, #sent)
+			assert.same({ id = id, command = "HUE_SYNCBOX_ASK_HELLO", params = {} }, sent[#sent])
+			sent[#sent] = nil
+		end
 	end
 
 	before_each(function()
@@ -113,7 +128,11 @@ describe("bridge.syncboxes", function()
 			assert.equal("HUE_SYNCBOX_GOODBYE", syncboxes.GOODBYE)
 			assert.equal("HUE_SYNCBOX_CONFIGURE", syncboxes.CONFIGURE)
 			assert.equal("HUE_SYNCBOX_AREA", syncboxes.AREA)
+			assert.equal("HUE_SYNCBOX_STATE", syncboxes.STATE)
+			assert.equal("HUE_SYNCBOX_STOP_AREA", syncboxes.STOP_AREA)
+			assert.equal("HUE_SYNCBOX_STOPPED", syncboxes.STOPPED)
 			assert.equal(64, syncboxes.MAX_AREAS)
+			assert.equal(3, syncboxes.TAKE_OVER_GRACE_S)
 		end)
 
 		it("needs send, and takes the rest from defaults", function()
@@ -123,7 +142,7 @@ describe("bridge.syncboxes", function()
 			end })
 			assert.is_true(bare:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
 			assert.is_true(bare:hello({ device_id = tostring(DEVICE), box_id = BOX }))
-			assert.same({ match = "false", areas = "[]" }, sent[1].params, "no bridge id, no areas")
+			assert.same({ match = "false", areas = "[]" }, of("HUE_SYNCBOX_CONFIGURE")[1].params, "no bridge id, no areas")
 			assert.is_nil(bare:label_for(TV))
 			assert.equal(1, bare:configure_all())
 		end)
@@ -520,6 +539,624 @@ describe("bridge.syncboxes", function()
 			own = OTHER_BRIDGE
 			s:configure_all()
 			assert.same({ { lamp(1), lamp(2), lamp(3) } }, label_changes)
+		end)
+	end)
+
+	describe("the sync state (stage 4)", function()
+		it("keeps a hello's sync state: true, false, or unknown when left out", function()
+			bind(DEVICE)
+			hello(DEVICE, BOX, BRIDGE, TV, "true")
+			assert.is_true(s:boxes()[1].syncing)
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			assert.is_false(s:boxes()[1].syncing)
+			hello(DEVICE, BOX, BRIDGE, TV, "")
+			assert.is_nil(s:boxes()[1].syncing)
+			assert.is_true(saw("area " .. TV .. ", sync state unknown"))
+		end)
+
+		it("drops a hello whose sync state is neither true nor false", function()
+			bind(DEVICE)
+			assert.is_false(hello(DEVICE, BOX, BRIDGE, TV, "yes"))
+			assert.is_true(saw("its sync state is neither true nor false"))
+			assert.same({}, sent)
+		end)
+
+		it("takes a STATE of a known box quietly: its area and state, no CONFIGURE", function()
+			bind(DEVICE)
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			sent = {}
+			assert.is_true(state(DEVICE, BOX, BRIDGE, OFFICE, "true"))
+			assert.same({}, sent)
+			assert.same({ device_id = DEVICE, box_id = BOX, bridge_id = BRIDGE, area_id = OFFICE, syncing = true,
+				name = "Living Room Sync Box" }, s:boxes()[1])
+			assert.is_true(saw("Living Room Sync Box #4E5F (device 2001) syncs, area " .. OFFICE))
+		end)
+
+		it("greets a STATE from a bound box it has no hello from as a hello (a bridge restart)", function()
+			bind(DEVICE)
+			assert.is_true(state(DEVICE, BOX, BRIDGE, TV, "true"))
+			local configure = of("HUE_SYNCBOX_CONFIGURE")
+			assert.equal(1, #configure)
+			assert.equal("true", configure[1].params.match)
+			assert.is_true(s:boxes()[1].syncing)
+		end)
+
+		it("greets a STATE that names another bridge or box than the hello as a hello", function()
+			bind(DEVICE)
+			hello(DEVICE, BOX, OTHER_BRIDGE, TV, "false")
+			sent = {}
+			assert.is_true(state(DEVICE, BOX, BRIDGE, TV, "true"))
+			assert.same({ "true" }, { of("HUE_SYNCBOX_CONFIGURE")[1].params.match })
+			assert.is_true(state(DEVICE, BOX2, BRIDGE, TV, "true"))
+			assert.equal(2, #of("HUE_SYNCBOX_CONFIGURE"))
+			assert.equal(BOX2, s:boxes()[1].box_id)
+		end)
+
+		it("keeps a STATE from a device not shown bound waiting, as a hello", function()
+			bound = {}
+			assert.is_false(state(DEVICE, BOX, BRIDGE, TV, "true"))
+			assert.same({}, sent)
+			assert.is_true(saw("HUE_SYNCBOX_STATE from device 2001 not answered"))
+			bind(DEVICE)
+			assert.equal(1, #of("HUE_SYNCBOX_CONFIGURE"))
+			assert.is_true(s:boxes()[1].syncing)
+		end)
+
+		it("drops a STATE without a sync state, or with a value that is none, with one debug line", function()
+			bind(DEVICE)
+			hello(DEVICE, BOX, BRIDGE, TV, "true")
+			sent = {}
+			local bad = {
+				{ device_id = "2001", box_id = BOX, bridge_id = BRIDGE, area_id = TV },
+				{ device_id = "2001", box_id = BOX, bridge_id = BRIDGE, area_id = TV, syncing = "maybe" },
+				{ box_id = BOX, bridge_id = BRIDGE, area_id = TV, syncing = "false" },
+				{ device_id = "2001", box_id = BOX, bridge_id = BRIDGE, area_id = "../light", syncing = "false" },
+			}
+			for i, params in ipairs(bad) do
+				local before = #lines
+				assert.is_false(s:state(params), tostring(i))
+				assert.equal(before + 1, #lines, tostring(i))
+				assert.truthy(lines[#lines]:find("HUE_SYNCBOX_STATE from device", 1, true), lines[#lines])
+				assert.truthy(lines[#lines]:find("dropped", 1, true), lines[#lines])
+			end
+			assert.is_false(s:state(nil))
+			assert.same({}, sent)
+			assert.is_true(s:boxes()[1].syncing)
+		end)
+	end)
+
+	describe("the label with the sync state (stage 4)", function()
+		it("names the box that says it syncs when two boxes name the area (W10)", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			hello(DEVICE2, BOX2, BRIDGE, TV, "false")
+			assert.is_nil(s:label_for(TV), "neither syncs")
+			state(DEVICE2, BOX2, BRIDGE, TV, "true")
+			assert.equal("Den Sync Box", s:label_for(TV))
+			state(DEVICE, BOX, BRIDGE, TV, "true")
+			assert.is_nil(s:label_for(TV), "two say so: neither is the one")
+		end)
+
+		it("never names a box that says it does not sync, and names a lone one whose state is unknown", function()
+			bind(DEVICE)
+			hello(DEVICE, BOX, BRIDGE, TV)
+			assert.equal("Living Room Sync Box", s:label_for(TV))
+			state(DEVICE, BOX, BRIDGE, TV, "false")
+			assert.is_nil(s:label_for(TV))
+		end)
+
+		it("prefers the box that syncs over one whose state is unknown", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE, BOX, BRIDGE, TV)
+			hello(DEVICE2, BOX2, BRIDGE, TV, "true")
+			assert.equal("Den Sync Box", s:label_for(TV))
+		end)
+
+		it("hands on the lamps when a STATE changes who streams to a streaming area", function()
+			areas[1].status = "active"
+			bind(DEVICE)
+			hello(DEVICE, BOX, BRIDGE, TV, "true")
+			assert.equal(1, #label_changes)
+			state(DEVICE, BOX, BRIDGE, TV, "true")
+			assert.equal(1, #label_changes, "the same word again changes nothing")
+			state(DEVICE, BOX, BRIDGE, TV, "false")
+			assert.same({ lamp(1), lamp(2), lamp(3) }, label_changes[2])
+		end)
+
+		it("forgets a box's 'not syncing' when a stream starts on its area, until its next word", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			hello(DEVICE2, BOX2, BRIDGE, OFFICE, "false")
+			assert.is_nil(s:label_for(TV))
+			areas[1].status = "active"
+			s:on_stream(areas[1], true)
+			assert.equal("Living Room Sync Box", s:label_for(TV))
+			assert.is_nil(s:boxes()[1].syncing)
+			assert.is_false(s:boxes()[2].syncing, "a box on another area keeps its word")
+			assert.same({ { lamp(1), lamp(2), lamp(3) } }, label_changes)
+			state(DEVICE, BOX, BRIDGE, TV, "false")
+			assert.is_nil(s:label_for(TV), "its next word: another app streams")
+			s:on_stream(areas[1], false)
+			assert.is_false(s:boxes()[1].syncing, "a stream that stops changes no word")
+		end)
+	end)
+
+	describe("stop_area() (stage 4: O12, W10)", function()
+		local timers, puts, http_answer, stopped_texts
+
+		local function new_take_over(extra)
+			local deps = {
+				http = function(req, cb)
+					puts[#puts + 1] = { req = req, cb = cb }
+					if http_answer then
+						cb(http_answer)
+					end
+				end,
+				set_timer = function(delay, fn)
+					local t = { delay = delay, fn = fn }
+					function t.Cancel(self)
+						self.cancelled = true
+					end
+					timers[#timers + 1] = t
+					return t
+				end,
+				on_stopped = function(text) stopped_texts[#stopped_texts + 1] = text end,
+			}
+			for k, v in pairs(extra or {}) do
+				deps[k] = v
+			end
+			s = new_s(deps)
+		end
+
+		-- A STOP_AREA from `device_id`; the box's bridge is BRIDGE unless given ("" leaves it out).
+		local function stop(device_id, area_id, bridge_id)
+			return s:stop_area({ device_id = device_id and tostring(device_id) or nil, box_id = BOX,
+				bridge_id = bridge_id or BRIDGE, area_id = area_id })
+		end
+
+		-- The STOPPED messages sent, as { device id, params }.
+		local function answers()
+			local out = {}
+			for _, m in ipairs(of("HUE_SYNCBOX_STOPPED")) do
+				out[#out + 1] = { m.id, m.params }
+			end
+			return out
+		end
+
+		local function puts_of()
+			local out = {}
+			for i, p in ipairs(puts) do
+				out[i] = p.req
+			end
+			return out
+		end
+
+		local STOP_PUT = { method = "PUT", path = "/clip/v2/resource/entertainment_configuration/" .. TV,
+			body = { action = "stop" } }
+
+		-- Two boxes of this bridge on the TV area, neither syncing: a stop waits the grace.
+		local function two_on_tv()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			hello(DEVICE2, BOX2, BRIDGE, TV, "false")
+			sent = {}
+		end
+
+		before_each(function()
+			timers, puts, stopped_texts = {}, {}, {}
+			http_answer = { ok = true, code = 200 }
+			areas[1].status = "active"
+			new_take_over()
+		end)
+
+		it("stops a lone box's area at once through the bridge's request path, and answers stopped", function()
+			bind(DEVICE)
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			sent = {}
+			assert.is_true(stop(DEVICE, TV:upper()))
+			assert.same({ STOP_PUT }, puts_of())
+			assert.same({}, timers)
+			assert.same({ { DEVICE, { area_id = TV, ok = "true", reason = "stopped" } } }, answers())
+			for k, v in pairs(answers()[1][2]) do
+				assert.equal("string", type(v), k)
+			end
+			assert.same({ "Sync stopped for Living Room Sync Box: Living Room TV" }, stopped_texts)
+			assert.is_true(saw("Living Room Sync Box #4E5F (device 2001) asks to stop the stream on area " .. TV))
+			assert.is_true(saw("the stream on Living Room TV is stopped for Living Room Sync Box"))
+			assert.equal(1, #sent, "STOPPED and nothing else")
+		end)
+
+		it("takes a box it has no hello from when Director shows it bound and it names this bridge", function()
+			bound = { [DEVICE] = "Hue Sync Box" }
+			assert.is_true(stop(DEVICE, TV))
+			assert.same({ STOP_PUT }, puts_of())
+			assert.equal("true", answers()[1][2].ok)
+		end)
+
+		it("ignores a device not shown bound, unanswered, with a warning naming it", function()
+			bound = {}
+			assert.is_false(stop(DEVICE, TV))
+			bound = nil
+			assert.is_false(stop(DEVICE, TV), "the lookup unknown")
+			assert.same({}, sent)
+			assert.same({}, puts)
+			assert.is_true(saw("HUE_SYNCBOX_STOP_AREA from device 2001 for area " .. TV
+				.. " ignored: not bound on Hue Sync Boxes"))
+		end)
+
+		it("drops a malformed request with one debug line", function()
+			bind(DEVICE)
+			local bad = {
+				{ area_id = TV },
+				{ device_id = "abc", area_id = TV },
+				{ device_id = "2001" },
+				{ device_id = "2001", area_id = "" },
+				{ device_id = "2001", area_id = "../light" },
+				{ device_id = "2001", area_id = ("a"):rep(65) },
+				{ device_id = "2001", area_id = TV, bridge_id = "001788fffe12/abc" },
+				{ device_id = "2001", area_id = TV, box_id = "0A1B2C3D4E5" },
+			}
+			for i, params in ipairs(bad) do
+				local before = #lines
+				assert.is_false(s:stop_area(params), tostring(i))
+				assert.equal(before + 1, #lines, tostring(i))
+				assert.truthy(lines[#lines]:find("HUE_SYNCBOX_STOP_AREA from device", 1, true), lines[#lines])
+				assert.truthy(lines[#lines]:find("dropped", 1, true), lines[#lines])
+			end
+			assert.is_false(s:stop_area(nil))
+			assert.same({}, sent)
+			assert.same({}, puts)
+		end)
+
+		it("refuses a box whose bridge is another or unknown, and while this bridge is unpaired: not_linked", function()
+			bind(DEVICE)
+			assert.is_false(stop(DEVICE, TV, OTHER_BRIDGE))
+			assert.same({ { DEVICE, { area_id = TV, ok = "false", reason = "not_linked" } } }, answers())
+			assert.is_true(saw("the stream on area " .. TV .. " is not stopped: its box is not linked to this bridge"))
+			assert.is_false(stop(DEVICE, TV, ""), "no bridge in the message, and no hello")
+			hello(DEVICE, BOX, BRIDGE, TV)
+			assert.is_true(stop(DEVICE, TV, ""), "the bridge of its hello")
+			own = nil
+			assert.is_false(stop(DEVICE, TV))
+			assert.same({ "not_linked", "not_linked", "stopped", "not_linked" }, {
+				answers()[1][2].reason, answers()[2][2].reason, answers()[3][2].reason, answers()[4][2].reason })
+			assert.equal(1, #puts)
+		end)
+
+		it("refuses an area this bridge does not have: no_area", function()
+			bind(DEVICE)
+			local gone = "6a7b8c9d-0000-4000-8000-0000000ea0ff"
+			assert.is_false(stop(DEVICE, gone))
+			assert.same({ { DEVICE, { area_id = gone, ok = "false", reason = "no_area" } } }, answers())
+			assert.same({}, puts)
+			assert.is_true(saw("is not stopped: this bridge has no such area"))
+		end)
+
+		it("refuses at once when another box of this bridge says it syncs to the area: another_box (W10)", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE2, BOX2, BRIDGE, TV, "true")
+			hello(DEVICE, BOX, BRIDGE, TV, "false")
+			sent = {}
+			assert.is_false(stop(DEVICE, TV))
+			assert.same({ { DEVICE, { area_id = TV, ok = "false", reason = "another_box", by = "Den Sync Box" } } },
+				answers())
+			assert.same({}, puts)
+			assert.same({}, timers)
+			assert.is_true(saw("a sync box of this project syncs to it (W10) (Den Sync Box)"))
+		end)
+
+		it("counts neither the asking box's own word, nor a box of another bridge, nor one on another area", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			bind(DEVICE3)
+			hello(DEVICE, BOX, BRIDGE, TV, "true")
+			hello(DEVICE2, BOX2, OTHER_BRIDGE, TV, "true")
+			hello(DEVICE3, "0A1B2C3D4E61", BRIDGE, OFFICE, "true")
+			assert.is_true(stop(DEVICE, TV))
+			assert.same({}, timers, "nobody to wait for")
+			assert.same({ STOP_PUT }, puts_of())
+			assert.equal("stopped", answers()[1][2].reason)
+		end)
+
+		it("counts a box of this bridge that says it syncs without naming an area", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE2, BOX2, BRIDGE, nil, "true")
+			hello(DEVICE, BOX, BRIDGE, TV)
+			assert.is_false(stop(DEVICE, TV))
+			assert.equal("another_box", answers()[1][2].reason)
+		end)
+
+		it("waits the grace while another box naming the area has not said it syncs, then stops", function()
+			two_on_tv()
+			assert.is_true(stop(DEVICE, TV))
+			assert.equal(1, #timers)
+			assert.equal(3000, timers[1].delay)
+			assert.same({}, puts)
+			assert.same({}, answers())
+			assert.is_true(saw("Living Room TV: waiting 3 s for the other sync boxes on it to say whether they sync (W10)"))
+			timers[1].fn()
+			assert.same({ STOP_PUT }, puts_of())
+			assert.same({ { DEVICE, { area_id = TV, ok = "true", reason = "stopped" } } }, answers())
+		end)
+
+		it("refuses after the grace when the other box said it syncs meanwhile (both started at once)", function()
+			two_on_tv()
+			stop(DEVICE, TV)
+			state(DEVICE2, BOX2, BRIDGE, TV, "true")
+			timers[1].fn()
+			assert.same({}, puts)
+			assert.same({ { DEVICE, { area_id = TV, ok = "false", reason = "another_box", by = "Den Sync Box" } } },
+				answers())
+		end)
+
+		it("waits for a box whose sync state is unknown too", function()
+			bind(DEVICE)
+			bind(DEVICE2)
+			hello(DEVICE2, BOX2, BRIDGE, TV)
+			assert.is_true(stop(DEVICE, TV))
+			assert.equal(1, #timers)
+		end)
+
+		it("answers every box that asked for the area with one PUT", function()
+			two_on_tv()
+			bind(DEVICE3)
+			hello(DEVICE3, "0A1B2C3D4E61", BRIDGE, TV, "false")
+			sent = {}
+			assert.is_true(stop(DEVICE, TV))
+			assert.is_true(stop(DEVICE2, TV))
+			assert.equal(1, #timers)
+			timers[1].fn()
+			assert.equal(1, #puts)
+			assert.same({ { DEVICE, { area_id = TV, ok = "true", reason = "stopped" } },
+				{ DEVICE2, { area_id = TV, ok = "true", reason = "stopped" } } }, answers())
+			assert.same({ "Sync stopped for Living Room Sync Box, Den Sync Box: Living Room TV" }, stopped_texts)
+		end)
+
+		it("answers a box that asks while the PUT is out with the same answer", function()
+			http_answer = nil
+			bind(DEVICE)
+			bind(DEVICE2)
+			assert.is_true(stop(DEVICE, TV))
+			assert.is_true(stop(DEVICE2, TV))
+			assert.equal(1, #puts)
+			assert.same({}, answers())
+			puts[1].cb({ ok = true, code = 200 })
+			assert.equal(2, #answers())
+			puts[1].cb({ ok = true, code = 200 })
+			assert.equal(2, #answers(), "a second callback answers nothing")
+		end)
+
+		it("answers failed with the bridge's error, when the request raises, and without a request path", function()
+			bind(DEVICE)
+			http_answer = { ok = false, code = 503, err = "HTTP 503" }
+			assert.is_true(stop(DEVICE, TV))
+			assert.same({ { DEVICE, { area_id = TV, ok = "false", reason = "failed", detail = "HTTP 503" } } }, answers())
+			assert.is_true(saw("stopping the stream on Living Room TV failed: HTTP 503"))
+			http_answer = { ok = false, code = 404 }
+			stop(DEVICE, TV)
+			assert.equal("HTTP 404", answers()[2][2].detail)
+			http_answer = { ok = false }
+			stop(DEVICE, TV)
+			assert.equal("no answer", answers()[3][2].detail)
+			assert.same({}, stopped_texts)
+			new_take_over({ http = function() error("boom") end })
+			bind(DEVICE)
+			stop(DEVICE, TV)
+			assert.equal("failed", answers()[4][2].reason)
+			assert.truthy(answers()[4][2].detail:find("boom", 1, true))
+			new_take_over({ http = false })
+			bind(DEVICE)
+			stop(DEVICE, TV)
+			assert.same({ area_id = TV, ok = "false", reason = "failed", detail = "no request path" }, answers()[5][2])
+		end)
+
+		it("cuts the detail and another box's name to 120 bytes", function()
+			bind(DEVICE)
+			http_answer = { ok = false, err = ("x"):rep(300) }
+			stop(DEVICE, TV)
+			assert.equal(("x"):rep(117) .. "...", answers()[1][2].detail)
+		end)
+
+		it("refuses while MAX_STOPS areas wait already: busy", function()
+			http_answer = nil
+			areas = {}
+			for i = 1, syncboxes.MAX_STOPS + 1 do
+				areas[i] = { id = string.format("ea-%02d", i), name = string.format("Area %02d", i), status = "active",
+					lamps = {} }
+			end
+			bind(DEVICE)
+			for i = 1, syncboxes.MAX_STOPS do
+				assert.is_true(stop(DEVICE, areas[i].id), tostring(i))
+			end
+			assert.is_false(stop(DEVICE, areas[syncboxes.MAX_STOPS + 1].id))
+			assert.same({ { DEVICE, { area_id = "ea-05", ok = "false", reason = "busy" } } }, answers())
+			assert.is_true(saw("too many stops wait already"))
+		end)
+
+		it("drops a stop whose boxes were all unbound during the grace, unanswered", function()
+			two_on_tv()
+			stop(DEVICE, TV)
+			s:binding_changed(2, "HUE_SYNCBOX", false, DEVICE)
+			timers[1].fn()
+			assert.same({}, puts)
+			assert.same({}, answers())
+			assert.is_true(saw("dropped: no box that asked is bound now"))
+		end)
+
+		it("answers no_area when the area went during the grace", function()
+			two_on_tv()
+			stop(DEVICE, TV)
+			table.remove(areas, 1)
+			timers[1].fn()
+			assert.same({}, puts)
+			assert.same({ { DEVICE, { area_id = TV, ok = "false", reason = "no_area" } } }, answers())
+		end)
+
+		it("stop() cancels the waiting take-overs unanswered; a late timer or answer does nothing", function()
+			two_on_tv()
+			stop(DEVICE, TV)
+			http_answer = nil
+			assert.is_true(stop(DEVICE, OFFICE), "nobody on that area: the PUT goes out at once")
+			assert.equal(1, #puts)
+			s:stop()
+			assert.is_true(timers[1].cancelled)
+			timers[1].fn()
+			puts[1].cb({ ok = true })
+			assert.equal(1, #puts)
+			assert.same({}, answers())
+		end)
+
+		it("answers failed when no timer can be set for the grace", function()
+			new_take_over({ set_timer = function() error("no timers") end })
+			two_on_tv()
+			assert.is_false(stop(DEVICE, TV))
+			assert.same({ { DEVICE, { area_id = TV, ok = "false", reason = "failed",
+				detail = "the bridge could not wait for the other sync boxes" } } }, answers())
+			assert.is_true(saw("no timer for the take-over"))
+			assert.same({}, puts)
+		end)
+
+		it("sets its grace timer with C4:SetTimer by default", function()
+			local saved, armed = _G.C4, {}
+			_G.C4 = { SetTimer = function(_, delay, fn)
+				armed[#armed + 1] = { delay = delay, fn = fn }
+				return { Cancel = function() end }
+			end }
+			local ok, err = pcall(function()
+				new_take_over({ set_timer = false })
+				two_on_tv()
+				stop(DEVICE, TV)
+				armed[1].fn()
+			end)
+			_G.C4 = saved
+			assert(ok, err)
+			assert.equal(3000, armed[1].delay)
+			assert.same({ STOP_PUT }, puts_of())
+		end)
+
+		it("logs a raise in the grace's run and in the answer, and goes on", function()
+			two_on_tv()
+			stop(DEVICE, TV)
+			s.deps.areas = function() error("areas gone") end
+			timers[1].fn()
+			assert.is_true(saw("areas failed"))
+			assert.equal("no_area", answers()[1][2].reason)
+			new_take_over({ on_stopped = function() error("no property") end })
+			bind(DEVICE)
+			areas[1].status = "active"
+			assert.is_true(stop(DEVICE, OFFICE))
+			assert.is_true(saw("on_stopped failed"))
+			assert.equal("stopped", answers()[2][2].reason)
+		end)
+	end)
+
+	describe("asking for hellos (ASK_HELLO, #568)", function()
+		local ASK = "HUE_SYNCBOX_ASK_HELLO"
+
+		local function asked()
+			local out = {}
+			for _, m in ipairs(of(ASK)) do
+				out[#out + 1] = m.id
+			end
+			return out
+		end
+
+		it("asks a device bound without a hello at its binding, once, with nothing in the message", function()
+			assert.equal("HUE_SYNCBOX_ASK_HELLO", syncboxes.ASK_HELLO)
+			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			assert.same({ { id = DEVICE, command = ASK, params = {} } }, sent)
+			assert.is_true(saw("device 2001 is bound on Hue Sync Boxes without a hello: asking for one"))
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({ DEVICE }, asked(), "once in a run")
+		end)
+
+		it("does not ask a device whose hello waits (it answers it) or is known", function()
+			bound = {}
+			hello(DEVICE, BOX, BRIDGE, TV)
+			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			assert.same({ "HUE_SYNCBOX_CONFIGURE" }, { sent[1].command })
+			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({}, asked())
+		end)
+
+		it("asks every device the lookup shows bound without a hello at each resync, once each", function()
+			bound = { [DEVICE] = "Hue Sync Box", [DEVICE2] = "Hue Sync Box", [DEVICE3] = "Hue Sync Box" }
+			hello(DEVICE, BOX, BRIDGE, TV)
+			sent = {}
+			assert.equal(1, s:configure_all(), "the number told CONFIGURE")
+			assert.same({ "HUE_SYNCBOX_CONFIGURE", ASK, ASK }, { sent[1].command, sent[2].command, sent[3].command })
+			assert.same({ DEVICE2, DEVICE3 }, asked())
+			s:configure_all()
+			assert.same({ DEVICE2, DEVICE3 }, asked(), "not again")
+			sent = {}
+			assert.is_true(hello(DEVICE2, BOX2, BRIDGE, OFFICE, "true"))
+			assert.same({ { id = DEVICE2, command = "HUE_SYNCBOX_CONFIGURE" } },
+				{ { id = sent[1].id, command = sent[1].command } })
+		end)
+
+		it("asks nothing while the lookup is unknown, nor a device OnBindingChanged says is unbound", function()
+			bound = nil
+			assert.equal(0, s:configure_all())
+			assert.same({}, sent)
+			s:binding_changed(2, "HUE_SYNCBOX", false, DEVICE)
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({}, asked())
+		end)
+
+		it("asks a device OnBindingChanged said is bound that the lookup misses (its first ask failed)", function()
+			local fail = true
+			s = new_s({ send = function(id, command, params)
+				if fail and command == ASK then error("gone") end
+				sent[#sent + 1] = { id = id, command = command, params = params }
+			end })
+			bound = {}
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			fail = false
+			s:configure_all()
+			assert.same({ DEVICE }, asked())
+		end)
+
+		it("asks again after an unbind and a new binding", function()
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			s:binding_changed(2, "HUE_SYNCBOX", false, DEVICE)
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			assert.same({ DEVICE, DEVICE }, asked())
+		end)
+
+		it("asks again at the next resync after a send that raised", function()
+			local fail = true
+			s = new_s({ send = function(id, command, params)
+				if fail and command == ASK then error("gone") end
+				sent[#sent + 1] = { id = id, command = command, params = params }
+			end })
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			assert.is_true(saw("HUE_SYNCBOX_ASK_HELLO to device 2001 failed"))
+			fail = false
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({ DEVICE }, asked())
+		end)
+
+		it("asks at most MAX_BOXES devices at a resync, the rest at the next", function()
+			bound = {}
+			for i = 1, syncboxes.MAX_BOXES + 4 do
+				bound[5000 + i] = "Hue Sync Box"
+			end
+			s:configure_all()
+			assert.equal(syncboxes.MAX_BOXES, #asked())
+			s:configure_all()
+			assert.equal(syncboxes.MAX_BOXES + 4, #asked())
 		end)
 	end)
 

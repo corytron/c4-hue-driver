@@ -25,7 +25,7 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <body>
 
 <h1>Hue Sync Box device</h1>
-<p class="subtitle">One Philips Hue Play HDMI Sync Box as a Control4 HDMI switch. <b>Beta:</b> in this 2.0 beta the device pairs with the box, shows its state, and switches the box and starts and stops its sync with the room, in each of the three ways a box can be wired. Intensity and brightness by the time of day, programming and the Watch-menu buttons come in the next beta. The Hue Bridge device's <b>Documentation</b> tab is the manual of the other Hue drivers.</p>
+<p class="subtitle">One Philips Hue Play HDMI Sync Box as a Control4 HDMI switch. <b>Beta:</b> this 2.0 beta does all that 2.0 plans for the box: it pairs with the box and shows its state, switches the box and starts and stops its sync with the room in each of the three ways a box can be wired, sets intensity and brightness by the time of day, and adds programming, four buttons for Navigator, the box's entertainment area, its name kept the same on both sides, a reversible switch-off of the box's own input switching and the take-over of another app's sync. <b>Installing it needs one reboot of the controller</b> (section 3). The Hue Bridge device's <b>Documentation</b> tab is the manual of the other Hue drivers.</p>
 
 <h3>Contents</h3>
 <ol class="toc">
@@ -34,6 +34,12 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <li><a href="#setup">Adding and pairing</a></li>
 <li><a href="#wiring">The three wirings, and the connections for each</a></li>
 <li><a href="#routing">Switching and syncing with the room</a></li>
+<li><a href="#periods">Intensity and brightness by the time of day</a></li>
+<li><a href="#area">The entertainment area, and another app's sync</a></li>
+<li><a href="#buttons">The buttons in Navigator</a></li>
+<li><a href="#programming">Programming</a></li>
+<li><a href="#offers">The box's own input switching and its wiring: Sync Box Settings</a></li>
+<li><a href="#name">The box's name</a></li>
 <li><a href="#bridge">The connection to the Hue Bridge</a></li>
 <li><a href="#everyday">How the device keeps up with the box</a></li>
 <li><a href="#properties">Properties</a></li>
@@ -51,24 +57,20 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <h3>What this beta does</h3>
 <ul>
 <li><b>Pairs with one box</b> (<b>Pair Sync Box</b>, then a hand on the box's button), and checks at every start that the box at the address is the paired one before it sends anything that carries the pairing (section 3).</li>
-<li><b>Shows the box's state</b> on its Properties page: its name, model, firmware, id and address; whether and how it syncs, and to which entertainment area; its inputs; its link to the Hue bridge; what it switches by itself; and how it is wired (section 8).</li>
+<li><b>Shows the box's state</b> on its Properties page: its name, model, firmware, id and address; whether and how it syncs, and to which entertainment area; its inputs; its link to the Hue bridge; what it switches by itself; and how it is wired (section 14).</li>
 <li><b>Switches the box with the room</b> (section 5). With the box in line, picking a source in Watch or Listen makes Control4 send the box that source's input: the device wakes the box, switches it, starts syncing, and tells Control4 the input changed only once the box shows it. Behind a receiver Control4 routes every source through the box's HDMI 1, and the device takes the source from the room. On a receiver's second output Control4 sends the box nothing, and the device follows a room you choose, <b>Follow Room</b>.</li>
 <li><b>Syncs in the mode the source calls for</b>: Video, Game or Music, from the input's type in the Hue app, from the route (a Listen source is Music), or from the source's Control4 driver; set per input (<b>HDMI 1 Sync Mode</b> to <b>HDMI 4 Sync Mode</b>) or per source (<b>Set Source Sync Mode</b>), or <code>Do not sync</code> (section 5).</li>
+<li><b>Sets intensity and brightness by the time of day</b>: Day, Evening (from an hour before the sunset) and Night, each with its own; a change by hand holds until the source changes or the sync stops (section 6).</li>
 <li><b>Room Off and a source that leaves the box</b>: power save, or stop syncing and keep the picture, as <b>At Room Off</b> and <b>When The Source Leaves The Box</b> say.</li>
-<li><b>Goes offline and comes back</b> as the other Hue devices do: after 5 minutes without an answer from the box, and at its first answer (section 7).</li>
-<li><b>Works with the Hue Bridge device</b> when connected to it: the bridge tells it when a sync starts or stops, and names it on its own rows and in the Status of the lights whose lamps sync (section 6).</li>
-<li><b>Writes to the box only what routing needs</b>: wake and power save, the input, and sync on and off with its mode. The box's intensity, brightness and entertainment area stay as they are, and none of the box's settings is written: not its input switching, not its wiring.</li>
+<li><b>Keeps the box's entertainment area</b>, chosen in Composer from the box's own list, and <b>takes over</b> the area from another app's sync when the box starts syncing (section 7).</li>
+<li><b>Four buttons for Navigator</b>, <b>Hue Sync</b>, <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b>, whose icons show the box's state (section 8), and <b>programming</b>: commands, events, conditionals and variables (section 9).</li>
+<li><b>Hands the choice of input to Control4</b> with one reversible click, <b>Sync Box Settings</b>: the box's own HDMI CEC and hot-plug switching, auto-sync and power save on the TV's standby turned off, and put back exactly as they were with another click. The same action sets the box's wiring setting, also reversibly (section 10).</li>
+<li><b>Keeps the box's name the same</b> in Composer and in the Hue app (section 11).</li>
+<li><b>Goes offline and comes back</b> as the other Hue devices do: after 5 minutes without an answer from the box, and at its first answer (section 13).</li>
+<li><b>Works with the Hue Bridge device</b> when connected to it: the bridge tells it when a sync starts or stops, stops another app's sync for it, and names it on its own rows and in the Status of the lights whose lamps sync (section 12).</li>
+<li><b>Writes to the box only what its job needs</b>: what routing, the periods, the buttons and programming change (wake and power save, the input, the sync, its mode, intensity, brightness and area), the box's name after a rename, and its input switching and its wiring setting only on a click of <b>Sync Box Settings</b>. Never its link to the Hue bridge or its picture settings.</li>
 </ul>
-
-<h3>What comes in the next 2.0 beta</h3>
-<p>As planned for 2.0; details may still change before the release:</p>
-<ul>
-<li><b>Intensity and brightness by the time of day.</b> Day, Evening and Night, each with its own intensity and brightness, applied when a sync starts and at each change of period; a change made by hand holds until the source changes or the sync stops. Until then a sync starts with the intensity and brightness the box already has.</li>
-<li><b>Programming and Navigators.</b> Commands, events, conditionals and variables, and four buttons for a room's Watch menu: <b>Hue Sync</b>, <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b>.</li>
-<li><b>Settings and offers.</b> The entertainment area chosen from Control4, the box's name kept the same on both sides, and one reversible click each to hand the choice of input to Control4 (the box's own HDMI CEC and hot-plug switching turned off) or to change the wiring setting. The driver never changes these by itself.</li>
-<li><b>Taking over another app's sync.</b> While another app syncs to the box's entertainment area (the Hue app's sync for a PC or for music, say), the box refuses to start its own. In this beta the device leaves the other app's sync running, still switches the box's input, and says so in <b>Last Action</b>.</li>
-</ul>
-<p>The device already has its whole Composer frame: the HDMI switch, the four buttons above and every connection. They are fixed from this first beta on, so the later betas add what they do without your deleting and adding the device again or making its connections again.</p>
+<p>The device's Composer frame (the HDMI switch, the four buttons and every connection) was fixed in the first 2.0 beta, and this beta adds the buttons' icons, the last change of that frame: the later releases add what they do without your deleting and adding the device again or making its connections again.</p>
 
 <h2 id="needs">2. What you need</h2>
 <ul>
@@ -76,7 +78,7 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <li><b>The box on the same network as the controller</b>, preferably with a fixed address: a DHCP reservation in your router. The box connects over Wi-Fi. The controller reaches it over HTTPS on port 443; no internet access and no Hue account are involved.</li>
 <li><b>Control4 OS 3.3.0 or newer</b> and Composer Pro, as for the other Hue drivers.</li>
 <li><b>The driver file</b> <code>hue_syncbox.c4z</code>, from the same release as the other Hue drivers, installed with them through <b>Driver</b> &raquo; <b>Add or Update Driver or Agent&hellip;</b>. Updates go the same way and keep the pairing; never delete and re-add the device to update it (section 3, "Forget Pairing and deleting the device").</li>
-<li><b>The Hue Bridge device</b> is optional for the box device, but recommended (section 6).</li>
+<li><b>The Hue Bridge device</b> is optional for the box device, but recommended (section 12).</li>
 </ul>
 <p>This page says "the Hue app" for the app that set up the box: the Hue app, or the older Hue Sync app. The device's own texts say "Hue Sync app".</p>
 
@@ -87,9 +89,18 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <li><b>Run Pair Sync Box</b> on the <b>Actions</b> tab. Under <b>Box</b>, pick the box from the boxes found, or pick <code>Type an address</code> and enter the box's address under <b>Address</b> (the Hue app shows it in the box's network information). If the list holds no box yet, the device searches again: open the action again a few seconds later, or type the address. Click <b>OK</b>.</li>
 <li><b>The device checks the box first.</b> Before it asks for a pairing, it makes sure the address answers over HTTPS with a certificate from the sync boxes' own root certificate, which ships with the driver, and that the box reports its id. Then the pairing window opens for 2 minutes: <b>Status</b> reads <code>Hold the button on the sync box for 3 seconds (1:58 left)</code>, counting down every 10 seconds, and <b>Last Action</b> says the same once.</li>
 <li><b>Hold the button on the box</b> for about 3 seconds, until its light blinks green. The box should be on and not syncing while you pair it.</li>
-<li><b>Paired.</b> <b>Last Action</b> reads, for example, <code>Paired with Hue Sync Box (8K) #4E5F at 10.0.2.150</code> (<code>#4E5F</code> being the last four characters of its <b>Box ID</b>). The rows fill in, the device starts reading the box, and, when the device is connected to the Hue Bridge, it tells the bridge (section 6).</li>
+<li><b>Paired.</b> <b>Last Action</b> reads, for example, <code>Paired with Hue Sync Box (8K) #4E5F at 10.0.2.150</code> (<code>#4E5F</code> being the last four characters of its <b>Box ID</b>). The rows fill in, the device starts reading the box, and, when the device is connected to the Hue Bridge, it tells the bridge (section 12). When the device's name in Composer differs from the box's (a new device is named <code>Hue Sync Box</code>), <b>Last Action</b> says so a moment later and <b>Sync Box Settings</b> offers either name (section 11).</li>
 </ol>
 <p>The box registers the pairing under the app name <code>c4-hue</code> and this device's Composer name (its first 32 characters). The device keeps the box's pairing key encrypted on the controller and never shows it: not in a property, not in the Lua output, not in <b>Last Action</b>.</p>
+
+<h3 id="reboot">Installing this beta: one reboot of the controller</h3>
+<p>This beta gives the four buttons their icons (section 8), which changes what the driver declares to Control4 about itself, and Control4 takes such a change only when the controller starts. So, once <b>Add or Update Driver or Agent&hellip;</b> has installed this beta:</p>
+<ol>
+<li>Composer may ask whether to restart Director. Answering <b>Yes</b> is not enough for the icons.</li>
+<li><b>Reboot the controller</b> from System Manager (its reboot of the controller, not of Director). The pairing, the settings and the programming stay.</li>
+<li>Choose <b>File</b> &raquo; <b>Refresh Navigators</b>.</li>
+</ol>
+<p>Until the reboot, everything else works, and the buttons show Control4's own button icon. This is the last change of this kind for the 2.0 box device: later updates take effect at once.</p>
 
 <h3>When pairing does not work</h3>
 <p><b>Last Action</b> says why, in words. The reasons:</p>
@@ -109,11 +120,11 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <p>At every start of the driver (an update, a Director restart, a controller reboot), the device checks the box at its address again before anything that carries the pairing is sent: the certificate, the controller's certificate check and the box's id. If another device answers at that address, <b>Status</b> reads <code>Another device answers at 10.0.2.150 (expected #4E5F); Pair Sync Box to find it</code>, nothing that carries the pairing is sent there, and the device searches the local network for the paired box. When it finds the box at a new address, and the box proves its id there, the device follows it and <b>Last Action</b> says so.</p>
 
 <h3 id="forget">Forget Pairing and deleting the device</h3>
-<p><b>Forget Pairing</b>, with <b>Confirm</b> set to <code>Yes</code>, removes this controller's registration from the box, clears the pairing on the device and stops reading the box. The rows clear, except <b>Box Address</b>, and the device tells the Hue Bridge it is gone (when it is connected to it, section 6). If the box does not answer, the pairing is cleared on the device all the same, and <b>Last Action</b> says the registration stays on the box until it is removed in the Hue app. Any other <b>Confirm</b> changes nothing.</p>
+<p><b>Forget Pairing</b>, with <b>Confirm</b> set to <code>Yes</code>, removes this controller's registration from the box, clears the pairing on the device and stops reading the box. The rows clear, except <b>Box Address</b>, and the device tells the Hue Bridge it is gone (when it is connected to it, section 12). If the box does not answer, the pairing is cleared on the device all the same, and <b>Last Action</b> says the registration stays on the box until it is removed in the Hue app. Any other <b>Confirm</b> changes nothing.</p>
 <p>Deleting the device in Composer does not remove the registration from the box: run <b>Forget Pairing</b> first. A box that was reset to its factory settings keeps its id but forgets every pairing: run <b>Pair Sync Box</b> again and hold the button.</p>
 
 <h2 id="wiring">4. The three wirings, and the connections for each</h2>
-<p>A sync box can be wired in three ways, and the box has a setting for each (made in the Hue app). The device reads that setting and shows it on its <b>Wiring</b> row. Make the HDMI connections in Composer's <b>Connections</b> view to match the cables. The box device has four HDMI inputs, <b>HDMI 1</b> to <b>HDMI 4</b>, and one output, <b>HDMI Out</b>, each with a video and an audio connection; connect both alike.</p>
+<p>A sync box can be wired in three ways, and the box has a setting for each, made in the Hue app or with <b>Sync Box Settings</b> (below). The device reads that setting and shows it on its <b>Wiring</b> row. Make the HDMI connections in Composer's <b>Connections</b> view to match the cables. The box device has four HDMI inputs, <b>HDMI 1</b> to <b>HDMI 4</b>, and one output, <b>HDMI Out</b>, each with a video and an audio connection; connect both alike.</p>
 <table>
 <tr><th>Wiring</th><th>Cables</th><th>The box's setting, and its Wiring row</th><th>Connections in Composer</th></tr>
 <tr><td><b>In line</b></td><td>Sources &rarr; box &rarr; TV or receiver</td><td>Neither ARC bypass nor solo mode: <code>In line (sources &rarr; box &rarr; TV or receiver)</code></td><td>Each source's HDMI output to one of the box's inputs, <b>HDMI 1</b> to <b>HDMI 4</b>, as cabled; the box's <b>HDMI Out</b> to the receiver or the TV.</td></tr>
@@ -121,9 +132,9 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <tr><td><b>From a receiver's second output</b></td><td>Sources &rarr; receiver &rarr; TV, and the receiver's second HDMI output &rarr; box, with nothing on the box's output</td><td>Solo mode on: <code>From a receiver's second output (solo mode)</code></td><td>The sources, the receiver and the TV as usual, without the box. Connect nothing to the box's <b>HDMI Out</b>: that would give Control4 a path the cables do not have, and it may pick it. If the receiver's driver offers its second output as a connection, you may connect it to the box's <b>HDMI 1</b>; that changes no path.</td></tr>
 </table>
 <ul>
-<li><b>The setting is the box's.</b> The driver reads it and never changes it by itself. Change it in the Hue app; the <b>Wiring</b> row follows at the next read. A later 2.0 beta offers to change it with one reversible click.</li>
+<li><b>The setting is the box's, changed only by a click.</b> The driver never changes it by itself. To change it from Composer, run <b>Sync Box Settings</b> and pick, under <b>What</b>, <code>Set the box to In line (ARC bypass and solo mode off)</code>, <code>Set the box to Behind a receiver (ARC bypass on, solo mode off)</code> or <code>Set the box to From a receiver's second output (solo mode on, ARC bypass off)</code>; only the wirings the box is not in, and that its model and software have the setting for, are listed (solo mode needs a box at API level 14, as the <b>Firmware</b> row shows). <b>Last Action</b> then says what the box now does and how the connections in Composer must match the cables, for example <code>Sent: the box is now Behind a receiver (ARC bypass on, solo mode off): every source reaches it from the receiver on HDMI 1. Control4's connections must match the cables: connect the receiver's HDMI output to the box's HDMI 1 and the box's HDMI Out to the TV (Sync Box Settings: Restore the box's wiring puts it back)</code>. Make those connections; the device does not change any. <code>Restore the box's wiring</code> puts back the setting the box had before the first such click. A change made in the Hue app works as well; the <b>Wiring</b> row follows at the next read either way.</li>
 <li><b>A one-input box</b> (the 4K box of 2026) shows four inputs in Composer too, as every model does; connect only <b>HDMI 1</b>.</li>
-<li><b>No HDMI CEC.</b> The driver relies on nothing the box learns over HDMI CEC: Control4 is meant to run the power, the signal path and the volume. The box's own CEC and hot-plug behaviour is shown on the <b>Input Switching</b> row.</li>
+<li><b>No HDMI CEC.</b> The driver relies on nothing the box learns over HDMI CEC: Control4 is meant to run the power, the signal path and the volume. The box's own CEC and hot-plug behaviour is shown on the <b>Input Switching</b> row, and <b>Sync Box Settings</b> turns it off with one reversible click (section 10).</li>
 <li><b>Put the device in the TV's room.</b> Behind a receiver and on a second output the device takes the source from a room, by default its own (<b>Follow Room</b>, section 5).</li>
 <li><b>The connections decide what Control4 sends the box</b> (section 5): in line, the input of each source watched through it; behind a receiver, <b>HDMI 1</b> for every source that passes the receiver; from a second output, nothing.</li>
 <li><b>The device shows only the settings of its wiring</b>: <b>HDMI 1 Sync Mode</b> to <b>HDMI 4 Sync Mode</b> in line (only <b>HDMI 1</b> on a one-input box); <b>Follow Room</b> and <b>Source Sync Modes</b> behind a receiver and on a second output; <b>At Room Off</b> and <b>When The Source Leaves The Box</b> in every wiring. When the box's setting changes, the device changes the rows it shows and how it drives the box, and says so in <b>Last Action</b>.</li>
@@ -134,14 +145,14 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 
 <h3>In line</h3>
 <ul>
-<li><b>Watching a source through the box.</b> Control4 sends the box the source's input. The device wakes the box if it is in power save, switches it to that input and starts syncing in that input's mode (below), in one change. It tells Control4 the input changed only once a read of the box shows it. Picking another source on the box switches it again, without a power save in between.</li>
+<li><b>Watching a source through the box.</b> Control4 sends the box the source's input. The device wakes the box if it is in power save, switches it to that input and starts syncing in that input's mode (below), with the period's intensity and brightness (section 6), in one change. It tells Control4 the input changed only once a read of the box shows it. Picking another source on the box switches it again, without a power save in between.</li>
 <li><b>Listening</b> to a source through the box (Control4 routes only its sound): the box syncs to music, whatever the input's type.</li>
 <li><b>Room Off</b>: as <b>At Room Off</b> says, power save (the default) or stop syncing and keep the picture.</li>
 <li><b>The room stays on, but its source no longer passes the box</b> (the TV's own apps, a source on another input of the TV): as <b>When The Source Leaves The Box</b> says, stop syncing and keep the picture (the default) or power save.</li>
 <li><b>When the box does not take a change</b> (it does not answer, or a read does not show it), the device sends it again every 2 seconds, 4 times in all. Then <b>Last Action</b> says what did not happen, for example <code>Not switched: the box did not change input</code>, and Control4 is not told that the input changed.</li>
 <li><b>A one-input box</b> (the 4K box of 2026): a source routed to <b>HDMI 2</b> to <b>HDMI 4</b> is not switched, and <b>Last Action</b> reads <code>Not switched: this box has 1 HDMI input</code>. Connect only <b>HDMI 1</b>.</li>
-<li><b>While another app syncs</b> to the box's entertainment area, the box refuses to start a sync of its own. The device still switches the input, leaves the other app's sync running, and <b>Last Action</b> says that another app streams to the area. It does not try again by itself; taking over comes in the next beta.</li>
-<li><b>Changes made outside Control4</b> (in the Hue app, or by the box's own HDMI CEC and hot-plug switching) show on the device's rows, never move a Control4 room, and are not switched back. The Watch screen can then show another source than the box: turn the box's own input switching off in the Hue app where Control4 should choose alone.</li>
+<li><b>While another app syncs</b> to the box's entertainment area, the box refuses to start a sync of its own. The device still switches the input, and then takes the area over through the Hue Bridge device (section 7). Where it cannot (no connection to the bridge, or the sync is another box's of this project), it leaves the other app's sync running and <b>Last Action</b> says why.</li>
+<li><b>Changes made outside Control4</b> (in the Hue app, or by the box's own HDMI CEC and hot-plug switching) show on the device's rows and in its events and variables (section 9), never move a Control4 room, and are not switched back. The Watch screen can then show another source than the box: hand the choice of input to Control4 with <b>Sync Box Settings</b> (section 10).</li>
 </ul>
 
 <h3>Each input's sync mode (in line)</h3>
@@ -183,7 +194,7 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <h3 id="sourcemodes">Each source's sync mode (behind a receiver and on a second output)</h3>
 <p><b>Source Sync Modes</b> lists the sources the device knows, each with its mode, for example <code>Apple TV: Video; PS5: Game (guessed from its driver); FM Tuner: Music</code>. The sources are those connected to the receiver ahead of the box and those seen in the followed room. A source's mode is, in this order:</p>
 <ol>
-<li>the one set with the action <b>Set Source Sync Mode</b> (section 9): <code>Video</code>, <code>Game</code>, <code>Music</code> or <code>Do not sync</code>; <code>Automatic</code> goes back to the rest of this list;</li>
+<li>the one set with the action <b>Set Source Sync Mode</b> (section 15): <code>Video</code>, <code>Game</code>, <code>Music</code> or <code>Do not sync</code>; <code>Automatic</code> goes back to the rest of this list;</li>
 <li>Music for a Listen selection;</li>
 <li>Game for a source whose Control4 driver's file name names a game console (Xbox, PlayStation, Nintendo), shown as a guess: Control4 has no kind of device for game consoles, so check the guess and set the mode where it is wrong;</li>
 <li>Music for a tuner, CD player or disc changer;</li>
@@ -191,62 +202,206 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 </ol>
 <p>The device keeps each mode by the source's Control4 device. When a source with a mode of its own is deleted in Composer, the mode is kept and shown with <code>(device gone)</code>. If one new device has the same name, the device offers it the old mode, once in <b>Last Action</b> and as an entry in the <b>Source</b> list of <b>Set Source Sync Mode</b>: picking that entry moves the mode. It never moves it by itself.</p>
 
-<h2 id="bridge">6. The connection to the Hue Bridge</h2>
+<h2 id="periods">6. Intensity and brightness by the time of day</h2>
+<p>The box syncs with an <i>intensity</i> (how strongly the lights follow the picture: Subtle, Moderate, High or Intense) and a <i>brightness</i> (0 to 200 %; at 100 % the lights take the picture's brightness as it is). The device sets both by the time of day, in three periods, each with its own pair:</p>
+<table>
+<tr><th>Period</th><th>Starts</th><th>Intensity (default)</th><th>Brightness (default)</th></tr>
+<tr><td><b>Day</b></td><td><b>Day Starts</b>, a clock time: <code>07:00</code></td><td><b>Day Intensity</b>: <code>High</code></td><td><b>Day Brightness</b>: <code>100</code></td></tr>
+<tr><td><b>Evening</b></td><td><b>Evening Starts</b>, minutes from the sunset: <code>-60</code>, an hour before it</td><td><b>Evening Intensity</b>: <code>Moderate</code></td><td><b>Evening Brightness</b>: <code>100</code></td></tr>
+<tr><td><b>Night</b></td><td><b>Night Starts</b>, a clock time: <code>22:00</code></td><td><b>Night Intensity</b>: <code>Subtle</code></td><td><b>Night Brightness</b>: <code>70</code></td></tr>
+</table>
+<ul>
+<li><b>When they apply.</b> The period's intensity and brightness go with every sync the device starts: a source routed through the box (section 5), <b>Start Sync</b>, <b>Toggle Sync</b>, the <b>Hue Sync</b> button. While the box syncs, they apply again at each change of period: at 22:00 a film that started in the Evening goes on at the Night's intensity and brightness. Nothing is sent while the box does not sync.</li>
+<li><b>A change by hand holds.</b> An intensity or a brightness set by hand (the <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b> buttons, a remote's or a keypad's button programmed with the commands of section 9, or programming itself) is never undone by a change of period. It holds until the source changes or the sync stops; the next sync starts with the period's values again. Only what was changed holds: after <b>Sync Brighter</b> the brightness holds, and the intensity still follows the periods. A restart of the driver keeps a hold.</li>
+<li><b>The sunset.</b> The device works out the sunset itself, on the controller, from the location set for the project in Composer (its latitude and longitude); it asks nothing of the internet. If the project has no location, if the location does not fit the controller's time zone, or on a day the sun does not set there, 19:00 stands in for the sunset, and the <b>Periods</b> row says so.</li>
+<li><b>The Periods row</b> shows the period now and when it ends, any value held by hand, and where the sunset comes from, for example <code>Evening until 22:00. Sunset 16:08 today, from the project's location</code>, or <code>Night until 07:00; brightness set by hand. No location is set in the project: 19:00 stands in for sunset</code>.</li>
+<li><b>Changing a setting.</b> Type a time as <code>HH:MM</code> (24-hour) and an offset as minutes, negative before the sunset and positive after it, then click <b>Set</b>. A value the device cannot read is replaced by the default, and <b>Last Action</b> says so, for example <code>Day Starts: "7 o'clock" is not a 24-hour time like 07:00; 07:00 is used</code>. A new setting counts at once: when it changes the period while the box syncs, the new period's values are sent at once (those held by hand left as they are), and <b>Last Action</b> names the period and what was sent, as at every change of period, for example <code>Night: intensity subtle, brightness 70 %</code>.</li>
+<li><b>Odd settings.</b> An Evening that would start before the Day (a large negative offset, a short winter day) starts with the Day, and there is no Day that day; one that would start after the Night does not happen that day. <b>Night Starts</b> may be after midnight (<code>01:00</code>). A change of the clocks for daylight saving moves no period: the Day still starts at 07:00.</li>
+<li><b>After a restart</b> of the driver the device takes the period it finds and sends nothing for a change of period it missed while it was down; the next change applies as usual.</li>
+</ul>
+
+<h2 id="area">7. The entertainment area, and another app's sync</h2>
+<h3>Choosing the area</h3>
+<p>An entertainment area is the set of Hue lamps that a sync drives; it is made in the Hue app, on the bridge. The area belongs to the box: the box syncs to the one it is set to, and a Control4 room has none of its own. The <b>Entertainment Area</b> property lists the areas the box offers, by name; pick one and click <b>Set</b>. The areas whose lamps are in the box device's room come first in the list (they are found through the Hue Bridge device's room mappings, when the box device is connected to it, section 12), but none is chosen for you. <b>Last Action</b> reads, for example, <code>Entertainment area set to Living Room TV</code>. Programming changes the area with <b>Set Entertainment Area</b> or <b>Apply Sync Settings</b> (section 9).</p>
+<ul>
+<li><b>Kept by its identity, not its name.</b> An area renamed in the Hue app is still the box's area, under its new name. A change made in the Hue app (another area picked for the box) shows on the device as it is; the device never sets the area back.</li>
+<li><b>An area deleted in the Hue app</b> stays named on the device, marked <code>(deleted in Hue)</code> in the <b>Entertainment Area</b> row, and <b>Last Action</b> says so once: <code>The box syncs to an entertainment area deleted in Hue (Living Room TV): pick another in Entertainment Area</code>. The device never picks another area by itself, not even when only one is left.</li>
+<li><b>An area made again under the same name.</b> When the Hue app makes a new area with the name of the deleted one, the device offers it once in <b>Last Action</b>, <code>Living Room TV is on the bridge again (made anew in Hue): pick it in Entertainment Area</code>, and lists it in <b>Entertainment Area</b>; it never sets it by itself. Picking it re-points everything at once: the programming lines that named the old area use the new one from then on, and <b>Last Action</b> says so.</li>
+<li><b>A programming line that names an area</b> keeps the area it was written with. If that area was deleted and not re-pointed, the command is not carried out, and <b>Last Action</b> says why.</li>
+</ul>
+
+<h3 id="takeover">Another app's sync: taking over</h3>
+<p>Only one sync can run on an entertainment area at a time. When another app syncs to the box's area (Hue's sync for a PC, or for music, say), the box refuses to start its own. The device then takes over, as the owner of this project decided Control4 should: it asks the Hue Bridge device to stop that sync, and once the bridge has stopped it, the box starts its own. <b>Last Action</b> says so, for example <code>Sync taken over: Hue Sync Box (8K) #4E5F took Living Room TV over from another app's sync</code>, the event <b>Sync Taken Over</b> fires, and the area is the box's for as long as it syncs.</p>
+<ul>
+<li><b>It needs the connection to the Hue Bridge</b> (section 12): the bridge stops the other app's sync with its own pairing, which never leaves the bridge driver. Without the connection, or when the bridge cannot stop it, the device switches the input all the same, leaves the other app's sync running and says so in <b>Last Action</b>, for example <code>Not syncing: another app streams to the Hue Bridge's entertainment area, so the box is busy</code>.</li>
+<li><b>Two boxes of this project never take a sync from each other.</b> If the sync on the area is another Hue Sync Box device of this project (two boxes set to the same area), nothing is stopped: <b>Last Action</b> names the other box, for example <code>Not syncing: Den Sync Box syncs to Living Room TV, and two sync boxes of this project never take a stream from each other</code>, and this box does not sync until the other stops.</li>
+<li>The device asks once per sync start; it does not keep trying. The next start (another source, <b>Start Sync</b>, the <b>Hue Sync</b> button) asks again.</li>
+</ul>
+
+<h2 id="buttons">8. The buttons in Navigator</h2>
+<p>The device comes with four buttons for a room's menus in Navigator (touch screens and the Control4 app). In Composer each is a device of its own, under the box device, named as below; rename them as you like.</p>
+<table>
+<tr><th>Button</th><th>Icon</th><th>A press</th></tr>
+<tr><td><b>Hue Sync</b></td><td><img src="icons/sync_on_70.png" width="70" height="70" alt="Hue Sync on: a TV with coloured light behind it"> <img src="icons/sync_off_70.png" width="70" height="70" alt="Hue Sync off: a TV with a dark screen"></td><td>Starts the box syncing, with the period's intensity and brightness (section 6), or stops it and keeps the picture. The icon shows whether the box syncs: a TV with coloured light behind it, or a dark TV.</td></tr>
+<tr><td><b>Sync Brighter</b></td><td><img src="icons/brighter_70.png" width="70" height="70" alt="Sync Brighter: a bright sun and an arrow up"></td><td>The sync brightness 10 points up, to 200 % at most.</td></tr>
+<tr><td><b>Sync Dimmer</b></td><td><img src="icons/dimmer_70.png" width="70" height="70" alt="Sync Dimmer: a small sun and an arrow down"></td><td>The sync brightness 10 points down, to 0 % at least.</td></tr>
+<tr><td><b>Sync Intensity</b></td><td><img src="icons/intensity_subtle_70.png" width="70" height="70" alt="Subtle: one bar lit"> <img src="icons/intensity_intense_70.png" width="70" height="70" alt="Intense: four bars lit"></td><td>The next intensity: Subtle, Moderate, High, Intense, then Subtle again. The icon shows the intensity now, one to four bars lit.</td></tr>
+</table>
+<ul>
+<li><b>Putting them on a menu.</b> In <b>System Design</b>, select the room, open its <b>Properties</b> and then <b>Navigator</b>. The four buttons are listed by name under the menus they can go on (<b>Watch</b> is the natural one); click <b>Modify&hellip;</b> to make each one visible where you want it, then choose <b>File</b> &raquo; <b>Refresh Navigators</b>. Do it for every room that should have them.</li>
+<li><b>A change by hand.</b> <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b> are changes by hand: they hold until the source changes or the sync stops (section 6). Pressed while the box does not sync, they change the setting the box's next sync starts with.</li>
+<li><b>Quick presses</b> add up: three quick presses of <b>Sync Brighter</b> raise the brightness by 30 points, even before the box has shown the first.</li>
+<li><b>Remotes, keypads and custom buttons</b> (a Halo remote, a keypad, a touch screen's custom button) get the same four through programming: <b>Toggle Sync</b>, <b>Adjust Brightness</b> with a step of 10 or -10, and <b>Next Intensity</b> (section 9).</li>
+<li><b>The icons need a reboot of the controller after the install of this beta</b> (section 3, "Installing this beta"). Until then Navigator shows Control4's own button icon.</li>
+<li>A press that cannot be carried out (the box offline, not paired, refusing the change) is answered in <b>Last Action</b>, as a command is.</li>
+</ul>
+
+<h2 id="programming">9. Programming</h2>
+<p>The box device has its own commands, events, conditionals and variables, in Composer's <b>Programming</b> view under the device. Every command goes to the box as one change; <b>Last Action</b> says what happened, once a read of the box shows it (or why not). The names below are fixed: programming written for this beta keeps working in the releases that follow.</p>
+
+<h3>Commands</h3>
+<table>
+<tr><th>Command</th><th>Parameters</th><th>What it does</th></tr>
+<tr><td><b>Start Sync</b></td><td>&mdash;</td><td>Starts syncing in the mode of the box's input, waking the box if needed, with the period's intensity and brightness (section 6).</td></tr>
+<tr><td><b>Stop Sync</b></td><td>&mdash;</td><td>Stops syncing and keeps the picture (passthrough).</td></tr>
+<tr><td><b>Toggle Sync</b></td><td>&mdash;</td><td><b>Start Sync</b> when the box does not sync, else <b>Stop Sync</b>. The <b>Hue Sync</b> button.</td></tr>
+<tr><td><b>Set Sync Mode</b></td><td><b>Mode</b>: <code>Video</code>, <code>Music</code>, <code>Game</code></td><td>Syncs in that mode (starting the sync if needed).</td></tr>
+<tr><td><b>Set Intensity</b></td><td><b>Intensity</b>: <code>Subtle</code>, <code>Moderate</code>, <code>High</code>, <code>Intense</code></td><td>Sets the intensity: a change by hand (section 6).</td></tr>
+<tr><td><b>Next Intensity</b></td><td>&mdash;</td><td>The next intensity, Subtle to Intense and round again: the <b>Sync Intensity</b> button. A change by hand.</td></tr>
+<tr><td><b>Set Brightness</b></td><td><b>Brightness</b>: 0 to 200 %</td><td>Sets the brightness; 100 % leaves the picture's brightness as it is. A change by hand.</td></tr>
+<tr><td><b>Adjust Brightness</b></td><td><b>Step</b>: -200 to 200</td><td>Raises or lowers the brightness by that many points, kept within 0 to 200 %. The buttons send 10 and -10. A change by hand.</td></tr>
+<tr><td><b>Set Entertainment Area</b></td><td><b>Area</b>: one of the box's areas</td><td>Sets the box's entertainment area (section 7).</td></tr>
+<tr><td><b>Apply Sync Settings</b></td><td><b>Mode</b>, <b>Intensity</b>, <b>Brightness</b>, <b>Area</b>, <b>Start</b> (<code>Start</code> or <code>Stop</code>); each can be left at <code>Leave</code></td><td>Everything chosen in one change: the box never shows a mix of old and new settings. The intensity goes to the mode sent with it. The intensity and brightness are changes by hand.</td></tr>
+<tr><td><b>Power Save</b></td><td>&mdash;</td><td>Puts the box in power save.</td></tr>
+<tr><td><b>Wake</b></td><td>&mdash;</td><td>Wakes the box from power save, without syncing.</td></tr>
+<tr><td><b>Select HDMI Input</b></td><td><b>Input</b>: <code>HDMI 1</code> to <code>HDMI 4</code></td><td>Switches the box to that input. <b>The Control4 room does not follow:</b> its Watch screen keeps the source Control4 routed, and the next source picked switches the box back. Prefer picking the source in the room; use this only where no room routes through the box. A one-input box answers <code>Not switched: this box has 1 HDMI input</code> for HDMI 2 to 4.</td></tr>
+</table>
+
+<h3>Events</h3>
+<table>
+<tr><th>Event</th><th>Fires when</th></tr>
+<tr><td><b>Sync Started</b>, <b>Sync Stopped</b></td><td>The box starts or stops syncing, whoever started or stopped it (Control4, the Hue app, the box by itself).</td></tr>
+<tr><td><b>Sync Mode Changed</b></td><td>The box syncs in another mode (Video, Music, Game), or stops syncing (Off).</td></tr>
+<tr><td><b>Intensity Changed</b>, <b>Brightness Changed</b></td><td>The box's intensity or brightness changes, by hand, by a change of period or in the Hue app.</td></tr>
+<tr><td><b>HDMI Input Changed</b></td><td>The box shows another HDMI input, whoever switched it: Control4's routing, <b>Select HDMI Input</b>, the box's own HDMI CEC or hot-plug switching, the Hue app.</td></tr>
+<tr><td><b>Entertainment Area Changed</b></td><td>The box syncs to another entertainment area.</td></tr>
+<tr><td><b>Sync Taken Over</b></td><td>The box took the area over from another app's sync (section 7).</td></tr>
+<tr><td><b>Powered On</b>, <b>Power Save</b></td><td>The box wakes from power save, or goes to it.</td></tr>
+<tr><td><b>Online</b>, <b>Offline</b></td><td>The box answers again after being offline, or goes offline after 5 minutes without an answer (section 13).</td></tr>
+</table>
+<p>The events report what a read of the box shows, so a change made outside Control4 fires them too, within the device's reading times (section 13). <b>No event fires at a restart</b> of the driver for a value that did not change while it was down: a Director restart during a film does not run the <b>Sync Started</b> programming again.</p>
+
+<h3>Conditionals</h3>
+<p><b>Sync Active</b>, <b>Powered On</b> and <b>Online</b> (true or false); <b>Sync Mode</b> (<code>Video</code>, <code>Music</code>, <code>Game</code>, <code>Off</code>); <b>Intensity</b> (<code>Subtle</code> to <code>Intense</code>, in that order, so "at least High" can be asked); <b>HDMI Input</b> (<code>HDMI 1</code> to <code>HDMI 4</code>); <b>Brightness</b> (a number, 0 to 200).</p>
+
+<h3>Variables</h3>
+<p>Read-only, for programming and other drivers. Each is set before the event that reports its change fires, so programming run by an event reads the new value.</p>
+<table>
+<tr><th>Variable</th><th>Holds</th></tr>
+<tr><td><code>SYNC_ACTIVE</code></td><td>Whether the box syncs (true or false).</td></tr>
+<tr><td><code>SYNC_MODE</code></td><td><code>video</code>, <code>music</code>, <code>game</code>, or <code>off</code> when the box does not sync.</td></tr>
+<tr><td><code>INTENSITY</code></td><td><code>subtle</code>, <code>moderate</code>, <code>high</code> or <code>intense</code>: the intensity of the mode the box syncs in, or last synced in.</td></tr>
+<tr><td><code>BRIGHTNESS</code></td><td>The brightness, 0 to 200.</td></tr>
+<tr><td><code>HDMI_INPUT</code></td><td>The input the box shows, 1 to 4.</td></tr>
+<tr><td><code>HDMI_INPUT_NAME</code></td><td>That input's name in the Hue app, for example <code>Apple TV</code>.</td></tr>
+<tr><td><code>ENTERTAINMENT_AREA</code></td><td>The name of the box's entertainment area.</td></tr>
+<tr><td><code>POWER</code></td><td><code>on</code>, or <code>powersave</code>.</td></tr>
+<tr><td><code>ONLINE</code></td><td>Whether the box answers (true or false).</td></tr>
+</table>
+
+<h2 id="offers">10. The box's own input switching and its wiring: Sync Box Settings</h2>
+<p>A sync box can do things by itself, as set in the Hue app: switch to an input whose source wakes it over HDMI CEC, switch to an input when a source is plugged in or powered on (hot-plug), start syncing by itself when an input's picture appears (auto-sync), and go to power save when the TV goes to standby. The <b>Input Switching</b> row shows what this box does, for example <code>By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2</code>.</p>
+<p>Control4 means to run the picture's path, the power and the volume itself, without HDMI CEC (section 4). A box that switches inputs by itself changes the picture behind Control4's back, and the room's Watch screen then shows another source than the TV. So, <b>while Control4 routes through the box</b> (in line, or behind a receiver) and the box switches inputs by itself, the <b>Input Switching</b> row is on Attention, for example <code>Attention: The box switches inputs by itself (HDMI CEC switching on HDMI 1, 2) while Control4 routes through it: Control4 may show the wrong source (Sync Box Settings: Let Control4 choose inputs)</code>, and <b>Status</b> ends with <code>; Attention: the box switches inputs by itself (see Input Switching)</code>. Both go once the box no longer switches by itself. On a receiver's second output Control4 routes nothing through the box, and there is no Attention. It never changes the box's settings by itself: the action <b>Sync Box Settings</b> does, with one click, and undoes it with another.</p>
+<table>
+<tr><th>Sync Box Settings &raquo; What</th><th>Does</th></tr>
+<tr><td><code>Let Control4 choose inputs</code></td><td>Turns off, on the box, each of these that is on: HDMI CEC input switching and auto-sync on each input, hot-plug switching (for the whole box or per input, as the model has it), and power save on the TV's standby. The values it changes are recorded on the controller first. <b>Last Action</b> says what was turned off, and the <b>Input Switching</b> row reads <code>None: turned off from Control4 (Sync Box Settings can restore the box's own)</code>.</td></tr>
+<tr><td><code>Restore the box's input switching</code></td><td>Puts back exactly the values the first one changed, no more: a setting changed in the Hue app since then is left as it is now. When nothing was changed from Control4, there is nothing to restore, and <b>Last Action</b> says so.</td></tr>
+<tr><td><code>Set the box to In line</code>, <code>Set the box to Behind a receiver</code>, <code>Set the box to From a receiver's second output</code></td><td>Sets the box's wiring setting (ARC bypass, solo mode) for that wiring, each listed only when the box is in another wiring and has the setting it needs. The values it changes are recorded first, and <b>Last Action</b> says how the connections in Composer must match the cables (section 4). The device's rows and how it drives the box follow at the next read.</td></tr>
+<tr><td><code>Restore the box's wiring</code></td><td>Listed once a wiring was set from here: puts back the wiring setting the box had before the first such click, and says how the connections must match. The input switching and the wiring each have their own <b>Restore</b>: one never undoes the other.</td></tr>
+</table>
+<ul>
+<li>Clicking <code>Let Control4 choose inputs</code> again turns off only what was turned on again since; the first record is kept, so <b>Restore</b> still brings back the box's own settings.</li>
+<li>The record belongs to the box it was made on: after a replacement box is paired, the old box's record is never put on the new one.</li>
+<li>The box's power save after idle time and on the TV's USB power, and its picture settings, are not touched; change them in the Hue app.</li>
+<li>While the box's name and the device's name wait for your choice (section 11), <b>Sync Box Settings</b> also lists <code>Name the box after this device (Hue Sync Box)</code> and <code>Name this device after the box (Living Room Sync Box)</code>, with the names.</li>
+</ul>
+
+<h2 id="name">11. The box's name</h2>
+<p>The box's name in the Hue app and the device's name in Composer stay the same, as for the Hue lights, scenes and motion sensors (the Hue Bridge device's manual, 8.2):</p>
+<ul>
+<li><b>Renamed in Composer</b> (select the device, F2, type, Enter): within seconds the box gets the same name, and <b>Last Action</b> reads, for example, <code>Name sent to the box: Theater Sync Box (was Living Room Sync Box)</code>.</li>
+<li><b>Renamed in the Hue app</b>: the device follows in Composer at the next read of the box, and <b>Last Action</b> reads, for example, <code>Name taken from the box: Den Sync Box (was Living Room Sync Box)</code>. The <b>Sync Box</b> row always shows the box's own name.</li>
+<li><b>Renamed on both sides</b> before the device saw either (while the box was offline, say): Control4 is the source of truth, so the Composer name wins and goes to the box: <code>Both renamed: kept the Composer name Theater Sync Box and sent it to the box (the box had Den Sync Box)</code>.</li>
+<li><b>The first time</b> (after pairing, or after the update to this version): names that already agree are kept in step from then on. Names that differ are not changed by themselves. A new device is named <code>Hue Sync Box</code>, so this is the usual case after pairing: <b>Last Action</b> reads, for example, <code>The box is named Living Room Sync Box and this device Hue Sync Box: Sync Box Settings offers either name, and a rename in Composer sends its name to the box</code>, <b>Status</b> ends with an <code>Attention:</code> note saying the same, and <b>Sync Box Settings</b> lists <code>Name the box after this device</code> and <code>Name this device after the box</code>. One click settles it, and so does a rename in Composer.</li>
+<li><b>A name the box does not take</b> (longer than it allows, 32 characters as far as is known) is never cut by itself: the names wait, and <b>Sync Box Settings</b> offers the name cut to fit.</li>
+<li>A device renamed every few seconds by both sides at once (two systems fighting over the name) stops syncing the name and says so; <b>Sync Box Settings</b> settles it.</li>
+<li>The input names (<b>Inputs</b>, <code>HDMI_INPUT_NAME</code>) are the box's, set in the Hue app; the device only shows them.</li>
+</ul>
+
+<h2 id="bridge">12. The connection to the Hue Bridge</h2>
 <p>The box device has a control input named <b>Hue Bridge</b>, and the Hue Bridge device an output for sync boxes, <b>Hue Sync Boxes</b> (apart from <b>Hue Lights</b>, which the lights, scenes and motion sensors use). In the <b>Connections</b> view, select the box device and connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Sync Boxes</b> output, by dragging the Hue Bridge from the lower pane onto that row. Several box devices can be connected to the one bridge.</p>
 <p>The connection is optional: a box device that is not connected pairs, reads and shows its box all the same. Connected:</p>
 <ul>
 <li><b>The device learns the bridge's entertainment areas.</b> When it is connected, at every start and whenever its box's area or bridge changes, it greets the bridge; the bridge answers with its areas and whether the box is linked to this bridge, and sends them again after each read of the bridge.</li>
 <li><b>It hears about syncs at once.</b> When a sync to any area starts or stops, the bridge tells every connected box device, and the device reads its box at once instead of at its next regular read (at most once every 2 seconds).</li>
+<li><b>The bridge stops another app's sync for the box.</b> When the box is refused a sync because another app syncs to its area, the device asks the bridge to stop that sync, and the bridge does, with its own pairing, unless the sync is another box device's of this project (section 7). The bridge acts on such a request only for an area it has.</li>
 <li><b>The bridge names the box.</b> While an area syncs and this device's box has that area as its entertainment area, the bridge shows this device's Composer name instead of <code>another app</code>: on its <b>Entertainment Areas</b> row, for example <code>Living Room TV (5 lamps, syncing: Living Room sync box)</code>, and in the <b>Status</b> and <b>Last Action</b> of the lights whose lamps sync, for example <code>Syncing with the TV (Living Room sync box)</code>. Hue does not say who streams to an area, so the bridge goes by the area the box reports: if another app syncs to that area, the box's name shows too.</li>
 </ul>
-<p>The bridge's messages are only hints: the device takes the box's state from the box alone. The bridge never passes its pairing key to the box device, and the box device never passes its own to the bridge. Removing the connection, or <b>Forget Pairing</b>, tells the bridge to forget the box. The <b>Bridge Link</b> row is something else: the box's own link to a Hue bridge, as set up in the Hue app (section 8).</p>
+<p>The bridge's messages are only hints: the device takes the box's state from the box alone. The bridge never passes its pairing key to the box device, and the box device never passes its own to the bridge. Removing the connection, or <b>Forget Pairing</b>, tells the bridge to forget the box. The <b>Bridge Link</b> row is something else: the box's own link to a Hue bridge, as set up in the Hue app (section 14).</p>
 
-<h2 id="everyday">7. How the device keeps up with the box</h2>
+<h2 id="everyday">13. How the device keeps up with the box</h2>
 <ul>
-<li><b>It asks the box.</b> A sync box has no event feed, so the device reads the box's whole state every 5 seconds while the box is on, every 30 seconds while it is in power save, and every 60 seconds after three failed reads in a row; at once when the Hue Bridge reports a sync starting or stopping (section 6). Only one request goes to the box at a time. A change made in the Hue app or by the box itself shows within those times.</li>
+<li><b>It asks the box.</b> A sync box has no event feed, so the device reads the box's whole state every 5 seconds while the box is on, every 30 seconds while it is in power save, and every 60 seconds after three failed reads in a row; at once when the Hue Bridge reports a sync starting or stopping (section 12). Only one request goes to the box at a time. A change made in the Hue app or by the box itself shows within those times.</li>
 <li><b>Offline after 5 minutes.</b> When the box has not answered for 5 minutes, <b>Online</b> reads, for example, <code>Offline since 21:04</code> and <b>Status</b> <code>Offline since 21:04 (10.0.2.150 does not answer)</code>. The device keeps trying, and both rows come back at the box's first answer. A Hue bridge that is away never takes the box device offline.</li>
 <li><b>The box refuses the pairing.</b> If the box answers that it no longer knows this controller (after a factory reset, or when the registration was removed), the device stops reading it and says so in <b>Status</b>: run <b>Pair Sync Box</b> and hold the button again.</li>
 <li><b>Debug Mode</b> writes many more lines to the device's Lua output (the box's address, names and states; never the pairing key). It turns itself back Off 8 hours after it was set to On, and <b>Last Action</b> reads <code>Debug Mode turned itself Off after 8 hours</code>; a restart of the controller or the driver keeps the time that is left.</li>
 </ul>
 
-<h2 id="properties">8. Properties</h2>
-<p>In the order Composer shows them. The device writes the rows down to <b>Input Switching</b> itself; you set <b>Debug Mode</b> only when asked, and the settings below it as the room needs. A dash (<code>&mdash;</code>) stands for something the box does not report. Settings that do not apply to the box's wiring are hidden (section 4).</p>
+<h2 id="properties">14. Properties</h2>
+<p>In the order Composer shows them. The device writes the rows down to <b>Bridge Link</b>, <b>Input Switching</b> and <b>Periods</b> itself; you set <b>Debug Mode</b> only when asked, and <b>Entertainment Area</b> and the settings below <b>Input Switching</b> as the room needs. A dash (<code>&mdash;</code>) stands for something the box does not report. Settings that do not apply to the box's wiring are hidden (section 4).</p>
 <table>
 <tr><th>Property</th><th>What it shows or does</th></tr>
 <tr><td><b>Driver Version</b></td><td>The build number of the installed driver, the same as the other Hue drivers' of the same release. A development build adds <code>-dev</code> to the number.</td></tr>
-<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>; for troubleshooting only. Back to <code>Off</code> by itself after 8 hours (section 7).</td></tr>
-<tr><td><b>Status</b></td><td>What the device is doing. Not paired: <code>Not paired: run Pair Sync Box</code>, or <code>Not paired: 1 Hue sync box found (run Pair Sync Box)</code>. While the pairing window is open: <code>Hold the button on the sync box for 3 seconds (1:58 left)</code>. Paired and online: the same text as <b>Sync</b>. Otherwise what is wrong (section 10).</td></tr>
-<tr><td><b>Online</b></td><td><code>Online</code>, or <code>Offline since 21:04</code> when the box has not answered for 5 minutes (section 7).</td></tr>
+<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>; for troubleshooting only. Back to <code>Off</code> by itself after 8 hours (section 13).</td></tr>
+<tr><td><b>Status</b></td><td>What the device is doing. Not paired: <code>Not paired: run Pair Sync Box</code>, or <code>Not paired: 1 Hue sync box found (run Pair Sync Box)</code>. While the pairing window is open: <code>Hold the button on the sync box for 3 seconds (1:58 left)</code>. Paired and online: the same text as <b>Sync</b>, followed by what needs you, if anything: the room followed (section 5), an entertainment area deleted in Hue or not chosen (section 7), and an <code>Attention:</code> note for the box's own input switching (section 10) or for names that wait for your choice (section 11). Otherwise what is wrong (section 16).</td></tr>
+<tr><td><b>Online</b></td><td><code>Online</code>, or <code>Offline since 21:04</code> when the box has not answered for 5 minutes (section 13).</td></tr>
 <tr><td><b>Last Action</b>, <b>Last Action (2)</b> to <b>(6)</b></td><td>The result of the last action, in words, and of each change the device made by itself (the box followed to a new address, <b>Debug Mode</b> turned back Off). A long text continues on the rows (2) to (6), shown only when needed.</td></tr>
 <tr><td><b>Sync Box</b></td><td>The box's name, as the Hue app shows it.</td></tr>
 <tr><td><b>Model</b></td><td><code>Hue Play HDMI Sync Box (HSB1)</code> for the original box, <code>Hue Play HDMI Sync Box 8K (HSB2)</code>, <code>Hue Play HDMI Sync Box 4K (HSB3)</code> for the one-input box of 2026; a type the driver does not know shows as the box reports it.</td></tr>
 <tr><td><b>Firmware</b></td><td>The box's software version and the level of its local interface, for example <code>2.5.4 (API level 14)</code>. Updates are made in the Hue app.</td></tr>
 <tr><td><b>Box ID</b></td><td>The paired box's id: 12 letters and digits, as on the box's label, for example <code>0A1B2C3D4E5F</code>. The device checks it before anything that carries the pairing is sent.</td></tr>
 <tr><td><b>Box Address</b></td><td>The address the device uses, for example <code>10.0.2.150</code>. Set by <b>Pair Sync Box</b>, and by the device when it follows the box to a new address. It stays after <b>Forget Pairing</b>.</td></tr>
-<tr><td><b>Wiring</b></td><td>How the box is wired, from its own setting: <code>In line (sources &rarr; box &rarr; TV or receiver)</code>, <code>Behind a receiver (ARC bypass on)</code> or <code>From a receiver's second output (solo mode)</code> (section 4).</td></tr>
+<tr><td><b>Wiring</b></td><td>How the box is wired, from its own setting (set in the Hue app or with <b>Sync Box Settings</b>, section 10): <code>In line (sources &rarr; box &rarr; TV or receiver)</code>, <code>Behind a receiver (ARC bypass on)</code> or <code>From a receiver's second output (solo mode)</code> (section 4).</td></tr>
 <tr><td><b>Sync</b></td><td>What the box does now: syncing, with its mode, intensity and brightness and the entertainment area, for example <code>Video, high, brightness 100 % on Living Room TV</code>; <code>Off (passthrough)</code> when it passes the picture without syncing; <code>Power save</code>. At a brightness of 100 % the lights take the picture's brightness as it is.</td></tr>
 <tr><td><b>Inputs</b></td><td>The box's HDMI inputs by number with the names the Hue app gives them, <code>(on)</code> after the input the box shows now (not in power save), for example <code>1 Apple TV (on), 2 PlayStation, 3 &mdash;, 4 &mdash;</code>; a dash where the box reports no name for an input. One input on the 4K box of 2026.</td></tr>
-<tr><td><b>Bridge Link</b></td><td>The box's own link to a Hue bridge, as set up in the Hue app: the bridge's id and the state of the link, for example <code>Hue Bridge 001788fffe123abc, connected</code>. The state reads <code>connected</code>, <code>streaming</code> while the box syncs, <code>busy</code> while something else syncs to that bridge, <code>invalid area</code> when the box's entertainment area is not on the bridge, <code>connecting</code>, <code>disconnected</code> or <code>not authorized</code>; the row reads <code>Not linked</code> for a box without a bridge, <code>Not linked (standalone mode)</code> for a 4K box of 2026 that runs without one. It is not the Control4 connection of section 6.</td></tr>
-<tr><td><b>Input Switching</b></td><td>What the box does by itself, as set in the Hue app: switching to a source that wakes it over HDMI CEC or is plugged in, and starting to sync by itself on some inputs, for example <code>By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2</code>, or <code>None: the box neither switches inputs nor starts syncing by itself</code>. Shown only: a later 2.0 beta offers to hand the choice of input to Control4, with one reversible click.</td></tr>
+<tr><td><b>Bridge Link</b></td><td>The box's own link to a Hue bridge, as set up in the Hue app: the bridge's id and the state of the link, for example <code>Hue Bridge 001788fffe123abc, connected</code>. The state reads <code>connected</code>, <code>streaming</code> while the box syncs, <code>busy</code> while something else syncs to that bridge, <code>invalid area</code> when the box's entertainment area is not on the bridge, <code>connecting</code>, <code>disconnected</code> or <code>not authorized</code>; the row reads <code>Not linked</code> for a box without a bridge, <code>Not linked (standalone mode)</code> for a 4K box of 2026 that runs without one. It is not the Control4 connection of section 12.</td></tr>
+<tr><td><b>Entertainment Area</b></td><td>The box's entertainment area, picked from the areas the box lists; pick one and click <b>Set</b>. The areas whose lamps are in this device's room come first. An area deleted in the Hue app stays shown, marked as deleted (section 7).</td></tr>
+<tr><td><b>Input Switching</b></td><td>What the box does by itself, as set in the Hue app: switching to a source that wakes it over HDMI CEC or is plugged in, starting to sync by itself on some inputs, and power save on the TV's standby, for example <code>By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2</code>; <code>None: the box neither switches inputs nor starts syncing by itself</code>; or, after <b>Sync Box Settings</b>, <code>None: turned off from Control4 (Sync Box Settings can restore the box's own)</code>. While Control4 routes through the box (in line, behind a receiver) and the box switches inputs by itself, the row starts with <code>Attention:</code> and says what to do (section 10).</td></tr>
 <tr><td><b>HDMI 1 Sync Mode</b> to <b>HDMI 4 Sync Mode</b></td><td>In line only. How the box syncs when Control4 routes a source through that input: <code>Automatic</code> (default; by the input's type in the Hue app, and music for a Listen source), <code>Video</code>, <code>Game</code>, <code>Music</code> or <code>Do not sync</code> (section 5). A one-input box shows only <b>HDMI 1 Sync Mode</b>.</td></tr>
 <tr><td><b>Follow Room</b></td><td>Behind a receiver and on a second output. The room whose power and source the device follows: <code>This device's room (Living Room)</code> (default), <code>None (the box decides)</code>, or a room by name (section 5, "Follow Room").</td></tr>
 <tr><td><b>Source Sync Modes</b></td><td>Behind a receiver and on a second output. Each source the device knows with its sync mode, for example <code>Apple TV: Video; PS5: Game (guessed from its driver); FM Tuner: Music</code>; changed with the action <b>Set Source Sync Mode</b> (section 5, "Each source's sync mode").</td></tr>
+<tr><td><b>Periods</b></td><td>The period now and when it ends, what is held by hand, and where the sunset comes from, for example <code>Evening until 22:00; Sunset 18:42 today, from the project's location</code> (section 6).</td></tr>
+<tr><td><b>Day Starts</b>, <b>Night Starts</b></td><td>When the Day and the Night start, as clock times, 24-hour: <code>07:00</code> and <code>22:00</code> by default (section 6).</td></tr>
+<tr><td><b>Evening Starts</b></td><td>When the Evening starts, in minutes from the sunset, negative before it: <code>-60</code> by default, an hour before the sunset.</td></tr>
+<tr><td><b>Day Intensity</b>, <b>Evening Intensity</b>, <b>Night Intensity</b></td><td>Each period's intensity: <code>Subtle</code>, <code>Moderate</code>, <code>High</code> or <code>Intense</code>; by default High, Moderate and Subtle.</td></tr>
+<tr><td><b>Day Brightness</b>, <b>Evening Brightness</b>, <b>Night Brightness</b></td><td>Each period's brightness, 0 to 200 % (100 % leaves the picture's brightness as it is); by default 100, 100 and 70.</td></tr>
 <tr><td><b>At Room Off</b></td><td>What the box does at Room Off: <code>Power save</code> (default) or <code>Stop syncing and keep the picture</code>.</td></tr>
 <tr><td><b>When The Source Leaves The Box</b></td><td>What the box does when the room stays on but its source no longer passes the box (the TV's own apps, for example): <code>Stop syncing and keep the picture</code> (default) or <code>Power save</code>.</td></tr>
 </table>
 
-<h2 id="actions">9. Actions</h2>
-<p>The device's <b>Actions</b> tab holds four actions. An action that takes choices opens Composer's dialog, as on the Hue Bridge (the bridge's manual, chapter 3, "How an action's dialog works"); the dialog remembers your last choices, so look at every row before clicking OK.</p>
+<h2 id="actions">15. Actions</h2>
+<p>The device's <b>Actions</b> tab holds five actions. An action that takes choices opens Composer's dialog, as on the Hue Bridge (the bridge's manual, chapter 3, "How an action's dialog works"); the dialog remembers your last choices, so look at every row before clicking OK.</p>
 <table>
 <tr><th>Action</th><th>Choices</th><th>What it does</th></tr>
 <tr><td><b>Pair Sync Box</b></td><td><b>Box</b>: a box found on the network, or <code>Type an address</code>; <b>Address</b>: the box's address, used with <code>Type an address</code></td><td>Checks the box at the address, then opens the 2-minute pairing window for the box's button (section 3). Also starts a search for boxes.</td></tr>
+<tr><td><b>Sync Box Settings</b></td><td><b>What</b>: <code>Let Control4 choose inputs</code>, <code>Restore the box's input switching</code>; <code>Set the box to &hellip;</code> a wiring, <code>Restore the box's wiring</code>; while the names wait, <code>Name the box after this device</code>, <code>Name this device after the box</code></td><td>Turns the box's own input switching, auto-sync and power save on the TV's standby off, or puts back exactly what the first one changed; sets the box's wiring setting, or puts it back (section 10); settles the names (section 11). Nothing of this changes on the box without the click.</td></tr>
 <tr><td><b>Set Source Sync Mode</b></td><td><b>Source</b>: a source the device knows (behind a receiver and on a second output); <b>Mode</b>: <code>Automatic</code>, <code>Video</code>, <code>Game</code>, <code>Music</code>, <code>Do not sync</code></td><td>Sets how the box syncs while the followed room is on that source; <code>Automatic</code> goes back to the device's own choice. <b>Source Sync Modes</b> shows the result (section 5). In line, set <b>HDMI 1 Sync Mode</b> to <b>HDMI 4 Sync Mode</b> instead.</td></tr>
 <tr><td><b>Diagnostics</b></td><td><b>What</b>: <code>Check the box now</code>, <code>Read everything from the box now</code>, <code>Show the box's raw state in the Lua output</code></td><td><code>Check the box now</code> checks the address, the certificate and the box's id, then the pairing, and reports what it found. <code>Read everything from the box now</code> reads the box at once and refreshes every row. <code>Show the box's raw state in the Lua output</code> writes the box's state, as the box reports it, to the device's Lua output for a report: it never holds the pairing key, but it does hold names and addresses from your network, so replace them with placeholders before you share it.</td></tr>
 <tr><td><b>Forget Pairing</b></td><td><b>Confirm</b>: <code>No</code>, <code>Yes</code></td><td>Removes the registration from the box and clears the pairing on the device; the device itself stays (section 3).</td></tr>
 </table>
-<p>The driver adds no programming commands, events, conditionals or variables of its own in this beta. Its four buttons, <b>Hue Sync</b>, <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b>, are there already, but in this beta a press only writes <code>Not done: the Hue Sync buttons come in a later 2.0 beta</code> in <b>Last Action</b>; leave them out of the rooms' menus until the beta that gives them their job.</p>
+<p>The commands for programming are in section 9, and the four buttons for Navigator in section 8.</p>
 
-<h2 id="troubleshooting">10. Troubleshooting</h2>
+<h2 id="troubleshooting">16. Troubleshooting</h2>
 
 <h3>Status texts and what to do</h3>
 <table>
@@ -270,10 +425,19 @@ code { font-family: Consolas, "Courier New", monospace; font-size: 13px; backgro
 <tr><td><code>Paired with Hue Sync Box (8K) #4E5F at 10.0.2.150</code></td><td>Pairing succeeded (section 3).</td></tr>
 <tr><td><code>Not switched: the box did not change input</code></td><td>Control4 routed a source through the box, and after 4 tries 2 seconds apart a read of the box still did not show the input (section 5). Control4 was not told that the input changed. Check that the box is online; the next source picked tries again. <code>Not syncing</code>, <code>Not turned on</code>, <code>Not turned off</code> and <code>Not stopped</code> say the same of a sync, a wake, a power save or a stop.</td></tr>
 <tr><td><code>Not switched: this box has 1 HDMI input</code></td><td>Control4 routed a source to <b>HDMI 2</b>, <b>3</b> or <b>4</b> of a one-input box. Connect the source to <b>HDMI 1</b> in Composer.</td></tr>
-<tr><td><code>Not syncing: another app streams to the Hue Bridge's entertainment area, so the box is busy</code></td><td>The box refused to start syncing because another app syncs to its entertainment area. The input was switched all the same, and the other app's sync keeps running (section 5).</td></tr>
+<tr><td><code>Not syncing: another app streams to the Hue Bridge's entertainment area, so the box is busy</code></td><td>The box refused to start syncing because another app syncs to its entertainment area, and the device could not take it over: the box device is not connected to the Hue Bridge device, or the bridge could not stop the other sync. The input was switched all the same, and the other app's sync keeps running (section 7). Connect the box device to the bridge (section 12); the next sync start tries again.</td></tr>
+<tr><td><code>Sync taken over: Hue Sync Box (8K) #4E5F took Living Room TV over from another app's sync</code></td><td>The box was refused a sync because another app synced to its area; the Hue Bridge stopped that sync and the box started its own (section 7).</td></tr>
+<tr><td><code>Not syncing: Den Sync Box syncs to Living Room TV, and two sync boxes of this project never take a stream from each other</code></td><td>Another box device of this project syncs to the same area. Give the boxes different areas, or stop the other one first (section 7).</td></tr>
+<tr><td><code>Not syncing: the Hue Bridge did not answer the request to stop the other app's stream</code></td><td>The take-over got no answer from the Hue Bridge device within 15 seconds; other texts in the same place say the bridge has no such area, is linked to another bridge than the one bound in Control4, or could not stop the stream. Check the Hue Bridge device; the next sync start tries again.</td></tr>
 <tr><td><code>No sound on the second output: music sync did not start</code></td><td>The followed room listens to a source, but the box sees no sound on its input: the receiver does not send its sound to its second output. See the receiver's settings for its second HDMI output.</td></tr>
-<tr><td><code>Not done: the Hue Sync buttons come in a later 2.0 beta</code></td><td>One of the device's four buttons was pressed; this beta does not carry it out, and nothing was sent to the box (section 9).</td></tr>
-<tr><td><code>Debug Mode turned itself Off after 8 hours</code></td><td>Set it On again if support still needs it (section 7).</td></tr>
+<tr><td><code>Syncing</code>, <code>Sync stopped</code>, <code>Brightness 80 %</code>, <code>Intensity high</code>, <code>Awake</code>, <code>Power save</code></td><td>A command or a button press was carried out: a read of the box shows it (section 9).</td></tr>
+<tr><td><code>Not syncing: the box is not paired; run Pair Sync Box</code></td><td>A command or a button press came while no box is paired, and nothing was sent. <code>Not stopped</code>, <code>Brightness not changed</code> and the like say the same of the other commands.</td></tr>
+<tr><td><code>HDMI 2 selected: the Control4 room does not follow it</code></td><td><b>Select HDMI Input</b> switched the box; the room still shows the source Control4 routed (section 9).</td></tr>
+<tr><td><code>Apply Sync Settings not done: every field is Leave</code></td><td>The command had nothing to change. A field with a value it cannot take is named in the same way.</td></tr>
+<tr><td><code>Entertainment area set to Living Room TV</code></td><td>The <b>Entertainment Area</b> property or <b>Set Entertainment Area</b> changed the box's area (section 7).</td></tr>
+<tr><td><code>Sent: the box is now Behind a receiver (ARC bypass on, solo mode off): &hellip; Control4's connections must match the cables: &hellip;</code></td><td><b>Sync Box Settings</b> changed the box's wiring setting. Make the connections in Composer as the text says (section 4); <code>Restore the box's wiring</code> puts the setting back.</td></tr>
+<tr><td><code>Sent: the box no longer does HDMI CEC switching on HDMI 1 and 2 by itself; Control4 chooses its inputs</code></td><td><b>Sync Box Settings</b> &raquo; <code>Let Control4 choose inputs</code> was carried out (section 10). <code>Restored the box's own &hellip;</code> answers <code>Restore the box's input switching</code>.</td></tr>
+<tr><td><code>Debug Mode turned itself Off after 8 hours</code></td><td>Set it On again if support still needs it (section 13).</td></tr>
 </table>
 
 <h3>Not yet seen working</h3>

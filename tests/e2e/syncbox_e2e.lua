@@ -20,10 +20,13 @@
 --                   box at the address"
 --   E2E_MODELS      MODEL:ID:PORT,... more boxes, each paired, read and
 --                   forgotten (HSB1, HSB3, HSB3_standalone)
---   E2E_ROUTING     NAME=MODEL:ID:PORT,... the routing suites' own boxes
---                   (#557): inline (HSB2), receiver (HSB2_behind_receiver),
---                   second (HSB2_second_output), onein (HSB3, in line) and
---                   faults (HSB2, in line)
+--   E2E_ROUTING     NAME=MODEL:ID:PORT,... the boxes of the suites that have
+--                   one of their own: the routing suites (#557), inline
+--                   (HSB2), receiver (HSB2_behind_receiver), second
+--                   (HSB2_second_output), onein (HSB3, in line) and faults
+--                   (HSB2, in line); and stage 4's (#568), programming,
+--                   buttons, periods, offers, area and takeover (each HSB2,
+--                   in line)
 --   E2E_FAKEBOX     the command that drives the fake: "<it> button --box ID"
 --                   (tools/fakebox.py --state-dir <the run's>)
 --   E2E_FAKE_TIME_SCALE  the fake's --time-scale (its clock against the
@@ -33,8 +36,9 @@
 --   E2E_ONLY        comma-separated suites to run (default all, in this
 --                   order: pinning, flows, faults, devhooks, models,
 --                   routing-inline, routing-onein, routing-receiver,
---                   routing-second, routing-faults; "routing" names the five
---                   routing ones).
+--                   routing-second, routing-faults, programming, buttons,
+--                   periods, offers, area-name, takeover; "routing" names
+--                   the five routing ones, "stage4" the six of stage 4).
 --                   tools/e2e_syncbox.sh runs the routing suites each in a
 --                   process of its own, beside the others: no two suites
 --                   that run at once share a box
@@ -343,7 +347,28 @@ local function expected_rows(box)
 end
 
 local ROWS = { { "Sync", "sync" }, { "Inputs", "inputs" }, { "Model", "model" }, { "Firmware", "firmware" },
-	{ "Wiring", "wiring" }, { "Bridge Link", "bridge_link" }, { "Input Switching", "input_switching" } }
+	{ "Wiring", "wiring" }, { "Bridge Link", "bridge_link" } }
+
+-- Status as stage 4 writes it: the box's text (describe's refusal or sync),
+-- then what needs a person, each after "; " (the room followed, the area,
+-- Attention: S4 §1.4, §1.5, §1.7). Whether `status` is that for `d`.
+local function status_is(status, d)
+	local base = d.refusal or d.sync
+	status = tostring(status)
+	return status == base or status:sub(1, #base + 2) == base .. "; "
+end
+
+-- Input Switching as stage 4 writes it (syncbox/offers.lua's row, or its
+-- Attention while Control4 routes through the box): whether `row` agrees
+-- with describe's text for the same box (the box switches by itself, or not).
+local function switching_is(row, d)
+	row = tostring(row)
+	local none = tostring(d.input_switching):find("^None") ~= nil
+	if none then
+		return row:find("^None") ~= nil
+	end
+	return row:find("^By the box: ") ~= nil or row:find("^Attention: ") ~= nil
+end
 
 -- The rows against the fake's state. The fake's clock runs on by itself
 -- (a bridge passing through connecting, say), so a state read a moment after
@@ -363,8 +388,11 @@ local function rows_follow(denv, box, what, c4)
 				wrong = r[1]
 			end
 		end
-		if P(denv, "Status") ~= (d.refusal or d.sync) or P(denv, "Sync Box") ~= model.name then
+		if not status_is(P(denv, "Status"), d) or P(denv, "Sync Box") ~= model.name then
 			wrong = "Status"
+		end
+		if not switching_is(P(denv, "Input Switching"), d) then
+			wrong = "Input Switching"
 		end
 		if not wrong or attempt == 4 then
 			break
@@ -377,7 +405,10 @@ local function rows_follow(denv, box, what, c4)
 	for _, r in ipairs(ROWS) do
 		eq(what .. ": " .. r[1], d[r[2]], P(denv, r[1]))
 	end
-	eq(what .. ": Status", d.refusal or d.sync, P(denv, "Status"))
+	check(what .. ": Status", status_is(P(denv, "Status"), d), string.format("expected %q (then notes), got %q",
+		tostring(d.refusal or d.sync), tostring(P(denv, "Status"))))
+	check(what .. ": Input Switching", switching_is(P(denv, "Input Switching"), d), string.format(
+		"expected a row agreeing with %q, got %q", tostring(d.input_switching), tostring(P(denv, "Input Switching"))))
 	eq(what .. ": Sync Box", model.name, P(denv, "Sync Box"))
 end
 
@@ -451,6 +482,23 @@ local function lan_for(box, srv_port)
 	return lan, function() return count end
 end
 
+-- The latest Last Action written after the m-th call of the runtime that
+-- matches `pattern` (its first row), else nil. A text the driver writes a
+-- moment later can replace the one a check is after (stage 4: right after
+-- pairing, the two-way name's first look says why the names wait, when the
+-- device is still named "Hue Sync Box"), so the checks read what was said,
+-- not only what is shown last.
+local function said(c4, m, pattern)
+	local found
+	for i = (m or 0) + 1, #c4.calls do
+		local call = c4.calls[i]
+		if call.name == "UpdateProperty" and call.args[1] == "Last Action" and tostring(call.args[2]):find(pattern) then
+			found = tostring(call.args[2])
+		end
+	end
+	return found
+end
+
 -- Pair Sync Box at `address`, the button pressed on the fake once the
 -- window is open. Returns whether the driver says it paired. `what`: the
 -- checks' prefix.
@@ -469,12 +517,13 @@ local function pair(denv, c4, box, address, T, what)
 	local waiting = sent(T, n, "POST", "/api/v1/registrations")[1]
 	eq(what .. "before the button the box answers the POST with HTTP 400", 400, waiting.status)
 	starts(what .. "Status counts the window down", "Hold the button on the sync box for 3 seconds", P(denv, "Status"))
+	local m = #c4.calls
 	fb.button(box)
 	local paired = until_(c4, function()
-		return fake.last_action(denv):find("^Paired with") ~= nil
+		return said(c4, m, "^Paired with") ~= nil
 	end, 10000)
 	check(what .. "paired once the button was pressed", paired, fake.last_action(denv))
-	return paired
+	return paired and said(c4, m, "^Paired with") or false
 end
 
 -- Suites ----------------------------------------------------------------------------------------
@@ -487,12 +536,16 @@ local function suite(name, fn)
 	order[#order + 1] = name
 end
 
+-- Stage 4's suites (#568), each with a box of its own.
+local S4_SUITES = { programming = true, buttons = true, periods = true, offers = true, ["area-name"] = true,
+	takeover = true }
+
 local function wanted(name)
 	if not CFG.only then
 		return true
 	end
 	for item in CFG.only:gmatch("[^,%s]+") do
-		if item == name or (item == "routing" and name:find("^routing%-")) then
+		if item == name or (item == "routing" and name:find("^routing%-")) or (item == "stage4" and S4_SUITES[name]) then
 			return true
 		end
 	end
@@ -586,12 +639,13 @@ suite("flows", function()
 		pinned = pinned or h.err_code == 60
 	end
 	check("the TLS self-check's decoy request is refused (curl 60)", pinned)
+	local m = #c4.calls
 	fb.button(box)
 	local paired = until_(c4, function()
-		return fake.last_action(denv):find("^Paired with") ~= nil
+		return said(c4, m, "^Paired with") ~= nil
 	end, 10000)
 	eq("paired once the button was pressed", "Paired with " .. label(box) .. " at " .. CFG.address,
-		fake.last_action(denv))
+		said(c4, m, "^Paired with") or fake.last_action(denv))
 	if not paired then
 		return
 	end
@@ -600,7 +654,7 @@ suite("flows", function()
 
 	-- The rows (S2 §5), against the Lua spec's texts for the same fixture.
 	c4.advance(1000)
-	eq("Status", "Video, high, brightness 100 % on Living Room TV", P(denv, "Status"))
+	starts("Status", "Video, high, brightness 100 % on Living Room TV", P(denv, "Status"))
 	eq("Online", "Online", P(denv, "Online"))
 	eq("Sync Box", "Living Room Sync Box", P(denv, "Sync Box"))
 	eq("Model", "Hue Play HDMI Sync Box 8K (HSB2)", P(denv, "Model"))
@@ -609,7 +663,18 @@ suite("flows", function()
 	eq("Box Address", CFG.address, P(denv, "Box Address"))
 	eq("Inputs", "1 Apple TV (on), 2 PlayStation, 3 HDMI 3, 4 HDMI 4", P(denv, "Inputs"))
 	eq("Bridge Link", "Hue Bridge 001788fffe123abc, streaming", P(denv, "Bridge Link"))
-	eq("Input Switching", "By the box: HDMI CEC; auto-sync on HDMI 1", P(denv, "Input Switching"))
+	check("Input Switching names the box's own HDMI CEC switching and auto-sync (stage 4: offers.lua's row)",
+		tostring(P(denv, "Input Switching")):find("HDMI CEC switching on HDMI 1, 2", 1, true) ~= nil,
+		P(denv, "Input Switching"))
+	-- Stage 4 (#568): in line Control4 routes through the box, which switches
+	-- inputs by itself (on Attention, design 5.4), and the new device is still
+	-- named "Hue Sync Box" while the box is "Living Room Sync Box" (the names
+	-- wait for a click, 1.2's D11).
+	starts("Input Switching on Attention while Control4 routes through a box that switches by itself",
+		"Attention: The box switches inputs by itself", P(denv, "Input Switching"))
+	check("Status ends with the Attention notes: the input switching and the names",
+		tostring(P(denv, "Status")):find("; Attention: the box switches inputs by itself", 1, true) ~= nil
+		and tostring(P(denv, "Status")):find("have different names", 1, true) ~= nil, P(denv, "Status"))
 	rows_follow(denv, box, "rows", c4)
 
 	-- Polling: a read every 5 s while the box is on.
@@ -780,7 +845,8 @@ suite("flows", function()
 		eq("no keyed request went to it", 0, #sent(T, n, "GET", "/api/v1"))
 		fb.clear(box, "other_id")
 		local again = until_(c4, function()
-			return P(denv, "Status") == (expected_rows(box) or {}).sync
+			local d = expected_rows(box)
+			return d ~= nil and status_is(P(denv, "Status"), d)
 		end, HOUR + 2 * MINUTE, MINUTE)
 		check("the paired box back: read again within the hour", again, P(denv, "Status"))
 	end
@@ -800,7 +866,8 @@ suite("flows", function()
 		end
 		T:route(CFG.address, box.target)
 		local again = until_(c4, function()
-			return P(denv, "Status") == (expected_rows(box) or {}).sync
+			local d = expected_rows(box)
+			return d ~= nil and status_is(P(denv, "Status"), d)
 		end, HOUR + 2 * MINUTE, MINUTE)
 		check("the right box back at the address: read again within the hour", again, P(denv, "Status"))
 	else
@@ -942,8 +1009,9 @@ suite("devhooks", function()
 	local T = new_transport({ route = false })
 	local denv, c4 = start_driver(T)
 	local address = "127.0.0.1:" .. box.port
-	if pair(denv, c4, box, address, T, "host:port") then
-		eq("paired at host:port", "Paired with " .. label(box) .. " at " .. address, fake.last_action(denv))
+	local paired_text = pair(denv, c4, box, address, T, "host:port")
+	if paired_text then
+		eq("paired at host:port", "Paired with " .. label(box) .. " at " .. address, paired_text)
 		c4.advance(6000)
 		eq("Box Address shows the port", address, P(denv, "Box Address"))
 		rows_follow(denv, box, "at host:port", c4)
@@ -975,12 +1043,13 @@ suite("devhooks", function()
 		until_(c4, function()
 			return #sent(T, n, "POST", "/api/v1/registrations") > 0
 		end, 20000)
+		local m = #c4.calls
 		fb.button(box)
 		local paired = until_(c4, function()
-			return fake.last_action(denv):find("^Paired with") ~= nil
+			return said(c4, m, "^Paired with") ~= nil
 		end, 10000)
 		eq("paired from the list at address:port", "Paired with " .. label(box) .. " at " .. srv,
-			fake.last_action(denv))
+			said(c4, m, "^Paired with") or fake.last_action(denv))
 		if paired then
 			c4.advance(6000)
 			eq("found at address:port: Online", "Online", P(denv, "Online"))
@@ -999,8 +1068,9 @@ suite("models", function()
 		local T = new_transport({ box = box })
 		local denv, c4 = start_driver(T)
 		local what = box.model
-		if pair(denv, c4, box, CFG.address, T, what) then
-			eq(what .. ": paired", "Paired with " .. label(box) .. " at " .. CFG.address, fake.last_action(denv))
+		local paired_text = pair(denv, c4, box, CFG.address, T, what)
+		if paired_text then
+			eq(what .. ": paired", "Paired with " .. label(box) .. " at " .. CFG.address, paired_text)
 			c4.advance(31000)
 			eq(what .. ": Online", "Online", P(denv, "Online"))
 			check(what .. ": the Model row names it", tostring(P(denv, "Model")):find("(" .. box.code .. ")", 1, true)
@@ -1789,6 +1859,1081 @@ suite("routing-faults", function()
 	-- Afterwards a route lands again at once.
 	puts = route_through("latency", "ms=1 --count 1", "after the faults")
 	check("after the faults: one PUT", puts and #puts == 1, puts and #puts)
+	T:close()
+end)
+
+-- Stage 4 (#568) ---------------------------------------------------------------------------------
+--
+-- docs/hdmi-sync-stage4-design.md §1 and §8; contracts C1.4 to C1.9 and C5.
+-- Each suite pairs a box of its own in the Python fake (E2E_ROUTING names it)
+-- and drives the driver as Director would: programming commands through
+-- ExecuteCommand under their <name>, the UI Buttons' SELECT on 5002 to 5005,
+-- conditionals through TestCondition, the period rows and the Entertainment
+-- Area through OnPropertyChanged, Sync Box Settings as a LUA_ACTION. What the
+-- box ends up with is read back from the fake's control API; what Control4
+-- sees from the fake runtime (c4.variables, c4.events_fired, the calls).
+-- The Hue Bridge's side of C5 is played here (bridge_peer): no bridge driver
+-- runs, so no request leaves for a Hue bridge.
+
+local S4 = {}
+
+S4.EVENTS = { sync_started = 1, sync_stopped = 2, mode = 3, intensity = 4, brightness = 5, input = 6, area = 7,
+	taken_over = 8, powered_on = 9, power_save = 10, online = 11, offline = 12 }
+S4.VARIABLES = { "SYNC_ACTIVE", "SYNC_MODE", "INTENSITY", "BRIGHTNESS", "HDMI_INPUT", "HDMI_INPUT_NAME",
+	"ENTERTAINMENT_AREA", "POWER", "ONLINE" }
+S4.BUTTONS = { hue_sync = 5002, brighter = 5003, dimmer = 5004, intensity = 5005 }
+S4.BRIDGE = 300 -- the Hue Bridge device id standing in on binding 1 (C1.2)
+S4.AREA = { tv = "6a7b8c9d-0000-4000-8000-0000000ea001", office = "6a7b8c9d-0000-4000-8000-0000000ea002" }
+S4.ICONS_DIR = "src/hue_syncbox/www/icons/"
+
+-- The epoch ms of a local clock time on 2026-11-17 (the run's time zone:
+-- tools/e2e_syncbox.sh runs the harness with TZ=UTC).
+function S4.at(hour, min)
+	return os.time({ year = 2026, month = 11, day = 17, hour = hour, min = min, sec = 0 }) * 1000
+end
+
+function S4.command(denv, name, params)
+	denv.ExecuteCommand(name, params or {})
+end
+
+function S4.var(c4, name)
+	local v = c4.variables[name]
+	return v and v.value
+end
+
+-- The intensity of the mode the box is in (or last synced in) in a state
+-- document.
+function S4.intensity(doc)
+	local ex = type(doc) == "table" and doc.execution or {}
+	local mode = (ex.mode == "video" or ex.mode == "game" or ex.mode == "music") and ex.mode or ex.lastSyncMode
+	return type(ex[mode]) == "table" and ex[mode].intensity or nil
+end
+
+-- A property's list as Composer has it (C4:UpdatePropertyList takes the
+-- items comma-separated; a table is taken as it is).
+function S4.list(c4, name)
+	local list = c4.property_lists[name]
+	if type(list) == "table" then
+		return list
+	end
+	local out = {}
+	for item in tostring(list or ""):gmatch("[^,]+") do
+		out[#out + 1] = item
+	end
+	return out
+end
+
+-- How many times event `id` fired after the n-th one.
+function S4.fired(c4, n, id)
+	local count = 0
+	for i = n + 1, #c4.events_fired do
+		if c4.events_fired[i] == id then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+function S4.events_text(c4, n)
+	local out = {}
+	for i = n + 1, #c4.events_fired do
+		out[#out + 1] = tostring(c4.events_fired[i])
+	end
+	return #out > 0 and table.concat(out, ",") or "none"
+end
+
+-- Whether, after the m-th call, the variable `name` was set before the first
+-- FireEventByID(id) (C1.9: a variable is set before the event that reports
+-- its change).
+function S4.set_before(c4, m, name, id)
+	local set_at, fired_at
+	for i = m + 1, #c4.calls do
+		local call = c4.calls[i]
+		if call.name == "SetVariable" and call.args[1] == name and not set_at then
+			set_at = i
+		elseif call.name == "FireEventByID" and tonumber(call.args[1]) == id and not fired_at then
+			fired_at = i
+		end
+	end
+	return set_at ~= nil and fired_at ~= nil and set_at < fired_at, string.format("SetVariable %s at %s, event %d at %s",
+		name, tostring(set_at), id, tostring(fired_at))
+end
+
+-- The ICON_CHANGED notifies to `binding` after the m-th call, in order.
+function S4.icons(c4, m, binding)
+	local out = {}
+	for i = m + 1, #c4.calls do
+		local call = c4.calls[i]
+		if call.name == "SendToProxy" and tonumber(call.args[1]) == binding and call.args[2] == "ICON_CHANGED" then
+			out[#out + 1] = call.args[3] or {}
+		end
+	end
+	return out
+end
+
+function S4.last_icon(c4, m, binding)
+	local list = S4.icons(c4, m, binding)
+	return list[#list] and list[#list].icon
+end
+
+-- A UI Button press as Navigator sends it (UIB 107/_1: the room and the menu).
+function S4.press(denv, binding)
+	denv.ReceivedFromProxy(binding, "SELECT", { ROOM_ID = tostring(ROOM), MENU = "watch" })
+end
+
+-- The fake clock on until pred() holds, a read's time at a time; false after
+-- max_ms.
+function S4.until_read(c4, pred, max_ms)
+	return until_(c4, pred, max_ms or 20000, 500)
+end
+
+-- The PUT bodies to `path` after the n-th transfer that the box answered,
+-- decoded.
+function S4.puts(T, n, path)
+	local out = {}
+	for _, h in ipairs(sent(T, n, "PUT", "/api/v1" .. path)) do
+		out[#out + 1] = { status = h.status, body = json.decode(h.data or "") or {}, data = h.data }
+	end
+	return out
+end
+
+-- Every write after the n-th transfer that is not on `allowed` paths.
+function S4.other_writes(T, n, allowed)
+	local out = {}
+	for _, h in ipairs(sent(T, n)) do
+		if h.method ~= "GET" and not allowed[h.path] then
+			out[#out + 1] = h.method .. " " .. tostring(h.path)
+		end
+	end
+	return out
+end
+
+-- The project of a stage 4 suite, as Director has it at every start: the
+-- clock at opts.clock, the project's location opts.location, an Apple TV in
+-- the box's room bound to its HDMI 1 (in line: Control4 routes through the
+-- box) unless opts.unbound, the box's AV proxy named opts.name (default the
+-- fixture's box name, so the two-way name starts in agreement), the
+-- properties in opts.properties, then opts.project.
+function S4.project(opts)
+	return function(c4_, denv_)
+		if opts.clock then
+			c4_.now_ms = opts.clock
+		end
+		for k, v in pairs(opts.location or {}) do
+			c4_.project_properties[k] = v
+		end
+		for k, v in pairs(opts.properties or {}) do
+			denv_.Properties[k] = v
+		end
+		if type(fake.add_device) == "function" then
+			local s = SRC.appletv
+			fake.add_device(s.id, { name = s.name, driver = s.file, proxy = s.kind, proxy_id = s.proxy, room_id = ROOM })
+			if not opts.unbound then
+				table.insert(c4_.bindings, { provider = s.proxy, provider_binding = 2000, consumer = box_proxy(),
+					consumer_binding = 1000, class = "HDMI" })
+			end
+		end
+		local proxy = fake.project.devices[box_proxy() or -1]
+		if proxy then
+			proxy.name = opts.name or "Living Room Sync Box"
+		end
+		if opts.project then
+			opts.project(c4_, denv_)
+		end
+	end
+end
+
+-- Pair a stage 4 suite's box in that project.
+function S4.start(box, what, opts)
+	opts = opts or {}
+	local T = new_transport({ box = box })
+	local denv, c4 = start_driver(T, { project = S4.project(opts) })
+	if not pair(denv, c4, box, CFG.address, T, what) then
+		T:close()
+		return nil
+	end
+	c4.advance(6000)
+	return T, denv, c4
+end
+
+-- A Director restart of a stage 4 suite's device: the store and the property
+-- values kept, the project as before (opts as S4.start's), the clock on from
+-- where it was (opts.clock overrides), the AV proxy's name as it was.
+function S4.restart(T, denv, c4, opts)
+	opts = opts or {}
+	local persist, props = {}, {}
+	for k, v in pairs(c4.persist) do
+		persist[k] = v
+	end
+	for k, v in pairs(denv.Properties) do
+		props[k] = v
+	end
+	local proxy = fake.project.devices[box_proxy() or -1]
+	local again = {}
+	for k, v in pairs(opts) do
+		again[k] = v
+	end
+	again.clock = opts.clock or c4.now_ms
+	again.name = proxy and proxy.name or opts.name
+	again.properties = props
+	denv.OnDriverDestroyed()
+	return start_driver(T, { persist = persist, project = S4.project(again) })
+end
+
+-- The Hue Bridge's side of C5 for one suite: the bridge device S4.BRIDGE bound
+-- on the box's binding 1 (class HUE_SYNCBOX), every SendToDevice to it kept,
+-- and STOP_AREA answered as `answer(params)` says (nil: no answer), the answer
+-- delivered a moment later through ExecuteCommand, as Director delivers a
+-- SendToDevice.
+function S4.bridge_peer(answer)
+	local peer = { sent = {}, answer = answer }
+	function peer.project(c4)
+		table.insert(c4.bindings, { provider = S4.BRIDGE, provider_binding = 2, consumer = BOX_DEVICE,
+			consumer_binding = 1, class = "HUE_SYNCBOX" })
+	end
+	-- Installed once the driver runs (the runtime's SendToDevice is wrapped).
+	function peer.attach(c4, denv)
+		local original = c4.SendToDevice
+		c4.SendToDevice = function(self, id, command, params, ...)
+			if tonumber(id) == S4.BRIDGE then
+				local copy = {}
+				for k, v in pairs(params or {}) do
+					copy[k] = tostring(v)
+				end
+				peer.sent[#peer.sent + 1] = { command = command, params = copy }
+				if command == "HUE_SYNCBOX_STOP_AREA" and peer.answer then
+					local reply = peer.answer(copy)
+					if reply then
+						c4:SetTimer(50, function()
+							denv.ExecuteCommand("HUE_SYNCBOX_STOPPED", reply)
+						end)
+					end
+				end
+				return
+			end
+			return original(self, id, command, params, ...)
+		end
+	end
+	function peer.count(command, n)
+		local c = 0
+		for i = (n or 0) + 1, #peer.sent do
+			if peer.sent[i].command == command then
+				c = c + 1
+			end
+		end
+		return c
+	end
+	function peer.last(command)
+		for i = #peer.sent, 1, -1 do
+			if peer.sent[i].command == command then
+				return peer.sent[i].params
+			end
+		end
+		return nil
+	end
+	return peer
+end
+
+-- Programming (C1.6 to C1.9): the variables in their order and as the box
+-- reads, no event for a baseline, each command's write and its events (each
+-- variable set first), Apply Sync Settings as one PUT, the conditionals, the
+-- HDMI input changed by the box itself, Offline and Online, and a restart
+-- that fires nothing.
+suite("programming", function()
+	local box = CFG.routing.programming
+	if not box then
+		return skip("programming", "E2E_ROUTING has no programming box")
+	end
+	local T, denv, c4 = S4.start(box, "programming", { clock = S4.at(12, 0) })
+	if not T then
+		return
+	end
+	-- C1.9: the nine variables, added in OnDriverInit in this order, ids 1001
+	-- to 1009 on a new device.
+	eq("the nine variables, in C1.9's order", table.concat(S4.VARIABLES, ","),
+		table.concat(c4.variable_names or {}, ","))
+	for i, name in ipairs(S4.VARIABLES) do
+		local v = c4.variables[name] or {}
+		eq(name .. ": id " .. (1000 + i), 1000 + i, v.id)
+		check(name .. ": read-only", v.read_only == true, tostring(v.read_only))
+	end
+	-- The first reads are a baseline: the values as the box reads, no event.
+	S4.until_read(c4, function() return S4.var(c4, "SYNC_MODE") == "video" end)
+	local want = { SYNC_ACTIVE = "1", SYNC_MODE = "video", INTENSITY = "high", BRIGHTNESS = "100", HDMI_INPUT = "1",
+		HDMI_INPUT_NAME = "Apple TV", ENTERTAINMENT_AREA = "Living Room TV", POWER = "on", ONLINE = "1" }
+	for _, name in ipairs(S4.VARIABLES) do
+		eq("baseline " .. name, want[name], S4.var(c4, name))
+	end
+	eq("no event for the first reads (a baseline, C1.9)", "none", S4.events_text(c4, 0))
+
+	-- Each command: its write, the box's state, the variable and its event.
+	local function run(what, name, params, state, var_checks, events, max_ms)
+		local n, m, e = #T.history, #c4.calls, #c4.events_fired
+		S4.command(denv, name, params)
+		local landed = S4.until_read(c4, function()
+			local doc = fb.state(box)
+			for _, s in ipairs(state) do
+				if lookup_path(doc, s[1]) ~= s[2] then
+					return false
+				end
+			end
+			for _, v in ipairs(var_checks or {}) do
+				if S4.var(c4, v[1]) ~= v[2] then
+					return false
+				end
+			end
+			return true
+		end, max_ms)
+		check(what .. ": the box shows it", landed, fake.last_action(denv))
+		box_is(what, box, state)
+		for _, v in ipairs(var_checks or {}) do
+			eq(what .. ": " .. v[1], v[2], S4.var(c4, v[1]))
+		end
+		for _, ev in ipairs(events or {}) do
+			check(what .. ": event " .. ev[2] .. " fired", S4.fired(c4, e, ev[2]) >= 1, S4.events_text(c4, e))
+			if ev[1] then
+				local ok, why = S4.set_before(c4, m, ev[1], ev[2])
+				check(what .. ": " .. ev[1] .. " set before event " .. ev[2], ok, why)
+			end
+		end
+		local _, other = writes(T, n)
+		local names = {}
+		for _, h in ipairs(other) do
+			names[#names + 1] = h.method .. " " .. tostring(h.path)
+		end
+		check(what .. ": only PUT /execution written", #other == 0, table.concat(names, ", "))
+		return n, e
+	end
+
+	run("Stop Sync", "Stop Sync", {}, { { "execution.mode", "passthrough" }, { "execution.hdmiActive", true } },
+		{ { "SYNC_ACTIVE", "0" }, { "SYNC_MODE", "off" } }, { { "SYNC_ACTIVE", 2 }, { "SYNC_MODE", 3 } })
+	starts("Stop Sync: Last Action", "Sync stopped", fake.last_action(denv))
+	-- At noon the period is Day: High and 100 % (contracts C1.4's defaults).
+	run("Start Sync", "Start Sync", {}, { { "execution.mode", "video" }, { "execution.syncActive", true },
+		{ "execution.video.intensity", "high" }, { "execution.brightness", 100 } },
+		{ { "SYNC_ACTIVE", "1" }, { "SYNC_MODE", "video" } }, { { "SYNC_ACTIVE", 1 }, { "SYNC_MODE", 3 } })
+	starts("Start Sync: Last Action", "Syncing", fake.last_action(denv))
+	run("Set Sync Mode Game", "Set Sync Mode", { Mode = "Game" }, { { "execution.mode", "game" } },
+		{ { "SYNC_MODE", "game" } }, { { "SYNC_MODE", 3 } })
+	run("Set Intensity Intense", "Set Intensity", { Intensity = "Intense" }, { { "execution.game.intensity", "intense" } },
+		{ { "INTENSITY", "intense" } }, { { "INTENSITY", 4 } })
+	run("Next Intensity wraps to Subtle", "Next Intensity", {}, { { "execution.game.intensity", "subtle" } },
+		{ { "INTENSITY", "subtle" } }, { { "INTENSITY", 4 } })
+	run("Set Brightness 150", "Set Brightness", { Brightness = "150" }, { { "execution.brightness", 150 } },
+		{ { "BRIGHTNESS", "150" } }, { { "BRIGHTNESS", 5 } })
+	run("Adjust Brightness -30", "Adjust Brightness", { Step = "-30" }, { { "execution.brightness", 120 } },
+		{ { "BRIGHTNESS", "120" } }, { { "BRIGHTNESS", 5 } })
+	run("Adjust Brightness +200 stops at 200", "Adjust Brightness", { Step = "200" }, { { "execution.brightness", 200 } },
+		{ { "BRIGHTNESS", "200" } }, { { "BRIGHTNESS", 5 } })
+
+	-- Apply Sync Settings: every field in one PUT, the area from the
+	-- command's own list (GetCommandParamList, OS 3.3.0).
+	local list = type(denv.GetCommandParamList) == "function" and denv.GetCommandParamList("Apply Sync Settings", "Area")
+		or {}
+	local office
+	for _, item in ipairs(list) do
+		local text = type(item) == "table" and (item.text or item.value) or item
+		if tostring(text):find("Office", 1, true) then
+			office = type(item) == "table" and (item.value or item.text) or item
+		end
+	end
+	check("Apply Sync Settings: its Area list offers the box's areas", office ~= nil, json.encode(list))
+	local n = run("Apply Sync Settings", "Apply Sync Settings", { Mode = "Video", Intensity = "Moderate",
+		Brightness = "80 %", Area = office or "Office", Start = "Start" }, { { "execution.mode", "video" },
+		{ "execution.video.intensity", "moderate" }, { "execution.brightness", 80 },
+		{ "execution.hueTarget", S4.AREA.office } }, { { "SYNC_MODE", "video" }, { "INTENSITY", "moderate" },
+		{ "BRIGHTNESS", "80" }, { "ENTERTAINMENT_AREA", "Office" } }, { { "SYNC_MODE", 3 }, { "INTENSITY", 4 },
+		{ "BRIGHTNESS", 5 }, { "ENTERTAINMENT_AREA", 7 } })
+	local puts = S4.puts(T, n, "/execution")
+	eq("Apply Sync Settings: one PUT", 1, #puts)
+	local body = puts[1] and puts[1].body or {}
+	check("Apply Sync Settings: the PUT carries mode, the mode's intensity, brightness and area together",
+		body.mode == "video" and type(body.video) == "table" and body.video.intensity == "moderate"
+		and body.brightness == 80 and body.hueTarget == S4.AREA.office, puts[1] and puts[1].data)
+	starts("Apply Sync Settings: Last Action", "Sync settings applied", fake.last_action(denv))
+	S4.command(denv, "Apply Sync Settings", { Mode = "Leave", Intensity = "Leave", Brightness = "Leave",
+		Area = "Leave", Start = "Leave" })
+	c4.advance(2000)
+	eq("Apply Sync Settings with every field Leave: nothing to do", "Apply Sync Settings not done: every field is Leave",
+		fake.last_action(denv))
+
+	-- Set Entertainment Area back to Living Room TV, from its own list.
+	local tv
+	for _, item in ipairs(type(denv.GetCommandParamList) == "function"
+		and denv.GetCommandParamList("Set Entertainment Area", "Area") or {}) do
+		local text = type(item) == "table" and (item.text or item.value) or item
+		if tostring(text):find("Living Room TV", 1, true) then
+			tv = type(item) == "table" and (item.value or item.text) or item
+		end
+	end
+	run("Set Entertainment Area", "Set Entertainment Area", { Area = tv or "Living Room TV" },
+		{ { "execution.hueTarget", S4.AREA.tv } }, { { "ENTERTAINMENT_AREA", "Living Room TV" } },
+		{ { "ENTERTAINMENT_AREA", 7 } })
+
+	-- Select HDMI Input: the box switches, the room does not follow.
+	local m = #c4.calls
+	run("Select HDMI Input HDMI 2", "Select HDMI Input", { Input = "HDMI 2" }, { { "execution.hdmiSource", "input2" } },
+		{ { "HDMI_INPUT", "2" }, { "HDMI_INPUT_NAME", "PlayStation" } }, { { "HDMI_INPUT", 6 } })
+	check("Select HDMI Input: Last Action says the room does not follow", tostring(fake.last_action(denv))
+		:find("does not follow", 1, true) ~= nil, fake.last_action(denv))
+	eq("Select HDMI Input: no INPUT_OUTPUT_CHANGED to the AV proxy", 0, notified(c4, m, "INPUT_OUTPUT_CHANGED"))
+
+	-- The box switching by itself (CEC Active Source on HDMI 1): HDMI Input
+	-- Changed from any cause.
+	local e = #c4.events_fired
+	local ok, err = pcall(fb.event, box, "cec_active_source", { input = 1 })
+	if check("the box switches by itself: the fake takes the event", ok, err) then
+		S4.until_read(c4, function() return S4.var(c4, "HDMI_INPUT") == "1" end)
+		eq("the box switched by itself: HDMI_INPUT", "1", S4.var(c4, "HDMI_INPUT"))
+		eq("the box switched by itself: HDMI Input Changed fired", 1, S4.fired(c4, e, S4.EVENTS.input))
+	end
+
+	-- The conditionals (C1.8), against the box now (video, moderate, 80 %, HDMI 1).
+	local function cond(name, params)
+		return type(denv.TestCondition) == "function" and denv.TestCondition(name, params) == true
+	end
+	check("Sync Active is True", cond("BOOL_SYNC_ACTIVE", { VALUE = "True" }))
+	check("Sync Active is not False", not cond("BOOL_SYNC_ACTIVE", { VALUE = "False" }))
+	check("Sync Mode is Video", cond("LIST_SYNC_MODE", { VALUE = "Video", LOGIC = "EQUAL" }))
+	check("Sync Mode is not Game", cond("LIST_SYNC_MODE", { VALUE = "Game", LOGIC = "NOT_EQUAL" }))
+	check("Intensity is Moderate", cond("LIST_INTENSITY", { VALUE = "Moderate", LOGIC = "EQUAL" }))
+	check("Intensity is below High", cond("LIST_INTENSITY", { VALUE = "High", LOGIC = "LESS_THAN" }))
+	check("HDMI Input is HDMI 1", cond("LIST_HDMI_INPUT", { VALUE = "HDMI 1", LOGIC = "EQUAL" }))
+	check("Brightness is above 50", cond("NUMBER_BRIGHTNESS", { VALUE = "50", LOGIC = "GREATER_THAN" }))
+	check("Brightness is not 100", not cond("NUMBER_BRIGHTNESS", { VALUE = "100", LOGIC = "EQUAL" }))
+	check("Powered On is True", cond("BOOL_POWERED_ON", { VALUE = "True" }))
+	check("Online is True", cond("BOOL_ONLINE", { VALUE = "True" }))
+
+	-- Power Save and Wake.
+	run("Power Save", "Power Save", {}, { { "execution.mode", "powersave" }, { "execution.hdmiActive", false } },
+		{ { "POWER", "powersave" }, { "SYNC_ACTIVE", "0" } }, { { "POWER", 10 }, { "SYNC_ACTIVE", 2 } })
+	check("in power save Powered On is False", cond("BOOL_POWERED_ON", { VALUE = "False" }))
+	run("Wake", "Wake", {}, { { "execution.hdmiActive", true }, { "execution.mode", "passthrough" } },
+		{ { "POWER", "on" } }, { { "POWER", 9 } })
+	run("Toggle Sync starts", "Toggle Sync", {}, { { "execution.syncActive", true } }, { { "SYNC_ACTIVE", "1" } },
+		{ { "SYNC_ACTIVE", 1 } })
+	run("Toggle Sync stops", "Toggle Sync", {}, { { "execution.syncActive", false }, { "execution.mode", "passthrough" } },
+		{ { "SYNC_ACTIVE", "0" } }, { { "SYNC_ACTIVE", 2 } })
+
+	-- A bad parameter is refused before anything is sent.
+	n = #T.history
+	S4.command(denv, "Set Brightness", { Brightness = "250" })
+	c4.advance(2000)
+	eq("Set Brightness 250: nothing written", 0, #writes(T, n))
+	check("Set Brightness 250: Last Action says why", tostring(fake.last_action(denv)):find("not done", 1, true) ~= nil,
+		fake.last_action(denv))
+
+	-- Offline after 5 minutes of silence, then Online (C1.7 ids 12 and 11,
+	-- ONLINE set first).
+	m, e = #c4.calls, #c4.events_fired
+	fb.fault(box, "silence")
+	local offline = until_(c4, function() return S4.var(c4, "ONLINE") == "0" end, 9 * MINUTE, 5000)
+	check("silence: ONLINE 0 after the 5-minute rule", offline, P(denv, "Online"))
+	eq("silence: Offline fired once", 1, S4.fired(c4, e, S4.EVENTS.offline))
+	local fine, why = S4.set_before(c4, m, "ONLINE", S4.EVENTS.offline)
+	check("silence: ONLINE set before Offline", fine, why)
+	check("Online is False while offline", cond("BOOL_ONLINE", { VALUE = "False" }))
+	m, e = #c4.calls, #c4.events_fired
+	fb.clear(box, "silence")
+	local back = until_(c4, function() return S4.var(c4, "ONLINE") == "1" end, 2 * MINUTE, 5000)
+	check("back: ONLINE 1", back, P(denv, "Online"))
+	eq("back: Online fired once", 1, S4.fired(c4, e, S4.EVENTS.online))
+	fine, why = S4.set_before(c4, m, "ONLINE", S4.EVENTS.online)
+	check("back: ONLINE set before Online", fine, why)
+
+	-- A Director restart: the variables kept, no event for a value that did
+	-- not change (design 5.5).
+	local before = {}
+	for _, name in ipairs(S4.VARIABLES) do
+		before[name] = S4.var(c4, name)
+	end
+	n = #T.history
+	denv, c4 = S4.restart(T, denv, c4, { })
+	S4.until_read(c4, function() return P(denv, "Online") == "Online" end, 30000)
+	c4.advance(15000)
+	eq("after a restart: no event fires for values that did not change", "none", S4.events_text(c4, 0))
+	for _, name in ipairs(S4.VARIABLES) do
+		eq("after a restart: " .. name .. " as before", before[name], S4.var(c4, name))
+	end
+	eq("after a restart: nothing written", 0, #writes(T, n) + #select(2, writes(T, n)))
+	token_kept(denv, c4, "programming")
+	T:close()
+end)
+
+-- The four UI Buttons (design 5.6; C1.1): Hue Sync toggles and its icon
+-- follows, Sync Brighter and Sync Dimmer step 10 points (quick presses add
+-- up), Sync Intensity steps and its icon shows the level; every icon state
+-- the driver sends is one driver.xml declares and make_icons.py drew.
+suite("buttons", function()
+	local box = CFG.routing.buttons
+	if not box then
+		return skip("buttons", "E2E_ROUTING has no buttons box")
+	end
+	local T, denv, c4 = S4.start(box, "buttons", { clock = S4.at(12, 0) })
+	if not T then
+		return
+	end
+	local xml = assert(io.open("src/hue_syncbox/driver.xml")):read("*a")
+	local function declared(binding, id)
+		local block = xml:match('<navigator_display_option proxybindingid="' .. binding
+			.. '">(.-)</navigator_display_option>')
+		if not block then
+			return false, "no navigator_display_option for " .. binding
+		end
+		if not block:find('<state id="' .. id .. '">', 1, true) then
+			return false, "no state " .. id
+		end
+		for _, size in ipairs({ 300, 90, 70 }) do
+			local path = S4.ICONS_DIR .. id .. "_" .. size .. ".png"
+			local f = io.open(path, "rb")
+			if not f then
+				return false, path .. " missing"
+			end
+			f:close()
+			if not block:find("controller://driver/hue_syncbox/icons/" .. id .. "_" .. size .. ".png", 1, true) then
+				return false, "the state does not name " .. path
+			end
+		end
+		return true
+	end
+	-- At start (late init, then the first reads) the icons show the box.
+	S4.until_read(c4, function() return S4.last_icon(c4, 0, S4.BUTTONS.intensity) ~= nil end)
+	eq("Hue Sync's icon: on (the box syncs)", "sync_on", S4.last_icon(c4, 0, S4.BUTTONS.hue_sync))
+	eq("Sync Intensity's icon: high", "intensity_high", S4.last_icon(c4, 0, S4.BUTTONS.intensity))
+	local first = S4.icons(c4, 0, S4.BUTTONS.hue_sync)[1] or {}
+	check("ICON_CHANGED carries an icon_description", type(first.icon_description) == "string"
+		and first.icon_description ~= "", json.encode(first))
+	for _, id in ipairs({ "sync_on", "sync_off" }) do
+		local ok, why = declared(5002, id)
+		check("Hue Sync's state " .. id .. " is declared with its three icons", ok, why)
+	end
+	for _, level in ipairs({ "subtle", "moderate", "high", "intense" }) do
+		local ok, why = declared(5005, "intensity_" .. level)
+		check("Sync Intensity's state intensity_" .. level .. " is declared with its three icons", ok, why)
+	end
+
+	-- Hue Sync: off, then on again; the icon follows the reads.
+	local m = #c4.calls
+	S4.press(denv, S4.BUTTONS.hue_sync)
+	S4.until_read(c4, function() return S4.last_icon(c4, m, S4.BUTTONS.hue_sync) == "sync_off" end)
+	box_is("Hue Sync pressed while syncing", box, { { "execution.mode", "passthrough" },
+		{ "execution.hdmiActive", true } })
+	eq("Hue Sync pressed while syncing: icon sync_off", "sync_off", S4.last_icon(c4, m, S4.BUTTONS.hue_sync))
+	m = #c4.calls
+	S4.press(denv, S4.BUTTONS.hue_sync)
+	S4.until_read(c4, function() return S4.last_icon(c4, m, S4.BUTTONS.hue_sync) == "sync_on" end)
+	box_is("Hue Sync pressed again", box, { { "execution.mode", "video" }, { "execution.syncActive", true },
+		{ "execution.video.intensity", "high" }, { "execution.brightness", 100 } })
+	eq("Hue Sync pressed again: icon sync_on", "sync_on", S4.last_icon(c4, m, S4.BUTTONS.hue_sync))
+
+	-- Sync Brighter and Sync Dimmer: 10 points a press.
+	S4.press(denv, S4.BUTTONS.brighter)
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 110 end)
+	box_is("Sync Brighter", box, { { "execution.brightness", 110 } })
+	S4.press(denv, S4.BUTTONS.dimmer)
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 100 end)
+	box_is("Sync Dimmer", box, { { "execution.brightness", 100 } })
+	-- Three quick presses add up, in few PUTs, never as the box's increment.
+	local n = #T.history
+	S4.press(denv, S4.BUTTONS.brighter)
+	S4.press(denv, S4.BUTTONS.brighter)
+	S4.press(denv, S4.BUTTONS.brighter)
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 130 end)
+	box_is("three quick presses of Sync Brighter", box, { { "execution.brightness", 130 } })
+	local puts = S4.puts(T, n, "/execution")
+	local increments = 0
+	for _, p in ipairs(puts) do
+		increments = increments + (p.body.incrementBrightness ~= nil and 1 or 0)
+	end
+	check("three quick presses: at most three PUTs", #puts >= 1 and #puts <= 3, #puts .. " PUTs")
+	eq("three quick presses: no incrementBrightness (a resend must change nothing more, SB57)", 0, increments)
+	-- At the top, Sync Brighter stops at 200.
+	S4.command(denv, "Set Brightness", { Brightness = "195" })
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 195 end)
+	S4.press(denv, S4.BUTTONS.brighter)
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 200 end)
+	box_is("Sync Brighter at 195 stops at 200", box, { { "execution.brightness", 200 } })
+
+	-- Sync Intensity: High -> Intense -> Subtle; the icon follows.
+	for _, step_ in ipairs({ { "intense", "intensity_intense" }, { "subtle", "intensity_subtle" },
+		{ "moderate", "intensity_moderate" } }) do
+		m = #c4.calls
+		S4.press(denv, S4.BUTTONS.intensity)
+		S4.until_read(c4, function() return S4.last_icon(c4, m, S4.BUTTONS.intensity) == step_[2] end)
+		box_is("Sync Intensity to " .. step_[1], box, { { "execution.video.intensity", step_[1] } })
+		eq("Sync Intensity to " .. step_[1] .. ": its icon", step_[2], S4.last_icon(c4, m, S4.BUTTONS.intensity))
+	end
+
+	-- Pressed while the box does not sync: the change is what the next sync
+	-- starts with (the sync's stop ended the earlier holds, design 5.3).
+	m = #c4.calls
+	S4.press(denv, S4.BUTTONS.hue_sync)
+	S4.until_read(c4, function() return S4.var(c4, "SYNC_ACTIVE") == "0" end)
+	S4.press(denv, S4.BUTTONS.dimmer)
+	S4.until_read(c4, function() return S4.var(c4, "BRIGHTNESS") == "190" end)
+	box_is("Sync Dimmer while not syncing", box, { { "execution.mode", "passthrough" }, { "execution.brightness", 190 } })
+	S4.press(denv, S4.BUTTONS.hue_sync)
+	S4.until_read(c4, function() return S4.var(c4, "SYNC_ACTIVE") == "1" end)
+	box_is("then Hue Sync: the Day's intensity, the brightness set by hand", box, { { "execution.syncActive", true },
+		{ "execution.video.intensity", "high" }, { "execution.brightness", 190 } })
+
+	-- A SELECT on a binding that is no button, and another proxy command on a
+	-- button, write nothing (#483 D-7).
+	n = #T.history
+	denv.ReceivedFromProxy(5001, "SELECT", {})
+	denv.ReceivedFromProxy(5006, "SELECT", {})
+	denv.ReceivedFromProxy(5003, "ON", {})
+	c4.advance(3000)
+	eq("SELECT on 5001 or 5006, ON on 5003: nothing written", 0, #writes(T, n))
+
+	-- A restart: the icons sent again at late init from the kept state.
+	local _
+	_, c4 = S4.restart(T, denv, c4)
+	S4.until_read(c4, function() return S4.last_icon(c4, 0, S4.BUTTONS.intensity) ~= nil end, 30000)
+	eq("after a restart: Hue Sync's icon", "sync_on", S4.last_icon(c4, 0, S4.BUTTONS.hue_sync))
+	eq("after a restart: Sync Intensity's icon", "intensity_high", S4.last_icon(c4, 0, S4.BUTTONS.intensity))
+	T:close()
+end)
+
+-- The periods (design 5.3; C1.4), on the driver's fake clock from 21:55 UTC
+-- on 2026-11-17 with the project at a placeholder location on the prime
+-- meridian (sunset about 16:00 UTC, Evening from about 15:00): the period's
+-- values at a sync start, the Night's at 22:00, a hold by hand that outlives
+-- the next boundaries until the sync stops, a setting changed in Composer,
+-- and a boundary passed while the driver was down that is not applied.
+suite("periods", function()
+	local box = CFG.routing.periods
+	if not box then
+		return skip("periods", "E2E_ROUTING has no periods box")
+	end
+	local T, denv, c4 = S4.start(box, "periods", { clock = S4.at(21, 55),
+		location = { Latitude = "51.48", Longitude = "0.0" } })
+	if not T then
+		return
+	end
+	starts("Periods row: Evening until 22:00", "Evening until 22:00", P(denv, "Periods"))
+	check("Periods row: the sunset from the project's location", tostring(P(denv, "Periods"))
+		:find("from the project's location", 1, true) ~= nil, P(denv, "Periods"))
+	-- A sync start in the Evening: Moderate and 100 %.
+	S4.command(denv, "Stop Sync", {})
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.mode") == "passthrough" end)
+	S4.command(denv, "Start Sync", {})
+	S4.until_read(c4, function()
+		return S4.var(c4, "SYNC_ACTIVE") == "1" and S4.var(c4, "INTENSITY") == "moderate"
+	end)
+	box_is("Start Sync in the Evening", box, { { "execution.video.intensity", "moderate" },
+		{ "execution.brightness", 100 } })
+	-- 22:00: the Night's Subtle and 70 % while it syncs, one write.
+	local n, e = #T.history, #c4.events_fired
+	until_(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 70 end, 8 * MINUTE, 5000)
+	box_is("at 22:00", box, { { "execution.video.intensity", "subtle" }, { "execution.brightness", 70 } })
+	starts("at 22:00: Last Action", "Night: intensity subtle, brightness 70 %", fake.last_action(denv))
+	starts("at 22:00: Periods row", "Night until 07:00", P(denv, "Periods"))
+	check("at 22:00: Intensity Changed and Brightness Changed fired", S4.fired(c4, e, S4.EVENTS.intensity) == 1
+		and S4.fired(c4, e, S4.EVENTS.brightness) == 1, S4.events_text(c4, e))
+	local puts = S4.puts(T, n, "/execution")
+	eq("at 22:00: one PUT", 1, #puts)
+	-- A hold by hand: Sync Brighter, then a setting that makes it Evening
+	-- again (Night Starts 22:30) and the boundary at 22:30 keep 80 %.
+	S4.press(denv, S4.BUTTONS.brighter)
+	S4.until_read(c4, function() return S4.var(c4, "BRIGHTNESS") == "80" end)
+	S4.until_read(c4, function() return tostring(P(denv, "Periods")):find("set by hand", 1, true) ~= nil end, 10000)
+	check("Sync Brighter: the Periods row says the brightness is held", tostring(P(denv, "Periods"))
+		:find("brightness set by hand", 1, true) ~= nil, P(denv, "Periods"))
+	set_property(denv, "Night Starts", "22:30")
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.video.intensity") == "moderate" end)
+	box_is("Night Starts 22:30 at about 22:05: Evening again, the brightness held", box,
+		{ { "execution.video.intensity", "moderate" }, { "execution.brightness", 80 } })
+	until_(c4, function() return lookup_path(fb.state(box), "execution.video.intensity") == "subtle" end, 30 * MINUTE,
+		10000)
+	box_is("at 22:30: the Night's intensity, the brightness still held", box,
+		{ { "execution.video.intensity", "subtle" }, { "execution.brightness", 80 } })
+	-- A bad setting is refused, the default used, and Last Action says so.
+	set_property(denv, "Day Starts", "7 o'clock")
+	c4.advance(1000)
+	check("Day Starts \"7 o'clock\": Last Action says why", tostring(fake.last_action(denv))
+		:find("Day Starts", 1, true) ~= nil, fake.last_action(denv))
+	set_property(denv, "Day Starts", "07:00")
+	-- The sync stops (a read shows it): the hold ends; the next start takes the
+	-- Night's 70 %.
+	S4.command(denv, "Stop Sync", {})
+	S4.until_read(c4, function() return S4.var(c4, "SYNC_ACTIVE") == "0" end)
+	check("the sync stopped: the Periods row holds nothing", tostring(P(denv, "Periods")):find("set by hand", 1, true)
+		== nil, P(denv, "Periods"))
+	S4.command(denv, "Start Sync", {})
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 70 end)
+	box_is("after a stop, a start takes the Night's values again", box, { { "execution.video.intensity", "subtle" },
+		{ "execution.brightness", 70 } })
+	-- A hold, then the source changes (Control4 routes HDMI 2): released.
+	S4.press(denv, S4.BUTTONS.dimmer)
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 60 end)
+	director(denv, "SET_INPUT", video_input(2))
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.hdmiSource") == "input2" end)
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.brightness") == 70 end)
+	box_is("a new source ends the hold: the Night's brightness", box, { { "execution.brightness", 70 } })
+	-- Down across a boundary: Night Starts back to 22:00 is no change now, so
+	-- make the next boundary 23:10; the driver is down from 23:05 to 23:20 and
+	-- sends nothing for it at start.
+	set_property(denv, "Night Starts", "23:10")
+	S4.until_read(c4, function() return S4.intensity(fb.state(box)) == "moderate" end)
+	eq("Night Starts 23:10: Evening again, Moderate", "moderate", S4.intensity(fb.state(box)))
+	-- 23:05 now; down until 23:20.
+	until_(c4, function() return c4.now_ms >= S4.at(23, 5) end, HOUR, 30000)
+	n = #T.history
+	denv, c4 = S4.restart(T, denv, c4, { clock = S4.at(23, 20), location = { Latitude = "51.48", Longitude = "0.0" } })
+	c4.advance(20000)
+	local _, other = writes(T, n)
+	eq("down across 23:10: nothing written at start (no catch-up)", 0, #writes(T, n) + #other)
+	starts("after the restart: Periods row", "Night until 07:00", P(denv, "Periods"))
+	T:close()
+end)
+
+-- Sync Box Settings (design 5.4, O4, O18): Attention while Control4 routes
+-- through a box that switches inputs by itself; Let Control4 choose inputs
+-- turns off exactly what was on, in one PUT /behavior, and the box no longer
+-- switches by itself; Restore puts back exactly that; nothing by itself.
+suite("offers", function()
+	local box = CFG.routing.offers
+	if not box then
+		return skip("offers", "E2E_ROUTING has no offers box")
+	end
+	local T, denv, c4 = S4.start(box, "offers", { clock = S4.at(12, 0) })
+	if not T then
+		return
+	end
+	local first = #T.history
+	-- The box device has no Attention row of its own: the Input Switching row
+	-- and Status carry it (S4 §7: "Input Switching on Attention").
+	local function attention_shown()
+		return (tostring(P(denv, "Status")) .. " | " .. tostring(P(denv, "Input Switching"))):find("Attention: ", 1, true)
+			~= nil
+	end
+	S4.until_read(c4, attention_shown)
+	check("routed through a box that switches by itself: on Attention", attention_shown(),
+		tostring(P(denv, "Status")) .. " | " .. tostring(P(denv, "Input Switching")))
+	check("the Input Switching row says what the box does", tostring(P(denv, "Input Switching"))
+		:find("HDMI CEC switching on HDMI 1, 2", 1, true) ~= nil, P(denv, "Input Switching"))
+	local list = type(denv.SyncBoxSettingsList) == "function" and denv.SyncBoxSettingsList() or {}
+	local let, restore
+	for _, item in ipairs(list) do
+		if tostring(item.text):find("^Let Control4 choose inputs") then
+			let = item.value
+		elseif tostring(item.text):find("^Restore the box's input switching") then
+			restore = item.value
+		end
+	end
+	check("Sync Box Settings offers Let Control4 choose inputs and Restore", let ~= nil and restore ~= nil,
+		json.encode(list))
+	c4.advance(2 * MINUTE)
+	eq("never written by itself: no PUT /behavior in two minutes of reads", 0, #S4.puts(T, first, "/behavior"))
+
+	local n = #T.history
+	action(denv, "Sync Box Settings", { What = let or "" })
+	S4.until_read(c4, function() return #S4.puts(T, n, "/behavior") > 0 end)
+	c4.advance(3000)
+	local puts = S4.puts(T, n, "/behavior")
+	eq("Let Control4 choose inputs: one PUT /behavior", 1, #puts)
+	local body = puts[1] and puts[1].body or {}
+	check("Let Control4 choose inputs: only what was on, turned off", body.cecPowersave == 0
+		and type(body.input1) == "table" and body.input1.cecInputSwitch == 0 and body.input1.linkAutoSync == 0
+		and type(body.input2) == "table" and body.input2.cecInputSwitch == 0 and body.input3 == nil
+		and body.arcBypassMode == nil and body.soloMode == nil and body.usbPowersave == nil
+		and body.inactivePowersave == nil and body.hpdInputSwitch == nil, puts[1] and puts[1].data)
+	box_is("Let Control4 choose inputs", box, { { "behavior.cecPowersave", 0 }, { "behavior.input1.cecInputSwitch", 0 },
+		{ "behavior.input1.linkAutoSync", 0 }, { "behavior.input2.cecInputSwitch", 0 }, { "behavior.inactivePowersave", 20 },
+		{ "execution.mode", "video" } })
+	starts("Let Control4 choose inputs: Last Action", "Sent: the box no longer does", fake.last_action(denv))
+	S4.until_read(c4, function() return tostring(P(denv, "Input Switching")):find("^None") ~= nil end)
+	starts("Let Control4 choose inputs: the row", "None: turned off from Control4", P(denv, "Input Switching"))
+	check("Let Control4 choose inputs: no longer on Attention", not attention_shown(), P(denv, "Status"))
+	local ok, err = pcall(fb.event, box, "cec_active_source", { input = 2 })
+	if check("a source's CEC Active Source afterwards: the fake takes the event", ok, err) then
+		c4.advance(6000)
+		box_is("the box no longer switches by itself", box, { { "execution.hdmiSource", "input1" } })
+	end
+
+	-- Changed in the Hue app since: input2's CEC switching on again. A second
+	-- click turns off only that, and the first record is kept.
+	fb.run(box, "set", "behavior.input2.cecInputSwitch 1")
+	c4.advance(6000)
+	n = #T.history
+	action(denv, "Sync Box Settings", { What = let or "" })
+	S4.until_read(c4, function() return #S4.puts(T, n, "/behavior") > 0 end)
+	c4.advance(3000)
+	puts = S4.puts(T, n, "/behavior")
+	body = puts[1] and puts[1].body or {}
+	check("a second Let Control4 choose inputs: only input2's switching", #puts == 1 and type(body.input2) == "table"
+		and body.input2.cecInputSwitch == 0 and body.input1 == nil and body.cecPowersave == nil, puts[1] and puts[1].data)
+
+	-- Restore: exactly the first values.
+	n = #T.history
+	action(denv, "Sync Box Settings", { What = restore or "" })
+	S4.until_read(c4, function() return #S4.puts(T, n, "/behavior") > 0 end)
+	c4.advance(3000)
+	box_is("Restore the box's input switching", box, { { "behavior.cecPowersave", 1 },
+		{ "behavior.input1.cecInputSwitch", 1 }, { "behavior.input1.linkAutoSync", 1 },
+		{ "behavior.input2.cecInputSwitch", 1 }, { "behavior.input3.cecInputSwitch", 0 } })
+	starts("Restore: Last Action", "Restored the box's own", fake.last_action(denv))
+	ok, err = pcall(fb.event, box, "cec_active_source", { input = 2 })
+	if check("after Restore a CEC Active Source: the fake takes the event", ok, err) then
+		S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.hdmiSource") == "input2" end)
+		box_is("after Restore the box switches by itself again", box, { { "execution.hdmiSource", "input2" } })
+	end
+	n = #T.history
+	action(denv, "Sync Box Settings", { What = restore or "" })
+	c4.advance(3000)
+	starts("Restore again: nothing to restore", "Nothing to restore", fake.last_action(denv))
+	eq("Restore again: no PUT", 0, #S4.puts(T, n, "/behavior"))
+
+	-- The wiring (design 5.8; offers.lua's wiring choices): Behind a receiver
+	-- by a click, only the key that differs, Last Action saying how the
+	-- connections must match; Restore the box's wiring puts it back; the
+	-- input switching untouched by either.
+	local function pick(prefix)
+		for _, item in ipairs(type(denv.SyncBoxSettingsList) == "function" and denv.SyncBoxSettingsList() or {}) do
+			if tostring(item.text):find(prefix, 1, true) == 1 then
+				return item.value, item.text
+			end
+		end
+		return nil
+	end
+	local behind, behind_text = pick("Set the box to Behind a receiver")
+	eq("Sync Box Settings offers Behind a receiver, with its flags", "Set the box to Behind a receiver (ARC bypass on, "
+		.. "solo mode off)", behind_text)
+	check("Sync Box Settings does not offer the wiring the box is in", pick("Set the box to In line") == nil)
+	n = #T.history
+	local m = #c4.calls
+	action(denv, "Sync Box Settings", { What = behind or "" })
+	S4.until_read(c4, function() return P(denv, "Wiring") == require("syncbox.state").WIRING_TEXTS.behind_receiver end)
+	puts = S4.puts(T, n, "/behavior")
+	check("Behind a receiver: one PUT /behavior with arcBypassMode 1 only", #puts == 1 and puts[1].body.arcBypassMode == 1
+		and next(puts[1].body, next(puts[1].body)) == nil, puts[1] and puts[1].data)
+	box_is("Behind a receiver", box, { { "behavior.arcBypassMode", 1 }, { "behavior.soloMode", 0 },
+		{ "behavior.input1.cecInputSwitch", 1 } })
+	-- The text continues on Last Action (2) and on: the whole of it is in the
+	-- driver's log line.
+	local whole
+	for _, line in ipairs(log_lines) do
+		if line:find("Sent: the box is now Behind a receiver", 1, true) then
+			whole = line
+		end
+	end
+	check("Behind a receiver: Last Action says so", said(c4, m, "^Sent: the box is now Behind a receiver") ~= nil,
+		fake.last_action(denv))
+	check("Behind a receiver: and how the connections must match", whole ~= nil and whole:find("connect the "
+		.. "receiver's HDMI output to the box's HDMI 1 and the box's HDMI Out to the TV", 1, true) ~= nil, whole)
+	check("Restore the box's wiring is offered", pick("Restore the box's wiring") ~= nil)
+	n, m = #T.history, #c4.calls
+	action(denv, "Sync Box Settings", { What = pick("Restore the box's wiring") or "" })
+	S4.until_read(c4, function() return P(denv, "Wiring") == require("syncbox.state").WIRING_TEXTS.in_line end)
+	box_is("Restore the box's wiring", box, { { "behavior.arcBypassMode", 0 }, { "behavior.soloMode", 0 },
+		{ "behavior.input1.cecInputSwitch", 1 } })
+	check("Restore the box's wiring: Last Action", said(c4, m, "^Restored the box's wiring") ~= nil,
+		fake.last_action(denv))
+	eq("Restore the box's wiring: one PUT /behavior", 1, #S4.puts(T, n, "/behavior"))
+
+	local other = S4.other_writes(T, first, { ["/api/v1/execution"] = true, ["/api/v1/behavior"] = true })
+	check("offers: no write but PUT /behavior and /execution", #other == 0, table.concat(other, ", "))
+	T:close()
+end)
+
+-- The entertainment area (C1.4, C1.6; design 8) and the name both ways
+-- (O14; 1.2's D6).
+suite("area-name", function()
+	local box = CFG.routing.area
+	if not box then
+		return skip("area and name", "E2E_ROUTING has no area box")
+	end
+	local T, denv, c4 = S4.start(box, "area and name", { clock = S4.at(12, 0) })
+	if not T then
+		return
+	end
+	local first = #T.history
+	-- The list and the value.
+	S4.until_read(c4, function() return P(denv, "Entertainment Area") == "Living Room TV" end)
+	eq("Entertainment Area shows the box's area", "Living Room TV", P(denv, "Entertainment Area"))
+	local list = S4.list(c4, "Entertainment Area")
+	local text = table.concat(list, "|")
+	check("Entertainment Area lists the box's areas", text:find("Living Room TV", 1, true) ~= nil
+		and text:find("Office", 1, true) ~= nil, text)
+	-- A pick writes hueTarget, once.
+	local n, e = #T.history, #c4.events_fired
+	set_property(denv, "Entertainment Area", "Office")
+	S4.until_read(c4, function() return S4.var(c4, "ENTERTAINMENT_AREA") == "Office" end)
+	box_is("Entertainment Area Office", box, { { "execution.hueTarget", S4.AREA.office } })
+	eq("Entertainment Area Office: Last Action", "Entertainment area set to Office", fake.last_action(denv))
+	eq("Entertainment Area Office: one PUT", 1, #S4.puts(T, n, "/execution"))
+	eq("Entertainment Area Changed fired", 1, S4.fired(c4, e, S4.EVENTS.area))
+	-- Renamed in the Hue app: followed by id, nothing written.
+	n = #T.history
+	fb.run(box, "set", "hue.groups." .. S4.AREA.office .. ".name " .. q('"Study"'))
+	S4.until_read(c4, function() return S4.var(c4, "ENTERTAINMENT_AREA") == "Study" end)
+	eq("the area renamed in Hue: the row follows", "Study", P(denv, "Entertainment Area"))
+	eq("the area renamed in Hue: nothing written", 0, #writes(T, n))
+	-- Deleted in Hue and made again under the same name with a new id: said,
+	-- offered once, never applied by itself; picking it re-points.
+	local successor = "6a7b8c9d-0000-4000-8000-0000000ea0f3"
+	n = #T.history
+	fb.run(box, "set", "hue.groups." .. successor .. " " .. q('{"active": false, "name": "Study", "numLights": 3}'))
+	fb.run(box, "set", "hue.groups." .. S4.AREA.office .. " --unset")
+	fb.run(box, "set", "hue.connectionState invalidgroup")
+	S4.until_read(c4, function() return tostring(fake.last_action(denv)):find("Study", 1, true) ~= nil end, 30000)
+	check("the area deleted in Hue: Last Action names it", tostring(fake.last_action(denv)):find("Study", 1, true) ~= nil,
+		fake.last_action(denv))
+	c4.advance(MINUTE)
+	box_is("the area deleted in Hue: never replaced by itself", box, { { "execution.hueTarget", S4.AREA.office } })
+	eq("the area deleted in Hue: nothing written", 0, #writes(T, n))
+	list = S4.list(c4, "Entertainment Area")
+	local offered
+	for _, item in ipairs(list) do
+		if item:find("Study", 1, true) and item ~= P(denv, "Entertainment Area") then
+			offered = item
+		end
+	end
+	check("the successor is in the list", offered ~= nil, table.concat(list, "|") .. " / now " .. tostring(P(denv,
+		"Entertainment Area")))
+	set_property(denv, "Entertainment Area", offered or "Study")
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.hueTarget") == successor end)
+	box_is("picking the successor", box, { { "execution.hueTarget", successor } })
+
+	-- The name: renamed in the Hue Sync app -> the device follows.
+	local proxy = box_proxy()
+	local r = #(c4.renamed or {})
+	n = #T.history
+	local ok, err = pcall(fb.event, box, "rename", { name = "Den Sync Box" })
+	if check("renamed in the Hue Sync app: the fake takes the event", ok, err) then
+		S4.until_read(c4, function() return #(c4.renamed or {}) > r end, 30000)
+		local last = (c4.renamed or {})[#(c4.renamed or {})] or {}
+		eq("renamed in the Hue Sync app: RenameDevice of the AV proxy", proxy, last.id)
+		eq("renamed in the Hue Sync app: the new name", "Den Sync Box", last.name)
+		c4.advance(10000)
+		eq("renamed in the Hue Sync app: its echo writes nothing back", 0, #S4.puts(T, n, "/device"))
+	end
+	-- Renamed in Composer -> the box follows.
+	n = #T.history
+	fake.project.devices[proxy].name = "Theater Sync Box"
+	if type(denv.OnSystemEvent) == "function" then
+		-- The payload is not documented; the bridge reads the event's name and
+		-- an iditem from it (src/hue_bridge/driver.lua, OnSystemEvent).
+		denv.OnSystemEvent(string.format("<OnItemNameChanged><iditem>%d</iditem><name>Theater Sync Box</name>"
+			.. "</OnItemNameChanged>", proxy))
+	end
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "device.name") == "Theater Sync Box" end, 30000)
+	c4.advance(2000) -- the PUT's answer delivered
+	box_is("renamed in Composer: the box follows", box, { { "device.name", "Theater Sync Box" } })
+	local puts = S4.puts(T, n, "/device")
+	eq("renamed in Composer: one PUT /device", 1, #puts)
+	check("renamed in Composer: the PUT names only the name", puts[1] ~= nil and puts[1].body.name == "Theater Sync Box"
+		and next(puts[1].body, next(puts[1].body)) == nil, puts[1] and puts[1].data)
+	r = #(c4.renamed or {})
+	c4.advance(15000)
+	eq("renamed in Composer: no rename of the device comes back", r, #(c4.renamed or {}))
+	local other = S4.other_writes(T, first, { ["/api/v1/execution"] = true, ["/api/v1/device"] = true })
+	check("area and name: no write but PUT /execution and /device", #other == 0, table.concat(other, ", "))
+	T:close()
+end)
+
+-- Take-over (O12; C5 STOP_AREA; research W10): a sync start refused with
+-- code 16 while another app streams to the area asks the bridge to stop
+-- it; once the bridge did, the box starts its own and Sync Taken Over fires;
+-- when the stream is another box of this project, nothing is taken; with no
+-- bridge bound, Last Action says the box is busy.
+suite("takeover", function()
+	local box = CFG.routing.takeover
+	if not box then
+		return skip("take-over", "E2E_ROUTING has no takeover box")
+	end
+	local mode = "stop"
+	local peer
+	peer = S4.bridge_peer(function(params)
+		if mode == "stop" then
+			-- The bridge stops the other app's stream on the area with its own
+			-- key (C6): the fake's other app goes (SB93), then STOPPED.
+			pcall(fb.event, box, "bridge", { state = "connected" })
+			return { area_id = params.area_id, ok = "true", reason = "stopped" }
+		elseif mode == "another_box" then
+			return { area_id = params.area_id, ok = "false", reason = "another_box", by = "Den Sync Box" }
+		end
+		return nil
+	end)
+	local T, denv, c4 = S4.start(box, "take-over", { clock = S4.at(12, 0), project = peer.project })
+	if not T then
+		return
+	end
+	peer.attach(c4, denv)
+	c4.advance(6000)
+	local hello = peer.last("HUE_SYNCBOX_HELLO") or {}
+	-- The hello went before attach; the next read's STATE or hello comes after.
+	S4.command(denv, "Stop Sync", {})
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.mode") == "passthrough" end)
+	c4.advance(6000)
+	local state_msg = peer.last("HUE_SYNCBOX_STATE") or peer.last("HUE_SYNCBOX_HELLO") or hello
+	eq("the bridge hears the box no longer syncs (syncing false)", "false", state_msg.syncing)
+
+	-- Another app streams to the box's area; Start Sync is refused with 16;
+	-- the bridge is asked to stop the area's stream; the box syncs; Sync Taken
+	-- Over fires after the variables.
+	fb.event(box, "bridge", { state = "busy" })
+	c4.advance(6000)
+	local n, m, e = #T.history, #c4.calls, #c4.events_fired
+	local asked = peer.count("HUE_SYNCBOX_STOP_AREA")
+	S4.command(denv, "Start Sync", {})
+	local taken = until_(c4, function() return S4.fired(c4, e, S4.EVENTS.taken_over) > 0 end, 30000, 500)
+	local refused = 0
+	for _, p in ipairs(S4.puts(T, n, "/execution")) do
+		refused = refused + (p.status == 400 and 1 or 0)
+	end
+	eq("another app streams: the first sync start was refused (HTTP 400, code 16)", 1, refused)
+	eq("STOP_AREA sent to the bridge once", asked + 1, peer.count("HUE_SYNCBOX_STOP_AREA"))
+	local stop = peer.last("HUE_SYNCBOX_STOP_AREA") or {}
+	eq("STOP_AREA names the box's area", S4.AREA.tv, stop.area_id)
+	eq("STOP_AREA names the box", box.id, tostring(stop.box_id or ""):upper())
+	check("Sync Taken Over fired", taken, S4.events_text(c4, e))
+	box_is("taken over", box, { { "execution.syncActive", true }, { "hue.connectionState", "streaming" },
+		{ "hue.groups." .. S4.AREA.tv .. ".active", true } })
+	check("taken over: the area no longer the other app's", lookup_path(fb.state(box), "hue.groups." .. S4.AREA.tv
+		.. ".owner") == nil)
+	starts("taken over: Last Action", "Sync taken over:", fake.last_action(denv))
+	local fine, why = S4.set_before(c4, m, "SYNC_ACTIVE", S4.EVENTS.taken_over)
+	check("taken over: SYNC_ACTIVE set before Sync Taken Over", fine, why)
+	eq("taken over: Sync Started fired too", 1, S4.fired(c4, e, S4.EVENTS.sync_started))
+	eq("taken over: Sync Taken Over fired once", 1, S4.fired(c4, e, S4.EVENTS.taken_over))
+
+	-- W10: the stream is another box of this project. Nothing is taken.
+	S4.command(denv, "Stop Sync", {})
+	S4.until_read(c4, function() return lookup_path(fb.state(box), "execution.syncActive") == false end)
+	fb.event(box, "bridge", { state = "busy" })
+	c4.advance(6000)
+	mode = "another_box"
+	n, e = #T.history, #c4.events_fired
+	S4.command(denv, "Start Sync", {})
+	S4.until_read(c4, function() return tostring(fake.last_action(denv)):find("Den Sync Box", 1, true) ~= nil end, 30000)
+	starts("another box of this project streams: Last Action", "Not syncing: Den Sync Box syncs to",
+		fake.last_action(denv))
+	c4.advance(20000)
+	eq("another box streams: one sync start, refused, never again", 1, #S4.puts(T, n, "/execution"))
+	eq("another box streams: no Sync Taken Over", 0, S4.fired(c4, e, S4.EVENTS.taken_over))
+	box_is("another box streams: nothing taken", box, { { "execution.syncActive", false },
+		{ "hue.groups." .. S4.AREA.tv .. ".owner", "other-app" } })
+
+	-- No bridge bound: the box is busy, said so; nothing is asked.
+	for i = #c4.bindings, 1, -1 do
+		if c4.bindings[i].consumer == BOX_DEVICE and c4.bindings[i].consumer_binding == 1 then
+			table.remove(c4.bindings, i)
+		end
+	end
+	if type(denv.OnBindingChanged) == "function" then
+		denv.OnBindingChanged(1, "HUE_SYNCBOX", false, S4.BRIDGE)
+	end
+	c4.advance(2000)
+	asked = peer.count("HUE_SYNCBOX_STOP_AREA")
+	S4.command(denv, "Start Sync", {})
+	S4.until_read(c4, function() return tostring(fake.last_action(denv)):find("busy", 1, true) ~= nil end, 30000)
+	starts("no bridge bound: Last Action says the box is busy", "Not syncing:", fake.last_action(denv))
+	check("no bridge bound: the busy reason", tostring(fake.last_action(denv)):find("busy", 1, true) ~= nil,
+		fake.last_action(denv))
+	eq("no bridge bound: no STOP_AREA", asked, peer.count("HUE_SYNCBOX_STOP_AREA"))
+	pcall(fb.event, box, "bridge", { state = "connected" })
 	T:close()
 end)
 

@@ -32,7 +32,6 @@ local BRIDGE = 15
 local OTHER_ID = "0A1B2C3D4E60"
 local MOVED_TO = "192.0.2.41"
 local SHORT = "#4E5F"
-local NOT_YET = "Not done: the Hue Sync buttons come in a later 2.0 beta"
 local HOUR = 3600000
 -- The rows a good read fills (driver.lua K.BOX_ROWS, Box ID excepted).
 local BOX_ROWS = { "Sync Box", "Model", "Firmware", "Wiring", "Sync", "Inputs", "Bridge Link", "Input Switching" }
@@ -60,16 +59,52 @@ local function logged(text)
 	return nil
 end
 
+-- Stage 4's periods follow the controller's local clock (syncbox/periods.lua,
+-- os.date and os.time): every start is at local noon on 2026-11-17 (Day, from
+-- 07:00 to an hour before the 19:00 that stands in for a sunset when the
+-- project has no location), so the period is the same in every time zone.
+local NOON = os.time({ year = 2026, month = 11, day = 17, hour = 12, min = 0, sec = 0 }) * 1000
+
+-- The epoch ms of local hh:mm on the day of `ms` (a spec's boundary).
+local function local_at(ms, hh, mm)
+	local t = os.date("*t", math.floor(ms / 1000))
+	return os.time({ year = t.year, month = t.month, day = t.day, hour = hh, min = mm, sec = 0 }) * 1000
+end
+
+-- The box device's Composer name, and its proxies' (the AV switch's is the
+-- one Composer shows and renames).
+local function name_device(name)
+	local rec = fake.project.devices[BOX_DEVICE]
+	if not rec then return end
+	rec.name = name
+	if rec.proxy_id and fake.project.devices[rec.proxy_id] then fake.project.devices[rec.proxy_id].name = name end
+end
+
+-- The AV switch proxy's id (the device Composer renames).
+local function proxy_of_box()
+	local rec = fake.project.devices[BOX_DEVICE]
+	return rec and rec.proxy_id
+end
+
 -- opts.persist: the store before the start; opts.box: fake.syncbox's opts
 -- (false: no box at all); opts.silent: the box does not answer; opts.bind:
 -- bound to the bridge; opts.debug: Debug Mode On from the start;
+-- opts.props: Composer's property values at the start; opts.now: the
+-- controller's clock (ms, local noon by default); opts.name: the device's
+-- Composer name (the box's own by default);
 -- opts.before_late(env, c4): just before OnDriverLateInit. Returns env, c4,
 -- the box handle.
 local function load_box(opts)
 	opts = opts or {}
 	local props = {}
 	if opts.debug then props["Debug Mode"] = "On" end
+	for k, v in pairs(opts.props or {}) do props[k] = v end
 	local env, c4 = fake.load_driver("hue_syncbox", props, { device_id = BOX_DEVICE })
+	c4.now_ms = opts.now or NOON
+	-- The device as the dealer named it: the box's own name unless opts.name
+	-- (stage 4: names that agree pair silently, syncbox/names.lua).
+	local state = opts.box and opts.box.state or F.state.HSB2
+	name_device(opts.name or (type(state) == "table" and state.device and state.device.name) or "Hue Sync Box")
 	for k, v in pairs(opts.persist or {}) do c4.persist[k] = v end
 	local box = nil
 	if opts.box ~= false then
@@ -85,15 +120,49 @@ local function load_box(opts)
 	return env, c4, box
 end
 
--- A box paired in an earlier life, answering with `state` (default HSB2).
+-- `state` with the box's own input switching off (CEC and hot-plug, as
+-- after a click on Let Control4 choose inputs), so a route through it puts
+-- nothing on Attention (stage 4 §1.4); the offers' own describe uses the
+-- fixtures as they are.
+local function quiet(state)
+	local s = F.copy(state)
+	local b = s.behavior
+	if type(b) == "table" then
+		if b.hpdInputSwitch ~= nil then b.hpdInputSwitch = 0 end
+		for n = 1, 4 do
+			local i = b["input" .. n]
+			if type(i) == "table" then
+				i.cecInputSwitch = i.cecInputSwitch ~= nil and 0 or nil
+				i.hpdInputPortSwitch = i.hpdInputPortSwitch ~= nil and 0 or nil
+			end
+		end
+	end
+	return s
+end
+
+-- A box paired in an earlier life, answering with `state` (default HSB2),
+-- its own input switching off unless extra.switching.
 local function paired(state, extra)
-	local opts = { persist = PAIRED,
-		box = { state = state or F.state.HSB2, registrations = { [F.REGISTRATION_ID] = F.TOKEN } } }
-	for k, v in pairs(extra or {}) do opts[k] = v end
+	state = state or F.state.HSB2
+	if not (extra and extra.switching) then state = quiet(state) end
+	local opts = { persist = PAIRED, box = { state = state, registrations = { [F.REGISTRATION_ID] = F.TOKEN } } }
+	for k, v in pairs(extra or {}) do
+		if k ~= "switching" then opts[k] = v end
+	end
 	return load_box(opts)
 end
 
 -- Stage 3's helpers ----------------------------------------------------------
+
+-- Everything the driver sent the AV switch proxy (5001): the UI Buttons'
+-- icons go to their own bindings (stage 4).
+local function to_av(c4)
+	local out = {}
+	for _, call in ipairs(c4.calls_to("SendToProxy")) do
+		if call[1] == 5001 then out[#out + 1] = call end
+	end
+	return out
+end
 
 -- What the driver told the AV switch proxy: the params of each notify named
 -- `command`, in order.
@@ -312,9 +381,16 @@ describe("Hue Sync Box driver (#534)", function()
 			end
 		end)
 
-		it("has exactly the capabilities of C1.3", function()
+		it("has exactly the capabilities of C1.3, and stage 4's Navigator icons for the four UI Buttons", function()
+			local body = field(xml(), "capabilities")
+			local icons = {}
+			local each_button = '<navigator_display_option proxybindingid="(%d+)">(.-)</navigator_display_option>'
+			for binding, inner in body:gmatch(each_button) do
+				icons[binding] = inner
+			end
+			body = body:gsub("<navigator_display_option.-</navigator_display_option>", "")
 			local caps = {}
-			for name, value in field(xml(), "capabilities"):gmatch("<([%w_]+)>(.-)</%1>") do caps[name] = value end
+			for name, value in body:gmatch("<([%w_]+)>(.-)</%1>") do caps[name] = value end
 			assert.same({
 				video_consumer_count = "4", video_provider_count = "1",
 				audio_consumer_count = "4", audio_provider_count = "1",
@@ -329,10 +405,50 @@ describe("Hue Sync Box driver (#534)", function()
 				has_discrete_loudness_control = "False",
 				has_audio_signal_sense = "False", has_video_signal_sense = "False",
 			}, caps)
+			-- UIB 104/_1: a default icon and one set per state, each at 300, 90, 70, 512 and 1024 px,
+			-- under controller://driver/hue_syncbox/ (the package's www/).
+			local function sets(inner)
+				local out = {}
+				local default = inner:gsub("<state.-</state>", "")
+				local function sizes(text)
+					local files = {}
+					for w, h, url in text:gmatch('<Icon width="(%d+)" height="(%d+)">(.-)</Icon>') do
+						assert.equal(w, h)
+						files[#files + 1] = w .. "=" .. url:gsub("^controller://driver/hue_syncbox/", "")
+					end
+					return table.concat(files, " ")
+				end
+				out.default = sizes(default)
+				for id, state in inner:gmatch('<state id="([%w_]+)">(.-)</state>') do out[id] = sizes(state) end
+				return out
+			end
+			local function want(path)
+				return string.format("300=icons/%s_300.png 90=icons/%s_90.png 70=icons/%s_70.png 512=icons/%s_512.png "
+					.. "1024=icons/%s_1024.png", path, path, path, path, path)
+			end
+			assert.same({ "5002", "5003", "5004", "5005" }, (function()
+				local keys = {}
+				for k in pairs(icons) do keys[#keys + 1] = k end
+				table.sort(keys)
+				return keys
+			end)())
+			assert.same({ default = want("sync"), sync_on = want("sync_on"), sync_off = want("sync_off") },
+				sets(icons["5002"]))
+			assert.same({ default = want("brighter") }, sets(icons["5003"]))
+			assert.same({ default = want("dimmer") }, sets(icons["5004"]))
+			assert.same({ default = want("intensity"), intensity_subtle = want("intensity_subtle"),
+				intensity_moderate = want("intensity_moderate"), intensity_high = want("intensity_high"),
+				intensity_intense = want("intensity_intense") }, sets(icons["5005"]))
+			-- Every icon the XML names is in the package (tools/make_icons.py draws them).
+			for path in xml():gmatch("controller://driver/hue_syncbox/([^<]+)</Icon>") do
+				local file = io.open("src/hue_syncbox/www/" .. path, "rb")
+				assert.truthy(file, "src/hue_syncbox/www/" .. path .. " is missing")
+				file:close()
+			end
 		end)
 
-		it("declares the stage 2 rows in S2 §5's order, then stage 3's settings, all read-only but the settings",
-			function()
+		it("declares the stage 2 rows in S2 §5's order, then stage 3's and stage 4's settings, all read-only but "
+			.. "the settings", function()
 			local names, writable = {}, {}
 			for _, body in ipairs(each(xml(), "property")) do
 				names[#names + 1] = field(body, "name")
@@ -340,18 +456,24 @@ describe("Hue Sync Box driver (#534)", function()
 			end
 			assert.same({ "Driver Version", "Debug Mode", "Status", "Online", "Last Action", "Last Action (2)",
 				"Last Action (3)", "Last Action (4)", "Last Action (5)", "Last Action (6)", "Sync Box", "Model", "Firmware",
-				"Box ID", "Box Address", "Wiring", "Sync", "Inputs", "Bridge Link", "Input Switching",
+				"Box ID", "Box Address", "Wiring", "Sync", "Inputs", "Bridge Link", "Entertainment Area", "Input Switching",
 				"HDMI 1 Sync Mode", "HDMI 2 Sync Mode", "HDMI 3 Sync Mode", "HDMI 4 Sync Mode", "Follow Room",
-				"Source Sync Modes", "At Room Off", "When The Source Leaves The Box" }, names)
-			assert.same({ "Debug Mode", "HDMI 1 Sync Mode", "HDMI 2 Sync Mode", "HDMI 3 Sync Mode", "HDMI 4 Sync Mode",
-				"Follow Room", "At Room Off", "When The Source Leaves The Box" }, writable)
+				"Source Sync Modes", "Periods", "Day Starts", "Evening Starts", "Night Starts", "Day Intensity",
+				"Evening Intensity", "Night Intensity", "Day Brightness", "Evening Brightness", "Night Brightness",
+				"At Room Off", "When The Source Leaves The Box" }, names)
+			assert.same({ "Debug Mode", "Entertainment Area", "HDMI 1 Sync Mode", "HDMI 2 Sync Mode", "HDMI 3 Sync Mode",
+				"HDMI 4 Sync Mode", "Follow Room", "Day Starts", "Evening Starts", "Night Starts", "Day Intensity",
+				"Evening Intensity", "Night Intensity", "Day Brightness", "Evening Brightness", "Night Brightness",
+				"At Room Off", "When The Source Leaves The Box" }, writable)
 		end)
 
-		it("declares the settings of contracts C1.4 and research §7.2 with their items and defaults (S3 §5)", function()
+		it("declares the settings of contracts C1.4 and research §7.2 with their items and defaults (S3 §5; stage 4)",
+			function()
 			local props = {}
 			for _, body in ipairs(each(xml(), "property")) do
 				props[field(body, "name")] = { type = field(body, "type"), items = table.concat(each(body, "item"), "/"),
-					default = field(body, "default") }
+					default = field(body, "default"), range = field(body, "minimum") and (field(body, "minimum") .. ".."
+						.. field(body, "maximum")) or nil }
 			end
 			for n = 1, 4 do
 				assert.same({ type = "LIST", items = "Automatic/Video/Game/Music/Do not sync", default = "Automatic" },
@@ -363,30 +485,106 @@ describe("Hue Sync Box driver (#534)", function()
 				default = "Stop syncing and keep the picture" }, props["When The Source Leaves The Box"])
 			assert.same({ type = "DYNAMIC_LIST", items = "" }, props["Follow Room"])
 			assert.equal("STRING", props["Source Sync Modes"].type)
+			-- Contracts C1.4: the periods, and the box's areas.
+			assert.same({ type = "DYNAMIC_LIST", items = "" }, props["Entertainment Area"])
+			assert.same({ type = "STRING", items = "", default = "07:00" }, props["Day Starts"])
+			assert.same({ type = "STRING", items = "", default = "-60" }, props["Evening Starts"])
+			assert.same({ type = "STRING", items = "", default = "22:00" }, props["Night Starts"])
+			for period, default in pairs({ Day = "High", Evening = "Moderate", Night = "Subtle" }) do
+				assert.same({ type = "LIST", items = "Subtle/Moderate/High/Intense", default = default },
+					props[period .. " Intensity"])
+			end
+			for period, default in pairs({ Day = "100", Evening = "100", Night = "70" }) do
+				assert.same({ type = "RANGED_INTEGER", items = "", default = default, range = "0..200" },
+					props[period .. " Brightness"])
+			end
 		end)
 
-		it("offers Pair Sync Box, Set Source Sync Mode, Diagnostics and Forget Pairing, nothing for programming yet",
-			function()
+		it("offers Pair Sync Box, Sync Box Settings, Set Source Sync Mode, Diagnostics and Forget Pairing", function()
 			local actions = {}
 			for _, body in ipairs(each(xml(), "action")) do
 				local params = {}
 				for _, p in ipairs(each(body, "param")) do
 					params[#params + 1] = field(p, "name") .. ":" .. field(p, "type") .. ":" .. table.concat(each(p, "item"), "/")
 				end
-				actions[#actions + 1] = field(body, "command") .. " (" .. table.concat(params, ", ") .. ")"
+				actions[#actions + 1] = field(body, "sort_order") .. " " .. field(body, "command") .. " ("
+					.. table.concat(params, ", ") .. ")"
 			end
 			assert.same({
-				"Pair Sync Box (Box:CUSTOM_SELECT:SyncBoxList:, Address:STRING:)",
-				"Set Source Sync Mode (Source:CUSTOM_SELECT:SourceList:, Mode:LIST:Automatic/Video/Game/Music/Do not sync)",
-				"Diagnostics (What:LIST:Check the box now/Read everything from the box now/"
+				"1 Pair Sync Box (Box:CUSTOM_SELECT:SyncBoxList:, Address:STRING:)",
+				"2 Sync Box Settings (What:CUSTOM_SELECT:SyncBoxSettingsList:)",
+				"3 Set Source Sync Mode (Source:CUSTOM_SELECT:SourceList:, Mode:LIST:Automatic/Video/Game/Music/Do not sync)",
+				"4 Diagnostics (What:LIST:Check the box now/Read everything from the box now/"
 					.. "Show the box's raw state in the Lua output)",
-				"Forget Pairing (Confirm:LIST:No/Yes)",
+				"5 Forget Pairing (Confirm:LIST:No/Yes)",
 			}, actions)
-			local x = xml()
-			assert.truthy(x:find("<commands/>", 1, true))
-			assert.is_nil(x:find("<commands>", 1, true))
-			assert.is_nil(x:find("<events>", 1, true))
-			assert.is_nil(x:find("<conditionals>", 1, true))
+		end)
+
+		it("declares the commands of contracts C1.6 in their order, with their parameters", function()
+			local commands = {}
+			for _, body in ipairs(each(field(xml(), "commands"), "command")) do
+				local params = {}
+				for _, p in ipairs(each(body, "param")) do
+					local range = field(p, "minimum") and ("[" .. field(p, "minimum") .. ".." .. field(p, "maximum") .. "]") or ""
+					params[#params + 1] = field(p, "name") .. ":" .. field(p, "type") .. range
+						.. (#each(p, "item") > 0 and (":" .. table.concat(each(p, "item"), "/")) or "")
+				end
+				assert.truthy(field(body, "description"):find("NAME", 1, true), field(body, "name"))
+				commands[#commands + 1] = field(body, "sort_order") .. " " .. field(body, "name")
+					.. (#params > 0 and (" (" .. table.concat(params, ", ") .. ")") or "")
+			end
+			local tens = {}
+			for v = 0, 200, 10 do tens[#tens + 1] = v .. " %" end
+			assert.same({
+				"0 Start Sync",
+				"1 Stop Sync",
+				"2 Toggle Sync",
+				"3 Set Sync Mode (Mode:LIST:Video/Music/Game)",
+				"4 Set Intensity (Intensity:LIST:Subtle/Moderate/High/Intense)",
+				"5 Next Intensity",
+				"6 Set Brightness (Brightness:RANGED_INTEGER[0..200])",
+				"7 Adjust Brightness (Step:RANGED_INTEGER[-200..200])",
+				"8 Set Entertainment Area (Area:DYNAMIC_LIST)",
+				"9 Apply Sync Settings (Mode:LIST:Leave/Video/Music/Game, Intensity:LIST:Leave/Subtle/Moderate/High/Intense, "
+					.. "Brightness:LIST:Leave/" .. table.concat(tens, "/") .. ", Area:DYNAMIC_LIST, Start:LIST:Leave/Start/Stop)",
+				"10 Power Save",
+				"11 Wake",
+				"12 Select HDMI Input (Input:LIST:HDMI 1/HDMI 2/HDMI 3/HDMI 4)",
+			}, commands)
+			local select_input = xml():match("<name>Select HDMI Input</name>%s*<description>(.-)</description>")
+			assert.truthy(select_input:find("room does not follow", 1, true), "its description warns (C1.6)")
+		end)
+
+		it("declares the events of contracts C1.7 with their fixed ids", function()
+			local events = {}
+			for _, body in ipairs(each(field(xml(), "events"), "event")) do
+				assert.truthy(field(body, "description"):find("NAME", 1, true), field(body, "name"))
+				events[#events + 1] = field(body, "id") .. " " .. field(body, "name")
+			end
+			assert.same({ "1 Sync Started", "2 Sync Stopped", "3 Sync Mode Changed", "4 Intensity Changed",
+				"5 Brightness Changed", "6 HDMI Input Changed", "7 Entertainment Area Changed", "8 Sync Taken Over",
+				"9 Powered On", "10 Power Save", "11 Online", "12 Offline" }, events)
+		end)
+
+		it("declares the conditionals of contracts C1.8, each answered by TestCondition", function()
+			local conditionals = {}
+			for _, body in ipairs(each(field(xml(), "conditionals"), "conditional")) do
+				assert.truthy(field(body, "description"):find("NAME", 1, true), field(body, "name"))
+				local items = table.concat(each(body, "item"), "/")
+				conditionals[#conditionals + 1] = table.concat({ field(body, "id"), field(body, "name"), field(body, "type"),
+					field(body, "condition_statement"), items ~= "" and items or (field(body, "minimum") and (field(body,
+					"minimum") .. ".." .. field(body, "maximum")) or (field(body, "true_text") .. "/" .. field(body,
+					"false_text"))) }, " | ")
+			end
+			assert.same({
+				"0 | BOOL_SYNC_ACTIVE | BOOL | Sync Active | True/False",
+				"1 | LIST_SYNC_MODE | LIST | Sync Mode | Video/Music/Game/Off",
+				"2 | LIST_INTENSITY | LIST | Intensity | Subtle/Moderate/High/Intense",
+				"3 | LIST_HDMI_INPUT | LIST | HDMI Input | HDMI 1/HDMI 2/HDMI 3/HDMI 4",
+				"4 | NUMBER_BRIGHTNESS | NUMBER | Brightness | 0..200",
+				"5 | BOOL_POWERED_ON | BOOL | Powered On | True/False",
+				"6 | BOOL_ONLINE | BOOL | Online | True/False",
+			}, conditionals)
 		end)
 	end)
 
@@ -447,7 +645,9 @@ describe("Hue Sync Box driver (#534)", function()
 			box:hold_button()
 			c4.advance(1000)
 			assert.equal("Paired with Hue Sync Box (8K) " .. SHORT .. " at " .. F.ADDRESS, fake.last_action(env))
-			assert.equal("Video, high, brightness 100 % on Living Room TV", env.Properties["Status"])
+			-- Stage 4: a box that switches inputs by itself, Control4 routing in line.
+			assert.equal("Video, high, brightness 100 % on Living Room TV; Attention: the box switches inputs by "
+				.. "itself (see Input Switching)", env.Properties["Status"])
 			assert.equal("Online", env.Properties["Online"])
 			assert.equal("Living Room Sync Box", env.Properties["Sync Box"])
 			assert.equal("Hue Play HDMI Sync Box 8K (HSB2)", env.Properties["Model"])
@@ -457,15 +657,19 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.equal("Video, high, brightness 100 % on Living Room TV", env.Properties["Sync"])
 			assert.equal("1 Apple TV (on), 2 PlayStation, 3 HDMI 3, 4 HDMI 4", env.Properties["Inputs"])
 			assert.equal("Hue Bridge 001788fffe123abc, streaming", env.Properties["Bridge Link"])
-			assert.equal("By the box: HDMI CEC; auto-sync on HDMI 1", env.Properties["Input Switching"])
+			-- Stage 4: on Attention while Control4 routes through the box (S4 §7).
+			assert.equal("Attention: The box switches inputs by itself (HDMI CEC switching on HDMI 1, 2) while "
+				.. "Control4 routes through it: Control4 may show the wrong source (Sync Box Settings: Let Control4 "
+				.. "choose inputs)", env.Properties["Input Switching"])
 			-- The registration names the device (EC B3) and the app (C2).
 			local post = box:requests_of("POST", "/registrations")
 			assert.equal("c4-hue", post[#post].json.appName)
-			-- HELLO to the bound bridge with the box, its bridge and its area (C5).
+			-- HELLO to the bound bridge with the box, its bridge and its area (C5),
+			-- and its sync state once a read showed it (stage 4 §6).
 			local sent = to_bridge(c4)
 			assert.equal("HUE_SYNCBOX_HELLO", sent[#sent][1])
 			assert.same({ device_id = tostring(BOX_DEVICE), box_id = F.BOX_ID, bridge_id = F.BRIDGE_ID,
-				area_id = F.AREA.tv }, sent[#sent][2])
+				area_id = F.AREA.tv, syncing = "true" }, sent[#sent][2])
 			-- Polling: a read every 5 s while the box is on.
 			local reads = #box:requests_of("GET", "")
 			c4.advance(5000)
@@ -491,8 +695,10 @@ describe("Hue Sync Box driver (#534)", function()
 			end
 			local function start(persist, box_opts)
 				local env, c4 = fake.load_driver("hue_syncbox", {}, { device_id = BOX_DEVICE })
+				name_device("Living Room Sync Box")
 				strict(c4)
 				for k, v in pairs(persist) do c4.persist[k] = v end
+				box_opts.state = box_opts.state or quiet(F.state.HSB2)
 				local box = fake.syncbox(box_opts)
 				env.OnDriverInit("DIT_STARTUP")
 				env.OnDriverLateInit("DIT_STARTUP")
@@ -768,14 +974,14 @@ describe("Hue Sync Box driver (#534)", function()
 		end)
 
 		it("shows the stored outage at once while the box is still away after a restart", function()
-			local persist = { syncbox_offline_since = 1000000 - 10 * 60000 }
+			local persist = { syncbox_offline_since = NOON - 10 * 60000 }
 			for k, v in pairs(PAIRED) do persist[k] = v end
 			local env, c4 = load_box({ persist = persist, silent = true })
 			assert.truthy(env.Properties["Online"]:match("^Offline since %d+:%d%d$"), "at once")
 			c4.advance(60000)
 			assert.truthy(env.Properties["Online"]:match("^Offline since %d+:%d%d$"), env.Properties["Online"])
 			assert.truthy(env.Properties["Status"]:match("^Offline since "), env.Properties["Status"])
-			assert.equal(1000000 - 10 * 60000, c4.persist.syncbox_offline_since)
+			assert.equal(NOON - 10 * 60000, c4.persist.syncbox_offline_since)
 		end)
 	end)
 
@@ -827,7 +1033,7 @@ describe("Hue Sync Box driver (#534)", function()
 	end)
 
 	describe("the proxies (S3 §5; #483 D-7)", function()
-		it("logs every proxy command with every parameter, and answers a UI Button press Not done", function()
+		it("logs every proxy command with every parameter, and takes a UI Button press as its command", function()
 			local env, c4, box = paired(nil, { bind = true, debug = true })
 			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1001", OUTPUT = "2000", AUDIO = "False", VIDEO = "True",
 				PREV_DEV_LIST = "1201,1301" })
@@ -836,17 +1042,12 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.truthy(line:find("AUDIO=False INPUT=1001 OUTPUT=2000 PREV_DEV_LIST=1201,1301 VIDEO=True", 1, true), line)
 			assert.truthy(line:match(" at %d+ ms: "), line)
 			c4.advance(20000)
-			local requests, sent = #box.requests, #to_bridge(c4)
-			c4.calls = {}
-			for binding = 5002, 5005 do
-				env.Properties["Last Action"] = ""
-				env.ReceivedFromProxy(binding, "SELECT", { ["Device ID"] = "7", Menu = "watch" })
-				assert.equal(NOT_YET, fake.last_action(env), binding)
-			end
-			assert.same({}, c4.calls_to("SendToProxy"), "no notify")
-			assert.equal(requests, #box.requests, "nothing to the box")
-			assert.equal(sent, #to_bridge(c4), "nothing to the bridge")
+			assert.equal(100, ex(box).brightness)
+			env.ReceivedFromProxy(5003, "SELECT", { ["Device ID"] = "7", Menu = "watch" })
+			c4.advance(3000)
 			assert.truthy(logged("proxy 5003 SELECT at "))
+			assert.equal(110, ex(box).brightness, "Sync Brighter: +10 points")
+			assert.equal("Brightness 110 %", fake.last_action(env))
 		end)
 
 		it("takes each command only on its own binding, and notes the rest without a word", function()
@@ -863,7 +1064,7 @@ describe("Hue Sync Box driver (#534)", function()
 			env.ReceivedFromProxy(5001, "DO_PUSH", {})
 			c4.advance(10000)
 			assert.equal("", fake.last_action(env))
-			assert.same({}, c4.calls_to("SendToProxy"))
+			assert.same({}, to_av(c4))
 			assert.equal(before, #box:requests_of("PUT"), "nothing written to the box")
 			assert.truthy(logged("proxy 5002 SET_INPUT at "), "logged before it is dropped")
 		end)
@@ -898,7 +1099,9 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.equal(1, #notifies(c4, "ON"))
 			assert.same({ "input2", "game", true, true },
 				{ ex(box).hdmiSource, ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
-			assert.equal("Game, intense, brightness 100 % on Living Room TV", env.Properties["Status"])
+			-- The period's intensity and brightness come with the sync start (stage 4:
+			-- Day, High and 100 %, at the spec's noon).
+			assert.equal("Game, high, brightness 100 % on Living Room TV", env.Properties["Status"])
 			c4.advance(30000)
 			assert.equal(before + 1, #puts(box), "nothing more once confirmed")
 		end)
@@ -1103,7 +1306,7 @@ describe("Hue Sync Box driver (#534)", function()
 		end)
 
 		it("never confirms a change the box made by itself (C4)", function()
-			local env, c4, box = asleep()
+			local env, c4, box = asleep(nil, { switching = true })
 			box:event("cec_active_source", { input = "input2" })
 			c4.advance(12000)
 			assert.equal("input2", ex(box).hdmiSource)
@@ -1316,7 +1519,7 @@ describe("Hue Sync Box driver (#534)", function()
 				e.C4SystemEvents = { OnPIP = 6, OnItemNameChanged = 13 }
 				c.RegisterSystemEvent = function(_, id, device) registered[#registered + 1] = { id, device } end
 			end })
-			assert.same({ { 6, 0 } }, registered, "OnPIP only, for every device")
+			assert.same({ { 6, 0 }, { 13, 0 } }, registered, "OnPIP and (stage 4) OnItemNameChanged, for every device")
 			fake.add_room(8, "Kitchen")
 			fake.room_variables(8)[1000] = nil
 			c4.advance(5000)
@@ -1405,7 +1608,7 @@ describe("Hue Sync Box driver (#534)", function()
 			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
 			c4.advance(5000)
 			assert.equal(before, #puts(box))
-			assert.same({}, c4.calls_to("SendToProxy"), "nothing to the proxy in this wiring")
+			assert.same({}, to_av(c4), "nothing to the proxy in this wiring")
 		end)
 
 		it("keeps the picture at Room Off when At Room Off says so", function()
@@ -1672,6 +1875,23 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.equal(reads + 1, #box:requests_of("GET", ""), "a malformed hint is dropped")
 		end)
 
+		it("says its sync state after an AREA, and hello again when the bridge asks for it (stage 4 §6)", function()
+			local env, c4 = paired(nil, { bind = true })
+			c4.advance(2500)
+			c4.sent = {}
+			env.ExecuteCommand("HUE_SYNCBOX_AREA", { id = F.AREA.tv, status = "active", streamer = "other" })
+			c4.advance(2000)
+			local sent = to_bridge(c4)
+			assert.equal("HUE_SYNCBOX_STATE", sent[1] and sent[1][1])
+			assert.equal("true", sent[1][2].syncing)
+			c4.sent = {}
+			env.ExecuteCommand("HUE_SYNCBOX_ASK_HELLO", {})
+			sent = to_bridge(c4)
+			assert.equal(1, #sent)
+			assert.same({ "HUE_SYNCBOX_HELLO", { device_id = tostring(BOX_DEVICE), box_id = F.BOX_ID,
+				bridge_id = F.BRIDGE_ID, area_id = F.AREA.tv, syncing = "true" } }, sent[1])
+		end)
+
 		it("keeps working when unbound from the bridge (EC C20)", function()
 			local env, c4 = paired(nil, { bind = true })
 			c4:Unbind(BOX_DEVICE, 1)
@@ -1698,6 +1918,476 @@ describe("Hue Sync Box driver (#534)", function()
 
 	-- #547, docs/fakebox-design.md §7: a dev build pairs with the VM's fake box,
 	-- which serves HTTPS on 8443 and announces that port by mDNS.
+	-- Stage 4 (#568, docs/hdmi-sync-stage4-design.md, "S4"; contracts C1.4 to
+	-- C1.9; design 5.3 to 5.6, 7.3, 8): programming, the UI Buttons, the
+	-- periods, the offers, the area, the name and the take-over, through the
+	-- driver against the Lua fake box. The modules each have their own spec.
+
+	-- A driver variable's value now (C1.9).
+	local function var(c4, name)
+		return c4.variables[name] and c4.variables[name].value
+	end
+
+	-- The icons each button was sent, in order (ICON_CHANGED's icon).
+	local function icons(c4, binding)
+		local out = {}
+		for _, call in ipairs(c4.calls_to("SendToProxy")) do
+			if call[1] == binding and call[2] == "ICON_CHANGED" then out[#out + 1] = call[3].icon end
+		end
+		return out
+	end
+
+	-- The index of the first call named `name` whose first argument is `arg`.
+	local function call_at(c4, name, arg)
+		for i, call in ipairs(c4.calls) do
+			if call.name == name and call.args[1] == arg then return i end
+		end
+		return nil
+	end
+
+	local VIDEO_2 = { INPUT = "1001", OUTPUT = "2000", AUDIO = "False", VIDEO = "True" }
+	local VIDEO_1 = { INPUT = "1000", OUTPUT = "2000", AUDIO = "False", VIDEO = "True" }
+
+	describe("programming (S4 §1.1, §3; C1.6 to C1.9)", function()
+		it("adds the nine variables in C1.9's order in OnDriverInit, and takes the first read as a baseline", function()
+			local added
+			local env, c4 = paired(nil, { before_late = function(_, c) added = { unpack(c.variable_names) } end })
+			assert.same({ "SYNC_ACTIVE", "SYNC_MODE", "INTENSITY", "BRIGHTNESS", "HDMI_INPUT", "HDMI_INPUT_NAME",
+				"ENTERTAINMENT_AREA", "POWER", "ONLINE" }, added)
+			c4.advance(2000)
+			assert.same({ "1", "video", "high", "100", "1", "Apple TV", "Living Room TV", "on", "1" }, {
+				var(c4, "SYNC_ACTIVE"), var(c4, "SYNC_MODE"), var(c4, "INTENSITY"), var(c4, "BRIGHTNESS"),
+				var(c4, "HDMI_INPUT"), var(c4, "HDMI_INPUT_NAME"), var(c4, "ENTERTAINMENT_AREA"), var(c4, "POWER"),
+				var(c4, "ONLINE") })
+			assert.same({}, c4.events_fired, "no event for a value never known before (design 5.5)")
+			assert.is_nil(env.Properties["Last Action"]:find("Sync", 1, true))
+		end)
+
+		it("sets each variable before the event that reports its change, and fires none again at a restart",
+			function()
+			local env, c4, box = paired()
+			c4.advance(2000)
+			c4.calls = {}
+			env.ExecuteCommand("Stop Sync", {})
+			c4.advance(3000)
+			assert.is_false(ex(box).syncActive)
+			assert.equal("passthrough", ex(box).mode, "the picture kept")
+			assert.same({ 2, 3 }, c4.events_fired, "Sync Stopped, Sync Mode Changed")
+			assert.truthy(call_at(c4, "SetVariable", "SYNC_ACTIVE") < call_at(c4, "FireEventByID", 2))
+			assert.truthy(call_at(c4, "SetVariable", "SYNC_MODE") < call_at(c4, "FireEventByID", 3))
+			assert.equal("Sync stopped", fake.last_action(env))
+			-- A Director restart (the dev loop's reload): the variables come from
+			-- PersistData and nothing unchanged fires (C1.9).
+			c4.events_fired = {}
+			reload(env)
+			c4.advance(10000)
+			assert.same({}, c4.events_fired)
+			assert.equal("0", var(c4, "SYNC_ACTIVE"))
+			env.ExecuteCommand("Start Sync", {})
+			c4.advance(3000)
+			assert.is_true(ex(box).syncActive)
+			assert.same({ 1, 3 }, c4.events_fired, "Sync Started, Sync Mode Changed")
+		end)
+
+		it("runs the commands through the box's one queue: Apply Sync Settings as one PUT, the area by name",
+			function()
+			local env, c4, box = paired()
+			c4.advance(2000)
+			assert.same({ "Leave", "Living Room TV", "Office" }, env.GetCommandParamList("Apply Sync Settings", "Area"))
+			assert.same({ "Living Room TV", "Office" }, env.GetCommandParamList("Set Entertainment Area", "Area"))
+			assert.same({}, env.GetCommandParamList("Set Sync Mode", "Mode"))
+			local before = #puts(box)
+			c4.events_fired = {}
+			env.ExecuteCommand("Apply Sync Settings", { Mode = "Game", Intensity = "Subtle", Brightness = "150 %",
+				Area = "Office", Start = "Leave" })
+			c4.advance(3000)
+			assert.equal(before + 1, #puts(box), "one PUT (C1.6)")
+			local body = puts(box)[before + 1].json
+			assert.same({ "game", "subtle", 150, F.AREA.office },
+				{ body.mode, body.game and body.game.intensity, body.brightness, body.hueTarget })
+			assert.same({ "game", "subtle", 150, F.AREA.office },
+				{ ex(box).mode, ex(box).game.intensity, ex(box).brightness, ex(box).hueTarget })
+			assert.equal("Office", var(c4, "ENTERTAINMENT_AREA"))
+			assert.same({ 3, 4, 5, 7 }, c4.events_fired)
+			-- Set Entertainment Area by the name GetCommandParamList listed.
+			env.ExecuteCommand("Set Entertainment Area", { Area = "Living Room TV" })
+			c4.advance(3000)
+			assert.equal(F.AREA.tv, ex(box).hueTarget)
+			assert.equal("Entertainment area Living Room TV", fake.last_action(env))
+			env.ExecuteCommand("Set Entertainment Area", { Area = "Den" })
+			assert.truthy(fake.last_action(env):find("not done", 1, true), fake.last_action(env))
+			-- Select HDMI Input warns that the room does not follow it, and tells the
+			-- proxy nothing (C1.6, C4).
+			env.ExecuteCommand("Select HDMI Input", { Input = "HDMI 2" })
+			c4.advance(3000)
+			assert.equal("input2", ex(box).hdmiSource)
+			assert.truthy(fake.last_action(env):find("the Control4 room does not follow it", 1, true))
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.equal("2", var(c4, "HDMI_INPUT"))
+			assert.equal("PlayStation", var(c4, "HDMI_INPUT_NAME"))
+			-- Power Save and Wake.
+			c4.events_fired = {}
+			env.ExecuteCommand("Power Save", {})
+			c4.advance(3000)
+			assert.equal("powersave", ex(box).mode)
+			assert.equal("powersave", var(c4, "POWER"))
+			assert.truthy(table.concat(c4.events_fired, ","):find("10", 1, true))
+			env.ExecuteCommand("Wake", {})
+			c4.advance(3000)
+			assert.is_true(ex(box).hdmiActive)
+			assert.equal("on", var(c4, "POWER"))
+			assert.truthy(table.concat(c4.events_fired, ","):find("9", 1, true))
+		end)
+
+		it("answers the conditionals of C1.8 from the variables", function()
+			local env, c4 = paired()
+			c4.advance(2000)
+			assert.is_true(env.TestCondition("BOOL_SYNC_ACTIVE", { VALUE = "True" }))
+			assert.is_false(env.TestCondition("BOOL_SYNC_ACTIVE", { VALUE = "False" }))
+			assert.is_true(env.TestCondition("LIST_SYNC_MODE", { LOGIC = "EQUAL", VALUE = "Video" }))
+			assert.is_false(env.TestCondition("LIST_SYNC_MODE", { LOGIC = "EQUAL", VALUE = "Game" }))
+			assert.is_true(env.TestCondition("LIST_INTENSITY", { LOGIC = "EQUAL", VALUE = "High" }))
+			assert.is_true(env.TestCondition("LIST_HDMI_INPUT", { LOGIC = "EQUAL", VALUE = "HDMI 1" }))
+			assert.is_true(env.TestCondition("NUMBER_BRIGHTNESS", { LOGIC = "GREATER_THAN_OR_EQUAL", VALUE = "100" }))
+			assert.is_false(env.TestCondition("NUMBER_BRIGHTNESS", { LOGIC = "LESS_THAN", VALUE = "100" }))
+			assert.is_true(env.TestCondition("BOOL_POWERED_ON", { VALUE = "True" }))
+			assert.is_true(env.TestCondition("BOOL_ONLINE", { VALUE = "True" }))
+			assert.is_false(env.TestCondition("NOT_ONE_OF_OURS", {}))
+		end)
+
+		it("fires Offline after 5 minutes without an answer and Online when the box answers again", function()
+			local _, c4, box = paired()
+			c4.advance(2000)
+			c4.events_fired = {}
+			box:silence(true)
+			c4.advance(6 * 60000)
+			assert.equal("0", var(c4, "ONLINE"))
+			assert.same({ 12 }, c4.events_fired)
+			box:silence(false)
+			c4.advance(120000)
+			assert.equal("1", var(c4, "ONLINE"))
+			assert.same({ 12, 11 }, c4.events_fired)
+		end)
+	end)
+
+	describe("the UI Buttons (S4 §1.2; design 5.6; O7, O16)", function()
+		it("toggles sync, steps the brightness by 10 and the intensity by one, and shows the state in the icons",
+			function()
+			local env, c4, box = paired()
+			c4.advance(2000)
+			assert.equal("sync_on", icons(c4, 5002)[#icons(c4, 5002)])
+			assert.equal("intensity_high", icons(c4, 5005)[#icons(c4, 5005)])
+			c4.calls = {}
+			env.ReceivedFromProxy(5002, "SELECT", { ["Device ID"] = "7", Menu = "watch" })
+			c4.advance(3000)
+			assert.is_false(ex(box).syncActive)
+			assert.same({ "sync_off" }, icons(c4, 5002))
+			local params = c4.calls_to("SendToProxy")[1][3]
+			assert.same({ icon = "sync_off", icon_description = "Hue Sync is off" }, params)
+			env.ReceivedFromProxy(5002, "SELECT", {})
+			c4.advance(3000)
+			assert.is_true(ex(box).syncActive)
+			assert.same({ "sync_off", "sync_on" }, icons(c4, 5002))
+			env.ReceivedFromProxy(5005, "SELECT", {})
+			c4.advance(3000)
+			assert.equal("intense", ex(box).video.intensity)
+			env.ReceivedFromProxy(5005, "SELECT", {})
+			c4.advance(3000)
+			assert.equal("subtle", ex(box).video.intensity, "Intense to Subtle")
+			assert.same({ "intensity_intense", "intensity_subtle" }, icons(c4, 5005))
+			env.ReceivedFromProxy(5004, "SELECT", {})
+			env.ReceivedFromProxy(5004, "SELECT", {})
+			c4.advance(3000)
+			assert.equal(80, ex(box).brightness, "two Sync Dimmer presses: -20")
+			env.ReceivedFromProxy(5003, "SELECT", {})
+			c4.advance(3000)
+			assert.equal(90, ex(box).brightness)
+			assert.same({}, to_av(c4), "nothing to the AV switch")
+			-- A restart shows the last state at once, before the box answers.
+			c4.calls = {}
+			box:silence(true)
+			reload(env)
+			assert.same({ "sync_on" }, icons(c4, 5002))
+			assert.same({ "intensity_subtle" }, icons(c4, 5005))
+		end)
+	end)
+
+	describe("the periods (S4 §1.3, §4; design 5.3; C1.4)", function()
+		it("applies the period at sync start and at each boundary while syncing; a manual change holds until the "
+			.. "source changes", function()
+			local start = local_at(NOON, 17, 58)
+			local env, c4, box = asleep(nil, { now = start })
+			assert.equal("Day until 18:00. No location is set in the project: 19:00 stands in for sunset",
+				env.Properties["Periods"])
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			assert.same({ "game", "high", 100 }, { ex(box).mode, ex(box).game.intensity, ex(box).brightness },
+				"Day: High, 100 %")
+			env.ReceivedFromProxy(5003, "SELECT", {})
+			c4.advance(3000)
+			assert.equal(110, ex(box).brightness)
+			-- 18:00: Evening (an hour before the stand-in sunset): Moderate; the
+			-- brightness set by hand holds.
+			c4.advance(local_at(start, 18, 0) - c4.now_ms + 5000)
+			assert.same({ "moderate", 110 }, { ex(box).game.intensity, ex(box).brightness })
+			assert.equal("Evening: intensity moderate", fake.last_action(env))
+			assert.truthy(env.Properties["Periods"]:find("^Evening until 22:00; brightness set by hand"),
+				env.Properties["Periods"])
+			-- Another source ends the hold: Evening's 100 %.
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_1)
+			c4.advance(3000)
+			assert.same({ "input1", "video", "moderate", 100 },
+				{ ex(box).hdmiSource, ex(box).mode, ex(box).video.intensity, ex(box).brightness })
+			assert.truthy(env.Properties["Periods"]:find("^Evening until 22:00%."), env.Properties["Periods"])
+		end)
+
+		it("leaves a box that does not sync alone at a boundary, and says what it refused in a period row", function()
+			local start = local_at(NOON, 21, 59)
+			local env, c4, box = asleep(nil, { now = start })
+			local before = #puts(box)
+			c4.advance(3 * 60000)
+			assert.equal(before, #puts(box), "nothing written at 22:00 to a box in power save")
+			assert.truthy(env.Properties["Periods"]:find("^Night until 07:00"), env.Properties["Periods"])
+			set_property(env, "Day Starts", "7 o'clock")
+			assert.equal("Day Starts: \"7 o'clock\" is not a 24-hour time like 07:00; 07:00 is used",
+				fake.last_action(env))
+			set_property(env, "Night Starts", "23:30")
+			assert.truthy(env.Properties["Periods"]:find("^Evening until 23:30"), env.Properties["Periods"])
+		end)
+
+		it("gives Follow Room's sync starts on a receiver's second output the period's settings too", function()
+			local env, c4, box = asleep(F.state.HSB2_second_output, { now = local_at(NOON, 23, 0) })
+			local src = add_sources()
+			c4.advance(2000)
+			watch(src.ps5)
+			c4.advance(3000)
+			local body = puts(box)[1].json
+			assert.same({ "game", true, "subtle", 70 }, { body.mode, body.syncActive, body.game and body.game.intensity,
+				body.brightness })
+			assert.same({ "game", "subtle", 70 }, { ex(box).mode, ex(box).game.intensity, ex(box).brightness })
+			assert.truthy(env.Properties["Status"]:find("follows Living Room", 1, true))
+		end)
+
+		it("syncs at the Night settings a sync started at night", function()
+			local env, c4, box = asleep(nil, { now = local_at(NOON, 23, 0),
+				props = { ["Night Intensity"] = "Moderate", ["Night Brightness"] = "60" } })
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_1)
+			c4.advance(3000)
+			assert.same({ "video", "moderate", 60 }, { ex(box).mode, ex(box).video.intensity, ex(box).brightness })
+		end)
+	end)
+
+	describe("Sync Box Settings and Input Switching (S4 §1.4; design 5.4, O4, O18)", function()
+		it("puts the box's own input switching on Attention while Control4 routes through it, and turns it off and "
+			.. "back on only by a click", function()
+			local env, c4, box = paired(nil, { switching = true })
+			c4.advance(2000)
+			assert.truthy(env.Properties["Status"]:find("; Attention: the box switches inputs by itself (see Input "
+				.. "Switching)", 1, true), env.Properties["Status"])
+			assert.truthy(env.Properties["Input Switching"]:find("^Attention: The box switches inputs by itself"),
+				env.Properties["Input Switching"])
+			assert.same({}, box:requests_of("PUT", "/behavior"), "never by itself")
+			local list = env.SyncBoxSettingsList()
+			assert.equal("inputs:control4", list[1].value)
+			assert.truthy(list[1].text:find("^Let Control4 choose inputs"), list[1].text)
+			assert.equal("inputs:restore", list[2].value)
+			action(env, "Sync Box Settings", { What = "inputs:control4" })
+			c4.advance(3000)
+			assert.equal(1, #box:requests_of("PUT", "/behavior"))
+			local b = box.state.behavior
+			assert.same({ 0, 0, 0 }, { b.input1.cecInputSwitch, b.input2.cecInputSwitch, b.cecPowersave })
+			assert.is_nil(env.Properties["Status"]:find("Attention", 1, true), env.Properties["Status"])
+			assert.truthy(env.Properties["Input Switching"]:find("^None: turned off from Control4"),
+				env.Properties["Input Switching"])
+			action(env, "Sync Box Settings", { What = "inputs:restore" })
+			c4.advance(3000)
+			assert.same({ 1, 1, 1 }, { b.input1.cecInputSwitch, b.input2.cecInputSwitch, b.cecPowersave })
+			assert.truthy(env.Properties["Status"]:find("Attention", 1, true))
+		end)
+
+		it("puts nothing on Attention on a receiver's second output, and asks for a pick or a pairing first",
+			function()
+			local env, c4 = paired(F.state.HSB2_second_output, { switching = true })
+			c4.advance(2000)
+			assert.is_nil(env.Properties["Status"]:find("Attention", 1, true), env.Properties["Status"])
+			action(env, "Sync Box Settings", {})
+			assert.truthy(fake.last_action(env):find("^Sync Box Settings: pick one under What"), fake.last_action(env))
+			local env2 = load_box()
+			action(env2, "Sync Box Settings", { What = "inputs:control4" })
+			assert.equal("Sync Box Settings: not paired; run Pair Sync Box first", fake.last_action(env2))
+		end)
+	end)
+
+	describe("the Entertainment Area (S4 §1.5; contracts C1.4; design 8)", function()
+		it("lists the box's areas by name and writes hueTarget on a pick, firing Entertainment Area Changed",
+			function()
+			local env, c4, box = paired()
+			c4.advance(2000)
+			assert.equal("Living Room TV,Office", c4.property_lists["Entertainment Area"])
+			assert.equal("Living Room TV", env.Properties["Entertainment Area"])
+			c4.events_fired = {}
+			set_property(env, "Entertainment Area", "Office")
+			c4.advance(3000)
+			assert.equal(F.AREA.office, ex(box).hueTarget)
+			assert.equal("Office", var(c4, "ENTERTAINMENT_AREA"))
+			assert.same({ 7 }, c4.events_fired)
+			assert.equal("Office", env.Properties["Entertainment Area"])
+			assert.truthy(fake.last_action(env):find("Office", 1, true), fake.last_action(env))
+		end)
+
+		it("says an area deleted in Hue, and offers its same-name successor without picking it (design 8)",
+			function()
+			local s = quiet(F.state.HSB2)
+			local env, c4, box = paired(s)
+			c4.advance(2000)
+			local groups = box.state.hue.groups
+			local old = groups[F.AREA.tv]
+			groups[F.AREA.tv] = nil
+			c4.advance(6000)
+			assert.truthy(env.Properties["Status"]:find("deleted in Hue", 1, true), env.Properties["Status"])
+			local new_id = "6a7b8c9d-0000-4000-8000-0000000ea003"
+			groups[new_id] = old
+			local before = #puts(box)
+			c4.advance(6000)
+			assert.truthy(fake.last_action(env):find("on the bridge again", 1, true), fake.last_action(env))
+			c4.advance(60000)
+			assert.equal(before, #puts(box), "never picked by itself")
+			assert.equal(F.AREA.tv, ex(box).hueTarget)
+		end)
+	end)
+
+	describe("the box's name, both ways (S4 §1.7; O14; design 8)", function()
+		it("renames the box after a rename in Composer, and the device after a rename in the Hue Sync app",
+			function()
+			local env, c4, box = paired()
+			c4.advance(2000)
+			assert.same({}, box:requests_of("PUT", "/device"), "names that agree pair silently")
+			-- Composer: the AV switch proxy renamed, then OnItemNameChanged.
+			name_device("Den TV Sync")
+			env.OnSystemEvent('<event name="OnItemNameChanged"><iditem>' .. tostring(proxy_of_box()) .. "</iditem></event>")
+			c4.advance(3000)
+			local put = box:requests_of("PUT", "/device")
+			assert.equal(1, #put)
+			assert.equal("Den TV Sync", put[1].json.name)
+			assert.equal("Den TV Sync", box.state.device.name)
+			-- The Hue Sync app: the box renamed, the device follows.
+			c4.advance(15000)
+			box:event("rename", { name = "Basement Sync" })
+			c4.advance(8000)
+			assert.same({ id = proxy_of_box(), name = "Basement Sync" }, c4.renamed[#c4.renamed])
+			assert.equal(1, #box:requests_of("PUT", "/device"), "the echo is not answered")
+		end)
+	end)
+
+	describe("the names at the first look (S4 §1.7; names-sync N19, N20)", function()
+		it("keeps Pair Sync Box's result in Last Action, puts names that differ on Attention, and renames only on "
+			.. "a click", function()
+			local env, c4, box = load_box({ name = "Hue Sync Box", box = { state = quiet(F.state.HSB2) } })
+			pair(env, c4, box)
+			c4.advance(3000)
+			assert.equal("Paired with Hue Sync Box (8K) " .. SHORT .. " at " .. F.ADDRESS, fake.last_action(env))
+			assert.truthy(env.Properties["Status"]:find("Attention: The box (Living Room Sync Box) and this device "
+				.. "(Hue Sync Box) have different names", 1, true), env.Properties["Status"])
+			assert.same({}, c4.renamed)
+			assert.same({}, box:requests_of("PUT", "/device"))
+			local values = {}
+			for _, item in ipairs(env.SyncBoxSettingsList()) do values[#values + 1] = item.value end
+			assert.same({ "inputs:control4", "inputs:restore" }, { values[1], values[2] })
+			assert.same({ "name:to_box", "name:to_device" }, { values[#values - 1], values[#values] },
+				"the names' choices after the offers'")
+			action(env, "Sync Box Settings", { What = "name:to_device" })
+			c4.advance(3000)
+			assert.same({ id = proxy_of_box(), name = "Living Room Sync Box" }, c4.renamed[#c4.renamed])
+			assert.is_nil(env.Properties["Status"]:find("Attention", 1, true), env.Properties["Status"])
+		end)
+	end)
+
+	describe("the take-over (S4 §1.6; O12; design 7.3; C5 STOP_AREA)", function()
+		-- A box asleep and busy (another app streams to its area), bound to the bridge.
+		local function busy_box()
+			local env, c4, box = asleep(nil, { bind = true })
+			box:event("bridge", { state = "busy" })
+			c4.advance(6000)
+			return env, c4, box
+		end
+
+		local function stop_areas(c4)
+			local out = {}
+			for _, m in ipairs(to_bridge(c4)) do
+				if m[1] == "HUE_SYNCBOX_STOP_AREA" then out[#out + 1] = m[2] end
+			end
+			return out
+		end
+
+		it("asks the bridge to stop another app's stream on code 16, then syncs and fires Sync Taken Over", function()
+			local env, c4, box = busy_box()
+			c4.events_fired = {}
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(1000)
+			local asked = stop_areas(c4)
+			assert.equal(1, #asked)
+			assert.same({ device_id = tostring(BOX_DEVICE), box_id = F.BOX_ID, bridge_id = F.BRIDGE_ID,
+				area_id = F.AREA.tv }, asked[1])
+			assert.equal("input2", ex(box).hdmiSource, "the picture switched meanwhile")
+			assert.is_false(ex(box).syncActive)
+			-- The bridge stops the stream with its own key and answers.
+			box:event("bridge", { state = "connected" })
+			env.ExecuteCommand("HUE_SYNCBOX_STOPPED", { area_id = F.AREA.tv, ok = "true", reason = "stopped" })
+			c4.advance(6000)
+			assert.same({ "game", true }, { ex(box).mode, ex(box).syncActive })
+			assert.equal("Sync taken over: Hue Sync Box (8K) #4E5F took Living Room TV over from another app's sync",
+				fake.last_action(env))
+			local fired = table.concat(c4.events_fired, ",")
+			assert.truthy(fired:find("1,.*8"), fired)
+			assert.equal(1, #stop_areas(c4), "asked once")
+		end)
+
+		it("takes nothing from another box of this project (W10) and says which box streams", function()
+			local env, c4, box = busy_box()
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(1000)
+			assert.equal(1, #stop_areas(c4))
+			env.ExecuteCommand("HUE_SYNCBOX_STOPPED", { area_id = F.AREA.tv, ok = "false", reason = "another_box",
+				by = "Den Sync Box" })
+			c4.advance(30000)
+			assert.equal("Not syncing: Den Sync Box syncs to Living Room TV, and two sync boxes of this project never "
+				.. "take a stream from each other", fake.last_action(env))
+			assert.is_false(ex(box).syncActive)
+			assert.same({ 9, 6 }, c4.events_fired, "Powered On and HDMI Input Changed (the picture switched); no Sync "
+				.. "Started, no Sync Taken Over")
+		end)
+
+		it("says why when the bridge does not stop the stream, or does not answer", function()
+			local env, c4 = busy_box()
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(1000)
+			env.ExecuteCommand("HUE_SYNCBOX_STOPPED", { area_id = F.AREA.tv, ok = "false", reason = "failed",
+				detail = "HTTP 503" })
+			assert.equal("Not syncing: the Hue Bridge could not stop the other app's stream (HTTP 503)",
+				fake.last_action(env))
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_1)
+			c4.advance(25000)
+			assert.equal("Not syncing: the Hue Bridge did not answer the request to stop the other app's stream",
+				fake.last_action(env))
+		end)
+
+		it("gives up when the box is still busy after the bridge stopped the stream", function()
+			local env, c4, box = busy_box()
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(1000)
+			env.ExecuteCommand("HUE_SYNCBOX_STOPPED", { area_id = F.AREA.tv, ok = "true", reason = "stopped" })
+			c4.advance(10000)
+			assert.equal("Not syncing: the box was still busy after the Hue Bridge stopped the other app's stream",
+				fake.last_action(env))
+			assert.is_false(ex(box).syncActive)
+			c4.advance(30000)
+			assert.equal(1, #stop_areas(c4), "no loop")
+		end)
+	end)
+
 	describe("a dev build's syncbox/devhooks.lua (#547)", function()
 		local FAKE = F.ADDRESS .. ":8443"
 		local blocked
@@ -1735,9 +2425,12 @@ describe("Hue Sync Box driver (#534)", function()
 		local function start(opts)
 			opts = opts or {}
 			local env, c4 = fake.load_driver("hue_syncbox", {}, { device_id = BOX_DEVICE })
+			name_device("Living Room Sync Box")
 			for k, v in pairs(opts.persist or {}) do c4.persist[k] = v end
 			local urls = box_on_8443(c4)
-			local box = fake.syncbox(opts.box or {})
+			local box_opts = opts.box or {}
+			box_opts.state = box_opts.state or quiet(F.state.HSB2)
+			local box = fake.syncbox(box_opts)
 			env.OnDriverInit("DIT_STARTUP")
 			env.OnDriverLateInit("DIT_STARTUP")
 			return env, c4, box, urls
