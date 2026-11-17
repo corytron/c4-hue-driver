@@ -7,8 +7,26 @@ keep their history too; where they and this page disagree about the
 present, this page and the code win. Brought up to date on 2026-11-13
 (#478).
 
-## Now (2026-11-16)
+## Now (2026-11-17)
 
+- **2.0 "Luthen" beta 3, build 719** (2026-11-17): stages 3 and 4 of #514
+  on top of beta 2. Stage 3 (#557, PR #558): routing through the box in
+  every wiring (in line, behind a receiver, a receiver's second output with
+  Follow Room). Stage 4 (#568, PR #569): programming (13 commands, 12
+  events, 7 conditionals, 9 variables), the four Watch-menu buttons with
+  their icons, Day/Evening/Night with the sunset computed on the controller,
+  the input-switching and wiring offers, the entertainment area, the box's
+  name both ways, and the take-over of another app's stream. It is the
+  house's desired state; its install changes the box driver's capabilities
+  (the buttons' icons), so **the owner reboots the controller from System
+  Manager** after it. The house runs dev 704 (stage 3) until then, with the
+  box device paired to the VM's fake box.
+- **Testing without a box** (#547, PRs #548 and #561): a Lua and a Python
+  fake held to one behaviour (85 rules, 200 scenarios), an end-to-end run in
+  CI (871 checks), dev builds that pair with the fake from the house, and a
+  real-box conformance probe that leaves the owner 5 hands-on steps
+  (`docs/syncbox-behaviour.md` §16). Stage 3's house probes P9 and P10 ran
+  against the fake (#557).
 - **2.0 beta stage 2 (#534, PR #535): the Hue Sync Box driver**, the fifth
   package `hue_syncbox.c4z` (`docs/hdmi-sync-stage2-design.md`): pairing
   with the box's button, the box's identity over its own pinned root,
