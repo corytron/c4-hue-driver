@@ -336,6 +336,9 @@ end
 
 -- A write that ended without ok: Last Action for what the owner should
 -- read, the log for the rest.
+-- The input's and the sync's "not landed" answers of one route arrive within this window.
+av.FAILURE_PAIR_MS = 1000
+
 function A:_failed(kind, why, detail)
 	if why == nil or why == queue.SUPERSEDED or why == queue.CANCELLED then
 		self.log.debug("av: a %s write ended: %s", kind, tostring(why))
@@ -357,6 +360,16 @@ function A:_failed(kind, why, detail)
 	-- A PUT the box refused, or never sent, ends the input's and the sync's
 	-- writes together: the input's text says it once.
 	if kind == "sync" and why ~= queue.BUSY and why ~= queue.NOT_LANDED then
+		self.log.info("av: %s: %s", t.no, words)
+		return
+	end
+	-- When the input did not land either, its text is the one that matters
+	-- (contracts C4): the sync's own failure stays in the log (#557, M4).
+	local now = self.now and self.now() or 0
+	if kind == "input" and why == queue.NOT_LANDED then
+		self.input_not_landed_at = now
+	elseif kind == "sync" and why == queue.NOT_LANDED and self.input_not_landed_at
+		and now - self.input_not_landed_at <= av.FAILURE_PAIR_MS then
 		self.log.info("av: %s: %s", t.no, words)
 		return
 	end
