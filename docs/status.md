@@ -9,7 +9,7 @@ present, this page and the code win. Brought up to date on 2026-11-13
 
 ## Now (2026-11-17)
 
-- **2.0 "Luthen" beta 3, build 719** (2026-11-17): stages 3 and 4 of #514
+- **2.0 "Luthen" beta 4, build 723** (2026-11-17; beta 3, build 719, plus the probe fixes of PR #580): stages 3 and 4 of #514
   on top of beta 2. Stage 3 (#557, PR #558): routing through the box in
   every wiring (in line, behind a receiver, a receiver's second output with
   Follow Room). Stage 4 (#568, PR #569): programming (13 commands, 12
