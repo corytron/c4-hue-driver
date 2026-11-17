@@ -197,6 +197,10 @@
         {"do": "PUT", "path": "/execution", "raw": "{\"brightness\": 5", "expect": {"status": 400, "code": 12, "has": ["code", "message"], "state": {"execution.brightness": 100}}}
       ]
     },
+    {"id": "SC-REQ-9a", "title": "a PUT with no body at all", "rules": ["SB17"], "model": "HSB2", "setup": "paired", "assumed": false,
+      "steps": [{"do": "PUT", "path": "/execution", "raw": "", "expect": {"status": 400, "code": 13}}]},
+    {"id": "SC-REQ-9b", "title": "a PUT whose body is an empty array (how C4:JsonEncode writes an empty table)", "rules": ["SB17"], "model": "HSB2", "setup": "paired", "assumed": false,
+      "steps": [{"do": "PUT", "path": "/execution", "raw": "[]", "expect": {"status": 400, "code": 13}}]},
     {
       "id": "SC-REQ-9",
       "title": "an empty PUT",
