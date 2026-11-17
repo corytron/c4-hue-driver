@@ -68,7 +68,7 @@ jobs:
       # installs it) and fails when a function nears Lua 5.1's limits of 200
       # locals or 60 upvalues (docs/driver-locals-design.md).
       - name: Lint, test and check the Lua limits (luacheck, busted, luac5.1)
-        run: tools/check.sh --strict --only lua-lint lua-test lua-limits
+        run: tools/check.sh --strict --only lua-lint lua-test lua-limits e2e
 
   # The name is a required status check on main, so it keeps its words; the
   # job builds and checks one package per src/<driver>/driver.xml, however many.

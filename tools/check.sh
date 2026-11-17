@@ -17,6 +17,8 @@
 #   lua-limits   python3 tools/lua_limits.py: no function of a Lua file under src/ has more
 #                than 180 locals or 50 upvalues (luac5.1 -p -l -l; Lua 5.1 stops at 200 and 60;
 #                docs/driver-locals-design.md)
+#   e2e          tools/e2e_syncbox.sh: the box driver's Lua against the Python fake box
+#                over real HTTPS through curl, on loopback only (#547)
 #   shell        shellcheck -S style tools/*.sh (and setup-vm.sh if present)
 #   python-lint  ruff check tools; ruff format --check tools
 #   python-test  python3 -B -m unittest discover -s tools/tests, one process a test module
@@ -55,7 +57,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.local/bin:$PATH"
 
-ALL_CHECKS=(lua-lint lua-test lua-limits shell python-lint python-test xml powershell workflows secrets house changelog links doc-tabs)
+ALL_CHECKS=(lua-lint lua-test lua-limits e2e shell python-lint python-test xml powershell workflows secrets house changelog links doc-tabs)
 
 usage() {
 	echo "usage: tools/check.sh [--strict] [--only <name>...]" >&2
@@ -69,6 +71,7 @@ tools_for() {
 		lua-lint) echo luacheck python3 ;;
 		lua-test) echo busted python3 ;;
 		lua-limits) echo luac5.1 python3 ;;
+		e2e) echo lua5.1 python3 curl openssl ;;
 		shell) echo shellcheck ;;
 		python-lint) echo ruff ;;
 		python-test | xml | house | changelog | doc-tabs) echo python3 ;;
@@ -96,6 +99,10 @@ check_lua_test() {
 
 check_lua_limits() {
 	run python3 -I tools/lua_limits.py
+}
+
+check_e2e() {
+	run tools/e2e_syncbox.sh
 }
 
 check_shell() {
