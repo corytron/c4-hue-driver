@@ -1,0 +1,209 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<title>Hue Sync Box device - documentation</title>
+<style type="text/css">
+body { font-family: "Segoe UI", Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.45; color: #222; background: #fff; margin: 16px 24px; max-width: 900px; }
+h1 { font-size: 22px; margin: 0 0 4px 0; }
+h2 { font-size: 17px; margin: 26px 0 8px 0; padding-bottom: 3px; border-bottom: 1px solid #c8c8c8; }
+h3 { font-size: 15px; margin: 18px 0 6px 0; }
+p { margin: 8px 0; }
+ul, ol { margin: 6px 0 10px 0; }
+li { margin: 3px 0; }
+table { border-collapse: collapse; margin: 10px 0 16px 0; }
+th, td { border: 1px solid #b8b8b8; padding: 4px 8px; vertical-align: top; text-align: left; }
+th { background: #ececec; }
+code { font-family: Consolas, "Courier New", monospace; font-size: 13px; background: #f2f2f2; padding: 0 3px; }
+.note { background: #f6f6ea; border: 1px solid #d8d8c0; padding: 6px 10px; margin: 10px 0; }
+.subtitle { color: #555; margin: 0 0 14px 0; }
+.toc li { margin: 2px 0; }
+.caption { font-size: 12px; color: #555; margin: 18px 0 0 0; }
+</style>
+</head>
+<body>
+
+<h1>Hue Sync Box device</h1>
+<p class="subtitle">One Philips Hue Play HDMI Sync Box as a Control4 HDMI switch. <b>Beta:</b> in this 2.0 beta the device pairs with the box and shows its state; it does not control the box yet. The Hue Bridge device's <b>Documentation</b> tab is the manual of the other Hue drivers.</p>
+
+<h3>Contents</h3>
+<ol class="toc">
+<li><a href="#about">What this device is, and what this beta does</a></li>
+<li><a href="#needs">What you need</a></li>
+<li><a href="#setup">Adding and pairing</a></li>
+<li><a href="#wiring">The three wirings, and the connections for each</a></li>
+<li><a href="#bridge">The connection to the Hue Bridge</a></li>
+<li><a href="#everyday">How the device keeps up with the box</a></li>
+<li><a href="#properties">Properties</a></li>
+<li><a href="#actions">Actions</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#changelog">Changelog</a></li>
+</ol>
+
+<!-- Picture to add once a box has been paired on the house (#534): the Properties page of a paired Hue Sync Box device, with example names. -->
+
+<h2 id="about">1. What this device is, and what this beta does</h2>
+<p>A <b>Hue Sync Box</b> device stands for one Hue Play HDMI Sync Box: the box that sits between your sources (an Apple TV, a game console, a set-top box) and the TV or receiver, passes the picture through, and makes the Hue lamps of an <i>entertainment area</i> follow the picture or the music. In Control4 the box is an HDMI switch, with four HDMI inputs and one HDMI output, placed in the TV's room.</p>
+<p>The device talks to the box directly over your home network, using the box's own local interface. It does not go through the Hue bridge, so it keeps working while the bridge is away. Nothing goes through the internet.</p>
+
+<h3>What this beta does</h3>
+<ul>
+<li><b>Pairs with one box</b> (<b>Pair Sync Box</b>, then a hand on the box's button), and checks at every start that the box at the address is the paired one before it sends anything that carries the pairing (section 3).</li>
+<li><b>Shows the box's state</b> on its Properties page: its name, model, firmware, id and address; whether and how it syncs, and to which entertainment area; its inputs; its link to the Hue bridge; what it switches by itself; and how it is wired (section 7).</li>
+<li><b>Goes offline and comes back</b> as the other Hue devices do: after 5 minutes without an answer from the box, and at its first answer (section 6).</li>
+<li><b>Works with the Hue Bridge device</b> when connected to it: the bridge tells it when a sync starts or stops, and names it on its own rows and in the Status of the lights whose lamps sync (section 5).</li>
+<li><b>Writes to the box only to register and to unregister.</b> It changes nothing else on the box: not the input, not the sync, not a setting.</li>
+</ul>
+
+<h3>What comes in later 2.0 betas</h3>
+<p>As planned for 2.0; details may still change before the release:</p>
+<ul>
+<li><b>Routing.</b> Control4 picks the box's input whenever someone watches a source through it, wakes the box with the room and puts it to power save at Room Off. Until then a command Control4 sends the box (a source picked in Watch, Room Off, a press of one of the device's buttons) changes nothing, and <b>Last Action</b> reads <code>Not done: routing through the box comes in a later 2.0 beta</code>. The box keeps choosing its input by itself, as set up in the Hue app (section 4).</li>
+<li><b>Syncing with the source.</b> Video for a film source, game mode for a console, music for an audio-only source, with intensity and brightness that follow the time of day and can be changed by hand.</li>
+<li><b>Programming and Navigators.</b> Commands, events, conditionals and variables, and four buttons for a room's Watch menu: <b>Hue Sync</b>, <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b>.</li>
+<li><b>Settings and offers.</b> The entertainment area chosen from Control4, the box's name kept the same on both sides, and one reversible click each to hand the choice of input to Control4 or to change the wiring setting. The driver never changes these by itself.</li>
+</ul>
+<p>The device already has its whole Composer frame: the HDMI switch, the four buttons above and every connection. They are fixed from this first beta on, so the later betas add what they do without your deleting and adding the device again or making its connections again.</p>
+
+<h2 id="needs">2. What you need</h2>
+<ul>
+<li><b>A sync box linked to a Hue bridge.</b> Supported: the original Hue Play HDMI Sync Box (four inputs; Signify now also calls it "4K"), the Hue Play HDMI Sync Box 8K (four inputs) and the Hue Play HDMI Sync Box 4K of 2026 (one input), each set up in the Hue app and linked to a Hue bridge with an entertainment area. The driver tells the models apart by the type the box reports (HSB1, HSB2, HSB3), never by the name on the packaging. Not supported: the 2026 4K box running without a bridge (its standalone mode), and the Hue Play Screen Sync camera.</li>
+<li><b>The box on the same network as the controller</b>, preferably with a fixed address: a DHCP reservation in your router. The box connects over Wi-Fi. The controller reaches it over HTTPS on port 443; no internet access and no Hue account are involved.</li>
+<li><b>Control4 OS 3.3.0 or newer</b> and Composer Pro, as for the other Hue drivers.</li>
+<li><b>The driver file</b> <code>hue_syncbox.c4z</code>, from the same release as the other Hue drivers, installed with them through <b>Driver</b> &raquo; <b>Add or Update Driver or Agent&hellip;</b>. Updates go the same way and keep the pairing; never delete and re-add the device to update it (section 3, "Forget Pairing and deleting the device").</li>
+<li><b>The Hue Bridge device</b> is optional for the box device, but recommended (section 5).</li>
+</ul>
+<p>This page says "the Hue app" for the app that set up the box: the Hue app, or the older Hue Sync app. The device's own texts say "Hue Sync app".</p>
+
+<h2 id="setup">3. Adding and pairing</h2>
+<ol>
+<li><b>Add the device.</b> In <b>System Design</b>, select the TV's room. In the <b>Items</b> pane, open the <b>Search</b> tab and type <code>Hue Sync Box</code>. Pick the <b>Hue Sync Box</b> by manufacturer Philips Hue with the model text <code>Hue Play HDMI Sync Box (local API)</code> (the search may find other drivers for the box too) and double-click it. One device per box. The Hue Bridge never adds a box device: its <b>Add From Hue</b> and <b>Import All New</b> do not list boxes.</li>
+<li><b>Status</b> reads <code>Not paired: run Pair Sync Box</code>. The device looks for sync boxes on the local network as soon as it is added, and then every hour until it is paired; once it found one, Status reads, for example, <code>Not paired: 1 Hue sync box found (run Pair Sync Box)</code>.</li>
+<li><b>Run Pair Sync Box</b> on the <b>Actions</b> tab. Under <b>Box</b>, pick the box from the boxes found, or pick <code>Type an address</code> and enter the box's address under <b>Address</b> (the Hue app shows it in the box's network information). If the list holds no box yet, the device searches again: open the action again a few seconds later, or type the address. Click <b>OK</b>.</li>
+<li><b>The device checks the box first.</b> Before it asks for a pairing, it makes sure the address answers over HTTPS with a certificate from the sync boxes' own root certificate, which ships with the driver, and that the box reports its id. Then the pairing window opens for 2 minutes: <b>Status</b> reads <code>Hold the button on the sync box for 3 seconds (1:58 left)</code>, counting down every 10 seconds, and <b>Last Action</b> says the same once.</li>
+<li><b>Hold the button on the box</b> for about 3 seconds, until its light blinks green. The box should be on and not syncing while you pair it.</li>
+<li><b>Paired.</b> <b>Last Action</b> reads, for example, <code>Paired with Hue Sync Box (8K) #4E5F at 10.0.2.150</code> (<code>#4E5F</code> being the last four characters of its <b>Box ID</b>). The rows fill in, the device starts reading the box, and, when the device is connected to the Hue Bridge, it tells the bridge (section 5).</li>
+</ol>
+<p>The box registers the pairing under the app name <code>c4-hue</code> and this device's Composer name (its first 32 characters). The device keeps the box's pairing key encrypted on the controller and never shows it: not in a property, not in the Lua output, not in <b>Last Action</b>.</p>
+
+<h3>When pairing does not work</h3>
+<p><b>Last Action</b> says why, in words. The reasons:</p>
+<table>
+<tr><th>Reason</th><th>What to do</th></tr>
+<tr><td>The 2 minutes passed without the button.</td><td>Run <b>Pair Sync Box</b> again and hold the button within the 2 minutes.</td></tr>
+<tr><td>Nothing answers at the address over HTTPS.</td><td>Check the address, that the box has power and is on the network (the Hue app shows it), and that the controller can reach it (another VLAN, a firewall).</td></tr>
+<tr><td>Something answers, but it is not a sync box.</td><td>The address belongs to another device. Find the box's address in the Hue app.</td></tr>
+<tr><td>It is a Hue Play Screen Sync camera.</td><td>Not supported.</td></tr>
+<tr><td>Another box than the paired one answers (when pairing again).</td><td>The device pairs again only with the box it was paired with. To pair it with another box, run <b>Forget Pairing</b> first.</td></tr>
+<tr><td>The controller's certificate check could not be confirmed.</td><td>Before anything that carries the pairing is sent, the device checks that the controller really applies the driver's certificates, as the Hue Bridge does (the bridge's manual, chapter 12, "The TLS check"). If the controller accepts a certificate it should refuse, nothing that carries the pairing is sent; report it, with the controller's OS version. If the check got no answer, try again.</td></tr>
+<tr><td>The box refused the registration with another error.</td><td><b>Last Action</b> keeps the box's own text. Make sure the box is on and not syncing, then try again.</td></tr>
+</table>
+<p>A box of a type the driver does not know yet is paired all the same, with a warning; its rows show what the box reports.</p>
+
+<h3>At every start</h3>
+<p>At every start of the driver (an update, a Director restart, a controller reboot), the device checks the box at its address again before anything that carries the pairing is sent: the certificate, the controller's certificate check and the box's id. If another device answers at that address, <b>Status</b> reads <code>Another device answers at 10.0.2.150 (expected #4E5F); Pair Sync Box to find it</code>, nothing that carries the pairing is sent there, and the device searches the local network for the paired box. When it finds the box at a new address, and the box proves its id there, the device follows it and <b>Last Action</b> says so.</p>
+
+<h3 id="forget">Forget Pairing and deleting the device</h3>
+<p><b>Forget Pairing</b>, with <b>Confirm</b> set to <code>Yes</code>, removes this controller's registration from the box, clears the pairing on the device and stops reading the box. The rows clear, except <b>Box Address</b>, and the device tells the Hue Bridge it is gone (when it is connected to it, section 5). If the box does not answer, the pairing is cleared on the device all the same, and <b>Last Action</b> says the registration stays on the box until it is removed in the Hue app. Any other <b>Confirm</b> changes nothing.</p>
+<p>Deleting the device in Composer does not remove the registration from the box: run <b>Forget Pairing</b> first. A box that was reset to its factory settings keeps its id but forgets every pairing: run <b>Pair Sync Box</b> again and hold the button.</p>
+
+<h2 id="wiring">4. The three wirings, and the connections for each</h2>
+<p>A sync box can be wired in three ways, and the box has a setting for each (made in the Hue app). The device reads that setting and shows it on its <b>Wiring</b> row. Make the HDMI connections in Composer's <b>Connections</b> view to match the cables. The box device has four HDMI inputs, <b>HDMI 1</b> to <b>HDMI 4</b>, and one output, <b>HDMI Out</b>, each with a video and an audio connection; connect both alike.</p>
+<table>
+<tr><th>Wiring</th><th>Cables</th><th>The box's setting, and its Wiring row</th><th>Connections in Composer</th></tr>
+<tr><td><b>In line</b></td><td>Sources &rarr; box &rarr; TV or receiver</td><td>Neither ARC bypass nor solo mode: <code>In line (sources &rarr; box &rarr; TV or receiver)</code></td><td>Each source's HDMI output to one of the box's inputs, <b>HDMI 1</b> to <b>HDMI 4</b>, as cabled; the box's <b>HDMI Out</b> to the receiver or the TV.</td></tr>
+<tr><td><b>Behind a receiver</b></td><td>Sources &rarr; receiver &rarr; box &rarr; TV</td><td>ARC bypass on: <code>Behind a receiver (ARC bypass on)</code></td><td>The sources to the receiver as usual; the receiver's HDMI output to the box's <b>HDMI 1</b>; the box's <b>HDMI Out</b> to the TV.</td></tr>
+<tr><td><b>From a receiver's second output</b></td><td>Sources &rarr; receiver &rarr; TV, and the receiver's second HDMI output &rarr; box, with nothing on the box's output</td><td>Solo mode on: <code>From a receiver's second output (solo mode)</code></td><td>The sources, the receiver and the TV as usual, without the box. Connect nothing to the box's <b>HDMI Out</b>, so that Control4 never routes a source through the box.</td></tr>
+</table>
+<ul>
+<li><b>The setting is the box's.</b> The driver reads it and never changes it by itself. Change it in the Hue app; the <b>Wiring</b> row follows at the next read. A later 2.0 beta offers to change it with one reversible click.</li>
+<li><b>A one-input box</b> (the 4K box of 2026) shows four inputs in Composer too, as every model does; connect only <b>HDMI 1</b>.</li>
+<li><b>No HDMI CEC.</b> The driver relies on nothing the box learns over HDMI CEC: Control4 is meant to run the power, the signal path and the volume. The box's own CEC and hot-plug behaviour is shown on the <b>Input Switching</b> row.</li>
+<li><b>In this beta</b> the connections change nothing yet: the device does not switch the box. With the box in line, picking a source in Watch makes Control4 send the box that source's input, which the device answers with <code>Not done: routing through the box comes in a later 2.0 beta</code> in <b>Last Action</b>; the box shows whichever input it chose by itself, by HDMI CEC or hot-plug as set in the Hue app. Behind a receiver every source arrives on <b>HDMI 1</b>, and from a second output the box is in no path Control4 builds, so in those two wirings nothing is missing meanwhile.</li>
+<li><b>What the later betas do with each wiring</b>, as planned: in line, Control4 picks the box's input and the sync follows the source on it; behind a receiver, the sync follows the room's current source; from a second output, the device follows a room you choose. How Control4 treats a box behind a receiver or on a second output is checked before the routing beta, and this section is brought up to date then.</li>
+</ul>
+
+<h2 id="bridge">5. The connection to the Hue Bridge</h2>
+<p>The box device has a control input named <b>Hue Bridge</b>, and the Hue Bridge device an output for sync boxes, <b>Hue Sync Boxes</b> (apart from <b>Hue Lights</b>, which the lights, scenes and motion sensors use). In the <b>Connections</b> view, select the box device and connect its <b>Hue Bridge</b> input to the bridge's <b>Hue Sync Boxes</b> output, by dragging the Hue Bridge from the lower pane onto that row. Several box devices can be connected to the one bridge.</p>
+<p>The connection is optional: a box device that is not connected pairs, reads and shows its box all the same. Connected:</p>
+<ul>
+<li><b>The device learns the bridge's entertainment areas.</b> When it is connected, at every start and whenever its box's area or bridge changes, it greets the bridge; the bridge answers with its areas and whether the box is linked to this bridge, and sends them again after each read of the bridge.</li>
+<li><b>It hears about syncs at once.</b> When a sync to any area starts or stops, the bridge tells every connected box device, and the device reads its box at once instead of at its next regular read (at most once every 2 seconds).</li>
+<li><b>The bridge names the box.</b> While an area syncs and this device's box has that area as its entertainment area, the bridge shows this device's Composer name instead of <code>another app</code>: on its <b>Entertainment Areas</b> row, for example <code>Living Room TV (5 lamps, syncing: Living Room sync box)</code>, and in the <b>Status</b> and <b>Last Action</b> of the lights whose lamps sync, for example <code>Syncing with the TV (Living Room sync box)</code>. Hue does not say who streams to an area, so the bridge goes by the area the box reports: if another app syncs to that area, the box's name shows too.</li>
+</ul>
+<p>The bridge's messages are only hints: the device takes the box's state from the box alone. The bridge never passes its pairing key to the box device, and the box device never passes its own to the bridge. Removing the connection, or <b>Forget Pairing</b>, tells the bridge to forget the box. The <b>Bridge Link</b> row is something else: the box's own link to a Hue bridge, as set up in the Hue app (section 7).</p>
+
+<h2 id="everyday">6. How the device keeps up with the box</h2>
+<ul>
+<li><b>It asks the box.</b> A sync box has no event feed, so the device reads the box's whole state every 5 seconds while the box is on, every 30 seconds while it is in power save, and every 60 seconds after three failed reads in a row; at once when the Hue Bridge reports a sync starting or stopping (section 5). Only one request goes to the box at a time. A change made in the Hue app or by the box itself shows within those times.</li>
+<li><b>Offline after 5 minutes.</b> When the box has not answered for 5 minutes, <b>Online</b> reads, for example, <code>Offline since 21:04</code> and <b>Status</b> <code>Offline since 21:04 (10.0.2.150 does not answer)</code>. The device keeps trying, and both rows come back at the box's first answer. A Hue bridge that is away never takes the box device offline.</li>
+<li><b>The box refuses the pairing.</b> If the box answers that it no longer knows this controller (after a factory reset, or when the registration was removed), the device stops reading it and says so in <b>Status</b>: run <b>Pair Sync Box</b> and hold the button again.</li>
+<li><b>Debug Mode</b> writes many more lines to the device's Lua output (the box's address, names and states; never the pairing key). It turns itself back Off 8 hours after it was set to On, and <b>Last Action</b> reads <code>Debug Mode turned itself Off after 8 hours</code>; a restart of the controller or the driver keeps the time that is left.</li>
+</ul>
+
+<h2 id="properties">7. Properties</h2>
+<p>In the order Composer shows them. The device writes every row itself; you set only <b>Debug Mode</b>, and only when asked. A dash (<code>&mdash;</code>) stands for something the box does not report.</p>
+<table>
+<tr><th>Property</th><th>What it shows or does</th></tr>
+<tr><td><b>Driver Version</b></td><td>The build number of the installed driver, the same as the other Hue drivers' of the same release. A development build adds <code>-dev</code> to the number.</td></tr>
+<tr><td><b>Debug Mode</b></td><td><code>Off</code> (default) or <code>On</code>; for troubleshooting only. Back to <code>Off</code> by itself after 8 hours (section 6).</td></tr>
+<tr><td><b>Status</b></td><td>What the device is doing. Not paired: <code>Not paired: run Pair Sync Box</code>, or <code>Not paired: 1 Hue sync box found (run Pair Sync Box)</code>. While the pairing window is open: <code>Hold the button on the sync box for 3 seconds (1:58 left)</code>. Paired and online: the same text as <b>Sync</b>. Otherwise what is wrong (section 9).</td></tr>
+<tr><td><b>Online</b></td><td><code>Online</code>, or <code>Offline since 21:04</code> when the box has not answered for 5 minutes (section 6).</td></tr>
+<tr><td><b>Last Action</b>, <b>Last Action (2)</b> to <b>(6)</b></td><td>The result of the last action, in words, and of each change the device made by itself (the box followed to a new address, <b>Debug Mode</b> turned back Off). A long text continues on the rows (2) to (6), shown only when needed.</td></tr>
+<tr><td><b>Sync Box</b></td><td>The box's name, as the Hue app shows it.</td></tr>
+<tr><td><b>Model</b></td><td><code>Hue Play HDMI Sync Box (HSB1)</code> for the original box, <code>Hue Play HDMI Sync Box 8K (HSB2)</code>, <code>Hue Play HDMI Sync Box 4K (HSB3)</code> for the one-input box of 2026; a type the driver does not know shows as the box reports it.</td></tr>
+<tr><td><b>Firmware</b></td><td>The box's software version and the level of its local interface, for example <code>2.5.4 (API level 14)</code>. Updates are made in the Hue app.</td></tr>
+<tr><td><b>Box ID</b></td><td>The paired box's id: 12 letters and digits, as on the box's label, for example <code>0A1B2C3D4E5F</code>. The device checks it before anything that carries the pairing is sent.</td></tr>
+<tr><td><b>Box Address</b></td><td>The address the device uses, for example <code>10.0.2.150</code>. Set by <b>Pair Sync Box</b>, and by the device when it follows the box to a new address. It stays after <b>Forget Pairing</b>.</td></tr>
+<tr><td><b>Wiring</b></td><td>How the box is wired, from its own setting: <code>In line (sources &rarr; box &rarr; TV or receiver)</code>, <code>Behind a receiver (ARC bypass on)</code> or <code>From a receiver's second output (solo mode)</code> (section 4).</td></tr>
+<tr><td><b>Sync</b></td><td>What the box does now: syncing, with its mode, intensity and brightness and the entertainment area, for example <code>Video, high, brightness 100 % on Living Room TV</code>; <code>Off (passthrough)</code> when it passes the picture without syncing; <code>Power save</code>. At a brightness of 100 % the lights take the picture's brightness as it is.</td></tr>
+<tr><td><b>Inputs</b></td><td>The box's HDMI inputs by number with the names the Hue app gives them, <code>(on)</code> after the input the box shows now (not in power save), for example <code>1 Apple TV (on), 2 PlayStation, 3 &mdash;, 4 &mdash;</code>; a dash where the box reports no name for an input. One input on the 4K box of 2026.</td></tr>
+<tr><td><b>Bridge Link</b></td><td>The box's own link to a Hue bridge, as set up in the Hue app: the bridge's id and the state of the link, for example <code>Hue Bridge 001788fffe123abc, connected</code>. The state reads <code>connected</code>, <code>streaming</code> while the box syncs, <code>busy</code> while something else syncs to that bridge, <code>invalid area</code> when the box's entertainment area is not on the bridge, <code>connecting</code>, <code>disconnected</code> or <code>not authorized</code>; the row reads <code>Not linked</code> for a box without a bridge, <code>Not linked (standalone mode)</code> for a 4K box of 2026 that runs without one. It is not the Control4 connection of section 5.</td></tr>
+<tr><td><b>Input Switching</b></td><td>What the box does by itself, as set in the Hue app: switching to a source that wakes it over HDMI CEC or is plugged in, and starting to sync by itself on some inputs, for example <code>By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2</code>, or <code>None: the box neither switches inputs nor starts syncing by itself</code>. Shown only: a later 2.0 beta offers to hand the choice of input to Control4, with one reversible click.</td></tr>
+</table>
+
+<h2 id="actions">8. Actions</h2>
+<p>The device's <b>Actions</b> tab holds three actions. An action that takes choices opens Composer's dialog, as on the Hue Bridge (the bridge's manual, chapter 3, "How an action's dialog works"); the dialog remembers your last choices, so look at every row before clicking OK.</p>
+<table>
+<tr><th>Action</th><th>Choices</th><th>What it does</th></tr>
+<tr><td><b>Pair Sync Box</b></td><td><b>Box</b>: a box found on the network, or <code>Type an address</code>; <b>Address</b>: the box's address, used with <code>Type an address</code></td><td>Checks the box at the address, then opens the 2-minute pairing window for the box's button (section 3). Also starts a search for boxes.</td></tr>
+<tr><td><b>Diagnostics</b></td><td><b>What</b>: <code>Check the box now</code>, <code>Read everything from the box now</code>, <code>Show the box's raw state in the Lua output</code></td><td><code>Check the box now</code> checks the address, the certificate and the box's id, then the pairing, and reports what it found. <code>Read everything from the box now</code> reads the box at once and refreshes every row. <code>Show the box's raw state in the Lua output</code> writes the box's state, as the box reports it, to the device's Lua output for a report: it never holds the pairing key, but it does hold names and addresses from your network, so replace them with placeholders before you share it.</td></tr>
+<tr><td><b>Forget Pairing</b></td><td><b>Confirm</b>: <code>No</code>, <code>Yes</code></td><td>Removes the registration from the box and clears the pairing on the device; the device itself stays (section 3).</td></tr>
+</table>
+<p>The driver adds no programming commands, events, conditionals or variables of its own in this beta. Its four buttons, <b>Hue Sync</b>, <b>Sync Brighter</b>, <b>Sync Dimmer</b> and <b>Sync Intensity</b>, are there already, but in this beta a press only writes <code>Not done: routing through the box comes in a later 2.0 beta</code> in <b>Last Action</b>; leave them out of the rooms' menus until the beta that gives them their job.</p>
+
+<h2 id="troubleshooting">9. Troubleshooting</h2>
+
+<h3>Status texts and what to do</h3>
+<table>
+<tr><th>Status</th><th>Meaning</th><th>What to do</th></tr>
+<tr><td><code>Not paired: run Pair Sync Box</code></td><td>No box is paired, and none was found on the network yet.</td><td>Run <b>Pair Sync Box</b> (section 3). A box on another part of a segmented network (another VLAN) is not found by the search: type its address.</td></tr>
+<tr><td><code>Not paired: 1 Hue sync box found (run Pair Sync Box)</code></td><td>Boxes were found on the network; none is paired.</td><td>Run <b>Pair Sync Box</b> and pick the box.</td></tr>
+<tr><td><code>Hold the button on the sync box for 3 seconds (1:58 left)</code></td><td>The pairing window is open.</td><td>Hold the box's button until its light blinks green.</td></tr>
+<tr><td><code>Video, high, brightness 100 % on Living Room TV</code>, <code>Off (passthrough)</code>, <code>Power save</code></td><td>Paired and online: what the box does now.</td><td>Nothing.</td></tr>
+<tr><td><code>Offline since 21:04 (10.0.2.150 does not answer)</code></td><td>The box has not answered for 5 minutes.</td><td>Check the box's power and its Wi-Fi in the Hue app. If its address changed, the device finds it again by itself when another device answers at the old address; otherwise run <b>Pair Sync Box</b> and pick it, or type its new address. A DHCP reservation keeps the address.</td></tr>
+<tr><td><code>Another device answers at 10.0.2.150 (expected #4E5F); Pair Sync Box to find it</code></td><td>Something with another id answers at the box's address: the box got a new address and another device took the old one. Nothing that carries the pairing is sent there.</td><td>Wait a little: the device searches for the box and follows it to its new address by itself, with a line in <b>Last Action</b>. If it does not, run <b>Pair Sync Box</b> and pick the box, or type its new address.</td></tr>
+<tr><td>(a text saying that the box refuses the pairing)</td><td>The box no longer knows this controller: it was reset to its factory settings, or the registration was removed. The device stopped reading it.</td><td>Run <b>Pair Sync Box</b> and hold the button.</td></tr>
+<tr><td><code>Not supported: this box runs without a Hue Bridge (standalone mode)</code></td><td>The 4K box of 2026 runs in its standalone mode, without a bridge, which the driver does not support.</td><td>Link the box to your Hue bridge in the Hue app.</td></tr>
+<tr><td><code>Not supported: the Hue Play Screen Sync camera has no HDMI</code></td><td>The address belongs to a Hue Play Screen Sync camera, which the driver does not support.</td><td>Delete the device, or run <b>Forget Pairing</b> and pair it with a sync box.</td></tr>
+</table>
+
+<h3>Last Action texts</h3>
+<table>
+<tr><th>Last Action</th><th>Meaning</th></tr>
+<tr><td><code>Paired with Hue Sync Box (8K) #4E5F at 10.0.2.150</code></td><td>Pairing succeeded (section 3).</td></tr>
+<tr><td><code>Not done: routing through the box comes in a later 2.0 beta</code></td><td>Control4 sent the box a command (a source picked in Watch, Room Off, a button pressed); this beta does not carry it out, and nothing was sent to the box (section 1).</td></tr>
+<tr><td><code>Debug Mode turned itself Off after 8 hours</code></td><td>Set it On again if support still needs it (section 6).</td></tr>
+</table>
+
+<h3>Not yet seen working</h3>
+<p>This beta was written against what other software that works with sync boxes shows about their local interface, and tested against an imitation of a box; it had not been run with a real box when this page was written. The first install with a box is expected to settle that the controller checks the box's certificate chain as it checks the bridge's, that the box answers the controller's encrypted connection by its address, and that the search finds boxes by mDNS. The texts in this page that depend on the box's answers, such as <b>Inputs</b>, <b>Bridge Link</b> and <b>Input Switching</b>, may change as real boxes are seen.</p>
+<p>To report how a box behaves, open an issue on the project's GitHub page with the device's <b>Driver Version</b>, the Control4 OS version, the box's <b>Model</b> and <b>Firmware</b>, the texts of <b>Status</b> and <b>Last Action</b>, and, if asked, the output of <b>Diagnostics</b> &raquo; <code>Show the box's raw state in the Lua output</code>, with your addresses, names and ids replaced by placeholders.</p>
+
+<!-- CHANGELOG -->
+
+<p class="caption">Hue Bridge, Hue Light, Hue Scene, Hue Motion Sensor and Hue Sync Box drivers for Control4. Copyright 2026 Cory Fair; licensed under the Apache License, Version 2.0 (the LICENSE and NOTICE files that come with the drivers). Philips Hue and Hue are trademarks of Signify Holding B.V.; Control4 and Composer are trademarks of Snap One, LLC; HDMI is a trademark of HDMI Licensing Administrator, Inc. This project is not affiliated with, endorsed by or supported by Signify or Snap One.</p>
+
+</body>
+</html>

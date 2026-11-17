@@ -8,8 +8,8 @@ in good faith, on a best-effort basis.
 
 Only the **latest release** on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases) is
-supported: the four `.c4z` files attached to it, identified by the build
-number they show as **Driver Version** in Composer. Older builds get no
+supported: the `.c4z` files attached to it, identified by the build number
+they show as **Driver Version** in Composer. Older builds get no
 fixes; update in place through Composer's *Add or Update Driver or Agent...*
 ([README, Updating](README.md#updating)). Prereleases for testers
 (`X.Y-beta.N`) are not supported versions: what you find in one goes to its
@@ -30,9 +30,10 @@ GitHub profile, [@corytron](https://github.com/corytron), instead of
 posting details anywhere public.
 
 Include the build number (Driver Version), the Control4 OS version, the
-bridge model, what you found and how to reproduce it. Replace your LAN
-addresses and the bridge id with placeholders, and never send your
-application key.
+bridge model (and the sync box's model when one is involved), what you
+found and how to reproduce it. Replace your LAN addresses, the bridge id
+and a sync box's id with placeholders, and never send your application
+key or a sync box's access token.
 
 ## What counts
 
@@ -41,6 +42,18 @@ application key.
   release build never shows it: not in a property, not in the Lua output,
   not in `Last Action`. Any way to read it back out of a release build (a
   property, a log line, an action result, a file in a package) is a
+  vulnerability.
+- **The sync box's access token.** The Hue Sync Box driver (a beta during
+  2.0) receives an access token from its Hue Play HDMI Sync Box when
+  someone holds the box's button during pairing. It stores the token in
+  its persistent storage with the encrypted flag and never shows it: not
+  in a property, not in the Lua output (Debug Mode On included), not in
+  `Last Action` or an error text, and the box's answer that carries it is
+  never logged. A token that arrives after the pairing window closed, after
+  Forget Pairing, or for another address than the one the window was
+  opened for, is thrown away unstored. The token is sent only in the
+  `Authorization` header, only to the paired box (below), and never
+  across a redirect. Any way to read it back out of a release build is a
   vulnerability.
 - **TLS.** All traffic to the bridge is HTTPS. Every request a release
   build sends there is verified against the two Signify root certificates
@@ -55,6 +68,23 @@ application key.
   back to plain HTTP, or send the key to a host that is not the paired
   bridge counts, apart from the known case of a rooted Hue bridge
   ([Trust boundaries](#trust-boundaries), the address follow-up).
+- **TLS to a sync box.** Every request the Hue Sync Box driver sends to its
+  box is verified against the box's own root certificate, Signify's
+  `root-hsb`, shipped in `src/hue_syncbox/certs/hsb_ca.pem` and only in
+  the box's package (the bridge's bundle never trusts a box's certificate,
+  nor the box's bundle a bridge's), except the TLS self-check's one
+  request without the token, which uses the decoy CA in
+  `src/hue_syncbox/certs/` and must fail. As for the bridge, host names
+  are not checked, because the box's certificate names the box's
+  12-character id, not its address; instead the driver asks the box for
+  its id, without the token, compares it with the paired id, and runs the
+  TLS self-check, before the first request that carries the token at
+  every start and at every new address.
+  Anything that makes the driver accept a certificate that does not chain
+  to `root-hsb`, fall back to plain HTTP, or send the token to a host that
+  is not the paired box counts, apart from the known case of a box whose
+  key was extracted ([Trust boundaries](#trust-boundaries), the sync box's
+  address follow-up).
 - **The development loop.** Development builds (`--dev`) fetch driver code
   from a developer's machine (`tools/devserver.py`) and run actions queued
   with `tools/devctl.py`, both signed with the developer's dev key, which
@@ -70,10 +100,11 @@ application key.
   under a random path (`tools/serve_install.py`) that is deleted
   afterwards.
 
-Not covered here: Control4 OS, Composer Pro, Director and the Hue bridge
-firmware belong to Snap One and Signify; report problems in them to those
-companies. What someone already on your LAN can do by talking to the bridge
-directly is the Hue API's own threat model, not this driver's.
+Not covered here: Control4 OS, Composer Pro, Director, and the Hue bridge
+and sync box firmware belong to Snap One and Signify; report problems in
+them to those companies. What someone already on your LAN can do by
+talking to the bridge or a sync box directly is the Hue API's own threat
+model, not this driver's.
 
 ## Trust boundaries
 
@@ -104,6 +135,16 @@ What the drivers rely on, and what follows where that does not hold.
     such as a motion report, which Control4 programming then acts on. Every one of the Hue
     Bridge's actions writes its **Last Action**, so a forged action shows
     there, and each can be undone.
+  - *The Hue Sync Box device* is no different: another driver can run its
+    actions (Pair Sync Box, Diagnostics, Forget Pairing) and send it
+    messages. No action or message reads out its token. A message from the
+    bridge, or from a driver that poses as the bridge, only makes the
+    device read its box sooner (at most once every 2 seconds); the box's
+    own answer over the pinned connection is the only source of the HDMI
+    and sync state the device shows. The bridge's key never
+    reaches the box device, nor the box's token the bridge. Such a driver
+    can forget the box's pairing; pairing again takes a hand on the box's
+    button.
 - **The address follow-up (#491).** When the paired bridge has not answered
   at its address for 5 minutes, or another bridge answers there, the Hue
   Bridge driver searches the local network for it. It moves **Bridge IP
@@ -124,12 +165,30 @@ What the drivers rely on, and what follows where that does not hold.
   follow-up only spares it. Reserve the bridge's address in the router and
   the follow-up never has to run. A move in **Last Action** that you cannot
   explain is worth a look at the router's list of devices, and a report.
+- **The sync box's address follow-up (#534).** When another device
+  answers at the paired box's address, the Hue Sync Box driver sends the
+  token nowhere there and searches the local network for the paired box. It
+  moves to a new address only for a box that presents a certificate from
+  `root-hsb`, reports the paired id and passes the TLS check, and it says
+  so in **Last Action**. The residual risk is the bridge's: the box's id
+  is public (on its label, in its network announcements, and given by the
+  box to anyone who asks), and no Control4 API lets the driver compare it
+  with the name in the certificate. A host on the LAN that holds a
+  `root-hsb` certificate *and its private key*, in practice a sync box
+  whose owner has extracted its key, could answer with the paired id
+  while the real box is away, and the driver would follow it and send it
+  the token. The token controls that one box (its inputs, its syncing and
+  its settings), not the Hue bridge or its lights, whose key never reaches
+  the box driver. The follow-up stays, as for the bridge: without it, a
+  box that the router gives a new address stops until someone runs Pair
+  Sync Box again. Reserve the box's address in the router and the
+  follow-up never has to run.
 - **Debug Mode (#493).** With **Debug Mode** On a driver writes much more
-  to its Lua output (names, levels, motion states, the bridge's address;
-  never the application key), and Director logs the messages between the
+  to its Lua output (names, levels, motion states, the bridge's and a sync
+  box's address; never the application key or a sync box's token), and Director logs the messages between the
   Hue Bridge and its devices. So that this does not stay on because someone
   forgot it, Debug Mode turns itself Off 8 hours after it was set to On, on
-  each of the four drivers, and **Last Action** says so. A restart of the
+  each driver, and **Last Action** says so. A restart of the
   controller or the driver keeps the time that is left.
 
 ## What is checked automatically
@@ -175,7 +234,7 @@ What the drivers rely on, and what follows where that does not hold.
   builds the packages from a clean checkout in another, which installs none
   of the lint and test tools; both have read-only access. A third job, which
   runs no third-party code, signs one build-provenance attestation naming
-  the four packages; the
+  every package; the
   bundle is also attached to the release as `attestations.sigstore.json`,
   and its in-toto envelope as `hue-drivers.intoto.jsonl`. Verify a download,
   once per package, with

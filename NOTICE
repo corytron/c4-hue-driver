@@ -1,4 +1,4 @@
-c4-hue-driver: Hue Bridge, Hue Light, Hue Scene and Hue Motion Sensor drivers
+c4-hue-driver: Hue Bridge, Hue Light, Hue Scene, Hue Motion Sensor and Hue Sync Box drivers
 for Control4
 Copyright 2026 Cory Fair
 
@@ -13,7 +13,13 @@ decoy_ca.pem in the same folder is this project's own: a self-signed CA
 certificate whose private key was destroyed when it was made, used only by
 the driver's TLS self-check.
 
+The certificate in src/hue_syncbox/certs/hsb_ca.pem is the X.509 root CA
+certificate of Philips Hue Play HDMI Sync Boxes ("root-hsb", Signify),
+included unmodified so the Hue Sync Box driver can verify a box's TLS
+certificate. It is Signify's and is not covered by this project's license.
+
 Philips Hue and Hue are trademarks of Signify Holding B.V. Philips is a
 registered trademark of Koninklijke Philips N.V. Control4, Composer and
-DriverWorks are trademarks of Snap One, LLC. This project is not
+DriverWorks are trademarks of Snap One, LLC. HDMI is a trademark of HDMI Licensing
+Administrator, Inc. This project is not
 affiliated with, endorsed by or supported by Signify or Snap One.

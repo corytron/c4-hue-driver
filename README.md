@@ -11,12 +11,14 @@
 [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) ·
 [Code of conduct](CODE_OF_CONDUCT.md) · [License](LICENSE) and [notice](NOTICE)
 
-Four Control4 DriverWorks drivers that work with one Philips Hue bridge over
+Control4 DriverWorks drivers that work with one Philips Hue bridge over
 the bridge's local CLIP v2 API: **Hue Bridge**, **Hue Light**, **Hue Scene**
 and **Hue Motion Sensor**. They turn the bridge's lights, rooms, zones, scenes
 and motion sensors into ordinary Control4 devices that you switch, dim, colour
-and program in Composer Pro like any other. Everything stays on the local
-network: no cloud account and no internet access are involved.
+and program in Composer Pro like any other. A fifth driver, **Hue Sync Box**,
+for the Hue Play HDMI Sync Boxes, is a beta in the 2.0 prereleases. Everything
+stays on the local network: no cloud account and no internet access are
+involved.
 
 An independent personal project for one Control4 home, offered as is. It is
 not affiliated with, endorsed by or supported by Snap One (Control4) or
@@ -27,7 +29,7 @@ To try it: [what you need](#what-you-need), [download](#download),
 
 ## What it does
 
-### The four drivers
+### The drivers
 
 | Driver | Package | What it is in Control4 |
 | --- | --- | --- |
@@ -35,9 +37,11 @@ To try it: [what you need](#what-you-need), [download](#download),
 | **Hue Light** | `hue_light.c4z` | One Hue light, or a whole Hue room or zone as one light (a zone light): a Control4 light (`light_v2` proxy) with dimming, and colour temperature and colour where the lamps have them. |
 | **Hue Scene** | `hue_scene.c4z` | One Hue scene, ordinary or time-of-day: a Control4 dimmer (`light_v2` proxy). On plays the scene; off turns its Hue room or zone off. |
 | **Hue Motion Sensor** | `hue_motion.c4z` | One Hue motion sensor, or one MotionAware area of a Hue Bridge Pro: Control4's stock motion sensor. |
+| **Hue Sync Box** (beta) | `hue_syncbox.c4z` | One Hue Play HDMI Sync Box: an HDMI switch (`avswitch` proxy) in the TV's room. In the 2.0 prereleases only, see [Sync boxes](#sync-boxes-beta). |
 
-The bridge creates the other three; you do not add them from Composer's
-Items pane. Install all four from the same release.
+The bridge creates the Hue Lights, Hue Scenes and Hue Motion Sensors; you do
+not add them from Composer's Items pane. A Hue Sync Box is added from the
+Items pane. Install all the drivers from the same release.
 
 ### Features
 
@@ -57,6 +61,7 @@ Items pane. Install all four from the same release.
   programming and an occupancy hold time; a sensor also brings its light
   level, temperature (also as an output for a thermostat or a temperature
   display) and battery.
+- **Sync boxes (beta).** See [below](#sync-boxes-beta).
 - **Keypads.** On a keypad, a Hue Light or Hue Scene behaves like a Control4
   dimmer: bind the keypad's buttons to its Top, Bottom or Toggle Button Link,
   and a tap ramps on or off (a second tap stops the ramp), a hold dims until
@@ -124,6 +129,34 @@ A Hue Light's and a Hue Scene's Properties pages, with example names. The
 pictures are the manual's and come from an earlier build, so rows added since,
 such as Load Groups and Keypad Follows, are not in them.
 
+### Sync boxes (beta)
+
+The **Hue Sync Box** driver (`hue_syncbox.c4z`) is new in 2.0 and is being
+built in stages through the 2.0 prereleases. It covers the Hue Play HDMI Sync
+Boxes linked to a Hue bridge: the original box, the 8K box and the one-input
+4K box of 2026 (not the 2026 box in its bridge-free mode, and not the Play
+Screen Sync camera). Each box is one Control4 device, an HDMI switch in the
+TV's room, that talks to the box directly over the box's own local HTTPS
+interface.
+
+- **In the current beta** the device pairs with its box (Pair Sync Box, then
+  hold the box's button), checks the box's certificate against the sync
+  boxes' own Signify root and the box's id before it sends the pairing token,
+  and shows the box's state in Composer: name, model, firmware, address, what
+  it syncs and to which entertainment area, its inputs, its link to the Hue
+  bridge, what it switches by itself, and how it is wired (in line, behind a
+  receiver, or from a receiver's second output). Connected to the Hue
+  Bridge's **Hue Sync Boxes** output, it hears at once when a sync starts or
+  stops, and the bridge names it on the lights that sync. It does not
+  control the box yet.
+- **Later 2.0 betas**, as planned: Control4's routing switches the box's
+  inputs, wakes it and puts it to power save with the room; each source
+  syncs in its own mode (video, game or music) at an intensity and
+  brightness that follow the time of day; programming commands, events and
+  variables; and four buttons for a room's Watch menu.
+
+The box device's Documentation tab is its manual.
+
 ## Status and compatibility
 
 The drivers run one home every day. [`docs/status.md`](docs/status.md) is the
@@ -154,13 +187,17 @@ changed is in the [changelog](CHANGELOG.md).
   entered by its address.
 - HTTPS from the controller to the bridge on port 443. No internet access
   and no Hue account.
+- For the Hue Sync Box beta: a Hue Play HDMI Sync Box set up in the Hue app
+  and linked to the Hue bridge, on the same network as the controller
+  (preferably at a reserved address), reachable over HTTPS on port 443.
 
 ### Limits
 
 - One bridge per project; a second Hue Bridge device is not supported.
 - Not represented as Control4 devices: Hue buttons, dimmer switches and other
-  switches (what they do to the lights still shows), entertainment areas,
-  the motion of a whole Hue room or zone, and Hue cameras. Hue automations
+  switches (what they do to the lights still shows), entertainment areas
+  (the bridge lists them), the motion of a whole Hue room or zone, Hue
+  cameras and the Hue Play Screen Sync camera. Hue automations
   are not devices either; the bridge lists them (above).
 - Hue's whole-home group ("all lights") is not offered as a light; make a Hue
   zone of all the lights and add that zone instead. The whole home's scenes
@@ -174,7 +211,8 @@ changed is in the [changelog](CHANGELOG.md).
 ## Download
 
 The four drivers of the latest release; install all four, from the same
-release:
+release (the Hue Sync Box driver is in the 2.0 prereleases only until 2.0 is
+released, see [Prereleases](#prereleases)):
 
 - [**hue_bridge.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_bridge.c4z): Hue Bridge
 - [**hue_light.c4z**](https://github.com/corytron/c4-hue-driver/releases/latest/download/hue_light.c4z): Hue Light
@@ -193,20 +231,21 @@ Releases are numbered `X.Y`, tagged `vX.Y` and named; each release's notes
 open with what its name means. The newest is marked **Latest** on the
 [Releases page](https://github.com/corytron/c4-hue-driver/releases), and the
 links above always serve it. Every release is built and attached by the
-repository's Release workflow, never by hand, and carries eight files:
+repository's Release workflow, never by hand, and carries the drivers and
+four more files:
 
 - `hue_bridge.c4z`, `hue_light.c4z`, `hue_motion.c4z`, `hue_scene.c4z`: the
-  four drivers.
+  four drivers, and from 2.0 `hue_syncbox.c4z`, the Hue Sync Box.
 - `SHA256SUMS.txt`: the checksum of each package.
 - `manifest.json`: what was built: `tag` and `version`, `build`, `commit`,
   `built_at`, `dev` (`false` in a release), and each package's `sha256` and
   size.
 - `attestations.sigstore.json`: the Sigstore bundle of the build provenance
   the Release workflow signed for the packages (one attestation naming all
-  four).
+  of them).
 - `hue-drivers.intoto.jsonl`: the same provenance as in-toto JSON lines.
 
-The **build number** is the integer the four drivers show as **Driver
+The **build number** is the integer the drivers show as **Driver
 Version** in Composer once installed (Control4 needs an integer there); the
 release notes and `manifest.json` name it. A version can be published again
 as a newer build: the Release workflow then moves the tag `vX.Y` and replaces
@@ -239,7 +278,8 @@ not install it, and report it ([SECURITY.md](SECURITY.md)).
 
 Prereleases for testers (`X.Y-beta.N`) are on the same Releases page, marked
 **Pre-release**. They are never **Latest**, the links above never serve
-them, and their tags never move. Their notes say how to install one, how to
+them, and their tags never move. The 2.0 prereleases carry the Hue Sync Box
+beta as a fifth package. Their notes say how to install one, how to
 go back to the stable release, and how to report with the
 [Beta feedback form](https://github.com/corytron/c4-hue-driver/issues/new?template=beta-feedback.yml).
 
@@ -257,7 +297,9 @@ scenes are the long version of these steps.
    manufacturer *Philips Hue* with the model text *Hue Bridge (CLIP v2)* (the
    search also finds Control4's own Hue drivers) and double-click it. Do not
    add a Hue Light, Hue Scene or Hue Motion Sensor from the Items pane: the
-   bridge creates them.
+   bridge creates them. (A Hue Sync Box, from a 2.0 prerelease, is the
+   exception: add it from the Items pane in the TV's room and pair it on its
+   own Actions tab; its Documentation tab has the steps.)
 4. On the bridge's **Properties** tab, open **Bridges Found**, pick your
    bridge and click the row's **Set** button; or type the bridge's address
    into **Bridge IP Address** (the Hue app shows it under Settings > My Hue
@@ -349,7 +391,8 @@ build before right after an update, select the device again.
 - **In Composer.** The Hue Bridge device's Documentation tab is the full
   owner's manual (`src/hue_bridge/www/documentation.html`); each Hue Light,
   Hue Scene and Hue Motion Sensor device has a shorter page of its own that
-  points back to it. Every tab ends with the full list of releases.
+  points back to it, and the Hue Sync Box device (beta) a manual of its own.
+  Every tab ends with the full list of releases.
 - **[`CHANGELOG.md`](CHANGELOG.md)**: every release and what it changed.
 - **[`docs/status.md`](docs/status.md)**: what runs and what is open.
 - **[`docs/`](docs/README.md)**: the design notes behind the drivers: the
@@ -384,12 +427,12 @@ Open an issue with the
 [bug report form](https://github.com/corytron/c4-hue-driver/issues/new?template=bug_report.yml),
 or the [Beta feedback form](https://github.com/corytron/c4-hue-driver/issues/new?template=beta-feedback.yml)
 for a prerelease. They ask for the **Driver Version**, the Control4 OS
-version, the bridge model, the texts of **Status**, **Event Stream**,
+version, the bridge model (and the sync box's model, for a Hue Sync Box), the texts of **Status**, **Event Stream**,
 **Attention** and **Last Action** (with their rows (2) to (6) when shown),
 and the relevant lines of the Lua output (the device's Lua tab in Composer;
 **Debug Mode** On if asked, and Off again afterwards). Replace your LAN
-addresses and the bridge id with placeholders. The driver never shows the
-application key; never paste one.
+addresses, the bridge id and a sync box's id with placeholders. The drivers
+never show the application key or a sync box's token; never paste one.
 
 ### Security
 
@@ -406,12 +449,12 @@ follows the [code of conduct](CODE_OF_CONDUCT.md).
 
 ### Build from source
 
-`tools/build.sh` packages the four drivers with Snap One's public driver
+`tools/build.sh` packages the drivers with Snap One's public driver
 packager, which you clone yourself (nothing of Snap One's is vendored here):
 
 ```sh
 git clone https://github.com/snap-one/drivers-driverpackager ~/c4-tools/drivers-driverpackager
-tools/build.sh          # -> build/hue_bridge.c4z, hue_light.c4z, hue_motion.c4z, hue_scene.c4z and manifest.json
+tools/build.sh          # -> build/hue_bridge.c4z, hue_light.c4z, hue_motion.c4z, hue_scene.c4z, hue_syncbox.c4z and manifest.json
 tools/build.sh --dev    # development build: dev loop, Lua command window, the dev key; never install or share it as production
 ```
 
@@ -436,11 +479,12 @@ their tools.
 ### Repository layout
 
 ```
-src/common/        modules the drivers share: dispatch and log (all four), device (the Hue Light,
-                   Hue Scene and Hue Motion Sensor: proxy, keypad machine and settings, LEDs,
-                   binding re-check), link (the bridge's offline notice as the devices read it),
-                   devloop (development builds only); build.sh adds build_version.lua, and the
-                   dev key to a development build
+src/common/        modules the drivers share: dispatch, log and num (number checks), device (the
+                   Hue Light, Hue Scene and Hue Motion Sensor: proxy, keypad machine and settings,
+                   LEDs, binding re-check), link (the bridge's offline notice as the devices read
+                   it), https, tlscheck and mdns (the HTTPS core, the TLS self-check and the mDNS
+                   search of the bridge and the sync box), devloop (development builds only);
+                   build.sh adds build_version.lua, and the dev key to a development build
 src/hue_bridge/    the bridge driver: driver.lua, driver.xml, bridge/ (HTTP, TLS self-check,
                    event stream and its parsing, pairing, credentials, command queue, discovery,
                    lights, scenes, zone lights, motion, Hue automations, load groups, registry;
@@ -452,6 +496,10 @@ src/hue_light/     the light driver (light_v2 proxy; also zone and room lights):
                    Documentation page, the icons)
 src/hue_scene/     the scene driver (light_v2 proxy, a dimmer), www/ as for the light
 src/hue_motion/    the motion sensor driver (Control4's motion sensor proxy), www/ (its page)
+src/hue_syncbox/   the sync box driver, a beta during 2.0 (avswitch and uibutton proxies):
+                   syncbox/ (client, pairing, identity, store, state, polling, discovery, the
+                   bridge link), certs/ (Signify's root-hsb certificate for the boxes and the TLS
+                   self-check's decoy CA), www/ (its manual, the icons)
 tests/             busted specs (spec/), the fake DriverWorks runtime (helpers/), invented
                    Hue resources (fixtures/)
 tools/             build.sh; check.sh (every check, as CI runs it) and setup-checks.sh (its
@@ -508,8 +556,8 @@ The author's house is the one installation, and it is run from the repository
    one issue labelled `deploy` open while they differ.
 5. `python3 tools/deploy.py start` downloads the release, verifies the
    checksums, the manifest and the attestations, records the deployment and
-   writes a brief; the author's Windows Composer session installs the four
-   files from the GitHub release URLs through *Add or Update Driver or
+   writes a brief; the author's Windows Composer session installs the
+   packages from the GitHub release URLs through *Add or Update Driver or
    Agent...* (the controller has no install API, so this click is never
    automatic); `python3 tools/deploy.py done` records the result, which
    closes the issue.
@@ -527,7 +575,8 @@ backup, and understand that your dealer may not support third-party drivers.
 
 Philips Hue and Hue are trademarks of Signify Holding B.V. Philips is a
 registered trademark of Koninklijke Philips N.V. Control4, Composer and
-DriverWorks are trademarks of Snap One, LLC. This project is not affiliated
+DriverWorks are trademarks of Snap One, LLC. HDMI is a trademark of HDMI
+Licensing Administrator, Inc. This project is not affiliated
 with, endorsed by or supported by Signify or Snap One; "works with Philips
 Hue" and "for Philips Hue" describe compatibility and nothing more, and no
 logo or badge of either company is used.
@@ -544,7 +593,10 @@ documentation text) is included here. The two root CA certificates in
 Signify for verifying Hue bridges, included unmodified and not covered by
 this project's license (see `NOTICE`). The third certificate there,
 `decoy_ca.pem`, is this project's own: a self-signed CA whose private key was
-destroyed when it was made, used only by the TLS self-check.
+destroyed when it was made, used only by the TLS self-check. Likewise
+`src/hue_syncbox/certs/hsb_ca.pem` is Signify's public root certificate for
+the sync boxes (`root-hsb`), included unmodified and not covered by this
+project's license, beside the TLS self-check's decoy CA.
 
 Written by Cory Fair with AI pair-programming (Anthropic's Claude, through
 Claude Code; see the `Co-Authored-By` trailers in the history). The copyright

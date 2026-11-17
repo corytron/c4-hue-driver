@@ -108,8 +108,8 @@ CODENAME_SHAPE = 'letters, digits, single spaces and hyphens, such as "Cassian",
 
 # The sentence under the Documentation tab's "Changelog" heading.
 INTRO = (
-    "Every release of the Hue Bridge, Hue Light, Hue Scene and Hue Motion Sensor drivers "
-    "(the last since 1.1), newest first; the build number is "
+    "Every release of the Hue Bridge, Hue Light, Hue Scene, Hue Motion Sensor and Hue Sync Box drivers "
+    "(the motion sensor since 1.1, the sync box since 2.0), newest first; the build number is "
     "the Driver Version that Composer shows for each device."
 )
 
