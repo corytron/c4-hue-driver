@@ -931,27 +931,43 @@
 		     _1-UIBUTTONCAPABILITIES.md (the element, display_icons, Icon with
 		     width and height, state id; 300, 90 and 70 px for a proxy other than
 		     the Media Service Proxy), UIB 106_ui_button_protocol_notifications/
-		     _1-ICONCHANGED.md]. controller://driver/<driver file name>/ is the
-		     package's www/ [verified: UIB 104/_1, web_view_url: "the driver name
-		     MUST be the same as the driver's filename"], so the files are
-		     www/icons/<name>_<size>.png (tools/make_icons.py). That a button
-		     with a default icon and no state takes the same element is
-		     [assumed: the SDK shows only an example with states]. -->
+		     _1-ICONCHANGED.md]. Each set also has 512 and 1024 px, which the
+		     mobile app takes on high-resolution screens: Snap One's icon
+		     guidance asks for 70, 90, 300, 512 and 1024 px for every driver
+		     with display_icons, Experience Buttons through the UI Button proxy
+		     included, and its UI Button sample declares the five for its
+		     default icon and for each state [verified: SDK
+		     github.com/snap-one/docs-driverworks icon_templates/OS3/README.md,
+		     "Icon Sizing Requirements"; sample_drivers/uibutton_remote_icons/
+		     driver.xml]. Added in this beta with the rest, so the frame's one
+		     capability change carries them all. controller://driver/<driver
+		     file name>/ is the package's www/ [verified: UIB 104/_1,
+		     web_view_url: "the driver name MUST be the same as the driver's
+		     filename"], so the files are www/icons/<name>_<size>.png
+		     (tools/make_icons.py). That a button with a default icon and no
+		     state takes the same element is [assumed: the SDK's examples all
+		     have states]. -->
 		<navigator_display_option proxybindingid="5002">
 			<display_icons>
 				<!-- Hue Sync: the default icon -->
 				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/sync_300.png</Icon>
 				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/sync_90.png</Icon>
 				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/sync_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/sync_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/sync_1024.png</Icon>
 				<state id="sync_on">
 					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/sync_on_300.png</Icon>
 					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/sync_on_90.png</Icon>
 					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/sync_on_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/sync_on_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/sync_on_1024.png</Icon>
 				</state>
 				<state id="sync_off">
 					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/sync_off_300.png</Icon>
 					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/sync_off_90.png</Icon>
 					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/sync_off_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/sync_off_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/sync_off_1024.png</Icon>
 				</state>
 			</display_icons>
 		</navigator_display_option>
@@ -961,6 +977,8 @@
 				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/brighter_300.png</Icon>
 				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/brighter_90.png</Icon>
 				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/brighter_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/brighter_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/brighter_1024.png</Icon>
 			</display_icons>
 		</navigator_display_option>
 		<navigator_display_option proxybindingid="5004">
@@ -969,6 +987,8 @@
 				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/dimmer_300.png</Icon>
 				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/dimmer_90.png</Icon>
 				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/dimmer_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/dimmer_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/dimmer_1024.png</Icon>
 			</display_icons>
 		</navigator_display_option>
 		<navigator_display_option proxybindingid="5005">
@@ -977,25 +997,35 @@
 				<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_300.png</Icon>
 				<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_90.png</Icon>
 				<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_70.png</Icon>
+				<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_512.png</Icon>
+				<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_1024.png</Icon>
 				<state id="intensity_subtle">
 					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_subtle_300.png</Icon>
 					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_subtle_90.png</Icon>
 					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_subtle_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_subtle_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_subtle_1024.png</Icon>
 				</state>
 				<state id="intensity_moderate">
 					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_moderate_300.png</Icon>
 					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_moderate_90.png</Icon>
 					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_moderate_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_moderate_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_moderate_1024.png</Icon>
 				</state>
 				<state id="intensity_high">
 					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_high_300.png</Icon>
 					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_high_90.png</Icon>
 					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_high_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_high_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_high_1024.png</Icon>
 				</state>
 				<state id="intensity_intense">
 					<Icon width="300" height="300">controller://driver/hue_syncbox/icons/intensity_intense_300.png</Icon>
 					<Icon width="90" height="90">controller://driver/hue_syncbox/icons/intensity_intense_90.png</Icon>
 					<Icon width="70" height="70">controller://driver/hue_syncbox/icons/intensity_intense_70.png</Icon>
+					<Icon width="512" height="512">controller://driver/hue_syncbox/icons/intensity_intense_512.png</Icon>
+					<Icon width="1024" height="1024">controller://driver/hue_syncbox/icons/intensity_intense_1024.png</Icon>
 				</state>
 			</display_icons>
 		</navigator_display_option>

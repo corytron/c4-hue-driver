@@ -43,10 +43,7 @@ follows it.
   the Hue bridge, what it switches by itself, and how it is wired: in
   line, behind a receiver or from a receiver's second output. It goes
   offline after 5 minutes without an answer from the box. Diagnostics and
-  Forget Pairing complete it. Intensity and brightness by the time of day,
-  programming and the Watch-menu buttons come in a later 2.0 beta; until
-  then a press of one of its buttons is answered in Last Action and not
-  sent (#534, #514).
+  Forget Pairing complete it (#534, #514).
 - The Hue Sync Box device switches its box with the room, in each of the
   three wirings. In line, picking a source in Watch or Listen wakes the
   box, switches it to that source's input and starts syncing, in one
@@ -67,8 +64,66 @@ follows it.
   new action, Set Source Sync Mode, sets a source's mode. Changes made in
   the Hue app or by the box itself never move a Control4 room, and a
   driver restart sends the box nothing. While another app syncs to the
-  box's entertainment area the input is still switched and the other
-  app's sync left running (#557, #514).
+  box's entertainment area the input is still switched (#557, #514).
+- The Hue Sync Box sets the sync's intensity and brightness by the time
+  of day, in three periods with their own: Day from 07:00 (High, 100 %),
+  Evening from an hour before the sunset (Moderate, 100 %) and Night from
+  22:00 (Subtle, 70 %), each start, intensity and brightness a property.
+  They apply when a sync starts and again at each change of period while
+  it runs. A change made by hand (a button, a remote, a keypad,
+  programming) holds until the source changes or the sync stops. The
+  sunset is worked out on the controller from the project's location; a
+  new Periods row says which period runs, and when 19:00 stands in for a
+  sunset the location cannot give (#568, #514).
+- Programming for the Hue Sync Box: thirteen commands (Start Sync, Stop
+  Sync, Toggle Sync, Set Sync Mode, Set Intensity, Next Intensity, Set
+  Brightness, Adjust Brightness, Set Entertainment Area, Apply Sync
+  Settings, which sends any of mode, intensity, brightness, area and
+  start or stop as one change, Power Save, Wake, and Select HDMI Input,
+  which the Control4 room does not follow), twelve events (Sync Started,
+  Sync Stopped, Sync Mode Changed, Intensity Changed, Brightness Changed,
+  HDMI Input Changed, Entertainment Area Changed, Sync Taken Over,
+  Powered On, Power Save, Online, Offline), seven conditionals and nine
+  variables. The events report what the box shows, whoever changed it,
+  and a restart of the driver fires none for a value that did not change
+  (#568, #514).
+- Four buttons for Navigator on the Hue Sync Box device, for a room's
+  Watch menu: Hue Sync starts or stops the sync, Sync Brighter and Sync
+  Dimmer change its brightness by 10 points, Sync Intensity steps through
+  Subtle, Moderate, High and Intense. Hue Sync's icon shows whether the
+  box syncs, Sync Intensity's the intensity now. A Hue Sync Box device
+  added with a 2.0 beta needs one reboot of the controller from System
+  Manager after this update before the icons show; Composer's offer to
+  restart Director is not enough (#568, #514).
+- The Hue Sync Box's entertainment area is chosen in Composer, from the
+  areas the box lists (those whose lamps are in the device's room first),
+  and kept by its identity through renames in the Hue app. An area
+  deleted in Hue is said once and never replaced by itself; one made
+  again under the same name is offered once, and picking it re-points
+  the programming that named the old one (#568, #514).
+- When the Hue Sync Box starts syncing while another app syncs to its
+  entertainment area, it takes the area over: the Hue Bridge device stops
+  the other app's sync, the box starts its own, Last Action says whose
+  sync it replaced and the Sync Taken Over event fires. Two boxes of the
+  same project never take a sync from each other, and without the
+  connection to the Hue Bridge the other app's sync is left running
+  (#568, #514).
+- A new action on the Hue Sync Box, Sync Box Settings, hands the choice
+  of input to Control4 with one click: the box's own HDMI CEC and
+  hot-plug input switching, its auto-sync and its power save on the TV's
+  standby are turned off, and a second choice puts back exactly what the
+  first changed. The same action sets the box's wiring setting (in line,
+  behind a receiver, or from a receiver's second output), says how the
+  connections in Composer must then match the cables, and puts the
+  setting back with Restore the box's wiring. The driver never changes
+  either by itself; while Control4 routes through the box and the box
+  switches inputs by itself, the Input Switching row says so (#568,
+  #514).
+- The Hue Sync Box's name is kept the same in Composer and in the Hue
+  app: a rename on one side renames the other, and when both changed the
+  Composer name wins, as for the Hue lights, scenes and motion sensors.
+  Names that differ when the box is first paired are not changed by
+  themselves: Sync Box Settings offers either one (#568, #514).
 - The Hue Bridge has a new connection, Hue Sync Boxes. A Hue Sync Box
   device connected to it learns the bridge's entertainment areas and reads
   its box at once when a sync starts or stops; while the area of its box

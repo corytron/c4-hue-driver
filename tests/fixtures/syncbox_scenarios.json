@@ -2387,6 +2387,65 @@
         {"event": "advance", "ms": 31000},
         {"do": "GET", "path": "", "expect": {"status": 200, "state": {"device.uniqueId": "0A1B2C3D4E5F", "device.deviceType": "HSB2", "device.apiLevel": 15, "behavior.soloMode": 0, "hue.operatingMode": "bridge"}, "present": ["registrations.7"]}}
       ]
+    },
+    {
+      "id": "SC-OFFER-1",
+      "title": "Let Control4 choose inputs, then Restore: the box's own switching off and back (#568)",
+      "rules": ["SB60", "SB63", "SB70", "SB75"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": 0, "input1": {"cecInputSwitch": 0, "linkAutoSync": 0}, "input2": {"cecInputSwitch": 0}}, "expect": {"status": 200, "state": {"behavior.cecPowersave": 0, "behavior.input1.cecInputSwitch": 0, "behavior.input1.linkAutoSync": 0, "behavior.input2.cecInputSwitch": 0, "behavior.hpdInputSwitch": 0, "behavior.inactivePowersave": 20, "behavior.usbPowersave": 0, "execution.mode": "video", "execution.hdmiSource": "input1"}}},
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.hdmiSource": "input1", "execution.mode": "video"}}},
+        {"event": "tv_standby", "expect": {"state": {"execution.mode": "video", "execution.hdmiActive": true}}},
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": 1, "input1": {"cecInputSwitch": 1, "linkAutoSync": 1}, "input2": {"cecInputSwitch": 1}}, "expect": {"status": 200, "state": {"behavior.cecPowersave": 1, "behavior.input1.cecInputSwitch": 1, "behavior.input1.linkAutoSync": 1, "behavior.input2.cecInputSwitch": 1, "execution.hdmiSource": "input1"}}},
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.hdmiSource": "input2"}}},
+        {"event": "tv_standby", "expect": {"state": {"execution.mode": "powersave", "execution.hdmiActive": false}}}
+      ]
+    },
+    {
+      "id": "SC-OFFER-2",
+      "title": "the offers on the one-input box: its per-input hot-plug switch off and back (#568)",
+      "rules": ["SB60", "SB62", "SB63", "SB71"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": 0, "input1": {"cecInputSwitch": 0, "hpdInputPortSwitch": 0, "linkAutoSync": 0}}, "expect": {"status": 200, "state": {"behavior.cecPowersave": 0, "behavior.input1.cecInputSwitch": 0, "behavior.input1.hpdInputPortSwitch": 0, "behavior.input1.linkAutoSync": 0, "execution.mode": "powersave"}}},
+        {"event": "hotplug", "input": "input1", "expect": {"state": {"execution.mode": "powersave", "execution.hdmiActive": false}}},
+        {"event": "cec_active_source", "input": "input1", "expect": {"state": {"execution.mode": "powersave"}}},
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": 1, "input1": {"cecInputSwitch": 1, "hpdInputPortSwitch": 1, "linkAutoSync": 1}}, "expect": {"status": 200, "state": {"behavior.input1.hpdInputPortSwitch": 1, "execution.mode": "powersave"}}},
+        {"event": "hotplug", "input": "input1", "expect": {"state": {"execution.hdmiActive": true, "execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-PROG-1",
+      "title": "Apply Sync Settings: area, mode, its intensity, brightness and the start in one PUT (#568)",
+      "rules": ["SB55", "SB48", "SB47", "SB42", "SB7", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "passthrough"}},
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "mode": "game", "game": {"intensity": "subtle"}, "brightness": 150, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.syncActive": true, "execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "hue.groupId": "6a7b8c9d-0000-4000-8000-0000000ea002", "execution.game.intensity": "subtle", "execution.video.intensity": "high", "execution.brightness": 150, "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true, "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "mode": "game", "game": {"intensity": "subtle"}, "brightness": 150, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "execution.game.intensity": "subtle", "execution.brightness": 150, "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-TAKE-1",
+      "title": "a take-over: refused with 16 while another app streams, started once the bridge stopped it (#568)",
+      "rules": ["SB91", "SB92", "SB93", "SB56"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "passthrough"}},
+        {"event": "bridge", "state": "busy", "expect": {"state": {"hue.connectionState": "busy", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true, "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner": "other-app"}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true, "video": {"intensity": "moderate"}, "brightness": 90}, "expect": {"status": 400, "code": 16, "state": {"execution.mode": "passthrough", "execution.video.intensity": "high", "execution.brightness": 100}}},
+        {"event": "bridge", "state": "connected", "expect": {"state": {"hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}, "absent": ["hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner"]}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true, "video": {"intensity": "moderate"}, "brightness": 90}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.syncActive": true, "execution.video.intensity": "moderate", "execution.brightness": 90, "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}, "absent": ["hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner"]}}
+      ]
     }
   ]
 }

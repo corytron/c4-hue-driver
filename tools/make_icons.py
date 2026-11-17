@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Draw the Composer icons for the Hue drivers (the motion sensor uses stock ones).
+"""Draw the Composer icons for the Hue drivers (the motion sensor uses stock ones), and the Navigator
+icons of the Hue Sync Box's four UI Buttons.
 
 Composer shows a driver's icon at 16 px (the project tree and the Items
 pane) and 32 px (List View), 96 DPI (Fundamentals 19, "Driver Icon
@@ -37,6 +38,19 @@ Hue Sync Box a wide, low near-black box with one white LED, sitting in a
            soft glow of several hues spilling out behind it: the light it
            makes.
 
+The Navigator button icons (1024, 512, 300, 90 and 70 px, drawn on their own
+2048 px canvas; see "Navigator" below):
+
+Hue Sync   a flat TV on a stand. On: its screen shows a picture in the sync
+           hues and the same colours spill out behind it. Off (also the
+           default): a dark screen, no light.
+Brighter   the dimmer switch's large sun, lit warm white, with a soft glow
+           and an arrow pointing up under it.
+Dimmer     its small sun, dim amber, with an arrow pointing down.
+Intensity  four bars rising left to right, lit in the sync hues up to the
+           level (subtle one bar ... intense four); unlit bars are dark glass
+           with a light rim. The default has every bar unlit.
+
 Run from the repo root with no arguments:
 
     python3 tools/make_icons.py
@@ -50,15 +64,22 @@ Writes:
     src/hue_scene/www/images/devices_lg/hue_scene_32.png
     src/hue_syncbox/www/images/devices_sm/hue_syncbox_16.png
     src/hue_syncbox/www/images/devices_lg/hue_syncbox_32.png
+    src/hue_syncbox/www/icons/<name>_<size>.png, size 1024, 512, 300, 90 and 70, for
+        the names sync, sync_on, sync_off, brighter, dimmer, intensity,
+        intensity_subtle, intensity_moderate, intensity_high and
+        intensity_intense (the files the box driver's driver.xml names)
 
     python3 tools/make_icons.py --inspect DIR
 
-also writes the 512 px masters (icons_v2_master_<name>.png) and a sheet
-(icons_v2_sheet.png) showing each icon at 1x, 4x and 8x on white and on
-Composer's #f0f0f0, for eyeballing.
+also writes the 512 px masters (icons_v2_master_<name>.png), a sheet
+(icons_v2_sheet.png) showing each Composer icon at 1x, 4x and 8x on white and
+on Composer's #f0f0f0, and a sheet of the button icons at their sizes on a
+Navigator-like dark wallpaper, black, white and #f0f0f0
+(icons_buttons_sheet.png), for eyeballing.
 
-The eight icons are drawn at the same time, one process each (up to JOBS,
-environment; default nproc, JOBS=1 one after the other; issue #456).
+The eight Composer icons and the nine button designs are drawn at the same
+time, one process each (up to JOBS, environment; default nproc, JOBS=1 one
+after the other; issue #456).
 
 Pillow only (12.x) plus the standard library. Deterministic: the grain
 comes from a seeded generator, and the PNGs carry no timestamps.
@@ -66,6 +87,7 @@ comes from a seeded generator, and the PNGs carry no timestamps.
 
 import colorsys
 import concurrent.futures
+import contextlib
 import math
 import multiprocessing
 import os
@@ -76,6 +98,10 @@ import sys
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter
 
 MASTER = 512
+# The side of the canvas the helpers below draw on: MASTER for the Composer
+# icons; the Navigator button icons set it to BUTTON_MASTER while they draw
+# (button_canvas), in their own process.
+CANVAS = MASTER
 DPI = (96, 96)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,9 +113,10 @@ def out_path(driver, name, size):
 
 
 # --------------------------------------------------------------------------
-# Low-level helpers. Everything is drawn on a MASTER x MASTER canvas; S is
-# the number of master pixels per target pixel, and all geometry arguments
-# are in target pixels so the same drawing code serves both sizes.
+# Low-level helpers. Everything is drawn on a CANVAS x CANVAS canvas (MASTER
+# for the Composer icons); S is the number of master pixels per target pixel
+# (per design unit for the button icons), and all geometry arguments are in
+# target pixels so the same drawing code serves both sizes.
 # --------------------------------------------------------------------------
 
 
@@ -114,13 +141,13 @@ def _box(S, x0, y0, x1, y1):
 
 def rrect(S, box, radius, value=255):
     """L mask of a rounded rectangle; box/radius in target pixels."""
-    m = Image.new("L", (MASTER, MASTER), 0)
+    m = Image.new("L", (CANVAS, CANVAS), 0)
     ImageDraw.Draw(m).rounded_rectangle(_box(S, *box), radius=radius * S, fill=value)
     return m
 
 
 def rect(S, box, value=255):
-    m = Image.new("L", (MASTER, MASTER), 0)
+    m = Image.new("L", (CANVAS, CANVAS), 0)
     ImageDraw.Draw(m).rectangle(_box(S, *box), fill=value)
     return m
 
@@ -136,12 +163,12 @@ def shift(img, dx_px, dy_px, S):
 
 
 def solid(colour):
-    return Image.new("RGBA", (MASTER, MASTER), colour)
+    return Image.new("RGBA", (CANVAS, CANVAS), colour)
 
 
 def layer(mask, colour, alpha=1.0):
     """RGBA layer of one colour whose alpha is the mask times alpha."""
-    out = Image.new("RGBA", (MASTER, MASTER), colour[:3] + (0,))
+    out = Image.new("RGBA", (CANVAS, CANVAS), colour[:3] + (0,))
     if alpha != 1.0:
         mask = mask.point([_clamp(v * alpha) for v in range(256)])
     out.putalpha(mask)
@@ -160,12 +187,12 @@ def lin_grad(S, p0, p1):
     kx, ky = dx / n, dy / n
     # Each axis is stored offset by 128 so a negative share survives the
     # 8-bit image; add() removes both offsets and clips the sum to 0..255.
-    xs = [_clamp(128 + 255 * kx * (x - x0)) for x in range(MASTER)]
-    ys = [_clamp(128 + 255 * ky * (y - y0)) for y in range(MASTER)]
+    xs = [_clamp(128 + 255 * kx * (x - x0)) for x in range(CANVAS)]
+    ys = [_clamp(128 + 255 * ky * (y - y0)) for y in range(CANVAS)]
     # Each axis repeated across the canvas byte for byte (what a NEAREST
     # resize of a one-pixel strip does; Pillow 12.1 fails that resize).
-    gx = Image.frombytes("L", (MASTER, MASTER), bytes(xs) * MASTER)
-    gy = Image.frombytes("L", (MASTER, MASTER), bytes(v for v in ys for _ in range(MASTER)))
+    gx = Image.frombytes("L", (CANVAS, CANVAS), bytes(xs) * CANVAS)
+    gy = Image.frombytes("L", (CANVAS, CANVAS), bytes(v for v in ys for _ in range(CANVAS)))
     return ImageChops.add(
         gx,
         gy,
@@ -704,6 +731,347 @@ def render_syncbox(size):
 
 
 # --------------------------------------------------------------------------
+# Navigator: the Hue Sync Box's four UI Buttons (#568).
+#
+# A UI Button's pictures are shown by Navigators (touch screens, the app) in
+# a room's menus: a default and one set per icon state, each at 300, 90 and
+# 70 px, the sizes for a driver that is not a Media Service Proxy (UIB
+# 104_ui_button_proxy_capabilities/_1-UIBUTTONCAPABILITIES.md), and at 512
+# and 1024 px, which the app takes on high-resolution screens (Snap One's
+# SDK, github.com/snap-one/docs-driverworks: icon_templates/OS3/README.md,
+# "Icon Sizing Requirements", 70 to 1024 for every driver with display_icons,
+# Experience Buttons included; sample_drivers/uibutton_remote_icons/
+# driver.xml declares the five). driver.xml's navigator_display_option names
+# the files, www/icons/<name>_<size>.png, and driver.lua picks the state
+# with ICON_CHANGED (UIB 106_ui_button_protocol_notifications/
+# _1-ICONCHANGED.md). Each design is
+# drawn once on a BUTTON_MASTER canvas in design units (0..100 across) and
+# downsampled to every size. As Snap One's icon guidance for OS 3 asks
+# (SDK icon_templates/OS3/README.md), the art is centred across and sits a
+# little high, its soft shadow below; and it must read on a Navigator's dark
+# wallpaper as on a light one: lit objects, light rims, no edge that is only
+# near-black.
+# --------------------------------------------------------------------------
+
+BUTTON_MASTER = 2048
+BUTTON_SIZES = (1024, 512, 300, 90, 70)
+UNITS = 100.0
+
+
+def button_path(name, size):
+    """www/icons/<name>_<size>.png of the box driver, as its driver.xml names them."""
+    return os.path.join(REPO_ROOT, "src", "hue_syncbox", "www", "icons", "%s_%d.png" % (name, size))
+
+
+@contextlib.contextmanager
+def button_canvas():
+    """The helpers draw on a BUTTON_MASTER canvas inside the block; yields S (master pixels per unit)."""
+    global CANVAS
+    saved = CANVAS
+    CANVAS = BUTTON_MASTER
+    try:
+        yield BUTTON_MASTER / UNITS
+    finally:
+        CANVAS = saved
+
+
+def glow(S, centre, r, inner=0.0):
+    """L: 255 at the centre falling to 0 at radius r (smoothstep), as radial(), but scaled from Pillow's
+    256 px radial gradient instead of computed pixel by pixel, which a 2048 px canvas would make slow.
+    That gradient's value is sqrt(2) times the distance from its centre (181 at its edges' middles,
+    255 from there to its corners): scaled so its edges' middles lie at radius r."""
+    size = max(2, round(2 * r * S))
+    g = Image.radial_gradient("L").resize((size, size), Image.Resampling.BILINEAR)
+    m = Image.new("L", (CANVAS, CANVAS), 255)
+    m.paste(g, (round(centre[0] * S - size / 2.0), round(centre[1] * S - size / 2.0)))
+    lut = []
+    for v in range(256):
+        d = v / (128 * math.sqrt(2)) * r
+        if d <= inner:
+            lut.append(255)
+        elif d >= r:
+            lut.append(0)
+        else:
+            t = (d - inner) / (r - inner)
+            lut.append(int(255 * (1 - t * t * (3 - 2 * t))))
+    return m.point(lut)
+
+
+def hue_field(stops):
+    """RGBA canvas whose colour sweeps across (left to right) through stops [(x in units, colour)]."""
+    row = []
+    for x in range(CANVAS):
+        u = (x + 0.5) * UNITS / CANVAS
+        if u <= stops[0][0]:
+            row.append(stops[0][1])
+            continue
+        if u >= stops[-1][0]:
+            row.append(stops[-1][1])
+            continue
+        for (u0, c0), (u1, c1) in zip(stops, stops[1:], strict=False):
+            if u0 <= u <= u1:
+                t = (u - u0) / (u1 - u0)
+                row.append(tuple(int(a + (b - a) * t + 0.5) for a, b in zip(c0, c1, strict=True)))
+                break
+    strip = Image.new("RGB", (CANVAS, 1))
+    strip.putdata(row)
+    return nearest(strip, (CANVAS, CANVAS)).convert("RGBA")
+
+
+def capsule(draw, S, p0, p1, width, fill=255):
+    """A line with round ends, in units."""
+    draw.line([(p0[0] * S, p0[1] * S), (p1[0] * S, p1[1] * S)], fill=fill, width=max(1, round(width * S)))
+    r = width / 2.0
+    for x, y in (p0, p1):
+        draw.ellipse(((x - r) * S, (y - r) * S, (x + r) * S, (y + r) * S), fill=fill)
+
+
+def chevron(S, cx, cy, half_w, half_h, width, up):
+    """L mask of a chevron (an arrow head of two round-ended strokes), pointing up or down."""
+    m = Image.new("L", (CANVAS, CANVAS), 0)
+    d = ImageDraw.Draw(m)
+    tip = (cx, cy - half_h) if up else (cx, cy + half_h)
+    foot = cy + half_h if up else cy - half_h
+    ends = [(cx - half_w, foot), (cx + half_w, foot)]
+    for end in ends:
+        capsule(d, S, end, tip, width)
+    return m
+
+
+# From this size up the icons are saved as 256-colour PNGs (with alpha),
+# quantized and dithered by libimagequant: the glows' smooth gradients make
+# full-colour PNGs large (3.5 MB for the 50 files, the box driver's package
+# being 0.16 MB without them), and at these sizes the dithered palette is not
+# told apart from the original on a Navigator's backgrounds. libimagequant
+# runs on its own thread pool, and its result in a forked worker differs from
+# the main process's (both repeat exactly), and a fork after it has run can
+# hang: so the workers return full colour, and quantize_buttons() runs in the
+# main process once the pool is closed, the same bytes whatever JOBS is. A
+# Pillow without libimagequant keeps them full colour: larger, still correct.
+QUANTIZE_FROM = 300
+
+
+def can_quantize():
+    try:
+        from PIL import features
+
+        return bool(features.check_feature("libimagequant"))
+    except Exception:  # an older Pillow: no feature check
+        return False
+
+
+def finish_button(master, size):
+    out = master.resize((size, size), Image.Resampling.LANCZOS)
+    if size <= 90:
+        # A light unsharp mask, premultiplied (as finish()), so the small
+        # sizes keep their edges after a 23x to 29x reduction.
+        out = out.convert("RGBa").filter(ImageFilter.UnsharpMask(0.7, 55, 0)).convert("RGBA")
+    return out
+
+
+def quantize_buttons(buttons):
+    """[(names, icons)] with the icons of QUANTIZE_FROM px and up as 256-colour images; in the main
+    process only (see QUANTIZE_FROM)."""
+    if not can_quantize():
+        return buttons
+    out = []
+    for names, icons in buttons:
+        done = []
+        for size, icon in zip(BUTTON_SIZES, icons, strict=True):
+            if size >= QUANTIZE_FROM:
+                icon = icon.quantize(
+                    colors=256, method=Image.Quantize.LIBIMAGEQUANT, dither=Image.Dither.FLOYDSTEINBERG
+                )
+            done.append(icon)
+        out.append((names, done))
+    return out
+
+
+# The light the box makes, as on its Composer icon: the same four hues.
+SYNC_MAGENTA, SYNC_BLUE, SYNC_TEAL, SYNC_AMBER = (255, 64, 160), (64, 120, 255), (40, 220, 200), (255, 170, 40)
+
+# Hue Sync: a flat TV on a stand. Graphite lighter than the bridge's, with a
+# light rim, so it keeps its outline on a dark wallpaper.
+TV_BODY, TV_R = (12, 17, 88, 64), 3.6
+TV_SCREEN, TV_SCREEN_R = (15.2, 20.2, 84.8, 60.8), 1.4
+TV_NECK, TV_FOOT, TV_FOOT_R = (45.5, 63, 54.5, 72), (32, 71, 68, 76), 2.4
+TV_TL, TV_BR = (104, 106, 116), (38, 39, 45)
+TV_RIM_TL, TV_RIM_BR = (214, 216, 224), (112, 114, 124)
+
+
+def render_tv(on):
+    """Hue Sync's two states. On: the screen shows a picture in the sync hues and the same colours
+    spill out behind the TV (the light the box makes). Off: a dark screen and no light."""
+    with button_canvas() as S:
+        body_m = rrect(S, TV_BODY, TV_R)
+        screen_m = rrect(S, TV_SCREEN, TV_SCREEN_R)
+        neck_m = rect(S, TV_NECK)
+        foot_m = rrect(S, TV_FOOT, TV_FOOT_R)
+        stand_m = ImageChops.lighter(neck_m, foot_m)
+        sil = ImageChops.lighter(body_m, stand_m)
+        near, far = (10, 15), (90, 78)
+
+        img = solid((0, 0, 0, 0))
+        if on:
+            # The light behind it: the TV's outline grown and blurred, in a
+            # sweep of the sync hues from left to right.
+            halo = blur(rrect(S, (TV_BODY[0] - 3, TV_BODY[1] - 3, TV_BODY[2] + 3, TV_BODY[3] + 2), TV_R + 3), 4.2, S)
+            halo = ImageChops.lighter(
+                halo, blur(rrect(S, (TV_BODY[0] - 1, TV_BODY[1] - 1, TV_BODY[2] + 1, TV_BODY[3]), TV_R + 1), 1.6, S)
+            )
+            field = hue_field([(14, SYNC_MAGENTA), (38, SYNC_BLUE), (62, SYNC_TEAL), (86, SYNC_AMBER)])
+            field.putalpha(halo.point([_clamp(v * 0.95) for v in range(256)]))
+            img = over(img, field)
+
+        H = Image.new("L", (CANVAS, CANVAS), 0)
+        H = add_height(H, body_m, 150, 0.9, S)
+        H = add_height(H, stand_m, 120, 0.7, S)
+        H = add_height(H, screen_m, -40, 0.35, S)  # the screen sits in the bezel
+
+        img = over(img, drop_shadow(sil, S, 0.5, 2.2, 2.2, 0.42))
+        img = over(img, grad_fill(stand_m, TV_TL, TV_BR, S, near, far))
+        img = over(img, grad_fill(body_m, TV_TL, TV_BR, S, near, far))
+
+        # The screen.
+        if on:
+            pic = over(solid((24, 18, 52, 255)), layer(glow(S, (27, 30), 26), SYNC_MAGENTA + (0,), 0.95))
+            pic = over(pic, layer(glow(S, (50, 24), 22), SYNC_BLUE + (0,), 0.9))
+            pic = over(pic, layer(glow(S, (46, 58), 20), SYNC_TEAL + (0,), 0.8))
+            pic = over(pic, layer(glow(S, (75, 44), 24), SYNC_AMBER + (0,), 0.95))
+            pic = over(pic, layer(glow(S, (58, 40), 10), (255, 244, 230, 0), 0.35))
+            pic.putalpha(screen_m)
+        else:
+            pic = grad_fill(screen_m, (58, 62, 74), (16, 17, 22), S, (16, 21), (84, 61))
+        img = over(img, pic)
+        # Glass: a broad diagonal sheen across the upper left of the screen.
+        band = Image.new("L", (CANVAS, CANVAS), 0)
+        ImageDraw.Draw(band).polygon(
+            [(14 * S, 20 * S), (52 * S, 20 * S), (30 * S, 62 * S), (14 * S, 62 * S)],
+            fill=255,
+        )
+        band = ImageChops.multiply(blur(band, 2.5, S), screen_m)
+        img = over(img, layer(band, (255, 255, 255, 0), 0.10 if on else 0.13))
+
+        img = shade(img, H, S, d_px=0.35, gain_hi=1.2, gain_lo=1.3, mask=sil)
+        img = specular(img, H, S, d_px=0.45, strength=0.6, gloss_mask=body_m, power=2.0, soften=0.15)
+        img = over(img, stroke(S, TV_BODY, TV_R, 0.7, TV_RIM_TL, TV_RIM_BR, 0.9, near, far))
+        img = over(img, stroke(S, TV_FOOT, TV_FOOT_R, 0.6, TV_RIM_TL, TV_RIM_BR, 0.8, near, far))
+        return img
+
+
+def render_sun(brighter):
+    """Sync Brighter and Sync Dimmer: the large and the small sun of the Hue dimmer switch, lit, with
+    an arrow under it: a big bright sun pointing up, a small dim one pointing down."""
+    with button_canvas() as S:
+        cx, cy = 50.0, 40.0
+        if brighter:
+            disc_r, ray_in, ray_out, ray_w, halo_r, halo_a = 13.5, 19.5, 29.0, 5.6, 40.0, 0.55
+            core, edge, ray0, ray1 = (255, 253, 240), (255, 200, 80), (255, 236, 170), (255, 186, 60)
+        else:
+            disc_r, ray_in, ray_out, ray_w, halo_r, halo_a = 10.0, 15.0, 20.5, 4.8, 24.0, 0.22
+            core, edge, ray0, ray1 = (238, 206, 150), (196, 128, 52), (226, 178, 104), (184, 120, 50)
+        disc_m = Image.new("L", (CANVAS, CANVAS), 0)
+        ImageDraw.Draw(disc_m).ellipse(
+            ((cx - disc_r) * S, (cy - disc_r) * S, (cx + disc_r) * S, (cy + disc_r) * S), fill=255
+        )
+        rays_m = Image.new("L", (CANVAS, CANVAS), 0)
+        d = ImageDraw.Draw(rays_m)
+        for i in range(8):
+            a = 2 * math.pi * i / 8 - math.pi / 2
+            capsule(
+                d,
+                S,
+                (cx + math.cos(a) * ray_in, cy + math.sin(a) * ray_in),
+                (cx + math.cos(a) * ray_out, cy + math.sin(a) * ray_out),
+                ray_w,
+            )
+        arrow_m = chevron(S, 50.0, 83.0, 9.0, 4.6, 4.4, brighter)
+        sun_m = ImageChops.lighter(disc_m, rays_m)
+        sil = ImageChops.lighter(sun_m, arrow_m)
+
+        img = layer(glow(S, (cx, cy), halo_r, inner=disc_r * 0.6), edge, halo_a)
+        img = over(img, drop_shadow(sil, S, 0.4, 1.8, 1.8, 0.38 if brighter else 0.32))
+
+        H = Image.new("L", (CANVAS, CANVAS), 0)
+        H = add_height(H, disc_m, 150, disc_r * 0.45, S)  # a dome
+        H = add_height(H, rays_m, 110, 0.9, S)
+        H = add_height(H, arrow_m, 110, 0.8, S)
+
+        img = over(img, grad_fill(rays_m, ray0, ray1, S, (cx - ray_out, cy - ray_out), (cx + ray_out, cy + ray_out)))
+        img = over(img, grad_fill(arrow_m, ray0, ray1, S, (41, 78), (59, 88)))
+        disc = grad_fill(disc_m, edge, edge, S, (0, 0), (1, 1))
+        disc = over(disc, layer(ImageChops.multiply(glow(S, (cx - 2, cy - 2), disc_r * 1.15), disc_m), core + (0,)))
+        img = over(img, disc)
+
+        img = shade(img, H, S, d_px=0.4, gain_hi=1.0, gain_lo=1.5, mask=sil)
+        img = specular(img, H, S, d_px=0.5, strength=0.8, gloss_mask=disc_m, power=2.2, soften=0.3)
+        return img
+
+
+# Sync Intensity: four bars rising left to right, lit up to the level, in
+# the sync hues from cool to hot; unlit bars are dark glass with a light rim.
+BAR_BOXES = [(14, 62, 27, 82), (33, 49, 46, 82), (52, 36, 65, 82), (71, 23, 84, 82)]
+BAR_R = 3.0
+BAR_COLOURS = [SYNC_TEAL, SYNC_BLUE, SYNC_MAGENTA, SYNC_AMBER]
+BAR_DARK_TL, BAR_DARK_BR = (92, 95, 106), (40, 42, 49)
+
+
+def render_bars(level):
+    """Sync Intensity at `level` 1 (subtle) to 4 (intense); 0, every bar unlit, is the default icon
+    (shown until the driver knows the box's intensity)."""
+    with button_canvas() as S:
+        img = solid((0, 0, 0, 0))
+        masks = [rrect(S, box, BAR_R) for box in BAR_BOXES]
+        sil = Image.new("L", (CANVAS, CANVAS), 0)
+        for m in masks:
+            sil = ImageChops.lighter(sil, m)
+        # The lit bars' light behind them.
+        for i in range(level):
+            x0, y0, x1, y1 = BAR_BOXES[i]
+            halo = blur(rrect(S, (x0 - 2, y0 - 2, x1 + 2, y1 + 1), BAR_R + 2), 3.0, S)
+            img = over(img, layer(halo, BAR_COLOURS[i] + (0,), 0.75))
+        img = over(img, drop_shadow(sil, S, 0.4, 1.8, 1.8, 0.4))
+
+        H = Image.new("L", (CANVAS, CANVAS), 0)
+        H = add_height(H, sil, 150, 0.9, S)
+        for i, (box, m) in enumerate(zip(BAR_BOXES, masks, strict=True)):
+            x0, y0, x1, y1 = box
+            if i < level:
+                colour = BAR_COLOURS[i]
+                top = tuple(_clamp(c + (255 - c) * 0.45) for c in colour)
+                bar = grad_fill(m, top, colour, S, (x0, y0), (x0, y1))
+                core = ImageChops.multiply(glow(S, ((x0 + x1) / 2.0, y0 + 4), (x1 - x0) * 0.9), m)
+                bar = over(bar, layer(core, (255, 255, 255, 0), 0.45))
+                img = over(img, bar)
+            else:
+                img = over(img, grad_fill(m, BAR_DARK_TL, BAR_DARK_BR, S, (x0, y0), (x1, y1)))
+        img = shade(img, H, S, d_px=0.35, gain_hi=1.1, gain_lo=1.3, mask=sil)
+        img = specular(img, H, S, d_px=0.45, strength=0.7, gloss_mask=sil, power=2.2, soften=0.15)
+        for i, box in enumerate(BAR_BOXES):
+            if i >= level:
+                img = over(img, stroke(S, box, BAR_R, 0.6, (196, 198, 208), (104, 106, 116), 0.9, (10, 20), (90, 86)))
+        return img
+
+
+# (names, render, args): one design each, saved as www/icons/<name>_<size>.png
+# under each of its names. The names are driver.xml's: a button's default
+# icon is its bare name (Hue Sync's is the off design), a state's is the
+# button's name and the state's (the state ids sync_on, sync_off,
+# intensity_subtle ... intensity_intense).
+BUTTON_ICONS = [
+    (("sync_on",), render_tv, (True,)),
+    (("sync", "sync_off"), render_tv, (False,)),
+    (("brighter",), render_sun, (True,)),
+    (("dimmer",), render_sun, (False,)),
+    (("intensity",), render_bars, (0,)),
+    (("intensity_subtle",), render_bars, (1,)),
+    (("intensity_moderate",), render_bars, (2,)),
+    (("intensity_high",), render_bars, (3,)),
+    (("intensity_intense",), render_bars, (4,)),
+]
+
+
+# --------------------------------------------------------------------------
 # Output.
 # --------------------------------------------------------------------------
 
@@ -736,30 +1104,55 @@ def render_one(job):
     return master, finish(master, size, sharpen, contrast, gamma)
 
 
+def render_button(job):
+    """[icon at each of BUTTON_SIZES] of one (names, render, args); the master is dropped here, in the
+    worker, rather than sent back."""
+    _names, render, args = job
+    master = render(*args)
+    return [finish_button(master, size) for size in BUTTON_SIZES]
+
+
+COMPOSER_ICONS = [
+    ("hue_bridge", "hue_bridge_pro", 16, render_bridge, (16,)),
+    ("hue_bridge", "hue_bridge_pro", 32, render_bridge, (32,)),
+    ("hue_light", "hue_light", 16, render_dimmer, (16, False)),
+    ("hue_light", "hue_light", 32, render_dimmer, (32, False)),
+    ("hue_scene", "hue_scene", 16, render_dimmer, (16, True)),
+    ("hue_scene", "hue_scene", 32, render_dimmer, (32, True)),
+    ("hue_syncbox", "hue_syncbox", 16, render_syncbox, (16,)),
+    ("hue_syncbox", "hue_syncbox", 32, render_syncbox, (32,)),
+]
+
+
+def run_job(job):
+    kind, spec = job
+    return render_button(spec) if kind == "button" else render_one(spec)
+
+
 def build_all():
-    """Returns [(driver, name, size, master, icon)] in output order; the icons are drawn in forked
-    processes, at most job_count() at once, when the platform can fork."""
-    jobs = [
-        ("hue_bridge", "hue_bridge_pro", 16, render_bridge, (16,)),
-        ("hue_bridge", "hue_bridge_pro", 32, render_bridge, (32,)),
-        ("hue_light", "hue_light", 16, render_dimmer, (16, False)),
-        ("hue_light", "hue_light", 32, render_dimmer, (32, False)),
-        ("hue_scene", "hue_scene", 16, render_dimmer, (16, True)),
-        ("hue_scene", "hue_scene", 32, render_dimmer, (32, True)),
-        ("hue_syncbox", "hue_syncbox", 16, render_syncbox, (16,)),
-        ("hue_syncbox", "hue_syncbox", 32, render_syncbox, (32,)),
-    ]
+    """Returns ([(driver, name, size, master, icon)], [(names, [icon per BUTTON_SIZES])]) in
+    output order; every icon is drawn in a forked process, at most job_count() at once (the large
+    button designs first, so the pool ends together), when the platform can fork."""
+    jobs = [("button", spec) for spec in BUTTON_ICONS] + [("composer", spec) for spec in COMPOSER_ICONS]
     workers = min(job_count(), len(jobs))
     if workers > 1 and "fork" in multiprocessing.get_all_start_methods():
         context = multiprocessing.get_context("fork")
         with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
-            rendered = list(pool.map(render_one, jobs))
+            rendered = list(pool.map(run_job, jobs))
     else:
-        rendered = [render_one(job) for job in jobs]
-    return [
-        (driver, name, size, master, icon)
-        for (driver, name, size, _render, _args), (master, icon) in zip(jobs, rendered, strict=True)
-    ]
+        rendered = [run_job(job) for job in jobs]
+    buttons = rendered[: len(BUTTON_ICONS)]
+    composer = rendered[len(BUTTON_ICONS) :]
+    buttons = quantize_buttons(
+        [(names, icons) for (names, _render, _args), icons in zip(BUTTON_ICONS, buttons, strict=True)]
+    )
+    return (
+        [
+            (driver, name, size, master, icon)
+            for (driver, name, size, _render, _args), (master, icon) in zip(COMPOSER_ICONS, composer, strict=True)
+        ],
+        buttons,
+    )
 
 
 def save(img, path):
@@ -800,16 +1193,47 @@ def inspection_sheet(results, out_dir):
         print("wrote", mp)
 
 
+def button_sheet(buttons, out_dir):
+    """Each button icon at 300, 90 and 70 px on Navigator-like backgrounds: a dark wallpaper, black,
+    white and Composer's #f0f0f0 (512 and 1024 are the 300's design, larger)."""
+    shown = [i for i, size in enumerate(BUTTON_SIZES) if size <= 300]
+    pad = 16
+    cell = 300 + 90 + 70 + 4 * pad
+    backgrounds = ((24, 30, 44), (0, 0, 0), (255, 255, 255), (240, 240, 240))
+    row_h = 300 + 2 * pad + 12
+    sheet = Image.new("RGB", (len(buttons) * cell + pad, len(backgrounds) * row_h), (255, 255, 255))
+    d = ImageDraw.Draw(sheet)
+    for bi, bg in enumerate(backgrounds):
+        y0 = bi * row_h
+        d.rectangle((0, y0, sheet.width, y0 + row_h), fill=bg)
+        label = (200, 200, 200) if sum(bg) < 300 else (90, 90, 90)
+        for ci, (names, icons) in enumerate(buttons):
+            x = pad + ci * cell
+            d.text((x, y0 + 4), " = ".join(names), fill=label)
+            for i in shown:
+                icon = icons[i].convert("RGBA")
+                sheet.paste(icon, (x, y0 + 12 + pad), icon)
+                x += icon.width + pad
+    path = os.path.join(out_dir, "icons_buttons_sheet.png")
+    sheet.save(path)
+    print("wrote", path)
+
+
 def main(argv):
     inspect = None
     if len(argv) >= 3 and argv[1] == "--inspect":
         inspect = argv[2]
-    results = build_all()
+    results, buttons = build_all()
     for driver, name, size, _master, icon in results:
         save(icon, out_path(driver, name, size))
+    for names, icons in buttons:
+        for name in names:
+            for size, icon in zip(BUTTON_SIZES, icons, strict=True):
+                save(icon, button_path(name, size))
     if inspect:
         os.makedirs(inspect, exist_ok=True)
         inspection_sheet(results, inspect)
+        button_sheet(buttons, inspect)
     return 0
 
 

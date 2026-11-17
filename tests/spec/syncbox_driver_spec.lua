@@ -405,7 +405,7 @@ describe("Hue Sync Box driver (#534)", function()
 				has_discrete_loudness_control = "False",
 				has_audio_signal_sense = "False", has_video_signal_sense = "False",
 			}, caps)
-			-- UIB 104/_1: a default icon and one set per state, each at 300, 90 and 70 px,
+			-- UIB 104/_1: a default icon and one set per state, each at 300, 90, 70, 512 and 1024 px,
 			-- under controller://driver/hue_syncbox/ (the package's www/).
 			local function sets(inner)
 				local out = {}
@@ -423,7 +423,8 @@ describe("Hue Sync Box driver (#534)", function()
 				return out
 			end
 			local function want(path)
-				return string.format("300=icons/%s_300.png 90=icons/%s_90.png 70=icons/%s_70.png", path, path, path)
+				return string.format("300=icons/%s_300.png 90=icons/%s_90.png 70=icons/%s_70.png 512=icons/%s_512.png "
+					.. "1024=icons/%s_1024.png", path, path, path, path, path)
 			end
 			assert.same({ "5002", "5003", "5004", "5005" }, (function()
 				local keys = {}
