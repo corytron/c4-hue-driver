@@ -14,6 +14,15 @@ if not package.path:find("src/hue_syncbox/?.lua", 1, true) then
 	package.path = "src/hue_syncbox/?.lua;" .. package.path
 end
 
+-- The release build's cases: tools/build.sh deletes syncbox/devhooks.lua
+-- from every release stage (#547, docs/fakebox-design.md §7), so it is kept
+-- out here, as it would be missing on the controller; the dev build's cases,
+-- with it, are in the describe "a dev build's syncbox/devhooks.lua" below.
+package.loaded["syncbox.devhooks"] = nil
+package.preload["syncbox.devhooks"] = function()
+	error("module 'syncbox.devhooks' not found (a release build)", 0)
+end
+
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
 local F = require("fixtures.hue_syncbox")
@@ -113,9 +122,9 @@ end
 
 -- An mDNS answer for _huesync._tcp.local (RFC 1035 §4.1, RFC 6763; the
 -- shape syncbox_discovery_spec.lua answers with): a PTR to the box's
--- instance, its SRV on 443, its TXT (name, devicetype, uniqueid) and its A
--- record, names written out in full.
-local function mdns_answer(query_id, id, ip)
+-- instance, its SRV on 443 (or `port`: the VM's fake box, #547), its TXT
+-- (name, devicetype, uniqueid) and its A record, names written out in full.
+local function mdns_answer(query_id, id, ip, port)
 	local function u16(n) return string.char(math.floor(n / 256) % 256, n % 256) end
 	local function name(n)
 		local out = {}
@@ -134,19 +143,20 @@ local function mdns_answer(query_id, id, ip)
 	return u16(query_id) .. u16(0x8400) .. u16(1) .. u16(1) .. u16(0) .. u16(3)
 		.. name(service) .. u16(12) .. u16(1)
 		.. record(service, 12, name(instance))
-		.. record(instance, 33, u16(0) .. u16(0) .. u16(443) .. name(host))
+		.. record(instance, 33, u16(0) .. u16(0) .. u16(port or 443) .. name(host))
 		.. record(instance, 16, txt)
 		.. record(host, 1, string.char(tonumber(a), tonumber(b), tonumber(c), tonumber(d)))
 end
 
--- The LAN answers every mDNS query the driver sends with `id` at `ip`.
-local function lan_answers(env, c4, id, ip)
+-- The LAN answers every mDNS query the driver sends with `id` at `ip`
+-- (its SRV on `srv_port`, 443 by default).
+local function lan_answers(env, c4, id, ip, srv_port)
 	local original = c4.SendToNetwork
 	c4.SendToNetwork = function(self, binding, port, data)
 		original(self, binding, port, data)
 		local qid = data:byte(1) * 256 + data:byte(2)
 		c4:SetTimer(1, function()
-			env.ReceivedFromNetwork(binding, port, mdns_answer(qid, id, ip))
+			env.ReceivedFromNetwork(binding, port, mdns_answer(qid, id, ip, srv_port))
 		end)
 	end
 end
@@ -379,6 +389,51 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.equal(F.TOKEN, c4.persist.syncbox_token)
 		end)
 
+		-- The house's first start could not read the box id, the address or the
+		-- registration id, the fields PersistGetValue was asked for with an
+		-- explicit false [house, build 682, 2026-11-17, #547]. Here the runtime
+		-- raises on any explicit encrypted flag but true, PersistSetValue's too.
+		it("keeps the box id, address and registration across a restart after pairing, with no warnings (#547)", function()
+			local function strict(c4)
+				local get, set = c4.PersistGetValue, c4.PersistSetValue
+				c4.PersistGetValue = function(self, name, ...)
+					if select("#", ...) > 0 and (...) ~= true then error("PersistGetValue: bad argument #2", 2) end
+					return get(self, name, ...)
+				end
+				c4.PersistSetValue = function(self, name, value, ...)
+					if select("#", ...) > 0 and (...) ~= true then error("PersistSetValue: bad argument #3", 2) end
+					return set(self, name, value, ...)
+				end
+			end
+			local function start(persist, box_opts)
+				local env, c4 = fake.load_driver("hue_syncbox", {}, { device_id = BOX_DEVICE })
+				strict(c4)
+				for k, v in pairs(persist) do c4.persist[k] = v end
+				local box = fake.syncbox(box_opts)
+				env.OnDriverInit("DIT_STARTUP")
+				env.OnDriverLateInit("DIT_STARTUP")
+				return env, c4, box
+			end
+			local env, c4, box = start({}, {})
+			pair(env, c4, box)
+			assert.equal("Paired with Hue Sync Box (8K) " .. SHORT .. " at " .. F.ADDRESS, fake.last_action(env))
+			assert.same({ F.TOKEN, F.REGISTRATION_ID, F.BOX_ID, F.ADDRESS }, { c4.persist.syncbox_token,
+				c4.persist.syncbox_registration_id, c4.persist.syncbox_box_id, c4.persist.syncbox_address })
+			-- The restart: a new Lua state with what Director kept.
+			local kept = {}
+			for k, v in pairs(c4.persist) do kept[k] = v end
+			env = start(kept, { registrations = { [F.REGISTRATION_ID] = F.TOKEN } })
+			assert.equal(F.BOX_ID, env.Properties["Box ID"])
+			assert.equal(F.ADDRESS, env.Properties["Box Address"])
+			assert.equal("Video, high, brightness 100 % on Living Room TV", env.Properties["Status"])
+			assert.equal("Online", env.Properties["Online"])
+			for _, line in ipairs(lines) do
+				assert.is_nil(line:find("could not read the stored", 1, true), line)
+				assert.is_nil(line:find("could not store", 1, true), line)
+				assert.is_nil(line:find("is not usable", 1, true), line)
+			end
+		end)
+
 		it("ends with the reason in words when the button is not held within 2 minutes", function()
 			local env, c4, box = load_box()
 			action(env, "Pair Sync Box", { Box = "address", Address = F.ADDRESS })
@@ -407,6 +462,16 @@ describe("Hue Sync Box driver (#534)", function()
 			c4.advance(1000)
 			assert.equal("Not paired: nothing answers at " .. MOVED_TO, fake.last_action(env))
 			assert.equal("Not paired: run Pair Sync Box", env.Properties["Status"])
+		end)
+
+		it("refuses host:port without syncbox/devhooks.lua, as a release build does (#547)", function()
+			local env, _, box = load_box()
+			for _, typed in ipairs({ F.ADDRESS .. ":8443", F.ADDRESS .. ":443" }) do
+				action(env, "Pair Sync Box", { Box = "address", Address = typed })
+				assert.equal("Not paired: " .. typed .. " is not an IPv4 address (four numbers, as 10.0.2.150)",
+					fake.last_action(env))
+			end
+			assert.same({}, box.requests)
 		end)
 
 		it("refuses another box while one is paired (Forget Pairing first)", function()
@@ -748,5 +813,209 @@ describe("Hue Sync Box driver (#534)", function()
 		c4.advance(8 * HOUR + 1000)
 		assert.equal("Off", env.Properties["Debug Mode"])
 		assert.equal("Debug Mode turned itself Off after 8 hours", fake.last_action(env))
+	end)
+
+	-- #547, docs/fakebox-design.md §7: a dev build pairs with the VM's fake box,
+	-- which serves HTTPS on 8443 and announces that port by mDNS.
+	describe("a dev build's syncbox/devhooks.lua (#547)", function()
+		local FAKE = F.ADDRESS .. ":8443"
+		local blocked
+
+		before_each(function()
+			blocked = package.preload["syncbox.devhooks"]
+			package.preload["syncbox.devhooks"], package.loaded["syncbox.devhooks"] = nil, nil
+		end)
+
+		after_each(function()
+			package.preload["syncbox.devhooks"], package.loaded["syncbox.devhooks"] = blocked, nil
+			package.preload["common.build_kind"], package.loaded["common.build_kind"] = nil, nil
+		end)
+
+		-- The Lua fake box answers on 443 only (tests/helpers/fake_c4.lua); here
+		-- a transfer to <its address>:8443 reaches it, and every URL the driver
+		-- built is kept, as it built it, in the list returned.
+		local function box_on_8443(c4)
+			local urls, make = {}, c4.url
+			c4.url = function(self)
+				local t = make(self)
+				for _, method in ipairs({ "Get", "Post", "Put", "Delete" }) do
+					local start = t[method]
+					t[method] = function(transfer, url, ...)
+						urls[#urls + 1] = tostring(url)
+						return start(transfer, (tostring(url):gsub("^(https://[%d%.]+):8443/", "%1/")), ...)
+					end
+				end
+				return t
+			end
+			return urls
+		end
+
+		-- load_box with the box reached on 8443 from the start.
+		local function start(opts)
+			opts = opts or {}
+			local env, c4 = fake.load_driver("hue_syncbox", {}, { device_id = BOX_DEVICE })
+			for k, v in pairs(opts.persist or {}) do c4.persist[k] = v end
+			local urls = box_on_8443(c4)
+			local box = fake.syncbox(opts.box or {})
+			env.OnDriverInit("DIT_STARTUP")
+			env.OnDriverLateInit("DIT_STARTUP")
+			return env, c4, box, urls
+		end
+
+		local function all_to(urls, prefix)
+			assert.truthy(#urls > 0, "requests went out")
+			for _, url in ipairs(urls) do
+				assert.equal(prefix, url:sub(1, #prefix), url)
+			end
+		end
+
+		it("pairs with the box at host:port typed under Address, and shows and stores it with the port", function()
+			local env, c4, box, urls = start()
+			pair(env, c4, box, FAKE)
+			assert.equal("Paired with Hue Sync Box (8K) " .. SHORT .. " at " .. FAKE, fake.last_action(env))
+			assert.equal(FAKE, env.Properties["Box Address"])
+			assert.equal(FAKE, c4.persist.syncbox_address)
+			assert.equal("Video, high, brightness 100 % on Living Room TV", env.Properties["Status"])
+			all_to(urls, "https://" .. FAKE .. "/api/v1")
+			assert.truthy(#box:requests_of("GET", "") > 0, "the reads reach the box")
+		end)
+
+		it("reads the box at host:port again after a restart", function()
+			local persist = {}
+			for k, v in pairs(PAIRED) do persist[k] = v end
+			persist.syncbox_address = FAKE
+			local env, _, box, urls = start({ persist = persist,
+				box = { registrations = { [F.REGISTRATION_ID] = F.TOKEN } } })
+			assert.equal(FAKE, env.Properties["Box Address"])
+			assert.equal("Online", env.Properties["Online"])
+			all_to(urls, "https://" .. FAKE .. "/api/v1")
+			assert.is_true(box.requests[#box.requests].keyed)
+		end)
+
+		it("writes the box's own port, 443, without it", function()
+			local env, c4, box = start()
+			pair(env, c4, box, F.ADDRESS .. ":443")
+			assert.equal("Paired with Hue Sync Box (8K) " .. SHORT .. " at " .. F.ADDRESS, fake.last_action(env))
+			assert.equal(F.ADDRESS, c4.persist.syncbox_address)
+		end)
+
+		it("refuses a port no URL can carry and a host a release build refuses, sending nothing", function()
+			local env, _, box, urls = start()
+			for _, typed in ipairs({ F.ADDRESS .. ":0", F.ADDRESS .. ":65536", F.ADDRESS .. ":08443",
+				F.ADDRESS .. ":", "hsb.local:8443", "10.0.2.150/x:8443", "10.0.02.150:8443" }) do
+				action(env, "Pair Sync Box", { Box = "address", Address = typed })
+				assert.equal("Not paired: " .. typed .. " is not an IPv4 address (four numbers, as 10.0.2.150)",
+					fake.last_action(env))
+			end
+			assert.same({}, urls)
+			assert.same({}, box.requests)
+		end)
+
+		it("lists a box the search found on another SRV port at ip:port, and pairs from the Box list", function()
+			local env, c4, box, urls = start()
+			lan_answers(env, c4, F.BOX_ID, F.ADDRESS, 8443)
+			action(env, "Pair Sync Box", {})
+			c4.advance(20000)
+			local list = fake.custom_select(env, "SyncBoxList")
+			assert.same({ text = "Hue Sync Box (8K) " .. SHORT .. ", Living Room Sync Box, " .. FAKE,
+				value = "box:" .. F.BOX_ID }, list[1])
+			action(env, "Pair Sync Box", { Box = "box:" .. F.BOX_ID })
+			c4.advance(2000)
+			box:hold_button()
+			c4.advance(2000)
+			assert.equal("Paired with Hue Sync Box (8K) " .. SHORT .. " at " .. FAKE, fake.last_action(env))
+			assert.equal(FAKE, c4.persist.syncbox_address)
+			all_to(urls, "https://" .. FAKE .. "/api/v1")
+		end)
+
+		it("is not used by a release build that finds it (an earlier dev build's file), which says so once", function()
+			package.preload["common.build_kind"] = function() return "release" end
+			local env, _, box, urls = start()
+			action(env, "Pair Sync Box", { Box = "address", Address = FAKE })
+			assert.equal("Not paired: " .. FAKE .. " is not an IPv4 address (four numbers, as 10.0.2.150)",
+				fake.last_action(env))
+			assert.same({}, urls)
+			assert.same({}, box.requests)
+			local said = 0
+			for _, line in ipairs(lines) do
+				if line:find("found syncbox/devhooks.lua of an earlier dev build; not used", 1, true) then
+					said = said + 1
+				end
+			end
+			assert.equal(1, said)
+		end)
+	end)
+
+	-- #547, docs/dev-loop.md: the bridge forwards the "syncbox" tree to the
+	-- devices bound on its connection 2; the device reloads itself from it.
+	describe("the dev loop's syncbox tree (#547)", function()
+		local function with_apply_forwarded(stub, body)
+			local devloop = require("common.devloop")
+			local original = devloop.apply_forwarded
+			devloop.apply_forwarded = stub
+			local ok, err = pcall(body)
+			devloop.apply_forwarded = original
+			assert(ok, err)
+		end
+
+		it("hands a syncbox bundle to the dev loop, says the new version to the bridge, and ignores other trees",
+			function()
+				local env, c4 = paired(nil, { bind = true })
+				local got = {}
+				with_apply_forwarded(function(params)
+					got[#got + 1] = params
+					return true, "B7"
+				end, function()
+					env.ExecuteCommand("DEV_RELOAD", { tree = "light", version = "L1", bundle = "{}", mac = "x" })
+					assert.same({}, got)
+					c4.sent = {}
+					env.ExecuteCommand("DEV_RELOAD", { tree = "syncbox", version = "B7", bundle = "{}", mac = "x" })
+				end)
+				assert.same({ { tree = "syncbox", version = "B7", bundle = "{}", mac = "x" } }, got)
+				local logs = {}
+				for _, m in ipairs(c4.sent) do
+					if m.command == "HUE_LOG" then logs[#logs + 1] = m end
+				end
+				assert.equal(1, #logs)
+				assert.equal(BRIDGE, logs[1].id)
+				assert.equal("Hue Sync Box: syncbox reloaded to version B7", logs[1].params.line)
+				assert.equal(F.BOX_ID, logs[1].params.rid)
+			end)
+
+		-- The reload sequence of common/devloop.lua, as tests/spec/drivers_spec.lua
+		-- runs it for the bridge: OnDriverDestroyed, the driver's modules
+		-- forgotten, driver.lua again, then both inits with DIT_UPDATING.
+		it("comes back paired after a reload, reading the box at the poller's own pace", function()
+			local env, c4, box = paired(nil, { bind = true })
+			c4.advance(20000)
+			local before = #box:requests_of("GET", "")
+			c4.advance(20000)
+			local pace = #box:requests_of("GET", "") - before
+			assert.truthy(pace > 0)
+
+			env.OnDriverDestroyed()
+			for name in pairs(package.loaded) do
+				if (name:match("^syncbox%.") or name:match("^common%.")) and name ~= "common.log"
+					and name ~= "common.devloop" then
+					package.loaded[name] = nil
+				end
+			end
+			local chunk = assert(loadfile("src/hue_syncbox/driver.lua"))
+			setfenv(chunk, env)
+			chunk()
+			env.OnDriverInit("DIT_UPDATING")
+			env.OnDriverLateInit("DIT_UPDATING")
+			assert.equal("Video, high, brightness 100 % on Living Room TV", env.Properties["Status"])
+			assert.equal(F.BOX_ID, env.Properties["Box ID"])
+			assert.equal("Online", env.Properties["Online"])
+			c4.advance(20000)
+			before = #box:requests_of("GET", "")
+			c4.advance(20000)
+			assert.equal(pace, #box:requests_of("GET", "") - before, "one poller: the old code's stopped")
+		end)
+	end)
+
+	teardown(function()
+		package.preload["syncbox.devhooks"] = nil
 	end)
 end)

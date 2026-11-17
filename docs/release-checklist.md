@@ -39,8 +39,9 @@ findings as comments), and `docs/status.md` sums them up.
   `bridge/devtools.lua`, which a release does not carry); no
   package holds `common/devloop.lua` or `common/devkey.lua`, and the bridge
   no `bridge/devtools.lua`, `bridge/conntest.lua`, `bridge/pinning.lua` or
-  `bridge/probe12.lua` (`tools/build.sh` refuses to package a release stage
-  that still has one). The dev build has all of them (the same 10 actions,
+  `bridge/probe12.lua`, and the sync box no `syncbox/devhooks.lua` and no
+  CA but `root-hsb` in `certs/hsb_ca.pem` (#547) (`tools/build.sh` refuses to
+  package a release stage that still has one). The dev build has all of them (the same 10 actions,
   with the four development entries inside the Diagnostics list; 32
   actions before 1.2, the three diagnostics before `Forget Pairing`); each
   package carries the dev

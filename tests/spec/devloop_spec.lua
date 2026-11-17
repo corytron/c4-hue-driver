@@ -14,9 +14,10 @@ function OnDriverLateInit(reason) table.insert(DEVLOOP_TEST_CALLS, "late:" .. to
 function OnDriverDestroyed() table.insert(DEVLOOP_TEST_CALLS, "destroyed") end
 ]]
 
--- The light and scene trees' driver.lua, distinguishable from the bridge's and each other.
+-- The light, scene and sync box trees' driver.lua, distinguishable from the bridge's and each other.
 local LIGHT_SRC = "DEVLOOP_TEST_MARK = 'light loaded'"
 local SCENE_SRC = "DEVLOOP_TEST_MARK = 'scene loaded'"
+local SYNCBOX_SRC = "DEVLOOP_TEST_MARK = 'syncbox loaded'"
 
 -- The dev key a dev package carries as common/devkey.lua (tools/build.sh
 -- --dev), installed here through package.preload; another build's key; and
@@ -32,6 +33,7 @@ local SHARED_BUNDLE_MAC = "ca15fb64cce6d849bd18e1f8b4f4303d5f45f1ca103867d4a8b7a
 -- Modules a reload clears; the other specs' instances are saved around each test.
 local function is_driver_module(name)
 	return name:match("^bridge%.") or name:match("^common%.") or name:match("^light%.") or name:match("^scene%.")
+		or name:match("^syncbox%.")
 end
 
 -- A fresh common.devloop whose package carries `key` (nil: none at all).
@@ -76,7 +78,8 @@ describe("common.devloop", function()
 
 	-- An idle tick's requests: every manifest, then the commands (recorded
 	-- without their nonce).
-	local POLL = { "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene", "GET /commands?after=0" }
+	local POLL = { "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
+		"GET /manifest?tree=syncbox", "GET /commands?after=0" }
 
 	local function state()
 		return rawget(_G, "__DEVLOOP")
@@ -112,10 +115,13 @@ describe("common.devloop", function()
 			light_files = { ["driver.lua"] = LIGHT_SRC, ["light/state.lua"] = "return {}" },
 			scene_version = "S1",
 			scene_files = { ["driver.lua"] = SCENE_SRC },
+			syncbox_version = "B1",
+			syncbox_files = { ["driver.lua"] = SYNCBOX_SRC, ["syncbox/client.lua"] = "return {}" },
 			trees = true,        -- false: an older server that knows no ?tree=
 			scene_tree = true,   -- false: a server with a light tree only (HTTP 400 for ?tree=scene)
+			syncbox_tree = true, -- false: a server from before the sync box tree (HTTP 400 for ?tree=syncbox)
 			key = TEST_KEY,      -- what it signs with
-			keys = {},           -- what = key: another key for "bridge", "light", "scene" or "commands"
+			keys = {},           -- what = key: another key for "bridge", "light", "scene", "syncbox" or "commands"
 			unsigned = {},       -- what = true: plain JSON there, as a server from before signing
 			tamper = {},         -- what = function(payload) -> payload changed after signing
 			swap = {},           -- tree = other tree: that tree's (correctly signed) bundle served instead
@@ -161,6 +167,9 @@ describe("common.devloop", function()
 			local tree = tree_of(path)
 			if tree == "scene" and not server.scene_tree then
 				return t:respond(400, json({ error = "unknown tree 'scene' (bridge or light)" }))
+			end
+			if tree == "syncbox" and not server.syncbox_tree then
+				return t:respond(400, json({ error = "unknown tree 'syncbox' (bridge or light or scene)" }))
 			end
 			local function version_of(name)
 				return (name ~= nil and name ~= "bridge") and server[name .. "_version"] or server.version
@@ -236,13 +245,24 @@ describe("common.devloop", function()
 		server.requests, server.reports, server.logs, sent = {}, {}, {}, {}
 	end
 
-	-- What the bridge has bound on binding 1; tests override per case.
-	local function bind_lights(devices)
-		c4.GetBoundConsumerDevices = function(_, device_id, binding)
+	-- What the bridge has bound on binding 1 (lights and scene devices) and on
+	-- binding 2 (sync box devices, #547); tests override per case.
+	local bound
+	local function bind_on(binding, devices)
+		bound[binding] = devices
+		c4.GetBoundConsumerDevices = function(_, device_id, which)
 			assert.equal(15, device_id, "the bridge's own device id")
-			assert.equal(1, binding)
-			return devices
+			assert.truthy(which == 1 or which == 2, "binding " .. tostring(which))
+			return bound[which]
 		end
+	end
+
+	local function bind_lights(devices)
+		bind_on(1, devices)
+	end
+
+	local function bind_boxes(devices)
+		bind_on(2, devices)
 	end
 
 	-- What C4:GetDevices reports for a bound device: the driver file it runs.
@@ -344,6 +364,7 @@ describe("common.devloop", function()
 				allow_empty = allow_empty, log_command = log_command, nargs = select("#", device_id, command, params,
 					allow_empty, log_command) })
 		end
+		bound = {}
 		bind_lights(nil)
 		real_print = print
 		printed = {}
@@ -460,6 +481,7 @@ describe("common.devloop", function()
 			assert.same({ "POST /report", "GET /manifest", "GET /bundle", "POST /report",
 				"GET /manifest?tree=light", "GET /bundle?tree=light",
 				"GET /manifest?tree=scene", "GET /bundle?tree=scene",
+				"GET /manifest?tree=syncbox", "GET /bundle?tree=syncbox",
 				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
 			assert.same({ "startup", "reload", "heartbeat" }, events())
 		end)
@@ -780,6 +802,7 @@ end
 			assert.same({ "POST /report", "GET /manifest", "GET /bundle", "POST /report",
 				"GET /manifest?tree=light", "GET /bundle?tree=light",
 				"GET /manifest?tree=scene", "GET /bundle?tree=scene",
+				"GET /manifest?tree=syncbox", "GET /bundle?tree=syncbox",
 				"GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
 		end)
 
@@ -938,7 +961,8 @@ end
 			assert.is_false(sent[1].log_command)
 			assert.equal("L2", devloop.light_version())
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
-				"GET /manifest?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+				"GET /manifest?tree=scene", "GET /manifest?tree=syncbox", "GET /commands?after=0", "POST /log",
+				"POST /report" }, server.requests)
 		end)
 
 		it("reports light_version in the heartbeat right after a forward, and in later reports", function()
@@ -1043,8 +1067,8 @@ end
 			assert.same({ [2001] = "L2", [2002] = "L2" }, state().light_forwarded)
 			assert.equal("L2", devloop.light_version())
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /bundle?tree=light",
-				"GET /manifest?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests,
-				"fetched once for the new version; a heartbeat is due at once")
+				"GET /manifest?tree=scene", "GET /manifest?tree=syncbox", "GET /commands?after=0", "POST /log",
+				"POST /report" }, server.requests, "fetched once for the new version; a heartbeat is due at once")
 		end)
 
 		it("forgets a device that is no longer bound, and forwards again if it comes back", function()
@@ -1145,8 +1169,8 @@ end
 			assert.equal("L1", devloop.light_version(), "the light tree is untouched")
 			assert.same({ [2002] = "S2" }, state().scene_forwarded)
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
-				"GET /bundle?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests,
-				"fetched once for the new version; a heartbeat is due at once")
+				"GET /bundle?tree=scene", "GET /manifest?tree=syncbox", "GET /commands?after=0", "POST /log",
+				"POST /report" }, server.requests, "fetched once for the new version; a heartbeat is due at once")
 			assert.same({ "heartbeat" }, events())
 			assert.equal("S2", last_report().scene_version)
 			assert.equal("L1", last_report().light_version)
@@ -1217,8 +1241,113 @@ end
 			assert.same(server.scene_files, forwarded_files(sent[2]))
 			assert.equal("S1", devloop.tree_version("scene"))
 			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
-				"GET /bundle?tree=scene", "GET /commands?after=0", "POST /log", "POST /report" }, server.requests)
+				"GET /bundle?tree=scene", "GET /manifest?tree=syncbox", "GET /commands?after=0", "POST /log",
+				"POST /report" }, server.requests)
 			assert_said("scene version S1 forwarded to 1 scene device(s)")
+		end)
+
+		-- #547: the sync box devices bind on the bridge's connection 2 ("Hue
+		-- Sync Boxes"), never on 1 with the lights and scene devices.
+		it("forwards the sync box tree only to the sync box devices bound on connection 2", function()
+			project_device(2001, "hue_light.c4z")
+			project_device(2301, "hue_syncbox.c4z")
+			project_device(2303, "hue_light.c4z")
+			bind_lights({ [2001] = "Hue Light" })
+			bind_boxes({ [2301] = "Hue Sync Box", [2302] = "B", [2303] = "C" }) -- 2302: GetDevices omits it
+			devloop.start(HOST)
+			serve()
+			assert.is_nil(server.reports[1].syncbox_version, "absent until the first forward")
+			tick()
+			assert.same({ 2001 }, sent_to("light"))
+			assert.same({ 2301, 2302 }, sent_to("syncbox"), "an unknown driver file on 2 counts as a sync box")
+			assert.equal(3, #sent)
+			for _, msg in ipairs(sent) do
+				if msg.params.tree == "syncbox" then
+					assert.equal("DEV_RELOAD", msg.command)
+					assert.equal("B1", msg.params.version)
+					assert.same(server.syncbox_files, forwarded_files(msg))
+					assert.equal(server.payloads.syncbox, msg.params.bundle, "the server's payload, unchanged")
+					assert.is_false(msg.allow_empty)
+					assert.is_false(msg.log_command)
+				end
+			end
+			assert.same({ [2301] = "B1", [2302] = "B1" }, state().syncbox_forwarded)
+			assert.same({ [2001] = "L1" }, state().light_forwarded)
+			assert.equal("B1", devloop.tree_version("syncbox"))
+			assert_said("syncbox version B1 forwarded to 2 syncbox device(s)")
+			assert_said("scene version S1: no bound scene devices")
+			assert.equal("heartbeat", last_report().event)
+			assert.equal("B1", last_report().syncbox_version)
+
+			-- A new version goes to the sync box devices alone, fetched once.
+			server.syncbox_version, server.syncbox_files["driver.lua"] = "B2", SYNCBOX_SRC .. " .. ' 2'"
+			sent, server.requests, server.reports = {}, {}, {}
+			tick()
+			assert.same({ 2301, 2302 }, sent_to("syncbox"))
+			assert.equal(2, #sent)
+			assert.same(server.syncbox_files, forwarded_files(sent[1]))
+			assert.same({ "GET /manifest", "GET /manifest?tree=light", "GET /manifest?tree=scene",
+				"GET /manifest?tree=syncbox", "GET /bundle?tree=syncbox", "GET /commands?after=0", "POST /log",
+				"POST /report" }, server.requests, "a heartbeat is due at once")
+			assert.equal("B2", last_report().syncbox_version)
+			assert.equal("L1", last_report().light_version)
+			assert.equal("S1", last_report().scene_version)
+		end)
+
+		it("catches up a sync box device bound after the first forward, from the held bundle", function()
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert_said("syncbox version B1: no bound syncbox devices")
+			bind_boxes({ [2301] = "Hue Sync Box" })
+			server.requests = {}
+			tick()
+			assert.same({ 2301 }, sent_to("syncbox"))
+			assert.same(server.syncbox_files, forwarded_files(sent[1]))
+			assert_said("syncbox version B1 forwarded to 1 newly bound syncbox device(s)")
+			assert.same(plus(POLL, "POST /log"), server.requests, "no second fetch")
+			-- Unbound, it is forgotten; bound again, it gets the version again.
+			bind_boxes(nil)
+			tick()
+			assert.same({}, state().syncbox_forwarded)
+			bind_boxes({ [2301] = "Hue Sync Box" })
+			tick()
+			assert.same({ 2301, 2301 }, sent_to("syncbox"))
+		end)
+
+		it("says once when the server lacks the sync box tree, and picks it up later", function()
+			bind_lights({ [2001] = "A" })
+			bind_boxes({ [2301] = "Hue Sync Box" })
+			server.syncbox_tree = false
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({ 2001 }, sent_to("light"))
+			assert.same({}, sent_to("syncbox"))
+			assert.is_nil(devloop.tree_version("syncbox"))
+			assert_said("server has no syncbox tree (HTTP 400); syncbox devices are not updated")
+			tick()
+			assert_said("server has no syncbox tree (HTTP 400); syncbox devices are not updated")
+
+			server.syncbox_tree = true
+			tick()
+			assert.same({ 2301 }, sent_to("syncbox"))
+			assert.equal("B1", devloop.tree_version("syncbox"))
+		end)
+
+		it("forwards nothing from an unsigned sync box bundle or one signed for the light tree", function()
+			bind_boxes({ [2301] = "Hue Sync Box" })
+			server.unsigned.syncbox = true
+			devloop.start(HOST)
+			serve()
+			tick()
+			assert.same({}, sent_to("syncbox"))
+			assert_said("syncbox bundle B1 refused: not signed")
+
+			server.unsigned.syncbox, server.swap.syncbox, server.syncbox_version = nil, "light", "B2"
+			tick()
+			assert.same({}, sent)
+			assert.is_nil(devloop.tree_version("syncbox"))
 		end)
 
 		it("keeps the loop going when SendToDevice raises", function()
@@ -1233,7 +1362,7 @@ end
 			assert.equal(1, #sent)
 			assert.equal("L1", devloop.light_version())
 			assert_said("light version L1 forwarded to 1 light device(s), 1 failed")
-			assert.equal("GET /commands?after=0", server.requests[9])
+			assert.equal("GET /commands?after=0", server.requests[11])
 			assert.same({ [2001] = "L1", [2002] = "L1" }, state().light_forwarded,
 				"a failed send is recorded too, so it is not retried at this version")
 			tick()
@@ -1293,6 +1422,8 @@ end
 			assert.equal("light", devloop.own_tree())
 			c4.driver_file = "hue_scene.c4z"
 			assert.equal("scene", devloop.own_tree())
+			c4.driver_file = "hue_syncbox.c4z"
+			assert.equal("syncbox", devloop.own_tree())
 			c4.driver_file = "other.c4z"
 			assert.is_nil(devloop.own_tree())
 		end)
@@ -1380,6 +1511,41 @@ end
 			assert.equal("scene loaded", rawget(_G, "DEVLOOP_TEST_MARK"))
 			assert.equal("S1", devloop.version())
 			assert.equal("devloop: scene reload complete: version S1", printed[#printed])
+		end)
+
+		it("on a sync box device applies the sync box tree, serving syncbox.* from it, and skips the others (#547)",
+			function()
+				c4.driver_file = "hue_syncbox.c4z"
+				rawset(_G, "OnDriverDestroyed", function() table.insert(calls(), "old destroyed") end)
+				for _, tree in ipairs({ "light", "scene" }) do
+					assert.same({ false, "skipped" }, { forwarded("X1", { ["driver.lua"] = DRIVER_SRC }, tree) })
+					assert.equal("devloop: syncbox reload skipped: DEV_RELOAD carries the " .. tree .. " tree",
+						printed[#printed])
+				end
+				assert.same({}, calls(), "nothing was torn down")
+
+				package.loaded["syncbox.client"] = { old = true }
+				assert.same({ true, "B1" }, { forwarded("B1", {
+					["driver.lua"] = "DEVLOOP_TEST_MARK = require('syncbox.client')",
+					["syncbox/client.lua"] = "return 'syncbox loaded'",
+				}, "syncbox") })
+				assert.equal("syncbox loaded", rawget(_G, "DEVLOOP_TEST_MARK"), "the bundle's module, not the old one")
+				assert.same({ "old destroyed" }, calls())
+				assert.equal("B1", devloop.version())
+				assert.equal("devloop: syncbox reload complete: version B1", printed[#printed])
+				assert.equal(0, #c4.transfers, "a sync box device never contacts the server")
+			end)
+
+		it("refuses a bundle signed for the sync box tree on a light, and one signed for a light on a sync box", function()
+			assert.same({ false, "refused", "signed for the syncbox tree" },
+				{ forwarded("B1", { ["driver.lua"] = SYNCBOX_SRC }, "light", { signed_tree = "syncbox" }) })
+			c4.driver_file = "hue_syncbox.c4z"
+			assert.same({ false, "refused", "signed for the light tree" },
+				{ forwarded("L1", { ["driver.lua"] = LIGHT_SRC }, "syncbox", { signed_tree = "light" }) })
+			assert.same({ false, "refused", "signed for the bridge tree" },
+				{ forwarded("v1", { ["driver.lua"] = DRIVER_SRC }, "syncbox", { signed_tree = "bridge" }) })
+			assert.is_nil(rawget(_G, "DEVLOOP_TEST_MARK"))
+			assert.is_nil(devloop.version())
 		end)
 
 		it("applies either device tree when its own driver file is not a hue_*.c4z", function()
@@ -1630,6 +1796,15 @@ end
 			handler({ tree = "light", version = "L1", bundle = "{}" })
 			assert.is_nil(got)
 			assert.same({ "debug DEV_RELOAD for the light tree ignored" }, lines)
+		end)
+
+		it("on a sync box device takes the syncbox tree and ignores the light tree (#547)", function()
+			local handler = devloop.reload_handler(log, "syncbox")
+			handler({ tree = "light", version = "L1", bundle = "{}" })
+			assert.is_nil(got)
+			handler({ tree = "syncbox", version = "B1", bundle = "{}", ok = true })
+			assert.equal("B1", got.version)
+			assert.same({ "debug DEV_RELOAD for the light tree ignored", "always syncbox reloaded to version B1" }, lines)
 		end)
 	end)
 

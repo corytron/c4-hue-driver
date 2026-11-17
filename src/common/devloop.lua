@@ -8,14 +8,16 @@
 --   GET /manifest?tree=light -> (GET /bundle?tree=light at a new version,
 --                                verify, DEV_RELOAD to the lights that lack it) ->
 --   GET /manifest?tree=scene -> (the same for the scene devices) ->
+--   GET /manifest?tree=syncbox -> (the same for the sync box devices, bound
+--                                on the bridge's connection 2) ->
 --   GET /commands -> (verify, run each, POST /report command_done) ->
 --   POST /log -> (POST /report heartbeat)
 -- so no transfer ever starts inside OnHeaders or OnBodyChunk, which Director
 -- fails with curl error 2. A tick that fires while the previous chain is
 -- still in flight is skipped.
 --
--- Device side: a light or scene driver never talks to the server. The bridge
--- hands it its tree's signed bundle as a DEV_RELOAD command, which the
+-- Device side: a light, scene or sync box driver never talks to the server.
+-- The bridge hands it its tree's signed bundle as a DEV_RELOAD command, which the
 -- handler from devloop.reload_handler verifies and applies with the same
 -- sequence the bridge uses on itself, and every non-debug line the device
 -- logs goes to the bridge as HUE_LOG through the sink devloop.forward_logs
@@ -51,9 +53,9 @@
 --   devloop.version()         -> version of the code last loaded, or nil
 --                                while the .c4z's own code is running
 --   devloop.light_version()   -> light-tree version last forwarded (bridge)
---   devloop.tree_version(t)   -> the same for any forwarded tree ("light", "scene")
---   devloop.own_tree()        -> "light" / "scene" / "bridge" from the driver file name
---   devloop.apply_forwarded(params)  the light's or scene's DEV_RELOAD handler
+--   devloop.tree_version(t)   -> the same for any forwarded tree ("light", "scene", "syncbox")
+--   devloop.own_tree()        -> "light" / "scene" / "syncbox" / "bridge" from the driver file name
+--   devloop.apply_forwarded(params)  a device's DEV_RELOAD handler (light, scene, sync box)
 --                                -> true, version | false, "skipped" / "refused" / "failed"[, why]
 --   devloop.reload_handler(log, tree)  the dispatch handler a device registers for DEV_RELOAD
 --   devloop.forward_logs(log, prefix, get_bridge, get_rid)  a device's HUE_LOG sink -> flush function
@@ -130,6 +132,7 @@ end
 -- an older state) start empty instead of nil.
 S.light_forwarded = S.light_forwarded or {}
 S.scene_forwarded = S.scene_forwarded or {}   -- same, for the scene tree
+S.syncbox_forwarded = S.syncbox_forwarded or {} -- same, for the sync box tree (#547)
 S.driver_files = S.driver_files or {}         -- bound device id -> driverFileName (false = unknown)
 S.no_tree = S.no_tree or {}                   -- tree name -> true once "server has no such tree" was said
 S.refused = S.refused or {}                   -- tree name -> { version, at } of the last refused bundle
@@ -588,12 +591,14 @@ local function request(method, path, body, callback, raw)
 	if not ok then finish({ ok = false, err = "could not start transfer: " .. tostring(err) }) end
 end
 
--- Every report carries both versions: the bridge's own and the light tree's
--- last forwarded one (absent until the first forward), so /status shows both,
--- and the key's fingerprint, so the server can tell a key mismatch at once.
+-- Every report carries every version: the bridge's own and each forwarded
+-- tree's last forwarded one (absent until its first forward), so /status
+-- shows them all, and the key's fingerprint, so the server can tell a key
+-- mismatch at once.
 local function report(event, extra, callback)
 	local body = { version = S.version, light_version = S.light_version, scene_version = S.scene_version,
-		event = event, properties = snapshot(), key_fingerprint = devloop.key_fingerprint() }
+		syncbox_version = S.syncbox_version, event = event, properties = snapshot(),
+		key_fingerprint = devloop.key_fingerprint() }
 	for k, v in pairs(extra or {}) do body[k] = v end
 	-- An error text can quote whatever a command saw: it passes the redactor
 	-- like a log line.
@@ -792,11 +797,12 @@ local function install_loader(files)
 end
 
 -- The driver's own modules, cleared on reload so the bundle's copies load:
--- bridge.* (bridge driver), light.* (light driver), common.* except this one.
+-- bridge.* (bridge driver), light.* (light driver), scene.*, syncbox.* (the
+-- sync box driver), common.* except this one.
 local function is_driver_module(name)
 	return name ~= "common.devloop"
 		and (name:match("^bridge%.") or name:match("^light%.") or name:match("^scene%.")
-			or name:match("^common%.")) ~= nil
+			or name:match("^syncbox%.") or name:match("^common%.")) ~= nil
 end
 
 -- Tear the running driver down and bring `files` up in its place. Returns
@@ -909,11 +915,20 @@ end
 
 -- Forwarded trees -------------------------------------------------------------
 
--- The light and scene drivers share binding 1, so each tree goes only to
--- the devices running its driver, told apart by driverFileName as
--- C4:GetDevices reports it [verified: hardware].
-local TREE_DRIVERS = { light = "hue_light.c4z", scene = "hue_scene.c4z" }
-devloop.TREES = { "light", "scene" }
+-- Each forwarded tree goes only to the devices running its driver, bound on
+-- the bridge's connection for that driver: the light and scene drivers share
+-- binding 1 and are told apart by driverFileName as C4:GetDevices reports it
+-- [verified: hardware]; the sync box driver alone binds on connection 2
+-- ("Hue Sync Boxes", class HUE_SYNCBOX, src/hue_bridge/driver.xml; #547). A
+-- device whose driver file could not be read counts as the tree marked
+-- `unread` on its binding: a light (the only receiver before scene devices
+-- existed), a sync box on 2.
+local TREE_DRIVERS = {
+	light = { file = "hue_light.c4z", binding = 1, unread = true },
+	scene = { file = "hue_scene.c4z", binding = 1 },
+	syncbox = { file = "hue_syncbox.c4z", binding = 2, unread = true },
+}
+devloop.TREES = { "light", "scene", "syncbox" }
 
 -- driverFileName per bound device, cached in S.driver_files; the ids not seen
 -- yet are looked up with one C4:GetDevices (DeviceIds is a comma-separated
@@ -939,7 +954,8 @@ local function driver_files(bound)
 end
 
 -- Hand a tree's signed bundle ({ payload, mac }, as the server sent it) to
--- every bound device of its kind that has not received this version, as one
+-- every device of its kind bound on its binding (TREE_DRIVERS) that has not
+-- received this version, as one
 -- DEV_RELOAD command { tree, version, bundle = payload, mac } each; the
 -- device verifies it and reloads itself through devloop.apply_forwarded.
 -- Runs every tick the server has the tree, from the held bundle when the
@@ -955,19 +971,18 @@ local function forward_tree(tree, bundle, version)
 	local changed = S[vkey] ~= version
 	S[vkey], S[bkey] = version, { payload = bundle.payload, mac = bundle.mac }
 	local ok, err = pcall(function()
-		local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)
+		local wanted = TREE_DRIVERS[tree]
+		local bound = C4:GetBoundConsumerDevices(C4:GetDeviceID(), wanted.binding)
 		if type(bound) ~= "table" then bound = {} end
 		local forwarded = S[fkey]
 		for id in pairs(forwarded) do
 			if bound[id] == nil then forwarded[id] = nil end
 		end
-		local kinds, wanted = driver_files(bound), TREE_DRIVERS[tree]
+		local kinds = driver_files(bound)
 		local due, members = {}, 0
 		for id in pairs(bound) do
 			local file = kinds[id]
-			-- A device whose driver file could not be read counts as a light,
-			-- the only receiver before scene devices existed.
-			if file == wanted or (file == false and tree == "light") then
+			if file == wanted.file or (file == false and wanted.unread) then
 				members = members + 1
 				if forwarded[id] ~= version then due[#due + 1] = id end
 			end
@@ -1226,9 +1241,11 @@ local function step_tree(tree, next_step)
 	end)
 end
 
--- The forwarded trees in turn, then the commands.
+-- The forwarded trees in turn (devloop.TREES), then the commands.
 local function step_light()
-	step_tree("light", function() step_tree("scene", step_commands) end)
+	step_tree("light", function()
+		step_tree("scene", function() step_tree("syncbox", step_commands) end)
+	end)
 end
 
 local function step_manifest()
@@ -1362,13 +1379,14 @@ function devloop.light_version()
 	return S.light_version
 end
 
--- Version last forwarded for `tree` ("light" or "scene").
+-- Version last forwarded for `tree` ("light", "scene" or "syncbox").
 function devloop.tree_version(tree)
 	return S[tostring(tree) .. "_version"]
 end
 
 -- Which forwarded tree this driver is: "light" for hue_light.c4z, "scene"
--- for hue_scene.c4z ("bridge" for the bridge); nil when unknown.
+-- for hue_scene.c4z, "syncbox" for hue_syncbox.c4z ("bridge" for the
+-- bridge); nil when unknown.
 function devloop.own_tree()
 	local ok, file = pcall(function() return C4:GetDriverFileName() end)
 	if ok and type(file) == "string" then
@@ -1377,7 +1395,10 @@ function devloop.own_tree()
 	return nil
 end
 
--- The light's DEV_RELOAD handler: `params` are the strings the bridge sent,
+-- The trees a device loads from a forwarded bundle: never the bridge's.
+local DEVICE_TREES = { light = true, scene = true, syncbox = true }
+
+-- A device's DEV_RELOAD handler: `params` are the strings the bridge sent,
 -- { tree, version, bundle = "<signed JSON payload>", mac = "<its MAC>" }.
 -- Verifies the bundle with this package's own key, then runs the reload
 -- sequence at the signed version; the outcome goes through print (the light
@@ -1389,8 +1410,8 @@ function devloop.apply_forwarded(params)
 	params = type(params) == "table" and params or {}
 	local own = devloop.own_tree()
 	local kind = own or "device"
-	-- Lights and scene devices share the bridge's binding; a bundle for the
-	-- other kind (an older bridge forwards without filtering) is not ours.
+	-- Lights and scene devices share the bridge's binding; a bundle for
+	-- another kind (an older bridge forwards without filtering) is not ours.
 	if params.tree and own and params.tree ~= own then
 		say("%s reload skipped: DEV_RELOAD carries the %s tree", kind, tostring(params.tree))
 		return false, "skipped"
@@ -1406,7 +1427,7 @@ function devloop.apply_forwarded(params)
 		return false, "failed"
 	end
 	-- The signed tree decides: only a device tree, and only this device's.
-	if not (j.tree == "light" or j.tree == "scene") or (own and j.tree ~= own) then
+	if not DEVICE_TREES[j.tree] or (own and j.tree ~= own) then
 		why = "signed for the " .. tostring(j.tree) .. " tree"
 		say("%s reload refused: %s", kind, why)
 		return false, "refused", why
@@ -1423,7 +1444,7 @@ function devloop.apply_forwarded(params)
 end
 
 -- The device's DEV_RELOAD handler (dispatch.commands["DEV_RELOAD"]) for the
--- driver whose source tree is `tree` ("light" / "scene"); `log` is the
+-- driver whose source tree is `tree` ("light" / "scene" / "syncbox"); `log` is the
 -- driver's common.log. Release builds register none, since they have no
 -- devloop module.
 function devloop.reload_handler(log, tree)

@@ -73,8 +73,10 @@
 -- internet; at most mdns.MAX_ANSWERS datagrams parsed per window, and as
 -- many again that name a wanted id (common/mdns.lua's window does all of
 -- that). Then, here: the TXT uniqueid 12 hex digits; an SRV port, when
--- there is one, 443 (R1 §2.2); the TXT path is never used (the client's
--- path is its own literal /api/v1). A candidate is listed only after the
+-- there is one, 443 (R1 §2.2; a dev build's syncbox/devhooks.lua takes
+-- another too, carried into the address as "ip:port", for the VM's fake box,
+-- #547); the TXT path is never used (the client's path is its own literal
+-- /api/v1). A candidate is listed only after the
 -- identity check at its address passed and reported the same id
 -- (contracts C3): one check at a time, at most IDENTITY_MAX per search,
 -- within IDENTITY_CAP_MS. The Hue Play Screen Sync camera is never listed
@@ -82,6 +84,14 @@
 
 local mdns_module = require("common.mdns")
 local https = require("common.https")
+
+-- Dev builds only (#547, docs/fakebox-design.md §7): syncbox/devhooks.lua,
+-- which a release build does not carry; without it the search is the
+-- release's, port 443 only.
+local hooks_ok, devhooks = pcall(require, "syncbox.devhooks")
+if not hooks_ok or type(devhooks) ~= "table" then
+	devhooks = nil
+end
 
 local discovery = {}
 
@@ -389,6 +399,16 @@ end
 
 -- Identity -----------------------------------------------------------------------
 
+-- Where a candidate is checked and listed: its address, when it announced
+-- no SRV port or 443 (R1 §2.2); else nil, and it is dropped. A dev build's
+-- syncbox/devhooks.lua takes another port too, as "ip:port" (#547).
+local function address_of(c)
+	if c.port == nil or c.port == discovery.PORT then
+		return c.ip
+	end
+	return devhooks and devhooks.srv_address(c.ip, c.port) or nil
+end
+
 -- The addresses to check, the wanted ids' first, one per address; the
 -- candidates that cannot be a box are dropped here.
 local function plan(job, cands)
@@ -396,16 +416,16 @@ local function plan(job, cands)
 	for _, c in ipairs(cands) do
 		if not c.id then
 			job.dropped[#job.dropped + 1] = { address = c.ip, why = "no 12-digit uniqueid in its TXT record" }
-		elseif c.port ~= nil and c.port ~= discovery.PORT then
+		elseif not address_of(c) then
 			job.dropped[#job.dropped + 1] = { address = c.ip, why = "announced port " .. tostring(c.port) }
 		end
 	end
 	for pass = 1, 2 do
 		for _, c in ipairs(cands) do
-			local usable = c.id and (c.port == nil or c.port == discovery.PORT)
-			if usable and (pass == 1) == (job.want[c.id] == true) and not by_ip[c.ip] then
-				by_ip[c.ip] = c
-				ips[#ips + 1] = c.ip
+			local address = c.id and address_of(c)
+			if address and (pass == 1) == (job.want[c.id] == true) and not by_ip[address] then
+				by_ip[address] = c
+				ips[#ips + 1] = address
 			end
 		end
 	end

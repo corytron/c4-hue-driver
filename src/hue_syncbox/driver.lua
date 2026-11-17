@@ -53,6 +53,14 @@ local mod = {
 	link = require("syncbox.link"),
 }
 
+-- Dev builds only (#547, docs/fakebox-design.md §7): syncbox/devhooks.lua
+-- lets Pair Sync Box's Address take host:port, for the VM's fake box. A
+-- release build does not carry it: the address is a plain IPv4 one.
+do
+	local ok, hooks = pcall(require, "syncbox.devhooks")
+	mod.devhooks = ok and type(hooks) == "table" and hooks or nil
+end
+
 -- Constants ----------------------------------------------------------------------
 
 local K = {
@@ -876,7 +884,7 @@ function actions.pair(params)
 		end
 		address = item.address
 	elseif typed then
-		address = mod.discovery.parse_ipv4(typed)
+		address = (mod.devhooks and mod.devhooks.parse_address or mod.discovery.parse_ipv4)(typed)
 		if not address then
 			return last_action(string.format("Not paired: %s is not an IPv4 address (four numbers, as 10.0.2.150)",
 				https.peer_text(typed, 64)))
@@ -1215,9 +1223,24 @@ end
 local function build()
 	local timer = function(ms, fn) return C4:SetTimer(math.max(1, math.floor(ms)), fn) end
 	m.state, m.link = mod.state, mod.link.new({ send = send_to_bridge, log = log })
+	-- The encrypted flag only when true: the house's first start could not
+	-- read the box id, address or registration id, the fields asked for with
+	-- an explicit false, while the token (true) read fine [house, build 682,
+	-- 2026-11-17, #547]; the bridge calls both with the name (and value)
+	-- alone (bridge/credentials.lua), and so does this for every other field.
 	m.store = mod.store.new({
-		persist_get = function(name, encrypted) return C4:PersistGetValue(name, encrypted) end,
-		persist_set = function(name, value, encrypted) return C4:PersistSetValue(name, value, encrypted) end,
+		persist_get = function(name, encrypted)
+			if encrypted then
+				return C4:PersistGetValue(name, true)
+			end
+			return C4:PersistGetValue(name)
+		end,
+		persist_set = function(name, value, encrypted)
+			if encrypted then
+				return C4:PersistSetValue(name, value, true)
+			end
+			return C4:PersistSetValue(name, value)
+		end,
 		persist_delete = function(name) return C4:PersistDeleteValue(name) end,
 		log = log,
 	})
