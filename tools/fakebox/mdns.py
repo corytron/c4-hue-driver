@@ -541,7 +541,7 @@ def query(packet, *, timeout=2.0, interface=None, group=GROUP, port=PORT):
     datagram that comes back within `timeout` seconds: [(data, (address, port))]."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
         _multicast_options(sock, interface)
-        sock.bind(("0.0.0.0", 0))
+        # No explicit bind: sendto() binds an ephemeral port by itself (code scanning #10).
         sock.sendto(packet, (group, port))
         out, deadline = [], time.monotonic() + timeout
         while True:
