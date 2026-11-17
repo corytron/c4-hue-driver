@@ -3,7 +3,7 @@
 This is a personal project for one Control4 home, offered as is: there is no
 roadmap and no support obligation. Bug reports and pull requests are welcome
 all the same. This page says what a contribution has to respect and how it
-reaches `main`; the [README](README.md) says what the four drivers do and how
+reaches `main`; the [README](README.md) says what the five drivers do and how
 they are built.
 
 ## License of contributions
@@ -68,9 +68,9 @@ optional.
   a new documented API, mirroring the real colon-call signature) and the
   invented Hue resources in `tests/fixtures/hue_resources.lua`. Every change
   of behaviour comes with a spec; `busted tests` stays green.
-- **Four drivers, one build.** `tools/build.sh` stages `src/common/` into
+- **Five drivers, one build.** `tools/build.sh` stages `src/common/` into
   each driver (the bridge without `device.lua`; release builds without
-  `devloop.lua` and the bridge's development modules) and stamps all four
+  `devloop.lua` and the bridge's development modules) and stamps all five
   with the same build number (the commit count), so a change to a shared
   module is a change to every driver that uses it.
 - **Texts users read.** Property texts, `Last Action` results and `Attention`
@@ -163,7 +163,7 @@ pip enforces (`--require-hashes`).
 - For anything bigger than a typo, an issue comes first; the pull request
   says `Closes #N`.
 - `tools/check.sh` passes (CI runs the same checks with `--strict`) and
-  `tools/build.sh` builds the four `.c4z` files.
+  `tools/build.sh` builds the five `.c4z` files.
 - The manual, the Hue Light, Hue Scene and Hue Motion Sensor pages and
   `docs/status.md` are updated if behaviour or a text changed.
 - A change to what the drivers do, or to what their documentation says, adds

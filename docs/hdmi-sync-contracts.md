@@ -49,6 +49,14 @@ settles it.
 Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 4000. All four inputs exist on every model (design 5.1).
 
+Left out on purpose, for every wiring of design 5.8
+([`syncbox-wirings-research.md`](syncbox-wirings-research.md) §7.1): **no
+room binding** (a room's video endpoint stays the TV) and **no Power
+Manager binding**. The AV connections are frozen in practice, not only
+add-only: the capability counts must match them, so adding one later is a
+capability change and a controller reboot. Properties and actions can still
+be added.
+
 ### C1.3 Capabilities (frozen before `v2.0-beta.1`)
 
 - `video_consumer_count` 4, `video_provider_count` 1.
@@ -58,6 +66,9 @@ Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 - `can_upclass` False, `can_downclass` False.
 - Every volume, mute, tone and loudness capability False.
 - `has_audio_signal_sense` False, `has_video_signal_sense` False.
+- Stage 4 adds `navigator_display_option` for the Hue Sync and Sync
+  Intensity buttons (their icons); that beta needs one controller reboot,
+  and the frame is final from then (stage 2 contract §9a).
 
 ### C1.4 Properties
 
@@ -256,15 +267,18 @@ amended from their results before beta stage 3.
 
 ## C5. Bridge ↔ box messages (binding `HUE_SYNCBOX`)
 
-All values are strings, as the existing messages are.
+All values are strings, as the existing messages are. `device_id` (stage 2,
+#534): Control4 gives a receiver no sender identity (#483), so the bridge
+answers only a device it sees bound on its connection 2. The stream label
+names a box only when exactly one bound box of this bridge has the area.
 
 | Message | Direction | Params | Meaning |
 |---|---|---|---|
-| `HUE_SYNCBOX_HELLO` | box → bridge | `box_id`, `bridge_id` (the box's own link), `area_id` | At late init and on binding |
-| `HUE_SYNCBOX_CONFIGURE` | bridge → box | `bridge_id`, `match` (`true` when the box is linked to this bridge), `areas` (JSON list of `{id, name, type, status, lamps, rooms}`) | The answer to a hello, and after every resync |
+| `HUE_SYNCBOX_HELLO` | box → bridge | `device_id`, `box_id`, `bridge_id` (the box's own link), `area_id` | At late init and on binding |
+| `HUE_SYNCBOX_CONFIGURE` | bridge → box | `bridge_id`, `match` (`true` when the box is linked to this bridge), `areas` (JSON list of `{id, name, type, status, lamps, rooms}`; `lamps` a count, `rooms` the Control4 room names of its lamps) | The answer to a hello, and after every resync |
 | `HUE_SYNCBOX_AREA` | bridge → box | `id`, `status` (`active`/`inactive`), `streamer` (`this_box`/`other`/`none`) | A stream starts or stops on any area. The box reads its own state at once; nothing else changes |
 | `HUE_SYNCBOX_STOP_AREA` | box → bridge | `area_id` | When the box reports the bridge busy as it starts syncing (O12, automatic): the bridge PUTs `action: stop` on the area with its own key (check T6), then the box starts its sync and fires Sync Taken Over |
-| `HUE_SYNCBOX_GOODBYE` | box → bridge | `box_id` | Unbind or removal |
+| `HUE_SYNCBOX_GOODBYE` | box → bridge | `device_id`, `box_id` | Unbind or removal |
 
 The trust rules of #483 apply on both sides:
 - A box acts on bridge messages only as hints.

@@ -1,7 +1,7 @@
 # Changelog
 
-Every release of the Hue Bridge, Hue Light, Hue Scene and (from 1.1) Hue
-Motion Sensor drivers, newest first, with what changed since the release
+Every release of the Hue Bridge, Hue Light, Hue Scene, (from 1.1) Hue
+Motion Sensor and (from 2.0) Hue Sync Box drivers, newest first, with what changed since the release
 before it, written for the people who install and use them. A version X.Y is
 the GitHub release tagged `vX.Y` and has its own name, which every build of
 it keeps. A version can be published as several builds: the build number is
@@ -31,6 +31,31 @@ follows it.
   changed, and commands sent to the lamps during the sync are not applied
   afterwards: the lamps go back to their state from before the sync
   (#514).
+- A fifth driver, Hue Sync Box (`hue_syncbox.c4z`), a beta during 2.0, for
+  the Hue Play HDMI Sync Boxes linked to a Hue bridge: the original box,
+  the 8K box and the one-input 4K box of 2026. Each box is a Control4 HDMI
+  switch, added from Composer's Items pane in the TV's room. In this beta
+  the device pairs with its box (Pair Sync Box, then a hand on the box's
+  button), checks at every start that the box at the address is the
+  paired one, follows the box to a new address once it proves its id
+  there, and shows the box's name, model, firmware, id and address, what
+  it syncs and to which entertainment area, its inputs, its own link to
+  the Hue bridge, what it switches by itself, and how it is wired: in
+  line, behind a receiver or from a receiver's second output. It goes
+  offline after 5 minutes without an answer from the box. Diagnostics and
+  Forget Pairing complete it. It does not control the box yet: switching
+  inputs with the room, sync control with intensity and brightness by the
+  time of day, programming and the Watch-menu buttons come in later 2.0
+  betas, and until then a command to the box is answered in Last Action
+  and not sent (#534, #514).
+- The Hue Bridge has a new connection, Hue Sync Boxes. A Hue Sync Box
+  device connected to it learns the bridge's entertainment areas and reads
+  its box at once when a sync starts or stops; while the area of its box
+  syncs, the bridge names the device instead of `another app` on the
+  Entertainment Areas row and in the Status and Last Action of the lights
+  whose lamps sync, for example `Syncing with the TV (Living Room sync
+  box)`. The connection is optional, and no key passes between the two
+  drivers (#534, #514).
 
 ### Changed
 - Hue Lights, zone lights and Hue Scenes say when their lamps sync with a

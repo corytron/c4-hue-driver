@@ -7,14 +7,23 @@ keep their history too; where they and this page disagree about the
 present, this page and the code win. Brought up to date on 2026-11-13
 (#478).
 
-## Now (2026-11-13)
+## Now (2026-11-16)
 
+- **2.0 beta stage 2 (#534, PR #535): the Hue Sync Box driver**, the fifth
+  package `hue_syncbox.c4z` (`docs/hdmi-sync-stage2-design.md`): pairing
+  with the box's button, the box's identity over its own pinned root,
+  discovery, polling and its state in Composer, including the wiring (in
+  line, behind a receiver, second output; O17, #531), and the bridge's Hue
+  Sync Boxes connection naming the box in the stream label. Read-only to
+  the box apart from registering. To ship as `v2.0-beta.2` with the #527
+  fix (an off names no brightness preset). Open owner questions for stages
+  3 and 4: #536.
 - **2.0 "Luthen" beta stage 1 (#514, #521): `v2.0-beta.1`, build 661**,
   a prerelease of 2026-11-14 (PR #522): entertainment areas on the bridge,
   lights that say when their lamps sync with a TV, and the hidden 1.1
   aliases and On State Follows removed as announced
   (`docs/hdmi-sync-stage1-design.md`). It is the house's desired state; the
-  house ran 1.8 until it is installed. Checks T0 to T9
+  house runs it since 2026-11-14 (#524). Checks T0 to T9
   (`docs/entertainment-areas-research.md` §4.5) wait for a sync on the
   house; the Composer steps are `docs/composer-checklist.md` section T.
 - **Latest release: 1.8 "B2EMO", build 644**, released 2026-11-13

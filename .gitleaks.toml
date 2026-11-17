@@ -13,11 +13,16 @@ title = "c4-hue-driver gitleaks config"
 [extend]
 useDefault = true
 
-[allowlist]
+# Global allowlists, one table each ([[allowlists]]; gitleaks 8.30 refuses the
+# older single [allowlist] table beside them).
+[[allowlists]]
 description = "Paths with no secrets by construction"
 paths = [
     # Signify's public root certificates, shipped in the bridge driver.
     '''^src/hue_bridge/certs/''',
+    # The Hue Sync Box's public root certificate (root-hsb) and its TLS
+    # self-check's decoy, shipped in the box driver (2.0, #534).
+    '''^src/hue_syncbox/certs/''',
     # Generated packages, staging directories and local diagnostics (gitignored).
     '''^build/''',
     # Worktrees other sessions keep under .claude/ (excluded from git, never pushed).
@@ -25,6 +30,23 @@ paths = [
     # Python bytecode caches (gitignored): they hold the unit tests' private-data
     # vectors folded back into whole strings.
     '''(^|/)__pycache__/''',
+]
+
+# The Hue Sync Box's placeholders (docs/hdmi-sync-contracts.md C8,
+# docs/hdmi-sync-stage2-design.md §7, #534), allowed whatever rule matches
+# them, as the whole of a finding's secret: the invented box id 0A1B2C3D4E5F
+# and the specs' "another box" 0A1B2C3D4E60 (real ids begin with a Signify
+# OUI that the bridge-oui rule refuses), in either case; and the token
+# TEST-TOKEN-NOT-REAL of the fixtures and the fake box, also with a suffix
+# (the fake box's "-<registration id>", the specs' "-2" or "-OTHER") and
+# spelled with spaces. The box address 10.0.2.150 is in the lan-address
+# rule's own allowlist, as is the specs' other address 198.51.100.150
+# (TEST-NET-2).
+[[allowlists]]
+description = "The Hue Sync Box's documented placeholders: box ids and test tokens"
+regexes = [
+    '''^(?i:0a1b2c3d4e(?:5f|60))$''',
+    '''^TEST[ -]TOKEN[ -]NOT[ -]REAL(?:-[0-9A-Z]+)?$''',
 ]
 
 # A Hue application key (the v1 "username", 32 to 40 characters today) or the

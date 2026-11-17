@@ -801,6 +801,93 @@ describe("bridge.entertainment", function()
 		end)
 	end)
 
+	-- 2.0 beta stage 2 (#534): docs/hdmi-sync-stage2-design.md §6, contracts
+	-- C7. The bound sync box names itself through label_for(area id).
+	describe("the stream label with label_for", function()
+		local asked, names
+
+		local function label_for(id)
+			asked[#asked + 1] = id
+			return names[id]
+		end
+
+		before_each(function()
+			asked, names = {}, { [E.area_rids.tv] = "Living Room Sync Box" }
+			e = new_e({ label_for = label_for })
+			fetch()
+		end)
+
+		local function asked_for(id)
+			for _, a in ipairs(asked) do
+				if a == id then
+					return true
+				end
+			end
+			return false
+		end
+
+		it("names the bound box for the area's lamps and in the row, asking by the area's id", function()
+			start_tv()
+			assert.equal("Living Room Sync Box", e:stream_label(E.rids.tv_left))
+			assert.equal("Living Room Sync Box", e:stream_label(E.rids.floor), "a lamp of two areas, one of them active")
+			assert.equal("Living Room TV (5 lamps, syncing: Living Room Sync Box) | Office (3 lamps)", e:row())
+			assert.is_true(asked_for(E.area_rids.tv))
+			assert.is_false(asked_for(E.area_rids.office), "an area that does not stream is never asked about")
+			assert.is_true(saw("Living Room TV started syncing (Living Room Sync Box)"), "the start's log line too")
+		end)
+
+		it("says another app when label_for gives no name, an empty or blank one, or no text", function()
+			start_tv()
+			for _, answer in ipairs({ false, "", "   ", 42, {} }) do
+				names[E.area_rids.tv] = answer
+				assert.equal("another app", e:stream_label(E.rids.tv_left), tostring(answer))
+				assert.equal("Living Room TV (5 lamps, syncing: another app) | Office (3 lamps)", e:row())
+			end
+			names[E.area_rids.tv] = nil
+			assert.equal("another app", e:stream_label(E.rids.tv_left))
+		end)
+
+		it("says another app, with one warning, when label_for raises", function()
+			e = new_e({ label_for = function() error("boom") end })
+			fetch()
+			start_tv()
+			assert.equal("another app", e:stream_label(E.rids.tv_left))
+			assert.equal("Living Room TV (5 lamps, syncing: another app) | Office (3 lamps)", e:row())
+			assert.is_true(saw("label_for failed"))
+		end)
+
+		it("is read at every call: a box that leaves turns the label back to another app", function()
+			start_tv()
+			assert.equal("Living Room Sync Box", e:stream_label(E.rids.tv_left))
+			names[E.area_rids.tv] = nil
+			assert.equal("another app", e:stream_label(E.rids.tv_left))
+		end)
+
+		it("says another app for a streaming lamp no active area holds", function()
+			names[E.area_rids.office] = "Office Box"
+			event(E.events.lamp_mode({ "desk" }, "streaming"))
+			assert.equal("another app", e:stream_label(E.rids.desk), "the Office area is not active")
+			assert.is_nil(e:stream_label(E.rids.shelf), "a lamp that does not stream has no label")
+		end)
+
+		it("takes the label through util.display_name: no control characters, no blanks around", function()
+			names[E.area_rids.tv] = "  Den\nBox\27  "
+			start_tv()
+			assert.equal("DenBox", e:stream_label(E.rids.tv_left))
+			assert.equal("DenBox", e:area_label({ id = E.area_rids.tv }))
+			assert.equal("another app", e:area_label({}), "an area without an id")
+			assert.equal("another app", e:area_label(nil))
+		end)
+
+		it("says another app everywhere without label_for, as in stage 1", function()
+			e = new_e()
+			fetch()
+			start_tv()
+			assert.equal("another app", e:stream_label(E.rids.tv_left))
+			assert.equal("another app", e:area_label({ id = E.area_rids.tv }))
+		end)
+	end)
+
 	describe("Last Action texts", function()
 		it("are the contract's", function()
 			local area = { name = "Living Room TV" }

@@ -35,7 +35,8 @@
 --                              state when it turns true.
 --   e:settle()                 end of a lights container or fetch: on_lamps_changed(rids)
 --                              once with the lamps lamp_mode named since the last settle.
---   e:is_streaming(rid), e:stream_label(rid), e:areas(), e:row(), e:pre_sync(rid)
+--   e:is_streaming(rid), e:stream_label(rid), e:area_label(area), e:areas(), e:row(),
+--   e:pre_sync(rid)
 --   e:stop()                   every restore timer cancelled (OnDriverDestroyed)
 --   entertainment.started_text(area), stopped_text(area), restored_text(area, count)
 --                              the bridge's Last Action texts (contract §4.4)
@@ -55,6 +56,10 @@
 --   put_back(rid, body, done)  one lamp's restore PUT body, through the lights queue;
 --                              false when it was not queued; done(result) optional
 --   on_restored(area, count)   the restore of an area sent `count` lamps (count > 0)
+--   label_for(area_id)         who streams to an area (2.0 beta stage 2, #534): the Composer
+--                              name of the one sync box bound to the bridge whose area it is
+--                              (bridge/syncboxes.lua label_for), else nil; stream_label and
+--                              the row say "another app" when it gives no name
 -- An area handed to on_stream, on_restored and returned by areas() is a copy:
 -- { id, id_v1, name, kind, status, streamer, lamps = { rid... }, streaming }.
 --
@@ -109,8 +114,9 @@ entertainment.PUT_BACK = "Put the lights back"
 entertainment.AS_HUE = "As Hue decides"
 entertainment.AFTER_SYNC = { entertainment.PUT_BACK, entertainment.AS_HUE }
 
--- Who streams, as the devices and the row say it. Stage 2 names the bound
--- sync box instead (contract §1).
+-- Who streams, as the devices and the row say it when no bound sync box
+-- names itself for the area (ctx.label_for; docs/hdmi-sync-stage2-design.md
+-- §6, contracts C7).
 entertainment.OTHER_APP = "another app"
 
 -- The row (contract §4.4) and what it reads without areas.
@@ -240,17 +246,49 @@ function entertainment:is_streaming(rid)
 	return model ~= nil and model.streaming == true
 end
 
--- Who a streaming lamp follows: "another app" in stage 1; nil while it does not stream.
-function entertainment:stream_label(rid)
-	if self:is_streaming(rid) then
-		return entertainment.OTHER_APP
+-- The name ctx.label_for gives an area id (a bound sync box's Composer name,
+-- through util.display_name), or nil: no label_for, no answer, an empty or
+-- non-string one, or a raise (logged).
+function entertainment:label_of(area_id)
+	local label_for = self.ctx.label_for
+	if type(label_for) ~= "function" or area_id == nil then
+		return nil
 	end
-	return nil
+	local ok, label = pcall(label_for, area_id)
+	if not ok then
+		self.ctx.log.warn("entertainment: label_for failed: %s", util.echo(label, util.LOG_MAX))
+		return nil
+	end
+	if type(label) ~= "string" then
+		return nil
+	end
+	label = util.display_name(label)
+	return label ~= "" and label or nil
 end
 
--- Who an active area's stream comes from (the row's "syncing: ..." text).
-function entertainment.area_label(_self, _area)
+-- Who a streaming lamp follows (contracts C7): the label of the first active
+-- area holding it (by id) that has one, else "another app"; nil while it
+-- does not stream.
+function entertainment:stream_label(rid)
+	if not self:is_streaming(rid) then
+		return nil
+	end
+	for _, id in ipairs(sorted_keys(self.by_id)) do
+		local area = self.by_id[id]
+		if area.status == "active" and contains(area.lamps, rid) then
+			local label = self:label_of(id)
+			if label then
+				return label
+			end
+		end
+	end
 	return entertainment.OTHER_APP
+end
+
+-- Who an active area's stream comes from (the row's "syncing: ..." text and
+-- the log): its label, else "another app".
+function entertainment:area_label(area)
+	return self:label_of(type(area) == "table" and area.id or nil) or entertainment.OTHER_APP
 end
 
 -- After A Sync Ends: "As Hue decides" when the property says so, else the default.

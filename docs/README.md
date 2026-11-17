@@ -200,6 +200,14 @@ where the code later moved on.
   beta stage 1: the shared network code in `src/common/`, entertainment
   areas on the Hue Bridge, lights while their lamps stream and the restore
   after a sync, and the removal of the "until 2.0" aliases.
+- [`hdmi-sync-stage2-design.md`](hdmi-sync-stage2-design.md) (contract):
+  beta stage 2: the Hue Sync Box driver's client, TLS pin, identity,
+  pairing, discovery, polling and state, its frozen Composer frame, and the
+  bridge's `HUE_SYNCBOX` connection.
+- [`syncbox-wirings-research.md`](syncbox-wirings-research.md) (research,
+  #531): how a box behind a receiver or on a receiver's second output
+  follows a room (room variables, the source's kind, Listen), the frozen
+  frame, 24 Follow Room cases and probes P8 to P13.
 
 ### Code health and security
 
