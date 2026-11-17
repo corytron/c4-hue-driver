@@ -26,10 +26,11 @@
 		<script jit="1" file="driver.lua"/>
 		<documentation file="www/documentation.html"/>
 		<!-- The rows of docs/hdmi-sync-stage2-design.md §5 (contracts C1.4, the
-		     stage 2 rows), in that order. Every row but Debug Mode is read-only;
-		     the settings rows (sync modes, periods, Room Off, Entertainment Area)
-		     come with stage 4. A long Last Action continues on the rows (2) to
-		     (6), word-wrapped, the unused ones hidden (as the bridge's). -->
+		     stage 2 rows), in that order, then the routing settings of stage 3
+		     (docs/hdmi-sync-stage3-design.md §5). Every stage 2 row but Debug
+		     Mode is read-only; the periods and Entertainment Area come with
+		     stage 4. A long Last Action continues on the rows (2) to (6),
+		     word-wrapped, the unused ones hidden (as the bridge's). -->
 		<properties>
 			<property>
 				<name>Driver Version</name>
@@ -158,11 +159,128 @@
 				<type>STRING</type>
 				<readonly>true</readonly>
 			</property>
+			<!-- Stage 3 (docs/hdmi-sync-stage3-design.md §5; contracts C1.4; design
+			     5.3, 5.8; docs/syncbox-wirings-research.md §7.2). Only the rows
+			     that apply to the box's wiring are shown: driver.lua hides the
+			     others with C4:SetPropertyAttribs(name, 1) and shows them with 0
+			     [verified: API 24_properties/_4-SetPropertyAttribs.md], at late
+			     init and whenever a read shows another wiring. In line: the four
+			     HDMI n Sync Mode rows (an HSB3 only HDMI 1); behind a receiver
+			     and on a second output: Follow Room and Source Sync Modes; At
+			     Room Off and When The Source Leaves The Box in every wiring. -->
+			<property>
+				<name>HDMI 1 Sync Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Automatic</item>
+					<item>Video</item>
+					<item>Game</item>
+					<item>Music</item>
+					<item>Do not sync</item>
+				</items>
+				<default>Automatic</default>
+				<readonly>false</readonly>
+				<tooltip>How the box syncs when Control4 routes a source through HDMI 1; Automatic goes by the input's type in the Hue Sync app, and a Listen source syncs to music</tooltip>
+			</property>
+			<property>
+				<name>HDMI 2 Sync Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Automatic</item>
+					<item>Video</item>
+					<item>Game</item>
+					<item>Music</item>
+					<item>Do not sync</item>
+				</items>
+				<default>Automatic</default>
+				<readonly>false</readonly>
+				<tooltip>How the box syncs when Control4 routes a source through HDMI 2; Automatic goes by the input's type in the Hue Sync app, and a Listen source syncs to music</tooltip>
+			</property>
+			<property>
+				<name>HDMI 3 Sync Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Automatic</item>
+					<item>Video</item>
+					<item>Game</item>
+					<item>Music</item>
+					<item>Do not sync</item>
+				</items>
+				<default>Automatic</default>
+				<readonly>false</readonly>
+				<tooltip>How the box syncs when Control4 routes a source through HDMI 3; Automatic goes by the input's type in the Hue Sync app, and a Listen source syncs to music</tooltip>
+			</property>
+			<property>
+				<name>HDMI 4 Sync Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Automatic</item>
+					<item>Video</item>
+					<item>Game</item>
+					<item>Music</item>
+					<item>Do not sync</item>
+				</items>
+				<default>Automatic</default>
+				<readonly>false</readonly>
+				<tooltip>How the box syncs when Control4 routes a source through HDMI 4; Automatic goes by the input's type in the Hue Sync app, and a Listen source syncs to music</tooltip>
+			</property>
+			<!-- Research §7.2: the room whose power and source drive the box (a
+			     receiver's second output) or set the sync mode (behind a
+			     receiver). The drop-down is built at run time with
+			     C4:UpdatePropertyList [verified: API 24_properties/_6-UpdatePropertyList.md;
+			     FUND 15_composerpro_interface_into_the_sdk/_2-DYNAMICLISTPROPERTIES.md:
+			     the items are not persisted, the driver rebuilds them, and a pick
+			     arrives in OnPropertyChanged]: "This device's room (<name>)",
+			     "None (the box decides)", then every room by name. The choice is
+			     kept as a room id with the name it had (PersistData), never as a
+			     name alone. -->
+			<property>
+				<name>Follow Room</name>
+				<type>DYNAMIC_LIST</type>
+				<readonly>false</readonly>
+				<tooltip>The Control4 room whose power and source this box follows on a receiver's second output, or whose source sets the sync mode behind a receiver; pick one, then click Set</tooltip>
+			</property>
+			<!-- Each source's sync mode behind a receiver and on a second output,
+			     set with the action Set Source Sync Mode: a source is known only at
+			     run time, so it cannot have a property of its own. -->
+			<property>
+				<name>Source Sync Modes</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<!-- Contracts C1.4, O6: what Room Off (OFF) and a source that no longer
+			     passes the box (DISCONNECT_OUTPUT, or the followed room choosing
+			     one) do to the box. -->
+			<property>
+				<name>At Room Off</name>
+				<type>LIST</type>
+				<items>
+					<item>Power save</item>
+					<item>Stop syncing and keep the picture</item>
+				</items>
+				<default>Power save</default>
+				<readonly>false</readonly>
+				<tooltip>What the box does when the room turns off</tooltip>
+			</property>
+			<property>
+				<name>When The Source Leaves The Box</name>
+				<type>LIST</type>
+				<items>
+					<item>Stop syncing and keep the picture</item>
+					<item>Power save</item>
+				</items>
+				<default>Stop syncing and keep the picture</default>
+				<readonly>false</readonly>
+				<tooltip>What the box does when the room stays on but watches a source that does not pass the box</tooltip>
+			</property>
 		</properties>
 		<!-- The actions of stage 2 (docs/hdmi-sync-stage2-design.md §5, contracts
-		     C1.5); Sync Box Settings comes with the offers of stage 4. Box is a
-		     CUSTOM_SELECT list built on demand by SyncBoxList in driver.lua
-		     [verified: FUND 12.3_custom_select_implementation/_1-Overview.md];
+		     C1.5) and Set Source Sync Mode of stage 3
+		     (docs/hdmi-sync-stage3-design.md §5); Sync Box Settings comes with
+		     the offers of stage 4. Box and Source are CUSTOM_SELECT lists built
+		     on demand by SyncBoxList and SourceList in driver.lua [verified:
+		     FUND 12.3_custom_select_implementation/_1-Overview.md, _2-CUSTOMSELECTLIST.md];
 		     Address is a STRING [verified: FUND 9_commands/_1-COMMANDS.md]. -->
 		<actions>
 			<action>
@@ -180,10 +298,36 @@
 					</param>
 				</params>
 			</action>
+			<!-- Research §7.2: the sync mode of one source behind a receiver or on a
+			     second output; the sources are those found upstream of the box and
+			     those seen in the followed room. -->
+			<action>
+				<name>Set Source Sync Mode</name>
+				<command>Set Source Sync Mode</command>
+				<sort_order>2</sort_order>
+				<params>
+					<param>
+						<name>Source</name>
+						<type>CUSTOM_SELECT:SourceList</type>
+					</param>
+					<param>
+						<name>Mode</name>
+						<type>LIST</type>
+						<items>
+							<item>Automatic</item>
+							<item>Video</item>
+							<item>Game</item>
+							<item>Music</item>
+							<item>Do not sync</item>
+						</items>
+						<default>Automatic</default>
+					</param>
+				</params>
+			</action>
 			<action>
 				<name>Diagnostics</name>
 				<command>Diagnostics</command>
-				<sort_order>2</sort_order>
+				<sort_order>3</sort_order>
 				<params>
 					<param>
 						<name>What</name>
@@ -200,7 +344,7 @@
 			<action>
 				<name>Forget Pairing</name>
 				<command>Forget Pairing</command>
-				<sort_order>3</sort_order>
+				<sort_order>4</sort_order>
 				<params>
 					<param>
 						<name>Confirm</name>

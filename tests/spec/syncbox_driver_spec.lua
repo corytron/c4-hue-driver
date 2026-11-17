@@ -32,8 +32,10 @@ local BRIDGE = 15
 local OTHER_ID = "0A1B2C3D4E60"
 local MOVED_TO = "192.0.2.41"
 local SHORT = "#4E5F"
-local NOT_YET = "Not done: routing through the box comes in a later 2.0 beta"
+local NOT_YET = "Not done: the Hue Sync buttons come in a later 2.0 beta"
 local HOUR = 3600000
+-- The rows a good read fills (driver.lua K.BOX_ROWS, Box ID excepted).
+local BOX_ROWS = { "Sync Box", "Model", "Firmware", "Wiring", "Sync", "Inputs", "Bridge Link", "Input Switching" }
 
 -- The store's persisted names (syncbox/store.lua's NAMES), as a box paired
 -- in an earlier life left them.
@@ -60,7 +62,9 @@ end
 
 -- opts.persist: the store before the start; opts.box: fake.syncbox's opts
 -- (false: no box at all); opts.silent: the box does not answer; opts.bind:
--- bound to the bridge; opts.debug: Debug Mode On from the start. Returns env, c4, the box handle.
+-- bound to the bridge; opts.debug: Debug Mode On from the start;
+-- opts.before_late(env, c4): just before OnDriverLateInit. Returns env, c4,
+-- the box handle.
 local function load_box(opts)
 	opts = opts or {}
 	local props = {}
@@ -76,6 +80,7 @@ local function load_box(opts)
 	if opts.bind then
 		c4:Bind(BRIDGE, 2, BOX_DEVICE, 1, "HUE_SYNCBOX")
 	end
+	if opts.before_late then opts.before_late(env, c4) end
 	env.OnDriverLateInit("DIT_STARTUP")
 	return env, c4, box
 end
@@ -86,6 +91,61 @@ local function paired(state, extra)
 		box = { state = state or F.state.HSB2, registrations = { [F.REGISTRATION_ID] = F.TOKEN } } }
 	for k, v in pairs(extra or {}) do opts[k] = v end
 	return load_box(opts)
+end
+
+-- Stage 3's helpers ----------------------------------------------------------
+
+-- What the driver told the AV switch proxy: the params of each notify named
+-- `command`, in order.
+local function notifies(c4, command)
+	local out = {}
+	for _, call in ipairs(c4.calls_to("SendToProxy")) do
+		if call[1] == 5001 and call[2] == command then out[#out + 1] = call[3] end
+	end
+	return out
+end
+
+local function puts(box)
+	return box:requests_of("PUT", "/execution")
+end
+
+local function ex(box)
+	return box.state.execution
+end
+
+-- Composer's Set on a property row.
+local function set_property(env, name, value)
+	env.Properties[name] = value
+	env.OnPropertyChanged(name)
+end
+
+-- A box paired in an earlier life, in power save on HDMI 1, its first reads
+-- done; c4.calls emptied.
+local function asleep(state, extra)
+	local s = F.copy(state or F.state.HSB2)
+	s.execution.mode, s.execution.syncActive, s.execution.hdmiActive = "powersave", false, false
+	local env, c4, box = paired(s, extra)
+	c4.advance(1000)
+	c4.calls = {}
+	return env, c4, box
+end
+
+-- The dev loop's reload (common/devloop.lua), as the reload spec at the end
+-- runs it: OnDriverDestroyed, the driver's modules forgotten, driver.lua
+-- again, both inits with DIT_UPDATING. Director's PersistData stays.
+local function reload(env)
+	env.OnDriverDestroyed()
+	for name in pairs(package.loaded) do
+		if (name:match("^syncbox%.") or name:match("^common%.")) and name ~= "common.log"
+			and name ~= "common.devloop" then
+			package.loaded[name] = nil
+		end
+	end
+	local chunk = assert(loadfile("src/hue_syncbox/driver.lua"))
+	setfenv(chunk, env)
+	chunk()
+	env.OnDriverInit("DIT_UPDATING")
+	env.OnDriverLateInit("DIT_UPDATING")
 end
 
 local function action(env, name, params)
@@ -271,19 +331,42 @@ describe("Hue Sync Box driver (#534)", function()
 			}, caps)
 		end)
 
-		it("declares the stage 2 rows in S2 §5's order, all read-only but Debug Mode", function()
-			local names = {}
+		it("declares the stage 2 rows in S2 §5's order, then stage 3's settings, all read-only but the settings",
+			function()
+			local names, writable = {}, {}
 			for _, body in ipairs(each(xml(), "property")) do
 				names[#names + 1] = field(body, "name")
-				assert.equal(field(body, "name") == "Debug Mode" and "false" or "true", field(body, "readonly"),
-					field(body, "name"))
+				if field(body, "readonly") == "false" then writable[#writable + 1] = field(body, "name") end
 			end
 			assert.same({ "Driver Version", "Debug Mode", "Status", "Online", "Last Action", "Last Action (2)",
 				"Last Action (3)", "Last Action (4)", "Last Action (5)", "Last Action (6)", "Sync Box", "Model", "Firmware",
-				"Box ID", "Box Address", "Wiring", "Sync", "Inputs", "Bridge Link", "Input Switching" }, names)
+				"Box ID", "Box Address", "Wiring", "Sync", "Inputs", "Bridge Link", "Input Switching",
+				"HDMI 1 Sync Mode", "HDMI 2 Sync Mode", "HDMI 3 Sync Mode", "HDMI 4 Sync Mode", "Follow Room",
+				"Source Sync Modes", "At Room Off", "When The Source Leaves The Box" }, names)
+			assert.same({ "Debug Mode", "HDMI 1 Sync Mode", "HDMI 2 Sync Mode", "HDMI 3 Sync Mode", "HDMI 4 Sync Mode",
+				"Follow Room", "At Room Off", "When The Source Leaves The Box" }, writable)
 		end)
 
-		it("offers Pair Sync Box, Diagnostics and Forget Pairing, and nothing for programming yet", function()
+		it("declares the settings of contracts C1.4 and research §7.2 with their items and defaults (S3 §5)", function()
+			local props = {}
+			for _, body in ipairs(each(xml(), "property")) do
+				props[field(body, "name")] = { type = field(body, "type"), items = table.concat(each(body, "item"), "/"),
+					default = field(body, "default") }
+			end
+			for n = 1, 4 do
+				assert.same({ type = "LIST", items = "Automatic/Video/Game/Music/Do not sync", default = "Automatic" },
+					props["HDMI " .. n .. " Sync Mode"])
+			end
+			assert.same({ type = "LIST", items = "Power save/Stop syncing and keep the picture", default = "Power save" },
+				props["At Room Off"])
+			assert.same({ type = "LIST", items = "Stop syncing and keep the picture/Power save",
+				default = "Stop syncing and keep the picture" }, props["When The Source Leaves The Box"])
+			assert.same({ type = "DYNAMIC_LIST", items = "" }, props["Follow Room"])
+			assert.equal("STRING", props["Source Sync Modes"].type)
+		end)
+
+		it("offers Pair Sync Box, Set Source Sync Mode, Diagnostics and Forget Pairing, nothing for programming yet",
+			function()
 			local actions = {}
 			for _, body in ipairs(each(xml(), "action")) do
 				local params = {}
@@ -294,6 +377,7 @@ describe("Hue Sync Box driver (#534)", function()
 			end
 			assert.same({
 				"Pair Sync Box (Box:CUSTOM_SELECT:SyncBoxList:, Address:STRING:)",
+				"Set Source Sync Mode (Source:CUSTOM_SELECT:SourceList:, Mode:LIST:Automatic/Video/Game/Music/Do not sync)",
 				"Diagnostics (What:LIST:Check the box now/Read everything from the box now/"
 					.. "Show the box's raw state in the Lua output)",
 				"Forget Pairing (Confirm:LIST:No/Yes)",
@@ -633,6 +717,56 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.truthy(#box:requests_of("GET", "") > 0)
 		end)
 
+		-- The house, dev 695: a reload while the box did not answer left Online
+		-- and the box rows empty until it answered (C1.9: at start the values
+		-- come from persisted ones; #428: Online is never empty while paired).
+		it("shows Not reached since the start in Online and the last good read's rows while the box does not answer "
+			.. "after a restart", function()
+			local env, c4 = paired()
+			c4.advance(1000)
+			local before = {}
+			for _, name in ipairs(BOX_ROWS) do before[name] = env.Properties[name] end
+			assert.equal("Apple TV", before["Inputs"]:match("^1 (Apple TV)"))
+			local kept = {}
+			for k, v in pairs(c4.persist) do kept[k] = v end
+			-- The restart, the box silent.
+			local env2, c4b, box = load_box({ persist = kept, silent = true,
+				box = { state = F.state.HSB2, registrations = { [F.REGISTRATION_ID] = F.TOKEN } } })
+			assert.truthy(env2.Properties["Online"]:match("^Not reached since %d+:%d%d$"), env2.Properties["Online"])
+			for _, name in ipairs(BOX_ROWS) do
+				assert.equal(before[name], env2.Properties[name], name)
+			end
+			assert.truthy(env2.Properties["Status"]:match("^Checking the sync box at 10%.0%.2%.150"), env2.Properties["Status"])
+			c4b.advance(60000)
+			assert.truthy(env2.Properties["Online"]:match("^Not reached since %d+:%d%d$"), env2.Properties["Online"])
+			assert.truthy(env2.Properties["Status"]:match("^Waiting for the sync box at 10%.0%.2%.150 %(no answer since "),
+				env2.Properties["Status"])
+			assert.equal(before["Sync"], env2.Properties["Sync"])
+			c4b.advance(5 * 60000)
+			assert.truthy(env2.Properties["Online"]:match("^Offline since %d+:%d%d$"), env2.Properties["Online"])
+			assert.equal(before["Inputs"], env2.Properties["Inputs"], "the rows stay through the outage")
+			box:silence(false)
+			c4b.advance(2 * 60000)
+			assert.equal("Online", env2.Properties["Online"])
+			assert.equal(before["Sync"], env2.Properties["Sync"])
+		end)
+
+		it("never shows another box's persisted rows, and forgets them with the pairing", function()
+			local env, c4 = paired()
+			c4.advance(1000)
+			assert.truthy(c4.persist.syncbox_rows, "the last good read's rows are kept")
+			action(env, "Forget Pairing", { Confirm = "Yes" })
+			c4.advance(1000)
+			assert.is_nil(c4.persist.syncbox_rows)
+			-- Rows kept for another box id are not shown for this one.
+			local persist = { syncbox_rows = { box_id = OTHER_ID, rows = { Sync = "Game, intense", Inputs = "1 Other" } } }
+			for k, v in pairs(PAIRED) do persist[k] = v end
+			local env2 = load_box({ persist = persist, silent = true })
+			assert.equal("", env2.Properties["Sync"])
+			assert.equal("", env2.Properties["Inputs"])
+			assert.equal(F.BOX_ID, env2.Properties["Box ID"])
+		end)
+
 		it("shows the stored outage at once while the box is still away after a restart", function()
 			local persist = { syncbox_offline_since = 1000000 - 10 * 60000 }
 			for k, v in pairs(PAIRED) do persist[k] = v end
@@ -692,18 +826,18 @@ describe("Hue Sync Box driver (#534)", function()
 		end)
 	end)
 
-	describe("the proxies send nothing in stage 2 (S2 §1)", function()
-		it("answers ON, SET_INPUT and a UI Button press with Last Action only, logged with every parameter",
-			function()
+	describe("the proxies (S3 §5; #483 D-7)", function()
+		it("logs every proxy command with every parameter, and answers a UI Button press Not done", function()
 			local env, c4, box = paired(nil, { bind = true, debug = true })
-			local requests, sent = #box.requests, #to_bridge(c4)
-			c4.calls = {}
-			env.ReceivedFromProxy(5001, "ON", {})
-			assert.equal(NOT_YET, fake.last_action(env))
-			env.Properties["Last Action"] = ""
 			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1001", OUTPUT = "2000", AUDIO = "False", VIDEO = "True",
 				PREV_DEV_LIST = "1201,1301" })
-			assert.equal(NOT_YET, fake.last_action(env))
+			local line = logged("proxy 5001 SET_INPUT at ")
+			assert.truthy(line)
+			assert.truthy(line:find("AUDIO=False INPUT=1001 OUTPUT=2000 PREV_DEV_LIST=1201,1301 VIDEO=True", 1, true), line)
+			assert.truthy(line:match(" at %d+ ms: "), line)
+			c4.advance(20000)
+			local requests, sent = #box.requests, #to_bridge(c4)
+			c4.calls = {}
 			for binding = 5002, 5005 do
 				env.Properties["Last Action"] = ""
 				env.ReceivedFromProxy(binding, "SELECT", { ["Device ID"] = "7", Menu = "watch" })
@@ -712,24 +846,771 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.same({}, c4.calls_to("SendToProxy"), "no notify")
 			assert.equal(requests, #box.requests, "nothing to the box")
 			assert.equal(sent, #to_bridge(c4), "nothing to the bridge")
-			local line = logged("proxy 5001 SET_INPUT at ")
-			assert.truthy(line)
-			assert.truthy(line:find("AUDIO=False INPUT=1001 OUTPUT=2000 PREV_DEV_LIST=1201,1301 VIDEO=True", 1, true), line)
-			assert.truthy(line:match(" at %d+ ms: "), line)
 			assert.truthy(logged("proxy 5003 SELECT at "))
 		end)
 
 		it("takes each command only on its own binding, and notes the rest without a word", function()
-			local env, c4 = paired(nil, { debug = true })
+			local env, c4, box = paired(nil, { debug = true })
+			local before = #box:requests_of("PUT")
 			env.Properties["Last Action"] = ""
 			env.ReceivedFromProxy(5001, "SELECT", {})
-			env.ReceivedFromProxy(5002, "SET_INPUT", { INPUT = "1000" })
+			env.ReceivedFromProxy(5002, "SET_INPUT", { INPUT = "1001", OUTPUT = "2000", VIDEO = "True" })
 			env.ReceivedFromProxy(5001, "GET_AUDIO_INPUTS", {})
 			env.ReceivedFromProxy(5001, "BINDING_CHANGE_ACTION", { BINDING_ID = "1000", IS_BOUND = "True" })
+			env.ReceivedFromProxy(5001, "SET_ROOM_BINDING_NAME", { OUTPUT = "2000", PartnerDevice = "7" })
+			env.ReceivedFromProxy(5001, "CONNECT_OUTPUT", { OUTPUT = "2000", VIDEO = "True" })
+			env.ReceivedFromProxy(5001, "PULSE_VOL_UP", {})
 			env.ReceivedFromProxy(5001, "DO_PUSH", {})
+			c4.advance(10000)
 			assert.equal("", fake.last_action(env))
 			assert.same({}, c4.calls_to("SendToProxy"))
+			assert.equal(before, #box:requests_of("PUT"), "nothing written to the box")
 			assert.truthy(logged("proxy 5002 SET_INPUT at "), "logged before it is dropped")
+		end)
+	end)
+
+	-- Stage 3 (#557, docs/hdmi-sync-stage3-design.md, "S3"; contracts C4;
+	-- design 5.2, 5.3, 5.8): Director's commands through syncbox/av.lua and
+	-- syncbox/queue.lua to the Lua fake box, confirmed by its reads.
+	describe("routing in line (S3 §1, §3; C4)", function()
+		local VIDEO_2 = { INPUT = "1001", OUTPUT = "2000", AUDIO = "False", VIDEO = "True" }
+		local AUDIO_2 = { INPUT = "3001", OUTPUT = "4000", AUDIO = "True", VIDEO = "False" }
+
+		it("routes a source in line: wakes, switches and syncs, then confirms INPUT_OUTPUT_CHANGED after the read",
+			function()
+			local env, c4, box = asleep()
+			local before = #puts(box)
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"), "nothing before a read shows it")
+			c4.advance(200)
+			local sent = puts(box)
+			assert.equal(before + 1, #sent, "ON and SET_INPUT in one PUT")
+			local body = sent[#sent].json
+			assert.is_true(body.hdmiActive)
+			assert.equal("input2", body.hdmiSource)
+			assert.equal("game", body.mode, "HDMI 2 is a PlayStation: Automatic is Game")
+			assert.is_true(body.syncActive)
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"), "the PUT's answer is no confirmation")
+			c4.advance(1500)
+			assert.same({ { INPUT = 1001, OUTPUT = 2000, AUDIO = "False", VIDEO = "True" } },
+				notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.equal(1, #notifies(c4, "ON"))
+			assert.same({ "input2", "game", true, true },
+				{ ex(box).hdmiSource, ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
+			assert.equal("Game, intense, brightness 100 % on Living Room TV", env.Properties["Status"])
+			c4.advance(30000)
+			assert.equal(before + 1, #puts(box), "nothing more once confirmed")
+		end)
+
+		-- Probes P1 to P4 (docs/syncbox-control4-research.md §6) have not run:
+		-- the orders and shapes Director may use, each ending the same way.
+		local ORDERS = {
+			{ "ON, then SET_INPUT video and SET_INPUT audio", { { "ON", {} }, { "SET_INPUT", VIDEO_2 },
+				{ "SET_INPUT", AUDIO_2 } }, { 1001, 3001 } },
+			{ "SET_INPUT before ON", { { "SET_INPUT", VIDEO_2 }, { "ON", {} } }, { 1001 } },
+			{ "SET_INPUT audio before video", { { "SET_INPUT", AUDIO_2 }, { "SET_INPUT", VIDEO_2 }, { "ON", {} } },
+				{ 3001, 1001 } },
+			{ "one SET_INPUT with AUDIO and VIDEO, no ON", { { "SET_INPUT", { INPUT = "1001", OUTPUT = "2000",
+				AUDIO = "True", VIDEO = "True" } } }, { 1001 } },
+			{ "SET_INPUT without AUDIO and VIDEO (the input's range says video)", { { "ON", {} },
+				{ "SET_INPUT", { INPUT = "1001", OUTPUT = "2000" } } }, { 1001 } },
+			{ "the same SET_INPUT twice", { { "ON", {} }, { "SET_INPUT", VIDEO_2 }, { "SET_INPUT", VIDEO_2 } },
+				{ 1001, 1001 } },
+			{ "SET_OUTPUT_INPUT from programming", { { "SET_OUTPUT_INPUT", { INPUT = "1001", OUTPUT = "2000" } } },
+				{ 1001 } },
+			{ "ON, a read, then SET_INPUT", { { "ON", {} }, 1500, { "SET_INPUT", VIDEO_2 } }, { 1001 } },
+			{ "SET_INPUT video, a read, then SET_INPUT audio", { { "SET_INPUT", VIDEO_2 }, 1500,
+				{ "SET_INPUT", AUDIO_2 } }, { 1001, 3001 } },
+		}
+		for _, case in ipairs(ORDERS) do
+			it("ends on HDMI 2 in game sync for " .. case[1], function()
+				local env, c4, box = asleep()
+				for _, step in ipairs(case[2]) do
+					if type(step) == "number" then
+						c4.advance(step)
+					else
+						env.ReceivedFromProxy(5001, step[1], step[2])
+					end
+				end
+				c4.advance(3000)
+				assert.same({ "input2", "game", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+				local inputs = {}
+				for _, p in ipairs(notifies(c4, "INPUT_OUTPUT_CHANGED")) do inputs[#inputs + 1] = p.INPUT end
+				table.sort(inputs)
+				local want = { unpack(case[3]) }
+				table.sort(want)
+				assert.same(want, inputs, "each SET_INPUT confirmed once")
+				assert.equal("", fake.last_action(env), "nothing went wrong")
+				c4.advance(30000)
+				assert.equal("", fake.last_action(env))
+			end)
+		end
+
+		it("takes the latest of two SET_INPUTs sent together, and confirms only that one", function()
+			local env, c4, box = asleep()
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", AUDIO = "False", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "input1", "video", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.same({ { INPUT = 1000, OUTPUT = 2000, AUDIO = "False", VIDEO = "True" } },
+				notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.equal("", fake.last_action(env), "a write a later one replaced says nothing")
+		end)
+
+		it("syncs in each input's own mode, and only switches an input set to Do not sync", function()
+			local env, c4, box = asleep()
+			set_property(env, "HDMI 2 Sync Mode", "Video")
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			assert.same({ "input2", "video", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			-- An audio-only route (a Listen source) on a generic input: Music.
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "3002", OUTPUT = "4000", AUDIO = "True", VIDEO = "False" })
+			c4.advance(3000)
+			assert.same({ "input3", "music", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			-- Do not sync: the input, and the sync of the input before stops.
+			set_property(env, "HDMI 1 Sync Mode", "Do not sync")
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", AUDIO = "False", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "input1", "passthrough", false }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.equal(3, #notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.equal("", fake.last_action(env))
+		end)
+
+		it("refuses an input the box lacks, sending nothing (HSB3)", function()
+			local env, c4, box = asleep(F.state.HSB3)
+			local before = #puts(box)
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(5000)
+			assert.equal("Not switched: this box has 1 HDMI input", fake.last_action(env))
+			assert.equal(before, #puts(box))
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"))
+		end)
+
+		it("tries an input the box did not take 4 times 2 s apart, then says it was not switched", function()
+			local env, c4, box = asleep()
+			box:fault("drop", { method = "PUT", path = "/execution" })
+			local before = #puts(box)
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(200)
+			assert.equal(before + 1, #puts(box))
+			c4.advance(2000)
+			assert.equal(before + 2, #puts(box), "the second try 2 s after the first")
+			c4.advance(30000)
+			assert.equal(before + 4, #puts(box), "4 tries in all")
+			assert.truthy(logged("Not switched: the box did not change input"))
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.same({}, notifies(c4, "ON"))
+			assert.equal("powersave", ex(box).mode, "the box as it was")
+		end)
+
+		it("confirms an input that landed at the second try", function()
+			local env, c4, box = asleep()
+			box:fault("drop", { method = "PUT", path = "/execution", count = 1 })
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(8000)
+			assert.same({ { INPUT = 1001, OUTPUT = 2000, AUDIO = "False", VIDEO = "True" } },
+				notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.same({ "input2", "game", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.is_nil(logged("Not switched"))
+		end)
+
+		it("answers a route to a box that does not answer as undelivered, and never confirms it", function()
+			local env, c4, box = asleep()
+			box:silence(true)
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(120000)
+			assert.truthy(logged("Not switched: "), "said in Last Action")
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.same({}, notifies(c4, "ON"))
+			-- The box back: nothing replayed by itself (EC I15: not the old sequence).
+			local before = #puts(box)
+			box:silence(false)
+			c4.advance(60000)
+			assert.equal(before, #puts(box))
+			assert.equal("powersave", ex(box).mode)
+		end)
+
+		it("switches the input but does not sync while another app streams (code 16, busy)", function()
+			local env, c4, box = asleep()
+			box:event("bridge", { state = "busy" })
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(8000)
+			assert.same({ "input2", false, true }, { ex(box).hdmiSource, ex(box).syncActive, ex(box).hdmiActive })
+			assert.same({ { INPUT = 1001, OUTPUT = 2000, AUDIO = "False", VIDEO = "True" } },
+				notifies(c4, "INPUT_OUTPUT_CHANGED"), "the picture switched")
+			assert.truthy(logged("Not syncing: another app streams to the Hue Bridge's entertainment area"))
+			local refused = 0
+			for _, r in ipairs(puts(box)) do
+				if r.status ~= 200 then refused = refused + 1 end
+			end
+			assert.equal(1, refused, "a code 16 is not retried")
+		end)
+
+		it("puts the box in power save at Room Off, or keeps the picture as At Room Off says", function()
+			local env, c4, box = asleep()
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			-- P4: DISCONNECT_OUTPUT and OFF, in either order, are Room Off.
+			env.ReceivedFromProxy(5001, "DISCONNECT_OUTPUT", { OUTPUT = "2000", VIDEO = "True", AUDIO = "False" })
+			env.ReceivedFromProxy(5001, "OFF", {})
+			assert.same({}, notifies(c4, "OFF"), "OFF only once done")
+			c4.advance(3000)
+			assert.equal("powersave", ex(box).mode)
+			assert.equal(1, #notifies(c4, "OFF"))
+			assert.equal("Power save", env.Properties["Status"])
+			-- At Room Off: Stop syncing and keep the picture; OFF before DISCONNECT_OUTPUT.
+			set_property(env, "At Room Off", "Stop syncing and keep the picture")
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			env.ReceivedFromProxy(5001, "ON", {})
+			c4.advance(3000)
+			assert.equal("game", ex(box).mode)
+			env.ReceivedFromProxy(5001, "OFF", {})
+			env.ReceivedFromProxy(5001, "DISCONNECT_OUTPUT", { OUTPUT = "2000" })
+			c4.advance(3000)
+			assert.same({ "passthrough", false, true }, { ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
+			assert.equal(2, #notifies(c4, "OFF"))
+			assert.equal("", fake.last_action(env))
+		end)
+
+		it("stops syncing and keeps the picture when the source leaves the box", function()
+			local env, c4, box = asleep()
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			env.ReceivedFromProxy(5001, "DISCONNECT_OUTPUT", { OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "passthrough", false, true }, { ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
+			assert.same({}, notifies(c4, "OFF"), "the room stays on")
+			-- The setting: Power save.
+			set_property(env, "When The Source Leaves The Box", "Power save")
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			env.ReceivedFromProxy(5001, "DISCONNECT_OUTPUT", { OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.equal("powersave", ex(box).mode)
+			-- A new route within the wait cancels the leave.
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			env.ReceivedFromProxy(5001, "DISCONNECT_OUTPUT", { OUTPUT = "2000", VIDEO = "True" })
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "input1", "video", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+		end)
+
+		it("never confirms a change the box made by itself (C4)", function()
+			local env, c4, box = asleep()
+			box:event("cec_active_source", { input = "input2" })
+			c4.advance(12000)
+			assert.equal("input2", ex(box).hdmiSource)
+			assert.same({}, c4.calls_to("SendToProxy"))
+			assert.equal("", fake.last_action(env))
+		end)
+
+		it("starts again after a restart in the middle of a route: nothing replayed, the next route works", function()
+			local env, c4, box = asleep()
+			box:fault("drop", { method = "PUT", path = "/execution" })
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(200)
+			local tried = #puts(box)
+			reload(env)
+			box:fault()
+			c4.advance(30000)
+			assert.equal(tried, #puts(box), "the old route is not sent again by itself (EC C14)")
+			assert.same({}, notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			assert.equal("powersave", ex(box).mode)
+			env.ReceivedFromProxy(5001, "SET_INPUT", VIDEO_2)
+			c4.advance(3000)
+			assert.same({ "input2", "game", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.equal(1, #notifies(c4, "INPUT_OUTPUT_CHANGED"))
+		end)
+	end)
+
+	-- The followed room and its sources (S3 §2, §4; W §1.2, §5, §7.2): the
+	-- default room 7 "Living Room" of the fake project, its variables set
+	-- with fake.room_variable as Director would change them.
+	local ROOM = 7
+	local function watch(id)
+		fake.room_variable(ROOM, 1002, id)
+		fake.room_variable(ROOM, 1000, id)
+	end
+	local function listen(id)
+		fake.room_variable(ROOM, 1001, id)
+		fake.room_variable(ROOM, 1000, id)
+	end
+	local function room_off()
+		fake.room_variable(ROOM, 1000, 0)
+	end
+
+	-- Three sources; the ids a room selects are their proxies' (4002, 4012,
+	-- 4022). The PS5's driver file names a console (#536: Game, guessed).
+	local function add_sources()
+		return {
+			apple = fake.add_device(4001, { name = "Apple TV", driver = "apple_tv_ip.c4z", proxy = "dvd" }),
+			ps5 = fake.add_device(4011, { name = "PS5", driver = "playstation_5_ip.c4z", proxy = "dvd" }),
+			radio = fake.add_device(4021, { name = "Radio", driver = "internet_radio.c4z", proxy = "tuner" }),
+		}
+	end
+
+	-- The receiver's output bound to the box's HDMI 1 (video 1000; the box's
+	-- avswitch proxy is 3001), the sources to the receiver's inputs: the
+	-- bindings syncbox/sources.lua walks upstream (W §3.2, §4.1 choice B).
+	local BOX_PROXY = 3001
+	local function connect_receiver(c4, src)
+		local receiver = fake.add_device(4101, { name = "AV Receiver", driver = "receiver_ip.c4z", proxy = "receiver" })
+		c4:Bind(receiver, 2000, BOX_PROXY, 1000, "HDMI")
+		c4:Bind(src.apple, 2000, receiver, 1000, "HDMI")
+		c4:Bind(src.ps5, 2000, receiver, 1001, "HDMI")
+		c4:Bind(src.radio, 2000, receiver, 1002, "HDMI")
+		return receiver
+	end
+
+	local MANAGED = { "HDMI 1 Sync Mode", "HDMI 2 Sync Mode", "HDMI 3 Sync Mode", "HDMI 4 Sync Mode", "Follow Room",
+		"Source Sync Modes" }
+
+	-- The managed rows as Composer shows them: name → true shown, false hidden.
+	local function shown(c4)
+		local out = {}
+		for _, name in ipairs(MANAGED) do out[name] = c4.property_attribs[name] == 0 end
+		return out
+	end
+
+	local IN_LINE = { ["HDMI 1 Sync Mode"] = true, ["HDMI 2 Sync Mode"] = true, ["HDMI 3 Sync Mode"] = true,
+		["HDMI 4 Sync Mode"] = true, ["Follow Room"] = false, ["Source Sync Modes"] = false }
+	local ROOM_DRIVEN = { ["HDMI 1 Sync Mode"] = false, ["HDMI 2 Sync Mode"] = false, ["HDMI 3 Sync Mode"] = false,
+		["HDMI 4 Sync Mode"] = false, ["Follow Room"] = true, ["Source Sync Modes"] = true }
+
+	describe("the settings rows per wiring (S3 §5; W §7.2)", function()
+		it("shows only the settings of the box's wiring and switches them when the wiring changes", function()
+			local env, c4, box = paired()
+			c4.advance(2000)
+			assert.same(IN_LINE, shown(c4))
+			assert.is_nil(c4.property_attribs["At Room Off"], "never hidden")
+			assert.is_nil(c4.property_attribs["When The Source Leaves The Box"], "never hidden")
+			assert.is_nil(logged("wiring changed"), "the first read is no change")
+			-- The Hue Sync app turns ARC bypass on: behind a receiver.
+			box.state.behavior.arcBypassMode = 1
+			c4.advance(5000)
+			assert.same(ROOM_DRIVEN, shown(c4))
+			assert.equal("The box's wiring changed to Behind a receiver (ARC bypass on): Control4 routes through the box "
+				.. "and the followed room's source sets the sync mode", fake.last_action(env))
+			assert.equal("behind_receiver", c4.persist.syncbox_wiring)
+			-- Solo mode on: a receiver's second output, the same rows. The room
+			-- followed is off (nothing selected), so At Room Off applies once (W22).
+			box.state.behavior.soloMode = 1
+			c4.advance(5000)
+			assert.same(ROOM_DRIVEN, shown(c4))
+			assert.truthy(logged("The box's wiring changed to From a receiver's second output (solo mode): the followed "
+				.. "room's power and source drive the box"))
+			assert.equal("The box is now on a receiver's second output; Living Room off: power save", fake.last_action(env))
+			assert.equal("powersave", box.state.execution.mode)
+			-- Back in line (the next read: 30 s in power save); Composer hears it
+			-- again 400 ms and 1.5 s later.
+			box.state.behavior.soloMode, box.state.behavior.arcBypassMode = 0, 0
+			c4.calls = {}
+			c4.advance(31000)
+			assert.same(IN_LINE, shown(c4))
+			local hides = 0
+			for _, call in ipairs(c4.calls_to("SetPropertyAttribs")) do
+				if call[1] == "Follow Room" and call[2] == 1 then hides = hides + 1 end
+			end
+			assert.truthy(hides >= 3, "at once, then 400 ms and 1.5 s later: " .. hides)
+		end)
+
+		it("shows HDMI 1 Sync Mode alone on an HSB3", function()
+			local _, c4 = paired(F.state.HSB3)
+			c4.advance(2000)
+			assert.same({ ["HDMI 1 Sync Mode"] = true, ["HDMI 2 Sync Mode"] = false, ["HDMI 3 Sync Mode"] = false,
+				["HDMI 4 Sync Mode"] = false, ["Follow Room"] = false, ["Source Sync Modes"] = false }, shown(c4))
+		end)
+
+		it("shows the last wiring's rows at a restart, before the box answers", function()
+			local _, c4 = paired(F.state.HSB2_second_output)
+			c4.advance(2000)
+			local kept = {}
+			for k, v in pairs(c4.persist) do kept[k] = v end
+			local env2, c4b = load_box({ persist = kept, silent = true })
+			assert.same(ROOM_DRIVEN, shown(c4b))
+			assert.equal("From a receiver's second output (solo mode)", env2.Properties["Wiring"], "the persisted row")
+		end)
+	end)
+
+	describe("Follow Room (S3 §2; W §5, §7.2)", function()
+		it("lists this device's room first and follows it by default (#536), and keeps a pick as a room id",
+			function()
+			local env, c4 = paired(F.state.HSB2_second_output)
+			c4.advance(2000)
+			assert.equal("This device's room (Living Room),None (the box decides),Living Room",
+				c4.property_lists["Follow Room"])
+			assert.equal("This device's room (Living Room)", env.Properties["Follow Room"])
+			assert.is_true(c4.listens(ROOM, 1000), "the device's room is followed")
+			assert.truthy(env.Properties["Status"]:find("; follows Living Room", 1, true), env.Properties["Status"])
+			-- A new room appears in the list at the next read.
+			fake.add_room(8, "Kitchen")
+			c4.advance(5000)
+			assert.equal("This device's room (Living Room),None (the box decides),Kitchen,Living Room",
+				c4.property_lists["Follow Room"])
+			set_property(env, "Follow Room", "Kitchen")
+			assert.same({ mode = "room", id = 8, name = "Kitchen" }, c4.persist.syncbox_follow_room)
+			assert.is_true(c4.listens(8, 1000))
+			assert.is_false(c4.listens(ROOM, 1000))
+			assert.equal("Follows Kitchen (chosen; this device is in Living Room)", fake.last_action(env))
+			c4.advance(2000)
+			assert.truthy(env.Properties["Status"]:find("; follows Kitchen", 1, true), env.Properties["Status"])
+			-- None: no room, the box on its own (W2).
+			set_property(env, "Follow Room", "None (the box decides)")
+			assert.is_false(c4.listens(8, 1000))
+			assert.truthy(env.Properties["Status"]:find("; follows no room: the box runs on its own settings", 1, true),
+				env.Properties["Status"])
+		end)
+
+		it("follows no room in line, and keeps the pick for later", function()
+			local env, c4 = paired()
+			c4.advance(2000)
+			assert.is_false(c4.listens(ROOM, 1000))
+			assert.equal("Video, high, brightness 100 % on Living Room TV", env.Properties["Status"])
+			set_property(env, "Follow Room", "None (the box decides)")
+			assert.equal("Follow Room: None (the box decides) (used behind a receiver and on a receiver's second output)",
+				fake.last_action(env))
+			assert.equal("none", c4.persist.syncbox_follow_room.mode)
+		end)
+
+		it("says a deleted followed room and follows no other room by itself (W4)", function()
+			local env, c4 = paired(F.state.HSB2_second_output)
+			fake.add_room(8, "Kitchen")
+			c4.advance(5000)
+			set_property(env, "Follow Room", "Kitchen")
+			c4.advance(2000)
+			fake.delete_room(8)
+			c4.advance(5000)
+			assert.equal("Follows a deleted room (Kitchen, room 8): pick another in Follow Room", fake.last_action(env))
+			assert.truthy(env.Properties["Status"]:find("; follows a deleted room (Kitchen, room 8)", 1, true),
+				env.Properties["Status"])
+			assert.is_false(c4.listens(8, 1000))
+			assert.is_false(c4.listens(ROOM, 1000), "never the device's room instead")
+			assert.equal("Kitchen (deleted room 8)", env.Properties["Follow Room"])
+		end)
+
+		it("says a room whose variables do not answer, in Status (W16)", function()
+			local env, c4 = paired(F.state.HSB2_second_output)
+			fake.add_room(8, "Kitchen")
+			fake.room_variables(8)[1000] = nil
+			c4.advance(5000)
+			set_property(env, "Follow Room", "Kitchen")
+			c4.advance(2000)
+			assert.truthy(env.Properties["Status"]:find("; cannot follow Kitchen: its variables do not answer", 1, true),
+				env.Properties["Status"])
+		end)
+	end)
+
+	describe("offers and the project's changes (W16, W20, W21; never applied by themselves)", function()
+		it("registers OnPIP and follows a room again on it when its variables did not answer (W16)", function()
+			local registered = {}
+			local s = F.copy(F.state.HSB2_second_output)
+			local env, c4 = paired(s, { before_late = function(e, c)
+				e.C4SystemEvents = { OnPIP = 6, OnItemNameChanged = 13 }
+				c.RegisterSystemEvent = function(_, id, device) registered[#registered + 1] = { id, device } end
+			end })
+			assert.same({ { 6, 0 } }, registered, "OnPIP only, for every device")
+			fake.add_room(8, "Kitchen")
+			fake.room_variables(8)[1000] = nil
+			c4.advance(5000)
+			set_property(env, "Follow Room", "Kitchen")
+			c4.advance(2000)
+			assert.truthy(env.Properties["Status"]:find("; cannot follow Kitchen", 1, true), env.Properties["Status"])
+			fake.room_variables(8)[1000] = { name = "CURRENT_SELECTED_DEVICE", value = "0" }
+			env.OnSystemEvent("<OnPIP/>")
+			c4.advance(2000)
+			assert.is_true(c4.listens(8, 1000))
+			assert.truthy(env.Properties["Status"]:find("; follows Kitchen", 1, true), env.Properties["Status"])
+		end)
+
+		it("offers the room whose picture runs through the box behind a receiver, once, without following it (W20)",
+			function()
+			local env, c4 = asleep(F.state.HSB2_behind_receiver)
+			local src = add_sources()
+			fake.add_room(9, "Theater")
+			fake.room_variable(9, 1008, "<id>" .. src.ps5 .. "</id><id>" .. BOX_PROXY .. "</id><id>4901</id>")
+			c4.advance(2000)
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.truthy(logged("Theater's picture runs through this box (Follow Room)"))
+			assert.is_false(c4.listens(9, 1000), "offered, not followed")
+			assert.is_true(c4.listens(ROOM, 1000))
+			local said = 0
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			for _, line in ipairs(lines) do
+				if line:find("Theater's picture runs through this box", 1, true) then said = said + 1 end
+			end
+			assert.equal(1, said, "said once")
+		end)
+
+		it("offers a replaced source's mode to the device that replaced it, and moves it on a click (W21)", function()
+			local env, c4 = asleep(F.state.HSB2_behind_receiver)
+			local src = add_sources()
+			local receiver = connect_receiver(c4, src)
+			env.ReceivedFromProxy(5001, "BINDING_CHANGE_ACTION", { BINDING_ID = "1000", IS_BOUND = "True" })
+			action(env, "Set Source Sync Mode", { Source = "source:" .. src.apple, Mode = "Music" })
+			-- The Apple TV replaced in Composer by a new device of the same name.
+			fake.delete_device(4001)
+			local new = fake.add_device(4301, { name = "Apple TV", driver = "apple_tv_ip.c4z", proxy = "dvd" })
+			c4:Bind(new, 2000, receiver, 1000, "HDMI")
+			env.OnSystemEvent("<OnPIP/>")
+			assert.equal("Apple TV (device " .. new .. ") replaces a source set to Music: give it Music with Set Source "
+				.. "Sync Mode", fake.last_action(env))
+			assert.truthy(env.Properties["Source Sync Modes"]:find("Apple TV: Music (device gone)", 1, true),
+				env.Properties["Source Sync Modes"])
+			assert.truthy(env.Properties["Source Sync Modes"]:find("Apple TV: Video", 1, true), "not applied by itself")
+			local list = fake.custom_select(env, "SourceList")
+			assert.equal(string.format("offer:%d:%d", src.apple, new), list[1].value)
+			action(env, "Set Source Sync Mode", { Source = list[1].value, Mode = "Automatic" })
+			assert.equal("Source Sync Mode of Apple TV: Music (from device " .. src.apple .. ", which it replaces)",
+				fake.last_action(env))
+			assert.equal("Apple TV: Music; PS5: Game (guessed from its driver); Radio: Music",
+				env.Properties["Source Sync Modes"])
+		end)
+	end)
+
+	describe("on a receiver's second output (S3 §1; W §4.2)", function()
+		it("follows the room on a receiver's second output: wakes and syncs on a source, power save at Room Off",
+			function()
+			local env, c4, box = asleep(F.state.HSB2_second_output)
+			local src = add_sources()
+			c4.advance(2000)
+			assert.equal(0, #puts(box), "the room's first state is a baseline")
+			watch(src.ps5)
+			c4.advance(3000)
+			assert.same({ "game", true, true }, { ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
+			assert.equal("Living Room on PS5: syncing game", fake.last_action(env))
+			assert.truthy(env.Properties["Status"]:find("; follows Living Room (watching PS5)", 1, true),
+				env.Properties["Status"])
+			watch(src.apple)
+			c4.advance(3000)
+			assert.same({ "video", true }, { ex(box).mode, ex(box).syncActive })
+			listen(src.radio)
+			c4.advance(3000)
+			assert.same({ "music", true }, { ex(box).mode, ex(box).syncActive })
+			room_off()
+			c4.advance(3000)
+			assert.equal("powersave", ex(box).mode, "At Room Off: Power save")
+			-- Director routes nothing through the box here; a command is only logged.
+			local before = #puts(box)
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(5000)
+			assert.equal(before, #puts(box))
+			assert.same({}, c4.calls_to("SendToProxy"), "nothing to the proxy in this wiring")
+		end)
+
+		it("keeps the picture at Room Off when At Room Off says so", function()
+			local env, c4, box = asleep(F.state.HSB2_second_output)
+			local src = add_sources()
+			set_property(env, "At Room Off", "Stop syncing and keep the picture")
+			c4.advance(2000)
+			watch(src.apple)
+			c4.advance(3000)
+			room_off()
+			c4.advance(3000)
+			assert.same({ "passthrough", false, true }, { ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
+		end)
+
+		it("stops syncing when the room's source does not pass the receiver (W17)", function()
+			local env, c4, box = asleep(F.state.HSB2_second_output)
+			local src = add_sources()
+			local receiver = connect_receiver(c4, src)
+			c4.advance(2000)
+			fake.room_variable(ROOM, 1008, "<id>" .. src.ps5 .. "</id><id>" .. receiver .. "</id>")
+			watch(src.ps5)
+			c4.advance(3000)
+			assert.same({ "game", true }, { ex(box).mode, ex(box).syncActive })
+			-- The TV's own app: its path does not run through the receiver.
+			local app = fake.add_device(4201, { name = "TV App", driver = "tv_app.c4z", proxy = "dvd" })
+			fake.room_variable(ROOM, 1008, "<id>" .. app .. "</id>")
+			watch(app)
+			c4.advance(3000)
+			assert.same({ "passthrough", false, true }, { ex(box).mode, ex(box).syncActive, ex(box).hdmiActive })
+			assert.truthy(fake.last_action(env):find("which does not pass the box", 1, true), fake.last_action(env))
+		end)
+
+		it("applies the room's state once when the box answers again after an outage, not the missed ones (W23)",
+			function()
+			local env, c4, box = asleep(F.state.HSB2_second_output)
+			local src = add_sources()
+			c4.advance(2000)
+			box:silence(true)
+			c4.advance(6 * 60000)
+			assert.truthy(env.Properties["Online"]:match("^Offline since "), env.Properties["Online"])
+			local before = #puts(box)
+			watch(src.ps5)
+			c4.advance(3000)
+			watch(src.apple)
+			c4.advance(3000)
+			assert.equal("Living Room on Apple TV: syncing video, once the box answers again", fake.last_action(env))
+			box:silence(false)
+			c4.advance(2 * 60000)
+			assert.equal("Online", env.Properties["Online"])
+			assert.same({ "video", true }, { ex(box).mode, ex(box).syncActive })
+			assert.equal(before + 1, #puts(box), "one write: the room's state now, not the sequence")
+			assert.equal("When the box answered again: Living Room on Apple TV: syncing video", fake.last_action(env))
+		end)
+
+		it("takes the last of quick source changes, and a write it replaced is no failure (W19)", function()
+			local env, c4, box = asleep(F.state.HSB2_second_output)
+			local src = add_sources()
+			c4.advance(2000)
+			box:fault("latency", { ms = 3000, method = "PUT", path = "/execution" })
+			listen(src.radio)
+			c4.advance(1500)
+			watch(src.apple)
+			box:fault()
+			c4.advance(8000)
+			assert.same({ "video", true }, { ex(box).mode, ex(box).syncActive })
+			assert.is_nil(logged("No sound"), "the music write was replaced, not refused")
+			assert.equal("Living Room on Apple TV: syncing video", fake.last_action(env))
+		end)
+
+		it("changes nothing on the box at a restart: the room's first state is a baseline (W15)", function()
+			local env, c4, box = asleep(F.state.HSB2_second_output)
+			local src = add_sources()
+			c4.advance(2000)
+			watch(src.ps5)
+			c4.advance(3000)
+			assert.equal("game", ex(box).mode)
+			local before = #puts(box)
+			reload(env)
+			c4.advance(30000)
+			assert.equal(before, #puts(box), "nothing sent at start (EC C14)")
+			assert.is_true(c4.listens(ROOM, 1000))
+			watch(src.apple)
+			c4.advance(3000)
+			assert.equal("video", ex(box).mode, "later changes act")
+		end)
+	end)
+
+	describe("behind a receiver (S3 §1; design 5.8)", function()
+		it("takes the sync mode from the followed room's source behind a receiver", function()
+			local env, c4, box = asleep(F.state.HSB2_behind_receiver)
+			local src = add_sources()
+			c4.advance(2000)
+			watch(src.ps5)
+			c4.advance(3000)
+			assert.equal(0, #puts(box), "the room alone does not route the box here")
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", AUDIO = "False", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "input1", "game", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.same({ { INPUT = 1000, OUTPUT = 2000, AUDIO = "False", VIDEO = "True" } },
+				notifies(c4, "INPUT_OUTPUT_CHANGED"))
+			-- Another source through the receiver: Director may send the box
+			-- nothing (W §3.1, P10); the room says it.
+			watch(src.apple)
+			c4.advance(3000)
+			assert.same({ "input1", "video", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.equal(1, #notifies(c4, "INPUT_OUTPUT_CHANGED"))
+		end)
+
+		it("starts music sync for a Listen selection behind a receiver (#536)", function()
+			local env, c4, box = asleep(F.state.HSB2_behind_receiver)
+			local src = add_sources()
+			c4.advance(2000)
+			watch(src.ps5)
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.equal("game", ex(box).mode)
+			-- Listen: Director takes the box off the picture's path.
+			env.ReceivedFromProxy(5001, "DISCONNECT_OUTPUT", { OUTPUT = "2000", VIDEO = "True" })
+			listen(src.radio)
+			c4.advance(4000)
+			assert.same({ "music", true }, { ex(box).mode, ex(box).syncActive })
+			-- A video source picked under Listen is a Music selection too (W §2.2).
+			listen(src.apple)
+			c4.advance(4000)
+			assert.same({ "music", true }, { ex(box).mode, ex(box).syncActive })
+		end)
+	end)
+
+	describe("Set Source Sync Mode (S3 §5; W §7.2)", function()
+		it("keeps a source's sync mode from Set Source Sync Mode and shows it in Source Sync Modes", function()
+			local env, c4, box = asleep(F.state.HSB2_behind_receiver)
+			local src = add_sources()
+			connect_receiver(c4, src)
+			env.ReceivedFromProxy(5001, "BINDING_CHANGE_ACTION", { BINDING_ID = "1000", IS_BOUND = "True" })
+			assert.equal("Apple TV: Video; PS5: Game (guessed from its driver); Radio: Music",
+				env.Properties["Source Sync Modes"])
+			local list = fake.custom_select(env, "SourceList")
+			assert.same({ text = "Apple TV: Video", value = "source:" .. src.apple }, list[1])
+			assert.same({ text = "PS5: Game (guessed from its driver)", value = "source:" .. src.ps5 }, list[2])
+			action(env, "Set Source Sync Mode", { Source = "source:" .. src.apple, Mode = "Music" })
+			assert.equal("Source Sync Mode of Apple TV: Music", fake.last_action(env))
+			assert.equal("Apple TV: Music; PS5: Game (guessed from its driver); Radio: Music",
+				env.Properties["Source Sync Modes"])
+			-- It decides the mode behind the receiver.
+			c4.advance(2000)
+			watch(src.apple)
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1000", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "music", true }, { ex(box).mode, ex(box).syncActive })
+			-- Kept across a restart; Automatic removes it.
+			reload(env)
+			assert.equal("Apple TV: Music; PS5: Game (guessed from its driver); Radio: Music",
+				env.Properties["Source Sync Modes"])
+			action(env, "Set Source Sync Mode", { Source = "source:" .. src.apple, Mode = "Automatic" })
+			assert.equal("Source Sync Mode of Apple TV: Automatic", fake.last_action(env))
+			assert.equal("Apple TV: Video; PS5: Game (guessed from its driver); Radio: Music",
+				env.Properties["Source Sync Modes"])
+		end)
+
+		it("asks for a source, and says where a mode applies in line", function()
+			local env, c4 = paired()
+			action(env, "Set Source Sync Mode", { Mode = "Game" })
+			assert.truthy(fake.last_action(env):find("^Set Source Sync Mode: pick a source under Source"))
+			local list = fake.custom_select(env, "SourceList")
+			assert.equal("", list[1].value, "nothing to pick yet")
+			local src = add_sources()
+			c4.advance(1000)
+			action(env, "Set Source Sync Mode", { Source = "source:" .. src.ps5, Mode = "Video" })
+			assert.equal("Source Sync Mode of PS5: Video (used behind a receiver and on a second output; in line the "
+				.. "HDMI n Sync Mode rows decide)", fake.last_action(env))
+		end)
+	end)
+
+	describe("a wiring change while routed (W22)", function()
+		it("hands the box from Director to the followed room when solo mode comes on, applying the room once",
+			function()
+			local env, c4, box = asleep()
+			local src = add_sources()
+			env.ReceivedFromProxy(5001, "ON", {})
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1001", OUTPUT = "2000", VIDEO = "True" })
+			watch(src.apple)
+			c4.advance(3000)
+			assert.same({ "input2", "game", true }, { ex(box).hdmiSource, ex(box).mode, ex(box).syncActive })
+			assert.is_false(c4.listens(ROOM, 1000), "in line no room is followed")
+			box.state.behavior.soloMode = 1
+			c4.advance(5000)
+			assert.same(ROOM_DRIVEN, shown(c4))
+			assert.truthy(logged("The box's wiring changed to From a receiver's second output (solo mode)"))
+			assert.is_true(c4.listens(ROOM, 1000))
+			assert.same({ "video", true }, { ex(box).mode, ex(box).syncActive }, "the room's Apple TV, once")
+			assert.truthy(logged("Living Room on Apple TV: syncing video"))
+			local before = #puts(box)
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1001", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(30000)
+			assert.equal(before, #puts(box), "Director's commands only logged now")
+			-- And back in line: the room is let go; Director routes again.
+			box.state.behavior.soloMode = 0
+			c4.advance(5000)
+			assert.same(IN_LINE, shown(c4))
+			assert.is_false(c4.listens(ROOM, 1000))
+			env.ReceivedFromProxy(5001, "SET_INPUT", { INPUT = "1001", OUTPUT = "2000", VIDEO = "True" })
+			c4.advance(3000)
+			assert.same({ "input2", "game" }, { ex(box).hdmiSource, ex(box).mode })
 		end)
 	end)
 

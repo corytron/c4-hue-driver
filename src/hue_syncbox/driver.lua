@@ -7,14 +7,23 @@
 -- The device talks to the box itself, over the box's local HTTPS API
 -- (syncbox/client.lua, pinned to the box's own root; syncbox/identity.lua
 -- proves the box before its token goes anywhere), and to the Hue Bridge
--- driver only through hints (syncbox/link.lua, C5, #483). Stage 2 is
--- read-only towards the box: it registers (Pair Sync Box), unregisters
--- (Forget Pairing), reads the state every few seconds (syncbox/poller.lua)
--- and shows it in the rows (syncbox/state.lua). A proxy command (ON,
--- SET_INPUT, a UI Button press) is answered with Last Action `Not done: ...`
--- and sends nothing, to the box or to the proxy (S2 §1); every command the
--- proxies send is logged at debug with all its parameters, for the routing
--- probes of #531 (P9 to P11).
+-- driver only through hints (syncbox/link.lua, C5, #483). Stage 2 registers
+-- (Pair Sync Box), unregisters (Forget Pairing), reads the state every few
+-- seconds (syncbox/poller.lua) and shows it in the rows (syncbox/state.lua).
+--
+-- Stage 3 (#557, docs/hdmi-sync-stage3-design.md, "S3" below; C4; design
+-- 5.2, 5.3, 5.8; docs/syncbox-wirings-research.md, "W" below) routes: the
+-- AV switch's commands go to syncbox/av.lua, which turns them into writes
+-- through syncbox/queue.lua (one coalescing queue, confirmed by a read,
+-- retried, answered as undelivered) and into the proxy's notifies; the
+-- followed room's variables go to syncbox/room.lua, whose changes drive the
+-- box on a receiver's second output (syncbox/follow.lua) and set the sync
+-- mode behind a receiver (syncbox/sources.lua). The box's own wiring row
+-- (state.wiring: in line, behind a receiver, second output) says which path
+-- is live, and a change of it at run time switches the path (W §5 W22).
+-- The UI Buttons still answer `Not done: ...` until stage 4. Every command
+-- the proxies send is logged at debug with all its parameters first, for
+-- the routing probes of #531 (P9 to P11).
 --
 -- The box's token never leaves syncbox/store.lua and syncbox/client.lua: no
 -- log line, row, Last Action or message here carries it (S2 §3.1), and the
@@ -32,6 +41,7 @@
 -- _27-OnConnectionStatusChanged.md].
 -- luacheck: globals OnDriverInit OnDriverLateInit OnDriverDestroyed OnDriverRemovedFromProject
 -- luacheck: globals OnBindingChanged ReceivedFromProxy ReceivedFromNetwork OnConnectionStatusChanged SyncBoxList
+-- luacheck: globals OnWatchedVariableChanged OnSystemEvent SourceList
 
 local log = require("common.log")
 local dispatch = require("common.dispatch")
@@ -51,6 +61,12 @@ local mod = {
 	poller = require("syncbox.poller"),
 	discovery = require("syncbox.discovery"),
 	link = require("syncbox.link"),
+	-- Stage 3 (S3 §3, §4).
+	queue = require("syncbox.queue"),
+	av = require("syncbox.av"),
+	room = require("syncbox.room"),
+	sources = require("syncbox.sources"),
+	follow = require("syncbox.follow"),
 }
 
 -- Dev builds only (#547, docs/fakebox-design.md §7): syncbox/devhooks.lua
@@ -70,8 +86,9 @@ local K = {
 	PROXY_AV = 5001,
 	UI_BUTTONS = { [5002] = "Hue Sync", [5003] = "Sync Brighter", [5004] = "Sync Dimmer", [5005] = "Sync Intensity" },
 	BRIDGE_BINDING = device.BRIDGE_BINDING,
-	-- S2 §1: what a proxy command gets until routing comes (stage 3).
-	NOT_YET = "Not done: routing through the box comes in a later 2.0 beta",
+	-- What a UI Button press gets until the buttons come (stage 4; S3 §1
+	-- routes the AV switch only).
+	NOT_YET = "Not done: the Hue Sync buttons come in a later 2.0 beta",
 	-- S2 §4 step 2: the countdown in Status while the button window is open.
 	TICK_MS = 10000,
 	WINDOW_S = mod.pairing.WINDOW_S,
@@ -114,18 +131,43 @@ local K = {
 		"Show the box's raw state in the Lua output" },
 	-- The time (ms) the box went offline, kept across a restart.
 	OFFLINE_KEY = "syncbox_offline_since",
+	-- Stage 3 ------------------------------------------------------------------
+	-- The last wiring a read showed, kept across a restart: the right rows
+	-- show at once, and only a change from a known wiring is W22's.
+	WIRING_KEY = "syncbox_wiring",
+	-- The settings rows (driver.xml; contracts C1.4) and their LIST items,
+	-- the default first: a value Composer did not offer reads as the default.
+	SYNC_MODE_ITEMS = { "Automatic", "Video", "Game", "Music", "Do not sync" },
+	ROOM_OFF_ITEMS = { "Power save", "Stop syncing and keep the picture" },
+	LEAVES_ITEMS = { "Stop syncing and keep the picture", "Power save" },
+	ROOM_OFF = "At Room Off",
+	LEAVES = "When The Source Leaves The Box",
+	FOLLOW_ROOM = "Follow Room",
+	SOURCE_MODES = "Source Sync Modes",
+	INPUTS = 4,
+	WIRING_NAMES = { in_line = true, behind_receiver = true, second_output = true },
+	-- W20: the rooms' paths are read this long after a SET_INPUT, once
+	-- Director has set them [assumed: P9 measures the order].
+	PATH_OFFER_MS = 2000,
 }
 
--- AV switch commands that would act (C4), and the UI Buttons' one command
--- [verified: PP 8_audio_video_switch_proxy_commands/_27-OFF.md, _28-ON.md,
--- _46-SETINPUT.md, _5-DISCONNECTOUTPUT.md, _48-SETOUTPUTINPUT.md,
--- _34-PULSEINPUT.md; UIB 107_ui_button_proxy_commands/_1-SELECT.md]: each is
--- answered with K.NOT_YET. The AV switch's other commands (C4: "nothing
--- beyond noting it", "ignored") get only the debug line every command gets.
-local ACTING = { ON = true, OFF = true, SET_INPUT = true, DISCONNECT_OUTPUT = true, SET_OUTPUT_INPUT = true,
-	PULSE_INPUT = true }
-local NOTED = { CONNECT_OUTPUT = true, GET_AUDIO_INPUTS = true, SET_ROOM_BINDING_NAME = true,
-	IS_AV_OUTPUT_TO_INPUT_VALID = true }
+-- "HDMI 1 Sync Mode" ... "HDMI 4 Sync Mode".
+function K.input_mode(n)
+	return string.format("HDMI %d Sync Mode", n)
+end
+
+-- The AV switch's commands syncbox/av.lua takes (C4) [verified: PP
+-- 8_audio_video_switch_proxy_commands/_27-OFF.md, _28-ON.md, _46-SETINPUT.md,
+-- _5-DISCONNECTOUTPUT.md, _3-CONNECTOUTPUT.md, _48-SETOUTPUTINPUT.md,
+-- _34-PULSEINPUT.md, _8-GETAUDIOINPUTS.md; PP 4_amplifier_proxy_commands/
+-- _2-BINDING_CHANGE_ACTION.md; SET_ROOM_BINDING_NAME and
+-- IS_AV_OUTPUT_TO_INPUT_VALID from Snap One's avswitch template,
+-- docs/syncbox-control4-research.md §1.3]. Volume, tone and key commands
+-- have no handler (C4: ignored; the capabilities say none): the debug line
+-- every command gets is all. The UI Buttons' SELECT [verified: UIB
+-- 107_ui_button_proxy_commands/_1-SELECT.md] is answered with K.NOT_YET.
+local AV_COMMANDS = { "ON", "OFF", "SET_INPUT", "DISCONNECT_OUTPUT", "CONNECT_OUTPUT", "SET_OUTPUT_INPUT",
+	"PULSE_INPUT", "BINDING_CHANGE_ACTION", "GET_AUDIO_INPUTS", "SET_ROOM_BINDING_NAME", "IS_AV_OUTPUT_TO_INPUT_VALID" }
 
 -- State ---------------------------------------------------------------------------
 
@@ -146,13 +188,28 @@ local st = {
 	found = {},          -- the last search's boxes { id, name, model, address }
 	bridge = nil,        -- device id of the bound Hue Bridge driver, or nil
 	link_match = nil,    -- the bridge's CONFIGURE: is the box linked to that bridge
-	av_bound = {},       -- BINDING_CHANGE_ACTION: AV binding id -> bound
 	timers = {},         -- name -> C4 timer (arm / disarm)
 	refused_step = 0,    -- EC B5: the asks since the refusal
+	-- Stage 3
+	wiring = nil,        -- the wiring that is live: "in_line" | "behind_receiver" | "second_output"
+	followed = nil,      -- the room id syncbox/room.lua follows, or nil
+	follow = nil,        -- room.lua's choice resolved: { room_id, name, how, status, trouble, offer }
+	follow_said = nil,   -- the choice's trouble Last Action said last (W4, W24: once)
+	follow_sent = nil,   -- Follow Room's list and value as last sent
+	room_trouble = nil,  -- room.lua's on_trouble words (W16), until its next baseline
+	path_offered = nil,  -- W20: the room last offered in Last Action
+	source_offers = {},  -- W21: sources.lua's offers, for the Source list
+	offers_said = {},    -- W21: "<from>><to>" said in Last Action
 }
+
+-- The settings rows as Composer last set them (dispatch.properties below).
+local cfg = {}
 
 -- The module instances (OnDriverLateInit).
 local m = {}
+
+-- Stage 3's routing, the wiring and Follow Room (below, after the rows).
+local route, fr, vis = {}, {}, {}
 
 -- The plumbing (common/device.lua) ---------------------------------------------------
 
@@ -326,6 +383,8 @@ function wrap.assert_rows()
 	for i = 2, K.WRAP_ROWS do
 		pcall(C4.SetPropertyAttribs, C4, wrap.name(i), wrap.shown[i] and 0 or 1)
 	end
+	-- The wiring's settings rows ride on the same re-assertion (stage 3).
+	vis.apply()
 end
 
 function wrap.assert_soon()
@@ -435,13 +494,22 @@ local function status_text()
 		return "Waiting for the sync box"
 	end
 	local d = m.state.describe(st.model)
-	return d.refusal or d.sync
+	if d.refusal then
+		return d.refusal
+	end
+	-- Behind a receiver and on a second output, the room it follows (W1,
+	-- W2, W4, W16); in line nothing more.
+	local note = fr.note()
+	return note and (d.sync .. "; " .. note) or d.sync
 end
 
 local function refresh_status()
 	row("Status", status_text())
 end
 
+-- Online is never empty while paired (#428, as the bridge's): "Not reached
+-- since <time>" from the start of the wait until the first answer, then
+-- "Online", and "Offline since <time>" once the 5-minute rule fired.
 local function refresh_online()
 	if st.offline_since then
 		row("Online", "Offline since " .. clock(st.offline_since))
@@ -449,11 +517,49 @@ local function refresh_online()
 		row("Online", "Online")
 	elseif not st.paired then
 		row("Online", "")
+	else
+		row("Online", "Not reached since " .. clock(st.away_since or st.waiting_since or now_ms()))
 	end
 end
 
--- The rows of the paired box: from the last good read, else from the
--- identity check (name, model, firmware), else empty.
+-- The box rows of the last good read, persisted with the box id they belong
+-- to (contracts C1.9: at start the values come from persisted ones), so a
+-- start while the box does not answer shows them, and Status says it waits.
+-- Written only when a text changed; nothing secret is among them.
+local saved = { key = "syncbox_rows", sig = nil, rows = nil }
+
+function saved.load()
+	local ok, v = pcall(C4.PersistGetValue, C4, saved.key)
+	if not (ok and type(v) == "table" and type(v.rows) == "table" and v.box_id == st.box_id) then
+		return nil
+	end
+	local out = {}
+	for _, name in ipairs(K.BOX_ROWS) do
+		out[name] = type(v.rows[name]) == "string" and https.peer_text(v.rows[name]) or nil
+	end
+	return out
+end
+
+function saved.store(texts)
+	local parts = { tostring(st.box_id) }
+	for _, name in ipairs(K.BOX_ROWS) do
+		parts[#parts + 1] = texts[name] or ""
+	end
+	local sig = table.concat(parts, "\n")
+	if sig ~= saved.sig then
+		saved.sig = sig
+		C4:PersistSetValue(saved.key, { box_id = st.box_id, rows = texts })
+	end
+end
+
+function saved.forget()
+	saved.sig, saved.rows = nil, nil
+	C4:PersistDeleteValue(saved.key)
+end
+
+-- The rows of the paired box: from the last good read, else from the rows
+-- persisted at the last good read before the start (with the identity
+-- check's name, model and firmware over them when it passed), else empty.
 local function refresh_box_rows()
 	if not st.paired then
 		for _, name in ipairs(K.BOX_ROWS) do
@@ -464,21 +570,36 @@ local function refresh_box_rows()
 	end
 	local source = st.model or st.device or {}
 	local d = m.state.describe(source)
-	row("Sync Box", source.name and https.peer_text(source.name) or "")
-	row("Model", model_code(source) and d.model or "")
-	row("Firmware", (source.firmware or source.api_level) and d.firmware or "")
-	row("Box ID", st.box_id)
-	row("Box Address", st.address)
+	local texts = {}
 	if st.model then
-		row("Wiring", d.wiring)
-		row("Sync", d.sync)
-		row("Inputs", d.inputs)
 		local link_text = d.bridge_link
 		if st.link_match == false then
 			link_text = link_text .. " (not the Hue Bridge bound in Control4)"
 		end
-		row("Bridge Link", link_text)
-		row("Input Switching", d.input_switching)
+		texts = { Wiring = d.wiring, Sync = d.sync, Inputs = d.inputs, ["Bridge Link"] = link_text,
+			["Input Switching"] = d.input_switching }
+	else
+		for name, value in pairs(saved.rows or {}) do
+			texts[name] = value
+		end
+	end
+	if source.name then
+		texts["Sync Box"] = https.peer_text(source.name)
+	end
+	if model_code(source) then
+		texts["Model"] = d.model
+	end
+	if source.firmware or source.api_level then
+		texts["Firmware"] = d.firmware
+	end
+	texts["Box ID"] = st.box_id
+	for _, name in ipairs(K.BOX_ROWS) do
+		row(name, texts[name] or "")
+	end
+	row("Box Address", st.address)
+	if st.model then
+		saved.rows = texts
+		saved.store(texts)
 	end
 end
 
@@ -486,6 +607,473 @@ local function refresh()
 	refresh_box_rows()
 	refresh_online()
 	refresh_status()
+end
+
+-- Stage 3's modules are called through this: a method the module has, its
+-- result; else nil (a module built without one, or not built yet).
+local function call(module, method, ...)
+	if module and type(module[method]) == "function" then
+		return module[method](module, ...)
+	end
+	return nil
+end
+
+-- The settings rows (stage 3) ------------------------------------------------------------
+-- The LIST rows av.lua and follow.lua read by name (S3 §3; contracts C1.4):
+-- the value Composer set, else the row's default (a value no item matches,
+-- or none yet). Composer calls OnPropertyChanged on a Set [verified: API
+-- 24_properties/_3-OnPropertyChanged.md]; late init replays every row.
+
+local LISTS = { [K.ROOM_OFF] = K.ROOM_OFF_ITEMS, [K.LEAVES] = K.LEAVES_ITEMS }
+for n = 1, K.INPUTS do
+	LISTS[K.input_mode(n)] = K.SYNC_MODE_ITEMS
+end
+
+function route.setting(name)
+	local items, value = LISTS[name], cfg[name]
+	if not items then
+		return value
+	end
+	for _, item in ipairs(items) do
+		if item == value then
+			return value
+		end
+	end
+	return items[1]
+end
+
+for name in pairs(LISTS) do
+	dispatch.properties[(name:gsub("%s+", "_"))] = function(value)
+		local before = route.setting(name)
+		cfg[name] = text(value)
+		if st.late and route.setting(name) ~= before then
+			log.info("%s: %s", name, route.setting(name))
+		end
+	end
+end
+
+-- Which rows the wiring shows (S3 §5; W §7.2) ------------------------------------------
+-- In line the HDMI n Sync Mode rows (as many as the box has inputs: one on
+-- an HSB3, contracts C1.4); behind a receiver and on a second output Follow
+-- Room and Source Sync Modes. At Room Off and When The Source Leaves The Box
+-- apply in every wiring and are never hidden. Hidden with
+-- C4:SetPropertyAttribs(name, 1), shown with 0 [verified: API
+-- 24_properties/_4-SetPropertyAttribs.md: not in OnDriverInit], at once and
+-- again with the Last Action rows' re-assertion (wrap.assert_soon), since
+-- Composer dropped a visibility change sent in a burst of texts.
+
+vis.MANAGED = { K.input_mode(1), K.input_mode(2), K.input_mode(3), K.input_mode(4), K.FOLLOW_ROOM, K.SOURCE_MODES }
+vis.shown = nil -- name -> true for the shown ones, as last applied
+
+function vis.wanted()
+	local wiring, shown = route.wiring(), {}
+	if wiring == "in_line" then
+		local inputs = st.model and type(st.model.inputs) == "table" and #st.model.inputs or 0
+		for n = 1, (inputs > 0 and math.min(inputs, K.INPUTS) or K.INPUTS) do
+			shown[K.input_mode(n)] = true
+		end
+	else
+		shown[K.FOLLOW_ROOM], shown[K.SOURCE_MODES] = true, true
+	end
+	return shown
+end
+
+function vis.apply()
+	if not (vis.shown and C4.SetPropertyAttribs) then
+		return
+	end
+	for _, name in ipairs(vis.MANAGED) do
+		pcall(C4.SetPropertyAttribs, C4, name, vis.shown[name] and 0 or 1)
+	end
+end
+
+-- Applied when the set changed (or `force`, at late init).
+function vis.update(force)
+	local want = vis.wanted()
+	local same = vis.shown ~= nil
+	for _, name in ipairs(vis.MANAGED) do
+		same = same and (vis.shown[name] == want[name])
+	end
+	if same and not force then
+		return
+	end
+	vis.shown = want
+	vis.apply()
+	wrap.assert_soon()
+end
+
+-- Follow Room (W §5, §7.2; S3 §2) -------------------------------------------------------
+-- syncbox/room.lua's choice keeps the pick (a room id with the name it had,
+-- never a name alone; this device's room by default, #536) and resolves it
+-- per the lifecycle cases W1 to W7 and W24; its watcher follows the room.
+-- This part shows the drop-down [verified: FUND 15_composerpro_interface_into_the_sdk/
+-- _2-DYNAMICLISTPROPERTIES.md: the items are not persisted, the driver
+-- rebuilds them, and a pick arrives in OnPropertyChanged; API
+-- 24_properties/_6-UpdatePropertyList.md], follows the room the choice names
+-- while the wiring needs one (behind a receiver and on a second output, S3
+-- §1) and says which in Status.
+
+-- This device's room [verified: API 22_miscellaneous/_33-RoomGetId.md, not
+-- in OnDriverInit].
+function fr.own_room()
+	local ok, id = pcall(C4.RoomGetId, C4)
+	return ok and num.int(id, 1) or nil
+end
+
+-- The drop-down and its value (as the bridge's rows: the list, then the
+-- row, since the list's value alone did not move the row after a pick).
+-- Sent only when it changed.
+function fr.list()
+	if not (st.late and m.choice) then
+		return
+	end
+	local ok, items, value = pcall(m.choice.items, m.choice)
+	if not ok or type(items) ~= "table" then
+		return log.warn("Follow Room: the list could not be built: %s", tostring(items))
+	end
+	local joined = table.concat(items, ",")
+	value = tostring(value or "")
+	if joined .. "\n" .. value == st.follow_sent then
+		return
+	end
+	st.follow_sent = joined .. "\n" .. value
+	pcall(C4.UpdatePropertyList, C4, K.FOLLOW_ROOM, joined, value)
+	rows[K.FOLLOW_ROOM] = value
+	prop(K.FOLLOW_ROOM, value)
+end
+
+-- Follow the room the choice names now when the wiring needs one and a box
+-- is paired; stop following otherwise. What the choice says (moved, gone,
+-- renamed at start) goes to Status, and once to Last Action. A room that
+-- cannot be followed (W16) is room.lua's to retry, every hour. `catch_up`:
+-- the room's first state is applied once (a pick, W22), not a baseline.
+function fr.apply(catch_up)
+	if not (m.room and m.choice) then
+		return
+	end
+	if not (st.paired and route.wiring() ~= "in_line") then
+		st.follow, st.room_trouble = nil, nil
+		if st.followed then
+			st.followed = nil
+			call(m.follow, "set_room", nil)
+			m.room:stop()
+		end
+		return
+	end
+	local ok, r = pcall(m.choice.resolve, m.choice)
+	if not ok or type(r) ~= "table" then
+		return log.warn("Follow Room: the choice could not be resolved: %s", tostring(r))
+	end
+	st.follow = r
+	if r.last_action then
+		last_action(r.last_action)
+	end
+	if (r.how == "gone" or r.how == "mismatch") and r.trouble ~= st.follow_said then
+		st.follow_said = r.trouble
+		last_action(r.trouble .. (r.offer and ("; " .. r.offer.text) or ""))
+	end
+	local wanted = r.room_id
+	if wanted == st.followed and not catch_up then
+		return
+	end
+	st.followed, st.room_trouble = wanted, nil
+	-- follow.lua's next baseline is a baseline, or (a dealer's pick, a change
+	-- to the second output: W22) applied once.
+	call(m.follow, "set_room", wanted, r.name, catch_up and { catch_up = true } or nil)
+	if not wanted then
+		m.room:stop()
+		return
+	end
+	local followed, why = m.room:follow(wanted, r.name)
+	log.info("following room %s (%s)%s", tostring(wanted), tostring(r.name),
+		followed and "" or (": " .. tostring(why)))
+end
+
+-- room.lua's on_trouble (W16): Status says so until the room answers.
+function fr.trouble(words)
+	st.room_trouble = type(words) == "string" and words or "the followed room does not answer"
+	refresh_status()
+end
+
+-- What Status adds behind a receiver and on a second output (W1, W2, W4,
+-- W6, W16, W24); nothing in line.
+function fr.note()
+	if route.wiring() == "in_line" or not st.paired then
+		return nil
+	end
+	local r = st.follow or {}
+	local words = st.room_trouble or r.trouble
+	if not words and st.followed then
+		local ok, said = pcall(call, m.follow, "status")
+		words = ok and type(said) == "string" and said or nil
+	end
+	words = words or r.status
+	if not words then
+		return nil
+	end
+	if r.how == "none" and not st.room_trouble and route.wiring() ~= "second_output" then
+		words = words .. ": every source syncs as video"
+	elseif r.how == "none" and not words:find("own settings", 1, true) then
+		words = words .. ": the box runs on its own settings"
+	end
+	return words:sub(1, 1):lower() .. words:sub(2)
+end
+
+-- A pick in the drop-down (OnPropertyChanged). Late init's replay of the
+-- row changes nothing: the stored choice holds.
+dispatch.properties["Follow_Room"] = function(value)
+	if not (st.late and m.choice) then
+		return
+	end
+	value = text(value) or ""
+	if value == rows[K.FOLLOW_ROOM] then
+		return
+	end
+	local ok, why = m.choice:choose(value)
+	st.follow_sent, st.follow_said = nil, nil
+	fr.list()
+	if not ok then
+		return last_action(string.format("Follow Room: %s is %s; pick again", https.peer_text(value, 64),
+			tostring(why or "not in the list any more")))
+	end
+	fr.apply(true)
+	refresh_status()
+	local r = st.follow or {}
+	last_action(r.status or ("Follow Room: " .. value .. " (used behind a receiver and on a receiver's second "
+		.. "output)"))
+end
+
+-- On every read behind a receiver and on a second output: this device moved
+-- (W6), the followed room deleted (W4) or renamed (W3); the list follows.
+-- In line the row is hidden and no room is followed: nothing to look at.
+function fr.check()
+	if route.wiring() == "in_line" then
+		return
+	end
+	fr.apply()
+	fr.list()
+end
+
+-- The wiring and the routes (S3 §1, §5; C4; W §7.2) -------------------------------------
+
+-- The wiring that is live: the last read's, else the persisted one, else
+-- in line (the box's default, and the rows a new device shows).
+function route.wiring()
+	return st.wiring or "in_line"
+end
+
+-- The box's model now (av.lua's state_now).
+function route.model()
+	return st.model
+end
+
+-- The AV switch's notifies, logged at debug (common/device.lua's notify).
+function route.notify(command, params)
+	dev.notify(command, params)
+end
+
+-- The queue's outcome of a write queued without a callback of its own
+-- (queue.lua's on_done(tag, ok, model, why, detail)): follow.lua's tags are
+-- its own (follow.owns); av.lua gives every write its own callback. A write
+-- a later one replaced, or one a wiring change or Forget Pairing dropped,
+-- did not fail: follow.lua hears only what landed or failed, so neither is
+-- applied again at the next contact (W23) nor read as "no sound" (W18).
+local ENDED_QUIETLY = { superseded = true, cancelled = true }
+
+function route.on_done(tag, ok, model, why)
+	if st.destroyed then
+		return
+	end
+	if ok ~= true and ENDED_QUIETLY[why] then
+		log.debug("a write ended: %s", tostring(why))
+	elseif mod.follow.owns(tag) then
+		call(m.follow, "done", tag, ok, model, why)
+	else
+		log.debug("a write ended (%s): %s", tostring(ok), tostring(why))
+	end
+	refresh_status()
+end
+
+-- Follow Room's wiring: on a second output it drives the box; behind a
+-- receiver av.lua takes the room's changes (S3 §3: the mode from the
+-- room's source, a Listen selection), so follow.lua only keeps the room's
+-- state there, as in line; nil before any wiring is known.
+function route.follow_wiring()
+	if st.wiring == "second_output" then
+		return "second_output"
+	end
+	return st.wiring and "in_line" or nil
+end
+
+-- Every good read: a new wiring switches the path first, then av.lua hands
+-- the read to the queue (q:observe, once per read), whose writes the read
+-- shows end, and the proxy hears what they confirm.
+function route.on_read(model)
+	if model.wiring and model.wiring ~= st.wiring then
+		route.set_wiring(model.wiring)
+	end
+	call(m.av, "confirm", model)
+	fr.check()
+	call(m.follow, "wiring_changed", st.wiring)
+	vis.update()
+end
+
+-- W22: the box's wiring changed (soloMode or arcBypassMode, set in the Hue
+-- Sync app). The writes the old path queued and not sent are dropped
+-- (their callbacks hear "cancelled" and say nothing), the room is followed
+-- or no more, and on a change to the second output follow.lua applies the
+-- room's state once, said in Last Action: at once when the room was
+-- followed already (f:wiring_changed), else with the new room's first
+-- state. A first read after an install, with no wiring known before, is no
+-- change.
+function route.set_wiring(wiring)
+	local from = st.wiring
+	st.wiring = wiring
+	C4:PersistSetValue(K.WIRING_KEY, wiring)
+	if from then
+		call(m.queue, "clear")
+		call(m.av, "reset")
+		local words = { in_line = "Control4 routes through the box and each input sets its sync mode",
+			behind_receiver = "Control4 routes through the box and the followed room's source sets the sync mode",
+			second_output = "the followed room's power and source drive the box" }
+		last_action(string.format("The box's wiring changed to %s: %s", m.state.describe({ wiring = wiring }).wiring,
+			words[wiring] or "nothing routes through it"))
+	end
+	fr.apply(from ~= nil and wiring == "second_output" and not st.followed)
+	vis.update()
+	refresh_status()
+end
+
+-- The followed room (syncbox/room.lua): its first state after following
+-- starts is a baseline, never a command (W15; C1.9); later changes act. On
+-- a second output follow.lua decides; behind a receiver av.lua takes a new
+-- source for the box on the path; in line nothing (I15, W20 later).
+function route.room_baseline(state)
+	if st.destroyed then
+		return
+	end
+	st.room_trouble = nil -- the room answers (W16 over)
+	route.saw(state)
+	call(m.follow, "baseline", state)
+	route.sources_row()
+	refresh_status()
+end
+
+function route.room_change(state, prev)
+	if st.destroyed then
+		return
+	end
+	route.saw(state)
+	call(m.follow, "changed", state, prev)
+	if route.wiring() == "behind_receiver" then
+		call(m.av, "room_changed", state, prev)
+	end
+	route.sources_row()
+	refresh_status()
+end
+
+-- The AV switch's proxy (5001): av.lua decides, by the wiring. A binding
+-- change may change what is upstream of the box (follow.lua caches it).
+function route.received(command, params)
+	if not m.av then
+		return
+	end
+	m.av:received(command, params or {})
+	if command == "BINDING_CHANGE_ACTION" then
+		call(m.follow, "refresh")
+		route.sources_row()
+	elseif (command == "SET_INPUT" or command == "SET_OUTPUT_INPUT") and route.wiring() == "behind_receiver" then
+		-- W20: once Director has set the rooms' paths.
+		arm("path_offer", K.PATH_OFFER_MS, route.path_offer)
+	end
+	refresh_status()
+end
+
+-- W20 (offered, never set by itself): behind a receiver, Director routes
+-- through the box but the followed room's picture path does not name it,
+-- while exactly one other room's does (a box placed in a rack room). That
+-- room is offered in Last Action, once per room; picking it in Follow Room
+-- is the click. In line Follow Room is not used in stage 3 (S3 §5: the row
+-- is hidden there), so nothing is offered. room.lua reads each room's
+-- CURRENT_VIDEO_PATH (1008) with C4:GetDeviceVariable [verified: API
+-- 36_variable/_5-GetDeviceVariable.md]; that the path names the box's own
+-- ids is [assumed: probe P9].
+function route.path_offer()
+	if route.wiring() ~= "behind_receiver" or not st.paired then
+		return
+	end
+	local ids = { [C4:GetDeviceID()] = true }
+	for _, id in ipairs({ route.proxy_id() }) do
+		ids[id] = true
+	end
+	local ok, offer = pcall(mod.room.path_offer, {
+		box_ids = ids,
+		rooms = C4:GetDevicesByC4iName("roomdevice.c4i"),
+		followed = st.followed,
+	})
+	if not ok then
+		return log.warn("the rooms' paths could not be read: %s", tostring(offer))
+	end
+	if type(offer) == "table" and offer.text and offer.id ~= st.path_offered then
+		st.path_offered = offer.id
+		last_action(offer.text)
+	end
+end
+
+-- Forget Pairing: nothing waits for the forgotten box, no room is followed,
+-- and the next box's first read is no wiring change (W22).
+function route.forget()
+	call(m.queue, "clear")
+	call(m.av, "reset")
+	st.wiring = nil
+	C4:PersistDeleteValue(K.WIRING_KEY)
+	fr.apply()
+	vis.update()
+end
+
+-- The sources (S3 §4; W §7.2) ---------------------------------------------------------
+-- The AV switch proxy's id: the consumer on binding 5001 (common/device.lua).
+function route.proxy_id()
+	local ok, id = pcall(dev.proxy_id)
+	return ok and id or nil
+end
+
+-- Source Sync Modes (read-only): each source's mode, as sources.lua words
+-- it, for the sources upstream of the box, those seen in the followed room
+-- and those with a mode of their own.
+function route.sources_row()
+	if not m.sources then
+		return
+	end
+	local ok, value = pcall(m.sources.summary, m.sources, route.proxy_id())
+	if not ok then
+		return log.warn("Source Sync Modes could not be built: %s", tostring(value))
+	end
+	row(K.SOURCE_MODES, type(value) == "string" and value or "")
+	route.source_offers()
+end
+
+-- W21 (offered): a source with a mode of its own was deleted or replaced in
+-- Composer, and exactly one present source has its name. Last Action says
+-- so once per pair; the Source list of Set Source Sync Mode carries the
+-- offer, so one click moves the mode. Never applied by itself.
+function route.source_offers()
+	local ok, offers = pcall(m.sources.offers, m.sources, route.proxy_id())
+	st.source_offers = ok and type(offers) == "table" and offers or {}
+	for _, offer in ipairs(st.source_offers) do
+		local key = tostring(offer.from_id) .. ">" .. tostring(offer.to_id)
+		if not st.offers_said[key] then
+			st.offers_said[key] = true
+			last_action(tostring(offer.text))
+		end
+	end
+end
+
+-- A source the followed room selected is one the action offers (W §7.2).
+function route.saw(state)
+	if type(state) == "table" and (state.kind == "watch" or state.kind == "listen") then
+		call(m.sources, "saw", state.selected)
+	end
 end
 
 -- The bridge (C5, through syncbox/link.lua) ----------------------------------------------
@@ -696,6 +1284,11 @@ function poll.on_state(model, changes)
 		log.debug("state: %s changed", table.concat(changes, ", "))
 	end
 	hello(false)
+	-- Stage 3: the queue's writes, the proxy's confirmations, the wiring.
+	local ok, err = pcall(route.on_read, model)
+	if not ok then
+		log.error("routing after a read failed: %s", tostring(err))
+	end
 	refresh()
 end
 
@@ -715,6 +1308,12 @@ function poll.on_online()
 	st.away_since = nil
 	set_online()
 	refresh()
+	-- W23: what the followed room asked for while the box was away is
+	-- applied once now if the box differs, never the missed sequence.
+	local ok, err = pcall(call, m.follow, "contact")
+	if not ok then
+		log.error("Follow Room after the outage failed: %s", tostring(err))
+	end
 end
 
 -- EC B5: the box refuses the token (401 or 403). The poller stopped; the
@@ -929,6 +1528,8 @@ function actions.forget(params)
 	st.paired, st.box_id, st.model, st.device = false, nil, nil, nil
 	st.trouble, st.away_since, st.online = nil, nil, nil
 	clear_offline()
+	saved.forget()
+	route.forget()
 	last_action(string.format("Forgetting the pairing with %s at %s", label, tostring(address)))
 	m.pairing:forget(function(result)
 		result = type(result) == "table" and result or {}
@@ -1062,10 +1663,55 @@ function actions.diagnostics(params)
 	run()
 end
 
+-- Set Source Sync Mode (S3 §5; W §7.2): one source's mode behind a receiver
+-- and on a second output, kept by syncbox/sources.lua by device id with the
+-- name it had. In line it is kept as well and says where it applies.
+function actions.source_mode(params)
+	-- W21's offer, picked from the Source list: the mode moves to the device
+	-- that replaced the one it was set for (Mode is not used).
+	local from, to = tostring(params.Source or ""):match("^offer:(%d+):(%d+)$")
+	if from then
+		local ok, moved = pcall(m.sources.accept, m.sources, from, to)
+		st.offers_said = {}
+		route.sources_row()
+		if not (ok and moved) then
+			return last_action("Set Source Sync Mode: that offer is gone; open the Source list again")
+		end
+		local d = call(m.sources, "describe", to)
+		local name = type(d) == "table" and d.name or ("device " .. to)
+		local mode = mod.sources.LABEL[call(m.sources, "setting", to) or ""] or "Automatic"
+		return last_action(string.format("Source Sync Mode of %s: %s (from device %s, which it replaces)",
+			https.peer_text(name, 64), mode, from))
+	end
+	local id = type(params.Source) == "string" and num.int(params.Source:match("^source:(%d+)$"), 1) or nil
+	local mode = text(params.Mode)
+	local known = false
+	for _, item in ipairs(K.SYNC_MODE_ITEMS) do
+		known = known or item == mode
+	end
+	if not id then
+		return last_action("Set Source Sync Mode: pick a source under Source (the sources connected to the box and "
+			.. "those seen in the followed room)")
+	elseif not known then
+		return last_action("Set Source Sync Mode: pick a mode under Mode (" .. table.concat(K.SYNC_MODE_ITEMS, ", ")
+			.. ")")
+	end
+	local ok, done, words = pcall(m.sources.set_mode, m.sources, id, mode)
+	if not (ok and done) then
+		log.warn("Set Source Sync Mode for %d: %s", id, tostring(ok and words or done))
+		return last_action(string.format("Set Source Sync Mode: not set (%s)", https.peer_text(tostring(ok and words
+			or "an error, see the Lua output"), 80)))
+	end
+	route.sources_row()
+	local where = route.wiring() == "in_line"
+		and " (used behind a receiver and on a second output; in line the HDMI n Sync Mode rows decide)" or ""
+	last_action(tostring(words) .. where)
+end
+
 -- Composer actions (LUA_ACTION): every click ends in Last Action. Before
 -- late init the modules do not exist yet.
 for command, run in pairs({ Pair_Sync_Box = actions.pair, Forget_Pairing = actions.forget,
-	Diagnostics = actions.diagnostics }) do
+	Diagnostics = actions.diagnostics, Set_Source_Sync_Mode = actions.source_mode }) do
 	dispatch.commands[command] = function(params)
 		if not st.late then
 			return last_action("Not done: the driver is still starting; try again in a moment")
@@ -1098,6 +1744,34 @@ function SyncBoxList()
 	return list
 end
 
+-- The Source picker of Set Source Sync Mode [verified: FUND
+-- 12.3_custom_select_implementation/_2-CUSTOMSELECTLIST.md]: the sources
+-- upstream of the box and those seen in the followed room, each with its
+-- mode now; "source:<device id>".
+function SourceList()
+	if not st.late then
+		return { { text = "(not ready yet; open the list again)", value = "" } }
+	end
+	local list = {}
+	local ok, err = pcall(function()
+		for _, offer in ipairs(m.sources:offers(route.proxy_id())) do
+			list[#list + 1] = { text = https.peer_text("Offer: " .. tostring(offer.text), 160),
+				value = string.format("offer:%d:%d", offer.from_id, offer.to_id) }
+		end
+		for _, item in ipairs(m.sources:candidates(route.proxy_id())) do
+			list[#list + 1] = { text = https.peer_text(m.sources:entry_text(item), 96), value = "source:" .. item.id }
+		end
+	end)
+	if not ok then
+		log.warn("the Source list could not be built: %s", tostring(err))
+	end
+	if #list == 0 then
+		list[1] = { text = "(no source found: connect the receiver to HDMI 1, or pick the room in Follow Room)",
+			value = "" }
+	end
+	return list
+end
+
 -- The proxies (ReceivedFromProxy) ------------------------------------------------------
 -- #483 D-7: the AV switch's commands are taken on 5001 only, SELECT on the
 -- UI Buttons' 5002 to 5005 only [verified: API 25_proxy/_5-ReceivedFromProxy:
@@ -1109,37 +1783,25 @@ dispatch.proxy_binding_ok = function(binding, command)
 	return binding == K.PROXY_AV
 end
 
--- S2 §1: nothing to the box, no notify to the proxy, Last Action says why.
-local function not_yet(binding, command)
-	log.debug("%s on %s: not done in this beta", command, K.UI_BUTTONS[tonumber(binding)] or "the AV switch")
+-- A UI Button press: nothing to the box, no notify, Last Action says why
+-- (the buttons come with stage 4).
+dispatch.proxy["SELECT"] = function(binding)
+	log.debug("SELECT on %s: not done in this beta", K.UI_BUTTONS[tonumber(binding)] or tostring(binding))
 	last_action(K.NOT_YET)
 end
 
-for command in pairs(ACTING) do
-	dispatch.proxy[command] = function(binding)
-		not_yet(binding, command)
+-- The AV switch's commands go to syncbox/av.lua (C4). One that comes before
+-- late init (Director starts the proxy first: GET_AUDIO_INPUTS,
+-- BINDING_CHANGE_ACTION) waits for it, in order, as the bridge's messages
+-- do (common/device.lua), since nothing can be sent to the proxy or the box
+-- before then [verified: API 22_miscellaneous/_25.2-SafeUsageTable.md].
+for _, command in ipairs(AV_COMMANDS) do
+	local handler = after_late_init(command, function(params)
+		route.received(command, params)
+	end)
+	dispatch.proxy[command] = function(_, params)
+		handler(params)
 	end
-end
-
-dispatch.proxy["SELECT"] = function(binding)
-	not_yet(binding, "SELECT")
-end
-
-for command in pairs(NOTED) do
-	dispatch.proxy[command] = function()
-	end
-end
-
--- C4: which AV inputs are bound, for the Inputs row of a later stage; the
--- protocol driver gets no OnBindingChanged for AV bindings (research
--- docs/syncbox-control4-research.md §1.3).
-dispatch.proxy["BINDING_CHANGE_ACTION"] = function(_, params)
-	local id = num.int(params.BINDING_ID, 1000, 4999)
-	if not id then
-		return log.debug("BINDING_CHANGE_ACTION without a binding id in range")
-	end
-	local bound = tostring(params.IS_BOUND):lower()
-	st.av_bound[id] = bound == "true" or bound == "1"
 end
 
 -- From the bridge (ExecuteCommand; C5, every one a hint, #483) -------------------------------
@@ -1209,6 +1871,22 @@ function ReceivedFromProxy(idBinding, strCommand, tParams)
 	return dispatch_proxy(idBinding, strCommand, tParams)
 end
 
+-- The followed room's variables [verified: API 36_variable/_9-OnWatchedVariableChanged.md:
+-- (idDevice, idVariable, strValue), for the listeners syncbox/room.lua sets
+-- with C4:RegisterVariableListener, _10-RegisterVariableListener.md].
+-- room.lua checks every value (W §7.4); one for no room it follows is its
+-- to drop. Before late init there is no room module and no listener.
+function OnWatchedVariableChanged(idDevice, idVariable, strValue)
+	if not m.room or st.destroyed then
+		return
+	end
+	local ok, err = pcall(m.room.on_variable, m.room, idDevice, idVariable, strValue)
+	if not ok then
+		log.error("OnWatchedVariableChanged %s/%s failed: %s", https.peer_text(idDevice, 16),
+			https.peer_text(idVariable, 16), tostring(err))
+	end
+end
+
 -- #492 (I-5, I-6): a release build locks Composer's Lua command window and
 -- refuses a dev loop left behind by an earlier dev build (common/device.lua).
 function OnDriverInit()
@@ -1262,7 +1940,123 @@ local function build()
 	m.discovery = mod.discovery.new({ timer = timer, now = now_ms, log = log, identity_for = function(address, cb)
 		return probe:check(address, nil, cb)
 	end })
+	route.build(timer)
 	return creds
+end
+
+-- Stage 3's modules (S3 §3, §4; W §7.4), each given the C4 calls it makes,
+-- so its spec can stand in for them. Every room and source call is one of
+-- the SDK's [verified: API 36_variable/_10-RegisterVariableListener.md,
+-- _11-UnregisterVariableListener.md, _10.5-UnRegisterAllVariableListeners.md
+-- (3.3.0), _5-GetDeviceVariable.md; API 22_miscellaneous/_12-GetDeviceVariables.md,
+-- _9-GetDevices.md (the filter value a string, docs/design.md "Project APIs");
+-- API 32_serial_network_device/_4-GetBoundProviderDevice.md,
+-- _6-GetDeviceDisplayName.md]. PersistData without the encrypted flag
+-- (#547: only an explicit true is passed, and nothing here is secret).
+function route.build(timer)
+	m.queue = mod.queue.new({ client = m.client, poller = m.poller, timer = timer, now = now_ms, log = log,
+		on_done = route.on_done })
+	m.sources = mod.sources.new({
+		get_devices = function(filter) return C4:GetDevices(filter) end,
+		display_name = function(id) return C4:GetDeviceDisplayName(id) end,
+		bound_provider = function(id, binding) return C4:GetBoundProviderDevice(id, binding) end,
+		persist_get = function(name) return C4:PersistGetValue(name) end,
+		persist_set = function(name, value) return C4:PersistSetValue(name, value) end,
+		log = log,
+	})
+	m.room = mod.room.new({
+		register = function(device_id, variable) return C4:RegisterVariableListener(device_id, variable) end,
+		unregister = function(device_id, variable) return C4:UnregisterVariableListener(device_id, variable) end,
+		unregister_all = function() return C4:UnregisterAllVariableListeners() end,
+		get_variable = function(device_id, variable) return C4:GetDeviceVariable(device_id, variable) end,
+		get_variables = function(device_id) return C4:GetDeviceVariables(device_id) end,
+		timer = timer, now = now_ms, log = log,
+		on_baseline = route.room_baseline, on_change = route.room_change, on_trouble = fr.trouble,
+	})
+	-- Follow Room's choice, kept in PersistData (room.lua's FOLLOW_KEY), the
+	-- rooms by id from C4:GetDevicesByC4iName("roomdevice.c4i") [house: OS
+	-- 3.4.2, docs/design.md "Project APIs"].
+	m.choice = mod.room.choice({
+		rooms = function() return C4:GetDevicesByC4iName("roomdevice.c4i") end,
+		own_room = fr.own_room,
+		persist_get = function(name) return C4:PersistGetValue(name) end,
+		persist_set = function(name, value) return C4:PersistSetValue(name, value) end,
+		log = log,
+	})
+	m.av = mod.av.new({ queue = m.queue, state_now = route.model, wiring_now = route.wiring, sources = m.sources,
+		room = m.room, notify = route.notify, last_action = last_action, properties = route.setting, timer = timer,
+		now = now_ms, log = log })
+	m.follow = mod.follow.new({
+		queue = m.queue, sources = m.sources, box_id = route.proxy_id, wiring = route.follow_wiring,
+		model = route.model, log = log,
+		online = function() return st.online ~= false and not st.offline_since end,
+		settings = function()
+			return { at_room_off = route.setting(K.ROOM_OFF), source_leaves = route.setting(K.LEAVES) }
+		end,
+		own_name = function()
+			local ok, name = pcall(C4.GetDeviceDisplayName, C4)
+			return ok and type(name) == "string" and name ~= "" and https.peer_text(name, 64) or paired_label()
+		end,
+		-- The box driver has no Attention row (contracts C1.4): Last Action
+		-- and a warning in the log say it.
+		notify = function(kind, words)
+			if kind == "attention" then
+				log.warn("%s", words)
+			end
+			last_action(words)
+		end,
+	})
+end
+
+-- Late init, once the pairing is known: the wiring the last read showed,
+-- the rows it shows, and the room followed (its first state a baseline:
+-- nothing is sent to the box at start, W15, EC C14).
+function route.start()
+	local ok, wiring = pcall(C4.PersistGetValue, C4, K.WIRING_KEY)
+	st.wiring = ok and K.WIRING_NAMES[wiring] and wiring or nil
+	st.followed, st.follow, st.follow_sent, st.follow_said, st.room_trouble = nil, nil, nil, nil, nil
+	vis.shown = nil
+	fr.list()
+	local started, err = pcall(fr.apply)
+	if not started then
+		log.error("following the room at start failed: %s", tostring(err))
+	end
+	vis.update(true)
+	route.sources_row()
+	route.register_pip()
+end
+
+-- OnPIP, Director's "Refresh Navigator" event, fires when bindings, device
+-- names or media change [verified: API 7_event/_1-RegisteringforSystemEvents.md,
+-- _5.5-RegisterSystemEvent.md: C4:RegisterSystemEvent(C4SystemEvents["OnPIP"], 0);
+-- _4.2-OnSystemEvent.md]. It is the only system event this driver
+-- registers, so every OnSystemEvent is one. A runtime without the table
+-- (the specs) goes without it, as the bridge does.
+function route.register_pip()
+	if type(C4SystemEvents) ~= "table" or type(C4.RegisterSystemEvent) ~= "function" then
+		return log.debug("system events unavailable in this runtime")
+	end
+	local id = C4SystemEvents["OnPIP"]
+	local ok, err = pcall(C4.RegisterSystemEvent, C4, id, 0)
+	if not (id and ok) then
+		log.warn("RegisterSystemEvent OnPIP: %s", tostring(id and err or "no such event"))
+	end
+end
+
+-- The project changed: a room whose variables did not answer is tried again
+-- (W16), what is upstream of the box read again, the rooms and sources
+-- listed again (W3, W21).
+function OnSystemEvent(data)
+	if not st.late or st.destroyed then
+		return
+	end
+	log.debug("OnSystemEvent (OnPIP): %s", https.peer_text(tostring(data), 200))
+	call(m.room, "retry")
+	call(m.follow, "refresh")
+	st.follow_sent = nil
+	fr.check()
+	fr.list()
+	route.sources_row()
 end
 
 -- After a Director restart the binding to the bridge can be invisible at late
@@ -1289,10 +2083,15 @@ function OnDriverLateInit()
 	-- An outage that began before the restart goes on from its own time.
 	st.offline_since = st.paired and stored_offline() or nil
 	st.online = st.offline_since and false or nil
+	-- Until the first answer: Online reads "Not reached since" this start,
+	-- and the box rows show what the last good read before it showed.
+	st.waiting_since = now_ms()
+	saved.rows = st.paired and saved.load() or nil
 	if not st.paired then
 		C4:PersistDeleteValue(K.OFFLINE_KEY)
 	end
 	st.bridge = dev.bound_bridge()
+	route.start()
 	dev.late_init()
 	-- EC C14: nothing is sent to the box at start but the identity check and,
 	-- once it passed, the reads.
@@ -1346,6 +2145,10 @@ function OnDriverDestroyed()
 	end
 	if m.discovery then
 		m.discovery:stop()
+	end
+	-- Stage 3: no write waits, no room is listened to.
+	for _, module in ipairs({ m.queue, m.av, m.follow, m.room }) do
+		pcall(call, module, "stop")
 	end
 	if m.client then
 		m.client:cancel_all()
