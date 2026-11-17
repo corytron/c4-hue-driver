@@ -318,9 +318,9 @@ class TestPieces(unittest.TestCase):
         r = conformance.Redactor()
         r.learn(
             {
-                "device": {"uniqueId": "C42996000000", "ipAddress": "192.168.4.20", "name": "Den Box",
+                "device": {"uniqueId": "AB12CD000000", "ipAddress": "192.168.4.20", "name": "Den Box",
                            "wifi": {"ssid": "HomeNet5"}},
-                "hue": {"bridgeUniqueId": "ecb5fafffe000000", "bridgeIpAddress": "192.168.4.2",
+                "hue": {"bridgeUniqueId": "ab12cdfffe000000", "bridgeIpAddress": "192.168.4.2",
                         "groups": {"11111111-2222-4333-8444-555555555555": {"name": "Den TV"}}},
                 "hdmi": {"input1": {"name": "Shield"}, "output": {"name": "OLED"}},
                 "registrations": {"3": {"appName": "HomeHub", "instanceName": "Kitchen iPad"}},
@@ -328,10 +328,10 @@ class TestPieces(unittest.TestCase):
             address="192.168.4.20",
         )  # fmt: skip
         r.secret("SECRET-TOKEN-VALUE")
-        text = r.text("box C42996000000 at 192.168.4.20 (bridge 192.168.4.2, ecb5fafffe000000), Den Box, "
-                      "Den TV, Shield, SECRET-TOKEN-VALUE, 11111111-2222-4333-8444-555555555555, 10.9.8.7")  # fmt: skip
-        for gone in ("C42996000000", "192.168.4.20", "192.168.4.2", "ecb5fafffe000000", "Den Box", "Den TV",
-                     "Shield", "SECRET-TOKEN-VALUE", "11111111-2222", "10.9.8.7"):  # fmt: skip
+        text = r.text("box AB12CD000000 at 192.168.4.20 (bridge 192.168.4.2, ab12cdfffe000000), Den Box, "
+                      "Den TV, Shield, SECRET-TOKEN-VALUE, 11111111-2222-4333-8444-555555555555, 198.51.100.77")  # fmt: skip
+        for gone in ("AB12CD000000", "192.168.4.20", "192.168.4.2", "ab12cdfffe000000", "Den Box", "Den TV",
+                     "Shield", "SECRET-TOKEN-VALUE", "11111111-2222", "198.51.100.77"):  # fmt: skip
             self.assertNotIn(gone, text)
         for placeholder in ("0A1B2C3D4E5F", "10.0.2.150", "10.0.2.143", "001788fffe123abc", "<redacted>"):
             self.assertIn(placeholder, text)
