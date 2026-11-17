@@ -1,0 +1,2178 @@
+{
+  "version": 1,
+  "about": "Scenarios for both fake sync boxes (#547). Rules and format: docs/syncbox-behaviour.md; contract: docs/fakebox-design.md section 4. Placeholders only.",
+  "scenarios": [
+    {
+      "id": "SC-STATE-1",
+      "title": "the whole state holds the eight resources",
+      "rules": ["SB1"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "GET", "path": "", "expect": {"status": 200, "has": ["device", "execution", "hdmi", "behavior", "hue", "ir", "registrations", "presets"]}}
+      ]
+    },
+    {
+      "id": "SC-STATE-2",
+      "title": "the one-input box has no ir resource",
+      "rules": ["SB1", "SB2"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "", "expect": {"status": 200, "has": ["device", "execution", "hdmi", "behavior", "hue", "registrations", "presets"], "body_absent": ["ir"]}},
+        {"do": "GET", "path": "/ir", "expect": {"status": 404, "code": 10}}
+      ]
+    },
+    {
+      "id": "SC-STATE-3",
+      "title": "a sub-object of a resource answers alone",
+      "rules": ["SB2"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/hdmi/input1", "expect": {"status": 200, "body": {"name": "Apple TV", "status": "linked", "type": "appletv"}}},
+        {"do": "GET", "path": "/behavior/input2", "expect": {"status": 200, "body": {"cecInputSwitch": 1, "linkAutoSync": 0}}},
+        {"do": "GET", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea001", "expect": {"status": 200, "body": {"name": "Living Room TV", "numLights": 5, "active": true}}},
+        {"do": "GET", "path": "/registrations/{t}", "expect": {"status": 200, "body": {"appName": "c4-hue"}}}
+      ]
+    },
+    {
+      "id": "SC-STATE-4",
+      "title": "an input the model lacks is not a path",
+      "rules": ["SB2"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/hdmi/input2", "expect": {"status": 404, "code": 10}},
+        {"do": "GET", "path": "/behavior/input2", "expect": {"status": 404, "code": 10}},
+        {"do": "GET", "path": "/hdmi/input1", "expect": {"status": 200, "body": {"name": "Game Console"}}}
+      ]
+    },
+    {
+      "id": "SC-STATE-5",
+      "title": "a scalar or an unknown name is not a path",
+      "rules": ["SB2"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/execution/mode", "expect": {"status": 404, "code": 10}},
+        {"do": "GET", "path": "/nothing", "expect": {"status": 404, "code": 10}},
+        {"do": "GET", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea999", "expect": {"status": 404, "code": 10}}
+      ]
+    },
+    {
+      "id": "SC-STATE-6",
+      "title": "no answer carries a token",
+      "rules": ["SB8", "SB84"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/registrations", "expect": {"status": 200, "body": {"7.appName": "c4-hue", "1.appName": "huesync"}, "body_absent": ["7.accessToken", "7.token"]}},
+        {"do": "GET", "path": "", "expect": {"status": 200, "body_absent": ["registrations.7.accessToken", "registrations.7.token"]}}
+      ]
+    },
+    {
+      "id": "SC-STATE-7",
+      "title": "with a token GET /device answers the whole device",
+      "rules": ["SB14"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "GET", "path": "/device", "expect": {"status": 200, "body": {"name": "Den Sync Box", "wifi.ssid": "ExampleNet", "ledMode": 1, "pushlink": "idle"}}}
+      ]
+    },
+    {
+      "id": "SC-STATE-8",
+      "title": "syncActive and hdmiActive follow the mode",
+      "rules": ["SB3", "SB4", "SB30"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"execution.mode": "video", "execution.syncActive": true, "execution.hdmiActive": true}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "passthrough"}, "expect": {"status": 200, "state": {"execution.syncActive": false, "execution.hdmiActive": true}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"execution.syncActive": false, "execution.hdmiActive": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "music"}, "expect": {"status": 200, "state": {"execution.syncActive": true, "execution.hdmiActive": true}}}
+      ]
+    },
+    {
+      "id": "SC-REQ-1",
+      "title": "without a token the whole state is refused",
+      "rules": ["SB12", "SB10"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "", "expect": {"status": 401, "code": 2, "has": ["code", "message"]}}
+      ]
+    },
+    {
+      "id": "SC-REQ-2",
+      "title": "without a token GET /device answers the identifying fields",
+      "rules": ["SB12"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/device", "expect": {"status": 200, "body": {"deviceType": "HSB2", "uniqueId": "0A1B2C3D4E5F", "apiLevel": 14, "name": "Living Room Sync Box", "firmwareVersion": "2.5.4"}, "body_absent": ["wifi", "update", "ledMode", "action", "pushlink"]}}
+      ]
+    },
+    {
+      "id": "SC-REQ-3",
+      "title": "without a token a PUT is refused and changes nothing",
+      "rules": ["SB12", "SB20"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 50}, "expect": {"status": 401, "code": 2, "state": {"execution.brightness": 100}}}
+      ]
+    },
+    {
+      "id": "SC-REQ-4",
+      "title": "a token the box does not know is refused everywhere",
+      "rules": ["SB13"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "", "token": "wrong", "expect": {"status": 401, "code": 2}},
+        {"do": "GET", "path": "/device", "token": "wrong", "expect": {"status": 401, "code": 2}},
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "token": "wrong", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "expect": {"status": 401, "code": 2}},
+        {"do": "GET", "path": "", "token": "t", "expect": {"status": 200}}
+      ]
+    },
+    {
+      "id": "SC-REQ-5",
+      "title": "without a token only the two open requests are served",
+      "rules": ["SB12"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/registrations", "token": "none", "expect": {"status": 401, "code": 2}},
+        {"do": "GET", "path": "/execution", "token": "none", "expect": {"status": 401, "code": 2}},
+        {"do": "DELETE", "path": "/registrations/{t}", "token": "none", "expect": {"status": 401, "code": 2, "present": ["registrations.7"]}},
+        {"do": "GET", "path": "/device", "token": "none", "expect": {"status": 200, "body": {"uniqueId": "0A1B2C3D4E5F"}}}
+      ]
+    },
+    {
+      "id": "SC-REQ-6",
+      "title": "an accepted PUT answers an empty object",
+      "rules": ["SB11", "SB10"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 120}, "expect": {"status": 200, "body_exact": {}, "state": {"execution.brightness": 120}}}
+      ]
+    },
+    {
+      "id": "SC-REQ-7",
+      "title": "a method a path does not take",
+      "rules": ["SB15"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "POST", "path": "/execution", "body": {"mode": "passthrough"}, "expect": {"status": 404, "code": 10, "state": {"execution.mode": "video"}}},
+        {"do": "DELETE", "path": "/device", "expect": {"status": 404, "code": 10}},
+        {"do": "PUT", "path": "", "body": {"execution": {"mode": "passthrough"}}, "expect": {"status": 404, "code": 10, "state": {"execution.mode": "video"}}},
+        {"do": "PUT", "path": "/registrations", "body": {"x": 1}, "expect": {"status": 404, "code": 10}}
+      ]
+    },
+    {
+      "id": "SC-REQ-8",
+      "title": "a body that is not JSON",
+      "rules": ["SB16", "SB20"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "raw": "{\"brightness\": 5", "expect": {"status": 400, "code": 12, "has": ["code", "message"], "state": {"execution.brightness": 100}}}
+      ]
+    },
+    {"id": "SC-REQ-9a", "title": "a PUT with no body at all", "rules": ["SB17"], "model": "HSB2", "setup": "paired", "assumed": false,
+      "steps": [{"do": "PUT", "path": "/execution", "raw": "", "expect": {"status": 400, "code": 13}}]},
+    {"id": "SC-REQ-9b", "title": "a PUT whose body is an empty array (how C4:JsonEncode writes an empty table)", "rules": ["SB17"], "model": "HSB2", "setup": "paired", "assumed": false,
+      "steps": [{"do": "PUT", "path": "/execution", "raw": "[]", "expect": {"status": 400, "code": 13}}]},
+    {
+      "id": "SC-REQ-9",
+      "title": "an empty PUT",
+      "rules": ["SB17"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {}, "expect": {"status": 400, "code": 13}}
+      ]
+    },
+    {
+      "id": "SC-REQ-10",
+      "title": "an unknown or read-only key",
+      "rules": ["SB18", "SB20"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"colour": 1}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/execution", "body": {"lastSyncMode": "game"}, "expect": {"status": 400, "code": 13, "state": {"execution.lastSyncMode": "video"}}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 80, "colour": 1}, "expect": {"status": 400, "code": 13, "state": {"execution.brightness": 100}}}
+      ]
+    },
+    {
+      "id": "SC-REQ-11",
+      "title": "a value of the wrong type",
+      "rules": ["SB19", "SB10"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": "yes"}, "expect": {"status": 400, "code": 15, "has": ["code", "message"], "state": {"execution.mode": "video"}}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": "high"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": 0}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-REQ-12",
+      "title": "a refused PUT applies none of its fields",
+      "rules": ["SB20", "SB51"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 120, "mode": "ambient"}, "expect": {"status": 400, "code": 15, "state": {"execution.brightness": 100, "execution.mode": "video"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2", "brightness": 999}, "expect": {"status": 400, "code": 15, "state": {"execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-REQ-13",
+      "title": "keys are checked before values",
+      "rules": ["SB21"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"colour": 1, "brightness": 300}, "expect": {"status": 400, "code": 13}}
+      ]
+    },
+    {
+      "id": "SC-REQ-14",
+      "title": "values are checked before the box's state",
+      "rules": ["SB21", "SB91"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 300, "syncActive": true}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 400, "code": 16}}
+      ]
+    },
+    {
+      "id": "SC-MODE-1",
+      "title": "passthrough ends a sync",
+      "rules": ["SB30", "SB3", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "passthrough"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.syncActive": false, "execution.hdmiActive": true, "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-2",
+      "title": "powersave ends a sync and the picture",
+      "rules": ["SB30", "SB4", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "execution.hdmiActive": false, "hue.connectionState": "connected"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-3",
+      "title": "a sync mode set in powersave wakes the box and streams",
+      "rules": ["SB31", "SB5", "SB6"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "music"}, "expect": {"status": 200, "state": {"execution.mode": "music", "execution.syncActive": true, "execution.hdmiActive": true, "execution.lastSyncMode": "music", "hdmi.input1.lastSyncMode": "music", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-4",
+      "title": "syncActive starts the selected input's last mode",
+      "rules": ["SB32", "SB5", "SB6"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-5",
+      "title": "syncActive wakes a box in powersave",
+      "rules": ["SB32"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.hdmiActive": true}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-6",
+      "title": "syncActive while syncing changes nothing",
+      "rules": ["SB32"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.syncActive": true}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-7",
+      "title": "syncActive false outside a sync changes nothing",
+      "rules": ["SB33"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-8",
+      "title": "hdmiActive true wakes to passthrough",
+      "rules": ["SB34"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiActive": true, "execution.syncActive": false}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-9",
+      "title": "hdmiActive true while syncing changes nothing",
+      "rules": ["SB34"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-10",
+      "title": "hdmiActive false ends a sync in powersave",
+      "rules": ["SB35", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": false}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "execution.syncActive": false, "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-11",
+      "title": "hdmiActive false from passthrough",
+      "rules": ["SB35"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": false}, "expect": {"status": 200, "state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-12",
+      "title": "toggleSyncActive",
+      "rules": ["SB36"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-13",
+      "title": "toggleHdmiActive",
+      "rules": ["SB36"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"toggleHdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleHdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-14",
+      "title": "a toggle sent as false changes nothing",
+      "rules": ["SB36"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "video"}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleHdmiActive": false}, "expect": {"status": 200, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-15",
+      "title": "toggleSyncMode enters a mode, or leaves it",
+      "rules": ["SB37"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncMode": "game"}, "expect": {"status": 200, "state": {"execution.mode": "game"}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncMode": "game"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-16",
+      "title": "toggleSyncMode wakes the box",
+      "rules": ["SB37"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncMode": "video"}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiActive": true}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncMode": "ambient"}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-MODE-17",
+      "title": "cycleSyncMode next goes video, music, game",
+      "rules": ["SB38"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "next"}, "expect": {"status": 200, "state": {"execution.mode": "music"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "next"}, "expect": {"status": 200, "state": {"execution.mode": "game"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "next"}, "expect": {"status": 200, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-18",
+      "title": "cycleSyncMode previous",
+      "rules": ["SB38"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "previous"}, "expect": {"status": 200, "state": {"execution.mode": "game"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "sideways"}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-MODE-19",
+      "title": "cycleSyncMode outside a sync counts from lastSyncMode",
+      "rules": ["SB38"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "next"}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.syncActive": true}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-20",
+      "title": "cycleSyncMode wakes the box",
+      "rules": ["SB38"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "previous"}, "expect": {"status": 200, "state": {"execution.mode": "music", "execution.hdmiActive": true}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-21",
+      "title": "a new input while syncing keeps the mode",
+      "rules": ["SB39", "SB5"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2"}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiSource": "input2", "hdmi.input2.lastSyncMode": "video", "execution.lastSyncMode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-22",
+      "title": "a new input in powersave does not wake the box",
+      "rules": ["SB39"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input3"}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "execution.hdmiSource": "input3"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-23",
+      "title": "a new input in passthrough",
+      "rules": ["SB39"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-24",
+      "title": "the one-input box has no input2",
+      "rules": ["SB40"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2"}, "expect": {"status": 400, "code": 15, "state": {"execution.hdmiSource": "input1"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1"}, "expect": {"status": 200}}
+      ]
+    },
+    {
+      "id": "SC-MODE-25",
+      "title": "an input that is no input",
+      "rules": ["SB40"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input5"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "hdmi1"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": 2}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-MODE-26",
+      "title": "cycleHdmiSource wraps round",
+      "rules": ["SB41"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleHdmiSource": "next"}, "expect": {"status": 200, "state": {"execution.hdmiSource": "input2", "execution.mode": "video"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleHdmiSource": "previous"}, "expect": {"status": 200, "state": {"execution.hdmiSource": "input1"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleHdmiSource": "previous"}, "expect": {"status": 200, "state": {"execution.hdmiSource": "input4"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleHdmiSource": "next"}, "expect": {"status": 200, "state": {"execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-27",
+      "title": "cycleHdmiSource on a one-input box",
+      "rules": ["SB41"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleHdmiSource": "next"}, "expect": {"status": 200, "state": {"execution.hdmiSource": "input1", "execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-MODE-28",
+      "title": "five modes and no more",
+      "rules": ["SB51", "SB19"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "ambient"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "off"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": 1}, "expect": {"status": 400, "code": 15, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-1",
+      "title": "brightness from 0 to 200",
+      "rules": ["SB42"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 0}, "expect": {"status": 200, "state": {"execution.brightness": 0}}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 200}, "expect": {"status": 200, "state": {"execution.brightness": 200}}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 150}, "expect": {"status": 200, "state": {"execution.brightness": 150}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-2",
+      "title": "brightness out of range",
+      "rules": ["SB42", "SB20"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 201}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": -1}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 50.5}, "expect": {"status": 400, "code": 15, "state": {"execution.brightness": 100}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-3",
+      "title": "incrementBrightness adds and stops at 200",
+      "rules": ["SB43"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": 30}, "expect": {"status": 200, "state": {"execution.brightness": 130}}},
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": -50}, "expect": {"status": 200, "state": {"execution.brightness": 80}}},
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": 150}, "expect": {"status": 200, "state": {"execution.brightness": 200}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-4",
+      "title": "incrementBrightness stops at 0 and refuses big steps",
+      "rules": ["SB43"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": -200}, "expect": {"status": 200, "state": {"execution.brightness": 0}}},
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": 201}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": -201}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": "up"}, "expect": {"status": 400, "code": 15, "state": {"execution.brightness": 0}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-5",
+      "title": "intensity while syncing goes to the current mode",
+      "rules": ["SB44"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"intensity": "subtle"}, "expect": {"status": 200, "state": {"execution.video.intensity": "subtle", "execution.game.intensity": "intense", "execution.music.intensity": "moderate", "execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-6",
+      "title": "intensity outside a sync goes to lastSyncMode",
+      "rules": ["SB44"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"intensity": "high"}, "expect": {"status": 200, "state": {"execution.music.intensity": "high", "execution.video.intensity": "moderate", "execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-7",
+      "title": "an intensity that is no intensity",
+      "rules": ["SB44", "SB19"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"intensity": "max"}, "expect": {"status": 400, "code": 15, "state": {"execution.video.intensity": "high"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-8",
+      "title": "cycleIntensity wraps round",
+      "rules": ["SB45"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleIntensity": "next"}, "expect": {"status": 200, "state": {"execution.video.intensity": "intense"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleIntensity": "next"}, "expect": {"status": 200, "state": {"execution.video.intensity": "subtle"}}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleIntensity": "previous"}, "expect": {"status": 200, "state": {"execution.video.intensity": "intense"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-9",
+      "title": "cycleIntensity in powersave goes to lastSyncMode and wakes nothing",
+      "rules": ["SB45", "SB50"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleIntensity": "previous"}, "expect": {"status": 200, "state": {"execution.game.intensity": "moderate", "execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-10",
+      "title": "background lighting on the current mode",
+      "rules": ["SB46"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"backgroundLighting": true}, "expect": {"status": 200, "state": {"execution.video.backgroundLighting": true, "execution.game.backgroundLighting": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleBackgroundLighting": true}, "expect": {"status": 200, "state": {"execution.video.backgroundLighting": false}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-11",
+      "title": "music has no background lighting",
+      "rules": ["SB46"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"backgroundLighting": true}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleBackgroundLighting": true}, "expect": {"status": 400, "code": 15, "state": {"execution.video.backgroundLighting": true}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-12",
+      "title": "the music object sets music only",
+      "rules": ["SB47"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"music": {"palette": "happyEnergetic", "intensity": "subtle"}}, "expect": {"status": 200, "state": {"execution.music.palette": "happyEnergetic", "execution.music.intensity": "subtle", "execution.mode": "video", "execution.video.intensity": "high"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-13",
+      "title": "the game object sets game only",
+      "rules": ["SB47"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"game": {"backgroundLighting": true}}, "expect": {"status": 200, "state": {"execution.game.backgroundLighting": true, "execution.game.intensity": "intense", "execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-14",
+      "title": "what a mode object refuses",
+      "rules": ["SB47"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"music": {"colour": 1}}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/execution", "body": {"music": {"palette": "loud"}}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"video": {"palette": "neutral"}}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/execution", "body": {"video": {"intensity": "max"}}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"game": {"backgroundLighting": "on"}}, "expect": {"status": 400, "code": 15, "state": {"execution.game.backgroundLighting": false}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-15",
+      "title": "a new area while syncing moves the stream",
+      "rules": ["SB48", "SB7"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002"}, "expect": {"status": 200, "state": {"execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "hue.groupId": "6a7b8c9d-0000-4000-8000-0000000ea002", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false, "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true, "hue.connectionState": "streaming", "execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-16",
+      "title": "a new area on a level-9 box",
+      "rules": ["SB48", "SB7"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002"}, "expect": {"status": 200, "state": {"execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": false}, "absent": ["hue.groupId"]}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-17",
+      "title": "an area that is not on the bridge",
+      "rules": ["SB48"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea999"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": 7}, "expect": {"status": 400, "code": 15, "state": {"execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-18",
+      "title": "an area of an older bridge by groups/<n>",
+      "rules": ["SB48"],
+      "model": "HSB1",
+      "setup": "paired",
+      "given": {"hue.groups.3": {"name": "Den", "numLights": 2, "active": false}},
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "groups/3"}, "expect": {"status": 200, "state": {"execution.hueTarget": "groups/3"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "groups/9"}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-19",
+      "title": "a preset runs its stored execution",
+      "rules": ["SB49"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"presets.p1": {"name": "Movie", "execution": {"mode": "game", "brightness": 150}}},
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"preset": "p1"}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.brightness": 150}, "present": ["presets.p1.lastUsed"]}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-20",
+      "title": "an unknown preset",
+      "rules": ["SB49"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"preset": "p9"}, "expect": {"status": 400, "code": 15, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EXEC-21",
+      "title": "settings apply in powersave without waking",
+      "rules": ["SB50"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 60}, "expect": {"status": 200, "state": {"execution.brightness": 60, "execution.mode": "powersave"}}},
+        {"do": "PUT", "path": "/execution", "body": {"video": {"intensity": "intense"}}, "expect": {"status": 200, "state": {"execution.video.intensity": "intense", "execution.mode": "powersave"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001"}, "expect": {"status": 200, "state": {"execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001", "hue.groupId": "6a7b8c9d-0000-4000-8000-0000000ea001", "execution.mode": "powersave", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-1",
+      "title": "wake, select and sync in one PUT",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true, "hdmiSource": "input2", "hdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.hdmiSource": "input2", "execution.hdmiActive": true, "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-2",
+      "title": "mode and intensity together put the intensity on the new mode",
+      "rules": ["SB55", "SB44"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"intensity": "subtle", "mode": "game"}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.game.intensity": "subtle", "execution.video.intensity": "high"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-3",
+      "title": "mode and intensity, whatever the key order",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "music", "intensity": "subtle"}, "expect": {"status": 200, "state": {"execution.music.intensity": "subtle", "execution.video.intensity": "high"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-4",
+      "title": "power off and sync off together",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false, "hdmiActive": false}, "expect": {"status": 200, "state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-5",
+      "title": "a mode then syncActive false",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false, "mode": "game"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-6",
+      "title": "brightness then its increment",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"incrementBrightness": 20, "brightness": 50}, "expect": {"status": 200, "state": {"execution.brightness": 70}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-7",
+      "title": "an input and passthrough from powersave",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "passthrough", "hdmiSource": "input2"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiSource": "input2"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-8",
+      "title": "a mode and background lighting",
+      "rules": ["SB55", "SB46"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"backgroundLighting": true, "mode": "game"}, "expect": {"status": 200, "state": {"execution.game.backgroundLighting": true, "execution.video.backgroundLighting": false}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-9",
+      "title": "a mode object then a cycle",
+      "rules": ["SB55"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"cycleIntensity": "next", "video": {"intensity": "moderate"}}, "expect": {"status": 200, "state": {"execution.video.intensity": "high"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-10",
+      "title": "a PUT that would sync is refused whole",
+      "rules": ["SB56", "SB91", "SB20"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 50, "syncActive": true}, "expect": {"status": 400, "code": 16, "state": {"execution.brightness": 120, "execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-11",
+      "title": "a PUT that ends out of sync is not refused by the link",
+      "rules": ["SB56"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 50, "mode": "passthrough"}, "expect": {"status": 200, "state": {"execution.brightness": 50}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true, "hdmiActive": false, "mode": "video"}, "expect": {"status": 400, "code": 16}}
+      ]
+    },
+    {
+      "id": "SC-ORDER-12",
+      "title": "a preset first, then the other fields",
+      "rules": ["SB55", "SB49"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"presets.p1": {"name": "Game night", "execution": {"mode": "game", "brightness": 150}}},
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 90, "preset": "p1"}, "expect": {"status": 200, "state": {"execution.brightness": 90, "execution.mode": "game"}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-1",
+      "title": "behavior flags are 0 and 1",
+      "rules": ["SB60"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": 0}, "expect": {"status": 200, "state": {"behavior.cecPowersave": 0}}},
+        {"do": "PUT", "path": "/behavior", "body": {"input2": {"cecInputSwitch": 0}}, "expect": {"status": 200, "state": {"behavior.input2.cecInputSwitch": 0, "behavior.input2.linkAutoSync": 0}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-2",
+      "title": "true, false and 2 are no flags",
+      "rules": ["SB60"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": true}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/behavior", "body": {"cecPowersave": 2}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/behavior", "body": {"input1": {"linkAutoSync": false}}, "expect": {"status": 400, "code": 15, "state": {"behavior.cecPowersave": 1, "behavior.input1.linkAutoSync": 1}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-3",
+      "title": "inactivePowersave from 0 to 10000",
+      "rules": ["SB61"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"inactivePowersave": 0}, "expect": {"status": 200, "state": {"behavior.inactivePowersave": 0}}},
+        {"do": "PUT", "path": "/behavior", "body": {"inactivePowersave": 10000}, "expect": {"status": 200, "state": {"behavior.inactivePowersave": 10000}}},
+        {"do": "PUT", "path": "/behavior", "body": {"inactivePowersave": 10001}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/behavior", "body": {"inactivePowersave": -1}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/behavior", "body": {"inactivePowersave": "20"}, "expect": {"status": 400, "code": 15, "state": {"behavior.inactivePowersave": 10000}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-4",
+      "title": "the 8K box has no HDR settings",
+      "rules": ["SB62"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"forceDoviNative": 0}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "body": {"input1": {"hdrMode": 0}}, "expect": {"status": 400, "code": 13}}
+      ]
+    },
+    {
+      "id": "SC-BEH-5",
+      "title": "the one-input box has no USB or hot-plug switch, nor input2",
+      "rules": ["SB62"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"usbPowersave": 0}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "body": {"hpdInputSwitch": 1}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "body": {"input2": {"cecInputSwitch": 1}}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "body": {"input1": {"hpdInputPortSwitch": 0}}, "expect": {"status": 200, "state": {"behavior.input1.hpdInputPortSwitch": 0}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-6",
+      "title": "the original box at level 9",
+      "rules": ["SB62"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"soloMode": 0}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "body": {"input1": {"hpdInputPortSwitch": 1}}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "body": {"forceDoviNative": 1}, "expect": {"status": 200, "state": {"behavior.forceDoviNative": 1}}},
+        {"do": "PUT", "path": "/behavior", "body": {"input4": {"hdrMode": 1}}, "expect": {"status": 200, "state": {"behavior.input4.hdrMode": 1}}},
+        {"do": "PUT", "path": "/behavior", "body": {"input4": {"hdrMode": 3}}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-BEH-7",
+      "title": "the wiring flags are stored and change nothing else",
+      "rules": ["SB64", "SB63"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"arcBypassMode": 1}, "expect": {"status": 200, "state": {"behavior.arcBypassMode": 1, "execution.mode": "video"}}},
+        {"do": "PUT", "path": "/behavior", "body": {"soloMode": 1}, "expect": {"status": 200, "state": {"behavior.soloMode": 1, "execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-8",
+      "title": "a behavior write acts at the next event",
+      "rules": ["SB63", "SB70"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {"input3": {"cecInputSwitch": 1}}, "expect": {"status": 200, "state": {"execution.hdmiSource": "input1"}}},
+        {"event": "cec_active_source", "input": "input3", "expect": {"state": {"execution.hdmiSource": "input3"}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-9",
+      "title": "behavior refusals of form",
+      "rules": ["SB17", "SB16", "SB18", "SB60"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/behavior", "body": {}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior", "raw": "cecPowersave=0", "expect": {"status": 400, "code": 12}},
+        {"do": "PUT", "path": "/behavior", "body": {"colour": 1}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/behavior/input1", "body": {"cecInputSwitch": 0}, "expect": {"status": 404, "code": 10}}
+      ]
+    },
+    {
+      "id": "SC-BEH-10",
+      "title": "behind a receiver the box powers down as usual",
+      "rules": ["SB64", "SB75"],
+      "model": "HSB2_behind_receiver",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "GET", "path": "/behavior", "expect": {"status": 200, "body": {"arcBypassMode": 1}}},
+        {"event": "tv_standby", "expect": {"state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-BEH-11",
+      "title": "on a second output the box switches as usual",
+      "rules": ["SB64", "SB70"],
+      "model": "HSB2_second_output",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/behavior", "expect": {"status": 200, "body": {"soloMode": 1}}},
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.hdmiSource": "input2"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-1",
+      "title": "CEC Active Source switches a switching input",
+      "rules": ["SB70", "SB39"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.hdmiSource": "input2", "execution.mode": "video", "hdmi.input2.lastSyncMode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-2",
+      "title": "CEC Active Source on an input without the switch",
+      "rules": ["SB70"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "cec_active_source", "input": "input3", "expect": {"state": {"execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-3",
+      "title": "CEC Active Source wakes the box",
+      "rules": ["SB70"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.mode": "passthrough", "execution.hdmiSource": "input2"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-4",
+      "title": "CEC Active Source on an input the box lacks",
+      "rules": ["SB70"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.mode": "powersave", "execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-5",
+      "title": "hot plug with the box-wide switch",
+      "rules": ["SB71"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "hotplug", "input": "input3", "expect": {"state": {"hdmi.input3.status": "plugged", "execution.hdmiSource": "input3", "execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-6",
+      "title": "hot plug without a switch",
+      "rules": ["SB71"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "hotplug", "input": "input3", "expect": {"state": {"hdmi.input3.status": "plugged", "execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-7",
+      "title": "hot plug with the per-input switch wakes the box",
+      "rules": ["SB71"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "hotplug", "input": "input1", "expect": {"state": {"execution.mode": "passthrough", "hdmi.input1.status": "plugged"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-8",
+      "title": "hot plug switches a syncing box and keeps its mode",
+      "rules": ["SB71", "SB39"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"behavior.input4.hpdInputPortSwitch": 1},
+      "assumed": true,
+      "steps": [
+        {"event": "hotplug", "input": "input4", "expect": {"state": {"hdmi.input4.status": "plugged", "execution.hdmiSource": "input4", "execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-9",
+      "title": "hot plug never lowers a linked input",
+      "rules": ["SB71"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "hotplug", "input": "input1", "expect": {"state": {"hdmi.input1.status": "linked"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-10",
+      "title": "a signal sets a port's status",
+      "rules": ["SB72"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "signal", "input": "input3", "status": "linked", "expect": {"state": {"hdmi.input3.status": "linked", "execution.hdmiSource": "input1"}}},
+        {"event": "signal", "input": "input3", "status": "unknown", "expect": {"state": {"hdmi.input3.status": "unknown"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-11",
+      "title": "linked reads plugged in powersave",
+      "rules": ["SB72"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"hdmi.input1.status": "plugged", "hdmi.output.status": "plugged"}}},
+        {"event": "signal", "input": "input2", "status": "linked", "expect": {"state": {"hdmi.input2.status": "plugged"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true}, "expect": {"status": 200, "state": {"hdmi.input1.status": "linked", "hdmi.input2.status": "linked", "hdmi.output.status": "linked"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-12",
+      "title": "auto-sync when the input and the output link",
+      "rules": ["SB73", "SB6"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}},
+        {"event": "signal", "input": "output", "status": "linked", "expect": {"state": {"execution.mode": "passthrough"}}},
+        {"event": "signal", "input": "input1", "status": "linked", "expect": {"state": {"execution.mode": "game", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-13",
+      "title": "no auto-sync on a link that was already there",
+      "rules": ["SB73"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"event": "signal", "input": "input1", "status": "linked", "expect": {"state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-14",
+      "title": "no auto-sync on an input without it",
+      "rules": ["SB73"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2"}},
+        {"event": "signal", "input": "input2", "status": "linked", "expect": {"state": {"execution.mode": "passthrough", "hdmi.input2.status": "linked"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-15",
+      "title": "auto-sync in the input's own mode",
+      "rules": ["SB73", "SB5"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"behavior.input2.linkAutoSync": 1},
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2"}},
+        {"event": "signal", "input": "input2", "status": "linked", "expect": {"state": {"execution.mode": "game", "execution.lastSyncMode": "game"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-16",
+      "title": "a request never starts auto-sync",
+      "rules": ["SB73"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": false}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "hdmi.input1.status": "linked"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-17",
+      "title": "auto-sync after a CEC switch to a linked input",
+      "rules": ["SB73", "SB70"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"behavior.input2.linkAutoSync": 1, "hdmi.input2.status": "linked"},
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"event": "cec_active_source", "input": "input2", "expect": {"state": {"execution.hdmiSource": "input2", "execution.mode": "game"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-18",
+      "title": "sync ends when the source goes",
+      "rules": ["SB74", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "signal", "input": "input1", "status": "plugged", "expect": {"state": {"execution.mode": "passthrough", "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-19",
+      "title": "another input's signal does not end a sync",
+      "rules": ["SB74"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "signal", "input": "input2", "status": "unplugged", "expect": {"state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-20",
+      "title": "the TV's standby with cecPowersave",
+      "rules": ["SB75"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "tv_standby", "expect": {"state": {"execution.mode": "powersave", "execution.hdmiActive": false}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-21",
+      "title": "the TV's standby without cecPowersave",
+      "rules": ["SB75"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"behavior.cecPowersave": 0},
+      "assumed": false,
+      "steps": [
+        {"event": "tv_standby", "expect": {"state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-22",
+      "title": "USB power lost with usbPowersave",
+      "rules": ["SB76"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "usb_power_lost", "expect": {"state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-23",
+      "title": "USB power lost without usbPowersave",
+      "rules": ["SB76"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "usb_power_lost", "expect": {"state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-24",
+      "title": "USB power lost on a box without the setting",
+      "rules": ["SB76"],
+      "model": "HSB3_standalone",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "usb_power_lost", "expect": {"state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-25",
+      "title": "idle time with a linked input",
+      "rules": ["SB77"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "idle", "minutes": 30, "expect": {"state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-26",
+      "title": "idle time with no link",
+      "rules": ["SB77"],
+      "model": "HSB1",
+      "setup": "paired",
+      "given": {"hdmi.input2.status": "plugged"},
+      "assumed": false,
+      "steps": [
+        {"event": "idle", "minutes": 19, "expect": {"state": {"execution.mode": "passthrough"}}},
+        {"event": "idle", "minutes": 20, "expect": {"state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-27",
+      "title": "idle powersave turned off",
+      "rules": ["SB77"],
+      "model": "HSB1",
+      "setup": "paired",
+      "given": {"hdmi.input2.status": "plugged", "behavior.inactivePowersave": 0},
+      "assumed": false,
+      "steps": [
+        {"event": "idle", "minutes": 600, "expect": {"state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-28",
+      "title": "idle time while syncing",
+      "rules": ["SB77"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "idle", "minutes": 60, "expect": {"state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-29",
+      "title": "idle time with the output unlinked",
+      "rules": ["SB77", "SB72"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"event": "signal", "input": "output", "status": "unplugged", "expect": {"state": {"hdmi.output.status": "unplugged", "execution.mode": "passthrough"}}},
+        {"event": "idle", "minutes": 25, "expect": {"state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-30",
+      "title": "contentSpecs follows the selected input's link",
+      "rules": ["SB78"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "signal", "input": "input1", "status": "plugged", "expect": {"state": {"hdmi.contentSpecs": "", "hdmi.videoSyncSupported": false, "hdmi.audioSyncSupported": false}}},
+        {"event": "signal", "input": "input1", "status": "linked", "expect": {"state": {"hdmi.contentSpecs": "3840 x 2160 @ 60000 - HDR10", "hdmi.videoSyncSupported": true, "hdmi.audioSyncSupported": true}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-31",
+      "title": "contentSpecs when the fixture had none",
+      "rules": ["SB78", "SB73"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true}, "expect": {"status": 200, "state": {"hdmi.contentSpecs": ""}}},
+        {"event": "signal", "input": "output", "status": "linked"},
+        {"event": "signal", "input": "input1", "status": "linked", "expect": {"state": {"hdmi.contentSpecs": "1920 x 1080 @ 60000 - SDR", "hdmi.videoSyncSupported": true, "execution.mode": "game"}}}
+      ]
+    },
+    {
+      "id": "SC-EVT-32",
+      "title": "contentSpecs in powersave",
+      "rules": ["SB78", "SB72"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"hdmi.contentSpecs": "", "hdmi.videoSyncSupported": false}}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-1",
+      "title": "pairing: refused, then the button, then a token",
+      "rules": ["SB81", "SB82"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "expect": {"status": 400, "code": 16}},
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200, "has": ["registrationId", "accessToken"]}},
+        {"do": "GET", "path": "", "token": "t1", "expect": {"status": 200, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-2",
+      "title": "the window is open 4 seconds after the button",
+      "rules": ["SB82"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"event": "advance", "ms": 4000},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200, "has": ["registrationId", "accessToken"]}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-3",
+      "title": "the window is shut 6 seconds after the button",
+      "rules": ["SB82"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"event": "advance", "ms": 6000},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "expect": {"status": 400, "code": 16}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-4",
+      "title": "one registration per press",
+      "rules": ["SB82"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200}},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "expect": {"status": 400, "code": 16}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-5",
+      "title": "bad names are refused before the button",
+      "rules": ["SB80", "SB16", "SB21"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue"}, "expect": {"status": 400, "code": 15}},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "", "instanceName": "Bedroom"}, "expect": {"status": 400, "code": 15}},
+        {"do": "POST", "path": "/registrations", "body": {"appName": 3, "instanceName": "Bedroom"}, "expect": {"status": 400, "code": 15}},
+        {"do": "POST", "path": "/registrations", "raw": "appName=c4-hue", "expect": {"status": 400, "code": 12}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-6",
+      "title": "a refused POST leaves the window open",
+      "rules": ["SB80", "SB82", "SB20"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue"}, "expect": {"status": 400, "code": 15}},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200, "has": ["accessToken"]}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-7",
+      "title": "ids count up from 7",
+      "rules": ["SB83", "SB85"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200, "body": {"registrationId": "7"}}},
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Den"}, "save_token": "t2", "expect": {"status": 200, "body": {"registrationId": "8"}}},
+        {"do": "GET", "path": "/registrations", "token": "t1", "expect": {"status": 200, "body": {"7.instanceName": "Bedroom", "8.instanceName": "Den", "1.appName": "huesync"}}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-8",
+      "title": "ids are never reused",
+      "rules": ["SB83", "SB86"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200}},
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t2", "expect": {"status": 200}},
+        {"do": "DELETE", "path": "/registrations/{t2}", "token": "t2", "expect": {"status": 200}},
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t3", "expect": {"status": 200, "body": {"registrationId": "9"}}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-9",
+      "title": "a new registration is a user, not verified, with its times",
+      "rules": ["SB84"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "/registrations", "expect": {"status": 200, "body": {"7.role": "user", "7.verified": false, "7.instanceName": "Scenario", "7.appName": "c4-hue", "1.role": "admin"}}},
+        {"do": "GET", "path": "", "expect": {"status": 200, "present": ["registrations.7.created", "registrations.7.lastUsed"]}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-10",
+      "title": "no verified flag below level 10",
+      "rules": ["SB84"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"registrations.7.role": "user"}, "absent": ["registrations.7.verified"]}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-11",
+      "title": "the same names twice make two registrations",
+      "rules": ["SB85"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200}},
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t2", "expect": {"status": 200}},
+        {"do": "GET", "path": "", "token": "t1", "expect": {"status": 200}},
+        {"do": "GET", "path": "", "token": "t2", "expect": {"status": 200, "state": {"registrations.7.instanceName": "Bedroom", "registrations.8.instanceName": "Bedroom"}}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-12",
+      "title": "a registration removes itself",
+      "rules": ["SB86", "SB11"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "DELETE", "path": "/registrations/{t}", "expect": {"status": 200, "body_exact": {}, "absent": ["registrations.7"]}},
+        {"do": "GET", "path": "", "expect": {"status": 401, "code": 2}},
+        {"do": "GET", "path": "/device", "token": "none", "expect": {"status": 200}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-13",
+      "title": "a registration cannot remove another",
+      "rules": ["SB86"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t2", "expect": {"status": 200}},
+        {"do": "DELETE", "path": "/registrations/{t}", "token": "t2", "expect": {"status": 401, "code": 2, "present": ["registrations.7"]}},
+        {"do": "GET", "path": "", "token": "t", "expect": {"status": 200}},
+        {"do": "DELETE", "path": "/registrations/1", "token": "t", "expect": {"status": 401, "code": 2, "present": ["registrations.1"]}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-14",
+      "title": "an id the box does not hold",
+      "rules": ["SB86"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "DELETE", "path": "/registrations/999", "expect": {"status": 404, "code": 10}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-15",
+      "title": "the Hue Sync app removes the registration",
+      "rules": ["SB87"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "app_deletes", "registration": "7", "expect": {"absent": ["registrations.7"]}},
+        {"do": "GET", "path": "", "expect": {"status": 401, "code": 2}},
+        {"do": "GET", "path": "/device", "token": "none", "expect": {"status": 200, "body": {"uniqueId": "0A1B2C3D4E5F"}}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-16",
+      "title": "removing one registration leaves the others",
+      "rules": ["SB87", "SB85"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t2", "expect": {"status": 200}},
+        {"event": "app_deletes", "registration": "7"},
+        {"do": "GET", "path": "", "token": "t", "expect": {"status": 401, "code": 2}},
+        {"do": "GET", "path": "", "token": "t2", "expect": {"status": 200}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-17",
+      "title": "lastUsed moves with each request",
+      "rules": ["SB88"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "advance", "ms": 60000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "changed": ["registrations.7.lastUsed"]}}
+      ]
+    },
+    {
+      "id": "SC-PAIR-18",
+      "title": "pairing works in powersave too",
+      "rules": ["SB82"],
+      "model": "HSB3",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "save_token": "t1", "expect": {"status": 200, "has": ["registrationId", "accessToken"]}},
+        {"do": "GET", "path": "", "token": "t1", "expect": {"status": 200, "state": {"execution.mode": "powersave"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-1",
+      "title": "no sync while the bridge is unreachable",
+      "rules": ["SB90", "SB91"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "disconnected", "expect": {"state": {"hue.connectionState": "disconnected"}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 400, "code": 16, "state": {"execution.mode": "passthrough"}}},
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 90}, "expect": {"status": 200, "state": {"execution.brightness": 90}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-2",
+      "title": "no sync in any state but connected",
+      "rules": ["SB90", "SB91"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "connecting", "expect": {"state": {"hue.connectionState": "connecting"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "video"}, "expect": {"status": 400, "code": 16}},
+        {"event": "bridge", "state": "unauthorized", "expect": {"state": {"hue.connectionState": "unauthorized"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "game"}, "expect": {"status": 400, "code": 16}},
+        {"event": "bridge", "state": "uninitialized", "expect": {"state": {"hue.connectionState": "uninitialized"}}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncMode": "music"}, "expect": {"status": 400, "code": 16}},
+        {"event": "bridge", "state": "invalidgroup", "expect": {"state": {"hue.connectionState": "invalidgroup"}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 400, "code": 16}},
+        {"event": "bridge", "state": "connected", "expect": {"state": {"hue.connectionState": "connected"}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-3",
+      "title": "another app streams: the area is busy",
+      "rules": ["SB92", "SB91"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy", "expect": {"state": {"hue.connectionState": "busy", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true, "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner": "other-app"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "video"}, "expect": {"status": 400, "code": 16}},
+        {"do": "PUT", "path": "/execution", "body": {"cycleSyncMode": "next"}, "expect": {"status": 400, "code": 16}},
+        {"do": "PUT", "path": "/execution", "body": {"toggleSyncActive": true}, "expect": {"status": 400, "code": 16, "state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-4",
+      "title": "taking over another app's stream",
+      "rules": ["SB94", "SB6"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea001", "body": {"active": false}, "expect": {"status": 200, "state": {"hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}, "absent": ["hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner"]}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-5",
+      "title": "another app takes the bridge while the box syncs",
+      "rules": ["SB93", "SB92"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy", "expect": {"state": {"execution.mode": "passthrough", "hue.connectionState": "busy", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner": "other-app"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-6",
+      "title": "the bridge drops while the box syncs",
+      "rules": ["SB93"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "disconnected", "expect": {"state": {"execution.mode": "passthrough", "hue.connectionState": "disconnected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-7",
+      "title": "connected while the box syncs keeps the stream",
+      "rules": ["SB93"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "connected", "expect": {"state": {"execution.mode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-8",
+      "title": "the other app stops by itself",
+      "rules": ["SB93"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"event": "bridge", "state": "connected", "expect": {"state": {"hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}, "absent": ["hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner"]}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-9",
+      "title": "stopping the box's own stream",
+      "rules": ["SB94"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea001", "body": {"active": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-10",
+      "title": "what a group PUT refuses",
+      "rules": ["SB94"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea002", "body": {"active": false}, "expect": {"status": 200, "state": {"execution.mode": "video"}}},
+        {"do": "PUT", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea001", "body": {"active": true}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea999", "body": {"active": false}, "expect": {"status": 404, "code": 10}},
+        {"do": "PUT", "path": "/hue/groups/6a7b8c9d-0000-4000-8000-0000000ea001", "body": {"colour": 1}, "expect": {"status": 400, "code": 13, "state": {"execution.mode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-11",
+      "title": "groupId selects an area",
+      "rules": ["SB95", "SB7"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hue", "body": {"groupId": "6a7b8c9d-0000-4000-8000-0000000ea002"}, "expect": {"status": 200, "state": {"execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002", "hue.groupId": "6a7b8c9d-0000-4000-8000-0000000ea002", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true}}},
+        {"do": "PUT", "path": "/hue", "body": {"groupId": "nope"}, "expect": {"status": 400, "code": 15}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-12",
+      "title": "no groupId below level 10",
+      "rules": ["SB95"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hue", "body": {"groupId": "6a7b8c9d-0000-4000-8000-0000000ea002"}, "expect": {"status": 400, "code": 13, "state": {"execution.hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-13",
+      "title": "the fakes never move to another bridge",
+      "rules": ["SB96"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/hue", "body": {"bridgeUniqueId": "001788fffe123abc", "username": "TEST-USERNAME-NOT-REAL", "clientKey": "TEST-CLIENT-KEY-NOT-REAL"}, "expect": {"status": 400, "code": 13, "state": {"hue.bridgeUniqueId": "001788fffe123abc", "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-14",
+      "title": "standalone: sync without a bridge",
+      "rules": ["SB97"],
+      "model": "HSB3_standalone",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "hue.connectionState": "uninitialized"}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-15",
+      "title": "standalone: no area to choose",
+      "rules": ["SB97"],
+      "model": "HSB3_standalone",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001"}, "expect": {"status": 400, "code": 16}},
+        {"do": "PUT", "path": "/hue", "body": {"groupId": "6a7b8c9d-0000-4000-8000-0000000ea001"}, "expect": {"status": 400, "code": 16, "state": {"execution.hueTarget": ""}}}
+      ]
+    },
+    {
+      "id": "SC-BRIDGE-16",
+      "title": "choosing an area again clears invalidgroup",
+      "rules": ["SB98", "SB91"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}},
+        {"event": "bridge", "state": "invalidgroup"},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "game"}, "expect": {"status": 400, "code": 16}},
+        {"do": "PUT", "path": "/execution", "body": {"hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002"}, "expect": {"status": 200, "state": {"hue.connectionState": "connected"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "game"}, "expect": {"status": 200, "state": {"execution.mode": "game", "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-HDMI-1",
+      "title": "naming an input",
+      "rules": ["SB100"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hdmi/input3", "body": {"name": "Blu-ray", "type": "diskplayer"}, "expect": {"status": 200, "state": {"hdmi.input3.name": "Blu-ray", "hdmi.input3.type": "diskplayer", "hdmi.input3.status": "unplugged"}}}
+      ]
+    },
+    {
+      "id": "SC-HDMI-2",
+      "title": "naming the output",
+      "rules": ["SB100"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hdmi/output", "body": {"name": "Projector", "type": "beamer"}, "expect": {"status": 200, "state": {"hdmi.output.name": "Projector", "hdmi.output.type": "beamer"}}}
+      ]
+    },
+    {
+      "id": "SC-HDMI-3",
+      "title": "what a port refuses",
+      "rules": ["SB100"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hdmi/input1", "body": {"type": "vcr"}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/hdmi/input1", "body": {"name": ""}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/hdmi/input1", "body": {"status": "linked"}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/hdmi/input1", "body": {"lastSyncMode": "game"}, "expect": {"status": 400, "code": 13, "state": {"hdmi.input1.name": "Apple TV"}}}
+      ]
+    },
+    {
+      "id": "SC-HDMI-4",
+      "title": "a port the model lacks, and the whole resource",
+      "rules": ["SB100"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/hdmi/input2", "body": {"name": "Spare"}, "expect": {"status": 404, "code": 10}},
+        {"do": "PUT", "path": "/hdmi", "body": {"input1": {"name": "Spare"}}, "expect": {"status": 404, "code": 10, "state": {"hdmi.input1.name": "Game Console"}}}
+      ]
+    },
+    {
+      "id": "SC-DEV-1",
+      "title": "naming the box",
+      "rules": ["SB110", "SB112"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/device", "body": {"name": "Den TV Box"}, "expect": {"status": 200, "state": {"device.name": "Den TV Box"}}},
+        {"do": "GET", "path": "/device", "token": "none", "expect": {"status": 200, "body": {"name": "Den TV Box"}}}
+      ]
+    },
+    {
+      "id": "SC-DEV-2",
+      "title": "LED mode and name values",
+      "rules": ["SB110"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/device", "body": {"ledMode": 2}, "expect": {"status": 200, "state": {"device.ledMode": 2}}},
+        {"do": "PUT", "path": "/device", "body": {"ledMode": 3}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/device", "body": {"name": ""}, "expect": {"status": 400, "code": 15}},
+        {"do": "PUT", "path": "/device", "body": {"name": 5}, "expect": {"status": 400, "code": 15, "state": {"device.name": "Living Room Sync Box"}}}
+      ]
+    },
+    {
+      "id": "SC-DEV-3",
+      "title": "what the device refuses",
+      "rules": ["SB111", "SB113"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"do": "PUT", "path": "/device", "body": {"uniqueId": "FFFFFFFFFFFF"}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/device", "body": {"apiLevel": 20}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/device", "body": {"action": "doSoftwareRestart"}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/device", "body": {"update": {"autoUpdateEnabled": false, "autoUpdateTime": 3}}, "expect": {"status": 400, "code": 13}},
+        {"do": "PUT", "path": "/device", "body": {"bluetooth": false}, "expect": {"status": 400, "code": 13, "state": {"device.uniqueId": "0A1B2C3D4E5F", "device.bluetooth": true}}},
+        {"do": "GET", "path": "", "expect": {"status": 200}}
+      ]
+    },
+    {
+      "id": "SC-DEV-4",
+      "title": "renamed in the Hue Sync app",
+      "rules": ["SB112", "SB113"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": false,
+      "steps": [
+        {"event": "rename", "name": "Cinema Box", "expect": {"state": {"device.name": "Cinema Box", "device.uniqueId": "0A1B2C3D4E5F"}}},
+        {"do": "GET", "path": "/device", "token": "none", "expect": {"status": 200, "body": {"name": "Cinema Box", "uniqueId": "0A1B2C3D4E5F"}}}
+      ]
+    },
+    {
+      "id": "SC-DEV-5",
+      "title": "a new address changes only ipAddress",
+      "rules": ["SB114", "SB113"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "address", "address": "192.0.2.41", "expect": {"state": {"device.ipAddress": "192.0.2.41", "device.uniqueId": "0A1B2C3D4E5F", "execution.mode": "video", "device.deviceType": "HSB2"}}}
+      ]
+    },
+    {
+      "id": "SC-FW-1",
+      "title": "a restart: silence, then the same state",
+      "rules": ["SB120"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "reboot"},
+        {"do": "GET", "path": "", "expect": {"no_answer": true}},
+        {"event": "advance", "ms": 10000},
+        {"do": "GET", "path": "", "expect": {"no_answer": true}},
+        {"event": "advance", "ms": 25000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"execution.mode": "video", "device.name": "Living Room Sync Box"}, "present": ["registrations.7"]}}
+      ]
+    },
+    {
+      "id": "SC-FW-2",
+      "title": "a restart keeps changes and tokens",
+      "rules": ["SB120"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"brightness": 150}},
+        {"event": "reboot"},
+        {"event": "advance", "ms": 31000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"execution.brightness": 150}}}
+      ]
+    },
+    {
+      "id": "SC-FW-3",
+      "title": "nothing answers during a restart",
+      "rules": ["SB120"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "reboot"},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "expect": {"no_answer": true}},
+        {"do": "GET", "path": "/device", "expect": {"no_answer": true}}
+      ]
+    },
+    {
+      "id": "SC-FW-4",
+      "title": "after a restart the button is needed again",
+      "rules": ["SB120", "SB82"],
+      "model": "HSB2",
+      "assumed": true,
+      "steps": [
+        {"event": "button"},
+        {"event": "reboot"},
+        {"event": "advance", "ms": 31000},
+        {"do": "POST", "path": "/registrations", "body": {"appName": "c4-hue", "instanceName": "Bedroom"}, "expect": {"status": 400, "code": 16}}
+      ]
+    },
+    {
+      "id": "SC-FW-5",
+      "title": "a firmware update restarts and reports the new version",
+      "rules": ["SB121"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "firmware", "version": "2.6.0", "api_level": 14},
+        {"do": "GET", "path": "", "expect": {"no_answer": true}},
+        {"event": "advance", "ms": 31000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"device.firmwareVersion": "2.6.0", "device.buildNumber": 2060000, "device.apiLevel": 14, "execution.mode": "video"}}},
+        {"do": "GET", "path": "/device", "token": "none", "expect": {"status": 200, "body": {"firmwareVersion": "2.6.0", "buildNumber": 2060000}}}
+      ]
+    },
+    {
+      "id": "SC-FW-6",
+      "title": "level 10 adds its fields",
+      "rules": ["SB122", "SB121"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "firmware", "version": "2.5.4", "api_level": 10},
+        {"event": "advance", "ms": 31000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"device.apiLevel": 10, "device.firmwareVersion": "2.5.4", "device.buildNumber": 2050400, "hue.groupId": "6a7b8c9d-0000-4000-8000-0000000ea001", "behavior.input1.hpdInputPortSwitch": 0, "behavior.input4.hpdInputPortSwitch": 0, "device.overheating": false, "device.bluetooth": true, "registrations.7.verified": false, "registrations.1.verified": false}, "absent": ["behavior.soloMode", "hue.operatingMode"]}}
+      ]
+    },
+    {
+      "id": "SC-FW-7",
+      "title": "level 14 on the original box",
+      "rules": ["SB122"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "firmware", "version": "2.5.4", "api_level": 14},
+        {"event": "advance", "ms": 31000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"behavior.soloMode": 0, "hue.groupId": "6a7b8c9d-0000-4000-8000-0000000ea001"}, "absent": ["hue.operatingMode"]}}
+      ]
+    },
+    {
+      "id": "SC-FW-8",
+      "title": "an update keeps the identity and the registrations",
+      "rules": ["SB121", "SB113"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "firmware", "version": "2.6.0", "api_level": 15},
+        {"event": "advance", "ms": 31000},
+        {"do": "GET", "path": "", "expect": {"status": 200, "state": {"device.uniqueId": "0A1B2C3D4E5F", "device.deviceType": "HSB2", "device.apiLevel": 15, "behavior.soloMode": 0, "hue.operatingMode": "bridge"}, "present": ["registrations.7"]}}
+      ]
+    }
+  ]
+}

@@ -168,7 +168,9 @@ def describe(command):
     return "#%s %s" % (command.get("id"), kind)
 
 
-LABEL_WIDTH = 22  # fits "running_light_version"
+LABEL_WIDTH = 23  # fits "running_syncbox_version"
+# The trees the bridge forwards to its devices (docs/dev-loop.md), each with its own rows in `status`.
+DEVICE_TREES = ("light", "scene", "syncbox")
 
 
 def row(label, value):
@@ -222,33 +224,25 @@ def cmd_status(args):
         "%s  (%s)" % (short(running), version_note(running, local, "reload", "driver has not reported yet")),
     )
     row("local_version", short(local))
-    if "local_light_version" in st:  # a server from before the light tree has neither field
-        running_light, local_light = st.get("running_light_version"), st.get("local_light_version")
+    for tree in DEVICE_TREES:
+        if "local_%s_version" % tree not in st:  # a server from before that tree has neither field
+            continue
+        running_tree, local_tree = st.get("running_%s_version" % tree), st.get("local_%s_version" % tree)
         row(
-            "running_light_version",
+            "running_%s_version" % tree,
             "%s  (%s)"
             % (
-                short(running_light),
-                version_note(running_light, local_light, "forward", "bridge has not forwarded yet"),
+                short(running_tree),
+                version_note(running_tree, local_tree, "forward", "bridge has not forwarded yet"),
             ),
         )
-        row("local_light_version", short(local_light))
-    if "local_scene_version" in st:
-        running_scene, local_scene = st.get("running_scene_version"), st.get("local_scene_version")
-        row(
-            "running_scene_version",
-            "%s  (%s)"
-            % (
-                short(running_scene),
-                version_note(running_scene, local_scene, "forward", "bridge has not forwarded yet"),
-            ),
-        )
-        row("local_scene_version", short(local_scene))
+        row("local_%s_version" % tree, short(local_tree))
     row("dev_key", key_note(st))
     pinned = st.get("pinned") or {}
     if any(pinned.values()):
         trees = ", ".join("%s at %s" % (name, short(pinned[name])) for name in sorted(pinned) if pinned[name])
-        live = [short(st.get(key)) for key in ("live_version", "live_light_version", "live_scene_version") if key in st]
+        keys = ["live_version"] + ["live_%s_version" % tree for tree in DEVICE_TREES]
+        live = [short(st.get(key)) for key in keys if key in st]
         row("pinned", "%s  (live tree: %s)" % (trees, " / ".join(live)))
     row("last_seen", ago(st.get("last_seen"), st.get("server_time")))
     row("last_event", st.get("last_event") or "-")
@@ -463,10 +457,10 @@ def build_parser():
     p = sub.add_parser(
         "pin", help="serve src/ as it is now until unpin or the next pin (controller ignores later edits)"
     )
-    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="pin one tree only (default all)")
+    p.add_argument("--tree", choices=["bridge", *DEVICE_TREES], help="pin one tree only (default all)")
     p.set_defaults(func=cmd_pin)
     p = sub.add_parser("unpin", help="serve the live tree again")
-    p.add_argument("--tree", choices=["bridge", "light", "scene"], help="unpin one tree only (default all)")
+    p.add_argument("--tree", choices=["bridge", *DEVICE_TREES], help="unpin one tree only (default all)")
     p.set_defaults(func=cmd_unpin)
 
     p = sub.add_parser("wait", help="wait for a queued command to finish")

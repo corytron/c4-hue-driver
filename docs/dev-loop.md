@@ -2,9 +2,10 @@
 
 The dev build of the bridge driver fetches its own Lua from a server on the
 development VM, reloads itself when the code changes, runs queued actions,
-and ships its log and properties back. It also fetches the light and scene
-drivers' Lua and hands each tree to the bound devices running that driver,
-which reload themselves the same way. After one Composer install of a dev
+and ships its log and properties back. It also fetches the light, scene and
+sync box drivers' Lua and hands each tree to the bound devices running that
+driver, which reload themselves the same way (the sync box tree since #547:
+the devices bound on the bridge's connection 2). After one Composer install of a dev
 build, only `driver.xml` changes need Composer again (a capability change
 also needs the owner's controller reboot, `docs/composer-remote.md` rule 10).
 The Hue Motion Sensor is the exception: the server has no tree for it, so a
@@ -12,15 +13,17 @@ change to `src/hue_motion` needs a Composer install; a dev build of it
 still forwards its log lines to the bridge (`HUE_LOG`).
 
 Dev builds only: `tools/build.sh --dev` includes `src/common/devloop.lua` in
-all four drivers, with the dev key baked in as `common/devkey.lua`, ships
+every driver, with the dev key baked in as `common/devkey.lua`, ships
 the bridge's development modules (`bridge/devtools.lua`,
-`bridge/conntest.lua`, `bridge/pinning.lua`, `bridge/probe12.lua`), keeps
+`bridge/conntest.lua`, `bridge/pinning.lua`, `bridge/probe12.lua`) and the
+sync box driver's `syncbox/devhooks.lua` ("The fake sync box" below), keeps
 the DEV-ONLY block of the bridge's `driver.xml` (the `Dev Server` and
 `Diagnostic Server` properties) and allows Composer's Lua command window
 (dp3 `--allowexecute`); release builds contain none of it. The controller acts
 only on what that key signed ("Security" below). The loop is inert until
-the bridge's `Dev Server` property holds a `host:port`. Light and scene
-devices have no such property: they only react to what the bridge forwards.
+the bridge's `Dev Server` property holds a `host:port`. Light, scene and
+sync box devices have no such property: they only react to what the bridge
+forwards.
 
 **Current state (2026-11-13): not in use.** The house runs release 1.6,
 build 624 (`docs/status.md`, "What runs on the house", is the authority on
@@ -33,10 +36,11 @@ To return to the loop: start `tools/devserver.py` (it listens on this VM's
 LAN address and creates the dev key on its first run), then build with
 `tools/build.sh --dev` (the packages carry that key) from a commit after
 the installed one (the version is the commit count, so Composer sees an
-update). Install the four dev `.c4z` the way `CLAUDE.md` (Deploy)
+update). Install the five dev `.c4z` the way `CLAUDE.md` (Deploy)
 describes an install that bypasses `tools/deploy.py`: served straight from
 `build/` with `python3 -I tools/serve_install.py build/hue_bridge.c4z
-build/hue_light.c4z build/hue_motion.c4z build/hue_scene.c4z`, which copies
+build/hue_light.c4z build/hue_motion.c4z build/hue_scene.c4z
+build/hue_syncbox.c4z`, which copies
 only those files into a temporary folder under a random path, serves them on
 port 8090 of this VM's LAN address, prints the URLs, the sha256 and the
 PowerShell for the brief, stops once each has been downloaded (or after 30
@@ -74,7 +78,7 @@ under "Leaving the loop" below.
   connection-experiment endpoints `/stream` and `/ping` alive. Both listen
   on one address, by default this VM's LAN address. It signs every bundle
   and command list with the dev key, and wants the admin token of its
-  current run on `/status` and `/admin/*`. Serves three trees, each a driver's `.lua` and `.xml`
+  current run on `/status` and `/admin/*`. Serves four trees, each a driver's `.lua` and `.xml`
   files and its `certs/` under the paths its `.c4z` uses (a module the
   bundle lacks, such as `common/build_version.lua`, still loads from the
   installed package):
@@ -83,6 +87,9 @@ under "Leaving the loop" below.
   - `tree=light`: `src/hue_light` with `src/common` mounted as `common/`.
   - `tree=scene`: `src/hue_scene` with `src/common` mounted as `common/`
     (added with the scenes feature, `docs/scenes-design.md` §6).
+  - `tree=syncbox`: `src/hue_syncbox` with `src/common` mounted as
+    `common/` (#547, `docs/fakebox-design.md` §7), `syncbox/devhooks.lua`
+    included.
   A file named `devkey.lua` is never served.
 - `tools/devctl.py`: CLI for the developer: queue actions, set properties,
   force a reload, wait for a queued command, pin or unpin the trees, show
@@ -91,13 +98,14 @@ under "Leaving the loop" below.
   `build/dev/driver.log` directly and needs neither.
 - `tools/serve_install.py`: serves the dev packages to the Windows session
   for their install, and nothing else (above, and `CLAUDE.md`, Deploy).
-- `src/common/devloop.lua`: the driver side, in all four drivers. The
-  bridge runs the polling loop; a light, scene or motion device only
+- `src/common/devloop.lua`: the driver side, in every driver. The
+  bridge runs the polling loop; a light, scene, motion or sync box device only
   registers the `DEV_RELOAD` handler `devloop.reload_handler` builds (it
   calls `devloop.apply_forwarded`, which applies only a bundle signed for
   its own tree) and the `HUE_LOG` log sink of `devloop.forward_logs`
-  (`common/device.lua`). The bridge forwards only the light and scene trees
-  (`devloop.TREES`), so a motion device's handler never receives one.
+  (`common/device.lua`). The bridge forwards only the light, scene and sync
+  box trees (`devloop.TREES`), so a motion device's handler never receives
+  one.
 - `src/hue_bridge/bridge/devtools.lua`: the bridge's development handlers
   (the `Dev Server` property; the commands `Connection Test`, `Reload
   Credentials` and `Check CA Pinning`, which the Diagnostics list offers as
@@ -120,7 +128,7 @@ uses, while the server runs).
 
 ## Wire protocol (all JSON unless noted; only the bridge ever initiates)
 
-`GET /manifest[?tree=bridge|light|scene]` →
+`GET /manifest[?tree=bridge|light|scene|syncbox]` →
 `{"version": "<sha1 over sorted path+contents>", "tree": "bridge", "files": ["driver.lua", "bridge/http.lua", ...], "server_time": <unix seconds>}`
 `tree` defaults to `bridge`; an unknown tree is a 400. Each tree has its own
 version. The `tree` field tells the driver which tree it got: a server from
@@ -172,10 +180,10 @@ each reload that restarts the event stream leaves one more transfer to drain.
 The server appends `HH:MM:SS.mmm <line>` to `driver.log` and echoes to stdout.
 
 `POST /report` body
-`{"version": "...", "light_version": "<or absent>", "scene_version": "<or absent>", "event": "<see below>", "command_id": <id or absent>, "properties": {...}, "error": "<text or absent>", "sandbox": {...or absent}, "elapsed_ms": <or absent>, "key_fingerprint": "<16 hex, absent without a key>"}` → 204.
-`light_version` / `scene_version` are the tree versions the bridge last
-fetched and forwarded (recorded even when no device of that kind was bound
-to receive them); absent until the first forward. Events: `startup` (loop started; includes `sandbox`
+`{"version": "...", "light_version": "<or absent>", "scene_version": "<or absent>", "syncbox_version": "<or absent>", "event": "<see below>", "command_id": <id or absent>, "properties": {...}, "error": "<text or absent>", "sandbox": {...or absent}, "elapsed_ms": <or absent>, "key_fingerprint": "<16 hex, absent without a key>"}` → 204.
+`light_version` / `scene_version` / `syncbox_version` are the tree versions
+the bridge last fetched and forwarded (recorded even when no device of that
+kind was bound to receive them); absent until the first forward. Events: `startup` (loop started; includes `sandbox`
 facts: `_VERSION`, `jit.version` if any, and the `type()` of `jit`,
 `loadstring`, `load`, `setfenv`, `package`, `package.loaders`, `C4` (the
 runtime's own, not the timer guard's proxy) and
@@ -189,14 +197,17 @@ runtime's own, not the timer guard's proxy) and
 version), `command_done` (with `command_id`, `elapsed_ms` and, when the
 command failed, its redacted `error`), `heartbeat` (at the end of a tick
 when no report went out for 30 s, properties only; also right after a new
-light or scene version is forwarded, so `/status` catches up at once).
+light, scene or sync box version is forwarded, so `/status` catches up at
+once).
 
-`GET /status` (admin token) → `{"running_version": ..., "local_version": ..., "running_light_version": ..., "local_light_version": ..., "running_scene_version": ..., "local_scene_version": ..., "pinned": {...}, "last_seen": <unix>, "server_time": <unix>, "last_event": ..., "last_error": ..., "properties": {...}, "pending_commands": [...], "done_commands": [ids], "last_done_id": N, "key_fingerprint": "<the server's>", "driver_key_fingerprint": "<last reported, or null>", "driver_reported_key": <whether any report said yet>}`
-(plus `live_version`, `live_light_version` and `live_scene_version`, what
-the working trees are now; they differ from `local_*` only while pinned).
-`running_light_version` / `running_scene_version` are what the bridge
-reported forwarding, not what any device reports (light and scene devices
-never talk to the server). `last_seen` is bumped by any driver-initiated
+`GET /status` (admin token) → `{"running_version": ..., "local_version": ..., "running_light_version": ..., "local_light_version": ..., "running_scene_version": ..., "local_scene_version": ..., "running_syncbox_version": ..., "local_syncbox_version": ..., "pinned": {...}, "last_seen": <unix>, "server_time": <unix>, "last_event": ..., "last_error": ..., "properties": {...}, "pending_commands": [...], "done_commands": [ids], "last_done_id": N, "key_fingerprint": "<the server's>", "driver_key_fingerprint": "<last reported, or null>", "driver_reported_key": <whether any report said yet>}`
+(plus `live_version`, `live_light_version`, `live_scene_version` and
+`live_syncbox_version`, what the working trees are now; they differ from
+`local_*` only while pinned).
+`running_light_version` / `running_scene_version` /
+`running_syncbox_version` are what the bridge reported forwarding, not what
+any device reports (light, scene and sync box devices never talk to the
+server). `last_seen` is bumped by any driver-initiated
 request. Times are unix seconds as floats.
 
 `POST /admin/enqueue` (admin token) body `{"type": "execute"|"set_property"|"reload", ...fields as above}` → `{"id": N}`.
@@ -245,7 +256,8 @@ Without the token, or with a wrong one: 401.
   `GET /manifest?tree=light` and, if that version differs from the one the
   bridge holds, `GET /bundle?tree=light` once and verify; then forward the
   held bundle to every bound light that has not received that version
-  (below); then the same for `tree=scene` and the bound scene devices; then
+  (below); then the same for `tree=scene` and the bound scene devices, and
+  for `tree=syncbox` and the bound sync box devices; then
   `GET /commands?after=<last id>&nonce=<fresh>`, verify, and run each
   command in order, reporting `command_done` after each with a properties
   snapshot; then flush the log buffer with `POST /log`; then a heartbeat if
@@ -263,16 +275,21 @@ Without the token, or with a wrong one: 401.
 - A command list that does not verify, or answers another nonce, runs
   nothing (`devloop: commands refused: ...`, once per streak). A command
   whose id is not above the last one run is skipped.
-- Forwarding a tree (light or scene): the bridge keeps the signed bundle it
-  last fetched per tree (`light_version` / `scene_version` plus the payload
-  and its MAC) and, per bound device id, the version that device last
-  received (`__DEVLOOP.light_forwarded`, `__DEVLOOP.scene_forwarded`). Light
-  and scene devices share binding 1, so every tick it reads
-  `C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)`, learns each new id's
-  `driverFileName` once with `C4:GetDevices` (`hue_light.c4z` → light tree,
-  `hue_scene.c4z` → scene tree; an unreadable one counts as a light), drops
-  ids no longer bound, and sends the tree's bundle to each bound device of
-  that kind whose recorded version is not the held one, as
+- Forwarding a tree (light, scene or sync box): the bridge keeps the signed
+  bundle it last fetched per tree (`light_version` / `scene_version` /
+  `syncbox_version` plus the payload and its MAC) and, per bound device id,
+  the version that device last received (`__DEVLOOP.light_forwarded`,
+  `__DEVLOOP.scene_forwarded`, `__DEVLOOP.syncbox_forwarded`). Light and
+  scene devices share binding 1 and the sync box devices bind on the
+  bridge's connection 2 ("Hue Sync Boxes", class `HUE_SYNCBOX`; #547), so
+  every tick it reads `C4:GetBoundConsumerDevices(C4:GetDeviceID(), 1)` for
+  the light and scene trees and `(..., 2)` for the sync box tree, learns
+  each new id's `driverFileName` once with `C4:GetDevices` (`hue_light.c4z`
+  → light tree, `hue_scene.c4z` → scene tree, `hue_syncbox.c4z` → sync box
+  tree; an unreadable one counts as a light on binding 1 and as a sync box
+  on binding 2), drops ids no longer bound, and sends the tree's bundle to
+  each bound device of that kind whose recorded version is not the held
+  one, as
   `C4:SendToDevice(id, "DEV_RELOAD", { tree = ..., version = ..., bundle = <signed payload>, mac = <its MAC> }, false, false)`.
   The payload is the server's text, unchanged, so the device checks the
   very bytes the server signed; `tree` and `version` ride along unsigned,
@@ -293,8 +310,9 @@ Without the token, or with a wrong one: 401.
   version of that tree; a catch-up does not. A manifest without the
   requested `"tree"` (a server without trees) is said once and ignored.
 - Reload sequence: `pcall(OnDriverDestroyed)`; clear every
-  `package.loaded` entry matching `^bridge%.`, `^light%.`, `^scene%.` or
-  `^common%.` except `common.devloop`; install (or replace) a loader at
+  `package.loaded` entry matching `^bridge%.`, `^light%.`, `^scene%.`,
+  `^syncbox%.` or `^common%.` except `common.devloop`; install (or replace)
+  a loader at
   `package.loaders[1]` that serves modules from the bundle (`a.b` →
   `a/b.lua`); run `loadstring(bundle["driver.lua"], "=driver.lua")`; then
   `OnDriverInit("DIT_UPDATING")` and `OnDriverLateInit("DIT_UPDATING")`.
@@ -408,7 +426,7 @@ Without the token, or with a wrong one: 401.
   (above) keeps the application key out of every shipped line, whatever
   printed it.
 
-### Light and scene devices
+### Light, scene and sync box devices
 
 - `devloop.apply_forwarded(params)` does the reload; each device's
   `DEV_RELOAD` handler calls it after checking `params.tree` (a bundle for
@@ -417,7 +435,7 @@ Without the token, or with a wrong one: 401.
   `params.mac` with the device's own baked key and refuses anything else
   (no bundle, no or a wrong MAC, the old `files` form), then decodes the
   payload with `C4:JsonDecode` and loads it only when the signed `tree` is
-  the device's own (`light` or `scene`, never `bridge`); then the same
+  the device's own (`light`, `scene` or `syncbox`, never `bridge`); then the same
   reload sequence as above runs, the timer guard's cancelling of the old
   code's timers included, with the same `pcall` discipline, at the
   signed version. It needs no `devloop.start()`: the shared state is created
@@ -436,6 +454,46 @@ Without the token, or with a wrong one: 401.
 - A device's reload re-runs its `driver.lua`, which re-registers the handler
   on the fresh `common.dispatch`; `common.devloop` itself stays the copy the
   `.c4z` shipped.
+- A sync box device (#547) is reloaded like the others: its
+  `OnDriverDestroyed` stops its poller, its search and its client's
+  requests, the timer guard cancels the rest, and the new code checks the
+  box's identity again before it reads (`tests/spec/syncbox_driver_spec.lua`,
+  "the dev loop's syncbox tree"). A reload re-creates the search's mDNS
+  binding (6008) in the same Lua state, as the bridge's reload does with
+  its own.
+
+### The fake sync box (#547)
+
+`docs/fakebox-design.md` §7: a dev build of the sync box driver pairs with
+the VM's fake box (`tools/fakebox.py`), which serves HTTPS on a port other
+than 443 (default 8450, clear of the dev server's TLS port; 443 needs root) under its own CA and announces that
+port in its mDNS answer. What makes that possible is dev-only:
+
+- `src/hue_syncbox/syncbox/devhooks.lua`, which a release stage never
+  carries (`tools/build.sh` deletes it and refuses a release stage that has
+  it). It does two things and nothing else: Pair Sync Box's Address takes
+  `host:port` (the host checked as a release checks the whole address, the
+  port 1 to 65535, `:443` left out), so Box Address and the store hold it
+  and the client sends to `https://host:port/api/v1`; and a search's
+  candidate whose SRV record announces another port than 443 is checked
+  and listed at `ip:port` instead of being dropped, so several fake boxes
+  on the VM's one address are each a candidate. The driver and
+  `syncbox/discovery.lua` reach it through `pcall(require,
+  "syncbox.devhooks")` and behave exactly as a release build without it
+  (the release cases of `tests/spec/syncbox_driver_spec.lua` and
+  `syncbox_discovery_spec.lua` run without it). A release build that still
+  finds it, a dev build's file an update left behind, does not use it and
+  says so once (`this release build found syncbox/devhooks.lua of an
+  earlier dev build; not used`; #492 I-6).
+- `tools/build.sh --dev` appends the fake's CA (`~/.config/c4-hue-driver/
+  fakebox/ca.pem`, when it exists) to the dev package's
+  `certs/hsb_ca.pem`; a release build refuses a bundle other than the
+  tracked one.
+- The client and the store took an address with a port in every build
+  before #547, so a release installed over a dev build that paired with the
+  fake keeps that pairing (`192.0.2.7:8450`) and then fails its TLS check
+  (the release bundle does not trust the fake's CA): Forget Pairing on the
+  box device before the release install.
 
 ## Developer workflow
 
@@ -446,6 +504,7 @@ tools/devctl.py status             # are the drivers talking to us, which versio
 # edit src/hue_bridge or src/common, then wait ~3 s: the bridge reloads itself
 # edit src/hue_light or src/common, then wait ~3 s: the bridge forwards, every bound light reloads
 # edit src/hue_scene or src/common, then wait ~3 s: the same for every bound scene device
+# edit src/hue_syncbox or src/common, then wait ~3 s: the same for every sync box device on the bridge's connection 2
 # Add Light / Add Scene at any time: each new device gets its tree's current version on the next tick
 tools/devctl.py run "Connection Test" Target=Bridge   # prints the command id
 tools/devctl.py wait 7 --timeout 120                  # until command_done, then properties
@@ -483,19 +542,22 @@ lua-lint lua-test` green), each pushed by a fresh `pin`. `status` shows a
 `devctl.py status` shows every tree, running against local:
 
 ```
-running_version        1f3a9c0b2d4e  (matches local)
-local_version          1f3a9c0b2d4e
-running_light_version  8b7e6d5c4a39  (DIFFERS from local; a forward is due)
-local_light_version    0c1d2e3f4a5b
-running_scene_version  5e6f7a8b9c0d  (matches local)
-local_scene_version    5e6f7a8b9c0d
-dev_key                matches the server's (fingerprint 3f9a0c1d2e4b5a6c)
-last_seen              2s ago
+running_version         1f3a9c0b2d4e  (matches local)
+local_version           1f3a9c0b2d4e
+running_light_version   8b7e6d5c4a39  (DIFFERS from local; a forward is due)
+local_light_version     0c1d2e3f4a5b
+running_scene_version   5e6f7a8b9c0d  (matches local)
+local_scene_version     5e6f7a8b9c0d
+running_syncbox_version 2a3b4c5d6e7f  (matches local)
+local_syncbox_version   2a3b4c5d6e7f
+dev_key                 matches the server's (fingerprint 3f9a0c1d2e4b5a6c)
+last_seen               2s ago
 ...
 ```
 
-`running_light_version` and `running_scene_version` read `bridge has not
-forwarded yet` until the bridge's first forward after its loop starts.
+`running_light_version`, `running_scene_version` and
+`running_syncbox_version` read `bridge has not forwarded yet` until the
+bridge's first forward after its loop starts.
 Each pair is omitted when the server predates that tree. `dev_key` reads
 `DIFFERS` when the installed dev build was made with another key, and
 `DRIVER HAS NONE` when it carries no key: the controller then refuses
@@ -511,7 +573,7 @@ $(devctl.py set "Dev Server" "")` works) and silent for 20 s since, it
 says the command is treated as done and exits 0. A wait begun after the
 bridge had already gone quiet cannot tell a stopped loop from a bridge
 that is down; it times out with a hint. `pin` and `unpin` take `--tree
-bridge|light|scene` (default: all three); `log` takes `-n`/`--lines`
+bridge|light|scene|syncbox` (default: all four); `log` takes `-n`/`--lines`
 (default 50), `-f`/`--follow` and `--file`. The server takes `--quiet` to
 drop the plain listener's connection and request lines and the heartbeat
 summaries, `--port` and `--tls-port`, `--bind` to listen elsewhere,
@@ -572,7 +634,7 @@ signed, and the key never crosses the wire.
   --ensure-key` does only that and prints the path. A key file that group
   or others can read, or that is not 64 lowercase hex characters, is
   refused.
-- `tools/build.sh --dev` bakes it into each of the four dev packages as
+- `tools/build.sh --dev` bakes it into each of the dev packages as
   `common/devkey.lua` (`return "<hex>"`), written into the stage only (umask
   077) and deleted from it once packed; the dev `.c4z` files are written
   0600. Every build refuses to run while a `src/common/devkey.lua` exists,
@@ -617,10 +679,10 @@ signed, and the key never crosses the wire.
   cover `set_property` (`Dev Server`, `Bridge IP Address`, ...) and
   Composer's actions alike, and they are the only way to the development
   commands (`Probe Call`, `Hue Request`, ...; "Development commands" below).
-- **`DEV_RELOAD` (finding 14).** The bridge forwards a light or scene bundle
-  unchanged: the signed payload and its MAC. The device verifies them with
-  its own baked key and loads only a payload signed for its own tree
-  (`light` or `scene`; never `bridge`). A `DEV_RELOAD` from any other
+- **`DEV_RELOAD` (finding 14).** The bridge forwards a light, scene or sync
+  box bundle unchanged: the signed payload and its MAC. The device verifies
+  them with its own baked key and loads only a payload signed for its own
+  tree (`light`, `scene` or `syncbox`; never `bridge`). A `DEV_RELOAD` from any other
   driver in the project, the bridge's own bundle replayed, or a bundle in
   the old unsigned form is refused the same way, with the running code
   untouched: `devloop: light reload refused: signature mismatch` in the
@@ -666,7 +728,7 @@ signed, and the key never crosses the wire.
   variant. Composer's `Test Connection` is the driver's own handler,
   which takes no parameters; another driver that sends it with a `Host`
   gets the dotted address.
-- **`HUE_LOG` stays reachable.** The light and scene devices send their log
+- **`HUE_LOG` stays reachable.** The light, scene and sync box devices send their log
   lines with `C4:SendToDevice` (`devloop.forward_logs`), which arrives
   through `ExecuteCommand`, so the handler must stay in the table. All it
   does is print one line under the sender's name; control characters

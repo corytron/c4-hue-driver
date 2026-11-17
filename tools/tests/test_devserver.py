@@ -61,7 +61,7 @@ def write_key(path, key=TEST_KEY, mode=0o600):
 
 
 def make_root(root):
-    """A scratch repository: the three driver trees, src/common and a devkey.lua
+    """A scratch repository: the four driver trees, src/common and a devkey.lua
     that must never be served."""
     files = {
         "src/hue_bridge/driver.lua": "-- bridge ‚\n",
@@ -71,6 +71,11 @@ def make_root(root):
         "src/hue_bridge/certs/ca.pem": "-----BEGIN CERTIFICATE-----\n",
         "src/hue_light/driver.lua": "-- light\n",
         "src/hue_scene/driver.lua": "-- scene\n",
+        "src/hue_syncbox/driver.lua": "-- sync box\n",
+        "src/hue_syncbox/driver.xml": "<devicedata/>\n",
+        "src/hue_syncbox/syncbox/devhooks.lua": "return {}\n",
+        "src/hue_syncbox/certs/hsb_ca.pem": "-----BEGIN CERTIFICATE-----\n",
+        "src/hue_syncbox/www/documentation.html": "<p>not served</p>\n",
         "src/common/log.lua": "return {}\n",
         "src/common/devkey.lua": "return '%s'\n" % OTHER_KEY.decode(),
     }
@@ -355,6 +360,47 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn("bridge/devkey.lua", payload["files"])
         self.assertNotIn(OTHER_KEY.decode(), json.dumps(payload))
 
+    def test_the_sync_box_tree_is_served_signed_like_the_others(self):
+        """#547: src/hue_syncbox as tree "syncbox", for the bridge to forward to its sync box devices."""
+        self.assertEqual(("bridge", "light", "scene", "syncbox"), devserver.TREES)
+        _, _, manifest = self.live.request("GET", "/manifest?tree=syncbox")
+        manifest = json.loads(manifest)
+        self.assertEqual("syncbox", manifest["tree"])
+        expected = {
+            "driver.lua": "-- sync box\n",
+            "driver.xml": "<devicedata/>\n",
+            "syncbox/devhooks.lua": "return {}\n",
+            "certs/hsb_ca.pem": "-----BEGIN CERTIFICATE-----\n",
+            "common/log.lua": "return {}\n",
+        }
+        self.assertEqual(sorted(expected), manifest["files"])
+        status, ctype, body = self.live.request("GET", "/bundle?tree=syncbox")
+        self.assertEqual(200, status)
+        self.assertEqual(devserver.SIGNED_TYPE, ctype)
+        payload = json.loads(check(TEST_KEY, "bundle", body))
+        self.assertEqual("syncbox", payload["tree"])
+        self.assertEqual(manifest["version"], payload["version"])
+        self.assertEqual(expected, payload["files"])
+        self.assertEqual(200, self.live.request("GET", "/file?tree=syncbox&path=syncbox/devhooks.lua")[0])
+        self.assertEqual(404, self.live.request("GET", "/file?tree=syncbox&path=www/documentation.html")[0])
+        status, _, body = self.live.request("GET", "/manifest?tree=motion")
+        self.assertEqual(400, status)
+        self.assertIn("syncbox", json.loads(body)["error"])
+
+    def test_status_shows_the_sync_box_tree_the_bridge_forwarded(self):
+        st = json.loads(self.live.request("GET", "/status", token=self.live.token)[2])
+        self.assertIsNone(st["running_syncbox_version"])
+        local = st["local_syncbox_version"]
+        self.assertEqual(json.loads(self.live.request("GET", "/manifest?tree=syncbox")[2])["version"], local)
+        self.assertEqual(local, st["live_syncbox_version"])
+        self.assertIsNone(st["pinned"]["syncbox"])
+        report = {"event": "reload", "version": "b1", "syncbox_version": local}
+        self.assertEqual(204, self.live.request("POST", "/report", report)[0])
+        st = json.loads(self.live.request("GET", "/status", token=self.live.token)[2])
+        self.assertEqual(local, st["running_syncbox_version"])
+        self.assertEqual("b1", st["running_version"])
+        self.assertTrue(any(" bv=" + local[:12] in line for line in self.live.lines), self.live.lines)
+
     def test_a_key_file_is_in_no_manifest_and_no_file_answer(self):
         for tree in devserver.TREES:
             _, _, manifest = self.live.request("GET", "/manifest?tree=" + tree)
@@ -532,11 +578,34 @@ class DevctlTest(unittest.TestCase):
         self.live.request("POST", "/report", {"event": "startup", "key_fingerprint": TEST_FINGERPRINT})
         code, out, _ = self.devctl("status")
         self.assertEqual(0, code)
-        self.assertIn("dev_key                matches the server's (fingerprint %s)" % TEST_FINGERPRINT, out)
+        self.assertIn("dev_key                 matches the server's (fingerprint %s)" % TEST_FINGERPRINT, out)
         self.live.request("POST", "/report", {"event": "heartbeat", "key_fingerprint": OTHER_FINGERPRINT})
         self.assertIn("DIFFERS: driver %s, server %s" % (OTHER_FINGERPRINT, TEST_FINGERPRINT), self.devctl("status")[1])
         self.live.request("POST", "/report", {"event": "heartbeat"})
         self.assertIn("DRIVER HAS NONE", self.devctl("status")[1])
+
+    def test_status_and_pin_know_the_sync_box_tree(self):
+        """#547: a row pair for the sync box tree, and pin / unpin --tree syncbox."""
+        code, out, _ = self.devctl("status")
+        self.assertEqual(0, code)
+        self.assertIn("running_syncbox_version -  (bridge has not forwarded yet)", out)
+        local = json.loads(self.live.request("GET", "/manifest?tree=syncbox")[2])["version"]
+        self.assertIn("local_syncbox_version   %s" % local[:12], out)
+        self.live.request("POST", "/report", {"event": "heartbeat", "syncbox_version": local})
+        self.assertIn("running_syncbox_version %s  (matches local)" % local[:12], self.devctl("status")[1])
+        self.live.request("POST", "/report", {"event": "heartbeat", "syncbox_version": "0" * 40})
+        self.assertIn("(DIFFERS from local; a forward is due)", self.devctl("status")[1])
+
+        code, out, _ = self.devctl("pin", "--tree", "syncbox")
+        self.assertEqual(0, code)
+        self.assertIn("pinned syncbox", out)
+        self.assertEqual(local, self.live.server.trees["syncbox"].pinned[0])
+        self.assertIsNone(self.live.server.trees["bridge"].pinned)
+        out = self.devctl("status")[1]
+        self.assertIn("syncbox at %s" % local[:12], out)
+        self.assertEqual((0, "serving the live tree\n", ""), self.devctl("unpin", "--tree", "syncbox"))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            devctl.main(["--state-dir", self.live.state_dir, "pin", "--tree", "motion"])
 
     def test_a_stale_token_is_refused_with_a_hint(self):
         """A server restarted since: server.json names another run's token."""

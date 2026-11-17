@@ -219,6 +219,20 @@ describe("syncbox/client.lua (#514 stage 2)", function()
 			assert.is_true(c:set_address("hsb-0A1B2C3D4E5F.local"))
 		end)
 
+		-- #547: a dev build's Box Address can name a port (syncbox/devhooks.lua,
+		-- the VM's fake box on 8443); the client itself is the same in every build.
+		it("puts an address's port into every URL: https://host:port/api/v1", function()
+			assert.is_true(c:set_address(BOX .. ":8443"))
+			c:set_trusted(true)
+			c:get("", recorder("state"))
+			assert.equal("https://10.0.2.150:8443/api/v1", c4.last_transfer().url)
+			assert.equal("Bearer " .. TOKEN, c4.last_transfer().headers.Authorization)
+			c4.last_transfer():respond(200, "{}")
+			c:get("/device", recorder("device"), { unkeyed = true, address = OTHER .. ":8443" })
+			assert.equal("https://198.51.100.150:8443/api/v1/device", c4.last_transfer().url)
+			assert.is_nil(c4.last_transfer().headers.Authorization)
+		end)
+
 		it("refuses a token that cannot travel as a header, without logging it", function()
 			assert.is_false(c:set_token("TEST TOKEN"))
 			assert.is_false(c:has_token())

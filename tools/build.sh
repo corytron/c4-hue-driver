@@ -176,18 +176,31 @@ build_driver() {
 		# What common/devloop.lua checks every bundle and command against.
 		# printf is a builtin, so the key is on no command line.
 		(umask 077 && printf 'return "%s"\n' "$dev_key" > "$stage/common/devkey.lua")
+		# The VM's fake sync box (docs/fakebox-design.md §7, #547): a dev box
+		# driver also trusts the fake's CA, so it can pair with tools/fakebox.py.
+		# Only the CA certificate is read; its key never leaves the VM's config.
+		fake_ca="${XDG_CONFIG_HOME:-$HOME/.config}/c4-hue-driver/fakebox/ca.pem"
+		if [[ "$driver" == hue_syncbox && -f "$fake_ca" ]]; then
+			cat "$fake_ca" >> "$stage/certs/hsb_ca.pem"
+		fi
 	else
 		# Release builds: no dev loop, none of the bridge's development
 		# handlers (bridge/devtools.lua) nor the connection experiment,
 		# pinning check and 1.2 probe modules they drive, and none of the DEV-ONLY
 		# properties and actions.
 		rm -f "$stage/common/devloop.lua" "$stage/bridge/devtools.lua" \
-			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua" "$stage/bridge/probe12.lua"
+			"$stage/bridge/conntest.lua" "$stage/bridge/pinning.lua" "$stage/bridge/probe12.lua" \
+			"$stage/syncbox/devhooks.lua"
+		# The box's bundle is exactly the tracked root-hsb: never the fake's CA (#547).
+		if [[ "$driver" == hue_syncbox ]] && ! cmp -s "$stage/certs/hsb_ca.pem" "$ROOT/src/hue_syncbox/certs/hsb_ca.pem"; then
+			echo "release build of $driver carries a CA bundle other than src/hue_syncbox/certs/hsb_ca.pem" >&2
+			exit 1
+		fi
 		awk '/<!-- DEV-ONLY BEGIN/ { skip = 1 } !skip { print } /<!-- DEV-ONLY END -->/ { skip = 0 }' \
 			"$stage/driver.xml" > "$stage/driver.xml.release" && mv "$stage/driver.xml.release" "$stage/driver.xml"
 		if grep -q "DEV-ONLY" "$stage/driver.xml" || [[ -e "$stage/bridge/devtools.lua" || -e "$stage/common/devloop.lua" \
 			|| -e "$stage/common/devkey.lua" || -e "$stage/bridge/conntest.lua" || -e "$stage/bridge/pinning.lua" \
-			|| -e "$stage/bridge/probe12.lua" ]]; then
+			|| -e "$stage/bridge/probe12.lua" || -e "$stage/syncbox/devhooks.lua" ]]; then
 			echo "release build still carries development items in $driver" >&2
 			exit 1
 		fi

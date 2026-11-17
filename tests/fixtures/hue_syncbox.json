@@ -1,0 +1,981 @@
+{
+  "ADDRESS": "10.0.2.150",
+  "APP_NAME": "c4-hue",
+  "AREA": {
+    "office": "6a7b8c9d-0000-4000-8000-0000000ea002",
+    "tv": "6a7b8c9d-0000-4000-8000-0000000ea001"
+  },
+  "AREA_NAMES": {
+    "office": "Office",
+    "tv": "Living Room TV"
+  },
+  "BOX_ID": "0A1B2C3D4E5F",
+  "BRIDGE_ADDRESS": "10.0.2.143",
+  "BRIDGE_ID": "001788fffe123abc",
+  "REGISTRATION_ID": "7",
+  "TOKEN": "TEST-TOKEN-NOT-REAL",
+  "device": {
+    "HSB1": {
+      "apiLevel": 9,
+      "beta": false,
+      "buildNumber": 1080300,
+      "capabilities": {
+        "maxIrCodes": 16,
+        "maxPresets": 16
+      },
+      "deviceType": "HSB1",
+      "firmwareVersion": "1.8.3",
+      "ipAddress": "10.0.2.150",
+      "name": "Den Sync Box",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    },
+    "HSB2": {
+      "apiLevel": 14,
+      "beta": false,
+      "buildNumber": 2050400,
+      "capabilities": {
+        "maxIrCodes": 16,
+        "maxPresets": 16
+      },
+      "deviceType": "HSB2",
+      "firmwareVersion": "2.5.4",
+      "ipAddress": "10.0.2.150",
+      "name": "Living Room Sync Box",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    },
+    "HSB2_behind_receiver": {
+      "apiLevel": 14,
+      "beta": false,
+      "buildNumber": 2050400,
+      "capabilities": {
+        "maxIrCodes": 16,
+        "maxPresets": 16
+      },
+      "deviceType": "HSB2",
+      "firmwareVersion": "2.5.4",
+      "ipAddress": "10.0.2.150",
+      "name": "Living Room Sync Box",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    },
+    "HSB2_second_output": {
+      "apiLevel": 14,
+      "beta": false,
+      "buildNumber": 2050400,
+      "capabilities": {
+        "maxIrCodes": 16,
+        "maxPresets": 16
+      },
+      "deviceType": "HSB2",
+      "firmwareVersion": "2.5.4",
+      "ipAddress": "10.0.2.150",
+      "name": "Living Room Sync Box",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    },
+    "HSB3": {
+      "apiLevel": 14,
+      "beta": false,
+      "buildNumber": 3050200,
+      "capabilities": {
+        "maxIrCodes": 0,
+        "maxPresets": 16
+      },
+      "deviceType": "HSB3",
+      "firmwareVersion": "3.5.2",
+      "ipAddress": "10.0.2.150",
+      "name": "Bedroom Sync Box",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    },
+    "HSB3_standalone": {
+      "apiLevel": 14,
+      "beta": false,
+      "buildNumber": 3050200,
+      "capabilities": {
+        "maxIrCodes": 0,
+        "maxPresets": 16
+      },
+      "deviceType": "HSB3",
+      "firmwareVersion": "3.5.2",
+      "ipAddress": "10.0.2.150",
+      "name": "Bedroom Sync Box",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    },
+    "HSC001": {
+      "apiLevel": 14,
+      "beta": false,
+      "buildNumber": 1000400,
+      "capabilities": {
+        "maxIrCodes": 0,
+        "maxPresets": 16
+      },
+      "deviceType": "HSC001",
+      "firmwareVersion": "1.0.4",
+      "ipAddress": "10.0.2.150",
+      "name": "TV Camera",
+      "termsAgreed": true,
+      "uniqueId": "0A1B2C3D4E5F",
+      "wifiState": "wan"
+    }
+  },
+  "error": {
+    "invalid_json": {
+      "code": 12,
+      "message": "Invalid JSON"
+    },
+    "invalid_key": {
+      "code": 13,
+      "message": "Invalid Key"
+    },
+    "invalid_state": {
+      "code": 16,
+      "message": "Invalid State"
+    },
+    "invalid_value": {
+      "code": 15,
+      "message": "Invalid Value"
+    },
+    "not_found": {
+      "code": 10,
+      "message": "Not Found"
+    },
+    "unauthorized": {
+      "code": 2,
+      "message": "Invalid Token"
+    }
+  },
+  "error_status": {
+    "invalid_json": 400,
+    "invalid_key": 400,
+    "invalid_state": 400,
+    "invalid_value": 400,
+    "not_found": 404,
+    "unauthorized": 401
+  },
+  "models": [
+    "HSB1",
+    "HSB2",
+    "HSB3",
+    "HSB3_standalone",
+    "HSB2_behind_receiver",
+    "HSB2_second_output"
+  ],
+  "registration_ok": {
+    "accessToken": "TEST-TOKEN-NOT-REAL",
+    "registrationId": "7"
+  },
+  "registration_pending": {
+    "code": 16,
+    "message": "Invalid State"
+  },
+  "state": {
+    "HSB1": {
+      "behavior": {
+        "arcBypassMode": 0,
+        "cecPowersave": 1,
+        "forceDoviNative": 0,
+        "hpdInputSwitch": 1,
+        "inactivePowersave": 20,
+        "input1": {
+          "cecInputSwitch": 1,
+          "hdrMode": 0,
+          "linkAutoSync": 0
+        },
+        "input2": {
+          "cecInputSwitch": 1,
+          "hdrMode": 0,
+          "linkAutoSync": 0
+        },
+        "input3": {
+          "cecInputSwitch": 0,
+          "hdrMode": 0,
+          "linkAutoSync": 0
+        },
+        "input4": {
+          "cecInputSwitch": 0,
+          "hdrMode": 2,
+          "linkAutoSync": 0
+        },
+        "usbPowersave": 1
+      },
+      "device": {
+        "action": "none",
+        "apiLevel": 9,
+        "beta": false,
+        "buildNumber": 1080300,
+        "capabilities": {
+          "maxIrCodes": 16,
+          "maxPresets": 16
+        },
+        "deviceType": "HSB1",
+        "firmwareVersion": "1.8.3",
+        "ipAddress": "10.0.2.150",
+        "ledMode": 1,
+        "name": "Den Sync Box",
+        "pushlink": "idle",
+        "temperature": 41,
+        "termsAgreed": true,
+        "uniqueId": "0A1B2C3D4E5F",
+        "update": {
+          "autoUpdateEnabled": true,
+          "autoUpdateTime": 3
+        },
+        "wifi": {
+          "ssid": "ExampleNet",
+          "strength": 3
+        },
+        "wifiState": "wan"
+      },
+      "execution": {
+        "brightness": 120,
+        "game": {
+          "backgroundLighting": false,
+          "intensity": "high"
+        },
+        "hdmiActive": true,
+        "hdmiSource": "input2",
+        "hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "lastSyncMode": "music",
+        "mode": "passthrough",
+        "music": {
+          "intensity": "subtle",
+          "palette": "happyCalm"
+        },
+        "syncActive": false,
+        "video": {
+          "backgroundLighting": true,
+          "intensity": "moderate"
+        }
+      },
+      "hdmi": {
+        "audioSyncSupported": true,
+        "contentSpecs": "1920 x 1080 @ 59940 - SDR",
+        "input1": {
+          "lastSyncMode": "video",
+          "name": "Blu-ray",
+          "status": "plugged",
+          "type": "diskplayer"
+        },
+        "input2": {
+          "lastSyncMode": "video",
+          "name": "Cable Box",
+          "status": "linked",
+          "type": "settopbox"
+        },
+        "input3": {
+          "lastSyncMode": "video",
+          "name": "HDMI 3",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "input4": {
+          "lastSyncMode": "video",
+          "name": "HDMI 4",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "output": {
+          "lastSyncMode": "video",
+          "name": "TV",
+          "status": "linked",
+          "type": "tv"
+        },
+        "videoSyncSupported": true
+      },
+      "hue": {
+        "bridgeIpAddress": "10.0.2.143",
+        "bridgeUniqueId": "001788fffe123abc",
+        "connectionState": "connected",
+        "groups": {
+          "6a7b8c9d-0000-4000-8000-0000000ea001": {
+            "active": false,
+            "name": "Living Room TV",
+            "numLights": 5
+          },
+          "6a7b8c9d-0000-4000-8000-0000000ea002": {
+            "active": false,
+            "name": "Office",
+            "numLights": 3
+          }
+        }
+      },
+      "ir": {
+        "codes": {},
+        "defaultCodes": true
+      },
+      "presets": {},
+      "registrations": {
+        "1": {
+          "appName": "huesync",
+          "instanceName": "Phone",
+          "role": "admin"
+        }
+      }
+    },
+    "HSB2": {
+      "behavior": {
+        "arcBypassMode": 0,
+        "cecPowersave": 1,
+        "hpdInputSwitch": 0,
+        "inactivePowersave": 20,
+        "input1": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 1
+        },
+        "input2": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "input3": {
+          "cecInputSwitch": 0,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "input4": {
+          "cecInputSwitch": 0,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "soloMode": 0,
+        "usbPowersave": 0
+      },
+      "device": {
+        "action": "none",
+        "apiLevel": 14,
+        "beta": false,
+        "bluetooth": true,
+        "buildNumber": 2050400,
+        "capabilities": {
+          "maxIrCodes": 16,
+          "maxPresets": 16
+        },
+        "deviceType": "HSB2",
+        "firmwareVersion": "2.5.4",
+        "ipAddress": "10.0.2.150",
+        "ledMode": 1,
+        "name": "Living Room Sync Box",
+        "overheating": false,
+        "pushlink": "idle",
+        "temperature": 44,
+        "termsAgreed": true,
+        "undervolt": false,
+        "uniqueId": "0A1B2C3D4E5F",
+        "update": {
+          "autoUpdateEnabled": true,
+          "autoUpdateTime": 3
+        },
+        "wifi": {
+          "ssid": "ExampleNet",
+          "strength": 4
+        },
+        "wifiState": "wan"
+      },
+      "execution": {
+        "brightness": 100,
+        "game": {
+          "backgroundLighting": false,
+          "intensity": "intense"
+        },
+        "hdmiActive": true,
+        "hdmiSource": "input1",
+        "hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "lastSyncMode": "video",
+        "mode": "video",
+        "music": {
+          "intensity": "moderate",
+          "palette": "neutral"
+        },
+        "syncActive": true,
+        "video": {
+          "backgroundLighting": false,
+          "intensity": "high"
+        }
+      },
+      "hdmi": {
+        "audioSyncSupported": true,
+        "contentSpecs": "3840 x 2160 @ 60000 - HDR10",
+        "input1": {
+          "lastSyncMode": "video",
+          "name": "Apple TV",
+          "status": "linked",
+          "type": "appletv"
+        },
+        "input2": {
+          "lastSyncMode": "game",
+          "name": "PlayStation",
+          "status": "plugged",
+          "type": "playstation"
+        },
+        "input3": {
+          "lastSyncMode": "video",
+          "name": "HDMI 3",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "input4": {
+          "lastSyncMode": "video",
+          "name": "HDMI 4",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "output": {
+          "lastSyncMode": "video",
+          "name": "TV",
+          "status": "linked",
+          "type": "tv"
+        },
+        "videoSyncSupported": true
+      },
+      "hue": {
+        "bridgeIpAddress": "10.0.2.143",
+        "bridgeUniqueId": "001788fffe123abc",
+        "connectionState": "streaming",
+        "groupId": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "groups": {
+          "6a7b8c9d-0000-4000-8000-0000000ea001": {
+            "active": true,
+            "name": "Living Room TV",
+            "numLights": 5
+          },
+          "6a7b8c9d-0000-4000-8000-0000000ea002": {
+            "active": false,
+            "name": "Office",
+            "numLights": 3
+          }
+        },
+        "operatingMode": "bridge"
+      },
+      "ir": {
+        "codes": {},
+        "defaultCodes": true
+      },
+      "presets": {},
+      "registrations": {
+        "1": {
+          "appName": "huesync",
+          "instanceName": "Phone",
+          "role": "admin",
+          "verified": true
+        }
+      }
+    },
+    "HSB2_behind_receiver": {
+      "behavior": {
+        "arcBypassMode": 1,
+        "cecPowersave": 1,
+        "hpdInputSwitch": 0,
+        "inactivePowersave": 20,
+        "input1": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 1
+        },
+        "input2": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "input3": {
+          "cecInputSwitch": 0,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "input4": {
+          "cecInputSwitch": 0,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "soloMode": 0,
+        "usbPowersave": 0
+      },
+      "device": {
+        "action": "none",
+        "apiLevel": 14,
+        "beta": false,
+        "bluetooth": true,
+        "buildNumber": 2050400,
+        "capabilities": {
+          "maxIrCodes": 16,
+          "maxPresets": 16
+        },
+        "deviceType": "HSB2",
+        "firmwareVersion": "2.5.4",
+        "ipAddress": "10.0.2.150",
+        "ledMode": 1,
+        "name": "Living Room Sync Box",
+        "overheating": false,
+        "pushlink": "idle",
+        "temperature": 44,
+        "termsAgreed": true,
+        "undervolt": false,
+        "uniqueId": "0A1B2C3D4E5F",
+        "update": {
+          "autoUpdateEnabled": true,
+          "autoUpdateTime": 3
+        },
+        "wifi": {
+          "ssid": "ExampleNet",
+          "strength": 4
+        },
+        "wifiState": "wan"
+      },
+      "execution": {
+        "brightness": 100,
+        "game": {
+          "backgroundLighting": false,
+          "intensity": "intense"
+        },
+        "hdmiActive": true,
+        "hdmiSource": "input1",
+        "hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "lastSyncMode": "video",
+        "mode": "video",
+        "music": {
+          "intensity": "moderate",
+          "palette": "neutral"
+        },
+        "syncActive": true,
+        "video": {
+          "backgroundLighting": false,
+          "intensity": "high"
+        }
+      },
+      "hdmi": {
+        "audioSyncSupported": true,
+        "contentSpecs": "3840 x 2160 @ 60000 - HDR10",
+        "input1": {
+          "lastSyncMode": "video",
+          "name": "Apple TV",
+          "status": "linked",
+          "type": "appletv"
+        },
+        "input2": {
+          "lastSyncMode": "game",
+          "name": "PlayStation",
+          "status": "plugged",
+          "type": "playstation"
+        },
+        "input3": {
+          "lastSyncMode": "video",
+          "name": "HDMI 3",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "input4": {
+          "lastSyncMode": "video",
+          "name": "HDMI 4",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "output": {
+          "lastSyncMode": "video",
+          "name": "TV",
+          "status": "linked",
+          "type": "tv"
+        },
+        "videoSyncSupported": true
+      },
+      "hue": {
+        "bridgeIpAddress": "10.0.2.143",
+        "bridgeUniqueId": "001788fffe123abc",
+        "connectionState": "streaming",
+        "groupId": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "groups": {
+          "6a7b8c9d-0000-4000-8000-0000000ea001": {
+            "active": true,
+            "name": "Living Room TV",
+            "numLights": 5
+          },
+          "6a7b8c9d-0000-4000-8000-0000000ea002": {
+            "active": false,
+            "name": "Office",
+            "numLights": 3
+          }
+        },
+        "operatingMode": "bridge"
+      },
+      "ir": {
+        "codes": {},
+        "defaultCodes": true
+      },
+      "presets": {},
+      "registrations": {
+        "1": {
+          "appName": "huesync",
+          "instanceName": "Phone",
+          "role": "admin",
+          "verified": true
+        }
+      }
+    },
+    "HSB2_second_output": {
+      "behavior": {
+        "arcBypassMode": 0,
+        "cecPowersave": 1,
+        "hpdInputSwitch": 0,
+        "inactivePowersave": 20,
+        "input1": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 1
+        },
+        "input2": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "input3": {
+          "cecInputSwitch": 0,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "input4": {
+          "cecInputSwitch": 0,
+          "hpdInputPortSwitch": 0,
+          "linkAutoSync": 0
+        },
+        "soloMode": 1,
+        "usbPowersave": 0
+      },
+      "device": {
+        "action": "none",
+        "apiLevel": 14,
+        "beta": false,
+        "bluetooth": true,
+        "buildNumber": 2050400,
+        "capabilities": {
+          "maxIrCodes": 16,
+          "maxPresets": 16
+        },
+        "deviceType": "HSB2",
+        "firmwareVersion": "2.5.4",
+        "ipAddress": "10.0.2.150",
+        "ledMode": 1,
+        "name": "Living Room Sync Box",
+        "overheating": false,
+        "pushlink": "idle",
+        "temperature": 44,
+        "termsAgreed": true,
+        "undervolt": false,
+        "uniqueId": "0A1B2C3D4E5F",
+        "update": {
+          "autoUpdateEnabled": true,
+          "autoUpdateTime": 3
+        },
+        "wifi": {
+          "ssid": "ExampleNet",
+          "strength": 4
+        },
+        "wifiState": "wan"
+      },
+      "execution": {
+        "brightness": 100,
+        "game": {
+          "backgroundLighting": false,
+          "intensity": "intense"
+        },
+        "hdmiActive": true,
+        "hdmiSource": "input1",
+        "hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "lastSyncMode": "video",
+        "mode": "video",
+        "music": {
+          "intensity": "moderate",
+          "palette": "neutral"
+        },
+        "syncActive": true,
+        "video": {
+          "backgroundLighting": false,
+          "intensity": "high"
+        }
+      },
+      "hdmi": {
+        "audioSyncSupported": true,
+        "contentSpecs": "3840 x 2160 @ 60000 - HDR10",
+        "input1": {
+          "lastSyncMode": "video",
+          "name": "Apple TV",
+          "status": "linked",
+          "type": "appletv"
+        },
+        "input2": {
+          "lastSyncMode": "game",
+          "name": "PlayStation",
+          "status": "plugged",
+          "type": "playstation"
+        },
+        "input3": {
+          "lastSyncMode": "video",
+          "name": "HDMI 3",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "input4": {
+          "lastSyncMode": "video",
+          "name": "HDMI 4",
+          "status": "unplugged",
+          "type": "generic"
+        },
+        "output": {
+          "lastSyncMode": "video",
+          "name": "TV",
+          "status": "linked",
+          "type": "tv"
+        },
+        "videoSyncSupported": true
+      },
+      "hue": {
+        "bridgeIpAddress": "10.0.2.143",
+        "bridgeUniqueId": "001788fffe123abc",
+        "connectionState": "streaming",
+        "groupId": "6a7b8c9d-0000-4000-8000-0000000ea001",
+        "groups": {
+          "6a7b8c9d-0000-4000-8000-0000000ea001": {
+            "active": true,
+            "name": "Living Room TV",
+            "numLights": 5
+          },
+          "6a7b8c9d-0000-4000-8000-0000000ea002": {
+            "active": false,
+            "name": "Office",
+            "numLights": 3
+          }
+        },
+        "operatingMode": "bridge"
+      },
+      "ir": {
+        "codes": {},
+        "defaultCodes": true
+      },
+      "presets": {},
+      "registrations": {
+        "1": {
+          "appName": "huesync",
+          "instanceName": "Phone",
+          "role": "admin",
+          "verified": true
+        }
+      }
+    },
+    "HSB3": {
+      "behavior": {
+        "arcBypassMode": 0,
+        "cecPowersave": 1,
+        "inactivePowersave": 10,
+        "input1": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 1,
+          "linkAutoSync": 1
+        },
+        "soloMode": 0
+      },
+      "device": {
+        "action": "none",
+        "apiLevel": 14,
+        "beta": false,
+        "bluetooth": true,
+        "buildNumber": 3050200,
+        "capabilities": {
+          "maxIrCodes": 0,
+          "maxPresets": 16
+        },
+        "deviceType": "HSB3",
+        "firmwareVersion": "3.5.2",
+        "ipAddress": "10.0.2.150",
+        "ledMode": 2,
+        "name": "Bedroom Sync Box",
+        "overheating": false,
+        "pushlink": "idle",
+        "temperature": 38,
+        "termsAgreed": true,
+        "uniqueId": "0A1B2C3D4E5F",
+        "update": {
+          "autoUpdateEnabled": false,
+          "autoUpdateTime": 4
+        },
+        "wifi": {
+          "ssid": "ExampleNet",
+          "strength": 2
+        },
+        "wifiState": "wan"
+      },
+      "execution": {
+        "brightness": 80,
+        "game": {
+          "backgroundLighting": true,
+          "intensity": "high"
+        },
+        "hdmiActive": false,
+        "hdmiSource": "input1",
+        "hueTarget": "6a7b8c9d-0000-4000-8000-0000000ea002",
+        "lastSyncMode": "game",
+        "mode": "powersave",
+        "music": {
+          "intensity": "intense",
+          "palette": "melancholicEnergetic"
+        },
+        "syncActive": false,
+        "video": {
+          "backgroundLighting": false,
+          "intensity": "subtle"
+        }
+      },
+      "hdmi": {
+        "audioSyncSupported": false,
+        "contentSpecs": "",
+        "input1": {
+          "lastSyncMode": "game",
+          "name": "Game Console",
+          "status": "plugged",
+          "type": "nintendoswitch"
+        },
+        "output": {
+          "lastSyncMode": "game",
+          "name": "Monitor",
+          "status": "plugged",
+          "type": "monitor"
+        },
+        "videoSyncSupported": false
+      },
+      "hue": {
+        "bridgeIpAddress": "10.0.2.143",
+        "bridgeUniqueId": "001788fffe123abc",
+        "connectionState": "connected",
+        "groupId": "6a7b8c9d-0000-4000-8000-0000000ea002",
+        "groups": {
+          "6a7b8c9d-0000-4000-8000-0000000ea001": {
+            "active": false,
+            "name": "Living Room TV",
+            "numLights": 5
+          },
+          "6a7b8c9d-0000-4000-8000-0000000ea002": {
+            "active": false,
+            "name": "Office",
+            "numLights": 3
+          }
+        },
+        "operatingMode": "bridge"
+      },
+      "presets": {},
+      "registrations": {
+        "1": {
+          "appName": "huesync",
+          "instanceName": "Phone",
+          "role": "admin",
+          "verified": true
+        }
+      }
+    },
+    "HSB3_standalone": {
+      "behavior": {
+        "arcBypassMode": 0,
+        "cecPowersave": 1,
+        "inactivePowersave": 10,
+        "input1": {
+          "cecInputSwitch": 1,
+          "hpdInputPortSwitch": 1,
+          "linkAutoSync": 1
+        },
+        "soloMode": 0
+      },
+      "device": {
+        "action": "none",
+        "apiLevel": 14,
+        "beta": false,
+        "bluetooth": true,
+        "buildNumber": 3050200,
+        "capabilities": {
+          "maxIrCodes": 0,
+          "maxPresets": 16
+        },
+        "deviceType": "HSB3",
+        "firmwareVersion": "3.5.2",
+        "ipAddress": "10.0.2.150",
+        "ledMode": 2,
+        "name": "Bedroom Sync Box",
+        "overheating": false,
+        "pushlink": "idle",
+        "temperature": 38,
+        "termsAgreed": true,
+        "uniqueId": "0A1B2C3D4E5F",
+        "update": {
+          "autoUpdateEnabled": false,
+          "autoUpdateTime": 4
+        },
+        "wifi": {
+          "ssid": "ExampleNet",
+          "strength": 2
+        },
+        "wifiState": "wan"
+      },
+      "execution": {
+        "brightness": 80,
+        "game": {
+          "backgroundLighting": true,
+          "intensity": "high"
+        },
+        "hdmiActive": true,
+        "hdmiSource": "input1",
+        "hueTarget": "",
+        "lastSyncMode": "game",
+        "mode": "passthrough",
+        "music": {
+          "intensity": "intense",
+          "palette": "melancholicEnergetic"
+        },
+        "syncActive": false,
+        "video": {
+          "backgroundLighting": false,
+          "intensity": "subtle"
+        }
+      },
+      "hdmi": {
+        "audioSyncSupported": true,
+        "contentSpecs": "2560 x 1440 @ 120000 - SDR",
+        "input1": {
+          "lastSyncMode": "game",
+          "name": "Game Console",
+          "status": "linked",
+          "type": "nintendoswitch"
+        },
+        "output": {
+          "lastSyncMode": "game",
+          "name": "Monitor",
+          "status": "linked",
+          "type": "monitor"
+        },
+        "videoSyncSupported": true
+      },
+      "hue": {
+        "bleConnectionState": "connected",
+        "bridgeIpAddress": "",
+        "bridgeUniqueId": "",
+        "connectionState": "uninitialized",
+        "groupId": "",
+        "groups": {},
+        "operatingMode": "standalone"
+      },
+      "presets": {},
+      "registrations": {
+        "1": {
+          "appName": "huesync",
+          "instanceName": "Phone",
+          "role": "admin",
+          "verified": true
+        }
+      }
+    }
+  }
+}

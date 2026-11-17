@@ -11,17 +11,19 @@ VM's LAN address, never every address unless --bind 0.0.0.0 says so):
 The TLS certificate is self-signed, generated with openssl into --cert-dir on
 first run; the driver talks to it in "insecure" mode, so its contents don't matter.
 
-Three served trees (published path -> file), each exactly the layout
+Four served trees (published path -> file), each exactly the layout
 tools/build.sh stages for that driver; /manifest, /bundle and /file take
-?tree=bridge (the default), ?tree=light or ?tree=scene:
-  bridge: src/hue_bridge/**/*.lua, **/*.xml, certs/*  ->  driver.lua, bridge/http.lua, certs/x.pem
-  light:  src/hue_light/**/*.lua, **/*.xml, certs/*   ->  driver.lua, light/state.lua
-  scene:  src/hue_scene/**/*.lua, **/*.xml, certs/*   ->  driver.lua, scene/...
-  all:    src/common/*.lua                            ->  common/log.lua
+?tree=bridge (the default), ?tree=light, ?tree=scene or ?tree=syncbox:
+  bridge:  src/hue_bridge/**/*.lua, **/*.xml, certs/*   ->  driver.lua, bridge/http.lua, certs/x.pem
+  light:   src/hue_light/**/*.lua, **/*.xml, certs/*    ->  driver.lua, light/state.lua
+  scene:   src/hue_scene/**/*.lua, **/*.xml, certs/*    ->  driver.lua, scene/...
+  syncbox: src/hue_syncbox/**/*.lua, **/*.xml, certs/*  ->  driver.lua, syncbox/client.lua (#547)
+  all:     src/common/*.lua                             ->  common/log.lua
 A file named devkey.lua is never served. A tree's version is sha1 over, in
 sorted published-path order, path + "\\0" + contents. It is recomputed on every
 /manifest and /bundle. Only the bridge driver talks to this server; it forwards
-the light and scene trees to its bound devices itself (docs/dev-loop.md).
+the light, scene and sync box trees to its bound devices itself
+(docs/dev-loop.md).
 
 Security (docs/dev-loop.md, "Security"): the dev key, 64 lowercase hex
 characters in ~/.config/c4-hue-driver/devkey (0600; C4_HUE_DEVKEY_FILE or
@@ -257,7 +259,10 @@ def url_host(bind):
 # The served tree
 # ---------------------------------------------------------------------------
 
-TREES = ("bridge", "light", "scene")
+TREES = ("bridge", "light", "scene", "syncbox")
+# The trees the bridge forwards to its devices, each with its own running
+# version in /status (running_<tree>_version, local_..., live_...).
+DEVICE_TREES = ("light", "scene", "syncbox")
 
 
 class Tree:
@@ -352,7 +357,8 @@ class State:
         self.done = []  # ids the driver reported command_done for, oldest first
         self.running_version = None
         self.running_light_version = None  # what the bridge last forwarded to its lights
-        self.running_scene_version = None  # ... and to its scene devices
+        self.running_scene_version = None  # ... to its scene devices
+        self.running_syncbox_version = None  # ... and to its sync box devices (#547)
         self.last_seen = None
         self.last_event = None
         self.last_error = None  # text of the most recent report that carried "error"
@@ -387,7 +393,7 @@ class State:
             json.dump({"next_id": self.next_id, "commands": self.commands, "done": self.done}, f, indent=1)
         os.replace(tmp, self.commands_path)
 
-    def touch(self, version=None, light_version=None, scene_version=None):
+    def touch(self, version=None, light_version=None, scene_version=None, syncbox_version=None):
         """The driver talked to us."""
         with self.lock:
             self.last_seen = now()
@@ -397,6 +403,8 @@ class State:
                 self.running_light_version = light_version
             if isinstance(scene_version, str) and scene_version:
                 self.running_scene_version = scene_version
+            if isinstance(syncbox_version, str) and syncbox_version:
+                self.running_syncbox_version = syncbox_version
 
     def note_fingerprint(self, reported, ours):
         """Record the key fingerprint a report carried (None: the driver has no
@@ -480,6 +488,8 @@ class State:
             summary += " lv=%s" % report["light_version"][:12]
         if isinstance(report.get("scene_version"), str):
             summary += " sv=%s" % report["scene_version"][:12]
+        if isinstance(report.get("syncbox_version"), str):
+            summary += " bv=%s" % report["syncbox_version"][:12]
         if isinstance(report.get("tree"), str):
             summary += " tree=%s" % report["tree"]
         if isinstance(report.get("refused_version"), str):
@@ -494,7 +504,7 @@ class State:
             summary += " error=%s" % clean(report["error"])[:300]
         return clean(summary)
 
-    def status(self, local_version, local_light_version, local_scene_version=None):
+    def status(self, local_version, local_light_version, local_scene_version=None, local_syncbox_version=None):
         """/status. Beyond the fields in docs/dev-loop.md this adds:
         done_commands  ids the driver has reported command_done for (last
                        DONE_KEEP, oldest first); `devctl wait` polls this
@@ -509,6 +519,8 @@ class State:
                 "local_light_version": local_light_version,
                 "running_scene_version": self.running_scene_version,
                 "local_scene_version": local_scene_version,
+                "running_syncbox_version": self.running_syncbox_version,
+                "local_syncbox_version": local_syncbox_version,
                 "last_seen": self.last_seen,
                 "last_event": self.last_event,
                 "last_error": self.last_error,
@@ -738,7 +750,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- dev-loop endpoints -------------------------------------------------
 
     def tree_from(self, query):
-        """The tree a request names (?tree=bridge|light|scene, default bridge),
+        """The tree a request names (?tree=bridge|light|scene|syncbox, default bridge),
         or None after a 400 has been sent."""
         name = query.get("tree", ["bridge"])[0]
         tree = self.server.trees.get(name)
@@ -803,15 +815,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_status(self, query):
         trees = self.server.trees
-        status = self.server.state.status(
-            trees["bridge"].snapshot()[0], trees["light"].snapshot()[0], trees["scene"].snapshot()[0]
-        )
+        status = self.server.state.status(*(trees[name].snapshot()[0] for name in TREES))
         # While pinned, local_* are the served (pinned) versions; live_* say
         # what the working tree has become in the meantime.
         status["pinned"] = self.pinned_versions()
         status["live_version"] = trees["bridge"].read()[0]
-        status["live_light_version"] = trees["light"].read()[0]
-        status["live_scene_version"] = trees["scene"].read()[0]
+        for name in DEVICE_TREES:
+            status["live_%s_version" % name] = trees[name].read()[0]
         status["key_fingerprint"] = self.server.key_fingerprint
         self.send_json(status)
 
@@ -835,7 +845,9 @@ class Handler(BaseHTTPRequestHandler):
         if err:
             self.send_bad_request(err, status or 400)
             return
-        self.server.state.touch(body.get("version"), body.get("light_version"), body.get("scene_version"))
+        self.server.state.touch(
+            body.get("version"), body.get("light_version"), body.get("scene_version"), body.get("syncbox_version")
+        )
         warning = self.server.state.note_fingerprint(body.get("key_fingerprint"), self.server.key_fingerprint)
         if warning:
             log(warning)
@@ -859,7 +871,7 @@ class Handler(BaseHTTPRequestHandler):
         return {name: (tree.pinned[0] if tree.pinned else None) for name, tree in self.server.trees.items()}
 
     def post_pin(self, query):
-        """Pin every tree (or ?tree=bridge|light|scene) to its content right
+        """Pin every tree (or ?tree=bridge|light|scene|syncbox) to its content right
         now; the controller keeps that version until unpin or the next pin."""
         names = query.get("tree") or list(self.server.trees)
         for name in names:

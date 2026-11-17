@@ -15,6 +15,15 @@ if not package.path:find("src/hue_syncbox/?.lua", 1, true) then
 	package.path = "src/hue_syncbox/?.lua;" .. package.path
 end
 
+-- The release build's cases: tools/build.sh deletes syncbox/devhooks.lua
+-- from every release stage (#547, docs/fakebox-design.md §7), so it is kept
+-- out here, as it would be missing on the controller; the dev build's cases,
+-- with it, are in the describe "a dev build's syncbox/devhooks.lua" below.
+package.loaded["syncbox.devhooks"] = nil
+package.preload["syncbox.devhooks"] = function()
+	error("module 'syncbox.devhooks' not found (a release build)", 0)
+end
+
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
 
@@ -527,5 +536,68 @@ describe("syncbox/discovery.lua (#534)", function()
 			assert.is_nil(discovery.normalise_id("0A1B2C3D4E5G"))
 			assert.is_nil(discovery.normalise_id(nil))
 		end)
+	end)
+
+	-- #547, docs/fakebox-design.md §7: the VM's fake box answers on 8443 and
+	-- announces that port; a dev build checks and lists it at "ip:port".
+	describe("a dev build's syncbox/devhooks.lua (#547)", function()
+		local blocked
+
+		before_each(function()
+			blocked = package.preload["syncbox.devhooks"]
+			package.preload["syncbox.devhooks"], package.loaded["syncbox.devhooks"] = nil, nil
+			load()
+		end)
+
+		after_each(function()
+			package.preload["syncbox.devhooks"], package.loaded["syncbox.devhooks"] = blocked, nil
+		end)
+
+		it("checks and lists a box that announces another SRV port at ip:port", function()
+			local r = box(BOX_ID, { BOX_IP }, { port = 8443, name = "Fake Box" })
+			lan.boxes[BOX_IP .. ":8443"], lan.boxes[BOX_IP] = lan.boxes[BOX_IP], nil
+			local answers = search()
+			assert.equal(1, #lan.identifies)
+			assert.equal(BOX_IP .. ":8443", lan.identifies[1].address)
+			assert.same({ { id = BOX_ID, name = r.name, model = "HSB2", address = BOX_IP .. ":8443",
+				device_type = "HSB2", firmware = "2.5.4", api_level = 14 } }, answers[1].list)
+			assert.same({}, answers[1].detail.dropped)
+		end)
+
+		-- tools/fakebox.py serves several boxes from the VM's one address, each
+		-- on its own port: each is its own candidate (F2, #547).
+		it("checks and lists several boxes on one address, each at its own port", function()
+			local second = other_id(1)
+			box(BOX_ID, { BOX_IP }, { port = 8443, name = "Fake A" })
+			box(second, { BOX_IP }, { port = 8444, name = "Fake B" })
+			lan.boxes[BOX_IP .. ":8443"] = { id = BOX_ID, name = "Fake A", model = "HSB2" }
+			lan.boxes[BOX_IP .. ":8444"] = { id = second, name = "Fake B", model = "HSB2" }
+			lan.boxes[BOX_IP] = nil
+			local answers = search()
+			local listed = {}
+			for _, item in ipairs(answers[1].list) do listed[#listed + 1] = item.id .. "@" .. item.address end
+			assert.same({ BOX_ID .. "@" .. BOX_IP .. ":8443", second .. "@" .. BOX_IP .. ":8444" }, listed)
+			assert.equal(2, #lan.identifies)
+		end)
+
+		it("keeps a box on 443 at its bare address, and one id once per address", function()
+			box(BOX_ID, { BOX_IP }, { port = 443 })
+			local answers = search()
+			assert.equal(BOX_IP, answers[1].list[1].address)
+			assert.equal(1, #lan.identifies)
+			assert.equal(BOX_IP, lan.identifies[1].address)
+		end)
+
+		it("still drops a port no URL can carry", function()
+			box(BOX_ID, { BOX_IP }, { port = 0 })
+			local answers = search()
+			assert.same({}, answers[1].list)
+			assert.equal(0, #lan.identifies)
+			assert.equal("announced port 0", answers[1].detail.dropped[1].why)
+		end)
+	end)
+
+	teardown(function()
+		package.preload["syncbox.devhooks"] = nil
 	end)
 end)
