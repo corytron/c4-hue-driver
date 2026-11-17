@@ -1,22 +1,30 @@
 -- The Sync Box Settings offers of the Hue Sync Box driver (2.0 beta stage 4,
 -- #568; docs/hdmi-sync-stage4-design.md §1.4 and §5, design
 -- docs/hdmi-sync-design.md §5.4 and §5.8, contracts C1.4, C1.5 and C2 in
--- docs/hdmi-sync-contracts.md, owner's answers O4 and O18): what the box
+-- docs/hdmi-sync-contracts.md, owner's answers O4, O17 and O18): what the box
 -- does by itself is shown, put on Attention while it switches inputs and
--- Control4 routes through it, and turned off or put back only by a click.
+-- Control4 routes through it, and turned off or put back only by a click;
+-- the box's wiring setting (in line, behind a receiver, on a receiver's
+-- second output) is shown by the driver's Wiring row and changed only by a
+-- click here too.
 --
 --   local o = offers.new{ client, poller, persist_get, persist_set,
 --                         persist_delete, now, log }
 --   o:observe(model)     every good read (syncbox/state.lua's model)
---   o:choices()          → { { text, value } }: the Sync Box Settings items
---                        (OFFER_LET, then OFFER_RESTORE), always both
+--   o:choices()          → { { text, value } }: the Sync Box Settings items:
+--                        OFFER_LET and OFFER_RESTORE always; then each
+--                        wiring the box can be set to and is not in now
+--                        (OFFER_WIRING[w], in WIRINGS' order); then
+--                        OFFER_WIRING_RESTORE while a wiring change of ours
+--                        can be put back
 --   o:choose(value, done) → true when `value` is one of them (else false,
 --                        done not called); done(ok, text) once, `text` for
 --                        Last Action. One PUT /behavior at most
 --   o:row()              → the Input Switching row (contracts C1.4)
 --   o:attention(routed)  → a text while the box switches inputs by itself
 --                        and Control4 routes through it (`routed` false: nil)
---   o:record()           → a copy of the recorded previous values, or nil
+--   o:record([kind])     → a copy of the recorded previous values, or nil;
+--                        kind "inputs" (the default) or "wiring"
 --   o:stop()             a PUT still out is forgotten (OnDriverDestroyed)
 --
 -- What the offer turns off (contracts C2's PUT /behavior; design 5.8, O18;
@@ -31,10 +39,26 @@
 --                                   (HSB1 and HSB2, SB62)
 --              cecPowersave         power save when the TV sends CEC standby
 --                                   (SB75; O18: Control4 owns power)
--- usbPowersave, inactivePowersave, arcBypassMode, soloMode and hdrMode are
--- never written: the first two are no CEC behaviour and stay the box's (O18
--- names only CEC), the wiring is the Hue Sync app's (design 5.8), and the
--- rest is picture settings (edge cases §7).
+-- usbPowersave, inactivePowersave and hdrMode are never written: the first
+-- two are no CEC behaviour and stay the box's (O18 names only CEC), the last
+-- is a picture setting (edge cases §7).
+--
+-- The wiring (design 5.8, O17; docs/syncbox-wirings-research.md, W22): the
+-- box's arcBypassMode and soloMode (SB62, SB64; soloMode from API level 14),
+-- read as syncbox/state.lua does (solo mode first, then ARC bypass, else in
+-- line). Each choice sets the keys the box has:
+--   wiring:in_line          arcBypassMode 0, soloMode 0
+--   wiring:behind_receiver  arcBypassMode 1, soloMode 0 (needs arcBypassMode)
+--   wiring:second_output    soloMode 1, arcBypassMode 0 (needs soloMode)
+-- offered only when the box is in another wiring and has the key it needs;
+-- only the keys that differ are sent. Its Last Action says what the box now
+-- does and how Control4's connections must match the cables (the manual's
+-- wiring section, wirings research §7.3). It is recorded and put back as the
+-- input switching is, in its own record (WIRING_KEY), by its own Restore
+-- (OFFER_WIRING_RESTORE): the input switching's Restore never moves the
+-- wiring, nor the wiring's the input switching. A second wiring click keeps
+-- the values recorded first, so its Restore goes back to the wiring the box
+-- had before Control4 first changed it.
 --
 -- The rules (edge cases B24, I1, rule 5: the box's own automations are
 -- Hue-side automations, shown and changed only by a click that can be
@@ -59,14 +83,16 @@
 --     changes the picture behind Control4's back (I1); auto-sync and power
 --     save stay on the row (B24) and in the offer (O18).
 --
--- The record is persisted plain (no secret in it) under KEY: { v, box_id,
--- at, values = { ["cecPowersave"] = 1, ["input1.cecInputSwitch"] = 1, ... }
--- } [verified: SDK docs-driverworks-api 26.5_persistence/_4-PersistSetValue.md:
--- a table value, nested tables allowed]. PersistSetValue is called without
+-- Each record is persisted plain (no secret in it), under KEY for the input
+-- switching and WIRING_KEY for the wiring: { v, box_id, at, values = {
+-- ["cecPowersave"] = 1, ["input1.cecInputSwitch"] = 1, ... } } [verified:
+-- SDK docs-driverworks-api 26.5_persistence/_4-PersistSetValue.md: a table
+-- value, nested tables allowed]. PersistSetValue is called without
 -- the encrypted argument: the flag goes only when true, and an explicit nil
 -- raises on the controller (syncbox/store.lua, #547). PersistGetValue may lag
 -- a write made moments before (same page), so the record is read from the
--- storage only once a run and kept in memory.
+-- storage only once a run and kept in memory. One PUT of ours is out at a
+-- time, whichever offer sent it.
 --
 -- DriverWorks calls: none but the defaults of persist_get, persist_set and
 -- persist_delete (C4:PersistGetValue, PersistSetValue, PersistDeleteValue)
@@ -88,6 +114,9 @@ offers.OFFER_LET = "inputs:control4"
 offers.OFFER_RESTORE = "inputs:restore"
 offers.LABEL_LET = "Let Control4 choose inputs"
 offers.LABEL_RESTORE = "Restore the box's input switching"
+offers.WIRING_KEY = "syncbox_wiring_offer"
+offers.OFFER_WIRING_RESTORE = "wiring:restore"
+offers.LABEL_WIRING_RESTORE = "Restore the box's wiring"
 offers.UNKNOWN = "\226\128\148" -- an em dash: nothing known (as syncbox/state.lua)
 offers.ROW_MAX = https.TEXT_ROW
 offers.TEXT_MAX = 400          -- a Last Action text, before its wrap onto (2) to (6)
@@ -105,6 +134,39 @@ offers.BOX_WIDE = {
 	{ key = "cecPowersave", field = "cec_powersave" },
 }
 
+-- The wirings (design 5.8): the values each sets, the key it needs, and what
+-- the box then does with Control4's connections.
+offers.WIRING_ORDER = { "in_line", "behind_receiver", "second_output" }
+offers.WIRINGS = {
+	in_line = {
+		name = "In line",
+		values = { arcBypassMode = 0, soloMode = 0 },
+		does = "Director switches it to each source's HDMI input",
+		connect = "connect each source to its HDMI input on the box and the box's HDMI Out to the TV or receiver",
+	},
+	behind_receiver = {
+		name = "Behind a receiver",
+		values = { arcBypassMode = 1, soloMode = 0 },
+		needs = "arcBypassMode",
+		does = "every source reaches it from the receiver on HDMI 1",
+		connect = "connect the receiver's HDMI output to the box's HDMI 1 and the box's HDMI Out to the TV",
+	},
+	second_output = {
+		name = "From a receiver's second output",
+		values = { soloMode = 1, arcBypassMode = 0 },
+		needs = "soloMode",
+		does = "it follows a room (Follow Room) and Director routes nothing through it",
+		connect = "connect the receiver's second HDMI output to the box's HDMI 1 if its driver offers one, and never "
+			.. "connect the box's HDMI Out",
+	},
+}
+offers.OFFER_WIRING = {}
+for _, w in ipairs(offers.WIRING_ORDER) do
+	offers.OFFER_WIRING[w] = "wiring:" .. w
+end
+-- The wiring keys: the box's name and the model's (syncbox/state.lua).
+offers.WIRING_FIELDS = { { key = "arcBypassMode", field = "arc_bypass" }, { key = "soloMode", field = "solo" } }
+
 -- The client's own refusals: nothing reached the box (syncbox/client.lua).
 local NOT_SENT = { ["not paired"] = true, ["no box address"] = true, busy = true,
 	["invalid request path"] = true }
@@ -118,6 +180,12 @@ for n = 1, offers.INPUTS do
 		KNOWN_KEYS["input" .. n .. "." .. s.key] = true
 	end
 end
+
+-- Per kind of record: its storage key and the keys it may hold.
+local RECORDS = {
+	inputs = { key = offers.KEY, known = KNOWN_KEYS, what = "input switching settings" },
+	wiring = { key = offers.WIRING_KEY, known = { arcBypassMode = true, soloMode = true }, what = "wiring" },
+}
 
 local function default_get(name)
 	return C4:PersistGetValue(name)
@@ -150,7 +218,7 @@ function offers.new(deps)
 		now = deps.now or default_now,
 		log = deps.log or require("common.log"),
 		model = nil,
-		rec = nil,       -- the record in memory (false: none)
+		recs = {},       -- kind -> the record in memory (false: none)
 		busy = false,    -- a PUT of ours is out
 		gen = 0,         -- bumped by stop(): a late answer changes nothing
 	}, offers)
@@ -182,12 +250,80 @@ function offers.settings(model)
 	return out
 end
 
+-- The wiring keys the box has in `model`: { { key, on } }; nil when the read
+-- carried no behavior.
+function offers.wiring_settings(model)
+	local b = type(model) == "table" and type(model.behavior) == "table" and model.behavior or nil
+	if not b then
+		return nil
+	end
+	local out = {}
+	for _, s in ipairs(offers.WIRING_FIELDS) do
+		if b[s.field] ~= nil then
+			out[#out + 1] = { key = s.key, kind = s.key, on = b[s.field] == true }
+		end
+	end
+	return out
+end
+
+local function settings_of(kind, model)
+	if kind == "wiring" then
+		return offers.wiring_settings(model)
+	end
+	return offers.settings(model)
+end
+
+-- The wiring the flags make, as syncbox/state.lua reads them.
+local function wiring_of(flags)
+	if flags.soloMode == 1 then
+		return "second_output"
+	elseif flags.arcBypassMode == 1 then
+		return "behind_receiver"
+	end
+	return "in_line"
+end
+
+-- "ARC bypass and solo mode off", "ARC bypass on, solo mode off": what a
+-- wiring sets, for the keys `have` holds.
+local function flags_text(w, have)
+	local v = offers.WIRINGS[w].values
+	local arc, solo = have.arcBypassMode ~= nil, have.soloMode ~= nil
+	if w == "in_line" then
+		return arc and solo and "ARC bypass and solo mode off" or arc and "ARC bypass off" or "solo mode off"
+	end
+	local parts = {}
+	for _, s in ipairs(w == "second_output" and { "soloMode", "arcBypassMode" } or { "arcBypassMode", "soloMode" }) do
+		if have[s] ~= nil then
+			parts[#parts + 1] = (s == "soloMode" and "solo mode " or "ARC bypass ") .. (v[s] == 1 and "on" or "off")
+		end
+	end
+	return table.concat(parts, ", ")
+end
+
 local function by_key(list)
 	local out = {}
 	for _, s in ipairs(list or {}) do
 		out[s.key] = s
 	end
 	return out
+end
+
+-- { [key] = 0 | 1 } of the settings `list` holds.
+local function flags_of(list)
+	local out = {}
+	for _, s in ipairs(list or {}) do
+		out[s.key] = s.on and 1 or 0
+	end
+	return out
+end
+
+-- "ARC bypass, solo mode": the wiring keys in words.
+local function wiring_keys_text(keys)
+	local parts = {}
+	for _, key in ipairs(keys) do
+		parts[#parts + 1] = key == "soloMode" and "solo mode" or "ARC bypass"
+	end
+	return table.concat(parts, ", ")
 end
 
 -- "HDMI 1, 2"
@@ -272,7 +408,7 @@ end
 -- A stored record as it may be used, or nil (an older build, a bug, a
 -- hand-edited store): the box id 12 hex digits, values 0 or 1 under known
 -- keys only, at least one.
-local function check_record(r)
+local function check_record(r, known)
 	if type(r) ~= "table" or r.v ~= offers.VERSION then
 		return nil
 	end
@@ -283,7 +419,7 @@ local function check_record(r)
 	local values, any = {}, false
 	for key, v in pairs(r.values) do
 		local flag = num.int(v, 0, 1)
-		if KNOWN_KEYS[key] and flag ~= nil and num.finite(v) == flag then
+		if known[key] and flag ~= nil and num.finite(v) == flag then
 			values[key] = flag
 			any = true
 		end
@@ -305,39 +441,42 @@ local function copy_record(r)
 	return { v = r.v, box_id = r.box_id, at = r.at, values = values }
 end
 
-function offers:load()
-	if self.rec == nil then
-		local ok, value = pcall(self.persist_get, offers.KEY)
-		local rec = ok and check_record(value) or nil
+function offers:load(kind)
+	kind = kind or "inputs"
+	local r = RECORDS[kind]
+	if self.recs[kind] == nil then
+		local ok, value = pcall(self.persist_get, r.key)
+		local rec = ok and check_record(value, r.known) or nil
 		if ok and value ~= nil and rec == nil then
-			self.log.warn("Sync box: the recorded input switching settings are not usable; Restore has nothing to "
-				.. "put back")
+			self.log.warn("Sync box: the recorded %s are not usable; Restore has nothing to put back", r.what)
 		end
-		self.rec = rec or false
+		self.recs[kind] = rec or false
 	end
-	return self.rec or nil
+	return self.recs[kind] or nil
 end
 
-function offers:save(rec)
-	self.rec = rec or false
+function offers:save(rec, kind)
+	kind = kind or "inputs"
+	local r = RECORDS[kind]
+	self.recs[kind] = rec or false
 	local ok, err
 	if rec then
-		ok, err = pcall(self.persist_set, offers.KEY, copy_record(rec))
+		ok, err = pcall(self.persist_set, r.key, copy_record(rec))
 	else
-		ok, err = pcall(self.persist_delete, offers.KEY)
+		ok, err = pcall(self.persist_delete, r.key)
 	end
 	if not ok then
-		self.log.warn("Sync box: could not store the input switching settings: %s", tostring(err))
+		self.log.warn("Sync box: could not store the %s: %s", r.what, tostring(err))
 	end
 end
 
-function offers:record()
-	return copy_record(self:load())
+function offers:record(kind)
+	return copy_record(self:load(kind))
 end
 
 -- The record of the box read last, or nil.
-function offers:own_record()
-	local rec = self:load()
+function offers:own_record(kind)
+	local rec = self:load(kind)
 	local id = type(self.model) == "table" and self.model.id or nil
 	if rec and id and rec.box_id == id then
 		return rec
@@ -347,12 +486,12 @@ end
 
 -- The recorded keys whose value differs from the box's now (the box has
 -- them), and the recorded keys the box lacks now.
-function offers:restorable()
-	local rec = self:own_record()
+function offers:restorable(kind)
+	local rec = self:own_record(kind)
 	if not rec then
 		return nil
 	end
-	local have = by_key(offers.settings(self.model))
+	local have = by_key(settings_of(kind, self.model))
 	local differ, missing = {}, {}
 	for key, v in pairs(rec.values) do
 		local s = have[key]
@@ -398,10 +537,61 @@ function offers:choices()
 	else
 		restore = offers.LABEL_RESTORE .. " (nothing recorded to put back)"
 	end
-	return {
+	local out = {
 		{ text = cap(let, 240), value = offers.OFFER_LET },
 		{ text = cap(restore, 240), value = offers.OFFER_RESTORE },
 	}
+	local have = flags_of(offers.wiring_settings(self.model))
+	for _, w in ipairs(offers.WIRING_ORDER) do
+		if self:wiring_changes(w) then
+			out[#out + 1] = { text = cap(string.format("Set the box to %s (%s)", offers.WIRINGS[w].name,
+				flags_text(w, have)), 240), value = offers.OFFER_WIRING[w] }
+		end
+	end
+	local back = self:restorable("wiring")
+	if back and #back > 0 then
+		out[#out + 1] = { text = cap(string.format("%s (back to %s)", offers.LABEL_WIRING_RESTORE,
+			offers.WIRINGS[self:restored_wiring(back)].name), 240), value = offers.OFFER_WIRING_RESTORE }
+	end
+	return out
+end
+
+-- The changes setting wiring `w` makes on the box read last ({ [key] = {
+-- from, to } }), or nil and why it is not offered: not read, the key it
+-- needs missing, or the box already in that wiring.
+function offers:wiring_changes(w)
+	local list = offers.wiring_settings(self.model)
+	if not list or not (type(self.model) == "table" and self.model.id) then
+		return nil, "unread"
+	end
+	local have, def = flags_of(list), offers.WIRINGS[w]
+	if def.needs and have[def.needs] == nil then
+		return nil, "lacks"
+	end
+	if wiring_of(have) == w then
+		return nil, "same"
+	end
+	local changes, any = {}, false
+	for key, to in pairs(def.values) do
+		if have[key] ~= nil and have[key] ~= to then
+			changes[key] = { from = have[key], to = to }
+			any = true
+		end
+	end
+	if not any then
+		return nil, "same"
+	end
+	return changes
+end
+
+-- The wiring the box would have with the recorded values of `keys` put back.
+function offers:restored_wiring(keys)
+	local flags = flags_of(offers.wiring_settings(self.model))
+	local rec = self:own_record("wiring")
+	for _, key in ipairs(keys) do
+		flags[key] = rec and rec.values[key] or flags[key]
+	end
+	return wiring_of(flags)
 end
 
 function offers:row()
@@ -501,59 +691,120 @@ function offers:let_control4(done)
 		return self:say(done, true, "Nothing to change: the box already leaves the inputs to Control4 (no HDMI CEC or "
 			.. "hot-plug switching, no auto-sync, no power save when the TV turns off)")
 	end
-	-- Record first: an answer that never comes must not lose the box's values.
-	local before = self:load()
-	local rec = copy_record(self:own_record()) or { v = offers.VERSION, box_id = id, values = {} }
-	rec.at = num.int(self.now(), 0)
-	local values = {}
+	local changes = {}
 	for _, key in ipairs(on) do
-		if rec.values[key] == nil then
-			rec.values[key] = 1
-		end
-		values[key] = 0
+		changes[key] = { from = 1, to = 0 }
 	end
-	self:save(rec)
 	local words = offers.describe(on)
 	self.log.info("Sync box: Let Control4 choose inputs: turning off %s", words)
+	self:change("inputs", changes, done, string.format("Sent: the box no longer does %s by itself; Control4 chooses "
+		.. "its inputs (Sync Box Settings: %s puts it back)", words, offers.LABEL_RESTORE), "the Input Switching row")
+end
+
+-- Record the values `changes` replaces ({ [key] = { from, to } }; a key
+-- already recorded keeps the value recorded first), then send the `to`
+-- values in one PUT. Record first: an answer that never comes must not lose
+-- the box's values; a refusal changed nothing (SB20), so the record is
+-- rolled back.
+function offers:change(kind, changes, done, sent_text, row)
+	local before = self:load(kind)
+	local rec = copy_record(self:own_record(kind)) or { v = offers.VERSION, box_id = self.model.id, values = {} }
+	rec.at = num.int(self.now(), 0)
+	local values = {}
+	for key, c in pairs(changes) do
+		if rec.values[key] == nil then
+			rec.values[key] = c.from
+		end
+		values[key] = c.to
+	end
+	self:save(rec, kind)
 	self:put(values, function(outcome, why)
 		if outcome == "ok" then
 			self:soon()
-			return self:say(done, true, string.format("Sent: the box no longer does %s by itself; Control4 chooses its "
-				.. "inputs (Sync Box Settings: %s puts it back)", words, offers.LABEL_RESTORE))
+			return self:say(done, true, sent_text)
 		end
 		if outcome == "refused" or outcome == "not sent" then
-			self:save(before and copy_record(before) or nil)
+			self:save(before and copy_record(before) or nil, kind)
 			return self:say(done, false, string.format("Not changed: %s (%s)", outcome == "refused"
 				and "the box refused the change" or "nothing was sent to the box", why))
 		end
 		self:soon()
-		self:say(done, false, string.format("Not confirmed: the box did not answer (%s); the Input Switching row shows "
-			.. "what it does after the next read", why))
+		self:say(done, false, string.format("Not confirmed: the box did not answer (%s); %s shows what it does after "
+			.. "the next read", why, row))
 	end)
 end
 
-function offers:restore(done)
-	local differ, missing = self:restorable()
+-- What the box does in wiring `w`, and how Control4's connections must match.
+local function wiring_words(w, have)
+	local def = offers.WIRINGS[w]
+	return string.format("the box is now %s (%s): %s. Control4's connections must match the cables: %s", def.name,
+		flags_text(w, have), def.does, def.connect)
+end
+
+function offers:set_wiring(w, done)
+	local changes, why = self:wiring_changes(w)
+	local def = offers.WIRINGS[w]
+	if why == "unread" then
+		return self:say(done, false, "Not changed: the box's settings have not been read yet; try again in a moment")
+	elseif why == "lacks" then
+		return self:say(done, false, string.format("Not changed: this box has no %s setting, so it cannot be set to %s",
+			wiring_keys_text({ def.needs }), def.name))
+	elseif why == "same" then
+		return self:say(done, true, string.format("Nothing to change: the box is already %s", def.name))
+	end
+	local have = flags_of(offers.wiring_settings(self.model))
+	self.log.info("Sync box: setting the box's wiring to %s (%s)", def.name, flags_text(w, have))
+	self:change("wiring", changes, done, string.format("Sent: %s (Sync Box Settings: %s puts it back)",
+		wiring_words(w, have), offers.LABEL_WIRING_RESTORE), "the Wiring row")
+end
+
+-- The texts of each Restore.
+local RESTORE_TEXTS = {
+	inputs = {
+		none = "Nothing to restore: " .. offers.LABEL_LET .. " has not changed this box",
+		same = function() return "Nothing to put back: the box already has its own input switching" end,
+		done = function(_, differ) return "Restored the box's own " .. offers.describe(differ) end,
+		missing = offers.describe,
+	},
+	wiring = {
+		none = "Nothing to restore: Sync Box Settings has not changed this box's wiring",
+		same = function(self)
+			return string.format("Nothing to put back: the box already has its own wiring (%s)",
+				offers.WIRINGS[self:restored_wiring({})].name)
+		end,
+		done = function(self, differ)
+			local w = self:restored_wiring(differ)
+			local flags = flags_of(offers.wiring_settings(self.model))
+			return "Restored the box's wiring: " .. wiring_words(w, flags)
+		end,
+		missing = wiring_keys_text,
+	},
+}
+
+function offers:restore(done, kind)
+	kind = kind or "inputs"
+	local texts = RESTORE_TEXTS[kind]
+	local differ, missing = self:restorable(kind)
 	if not differ then
-		return self:say(done, false, "Nothing to restore: " .. offers.LABEL_LET .. " has not changed this box")
+		return self:say(done, false, texts.none)
 	end
-	local skipped = #missing > 0 and string.format(" (not on the box any more: %s)", offers.describe(missing)) or ""
+	local skipped = #missing > 0 and string.format(" (not on the box any more: %s)", texts.missing(missing)) or ""
 	if #differ == 0 then
-		self:save(nil)
-		return self:say(done, true, "Nothing to put back: the box already has its own input switching" .. skipped)
+		self:save(nil, kind)
+		return self:say(done, true, texts.same(self) .. skipped)
 	end
-	local rec = self:own_record()
+	local rec = self:own_record(kind)
 	local values = {}
 	for _, key in ipairs(differ) do
 		values[key] = rec.values[key]
 	end
-	local words = offers.describe(differ)
-	self.log.info("Sync box: Restore the box's input switching: %s", words)
+	local done_text = texts.done(self, differ) .. skipped
+	self.log.info("Sync box: %s", done_text)
 	self:put(values, function(outcome, why)
 		if outcome == "ok" then
-			self:save(nil)
+			self:save(nil, kind)
 			self:soon()
-			return self:say(done, true, "Restored the box's own " .. words .. skipped)
+			return self:say(done, true, done_text)
 		end
 		if outcome == "unknown" then
 			self:soon()
@@ -565,8 +816,16 @@ function offers:restore(done)
 	end)
 end
 
+-- value -> the wiring it sets.
+local WIRING_OF_VALUE = {}
+for w, v in pairs(offers.OFFER_WIRING) do
+	WIRING_OF_VALUE[v] = w
+end
+
 function offers:choose(value, done)
-	if value ~= offers.OFFER_LET and value ~= offers.OFFER_RESTORE then
+	local w = WIRING_OF_VALUE[value]
+	if value ~= offers.OFFER_LET and value ~= offers.OFFER_RESTORE and value ~= offers.OFFER_WIRING_RESTORE
+		and not w then
 		return false
 	end
 	if self.busy then
@@ -575,8 +834,12 @@ function offers:choose(value, done)
 	end
 	if value == offers.OFFER_LET then
 		self:let_control4(done)
+	elseif value == offers.OFFER_RESTORE then
+		self:restore(done, "inputs")
+	elseif value == offers.OFFER_WIRING_RESTORE then
+		self:restore(done, "wiring")
 	else
-		self:restore(done)
+		self:set_wiring(w, done)
 	end
 	return true
 end

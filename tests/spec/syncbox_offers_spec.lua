@@ -140,18 +140,26 @@ describe("syncbox/offers.lua (#568)", function()
 			assert.truthy(o:attention(true):find("hot-plug switching on HDMI 3", 1, true))
 		end)
 
-		it("lists both choices always, each saying what it would change", function()
-			rig("HSB2")
-			assert.same({
-				{ text = "Let Control4 choose inputs (turns off HDMI CEC switching on HDMI 1, 2; auto-sync on HDMI 1; "
-					.. "power save when the TV turns off)", value = offers.OFFER_LET },
-				{ text = "Restore the box's input switching (nothing recorded to put back)", value = offers.OFFER_RESTORE },
-			}, o:choices())
-		end)
+		it("lists the input pair always, then the wirings the box is not in, each saying what it would change",
+			function()
+				rig("HSB2")
+				assert.same({
+					{ text = "Let Control4 choose inputs (turns off HDMI CEC switching on HDMI 1, 2; auto-sync on HDMI 1; "
+						.. "power save when the TV turns off)", value = offers.OFFER_LET },
+					{ text = "Restore the box's input switching (nothing recorded to put back)", value = offers.OFFER_RESTORE },
+					{ text = "Set the box to Behind a receiver (ARC bypass on, solo mode off)",
+						value = "wiring:behind_receiver" },
+					{ text = "Set the box to From a receiver's second output (solo mode on, ARC bypass off)",
+						value = "wiring:second_output" },
+				}, o:choices())
+			end)
 
 		it("never writes by itself: reads, rows, choices and Attention send nothing", function()
 			rig("HSB2")
-			for _ = 1, 5 do
+			for i = 1, 6 do
+				-- The Hue Sync app moves the wiring around meanwhile (W22).
+				h.state.behavior.arcBypassMode = i % 2
+				h.state.behavior.soloMode = i % 3 == 0 and 1 or 0
 				read()
 				o:row()
 				o:choices()
@@ -384,18 +392,180 @@ describe("syncbox/offers.lua (#568)", function()
 		end)
 	end)
 
+	describe("the wiring (design 5.8, O17)", function()
+		local function wiring_puts()
+			local out = {}
+			for _, r in ipairs(puts()) do
+				if r.json.arcBypassMode ~= nil or r.json.soloMode ~= nil then out[#out + 1] = r end
+			end
+			return out
+		end
+
+		local function values_of(list)
+			local out = {}
+			for _, item in ipairs(list) do out[#out + 1] = item.value end
+			return out
+		end
+
+		it("offers only the wirings the box is not in and has the key for", function()
+			rig("HSB2_behind_receiver")
+			local items = o:choices()
+			assert.same({ text = "Set the box to In line (ARC bypass and solo mode off)", value = "wiring:in_line" }, items[3])
+			assert.same({ offers.OFFER_LET, offers.OFFER_RESTORE, "wiring:in_line", "wiring:second_output" },
+				values_of(items))
+			-- HSB1 (API level 9) has no solo mode: never offered there.
+			rig("HSB1")
+			assert.same({ offers.OFFER_LET, offers.OFFER_RESTORE, "wiring:behind_receiver" }, values_of(o:choices()))
+			assert.equal("Set the box to Behind a receiver (ARC bypass on)", o:choices()[3].text)
+			h.state.behavior.arcBypassMode = 1
+			read()
+			assert.same({ text = "Set the box to In line (ARC bypass off)", value = "wiring:in_line" }, o:choices()[3])
+			-- Not read yet: nothing to offer.
+			o = new_offers()
+			assert.same({ offers.OFFER_LET, offers.OFFER_RESTORE }, values_of(o:choices()))
+		end)
+
+		it("sets a wiring with the keys that differ, records them first, and says how to connect", function()
+			rig("HSB2")
+			local a = click("wiring:behind_receiver")
+			assert.is_true(a.ok)
+			assert.equal("Sent: the box is now Behind a receiver (ARC bypass on, solo mode off): every source reaches it "
+				.. "from the receiver on HDMI 1. Control4's connections must match the cables: connect the receiver's HDMI "
+				.. "output to the box's HDMI 1 and the box's HDMI Out to the TV (Sync Box Settings: Restore the box's "
+				.. "wiring puts it back)", a.text)
+			assert.same({ arcBypassMode = 1 }, puts()[1].json)
+			assert.equal(1, behavior().arcBypassMode)
+			assert.same({ arcBypassMode = 0 }, o:record("wiring").values)
+			assert.equal(F.BOX_ID, o:record("wiring").box_id)
+			assert.is_nil(o:record(), "the input switching's record is apart")
+			assert.same({ "command" }, soons)
+			read()
+			assert.same({ offers.OFFER_LET, offers.OFFER_RESTORE, "wiring:in_line", "wiring:second_output",
+				offers.OFFER_WIRING_RESTORE }, values_of(o:choices()))
+			assert.equal("Restore the box's wiring (back to In line)", o:choices()[5].text)
+		end)
+
+		it("each wiring's Last Action fits Last Action's rows whole", function()
+			for _, from in ipairs({ "HSB2", "HSB2_behind_receiver", "HSB2_second_output" }) do
+				rig(from)
+				for _, item in ipairs(o:choices()) do
+					if item.value:find("^wiring:") then
+						rig(from)
+						local a = click(item.value)
+						assert.is_true(a.ok)
+						assert.is_nil(a.text:find("...", 1, true), a.text)
+						assert.truthy(a.text:find("Control4's connections must match the cables", 1, true))
+					end
+				end
+			end
+			rig("HSB2")
+			local a = click("wiring:second_output")
+			assert.equal("Sent: the box is now From a receiver's second output (solo mode on, ARC bypass off): it "
+				.. "follows a room (Follow Room) and Director routes nothing through it. Control4's connections must "
+				.. "match the cables: connect the receiver's second HDMI output to the box's HDMI 1 if its driver offers "
+				.. "one, and never connect the box's HDMI Out (Sync Box Settings: Restore the box's wiring puts it back)",
+				a.text)
+		end)
+
+		it("a second change keeps the values recorded first; Restore goes back to the wiring before", function()
+			rig("HSB2")
+			click("wiring:behind_receiver")
+			read()
+			click("wiring:second_output")
+			assert.same({ soloMode = 1, arcBypassMode = 0 }, wiring_puts()[2].json)
+			assert.same({ arcBypassMode = 0, soloMode = 0 }, o:record("wiring").values)
+			read()
+			assert.equal("Restore the box's wiring (back to In line)", o:choices()[#o:choices()].text)
+			local a = click(offers.OFFER_WIRING_RESTORE)
+			assert.is_true(a.ok)
+			assert.equal("Restored the box's wiring: the box is now In line (ARC bypass and solo mode off): Director "
+				.. "switches it to each source's HDMI input. Control4's connections must match the cables: connect each "
+				.. "source to its HDMI input on the box and the box's HDMI Out to the TV or receiver", a.text)
+			assert.same({ soloMode = 0 }, wiring_puts()[3].json, "only what differs")
+			assert.equal(0, behavior().soloMode)
+			assert.equal(0, behavior().arcBypassMode)
+			assert.is_nil(o:record("wiring"))
+			read()
+			assert.same({ offers.OFFER_LET, offers.OFFER_RESTORE, "wiring:behind_receiver", "wiring:second_output" },
+				values_of(o:choices()))
+		end)
+
+		it("the two Restores are apart: neither moves what the other changed", function()
+			rig("HSB2")
+			click(offers.OFFER_LET)
+			read()
+			click("wiring:behind_receiver")
+			read()
+			assert.is_true(click(offers.OFFER_RESTORE).ok)
+			assert.is_nil(puts()[3].json.arcBypassMode)
+			assert.equal(1, behavior().arcBypassMode)
+			assert.equal(1, behavior().cecPowersave)
+			read()
+			click("wiring:in_line")
+			read()
+			-- The wiring is back by hand: its Restore has nothing to put back.
+			assert.is_nil(o:choices()[5])
+			local a = click(offers.OFFER_WIRING_RESTORE)
+			assert.equal("Nothing to put back: the box already has its own wiring (In line)", a.text)
+			assert.is_nil(o:record("wiring"))
+			assert.equal(4, #puts())
+		end)
+
+		it("refuses a wiring the box has no key for, and one it is in, sending nothing", function()
+			rig("HSB1")
+			local a = click("wiring:second_output")
+			assert.is_false(a.ok)
+			assert.equal("Not changed: this box has no solo mode setting, so it cannot be set to From a receiver's "
+				.. "second output", a.text)
+			a = click("wiring:in_line")
+			assert.is_true(a.ok)
+			assert.equal("Nothing to change: the box is already In line", a.text)
+			assert.equal(0, #puts())
+			assert.is_nil(o:record("wiring"))
+			o = new_offers()
+			a = click("wiring:behind_receiver")
+			assert.is_false(a.ok)
+			assert.truthy(a.text:find("not been read yet", 1, true))
+		end)
+
+		it("a refused wiring PUT is rolled back; another box's record is never offered", function()
+			rig("HSB2")
+			h:fault("5xx", { status = 400, body = { code = 13, message = "Invalid Key" }, method = "PUT",
+				path = "/behavior", count = 1 })
+			local a = click("wiring:second_output")
+			assert.equal("Not changed: the box refused the change (Invalid Key)", a.text)
+			assert.is_nil(o:record("wiring"))
+			assert.equal(0, behavior().soloMode)
+			c4.persist[offers.WIRING_KEY] = { v = 1, box_id = "0A1B2C3D4E60", values = { arcBypassMode = 1 } }
+			o = new_offers()
+			read()
+			for _, item in ipairs(o:choices()) do
+				assert.are_not.equal(offers.OFFER_WIRING_RESTORE, item.value)
+			end
+			assert.equal("Nothing to restore: Sync Box Settings has not changed this box's wiring",
+				click(offers.OFFER_WIRING_RESTORE).text)
+		end)
+	end)
+
 	describe("the record", function()
 		it("survives a restart: read from the storage once, then kept in memory", function()
 			rig("HSB2")
 			click(offers.OFFER_LET)
-			local before = #c4.calls_to("PersistGetValue")
+			local function reads()
+				local n = 0
+				for _, args in ipairs(c4.calls_to("PersistGetValue")) do
+					if args[1] == offers.KEY then n = n + 1 end
+				end
+				return n
+			end
+			local before = reads()
 			o = new_offers()
 			read()
 			o:choices()
 			o:row()
 			assert.is_true(click(offers.OFFER_RESTORE).ok)
 			assert.equal(1, behavior().cecPowersave)
-			assert.equal(before + 1, #c4.calls_to("PersistGetValue"))
+			assert.equal(before + 1, reads())
 		end)
 
 		it("drops a stored record it cannot use, keeping only known keys and flags", function()
