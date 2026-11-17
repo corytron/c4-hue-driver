@@ -466,7 +466,7 @@ Without the token, or with a wrong one: 401.
 
 `docs/fakebox-design.md` §7: a dev build of the sync box driver pairs with
 the VM's fake box (`tools/fakebox.py`), which serves HTTPS on a port other
-than 443 (default 8443; 443 needs root) under its own CA and announces that
+than 443 (default 8450, clear of the dev server's TLS port; 443 needs root) under its own CA and announces that
 port in its mDNS answer. What makes that possible is dev-only:
 
 - `src/hue_syncbox/syncbox/devhooks.lua`, which a release stage never
@@ -491,7 +491,7 @@ port in its mDNS answer. What makes that possible is dev-only:
   tracked one.
 - The client and the store took an address with a port in every build
   before #547, so a release installed over a dev build that paired with the
-  fake keeps that pairing (`192.0.2.7:8443`) and then fails its TLS check
+  fake keeps that pairing (`192.0.2.7:8450`) and then fails its TLS check
   (the release bundle does not trust the fake's CA): Forget Pairing on the
   box device before the release install.
 

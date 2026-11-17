@@ -126,7 +126,7 @@ Standard library only (plus the `openssl` command for the CA). Python
 - `tools/fakebox/model.py` (F1): the state machine of §2, pure (no I/O):
   `Box(fixture, clock)`, `box.request(method, path, headers, body) ->
   (status, body)`, `box.event(name, **args)`, `box.state()`.
-- `tools/fakebox/server.py` (F1): HTTPS on `--port` (default 8443; 443
+- `tools/fakebox/server.py` (F1): HTTPS on `--port` (default 8450, clear of the dev server's 8443; 443
   needs root and is not used), TLS from the CA of F2, threads, at most one
   request served at a time per box as a real box (others wait), the faults
   of §2; several boxes at once (`--box HSB2:0A1B2C3D4E5F`, repeatable, each
@@ -197,7 +197,7 @@ if it does (as `devloop.lua` today).
 The house run, after the agents: the coordinator builds `--dev`, serves it
 with `tools/serve_install.py`, the Windows session installs it and binds the
 box device, and the device pairs with the fake on the VM (its address
-`192.0.2.7:8443` in every public text), the button pressed from the VM.
+`192.0.2.7:8450` in every public text), the button pressed from the VM.
 Then each flow of §6 again on the real controller, and the release build
 is installed again afterwards (`deploy.py`).
 

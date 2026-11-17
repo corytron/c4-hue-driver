@@ -4,7 +4,7 @@
 What a box announces (docs/syncbox-api-research.md §2.2): the service _huesync._tcp.local, the
 instance HueSyncBox-<box id>, the host <box id>.local, port 443, and TXT name (the friendly name),
 devicetype, uniqueid (the 12 upper-case hex digits) and path=/api. The fake announces the same, with
-the port of its HTTPS server (8443 by default; a development build's syncbox/devhooks.lua takes a port
+the port of its HTTPS server (8450 by default; a development build's syncbox/devhooks.lua takes a port
 other than 443, a release build does not, §7) and the IPv4 address the server listens on.
 
 How the drivers ask (src/common/mdns.lua, src/hue_syncbox/syncbox/discovery.lua): one PTR question for
