@@ -383,6 +383,17 @@ describe("syncbox/programming.lua (#568)", function()
 			assert.same({}, periods.holds, "starting is no manual adjustment")
 		end)
 
+		it("Stop Sync and Power Save end the manual holds at once, so a Start right after takes the period's values",
+			function()
+				periods.held_now = { brightness = true }
+				p:command("Stop Sync", {})
+				assert.same({ "stop" }, periods.releases)
+				p:command("Start Sync", {})
+				assert.same({ syncActive = true, intensity = "moderate", brightness = 90 }, sq:last())
+				p:command("Power Save", {})
+				assert.same({ "stop", "stop" }, periods.releases)
+			end)
+
 		it("Start Sync leaves out what the periods hold", function()
 			periods.held_now = { brightness = true }
 			p:command("Start Sync", {})

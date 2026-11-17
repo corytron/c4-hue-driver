@@ -1002,6 +1002,9 @@ function C.start_sync(self, command)
 end
 
 function C.stop_sync(self, command)
+	-- A sync stopped by command ends the manual holds at once, not at the next
+	-- read, so a Start Sync right after takes the period's values (#568).
+	self:_release("stop")
 	return self:_write("stop", command, { syncActive = false }, programming.TEXT.stop.ok)
 end
 
@@ -1078,6 +1081,7 @@ function C.set_entertainment_area(self, command, params)
 end
 
 function C.power_save(self, command)
+	self:_release("stop")
 	return self:_write("power_save", command, { mode = "powersave" }, programming.TEXT.power_save.ok)
 end
 
