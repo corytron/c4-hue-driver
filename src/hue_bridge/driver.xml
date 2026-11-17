@@ -480,5 +480,21 @@
 			</classes>
 			<hidden>False</hidden>
 		</connection>
+		<connection>
+			<id>2</id>
+			<facing>6</facing>
+			<connectionname>Hue Sync Boxes</connectionname>
+			<type>1</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>HUE_SYNCBOX</classname>
+				</class>
+			</classes>
+			<hidden>False</hidden>
+		</connection>
 	</connections>
 </devicedata>

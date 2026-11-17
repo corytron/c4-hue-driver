@@ -847,6 +847,10 @@ local function resync_all(done, tier)
 					-- started or stopped while the stream was down (#514).
 					state.entertainment:fetch_all(function(eok)
 						note("entertainment area", eok, "the areas could not be read", 0)
+						-- The sync boxes hear the areas again (contracts C5).
+						if state.syncboxes then
+							state.syncboxes:configure_all()
+						end
 						-- The Hue automations last: the full tier reads them, the
 						-- quick tier answers at once (#280 D18).
 						state.automations:resync(function(aok, aerr, asent)
@@ -1704,6 +1708,16 @@ dispatch.commands["HUE_MOTION_GOODBYE"] = function(params)
 	refresh_lights_props()
 end
 
+-- Hue Sync Boxes (contracts C5): a box's hello and goodbye, answered only for a
+-- device bound on connection 2 (bridge/syncboxes.lua).
+dispatch.commands["HUE_SYNCBOX_HELLO"] = function(params)
+	if state.syncboxes then state.syncboxes:hello(params) end
+end
+
+dispatch.commands["HUE_SYNCBOX_GOODBYE"] = function(params)
+	if state.syncboxes then state.syncboxes:goodbye(params) end
+end
+
 dispatch.commands["HUE_MOTION_FORGET"] = function(params)
 	local _, text = state.motion:forget_request(params or {})
 	last_action(text)
@@ -1992,6 +2006,13 @@ function OnBindingChanged(idBinding, strClass, bIsBound, otherDeviceID, otherBin
 		log.debug("OnBindingChanged(%s, %s, %s, %s, %s)", tostring(idBinding), tostring(strClass), tostring(bIsBound),
 			tostring(otherDeviceID), tostring(otherBindingID))
 	end
+	-- Connection 2, Hue Sync Boxes (#534): the boxes' own; the light registries never see it.
+	if tonumber(idBinding) == 2 then
+		if state.syncboxes then
+			state.syncboxes:binding_changed(idBinding, strClass, bIsBound, otherDeviceID)
+		end
+		return
+	end
 	-- A device bound during an outage hears the link before the state its
 	-- binding brings (#428 E21, D4): no online-then-offline flicker.
 	if state.link and tonumber(idBinding) == 1 and (bIsBound == true or bIsBound == "true") then
@@ -2028,7 +2049,7 @@ end
 -- Called before Director adds a binding [verified: API 32/_26]; only the
 -- HUE_BRIDGE class belongs here [assumed: returning false rejects].
 function OnBindingValidate(idBinding, strClass)
-	local ok = strClass == "HUE_BRIDGE"
+	local ok = strClass == "HUE_BRIDGE" or strClass == "HUE_SYNCBOX"
 	log.debug("OnBindingValidate(%s, %s) -> %s", tostring(idBinding), tostring(strClass), tostring(ok))
 	return ok
 end
@@ -2087,7 +2108,8 @@ end
 -- with it, so a Director restart keeps the load group memberships; one that
 -- names no group tells a bridge that has just started nothing, and is
 -- dropped quietly rather than taking a hello's place.
-local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true, HUE_LOAD_GROUPS = true }
+local EARLY_QUEUED = { HUE_HELLO = true, HUE_SCENE_HELLO = true, HUE_MOTION_HELLO = true, HUE_LOAD_GROUPS = true,
+	HUE_SYNCBOX_HELLO = true }
 local EARLY_MAX = 200
 local early_commands = {}
 local execute_command = dispatch.execute_command
@@ -2488,6 +2510,43 @@ function OnDriverInit()
 	end
 end
 
+-- Hue Sync Boxes (docs/hdmi-sync-stage2-design.md §6, contracts C5, #534): the box
+-- devices bound on connection 2 and what they are told. A function, so the main
+-- chunk keeps its locals.
+local function new_syncboxes()
+	local syncboxes_mod = require("bridge.syncboxes")
+	return syncboxes_mod.new({
+		send = device_send,
+		bridge_id = function() return paired() and state.creds.bridge_id or nil end,
+		areas = function() return state.entertainment and state.entertainment:areas() or {} end,
+		lights = function() return state.lights end,
+		-- [verified: API 32/_3]
+		bound = function() return C4:GetBoundConsumerDevices(C4:GetDeviceID(), syncboxes_mod.BINDING) end,
+		-- The name Composer shows: the box's AV switch proxy (binding 5001), as bridge/names.lua reads a light's.
+		display_name = function(device_id)
+			local consumers = C4:GetBoundConsumerDevices(device_id, 5001)
+			local proxy = type(consumers) == "table" and next(consumers) or nil
+			return C4:GetDeviceDisplayName(proxy or device_id) -- [verified: docs/design.md "Project APIs"]
+		end,
+		-- Who streams changed: the lamps' devices and zone lights hear the new label, and the row.
+		on_labels_changed = function(rids)
+			if state.lights then
+				for _, rid in ipairs(rids) do
+					if state.lights:is_streaming(rid) then
+						state.lights:send_state(rid, "event")
+					end
+				end
+			end
+			if state.zone_lights then
+				local ok, err = pcall(state.zone_lights.streaming_changed, state.zone_lights, rids)
+				if not ok then log.warn("zone_lights: streaming_changed failed: %s", tostring(err)) end
+			end
+			refresh_lights_props()
+		end,
+		log = log,
+	})
+end
+
 -- Entertainment areas (docs/hdmi-sync-stage1-design.md §4, #514): the areas
 -- and which of their lamps stream, the Sync Started and Sync Stopped events
 -- for any streamer (O10), and the lamps put back after a sync (O11). Built
@@ -2499,6 +2558,13 @@ local function new_entertainment()
 		on_stream = function(area, started)
 			last_action(started and entertainment_mod.started_text(area) or entertainment_mod.stopped_text(area))
 			C4:FireEventByID(started and 1 or 2) -- [verified: API 7/_4; not in OnDriverInit]
+			if state.syncboxes then
+				state.syncboxes:on_stream(area, started)
+			end
+		end,
+		-- The stream label names the bound sync box that owns the area (#534).
+		label_for = function(area_id)
+			return state.syncboxes and state.syncboxes:label_for(area_id) or nil
 		end,
 		-- Each module on its own: one that raises leaves the others told.
 		on_lamps_changed = function(rids)
@@ -2673,6 +2739,7 @@ function OnDriverLateInit(dit)
 	state.motion:configure_all()
 	state.motion:reconcile()
 	state.entertainment = new_entertainment()
+	state.syncboxes = new_syncboxes()
 	state.automations = new_automations()
 	state.automations:load()
 	-- The diagnostics' output goes into public issues: everything that
