@@ -2,7 +2,7 @@
 
 The design spec for issue #514, the first feature of the 2.x release train.
 Status: **reviewed with the owner on 2026-11-13; his decisions are O1 to O16
-in section 10**. Nothing here is built. Where a decision changed the first
+in section 10**, and O17 and O18 were added on 2026-11-16 (#531). Nothing here is built. Where a decision changed the first
 proposal, the text below follows the decision.
 
 The wire-level details every builder works against are in
@@ -92,7 +92,7 @@ every model, and each model shows only the controls it has.
 
 - Running an entertainment stream from Control4 (DriverWorks has no DTLS).
 - Creating, editing or deleting entertainment areas (the Hue app's job).
-- The box's Wi-Fi, IR learning, presets, ARC bypass, Dolby Vision and HDR
+- The box's Wi-Fi, IR learning, presets, Dolby Vision and HDR
   settings, and its bridge link. These stay in the Hue Sync app; some are
   shown as read-only facts.
 - A light_v2 "sync brightness" tile (O8: commands, variables and
@@ -279,9 +279,55 @@ released, so the four are frozen before `v2.0-beta.1`.
 - **Actions**, kept few as 1.2 decided:
   - **Pair Sync Box:** pick a found box or type an address, then hold its
     button.
-  - **Sync Box Settings:** the offers of 5.4.
+  - **Sync Box Settings:** the offers of 5.4 and the wiring (5.8).
   - **Diagnostics.**
   - **Forget Pairing.**
+
+### 5.8 Every wiring, and no CEC (O17, O18)
+
+The drivers are open source for anyone, so the box works in each of the
+three wirings its own settings know, not only the house's (O17):
+
+| Wiring | Signal path | Box setting | What Director sends the box | Where the sync mode comes from |
+|---|---|---|---|---|
+| **In line** | sources → box → receiver or TV | neither | `ON`, `SET_INPUT` n, `OFF` (5.2) | The input (5.3) |
+| **Behind a receiver** | sources → receiver → box → TV | `arcBypassMode` | `ON`, `SET_INPUT` 1 for every source, `OFF` | The room's current source |
+| **From a receiver's second output** | sources → receiver → TV, and the receiver's second HDMI output → box, with nothing on the box's output | `soloMode` | Nothing: the box is in no path Director builds | The room's current source |
+
+- **In line** is sections 5.1 to 5.3 as written.
+- **Behind a receiver.** In Composer the receiver's HDMI output binds to
+  the box's input 1 and the box's output to the TV. Every source arrives on
+  the same input, so `SET_INPUT` cannot say which source it is. The mode
+  comes from the room's current source (its Control4 device), and the
+  Sync Mode properties are kept per source instead of per HDMI input. Room
+  Off and a box that leaves the path behave as in 5.3.
+- **From a second output.** Director never routes through the box, so the
+  driver follows a room instead (a **Follow Room** property). That room's
+  power and current source drive sync start, mode and power save, as in
+  5.3. An audio-only source syncs only if the receiver sends its audio on
+  the second output; that is checked on the house (#531).
+- **The wiring is the box's.** The driver reads `arcBypassMode` and
+  `soloMode`, shows the wiring, and offers to change it with one reversible
+  click under Sync Box Settings. It never changes it by itself (as 5.4).
+
+**No CEC (O18).** Control4 orchestrates power, the signal path and volume.
+The driver relies on nothing the box learns over CEC. The offer of 5.4
+covers every CEC behaviour of the box: input switching (`cecInputSwitch`,
+`hpdInputSwitch`, `hpdInputPortSwitch`) and power save on the TV's standby
+(`cecPowersave`).
+
+**Open before stage 3** (research for #531, verified versus assumed as
+usual):
+- How a driver learns a room's power and current source.
+  `C4:RegisterVariableListener` exists
+  (`docs-driverworks-api/…/36_variable/`); whether it works on a room's
+  variables, on OS 3.x and 4.x, is not verified. A probe settles it.
+- How Composer connects a box behind a receiver or on a second output, and
+  what Director sends it then. Probes P1 to P7 get a case for each wiring.
+- How a Listen (audio-only) source shows in the room's variables.
+
+Stage 2 (the client, pairing, identity and state) is the same in every
+wiring.
 
 ## 6. Entertainment areas
 
@@ -436,13 +482,13 @@ click.
 
 Pairing, real fixtures recorded from the box (which replace the
 hand-written ones), routing through the box, CEC fights, and power save.
-**The house has an 8K box (HSB2, O1)** in the bedroom, wired sources → box
-→ AV receiver → TV. The box's HDMI output feeds the receiver's input, so in
-Composer the box's outputs 2000 and 4000 bind to the receiver, and the
-receiver to the TV. Music mode for an audio-only source works, because the
-audio passes through the box on its way to the receiver. `arcBypassMode`
-is for a box *behind* a receiver, so it does not apply here. These checks
-need the owner's hands for the button.
+**The house has an 8K box (HSB2, O1)** in the bedroom, wired today
+sources → box → AV receiver → TV (in line). The receiver has a second HDMI
+output, so the owner may move the box to it (the second-output wiring,
+5.8); the house then checks that wiring, and the other two are covered by
+the fake box and probes. Whether the receiver's second output carries audio
+for an audio-only source is a house check (#531). These checks need the
+owner's hands for the button.
 
 ### 9.3 Releases
 
@@ -487,10 +533,12 @@ His answers, quoted where they changed the proposal:
 | O14 | Names | **Two-way for the box's name**; input names only offered |
 | O15 | The "until 2.0" promises | **Removed in 2.0 as announced** |
 | O16 | Adjusting from Navigators and remotes | **Several Watch-menu buttons:** Hue Sync, Sync Brighter, Sync Dimmer, Sync Intensity (5.6) |
+| O17 | Wirings (2026-11-16, #531) | "I'd still want the sync box driver to work in all the modes, this driver isn't just for me": **in line, behind a receiver, and from a receiver's second output** (5.8) |
+| O18 | CEC (2026-11-16, #531) | "I want control 4 to orchestrate the power and signal path and volume control": **the driver relies on no CEC**, and offers to turn the box's CEC behaviours off (5.8) |
 
 Settled the same day, after the first round:
 - **The house's box** is in the bedroom: sources → box → AV receiver → TV
-  (9.2).
+  today; it may move to the receiver's second output (9.2, 5.8).
 - **The periods:** Evening starts 1 hour before the controller's sunset; a
   manual adjustment is never overridden by a period boundary (5.3).
 - **Commands during a sync** are not applied when it ends; the lamps go
