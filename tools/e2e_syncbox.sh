@@ -8,9 +8,11 @@
 #
 # Usage: tools/e2e_syncbox.sh [--only SUITE[,SUITE...]] [--trace] [--keep]
 #   --only   run only these suites of tests/e2e/syncbox_e2e.lua: pinning,
-#            flows, faults, devhooks, models (default all, in that order)
+#            flows, faults, devhooks, models, and routing (#557), which is
+#            routing-inline, routing-onein, routing-receiver, routing-second
+#            and routing-faults, each also by its own name (default all)
 #   --trace  print every HTTPS exchange of the transport
-#   --keep   keep the temporary directory (the fake's log, the driver's log)
+#   --keep   keep the temporary directory (the fakes' logs, the drivers')
 #
 # What it does, in a private temporary directory (several runs at once do not
 # meet: their own CA, their own state directory, ports the system picks):
@@ -18,14 +20,23 @@
 #      the archive the transport reads as the extracted .c4z: its
 #      certs/hsb_ca.pem the repository's bundle followed by that CA, its
 #      certs/decoy.pem the repository's decoy;
-#   2. the fake (tools/fakebox.py serve) with five boxes, each on a port of
-#      127.0.0.1 the system picks, read back from its server.json: HSB2
+#   2. the suites in groups that share no box, each group with a fake of its
+#      own (tools/fakebox.py serve, its own state directory and log), every
+#      port of 127.0.0.1 the system's pick, read back from its server.json:
+#      pinning to models (in that order, on one fake) with HSB2
 #      0A1B2C3D4E5F (the flows), HSB2 0A1B2C3D4E60 (another box at the same
 #      address), then HSB1, HSB3 and HSB3_standalone (0A1B2C3D4E61 to
-#      0A1B2C3D4E63); its control API on another such port;
-#   3. lua5.1 tests/e2e/syncbox_e2e.lua with that environment (E2E_*), one
-#      PASS/FAIL/SKIP line per check and a summary;
-#   4. the fake stopped (also on failure or interruption).
+#      0A1B2C3D4E63); each routing suite (#557) with its box: routing-inline
+#      HSB2 0A1B2C3D4E64, routing-onein HSB3 0A1B2C3D4E67, routing-receiver
+#      HSB2_behind_receiver 0A1B2C3D4E65, routing-second HSB2_second_output
+#      0A1B2C3D4E66, routing-faults HSB2 0A1B2C3D4E68. One fake per group
+#      keeps a busy group from slowing another's answers past the scaled
+#      timeouts;
+#   3. lua5.1 tests/e2e/syncbox_e2e.lua with that environment (E2E_*), once
+#      per group, the groups at the same time. Each group's PASS/FAIL/SKIP
+#      lines and summary are printed in that order once all have ended,
+#      then a total;
+#   4. the fakes stopped (also on failure or interruption).
 # Exit 0 when every check passed, 1 when one failed, 2 when the run could not
 # start (a tool or file missing, the fake not starting).
 #
@@ -36,6 +47,8 @@
 #   FAKE_TIME_SCALE  the fake's --time-scale (default 10: its 30 s restart
 #                    takes 3 s; the pairing window is held open longer, see
 #                    the Lua script)
+#   JOBS             how many groups run at once (default: nproc; 1 runs
+#                    them one after the other)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -97,16 +110,15 @@ case "$WORK" in
 	exit 2
 	;;
 esac
-STATE="$WORK/state"
-FAKEBOX="python3 -I tools/fakebox.py --state-dir $STATE"
-FAKE_PID=""
+FAKE_PIDS=()
 
 # shellcheck disable=SC2317,SC2329 # run by the EXIT trap
 cleanup() {
-	if [[ -n "$FAKE_PID" ]]; then
-		kill "$FAKE_PID" 2>/dev/null || true
-		wait "$FAKE_PID" 2>/dev/null || true
-	fi
+	local pid
+	for pid in "${FAKE_PIDS[@]}"; do
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+	done
 	if [[ -n "$KEEP" ]]; then
 		echo "e2e: kept $WORK"
 	else
@@ -122,19 +134,53 @@ mkdir -p "$WORK/archive/certs"
 cat src/hue_syncbox/certs/hsb_ca.pem "$CA_PEM" >"$WORK/archive/certs/hsb_ca.pem"
 cp src/hue_syncbox/certs/decoy.pem "$WORK/archive/certs/decoy.pem"
 
-# 2. The fake: five boxes and the control API, every port the system's pick.
-BOXES=(HSB2:0A1B2C3D4E5F HSB2:0A1B2C3D4E60 HSB1:0A1B2C3D4E61 HSB3:0A1B2C3D4E62 HSB3_standalone:0A1B2C3D4E63)
-serve_args=(serve --port 0 --control-port 0 --cert-base "$WORK/ca" --time-scale "$FAKE_TIME_SCALE")
-for box in "${BOXES[@]}"; do
-	serve_args+=(--box "$box")
-done
-# shellcheck disable=SC2086 # FAKEBOX is a command and its fixed options
-$FAKEBOX "${serve_args[@]}" >"$WORK/fake.log" 2>&1 &
-FAKE_PID=$!
+# 2. The groups: the suites that share boxes, in order, each with a fake of
+# its own (tools/fakebox.py serve, its state directory, every port the
+# system's pick), so that no fake serves two groups at once.
+SUITE_GROUPS=("pinning,flows,faults,devhooks,models" routing-inline routing-onein routing-receiver routing-second
+	routing-faults)
+GROUP_BOXES=(
+	"HSB2:0A1B2C3D4E5F HSB2:0A1B2C3D4E60 HSB1:0A1B2C3D4E61 HSB3:0A1B2C3D4E62 HSB3_standalone:0A1B2C3D4E63"
+	"HSB2:0A1B2C3D4E64"
+	"HSB3:0A1B2C3D4E67"
+	"HSB2_behind_receiver:0A1B2C3D4E65"
+	"HSB2_second_output:0A1B2C3D4E66"
+	"HSB2:0A1B2C3D4E68"
+)
+ROUTING_NAMES=("" inline onein receiver second faults)
 
-# Each box as FIXTURE:ID:PORT, in the order above, from server.json (written
-# once every box and the control API listen); nothing while it is not there.
+# The suites of a group that --only names ("routing" names every routing-*).
+wanted_in() {
+	local group="$1" out="" suite item
+	local -a names items
+	IFS=',' read -r -a names <<<"$group"
+	for suite in "${names[@]}"; do
+		if [[ -z "$ONLY" ]]; then
+			out+="${out:+,}$suite"
+			continue
+		fi
+		IFS=',' read -r -a items <<<"$ONLY"
+		for item in "${items[@]}"; do
+			if [[ "$item" == "$suite" || ("$item" == routing && "$suite" == routing-*) ]]; then
+				out+="${out:+,}$suite"
+				break
+			fi
+		done
+	done
+	printf '%s' "$out"
+}
+
+fakebox_of() {
+	printf 'python3 -I tools/fakebox.py --state-dir %s' "$WORK/state-$1"
+}
+
+# Each box of group $1 as FIXTURE:ID:PORT, in its order, from its fake's
+# server.json (written once every box and the control API listen); nothing
+# while it is not there.
 ports_of() {
+	local i="$1"
+	local -a boxes
+	read -r -a boxes <<<"${GROUP_BOXES[$i]}"
 	python3 -I -c '
 import json, sys, urllib.parse
 try:
@@ -150,49 +196,133 @@ for spec in sys.argv[2:]:
         sys.exit(1)
     out.append("%s:%s:%s" % (fixture, box_id, port[box_id]))
 print(" ".join(out))
-' "$STATE/server.json" "${BOXES[@]}"
+' "$WORK/state-$i/server.json" "${boxes[@]}"
 }
 
-SPECS=""
-for _ in $(seq 1 100); do
-	if SPECS="$(ports_of 2>/dev/null)"; then
-		break
+CHOSEN=()
+RAN=()
+for i in "${!SUITE_GROUPS[@]}"; do
+	CHOSEN[i]="$(wanted_in "${SUITE_GROUPS[$i]}")"
+	if [[ -n "${CHOSEN[$i]}" ]]; then
+		RAN+=("$i")
 	fi
-	if ! kill -0 "$FAKE_PID" 2>/dev/null; then
-		echo "e2e: the fake exited at start:" >&2
-		cat "$WORK/fake.log" >&2
-		FAKE_PID=""
-		exit 2
-	fi
-	sleep 0.2
 done
-if [[ -z "$SPECS" ]]; then
-	echo "e2e: the fake did not start within 20 s:" >&2
-	cat "$WORK/fake.log" >&2
+if [[ ${#RAN[@]} -eq 0 ]]; then
+	echo "e2e: --only $ONLY names no suite (see --help)" >&2
 	exit 2
 fi
-read -r MAIN OTHER M1 M2 M3 <<<"$SPECS"
 
-# 3. The flows.
+# The fakes of the groups that run, all at once.
+declare -A FAKE_OF
+for i in "${RAN[@]}"; do
+	serve_args=(serve --port 0 --control-port 0 --cert-base "$WORK/ca" --time-scale "$FAKE_TIME_SCALE")
+	for box in ${GROUP_BOXES[$i]}; do
+		serve_args+=(--box "$box")
+	done
+	# shellcheck disable=SC2046 # fakebox_of prints a command and its fixed options
+	$(fakebox_of "$i") "${serve_args[@]}" >"$WORK/fake-$i.log" 2>&1 &
+	FAKE_OF[$i]=$!
+	FAKE_PIDS+=("$!")
+done
+
+declare -A SPECS_OF
+for i in "${RAN[@]}"; do
+	specs=""
+	for _ in $(seq 1 100); do
+		if specs="$(ports_of "$i" 2>/dev/null)"; then
+			break
+		fi
+		specs=""
+		if ! kill -0 "${FAKE_OF[$i]}" 2>/dev/null; then
+			echo "e2e: the fake of ${SUITE_GROUPS[$i]} exited at start:" >&2
+			cat "$WORK/fake-$i.log" >&2
+			exit 2
+		fi
+		sleep 0.2
+	done
+	if [[ -z "$specs" ]]; then
+		echo "e2e: the fake of ${SUITE_GROUPS[$i]} did not start within 20 s:" >&2
+		cat "$WORK/fake-$i.log" >&2
+		exit 2
+	fi
+	SPECS_OF[$i]="$specs"
+done
+
+# 3. The suites, each group a lua5.1 process of its own (its output and its
+# driver's log in WORK), JOBS of them at a time.
+run_group() {
+	local n="$1" list="$2" main="" other="" models="" routing=""
+	local -a specs
+	read -r -a specs <<<"${SPECS_OF[$n]}"
+	if [[ -n "${ROUTING_NAMES[$n]}" ]]; then
+		routing="${ROUTING_NAMES[$n]}=${specs[0]}"
+	else
+		main="${specs[0]}"
+		other="${specs[1]}"
+		models="${specs[2]},${specs[3]},${specs[4]}"
+	fi
+	E2E_ARCHIVE="$WORK/archive" \
+		E2E_ADDRESS="10.0.2.150" \
+		E2E_MAIN="$main" \
+		E2E_OTHER="$other" \
+		E2E_MODELS="$models" \
+		E2E_ROUTING="$routing" \
+		E2E_FAKEBOX="$(fakebox_of "$n")" \
+		E2E_TIME_SCALE="$TIME_SCALE" \
+		E2E_FAKE_TIME_SCALE="$FAKE_TIME_SCALE" \
+		E2E_ONLY="$list" \
+		E2E_TRACE="$TRACE" \
+		E2E_LOG="$WORK/driver-$n.log" \
+		TMPDIR="$WORK" \
+		lua5.1 tests/e2e/syncbox_e2e.lua >"$WORK/out-$n.txt" 2>&1
+	echo "$?" >"$WORK/exit-$n"
+}
+
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || JOBS=1
+pids=()
+for i in "${RAN[@]}"; do
+	while [[ "$(jobs -rp | wc -l)" -gt "$((JOBS + ${#FAKE_PIDS[@]} - 1))" ]]; do
+		wait -n 2>/dev/null || true
+	done
+	run_group "$i" "${CHOSEN[$i]}" &
+	pids+=("$!")
+done
+for pid in "${pids[@]}"; do
+	wait "$pid" 2>/dev/null || true
+done
+
 status=0
-E2E_ARCHIVE="$WORK/archive" \
-	E2E_ADDRESS="10.0.2.150" \
-	E2E_MAIN="$MAIN" \
-	E2E_OTHER="$OTHER" \
-	E2E_MODELS="$M1,$M2,$M3" \
-	E2E_FAKEBOX="$FAKEBOX" \
-	E2E_TIME_SCALE="$TIME_SCALE" \
-	E2E_FAKE_TIME_SCALE="$FAKE_TIME_SCALE" \
-	E2E_ONLY="$ONLY" \
-	E2E_TRACE="$TRACE" \
-	E2E_LOG="$WORK/driver.log" \
-	TMPDIR="$WORK" \
-	lua5.1 tests/e2e/syncbox_e2e.lua || status=$?
+total_pass=0
+total_fail=0
+total_skip=0
+for i in "${RAN[@]}"; do
+	cat "$WORK/out-$i.txt"
+	code="$(cat "$WORK/exit-$i" 2>/dev/null || echo 2)"
+	summary="$(grep -E '^e2e: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' "$WORK/out-$i.txt" | tail -n 1 || true)"
+	if [[ -z "$summary" ]]; then
+		echo "e2e: the group ${SUITE_GROUPS[$i]} ended without its summary (exit $code)"
+		status=1
+		continue
+	fi
+	read -r p f k <<<"$(sed -E 's/^e2e: ([0-9]+) passed, ([0-9]+) failed, ([0-9]+) skipped$/\1 \2 \3/' <<<"$summary")"
+	total_pass=$((total_pass + p))
+	total_fail=$((total_fail + f))
+	total_skip=$((total_skip + k))
+	if [[ "$code" -ne 0 ]]; then
+		status=1
+	fi
+done
+if [[ ${#RAN[@]} -gt 1 ]]; then
+	echo "e2e total: $total_pass passed, $total_fail failed, $total_skip skipped"
+fi
 
-# 4. The fake stopped (the trap kills it on any other way out).
-# shellcheck disable=SC2086 # FAKEBOX is a command and its fixed options
-$FAKEBOX stop >/dev/null 2>&1 || true
+# 4. The fakes stopped (the trap kills them on any other way out).
+for i in "${RAN[@]}"; do
+	# shellcheck disable=SC2046 # fakebox_of prints a command and its fixed options
+	$(fakebox_of "$i") stop >/dev/null 2>&1 || true
+done
 if [[ "$status" -ne 0 && -z "$KEEP" ]]; then
-	echo "e2e: run again with --keep to keep the fake's log and the driver's"
+	echo "e2e: run again with --keep to keep the fakes' logs and the drivers'"
 fi
 exit "$status"

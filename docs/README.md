@@ -204,6 +204,9 @@ where the code later moved on.
   beta stage 2: the Hue Sync Box driver's client, TLS pin, identity,
   pairing, discovery, polling and state, its frozen Composer frame, and the
   bridge's `HUE_SYNCBOX` connection.
+- [`syncbox-probes.md`](syncbox-probes.md) (runbook, #557): the house
+  probes P8 to P12 for stage 3 (room variables, Director's commands in each
+  wiring, room lifecycle), with their chunks under `tools/probes/`.
 - [`syncbox-wirings-research.md`](syncbox-wirings-research.md) (research,
   #531): how a box behind a receiver or on a receiver's second output
   follows a room (room variables, the source's kind, Listen), the frozen

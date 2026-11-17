@@ -247,6 +247,13 @@ placeholder values (box id 0A1B2C3D4E5F at 10.0.2.150, bridge
 - **SB56** The box checks the whole PUT before applying any of it (SB20,
   SB21); a refusal by state (16, §8) is judged on the result the whole PUT
   would have. [assumed]
+- **SB57** The fields that set a value (`hdmiActive`, `hdmiSource`,
+  `hueTarget`, `mode`, `syncActive`, the mode objects, `intensity`,
+  `backgroundLighting`, `brightness`) leave `execution`, `hdmi` and `hue` the
+  same when the same PUT comes again, as a PUT resent after its answer was
+  lost does. The commands that step (the toggles, the cycles,
+  `incrementBrightness`) are not like that, and the drivers never resend
+  them. [assumed: it follows from SB30 to SB50; no source sends a PUT twice]
 
 ## 5. Behavior settings
 
@@ -667,6 +674,7 @@ The rules each step settles:
 | --- | --- | --- |
 | SB95 | 13 for `groupId` below level 10 | Only a box below API level 10 shows it (`run` checks it when the box is one). The box driver sends no PUT at all in this stage and reads the area from `hueTarget`, else `groupId` (`tests/spec/syncbox_state_spec.lua`, "takes the area from hue.groupId when execution has no hueTarget") |
 | SB97 | `hueTarget` refused in standalone; `hue` untouched | Only a box run without a bridge (`run` checks it when the box is one). The driver refuses a standalone box in Status and never writes `hueTarget` (`tests/spec/syncbox_driver_spec.lua`, "refuses a standalone HSB3 in Status (O2)") |
+| SB57 | A set-value PUT sent again changes nothing more | The queue resends only whole set-value writes (no toggles, cycles or increments) and confirms each by reading the state back, so a resend that changed something else would show at the next read (`tests/spec/syncbox_queue_spec.lua`, the retry cases) |
 | SB114 | Only `ipAddress` changes with the address | Needs the router to move the box. The driver finds the box again by its id, not its address (`tests/spec/syncbox_driver_spec.lua`, "follows the box to a new address the search finds, after the identity proved it (EC B11)"), and reads the whole state at every poll, so anything else a move changed shows at the next one |
 | SB121 | Everything else kept across a firmware update | Needs an update from Signify, which takes many minutes. The driver keeps nothing of the box's but its id, address and token, and reads the firmware and level at every poll (`tests/spec/syncbox_state_spec.lua`, "writes the firmware with whatever is known"); the restart itself is SB120, step 5 |
 | SB122 | The values a new level adds | Needs an update that raises `apiLevel`. The driver reads every field a level adds as optional (`tests/spec/syncbox_state_spec.lua`, "leaves out what an older box lacks (HSB1 at API level 7)"), so their first values change nothing it does |

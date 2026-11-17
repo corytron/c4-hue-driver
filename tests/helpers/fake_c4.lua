@@ -506,7 +506,100 @@ local function new_c4(env)
 	function c4:GetDeviceVariable(id, variable)
 		record("GetDeviceVariable", id, variable)
 		local vars = c4.device_variables[id] or c4.device_variables[tonumber(id) or id]
-		return vars and vars[variable] or nil
+		local value = vars and vars[variable] or nil
+		if value == nil then
+			-- A room's variables (fake.room_variables, below).
+			local room = fake.room_variables(tonumber(id))
+			local var = room and room[tonumber(variable)]
+			value = var and var.value or nil
+		end
+		return value
+	end
+
+	-- Another device's variables as a table [verified: API
+	-- 22_miscellaneous/_12-GetDeviceVariables]: keyed by the variable id as
+	-- text, each entry with its name and value [verified: Snap One's
+	-- drivers-common-public global/handlers.lua reads the name so]. A room
+	-- answers from the project (fake.room_variables); another device from
+	-- c4.device_variables, without names; nil for a device with neither
+	-- [assumed]. A spec replaces c4.GetDeviceVariables to model a controller
+	-- that answers otherwise.
+	function c4:GetDeviceVariables(id)
+		record("GetDeviceVariables", id)
+		local room = fake.room_variables(tonumber(id))
+		if room then
+			local out = {}
+			for var, entry in pairs(room) do
+				out[tostring(var)] = { name = entry.name, value = entry.value }
+			end
+			return out
+		end
+		local vars = c4.device_variables[id] or c4.device_variables[tonumber(id) or id]
+		if not vars then return nil end
+		local out = {}
+		for var, value in pairs(vars) do out[tostring(var)] = { value = value } end
+		return out
+	end
+
+	-- Variable listeners [verified: API 36_variable/_10
+	-- RegisterVariableListener, _11 UnregisterVariableListener, _10.5
+	-- UnregisterAllVariableListeners, _9 OnWatchedVariableChanged]:
+	-- c4.variable_listeners[device][variable] = true. Registering a variable
+	-- that does not exist raises ("This API will fail if the variable does not
+	-- exist"); one that exists calls the driver's OnWatchedVariableChanged(
+	-- device, variable, value) at once, inside the call, with the value as
+	-- text (the SDK: "called immediately after the listener is successfully
+	-- set"; [assumed] that it runs before RegisterVariableListener returns).
+	-- A room's variable exists while the room and the variable are in the
+	-- project (fake.room_variables); another device's while
+	-- c4.device_variables holds it. Unregistering one never registered only
+	-- records the call [assumed: the SDK says it "will not work"].
+	-- fake.room_variable(room, id, value) changes a room's variable and calls
+	-- OnWatchedVariableChanged in every loaded driver listening to it.
+	c4.variable_listeners = {}
+
+	local function variable_now(device, variable)
+		local room = fake.room_variables(device)
+		if room then
+			local var = room[variable]
+			if var then return true, var.value end
+			return false
+		end
+		local vars = c4.device_variables[device]
+		if vars and vars[variable] ~= nil then return true, vars[variable] end
+		return false
+	end
+
+	function c4:RegisterVariableListener(device, variable)
+		record("RegisterVariableListener", device, variable)
+		device, variable = tonumber(device), tonumber(variable)
+		local exists, value = variable_now(device, variable)
+		if not exists then
+			error(string.format("C4:RegisterVariableListener: device %s has no variable %s", tostring(device),
+				tostring(variable)), 2)
+		end
+		c4.variable_listeners[device] = c4.variable_listeners[device] or {}
+		c4.variable_listeners[device][variable] = true
+		if type(env.OnWatchedVariableChanged) == "function" then
+			as(env, env.OnWatchedVariableChanged, device, variable, tostring(value == nil and "" or value))
+		end
+	end
+
+	function c4:UnregisterVariableListener(device, variable)
+		record("UnregisterVariableListener", device, variable)
+		local listening = c4.variable_listeners[tonumber(device)]
+		if listening then listening[tonumber(variable)] = nil end
+	end
+
+	function c4:UnregisterAllVariableListeners()
+		record("UnregisterAllVariableListeners")
+		c4.variable_listeners = {}
+	end
+
+	-- Whether this driver listens to that variable now.
+	function c4.listens(device, variable)
+		local listening = c4.variable_listeners[tonumber(device)]
+		return listening ~= nil and listening[tonumber(variable)] == true
 	end
 
 	function c4:url()
@@ -1492,6 +1585,91 @@ function fake.delete_room(id)
 		assert(rec.room_id ~= id, "fake.delete_room: room " .. tostring(id) .. " still holds device " .. tostring(device_id))
 	end
 	fake.project.rooms[id] = nil
+end
+
+-- A room's variables (#557, docs/hdmi-sync-stage3-design.md §4) ------------
+--
+-- fake.room_variables(room_id) is the room's table { [id] = { name, value } },
+-- made on first use with the SDK's room variables 1000 to 1035 in the SDK's
+-- order [verified: API 36_variable/_12-ListofRoomVariables], named as the
+-- SDK's list without "Variable_", upper case [assumed: the names Director
+-- reports; probe P8 reads them], every value "" but the device ids
+-- (1000 to 1004, 1015) "0" (nothing selected) and POWER_STATE "0" [assumed:
+-- its format is not documented]. nil for a room not in the project: a
+-- deleted room's variables are gone with it. A spec edits the table to
+-- renumber or remove a variable.
+--
+-- fake.room_variable(room_id, id, value [, name]) sets one (made when
+-- missing, with `name`) and calls OnWatchedVariableChanged(room_id, id,
+-- value as text) in every loaded driver of the harness run listening to it
+-- (c4.variable_listeners), in load order. Returns how many were called.
+fake.ROOM_VARIABLE_NAMES = {
+	"CURRENT_SELECTED_DEVICE", "CURRENT_AUDIO_DEVICE", "CURRENT_VIDEO_DEVICE", "AUDIO_VOLUME_DEVICE",
+	"VIDEO_VOLUME_DEVICE", "CURRENT_MEDIA", "CURRENT_MEDIA_TYPE", "CURRENT_AUDIO_PATH", "CURRENT_VIDEO_PATH",
+	"CURRENT_VIDEO_AUDIO_PATH", "POWER_STATE", "CURRENT_VOLUME", "TEMPERATURE_ID", "TEMPERATURE_CONTROL_ID",
+	"SECURITY_ID", "CURRENT_VOLUME_DEVICE", "HAS_DISCRETE_VOLUME", "HAS_DISCRETE_MUTE", "IS_MUTED",
+	"IN_NAVIGATION", "USE_DEFAULT_VOLUMES", "DEFAULT_AUDIO_VOLUME", "DEFAULT_VIDEO_VOLUME", "VOLUME_LINKED",
+	"LINKED_ROOM_LIST", "MUTE_LINKED", "ROOMOFF_LINKED", "SELECTIONS_LINKED", "CURRENT_LINKED_MEDIAID",
+	"ROOM_HIDDEN", "LINKED", "MEDIA_INFO", "LAST_DEVICE_GROUP", "AVAILABLE_CAMERAS", "POOLS",
+	"SCENE_IS_DISCRETE_VOLUME",
+}
+local ROOM_DEVICE_VARIABLES = { [1000] = true, [1001] = true, [1002] = true, [1003] = true, [1004] = true,
+	[1015] = true, [1010] = true }
+
+function fake.room_variables(room_id)
+	if room_id == nil or not fake.project.rooms[room_id] then return nil end
+	fake.project.room_variables = fake.project.room_variables or {}
+	local vars = fake.project.room_variables[room_id]
+	if not vars then
+		vars = {}
+		for i, name in ipairs(fake.ROOM_VARIABLE_NAMES) do
+			local id = 999 + i
+			vars[id] = { name = name, value = ROOM_DEVICE_VARIABLES[id] and "0" or "" }
+		end
+		fake.project.room_variables[room_id] = vars
+	end
+	return vars
+end
+
+function fake.room_variable(room_id, id, value, name)
+	local vars = assert(fake.room_variables(room_id), "fake.room_variable: unknown room " .. tostring(room_id))
+	local text = tostring(value == nil and "" or value)
+	vars[id] = vars[id] or { name = name }
+	vars[id].value = text
+	local called = 0
+	for _, env in ipairs(envs) do
+		if env.C4.listens(room_id, id) and not env.C4.removed and type(env.OnWatchedVariableChanged) == "function" then
+			fake.as(env, env.OnWatchedVariableChanged, room_id, id, text)
+			called = called + 1
+		end
+	end
+	return called
+end
+
+-- A source device for the room specs (#557): a protocol driver `id` with the
+-- file opts.driver (default "source.c4z") and, unless opts.proxy is false,
+-- its proxy device opts.proxy_id (default id + 1) of the proxy opts.proxy
+-- (default "dvd": its driverFileName "dvd.c4i", as a proxy's file reads
+-- [house: "light_v2.c4i"; assumed for the AV proxies]). Both are named
+-- opts.name, in opts.room_id (default the default room). Returns the id a
+-- room selects: the proxy's, or the device's own for a combo driver
+-- (opts.proxy = false).
+function fake.add_device(id, opts)
+	opts = opts or {}
+	local room_id = opts.room_id or DEFAULT_ROOM_ID
+	assert(fake.project.rooms[room_id], "fake.add_device: unknown room " .. tostring(room_id))
+	assert(not fake.project.devices[id], "fake.add_device: device " .. tostring(id) .. " exists")
+	local driver = opts.driver or "source.c4z"
+	local name = opts.name or ("Device " .. tostring(id))
+	local rec = { name = name, room_id = room_id, c4i = driver, driver_name = (driver:gsub("%.c4[iz]$", "")) }
+	fake.project.devices[id] = rec
+	if opts.proxy == false then return id end
+	local proxy_id = opts.proxy_id or (id + 1)
+	assert(not fake.project.devices[proxy_id], "fake.add_device: device " .. tostring(proxy_id) .. " exists")
+	rec.proxy_id, rec.proxy_binding = proxy_id, 5001
+	fake.project.devices[proxy_id] = { name = name, room_id = room_id, c4i = (opts.proxy or "dvd") .. ".c4i",
+		protocol_id = id, driver_name = rec.driver_name }
+	return proxy_id
 end
 
 -- Move a device (by its protocol or proxy id) and its other half to a room.

@@ -43,11 +43,32 @@ follows it.
   the Hue bridge, what it switches by itself, and how it is wired: in
   line, behind a receiver or from a receiver's second output. It goes
   offline after 5 minutes without an answer from the box. Diagnostics and
-  Forget Pairing complete it. It does not control the box yet: switching
-  inputs with the room, sync control with intensity and brightness by the
-  time of day, programming and the Watch-menu buttons come in later 2.0
-  betas, and until then a command to the box is answered in Last Action
-  and not sent (#534, #514).
+  Forget Pairing complete it. Intensity and brightness by the time of day,
+  programming and the Watch-menu buttons come in a later 2.0 beta; until
+  then a press of one of its buttons is answered in Last Action and not
+  sent (#534, #514).
+- The Hue Sync Box device switches its box with the room, in each of the
+  three wirings. In line, picking a source in Watch or Listen wakes the
+  box, switches it to that source's input and starts syncing, in one
+  change, and Control4 is told the input changed only once the box shows
+  it; a change the box does not take is sent again every 2 seconds, 4
+  times, then Last Action says what did not happen. Behind a receiver the
+  box is switched to HDMI 1 and the sync mode follows the room's current
+  source. On a receiver's second output, where Control4 sends the box
+  nothing, the device follows a room's power and source. The box syncs
+  in the mode the source calls for: Video, Game or Music, by the input's
+  type in the Hue app or the route in line (a Listen source is Music),
+  by the source's Control4 driver elsewhere (a console's guessed from its
+  driver's name and shown as a guess), or `Do not sync`. New properties:
+  HDMI 1 Sync Mode to HDMI 4 Sync Mode (in line), Follow Room and Source
+  Sync Modes (behind a receiver and on a second output), At Room Off
+  (`Power save` or `Stop syncing and keep the picture`) and When The
+  Source Leaves The Box; only the ones of the box's wiring are shown. A
+  new action, Set Source Sync Mode, sets a source's mode. Changes made in
+  the Hue app or by the box itself never move a Control4 room, and a
+  driver restart sends the box nothing. While another app syncs to the
+  box's entertainment area the input is still switched and the other
+  app's sync left running (#557, #514).
 - The Hue Bridge has a new connection, Hue Sync Boxes. A Hue Sync Box
   device connected to it learns the bridge's entertainment areas and reads
   its box at once when a sync starts or stops; while the area of its box

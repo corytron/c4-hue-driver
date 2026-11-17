@@ -935,8 +935,8 @@ ledger.rows = {
 	},
 	{
 		id = "E12",
-		capability = "The sync box device is an AV switch with four UI Buttons and its HDMI connections; their "
-			.. "commands are logged with every parameter and answered Not done until routing comes (stage 3)",
+		capability = "The sync box device is an AV switch with four UI Buttons and its HDMI connections; every "
+			.. "proxy command is logged with every parameter; the UI Buttons answer Not done until stage 4",
 		gate = { "proxy" },
 		paths = {
 			{ proxy = "avswitch", driver = "hue_syncbox" },
@@ -953,7 +953,7 @@ ledger.rows = {
 			{ proxy_command = "BINDING_CHANGE_ACTION", binding = 5001, driver = "hue_syncbox" },
 			{ proxy_command = "SELECT", binding = 5002, driver = "hue_syncbox" },
 			{ auto = "a proxy command", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
-				test = "answers ON, SET_INPUT and a UI Button press with Last Action only, logged with every parameter" } },
+				test = "logs every proxy command with every parameter, and answers a UI Button press Not done" } },
 		},
 	},
 	{
@@ -969,6 +969,112 @@ ledger.rows = {
 				test = "reads the box at once on an AREA and marks a CONFIGURE that names another bridge" } },
 			{ auto = "late init and a binding", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
 				test = "checks the identity with the stored id, then polls, and says hello to the bridge" } },
+		},
+	},
+	-- 2.0 beta stage 3 (#557, docs/hdmi-sync-stage3-design.md §5; contracts C4; design 5.2, 5.3, 5.8).
+	{
+		id = "E14",
+		capability = "Control4 routes through the sync box: ON, SET_INPUT, OFF and DISCONNECT_OUTPUT become writes "
+			.. "through one queue, confirmed to the proxy only when a read shows them, tried 4 times 2 s apart, "
+			.. "else answered as undelivered in Last Action",
+		gate = { "proxy" },
+		paths = {
+			{ proxy_command = "ON", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "SET_INPUT", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "OFF", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "DISCONNECT_OUTPUT", binding = 5001, driver = "hue_syncbox" },
+			{ auto = "a source routed through the box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "routes a source in line: wakes, switches and syncs, then confirms INPUT_OUTPUT_CHANGED after "
+					.. "the read" } },
+			{ auto = "an input the box did not take", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "tries an input the box did not take 4 times 2 s apart, then says it was not switched" } },
+		},
+	},
+	{
+		id = "E15",
+		capability = "Each HDMI input's sync mode in line: Automatic (by the input's type in the Hue Sync app, "
+			.. "a Listen route to music), Video, Game, Music or Do not sync",
+		gate = { "prop" },
+		paths = {
+			{ property = "HDMI 1 Sync Mode", type = "LIST",
+				items = { "Automatic", "Video", "Game", "Music", "Do not sync" }, driver = "hue_syncbox" },
+			{ property = "HDMI 2 Sync Mode", type = "LIST",
+				items = { "Automatic", "Video", "Game", "Music", "Do not sync" }, driver = "hue_syncbox" },
+			{ property = "HDMI 3 Sync Mode", type = "LIST",
+				items = { "Automatic", "Video", "Game", "Music", "Do not sync" }, driver = "hue_syncbox" },
+			{ property = "HDMI 4 Sync Mode", type = "LIST",
+				items = { "Automatic", "Video", "Game", "Music", "Do not sync" }, driver = "hue_syncbox" },
+			{ auto = "a route through an input", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "syncs in each input's own mode, and only switches an input set to Do not sync" } },
+		},
+	},
+	{
+		id = "E16",
+		capability = "What Room Off and a source that leaves the box do to the sync box: power save, or stop "
+			.. "syncing and keep the picture",
+		gate = { "prop" },
+		paths = {
+			{ property = "At Room Off", type = "LIST", items = { "Power save", "Stop syncing and keep the picture" },
+				driver = "hue_syncbox" },
+			{ property = "When The Source Leaves The Box", type = "LIST",
+				items = { "Stop syncing and keep the picture", "Power save" }, driver = "hue_syncbox" },
+			{ auto = "Room Off", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "puts the box in power save at Room Off, or keeps the picture as At Room Off says" } },
+			{ auto = "a source that leaves the box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "stops syncing and keeps the picture when the source leaves the box" } },
+		},
+	},
+	{
+		id = "E17",
+		capability = "Follow a Control4 room: on a receiver's second output its power and source drive the "
+			.. "sync box; behind a receiver its source sets the sync mode; the device's own room by default",
+		gate = { "prop", "auto" },
+		paths = {
+			{ property = "Follow Room", type = "DYNAMIC_LIST", driver = "hue_syncbox" },
+			{ auto = "the followed room's power and source", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "follows the room on a receiver's second output: wakes and syncs on a source, power save at "
+					.. "Room Off" } },
+			{ auto = "the followed room's source behind a receiver", proof = {
+				spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "takes the sync mode from the followed room's source behind a receiver" } },
+		},
+	},
+	{
+		id = "E18",
+		capability = "Each source's sync mode behind a receiver and on a second output: Automatic (Listen to "
+			.. "music, a game console guessed from its driver, else video), Video, Game, Music or Do not sync",
+		gate = { "click" },
+		paths = {
+			{ action = "Set Source Sync Mode", params = { "Source", "Mode" }, driver = "hue_syncbox" },
+			{ action = "Set Source Sync Mode", params = { "Source", "Mode" }, pick = { Mode = "Game" },
+				driver = "hue_syncbox" },
+			{ property = "Source Sync Modes", type = "STRING", driver = "hue_syncbox" },
+			{ auto = "Set Source Sync Mode", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "keeps a source's sync mode from Set Source Sync Mode and shows it in Source Sync Modes" } },
+		},
+	},
+	{
+		id = "E19",
+		capability = "Only the sync box's settings that apply to its wiring are shown, switched when the box's "
+			.. "wiring changes",
+		gate = { "auto" },
+		paths = {
+			{ auto = "late init and every read of the wiring", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "shows only the settings of the box's wiring and switches them when the wiring changes" } },
+		},
+	},
+	{
+		id = "E20",
+		capability = "Offers, never applied by themselves: the room whose picture runs through the sync box "
+			.. "behind a receiver (W20), a replaced source's sync mode for the device that replaced it (W21)",
+		gate = { "offered" },
+		paths = {
+			{ auto = "a SET_INPUT behind a receiver", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "offers the room whose picture runs through the box behind a receiver, once, without following it" } },
+			{ auto = "a source replaced in Composer", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "offers a replaced source's mode to the device that replaced it, and moves it on a click" } },
+			{ action = "Set Source Sync Mode", params = { "Source", "Mode" }, driver = "hue_syncbox" },
+			{ property = "Follow Room", type = "DYNAMIC_LIST", driver = "hue_syncbox" },
 		},
 	},
 
@@ -1056,10 +1162,12 @@ ledger.actions = {
 	hue_motion = {
 		{ command = "Test Motion Programming" },
 	},
-	-- 2.0 beta stage 2 (#534, docs/hdmi-sync-stage2-design.md §5); Sync Box
-	-- Settings comes with stage 4 (contracts C1.5).
+	-- 2.0 beta stage 2 (#534, docs/hdmi-sync-stage2-design.md §5), and Set
+	-- Source Sync Mode of stage 3 (#557, docs/hdmi-sync-stage3-design.md §5);
+	-- Sync Box Settings comes with stage 4 (contracts C1.5).
 	hue_syncbox = {
 		{ command = "Pair Sync Box", params = { "Box", "Address" } },
+		{ command = "Set Source Sync Mode", params = { "Source", "Mode" } },
 		{ command = "Diagnostics", params = { "What" } },
 		{ command = "Forget Pairing", params = { "Confirm" } },
 	},
