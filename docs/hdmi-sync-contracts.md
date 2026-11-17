@@ -49,6 +49,14 @@ settles it.
 Input n of the box is video 999+n and audio 2999+n. The output is 2000 and
 4000. All four inputs exist on every model (design 5.1).
 
+Left out on purpose, for every wiring of design 5.8
+([`syncbox-wirings-research.md`](syncbox-wirings-research.md) §7.1): **no
+room binding** (a room's video endpoint stays the TV) and **no Power
+Manager binding**. The AV connections are frozen in practice, not only
+add-only: the capability counts must match them, so adding one later is a
+capability change and a controller reboot. Properties and actions can still
+be added.
+
 ### C1.3 Capabilities (frozen before `v2.0-beta.1`)
 
 - `video_consumer_count` 4, `video_provider_count` 1.
