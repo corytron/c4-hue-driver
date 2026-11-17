@@ -17,6 +17,8 @@ The certificate in src/hue_syncbox/certs/hsb_ca.pem is the X.509 root CA
 certificate of Philips Hue Play HDMI Sync Boxes ("root-hsb", Signify),
 included unmodified so the Hue Sync Box driver can verify a box's TLS
 certificate. It is Signify's and is not covered by this project's license.
+decoy.pem in the same folder is this project's own, made the same way as
+the bridge's decoy_ca.pem and used only by the box driver's TLS self-check.
 
 Philips Hue and Hue are trademarks of Signify Holding B.V. Philips is a
 registered trademark of Koninklijke Philips N.V. Control4, Composer and
