@@ -98,7 +98,10 @@ sources.PROXIES_READ = 16         -- entries of a device's proxies table looked 
 -- "offer" shows the guess without applying it. One line.
 sources.GAME_GUESS = "apply"
 sources.GAME_HINTS = { "xbox", "playstation", "nintendo" }   -- research §2.1
-sources.MUSIC_PROXIES = { tuner = true, tunerxm = true, discchanger = true, cdplayer = true }
+-- "cd" and the CD player's other names: probe P10/P11 showed a Denon CD player
+-- listed as Video in Source Sync Modes (#557).
+sources.MUSIC_PROXIES = { tuner = true, tunerxm = true, discchanger = true, cdplayer = true, cd = true,
+	cd_player = true, digital_audio = true }
 -- The box's input types (docs/syncbox-api-research.md §2.7; design 5.3).
 sources.GAME_TYPES = { game = true, xbox = true, playstation = true, nintendoswitch = true }
 sources.MUSIC_TYPES = { music = true, avreceiver = true, soundbar = true, speaker = true }

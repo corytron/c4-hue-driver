@@ -848,9 +848,18 @@ function fr.apply(catch_up)
 	end
 	local wanted = r.room_id
 	if wanted == st.followed and not catch_up then
+		-- W3: the followed room renamed in Composer; the id stands, the name
+		-- moves into follow.lua's Status note and Last Action at once (P12).
+		if wanted and r.name and st.followed_name and r.name ~= st.followed_name then
+			local old = st.followed_name
+			st.followed_name = r.name
+			call(m.follow, "set_room", wanted, r.name)
+			last_action(string.format("Follows %s: the room %s was renamed in Composer", r.name, old))
+			refresh_status()
+		end
 		return
 	end
-	st.followed, st.room_trouble = wanted, nil
+	st.followed, st.followed_name, st.room_trouble = wanted, r.name, nil
 	-- follow.lua's next baseline is a baseline, or (a dealer's pick, a change
 	-- to the second output: W22) applied once.
 	call(m.follow, "set_room", wanted, r.name, catch_up and { catch_up = true } or nil)
@@ -3000,6 +3009,7 @@ function OnSystemEvent(data)
 	end
 	if type(data) == "string" and data:find("OnItemNameChanged", 1, true) then
 		log.debug("OnSystemEvent (OnItemNameChanged): %s", https.peer_text(data, 200))
+		fr.check() -- a followed room renamed (W3, probe P12)
 		return ofr.renamed()
 	end
 	log.debug("OnSystemEvent (OnPIP): %s", https.peer_text(tostring(data), 200))

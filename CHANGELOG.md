@@ -154,6 +154,7 @@ follows it.
   scene` (#514).
 
 ### Fixed
+- Hue Sync Box: when the room the box follows is renamed in Composer, Status and Last Action show the new name at once, and a CD player's source sync mode reads Music (found by the house probes of stage 3, #557).
 - A Hue Light, zone light or room light that turns off no longer shows a
   huge negative number (Composer shows -1.07967e+09) as its brightness target
   while it fades out, nor as its Brightness Percent for a moment when the

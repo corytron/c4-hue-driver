@@ -1483,6 +1483,23 @@ describe("Hue Sync Box driver (#534)", function()
 			assert.equal("none", c4.persist.syncbox_follow_room.mode)
 		end)
 
+		it("a followed room renamed in Composer: Status and Last Action take the new name at once (W3, probe P12)",
+			function()
+				local env, c4 = paired(F.state.HSB2_second_output)
+				fake.add_room(8, "Kitchen")
+				c4.advance(5000)
+				set_property(env, "Follow Room", "Kitchen")
+				c4.advance(2000)
+				fake.project.rooms[8].name = "Kitchen 2"
+				env.OnSystemEvent('<c4soap name="OnItemNameChanged"><param name="iditem" type="ulong">8</param>'
+					.. '<param name="name" type="string">Kitchen 2</param></c4soap>')
+				c4.advance(1000)
+				assert.equal("Follows Kitchen 2: the room Kitchen was renamed in Composer", fake.last_action(env))
+				assert.truthy(env.Properties["Status"]:find("Kitchen 2", 1, true), env.Properties["Status"])
+				assert.is_nil(env.Properties["Status"]:find("Kitchen%f[^%w ]"), env.Properties["Status"])
+				assert.is_true(c4.listens(8, 1000), "still the same room")
+			end)
+
 		it("says a deleted followed room and follows no other room by itself (W4)", function()
 			local env, c4 = paired(F.state.HSB2_second_output)
 			fake.add_room(8, "Kitchen")
