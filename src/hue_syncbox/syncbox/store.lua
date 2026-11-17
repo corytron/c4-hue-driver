@@ -85,11 +85,19 @@ store.check = check
 function store.new(deps)
 	deps = deps or {}
 	return setmetatable({
+		-- The encrypted flag only when true: Director raises on an explicit nil
+		-- there [verified: house, build 682, 2026-11-17, #547].
 		get = deps.persist_get or function(name, encrypted)
-			return C4:PersistGetValue(name, encrypted)
+			if encrypted then
+				return C4:PersistGetValue(name, true)
+			end
+			return C4:PersistGetValue(name)
 		end,
 		set = deps.persist_set or function(name, value, encrypted)
-			return C4:PersistSetValue(name, value, encrypted)
+			if encrypted then
+				return C4:PersistSetValue(name, value, true)
+			end
+			return C4:PersistSetValue(name, value)
 		end,
 		delete = deps.persist_delete or function(name)
 			return C4:PersistDeleteValue(name)
@@ -115,7 +123,7 @@ local function memory(self)
 	local m = {}
 	for _, field in ipairs(store.FIELDS) do
 		local encrypted = field == "token"
-		local ok, value = pcall(self.get, store.NAMES[field], encrypted or nil)
+		local ok, value = pcall(self.get, store.NAMES[field], encrypted)
 		if not ok then
 			self.log.warn("Sync box: could not read the stored %s", field)
 		elseif value ~= nil and value ~= "" then

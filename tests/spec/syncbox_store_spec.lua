@@ -167,4 +167,30 @@ describe("syncbox/store.lua (#514 stage 2)", function()
 		assert.truthy(line:find("token present", 1, true))
 		assert.truthy(line:find("0A1B2C3D4E5F", 1, true))
 	end)
+	it("calls Director's Persist functions with the encrypted flag only when true (#547)", function()
+		-- Director raises on an explicit nil flag [verified: house, build 682, 2026-11-17].
+		local calls = {}
+		local strict = function(kind)
+			return function(_, ...)
+				local n = select("#", ...)
+				local flag_at = kind == "get" and 2 or 3
+				if n >= flag_at and type((select(flag_at, ...))) ~= "boolean" then
+					error("bad argument: encrypted must be a boolean")
+				end
+				calls[#calls + 1] = { kind, n }
+				return nil
+			end
+		end
+		local saved = { get = C4.PersistGetValue, set = C4.PersistSetValue }
+		C4.PersistGetValue, C4.PersistSetValue = strict("get"), strict("set")
+		local ok, err = pcall(function()
+			local st = require("syncbox.store").new({ log = log })
+			assert.same({}, st:load())
+			assert.is_true(st:save({ token = "TEST-TOKEN-NOT-REAL", box_id = "0A1B2C3D4E5F", address = "10.0.2.150",
+				registration_id = "7" }))
+		end)
+		C4.PersistGetValue, C4.PersistSetValue = saved.get, saved.set
+		assert.is_true(ok, tostring(err))
+		assert.is_true(#calls >= 8)
+	end)
 end)
