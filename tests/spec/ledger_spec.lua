@@ -41,11 +41,11 @@ local log = require("common.log")
 local LEDGER = require("fixtures.ledger")
 local ACTIONS = require("bridge.actions")
 
-local DRIVERS = { "hue_bridge", "hue_light", "hue_scene", "hue_motion" }
-local IS_DRIVER = { hue_bridge = true, hue_light = true, hue_scene = true, hue_motion = true }
+local DRIVERS = { "hue_bridge", "hue_light", "hue_scene", "hue_motion", "hue_syncbox" }
+local IS_DRIVER = { hue_bridge = true, hue_light = true, hue_scene = true, hue_motion = true, hue_syncbox = true }
 local FORMS = { "dev", "release" }
 local DEFAULT_DRIVER = "hue_bridge"
-local DEVICE_ID = { hue_bridge = 15, hue_light = 2101, hue_scene = 2101, hue_motion = 2101 }
+local DEVICE_ID = { hue_bridge = 15, hue_light = 2101, hue_scene = 2101, hue_motion = 2101, hue_syncbox = 2301 }
 
 local function read(path)
 	local file = assert(io.open(path), "cannot read " .. path)

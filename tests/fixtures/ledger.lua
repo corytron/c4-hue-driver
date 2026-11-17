@@ -822,6 +822,155 @@ ledger.rows = {
 				find = "RESTORE_AFTER_S" } },
 		},
 	},
+	-- The Hue Sync Box driver (2.0 beta stage 2, #534, docs/hdmi-sync-stage2-design.md §4, §5).
+	{
+		id = "E4",
+		capability = "Pair a Hue Sync Box, found on the network or at a typed address: its identity over the "
+			.. "pinned chain, then its button held within 2 minutes; the box's rows fill",
+		gate = { "click" },
+		paths = {
+			{ action = "Pair Sync Box", params = { "Box", "Address" }, driver = "hue_syncbox" },
+			{ action = "Pair Sync Box", params = { "Box", "Address" }, pick = { Box = "address" },
+				driver = "hue_syncbox" },
+			{ property = "Sync Box", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Model", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Firmware", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Box ID", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Box Address", type = "STRING", driver = "hue_syncbox" },
+			{ auto = "the button held while the window is open", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "checks the box, counts the window down every 10 s, then pairs, fills the rows and polls" } },
+		},
+	},
+	{
+		id = "E5",
+		capability = "Find Hue sync boxes on the network (mDNS, local only, each proven by its identity): at "
+			.. "first load, on Pair Sync Box and every hour while none is paired",
+		gate = { "auto" },
+		paths = {
+			{ auto = "first load, Pair Sync Box, hourly", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "searches the network at first load and every hour while unpaired" } },
+			{ auto = "a box answers the search", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "lists a box the search found once its identity answered, and counts it in Status" } },
+		},
+	},
+	{
+		id = "E6",
+		capability = "Forget a sync box's pairing: its registration deleted on the box, the token gone, Box "
+			.. "Address kept, the device kept",
+		gate = { "click" },
+		paths = {
+			{ action = "Forget Pairing", params = { "Confirm" }, pick = { Confirm = "Yes" }, driver = "hue_syncbox" },
+			{ auto = "Forget Pairing, Yes", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "deletes the registration, clears the rows but Box Address, stops polling and says goodbye" } },
+		},
+	},
+	{
+		id = "E7",
+		capability = "The sync box's state, read every few seconds: sync, inputs, bridge link, its own input "
+			.. "switching and its wiring (in line, behind a receiver, a receiver's second output)",
+		gate = { "auto" },
+		paths = {
+			{ property = "Status", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Sync", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Inputs", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Bridge Link", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Input Switching", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Wiring", type = "STRING", driver = "hue_syncbox" },
+			{ auto = "every read of the box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "follows a change the box made by itself at the next read (EC B23)" } },
+			{ auto = "a standalone box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "refuses a standalone HSB3 in Status (O2)" } },
+		},
+	},
+	{
+		id = "E8",
+		capability = "A sync box offline after 5 minutes without an answer and online at the first good read, "
+			.. "the outage kept across a restart",
+		gate = { "auto" },
+		paths = {
+			{ property = "Online", type = "STRING", driver = "hue_syncbox" },
+			{ auto = "300 s without an answer", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "goes offline after 5 minutes without an answer and online at the first good read" } },
+			{ auto = "a restart during an outage", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "keeps an outage's time across a restart and reports it once" } },
+		},
+	},
+	{
+		id = "E9",
+		capability = "Follow the paired sync box to a new address once its identity proved it there; send no "
+			.. "token where another device answers",
+		gate = { "auto" },
+		paths = {
+			{ auto = "the box found at another address", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "follows the box to a new address the search finds, after the identity proved it (EC B11)" } },
+			{ auto = "another device at the address", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "sends no token where another device answers, and says so (EC B12)" } },
+		},
+	},
+	{
+		id = "E10",
+		capability = "A sync box that forgot the registration: said in Status and Last Action, the token kept, "
+			.. "the box asked again after 5 and 15 minutes and an hour",
+		gate = { "auto" },
+		paths = {
+			{ auto = "a 401 or 403 from the proven box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "says so after re-checking the identity, keeps the token, and asks again after 5 minutes" } },
+		},
+	},
+	{
+		id = "E11",
+		capability = "Sync box Diagnostics: check the box now, read everything now, the raw state in the Lua "
+			.. "output with every secret field redacted",
+		gate = { "click" },
+		paths = {
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "Check the box now" },
+				driver = "hue_syncbox" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "Read everything from the box now" },
+				driver = "hue_syncbox" },
+			{ action = "Diagnostics", params = { "What" }, pick = { What = "Show the box's raw state in the Lua output" },
+				driver = "hue_syncbox" },
+			{ auto = "the raw state", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "prints the raw state with every secret field redacted" } },
+		},
+	},
+	{
+		id = "E12",
+		capability = "The sync box device is an AV switch with four UI Buttons and its HDMI connections; their "
+			.. "commands are logged with every parameter and answered Not done until routing comes (stage 3)",
+		gate = { "proxy" },
+		paths = {
+			{ proxy = "avswitch", driver = "hue_syncbox" },
+			{ proxy = "uibutton", driver = "hue_syncbox" },
+			{ connection = "Hue Sync Box", id = 5001, driver = "hue_syncbox" },
+			{ connection = "Hue Sync", id = 5002, driver = "hue_syncbox" },
+			{ connection = "Sync Brighter", id = 5003, driver = "hue_syncbox" },
+			{ connection = "Sync Dimmer", id = 5004, driver = "hue_syncbox" },
+			{ connection = "Sync Intensity", id = 5005, driver = "hue_syncbox" },
+			{ proxy_command = "ON", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "OFF", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "SET_INPUT", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "DISCONNECT_OUTPUT", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "BINDING_CHANGE_ACTION", binding = 5001, driver = "hue_syncbox" },
+			{ proxy_command = "SELECT", binding = 5002, driver = "hue_syncbox" },
+			{ auto = "a proxy command", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "answers ON, SET_INPUT and a UI Button press with Last Action only, logged with every parameter" } },
+		},
+	},
+	{
+		id = "E13",
+		capability = "The sync box's link to the Hue Bridge: hello and goodbye, the bridge's areas and stream "
+			.. "changes taken only as hints (C5, #483)",
+		gate = { "auto" },
+		paths = {
+			{ connection = "Hue Bridge", id = 1, driver = "hue_syncbox" },
+			{ message = "HUE_SYNCBOX_CONFIGURE", driver = "hue_syncbox" },
+			{ message = "HUE_SYNCBOX_AREA", driver = "hue_syncbox" },
+			{ auto = "a bridge hint", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "reads the box at once on an AREA and marks a CONFIGURE that names another bridge" } },
+			{ auto = "late init and a binding", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "checks the identity with the stored id, then polls, and says hello to the bridge" } },
+		},
+	},
 
 	-- Every driver ---------------------------------------------------------------
 	{
@@ -838,6 +987,11 @@ ledger.rows = {
 			{ property = "Last Action", type = "STRING", driver = "hue_light" },
 			{ property = "Last Action", type = "STRING", driver = "hue_scene" },
 			{ property = "Last Action", type = "STRING", driver = "hue_motion" },
+			{ property = "Last Action", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Last Action (2)", type = "STRING", driver = "hue_syncbox" },
+			{ property = "Last Action (6)", type = "STRING", driver = "hue_syncbox" },
+			{ auto = "a long result on the sync box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "says the registration stays on the box when the box does not answer" } },
 			{ auto = "a long result", proof = { spec = "tests/spec/drivers_spec.lua",
 				test = "word-wraps a long Last Action onto its continuation rows and hides them again" } },
 		},
@@ -851,14 +1005,19 @@ ledger.rows = {
 			{ property = "Debug Mode", type = "LIST", items = { "Off", "On" }, driver = "hue_light" },
 			{ property = "Debug Mode", type = "LIST", items = { "Off", "On" }, driver = "hue_scene" },
 			{ property = "Debug Mode", type = "LIST", items = { "Off", "On" }, driver = "hue_motion" },
+			{ property = "Debug Mode", type = "LIST", items = { "Off", "On" }, driver = "hue_syncbox" },
 			{ property = "Driver Version", type = "STRING" },
 			{ property = "Driver Version", type = "STRING", driver = "hue_light" },
 			{ property = "Driver Version", type = "STRING", driver = "hue_scene" },
 			{ property = "Driver Version", type = "STRING", driver = "hue_motion" },
+			{ property = "Driver Version", type = "STRING", driver = "hue_syncbox" },
 			{ documentation = "www/documentation.html", find = "<!-- CHANGELOG -->" },
 			{ documentation = "www/documentation.html", find = "<!-- CHANGELOG -->", driver = "hue_light" },
 			{ documentation = "www/documentation.html", find = "<!-- CHANGELOG -->", driver = "hue_scene" },
 			{ documentation = "www/documentation.html", find = "<!-- CHANGELOG -->", driver = "hue_motion" },
+			{ documentation = "www/documentation.html", find = "<!-- CHANGELOG -->", driver = "hue_syncbox" },
+			{ auto = "8 hours after Debug Mode On on the sync box", proof = { spec = "tests/spec/syncbox_driver_spec.lua",
+				test = "turns Debug Mode Off after 8 hours, in Last Action (#493)" } },
 		},
 	},
 	{
@@ -896,6 +1055,13 @@ ledger.actions = {
 	hue_scene = {},
 	hue_motion = {
 		{ command = "Test Motion Programming" },
+	},
+	-- 2.0 beta stage 2 (#534, docs/hdmi-sync-stage2-design.md §5); Sync Box
+	-- Settings comes with stage 4 (contracts C1.5).
+	hue_syncbox = {
+		{ command = "Pair Sync Box", params = { "Box", "Address" } },
+		{ command = "Diagnostics", params = { "What" } },
+		{ command = "Forget Pairing", params = { "Confirm" } },
 	},
 }
 

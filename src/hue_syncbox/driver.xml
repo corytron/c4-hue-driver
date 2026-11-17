@@ -1,0 +1,540 @@
+<devicedata>
+	<copyright>Copyright 2026 Cory Fair. Licensed under the Apache License, Version 2.0 (see LICENSE). Not affiliated with Signify or Snap One.</copyright>
+	<creator>Cory Fair</creator>
+	<manufacturer>Philips Hue</manufacturer>
+	<name>Hue Sync Box</name>
+	<model>Hue Play HDMI Sync Box (local API)</model>
+	<created>11/16/2026 12:00</created>
+	<modified>11/16/2026 12:00</modified>
+	<version>1</version>
+	<!-- The package's own icons, drawn by tools/make_icons.py, as the bridge's
+	     (image_source c4z: the path is relative to www/) [verified: FUND
+	     19_driver_icon_management/_1-DRIVERICONMANAGEMENT.md]. -->
+	<small image_source="c4z">images/devices_sm/hue_syncbox_16.png</small>
+	<large image_source="c4z">images/devices_lg/hue_syncbox_32.png</large>
+	<control>lua_gen</control>
+	<controlmethod>IP</controlmethod>
+	<driver>DriverWorks</driver>
+	<!-- 3.3.0: the floor of the other four drivers (contracts C1). -->
+	<minimum_os_version>3.3.0</minimum_os_version>
+	<!-- Listed with the AV devices in Composer's driver search (O13) [verified:
+	     XML 15_common_xml/_100-composercatagories.md]. -->
+	<composer_categories>
+		<category>Audio/Video</category>
+	</composer_categories>
+	<config>
+		<script jit="1" file="driver.lua"/>
+		<documentation file="www/documentation.html"/>
+		<!-- The rows of docs/hdmi-sync-stage2-design.md §5 (contracts C1.4, the
+		     stage 2 rows), in that order. Every row but Debug Mode is read-only;
+		     the settings rows (sync modes, periods, Room Off, Entertainment Area)
+		     come with stage 4. A long Last Action continues on the rows (2) to
+		     (6), word-wrapped, the unused ones hidden (as the bridge's). -->
+		<properties>
+			<property>
+				<name>Driver Version</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Debug Mode</name>
+				<type>LIST</type>
+				<items>
+					<item>Off</item>
+					<item>On</item>
+				</items>
+				<default>Off</default>
+				<readonly>false</readonly>
+				<tooltip>Off in normal use; On writes a detailed log to the Lua tab for troubleshooting and turns itself Off after 8 hours</tooltip>
+			</property>
+			<property>
+				<name>Status</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Online</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (2)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (3)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (4)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (5)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Last Action (6)</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Sync Box</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Model</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Firmware</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Box ID</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Box Address</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<!-- O17, design 5.8: the box's own setting (arcBypassMode, soloMode),
+			     shown; changed only by a click in a later stage. -->
+			<property>
+				<name>Wiring</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Sync</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Inputs</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Bridge Link</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+			<property>
+				<name>Input Switching</name>
+				<default></default>
+				<type>STRING</type>
+				<readonly>true</readonly>
+			</property>
+		</properties>
+		<!-- The actions of stage 2 (docs/hdmi-sync-stage2-design.md §5, contracts
+		     C1.5); Sync Box Settings comes with the offers of stage 4. Box is a
+		     CUSTOM_SELECT list built on demand by SyncBoxList in driver.lua
+		     [verified: FUND 12.3_custom_select_implementation/_1-Overview.md];
+		     Address is a STRING [verified: FUND 9_commands/_1-COMMANDS.md]. -->
+		<actions>
+			<action>
+				<name>Pair Sync Box</name>
+				<command>Pair Sync Box</command>
+				<sort_order>1</sort_order>
+				<params>
+					<param>
+						<name>Box</name>
+						<type>CUSTOM_SELECT:SyncBoxList</type>
+					</param>
+					<param>
+						<name>Address</name>
+						<type>STRING</type>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Diagnostics</name>
+				<command>Diagnostics</command>
+				<sort_order>2</sort_order>
+				<params>
+					<param>
+						<name>What</name>
+						<type>LIST</type>
+						<items>
+							<item>Check the box now</item>
+							<item>Read everything from the box now</item>
+							<item>Show the box's raw state in the Lua output</item>
+						</items>
+						<default>Check the box now</default>
+					</param>
+				</params>
+			</action>
+			<action>
+				<name>Forget Pairing</name>
+				<command>Forget Pairing</command>
+				<sort_order>3</sort_order>
+				<params>
+					<param>
+						<name>Confirm</name>
+						<type>LIST</type>
+						<items>
+							<item>No</item>
+							<item>Yes</item>
+						</items>
+						<default>No</default>
+					</param>
+				</params>
+			</action>
+		</actions>
+		<!-- No programming commands, events, conditionals or variables before
+		     stage 4 (docs/hdmi-sync-stage2-design.md §5). -->
+		<commands/>
+	</config>
+	<!-- Contracts C1.1, frozen for good from the first release: a driver may
+	     never add, remove or change a proxy once released [verified: FUND
+	     14_updating_released_drivers/_2]. The AV switch is the primary proxy
+	     [verified: XML 15_common_xml/_31-proxies.md, _32-proxy.md: primary],
+	     the four UI Buttons follow, each its own device with its own name
+	     [verified: FUND 8_proxies_and_proxy_types/_1-SINGLEANDMULTIPROXIES.md;
+	     UIB 103_ui_button_proxy_overview/_1-UIBUTTONPROXYOVERVIEW.md]. The
+	     buttons show their proxy's default icon [verified: FUND 19/_1]. -->
+	<proxies qty="5">
+		<proxy proxybindingid="5001" name="Hue Sync Box" primary="True" image_source="c4z" small_image="images/devices_sm/hue_syncbox_16.png" large_image="images/devices_lg/hue_syncbox_32.png">avswitch</proxy>
+		<proxy proxybindingid="5002" name="Hue Sync">uibutton</proxy>
+		<proxy proxybindingid="5003" name="Sync Brighter">uibutton</proxy>
+		<proxy proxybindingid="5004" name="Sync Dimmer">uibutton</proxy>
+		<proxy proxybindingid="5005" name="Sync Intensity">uibutton</proxy>
+	</proxies>
+	<!-- Contracts C1.3, frozen before the first release: a change needs the
+	     controller rebooted from System Manager. The counts match the
+	     connections [verified: PP 6_audio_video_switch_capabilities/_1, _2,
+	     _21, _22]; the box switches audio and video together and converts
+	     nothing [verified: PP 6/_3, 6/_4, 6/_5, 6/_20]; no volume, mute, tone
+	     or loudness [verified: PP 6/_7 to 6/_18]; no signal sense [verified:
+	     PP 6/_6, 6/_19]. can_switch and has_discrete_input_select are not in
+	     the AV switch's list: the receiver's and Snap One's AV switch defaults
+	     [verified: PP 19_receiver_capabilities/_4-CANSWITCH.md; FUND
+	     26.5_jumpstart/_3-Configuration.md] [assumed: harmless on avswitch]
+	     (docs/syncbox-control4-research.md §1.2). -->
+	<capabilities>
+		<video_consumer_count>4</video_consumer_count>
+		<video_provider_count>1</video_provider_count>
+		<audio_consumer_count>4</audio_consumer_count>
+		<audio_provider_count>1</audio_provider_count>
+		<can_switch>True</can_switch>
+		<has_discrete_input_select>True</has_discrete_input_select>
+		<can_switch_separately>False</can_switch_separately>
+		<requires_separate_switching>False</requires_separate_switching>
+		<can_upclass>False</can_upclass>
+		<can_downclass>False</can_downclass>
+		<has_discrete_volume_control>False</has_discrete_volume_control>
+		<has_up_down_volume_control>False</has_up_down_volume_control>
+		<has_discrete_mute_control>False</has_discrete_mute_control>
+		<has_toggle_mute_control>False</has_toggle_mute_control>
+		<has_discrete_bass_control>False</has_discrete_bass_control>
+		<has_up_down_bass_control>False</has_up_down_bass_control>
+		<has_discrete_treble_control>False</has_discrete_treble_control>
+		<has_up_down_treble_control>False</has_up_down_treble_control>
+		<has_discrete_balance_control>False</has_discrete_balance_control>
+		<has_up_down_balance_control>False</has_up_down_balance_control>
+		<has_discrete_loudness_control>False</has_discrete_loudness_control>
+		<has_audio_signal_sense>False</has_audio_signal_sense>
+		<has_video_signal_sense>False</has_video_signal_sense>
+	</capabilities>
+	<!-- Contracts C1.2, fixed for good once released: connections may only be
+	     added [verified: FUND 14/_2]. Binding ids in their ranges (video in
+	     1000-1099, video out 2000-2999, audio in 3000-3099, audio out from
+	     4000, proxies 5000-5999, control 1-999) [verified: FUND
+	     11_connections/_1-OVERVIEW.md; PP 8_audio_video_switch_proxy_commands/
+	     _46-SETINPUT.md; PP 8.7_avswitch_proxy_events/_0-HEADER.md]. Input n of
+	     the box is video 999+n and audio 2999+n; all four exist on every model
+	     (design 5.1). -->
+	<connections>
+		<!-- The proxy bindings, one per proxy, made by Director when the device
+		     is added [verified: FUND 11_connections/_5-PROXYBINDINGMULTIPLE.md;
+		     UIB 103/_1 for the UIBUTTON class]. AVSWITCH: the class of Snap
+		     One's avswitch proxy connection (docs/syncbox-control4-research.md
+		     §1.2). -->
+		<connection>
+			<id>5001</id>
+			<facing>6</facing>
+			<connectionname>Hue Sync Box</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>AVSWITCH</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>5002</id>
+			<facing>6</facing>
+			<connectionname>Hue Sync</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>UIBUTTON</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>5003</id>
+			<facing>6</facing>
+			<connectionname>Sync Brighter</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>UIBUTTON</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>5004</id>
+			<facing>6</facing>
+			<connectionname>Sync Dimmer</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>UIBUTTON</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection>
+			<id>5005</id>
+			<facing>6</facing>
+			<connectionname>Sync Intensity</connectionname>
+			<type>2</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>UIBUTTON</classname>
+				</class>
+			</classes>
+		</connection>
+		<!-- HDMI video in and out, on the AV switch proxy [verified: XML
+		     15_common_xml/_34-connections.md, a TV's HDMI inputs carry
+		     proxybindingid]. The box passes the picture through and is no
+		     source of its own [assumed: audiosource and videosource False on
+		     a switch's outputs]. -->
+		<connection proxybindingid="5001">
+			<id>1000</id>
+			<facing>6</facing>
+			<connectionname>HDMI 1</connectionname>
+			<type>5</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>1001</id>
+			<facing>6</facing>
+			<connectionname>HDMI 2</connectionname>
+			<type>5</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>1002</id>
+			<facing>6</facing>
+			<connectionname>HDMI 3</connectionname>
+			<type>5</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>1003</id>
+			<facing>6</facing>
+			<connectionname>HDMI 4</connectionname>
+			<type>5</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>2000</id>
+			<facing>6</facing>
+			<connectionname>HDMI Out</connectionname>
+			<type>5</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<!-- The same cables' audio, so Director can build a path with audio
+		     through the box (docs/syncbox-control4-research.md §1.2); HDMI is
+		     an audio class too [verified: FUND 11_connections/
+		     _8-FAVOREDBLOCKEDCLASSES.md]. -->
+		<connection proxybindingid="5001">
+			<id>3000</id>
+			<facing>6</facing>
+			<connectionname>HDMI 1</connectionname>
+			<type>6</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>3001</id>
+			<facing>6</facing>
+			<connectionname>HDMI 2</connectionname>
+			<type>6</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>3002</id>
+			<facing>6</facing>
+			<connectionname>HDMI 3</connectionname>
+			<type>6</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>3003</id>
+			<facing>6</facing>
+			<connectionname>HDMI 4</connectionname>
+			<type>6</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<connection proxybindingid="5001">
+			<id>4000</id>
+			<facing>6</facing>
+			<connectionname>HDMI Out</connectionname>
+			<type>6</type>
+			<consumer>False</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>True</linelevel>
+			<classes>
+				<class>
+					<classname>HDMI</classname>
+				</class>
+			</classes>
+		</connection>
+		<!-- The Hue Bridge's provider connection 2 "Hue Sync Boxes" (contracts
+		     C5, C6; docs/hdmi-sync-stage2-design.md §6): HELLO and GOODBYE go
+		     out here, CONFIGURE and AREA come in, every one only a hint (#483). -->
+		<connection>
+			<id>1</id>
+			<facing>6</facing>
+			<connectionname>Hue Bridge</connectionname>
+			<type>1</type>
+			<consumer>True</consumer>
+			<audiosource>False</audiosource>
+			<videosource>False</videosource>
+			<linelevel>False</linelevel>
+			<classes>
+				<class>
+					<classname>HUE_SYNCBOX</classname>
+				</class>
+			</classes>
+			<hidden>False</hidden>
+		</connection>
+	</connections>
+</devicedata>
