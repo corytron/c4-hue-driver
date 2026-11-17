@@ -1,10 +1,16 @@
 -- The fake runtime's stage 2 additions (#534, docs/hdmi-sync-stage2-design.md
 -- §7, contracts C8): the fake Hue Sync Box (fake.syncbox), the hand-written
 -- box fixtures (tests/fixtures/hue_syncbox.lua) and driver.xml files with more
--- than one <proxy>. The box is driven through common/https.lua configured as
--- the box's client configures it (contract §3.1), and through raw C4:url
--- transfers where a request must be one https.lua never sends. Placeholders
--- only: box 10.0.2.150, id 0A1B2C3D4E5F, token TEST-TOKEN-NOT-REAL.
+-- than one <proxy>; and since #547 (docs/fakebox-design.md §2, §4, §8) the box
+-- as a state machine (tests/helpers/fake_syncbox.lua): its writes, events,
+-- time, transport faults and pure handle, fake.set_url_transport, and the
+-- fake's Persist calls refusing a non-boolean encrypted flag. Each rule of
+-- docs/syncbox-behaviour.md is checked on its own by the scenarios
+-- (tests/spec/syncbox_scenarios_spec.lua); here the box is driven through
+-- common/https.lua configured as the box's client configures it (contract
+-- §3.1), and through raw C4:url transfers where a request must be one
+-- https.lua never sends. Placeholders only: box 10.0.2.150, id 0A1B2C3D4E5F,
+-- token TEST-TOKEN-NOT-REAL.
 
 local fake = require("helpers.fake_c4")
 local log = require("common.log")
@@ -71,21 +77,36 @@ describe("fake sync box (#534)", function()
 		return result
 	end
 
-	-- One raw C4:url transfer: { done, code, json, err_code }, and the transfer.
+	-- One raw C4:url transfer: { done, code, json, body, responses, err_code },
+	-- and the transfer.
 	local function raw(method, url, data, options, headers)
 		local got = {}
 		local t = c4:url():SetOptions(options or BOX_TLS):OnDone(function(_, responses, err_code)
 			local last = responses[#responses]
-			got.done, got.err_code = true, err_code
+			got.done, got.err_code, got.responses = true, err_code, responses
 			got.code = last and last.code
+			got.body = last and last.body
 			got.json = last and last.body and json.decode(last.body) or nil
 		end)
 		if method == "GET" then
 			t:Get(url, headers)
 		elseif method == "POST" then
 			t:Post(url, data, headers)
+		elseif method == "PUT" then
+			t:Put(url, data, headers)
+		elseif method == "DELETE" then
+			t:Delete(url, headers)
 		end
 		return got, t
+	end
+
+	local KEYED = { Authorization = "Bearer " .. F.TOKEN }
+
+	-- A box paired with the placeholder token.
+	local function paired(opts)
+		opts = opts or {}
+		opts.registrations = opts.registrations or { [F.REGISTRATION_ID] = F.TOKEN }
+		return fake.syncbox(opts)
 	end
 
 	describe("identity and pairing", function()
@@ -249,16 +270,23 @@ describe("fake sync box (#534)", function()
 			assert.equal("video", F.state.HSB2.execution.mode, "the fixture is never changed")
 		end)
 
-		it("records a PUT and answers it without changing the state; an empty one is refused", function()
+		it("records a PUT and applies it (SB30, SB5, SB11); a refused one changes nothing (SB20)", function()
 			local h = fake.syncbox({ registrations = { [F.REGISTRATION_ID] = F.TOKEN } })
 			local http = client()
 			local r = call(http, "PUT", "/execution", F.TOKEN, { mode = "game" })
 			assert.is_true(r.ok)
-			assert.equal("video", h.state.execution.mode, "stage 2: the spec changes h.state itself")
+			assert.same({}, r.json)
+			assert.equal("game", h.state.execution.mode)
+			assert.equal("game", h.state.execution.lastSyncMode)
+			assert.equal("game", h.state.hdmi.input1.lastSyncMode)
 			local put = h:requests_of("PUT", "/execution")
 			assert.equal(1, #put)
 			assert.same({ mode = "game" }, put[1].json)
 			assert.same(F.error.invalid_key, call(http, "PUT", "/execution", F.TOKEN, {}).json)
+			assert.same(F.error.invalid_key, call(http, "PUT", "/execution", F.TOKEN, { colour = 1 }).json)
+			assert.same(F.error.invalid_value, call(http, "PUT", "/execution", F.TOKEN,
+				{ brightness = 120, mode = "ambient" }).json)
+			assert.equal(100, h.state.execution.brightness, "nothing of a refused PUT applies")
 			assert.equal(404, call(http, "PUT", "/nothing", F.TOKEN, { a = 1 }).code)
 			assert.equal(404, call(http, "PUT", "", F.TOKEN, { a = 1 }).code)
 			assert.equal(401, call(http, "PUT", "/execution", nil, { mode = "game" }).code)
@@ -456,6 +484,474 @@ describe("fake sync box (#534)", function()
 			assert.is_true(results[3].ok)
 			assert.equal(3, #h.requests)
 		end)
+	end)
+
+	-- The state machine (#547, docs/syncbox-behaviour.md SBn), through the
+	-- client as the driver sends; the scenarios cover each rule on its own.
+	describe("the state machine through C4:url (#547)", function()
+		it("applies a combined PUT in SB55's order and judges the link on its result (SB56, SB91, SB94)", function()
+			local h = paired({ state = F.state.HSB3 })
+			local http = client()
+			local office = F.AREA.office
+			assert.is_true(call(http, "PUT", "/execution", F.TOKEN, { hdmiActive = true, syncActive = true }).ok)
+			assert.equal("game", h.state.execution.mode, "input1's last sync mode")
+			assert.is_true(h.state.execution.hdmiActive)
+			assert.equal("streaming", h.state.hue.connectionState)
+			assert.is_true(h.state.hue.groups[office].active)
+
+			assert.is_true(h:event("bridge", { state = "busy" }))
+			assert.equal("passthrough", h.state.execution.mode, "another app took the bridge")
+			assert.equal("other-app", h.state.hue.groups[office].owner)
+			local r = call(http, "PUT", "/execution", F.TOKEN, { brightness = 50, syncActive = true })
+			assert.same(F.error.invalid_state, r.json)
+			assert.equal(80, h.state.execution.brightness, "judged whole: the brightness did not apply")
+			assert.is_true(call(http, "PUT", "/execution", F.TOKEN, { brightness = 50, mode = "passthrough" }).ok)
+			assert.equal(50, h.state.execution.brightness)
+
+			assert.is_true(call(http, "PUT", "/hue/groups/" .. office, F.TOKEN, { active = false }).ok)
+			assert.equal("connected", h.state.hue.connectionState)
+			assert.is_false(h.state.hue.groups[office].active)
+			assert.is_nil(h.state.hue.groups[office].owner)
+			assert.is_true(call(http, "PUT", "/execution", F.TOKEN, { syncActive = true }).ok)
+			assert.equal("streaming", h.state.hue.connectionState)
+		end)
+
+		it("puts the intensity of a combined PUT on its new mode, and cycles modes video, music, game (SB38, SB55)",
+			function()
+				local h = paired()
+				local http = client()
+				assert.is_true(call(http, "PUT", "/execution", F.TOKEN, { mode = "music", intensity = "subtle" }).ok)
+				assert.equal("subtle", h.state.execution.music.intensity)
+				assert.equal("high", h.state.execution.video.intensity)
+				for _, want in ipairs({ "game", "video", "music" }) do
+					call(http, "PUT", "/execution", F.TOKEN, { cycleSyncMode = "next" })
+					assert.equal(want, h.state.execution.mode)
+				end
+				assert.same(F.error.invalid_value, call(http, "PUT", "/execution", F.TOKEN,
+					{ backgroundLighting = true }).json, "music has a palette instead (SB46)")
+				call(http, "PUT", "/execution", F.TOKEN, { incrementBrightness = 150 })
+				assert.equal(200, h.state.execution.brightness, "held within 0 to 200 (SB43)")
+			end)
+
+		it("keeps the mode across an input change and runs a preset as part of the PUT (SB39, SB49)", function()
+			local state = F.copy(F.state.HSB2)
+			state.presets = { p1 = { name = "Movie", execution = { mode = "game", brightness = 150 } } }
+			local h = paired({ state = state })
+			local http = client()
+			assert.is_true(call(http, "PUT", "/execution", F.TOKEN, { hdmiSource = "input3" }).ok)
+			assert.equal("video", h.state.execution.mode)
+			assert.equal("video", h.state.hdmi.input3.lastSyncMode)
+			assert.equal("", h.state.hdmi.contentSpecs, "input3 has no link (SB78)")
+			assert.is_true(call(http, "PUT", "/execution", F.TOKEN, { preset = "p1", brightness = 90 }).ok)
+			assert.equal("game", h.state.execution.mode)
+			assert.equal(90, h.state.execution.brightness, "the PUT's own field wins")
+			assert.equal(c4.now_ms, h.state.presets.p1.lastUsed)
+			assert.same(F.error.invalid_value, call(http, "PUT", "/execution", F.TOKEN, { preset = "p9" }).json)
+		end)
+
+		it("writes behavior, a port, the device's name and the area; refuses what the fakes leave out", function()
+			local h = paired()
+			local http = client()
+			assert.is_true(call(http, "PUT", "/behavior", F.TOKEN, { cecPowersave = 0, input2 = { linkAutoSync = 1 } }).ok)
+			assert.equal(0, h.state.behavior.cecPowersave)
+			assert.equal(1, h.state.behavior.input2.linkAutoSync)
+			assert.equal(15, call(http, "PUT", "/behavior", F.TOKEN, { cecPowersave = true }).json.code, "SB60")
+			assert.equal(15, call(http, "PUT", "/behavior", F.TOKEN, { inactivePowersave = 10001 }).json.code)
+			assert.equal(13, call(http, "PUT", "/behavior", F.TOKEN, { forceDoviNative = 0 }).json.code, "HSB1 only")
+			assert.equal(13, call(http, "PUT", "/behavior", F.TOKEN, { colour = 1, cecPowersave = true }).json.code,
+				"keys before values (SB21)")
+			assert.equal(404, call(http, "PUT", "/behavior/input1", F.TOKEN, { cecInputSwitch = 0 }).code)
+
+			assert.is_true(call(http, "PUT", "/hdmi/input2", F.TOKEN, { name = "PS5", type = "playstation" }).ok)
+			assert.equal("PS5", h.state.hdmi.input2.name)
+			assert.equal(13, call(http, "PUT", "/hdmi/input2", F.TOKEN, { status = "linked" }).json.code)
+			assert.equal(15, call(http, "PUT", "/hdmi/output", F.TOKEN, { type = "toaster" }).json.code)
+			assert.equal(404, call(http, "PUT", "/hdmi", F.TOKEN, { input2 = { name = "X" } }).code, "SB100")
+
+			assert.is_true(call(http, "PUT", "/device", F.TOKEN, { name = "Cinema Box", ledMode = 2 }).ok)
+			assert.equal("Cinema Box", call(http, "GET", "/device").json.name, "the unkeyed answer too")
+			for _, body in ipairs({ { action = "doSoftwareRestart" }, { uniqueId = "X" }, { bluetooth = false } }) do
+				assert.equal(13, call(http, "PUT", "/device", F.TOKEN, body).json.code, "SB111")
+			end
+			assert.equal(15, call(http, "PUT", "/device", F.TOKEN, { name = " " }).json.code)
+
+			assert.is_true(call(http, "PUT", "/hue", F.TOKEN, { groupId = F.AREA.office }).ok)
+			assert.equal(F.AREA.office, h.state.execution.hueTarget)
+			assert.is_true(h.state.hue.groups[F.AREA.office].active, "the stream moved (SB48)")
+			assert.is_false(h.state.hue.groups[F.AREA.tv].active)
+			assert.equal(13, call(http, "PUT", "/hue", F.TOKEN, { bridgeUniqueId = F.BRIDGE_ID }).json.code, "SB96")
+		end)
+
+		it("keeps created and lastUsed of a registration and never reuses an id (SB83, SB84, SB88)", function()
+			local h = fake.syncbox()
+			local http = client()
+			h:hold_button()
+			local first = call(http, "POST", "/registrations", nil, { appName = F.APP_NAME, instanceName = "Den" })
+			local created = c4.now_ms
+			c4.advance(60000)
+			local list = call(http, "GET", "/registrations", F.TOKEN).json
+			assert.equal(created, list["7"].created)
+			assert.equal(c4.now_ms, list["7"].lastUsed)
+			assert.is_false(list["7"].verified, "API level 14")
+			assert.equal("user", list["7"].role)
+			assert.is_true(call(http, "DELETE", "/registrations/7", first.json.accessToken).ok)
+			h:hold_button()
+			local again = call(http, "POST", "/registrations", nil, { appName = F.APP_NAME, instanceName = "Den" })
+			assert.equal("8", again.json.registrationId)
+			assert.equal(F.TOKEN .. "-8", again.json.accessToken)
+		end)
+
+		it("masks a linked port as plugged in powersave in every answer, not in h.state (SB72)", function()
+			local h = paired()
+			local http = client()
+			call(http, "PUT", "/execution", F.TOKEN, { hdmiActive = false })
+			assert.equal("linked", h.state.hdmi.input1.status)
+			assert.equal("plugged", call(http, "GET", "/hdmi/input1", F.TOKEN).json.status)
+			assert.equal("plugged", h:view().hdmi.output.status)
+			assert.equal("", h.state.hdmi.contentSpecs)
+			call(http, "PUT", "/execution", F.TOKEN, { hdmiActive = true })
+			assert.equal("linked", call(http, "GET", "", F.TOKEN).json.hdmi.input1.status)
+			assert.equal(F.state.HSB2.hdmi.contentSpecs, h.state.hdmi.contentSpecs, "the fixture's signal (SB78)")
+		end)
+	end)
+
+	describe("events (#547)", function()
+		it("switches on CEC Active Source and hot plug only as the behavior flags say, then auto-syncs (SB70, SB71, SB73)",
+			function()
+				local h = paired()
+				h:request("PUT", "/execution", KEYED, { syncActive = false })
+				assert.is_false(h:event("cec_active_source", { input = "input3" }), "its cecInputSwitch is 0")
+				assert.equal("input1", h.state.execution.hdmiSource)
+				h.state.behavior.input2.linkAutoSync = 1
+				assert.is_true(h:event("cec_active_source", { input = 2 }))
+				assert.equal("input2", h.state.execution.hdmiSource)
+				assert.equal("passthrough", h.state.execution.mode, "input2 reads plugged: no link yet")
+				assert.is_true(h:event("signal", { input = "input2", status = "linked" }))
+				assert.equal("game", h.state.execution.mode, "auto-sync in input2's last sync mode")
+				assert.equal("streaming", h.state.hue.connectionState)
+
+				assert.is_false(h:event("hotplug", { input = "input4" }), "no hot-plug switching on this box")
+				assert.equal("plugged", h.state.hdmi.input4.status)
+				h.state.behavior.input4.hpdInputPortSwitch = 1
+				h:event("tv_standby")
+				assert.is_true(h:event("hotplug", { input = "input4" }))
+				assert.equal("input4", h.state.execution.hdmiSource)
+				assert.equal("passthrough", h.state.execution.mode, "woken from powersave")
+				assert.is_false(h:event("cec_active_source", { input = "input5" }), "an input the box lacks")
+			end)
+
+		it("ends a sync when the selected input loses its link (SB74), and empties contentSpecs (SB78)", function()
+			local h = paired()
+			assert.is_true(h:event("signal", { input = "input2", status = "unplugged" }))
+			assert.equal("video", h.state.execution.mode, "not the selected input")
+			h:event("signal", { input = "input1", status = "plugged" })
+			assert.equal("passthrough", h.state.execution.mode)
+			assert.equal("", h.state.hdmi.contentSpecs)
+			assert.is_false(h.state.hdmi.videoSyncSupported)
+			assert.equal("connected", h.state.hue.connectionState)
+		end)
+
+		it("goes to powersave on TV standby, USB power and idle time only as behavior says (SB75 to SB77)", function()
+			local h = paired({ state = F.state.HSB1 })
+			assert.is_false(h:event("idle", { minutes = 30 }), "input2 reads linked")
+			h.state.hdmi.input2.status = "plugged"
+			assert.is_false(h:event("idle", { minutes = 19 }))
+			assert.is_true(h:event("idle", { minutes = 20 }))
+			assert.equal("powersave", h.state.execution.mode)
+			h:request("PUT", "/execution", KEYED, { hdmiActive = true })
+			h.state.behavior.usbPowersave = 0
+			assert.is_false(h:event("usb_power_lost"))
+			assert.is_true(h:event("tv_standby"))
+			local hsb3 = paired({ state = F.state.HSB3_standalone, address = "10.0.2.151" })
+			assert.is_false(hsb3:event("usb_power_lost"), "HSB3 has no usbPowersave")
+		end)
+
+		it("follows the bridge link (SB90, SB92, SB93)", function()
+			local h = paired()
+			h:event("bridge", { state = "connected" })
+			assert.equal("streaming", h.state.hue.connectionState, "a syncing box keeps streaming")
+			h:event("bridge", { state = "disconnected" })
+			assert.equal("passthrough", h.state.execution.mode)
+			assert.equal("disconnected", h.state.hue.connectionState)
+			assert.is_false(h.state.hue.groups[F.AREA.tv].active)
+			local _, refused = h:request("PUT", "/execution", KEYED, { syncActive = true })
+			assert.equal(16, refused.code)
+			h:event("bridge", { state = "busy", group = F.AREA.office })
+			assert.is_true(h.state.hue.groups[F.AREA.office].active)
+			assert.equal("other-app", h.state.hue.groups[F.AREA.office].owner)
+			h:event("bridge", { state = "connected" })
+			assert.is_nil(h.state.hue.groups[F.AREA.office].owner)
+			assert.equal(200, (h:request("PUT", "/execution", KEYED, { syncActive = true })))
+			assert.has_error(function() h:event("bridge", { state = "sideways" }) end)
+		end)
+
+		it("renames, forgets a registration and moves (SB87, SB112, SB114)", function()
+			local h = paired()
+			local http = client()
+			h:event("rename", { name = "Cinema Box" })
+			assert.equal("Cinema Box", call(http, "GET", "/device").json.name)
+			assert.is_true(h:event("app_deletes", { registration = "7" }))
+			assert.equal(401, call(http, "GET", "", F.TOKEN).code)
+			assert.is_false(h:event("app_deletes", { registration = "42" }))
+			assert.is_true(h:event("app_deletes", { registration = "1" }), "the Hue app's")
+			assert.is_nil(h:view().registrations["1"])
+			h:event("address", { address = "192.0.2.41" })
+			assert.equal("192.0.2.41", h.state.device.ipAddress)
+			assert.equal("192.0.2.41", call(http, "GET", "/device", nil, nil, "192.0.2.41").json.ipAddress)
+		end)
+
+		it("reboots: nothing answers until the time has passed, then the same state (SB120)", function()
+			local h = paired()
+			local http = client()
+			h:request("PUT", "/execution", KEYED, { brightness = 150 })
+			h:hold_button()
+			assert.is_true(h:event("reboot", { ms = 20000 }))
+			assert.is_false(h.button_held, "the pairing window closed")
+			assert.is_true(h:down())
+			assert.is_nil((h:request("GET", "", KEYED)))
+			local result
+			http.request({ ip = F.ADDRESS, path = "/api/v1/device" }, function(x) result = x end)
+			c4.advance(2999)
+			assert.is_nil(result)
+			c4.advance(1)
+			assert.equal(28, result.err_code, "the connect timeout (3 s)")
+			assert.equal("reboot", h.requests[#h.requests].fault)
+			c4.advance(17000)
+			assert.is_false(h:down())
+			assert.equal(150, call(http, "GET", "", F.TOKEN).json.execution.brightness)
+			h:event("reboot", { refuse = true })
+			assert.equal(7, call(http, "GET", "/device").err_code, "connection refused")
+			assert.is_false(h:event("button"), "ignored while the box restarts")
+		end)
+
+		it("updates its firmware: the version, the build and the fields of the levels it crosses (SB121, SB122)",
+			function()
+				local h = paired({ state = F.state.HSB1 })
+				h:event("firmware", { version = "2.5.4", api_level = 14 })
+				assert.is_true(h:down())
+				h:event("advance", { ms = 30000 })
+				local v = h:view()
+				assert.equal("2.5.4", v.device.firmwareVersion)
+				assert.equal(2050400, v.device.buildNumber)
+				assert.equal(F.AREA.tv, v.hue.groupId)
+				assert.equal(0, v.behavior.input3.hpdInputPortSwitch)
+				assert.equal(0, v.behavior.soloMode)
+				assert.is_nil(v.hue.operatingMode, "HSB1 has no bridge-free mode")
+				assert.is_false(v.registrations["7"].verified)
+				assert.is_false(v.registrations["1"].verified)
+				assert.equal(14, h:value("device.apiLevel"))
+			end)
+
+		it("opens the pairing window for 5 s of the runtime's clock, which advance moves (SB82)", function()
+			local h = fake.syncbox()
+			local http = client()
+			local body = { appName = F.APP_NAME, instanceName = "Den" }
+			local fired = 0
+			c4:SetTimer(3000, function() fired = fired + 1 end)
+			h:event("button")
+			h:event("advance", { ms = 4000 })
+			assert.equal(1, fired, "the runtime's timers fire too")
+			assert.is_true(call(http, "POST", "/registrations", nil, body).ok)
+			h:event("button")
+			h:event("advance", { ms = 6000 })
+			assert.equal(16, call(http, "POST", "/registrations", nil, body).json.code)
+			assert.has_error(function() h:event("earthquake") end)
+		end)
+	end)
+
+	describe("faults (#547)", function()
+		it("refuse, wrong_cert and drop end the transfer at once; count limits a fault", function()
+			local h = paired()
+			h:fault("refuse", { count = 1 })
+			assert.equal(7, raw("GET", BOX_URL .. "/device").err_code)
+			assert.equal(200, raw("GET", BOX_URL .. "/device").code, "used up")
+			h:fault("wrong_cert")
+			assert.equal(60, raw("GET", BOX_URL .. "/device").err_code)
+			assert.equal(200, raw("GET", BOX_URL .. "/device", nil, { ssl_verify_peer = false }).code)
+			h:fault("wrong_cert", false)
+			h:fault("drop")
+			assert.equal(52, raw("GET", BOX_URL .. "/device").err_code)
+			h:fault("drop", { code = 56, processed = true })
+			local got = raw("PUT", BOX_URL .. "/execution", json.encode({ brightness = 30 }), nil, KEYED)
+			assert.equal(56, got.err_code)
+			assert.is_nil(got.code)
+			assert.equal(30, h.state.execution.brightness, "the box handled it before the drop")
+			assert.equal("drop", h.requests[#h.requests].fault)
+			h:fault()
+			assert.equal(200, raw("GET", BOX_URL .. "/device").code)
+		end)
+
+		it("latency: answers later on the fake clock, one at a time; a timeout first, and the box still acts", function()
+			local h = paired()
+			h:fault("latency", { ms = 1000 })
+			local a = raw("GET", BOX_URL .. "/device")
+			local b = raw("GET", BOX_URL .. "/device")
+			c4.advance(999)
+			assert.is_nil(a.done)
+			c4.advance(1)
+			assert.equal(200, a.code)
+			assert.is_nil(b.done, "the box serves one request at a time")
+			c4.advance(1000)
+			assert.equal(200, b.code)
+
+			h:fault("latency", { ms = 8000 })
+			local result
+			client().request({ ip = F.ADDRESS, path = "/api/v1/execution", method = "PUT", key = F.TOKEN,
+				body = { brightness = 40 } }, function(r) result = r end)
+			c4.advance(6000)
+			assert.equal(28, result.err_code)
+			assert.equal(100, h.state.execution.brightness)
+			c4.advance(2000)
+			assert.equal(40, h.state.execution.brightness, "the box handled it at its time")
+		end)
+
+		it("other_id: another box answers at the address, with its own id and none of our tokens", function()
+			local h = paired()
+			local http = client()
+			h:fault("other_id")
+			assert.equal("0A1B2C3D4E60", call(http, "GET", "/device").json.uniqueId)
+			assert.equal(401, call(http, "GET", "", F.TOKEN).code)
+			assert.is_true(h.requests[#h.requests].other)
+			assert.equal(F.BOX_ID, h.state.device.uniqueId, "ours is unchanged")
+			assert.equal(0, #h.other.requests, "recorded at the address, on h.requests")
+			h:fault("other_id", false)
+			assert.equal(F.BOX_ID, call(http, "GET", "/device").json.uniqueId)
+		end)
+
+		it("5xx answers instead of the box; method and path narrow a fault", function()
+			local h = paired()
+			local http = client()
+			h:fault("http5xx", { method = "PUT", path = "/execution" })
+			assert.is_true(call(http, "GET", "", F.TOKEN).ok, "a GET is not touched")
+			local r = call(http, "PUT", "/execution", F.TOKEN, { brightness = 10 })
+			assert.equal(500, r.code)
+			assert.equal(500, r.json.code)
+			assert.equal(100, h.state.execution.brightness, "the box did not handle it")
+			assert.is_true(call(http, "PUT", "/hdmi/input2", F.TOKEN, { name = "PS5" }).ok)
+			h:fault("5xx", { status = 503, count = 1 })
+			assert.equal(503, call(http, "GET", "/device").code)
+			assert.equal(200, call(http, "GET", "/device").code)
+			assert.has_error(function() h:fault("gremlins") end)
+		end)
+
+		it("redirect: a keyed request refuses it; C4:url follows an unkeyed one to the box, or ends", function()
+			local h = paired()
+			h:fault("redirect")
+			local r = call(client(), "GET", "", F.TOKEN)
+			assert.equal(302, r.code)
+			assert.equal("redirect refused (HTTP 302)", r.err)
+			h:fault("redirect", { count = 1 })
+			local got = raw("GET", BOX_URL .. "/device")
+			assert.equal(404, got.code, "followed to https://<box>/redirected, off the API")
+			assert.equal("/redirected", h.requests[#h.requests].path)
+			h:fault("redirect", { location = BOX_URL .. "/device", count = 1 })
+			got = raw("GET", BOX_URL .. "/device")
+			assert.equal(2, #got.responses)
+			assert.equal(302, got.responses[1].code)
+			assert.equal(200, got.code)
+			assert.equal(BOX_URL .. "/device", h.requests[#h.requests].redirected_from)
+			h:fault("redirect", { location = "http://" .. F.ADDRESS .. "/api/v1/device" })
+			assert.equal(7, raw("GET", BOX_URL .. "/device").err_code, "plain http")
+			h:fault("redirect", { location = BOX_URL .. "/device" })
+			assert.equal(47, raw("GET", BOX_URL .. "/device").err_code, "a loop")
+		end)
+
+		it("truncated cuts the body (curl 18, or a short body); oversized pads it past the client's limit", function()
+			local h = paired()
+			local http = client()
+			h:fault("truncated", { count = 1 })
+			local r = call(http, "GET", "", F.TOKEN)
+			assert.equal(18, r.err_code)
+			h:fault("truncated", { err_code = 0, count = 1 })
+			r = call(http, "GET", "", F.TOKEN)
+			assert.is_true(r.ok)
+			assert.is_nil(r.json, "half a JSON text")
+			h:fault("oversized", { count = 1 })
+			r = call(http, "GET", "", F.TOKEN)
+			assert.is_false(r.ok)
+			assert.truthy(r.err:find("refused", 1, true))
+			h:fault("oversized", { bytes = 400000, count = 1 })
+			local got = raw("GET", BOX_URL, nil, nil, KEYED)
+			assert.equal(400000, #got.body)
+			assert.equal("video", got.json.execution.mode, "valid JSON with a padding key")
+		end)
+	end)
+
+	describe("the handle without C4:url (#547)", function()
+		it("answers h:request on its own clock, M.new with no runtime", function()
+			local SB = require("helpers.fake_syncbox")
+			local h = SB.new({ state = F.state.HSB2 }, nil, true)
+			assert.equal(0, h:now())
+			h:event("button")
+			local status, body = h:request("POST", "/registrations", {}, { appName = F.APP_NAME, instanceName = "Den" })
+			assert.equal(200, status)
+			local auth = { Authorization = "Bearer " .. body.accessToken }
+			assert.equal(200, (h:request("PUT", "/api/v1/execution", auth, '{"mode":"music"}')))
+			assert.equal("music", h:value("execution.mode"))
+			assert.is_nil(h:value("execution.nothing.here"))
+			status, body = h:request("GET", "", auth)
+			assert.equal(200, status)
+			body.execution.mode = "changed"
+			assert.equal("music", h.state.execution.mode, "the answer is a copy")
+			h:event("reboot")
+			assert.is_nil((h:request("GET", "", auth)))
+			h:event("advance", { seconds = 30 })
+			assert.equal(30000, h:now())
+			assert.equal(200, (h:request("GET", "", auth)))
+			assert.is_nil(SB.at(F.ADDRESS), "hidden: not at its address")
+		end)
+	end)
+
+	describe("fake.set_url_transport (#547)", function()
+		after_each(function()
+			fake.set_url_transport(nil)
+		end)
+
+		it("hands every transfer to the transport, the box's and the decoy's too, until cleared", function()
+			local h = fake.syncbox()
+			local seen = {}
+			fake.set_url_transport(function(t, runtime)
+				seen[#seen + 1] = { method = t.method, url = t.url, options = t.options, c4 = runtime }
+				t:respond(200, '{"from":"transport"}')
+			end)
+			local r = call(client(), "GET", "/device")
+			assert.equal("transport", r.json.from)
+			assert.equal("GET", seen[1].method)
+			assert.equal(BOX_URL .. "/device", seen[1].url)
+			assert.equal("certs/hsb_ca.pem", seen[1].options.ssl_cabundle)
+			assert.equal(c4, seen[1].c4)
+			raw("GET", BOX_URL .. "/device", nil, { ssl_cabundle = "certs/decoy.pem" })
+			assert.equal(2, #seen)
+			assert.equal(0, #c4.decoy_transfers)
+			assert.equal(0, #h.requests)
+			assert.equal(0, #c4.transfers)
+			fake.load_driver("hue_syncbox")
+			assert.has_error(function() fake.set_url_transport("curl") end)
+
+			fake.set_url_transport(nil)
+			c4 = fake.install_c4()
+			h = fake.syncbox()
+			assert.equal(200, call(client(), "GET", "/device").code)
+			assert.equal(1, #h.requests)
+		end)
+	end)
+end)
+
+describe("fake C4:PersistGetValue and PersistSetValue (#547)", function()
+	-- [verified: house, build 682, 2026-11-17]: an explicit nil as the
+	-- encrypted flag raises on the controller.
+	it("raise on an encrypted argument that is there but not a boolean", function()
+		local c4 = fake.install_c4()
+		c4:PersistSetValue("a", "1")
+		c4:PersistSetValue("b", "2", true)
+		c4:PersistSetValue("c", "3", false)
+		assert.equal("1", c4:PersistGetValue("a"))
+		assert.equal("2", c4:PersistGetValue("b", true))
+		assert.equal("3", c4:PersistGetValue("c", false))
+		assert.has_error(function() c4:PersistGetValue("a", nil) end)
+		assert.has_error(function() c4:PersistSetValue("a", "1", nil) end)
+		assert.has_error(function() c4:PersistSetValue("a", "1", "yes") end)
+		assert.has_error(function() c4:PersistGetValue("a", 1) end)
 	end)
 end)
 
