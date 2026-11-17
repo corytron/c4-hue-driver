@@ -66,6 +66,9 @@ be added.
 - `can_upclass` False, `can_downclass` False.
 - Every volume, mute, tone and loudness capability False.
 - `has_audio_signal_sense` False, `has_video_signal_sense` False.
+- Stage 4 adds `navigator_display_option` for the Hue Sync and Sync
+  Intensity buttons (their icons); that beta needs one controller reboot,
+  and the frame is final from then (stage 2 contract §9a).
 
 ### C1.4 Properties
 

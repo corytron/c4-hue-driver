@@ -326,6 +326,20 @@ them; a spec may stub a neighbour module through its `new(deps)`. An agent
 that needs a change in a file it does not own asks the coordinator in its
 hand-back and does not edit it.
 
+## 9a. Decided while building (coordinator, 2026-11-16)
+
+- **Pair Sync Box's Box parameter** is `CUSTOM_SELECT` (the house pattern),
+  not C1.5's `DYNAMIC_LIST`, which an action parameter could only fill
+  through `GetCommandParamList`. The Sync Boxes Found row is not declared.
+- **UI Button icons** (Hue Sync on/off, Sync Intensity's current level)
+  need `navigator_display_option` inside `<capabilities>` and icon files.
+  They come with the buttons' behaviour in stage 4. That beta's install
+  therefore costs one controller reboot; the frame is final from then,
+  before the 2.0 release.
+- **HELLO and GOODBYE carry `device_id`** (contracts C5, amended).
+- **No room binding and no Power Manager binding** in any wiring (#531,
+  contracts C1.2).
+
 ## 10. Done, and what the house settles
 
 - Each module has a spec; `tools/check.sh` passes (lint, tests, Lua
