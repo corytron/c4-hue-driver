@@ -97,13 +97,14 @@ be added.
 | At Room Off | LIST | Power save, Stop syncing and keep the picture / Power save (O6) | no |
 | When The Source Leaves The Box | LIST | Stop syncing and keep the picture, Power save / Stop syncing and keep the picture (O6) | no |
 | Input Switching | STRING | what the box does by itself: `By the box: HDMI CEC and hot-plug; auto-sync on HDMI 1, 2` | yes |
+| Periods | STRING | the current period and the sunset's source, e.g. `Day until 18:00. No location is set in the project: 19:00 stands in for sunset` (stage 4, #568) | yes |
 
 ### C1.5 Actions
 
 | Action | Parameters | Does |
 |---|---|---|
 | Pair Sync Box | Box (DYNAMIC_LIST: the Sync Boxes Found, or "Type an address"), Address (STRING) | Identity check, then a 2-minute window for the button |
-| Sync Box Settings | What (DYNAMIC_LIST: Let Control4 choose inputs; Restore the box's input switching) | The offers (design 5.4) |
+| Sync Box Settings | What (CUSTOM_SELECT, as Pair Sync Box: Let Control4 choose inputs; Restore the box's input switching; the wiring choices and their Restore; the name choices while the names differ) | The offers (design 5.4, 5.8; stage 4) |
 | Diagnostics | What (LIST: Check the box now; Read everything from the box now; Show the box's raw state in the Lua output) | As the bridge's Diagnostics |
 | Forget Pairing | Confirm (LIST: No, Yes) | Deletes the registration; keeps the device |
 
