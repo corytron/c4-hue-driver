@@ -247,6 +247,13 @@ placeholder values (box id 0A1B2C3D4E5F at 10.0.2.150, bridge
 - **SB56** The box checks the whole PUT before applying any of it (SB20,
   SB21); a refusal by state (16, §8) is judged on the result the whole PUT
   would have. [assumed]
+- **SB57** The fields that set a value (`hdmiActive`, `hdmiSource`,
+  `hueTarget`, `mode`, `syncActive`, the mode objects, `intensity`,
+  `backgroundLighting`, `brightness`) leave `execution`, `hdmi` and `hue` the
+  same when the same PUT comes again, as a PUT resent after its answer was
+  lost does. The commands that step (the toggles, the cycles,
+  `incrementBrightness`) are not like that, and the drivers never resend
+  them. [assumed: it follows from SB30 to SB50; no source sends a PUT twice]
 
 ## 5. Behavior settings
 
@@ -575,6 +582,7 @@ marks the few that need someone at the box, the TV or the Hue Sync app.
 | SB51 | 15 for `ambient` | PUT `{"mode": "ambient"}` |
 | SB55 | The order inside one PUT | In powersave PUT `{"hdmiActive": true, "hdmiSource": "input2", "syncActive": true}`; and `{"mode": "game", "intensity": "subtle"}` |
 | SB56 | Judged on the whole result | While another app streams PUT `{"brightness": 50, "syncActive": true}`; read brightness |
+| SB57 | A PUT sent again changes nothing more | In powersave PUT `{"hdmiActive": true, "hdmiSource": "input2", "mode": "game", "syncActive": true}` twice; compare `execution`, `hdmi` and `hue` after each |
 | SB60 | `true`/`false` refused in `behavior`; no PUT of a part | PUT `/behavior` `{"cecPowersave": true}`, then put the value back; PUT `/behavior/input1` `{"cecInputSwitch": 1}` |
 | SB61 | 15 outside 0 to 10000 | PUT `/behavior` `{"inactivePowersave": 10001}` |
 | SB62 | 13 for a key the model lacks | On the 8K box PUT `/behavior` `{"forceDoviNative": 0}` |

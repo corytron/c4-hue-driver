@@ -41,10 +41,12 @@
 --                       detail, responses = {{code, headers, body}},
 --                       ms, attempts, name, target }
 --   T.history           every transfer (each hop of a redirect): { method,
---                       url, path, target, name, status, err_code, detail,
---                       ms, attempts, settled, cancelled, aborted,
+--                       url, path, data, target, name, status, err_code,
+--                       detail, ms, attempts, settled, cancelled, aborted,
 --                       redirects, redirected }; T:since(n) those after the
---                       n-th (see T:deliver for settled)
+--                       n-th (see T:deliver for settled). data is the request
+--                       body as sent (a box's bodies carry no token: that
+--                       goes in a header, which is never kept)
 --   T:close()           removes the temporary directory
 --
 -- What it does as Director does [verified: SDK 35_url/_8-OnDone,
@@ -522,7 +524,8 @@ local function redirect_of(hop, method, data, location)
 end
 
 function T:record(t, hop)
-	local entry = { method = t.method, url = t.url, path = hop.path, target = hop.target, name = hop.name,
+	local entry = { method = t.method, url = t.url, path = hop.path, data = hop.data, target = hop.target,
+		name = hop.name,
 		status = #hop.responses > 0 and hop.responses[#hop.responses].code or nil,
 		err_code = hop.exit ~= 0 and hop.exit or nil, detail = hop.exit ~= 0 and hop.detail or nil,
 		ms = hop.ms, attempts = hop.attempts }

@@ -995,6 +995,220 @@
       ]
     },
     {
+      "id": "SC-QUEUE-1",
+      "title": "a route from powersave: wake, input, mode, its intensity, brightness and sync in one PUT",
+      "rules": ["SB55", "SB31", "SB47", "SB42", "SB5", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input2", "mode": "game", "game": {"intensity": "subtle"}, "brightness": 80, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.syncActive": true, "execution.hdmiActive": true, "execution.hdmiSource": "input2", "execution.game.intensity": "subtle", "execution.video.intensity": "high", "execution.brightness": 80, "execution.lastSyncMode": "game", "hdmi.input2.lastSyncMode": "game", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-2",
+      "title": "a route from passthrough, the intensity beside the mode",
+      "rules": ["SB55", "SB44", "SB30"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input1", "mode": "video", "intensity": "intense", "brightness": 150, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiSource": "input1", "execution.video.intensity": "intense", "execution.music.intensity": "subtle", "execution.game.intensity": "high", "execution.brightness": 150, "execution.lastSyncMode": "video", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-3",
+      "title": "another source while syncing: input, mode and intensity in one PUT",
+      "rules": ["SB55", "SB39", "SB44"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2", "mode": "game", "intensity": "moderate", "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.hdmiSource": "input2", "execution.game.intensity": "moderate", "execution.video.intensity": "high", "hdmi.input2.lastSyncMode": "game", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-4",
+      "title": "an input set to Do not sync: the input alone, while syncing and from powersave",
+      "rules": ["SB55", "SB39", "SB33", "SB34", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2", "syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiSource": "input2", "execution.hdmiActive": true, "execution.syncActive": false, "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input3"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiSource": "input3", "execution.hdmiActive": true, "execution.syncActive": false}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-5",
+      "title": "a route sent again, as after a lost answer, changes nothing more",
+      "rules": ["SB57", "SB32", "SB34", "SB39"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input2", "mode": "game", "game": {"intensity": "subtle"}, "brightness": 80, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.hdmiSource": "input2", "execution.game.intensity": "subtle", "execution.brightness": 80, "execution.lastSyncMode": "game", "hdmi.input2.lastSyncMode": "game", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input2", "mode": "game", "game": {"intensity": "subtle"}, "brightness": 80, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "game", "execution.hdmiSource": "input2", "execution.game.intensity": "subtle", "execution.brightness": 80, "execution.lastSyncMode": "game", "hdmi.input2.lastSyncMode": "game", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-6",
+      "title": "the latest route wins: two routes one after the other",
+      "rules": ["SB55", "SB39", "SB5"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input2", "mode": "game", "syncActive": true}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1", "mode": "video", "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiSource": "input1", "execution.lastSyncMode": "video", "hdmi.input1.lastSyncMode": "video", "hdmi.input2.lastSyncMode": "game", "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-7",
+      "title": "Room Off: power save, and the same again",
+      "rules": ["SB30", "SB57", "SB6"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "execution.hdmiActive": false, "execution.syncActive": false, "execution.hdmiSource": "input1", "execution.lastSyncMode": "video", "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "execution.hdmiActive": false, "execution.syncActive": false, "execution.hdmiSource": "input1", "execution.lastSyncMode": "video", "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-8",
+      "title": "another app streams: a route that would sync is refused whole with 16, the input alone is not",
+      "rules": ["SB56", "SB91", "SB92", "SB20"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input2", "mode": "game", "game": {"intensity": "subtle"}, "brightness": 80, "syncActive": true}, "expect": {"status": 400, "code": 16, "state": {"execution.mode": "powersave", "execution.hdmiActive": false, "execution.hdmiSource": "input1", "execution.brightness": 100, "execution.game.intensity": "intense", "hue.connectionState": "busy", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.owner": "other-app"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input2"}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiSource": "input2", "hue.connectionState": "busy"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-9",
+      "title": "the same route once the other app stops streaming",
+      "rules": ["SB93", "SB91", "SB56"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1", "mode": "video", "intensity": "subtle", "syncActive": true}, "expect": {"status": 400, "code": 16, "state": {"execution.mode": "passthrough", "execution.hdmiSource": "input2", "execution.video.intensity": "moderate"}}},
+        {"event": "bridge", "state": "connected"},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1", "mode": "video", "intensity": "subtle", "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiSource": "input1", "execution.video.intensity": "subtle", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-10",
+      "title": "stopping sync and power save are not refused while another app streams",
+      "rules": ["SB56", "SB91", "SB33", "SB34"],
+      "model": "HSB1",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"event": "bridge", "state": "busy"},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "execution.hdmiActive": false, "hue.connectionState": "busy"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiActive": true, "hue.connectionState": "busy"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-11",
+      "title": "a sync start from powersave with the mode named",
+      "rules": ["SB55", "SB31", "SB44", "SB5"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input1", "mode": "video", "intensity": "moderate", "brightness": 60, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiActive": true, "execution.syncActive": true, "execution.video.intensity": "moderate", "execution.game.intensity": "high", "execution.brightness": 60, "execution.lastSyncMode": "video", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "streaming", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea002.active": true}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-12",
+      "title": "Music on an audio-only route: only the music settings change",
+      "rules": ["SB55", "SB47", "SB5", "SB72"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"event": "signal", "input": "input3", "status": "linked"},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input3", "mode": "music", "music": {"intensity": "high"}, "brightness": 100, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "music", "execution.hdmiSource": "input3", "execution.music.intensity": "high", "execution.music.palette": "neutral", "execution.video.intensity": "high", "execution.game.intensity": "intense", "execution.lastSyncMode": "music", "hdmi.input3.lastSyncMode": "music", "hdmi.input1.lastSyncMode": "video", "hdmi.input3.status": "linked", "hdmi.audioSyncSupported": true, "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-13",
+      "title": "Music where the box sees sound but no picture it can sync",
+      "rules": ["SB78", "SB30", "SB31"],
+      "model": "HSB2",
+      "setup": "paired",
+      "given": {"hdmi.videoSyncSupported": false},
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}, "expect": {"status": 200, "state": {"hdmi.audioSyncSupported": false, "hdmi.videoSyncSupported": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "mode": "music", "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "music", "execution.hdmiSource": "input1", "hdmi.audioSyncSupported": true, "hdmi.videoSyncSupported": false, "hdmi.input1.lastSyncMode": "music", "hue.connectionState": "streaming"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-14",
+      "title": "syncActive false: passthrough, the picture and the input kept, and the same again",
+      "rules": ["SB33", "SB57", "SB6", "SB34"],
+      "model": "HSB2",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiActive": true, "execution.hdmiSource": "input1", "execution.lastSyncMode": "video", "hdmi.input1.lastSyncMode": "video", "hue.connectionState": "connected", "hue.groups.6a7b8c9d-0000-4000-8000-0000000ea001.active": false}}},
+        {"do": "PUT", "path": "/execution", "body": {"syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiActive": true, "execution.hdmiSource": "input1", "hue.connectionState": "connected"}}},
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "syncActive": false}, "expect": {"status": 200, "state": {"execution.mode": "passthrough", "execution.hdmiActive": true, "hue.connectionState": "connected"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-15",
+      "title": "a route to an input the one-input box lacks is refused whole",
+      "rules": ["SB40", "SB20", "SB55"],
+      "model": "HSB3",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input2", "mode": "video", "syncActive": true}, "expect": {"status": 400, "code": 15, "state": {"execution.mode": "powersave", "execution.hdmiActive": false, "execution.hdmiSource": "input1"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-16",
+      "title": "behind a receiver: every route names HDMI 1",
+      "rules": ["SB55", "SB64", "SB31"],
+      "model": "HSB2_behind_receiver",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "hdmiSource": "input1", "mode": "music", "music": {"intensity": "subtle"}, "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "music", "execution.hdmiSource": "input1", "execution.music.intensity": "subtle", "hdmi.input1.lastSyncMode": "music", "behavior.arcBypassMode": 1, "hue.connectionState": "streaming"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiSource": "input1", "mode": "video", "intensity": "moderate", "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiSource": "input1", "execution.video.intensity": "moderate", "execution.music.intensity": "subtle", "hdmi.input1.lastSyncMode": "video"}}}
+      ]
+    },
+    {
+      "id": "SC-QUEUE-17",
+      "title": "on a second output: wake and sync with no input named",
+      "rules": ["SB55", "SB64", "SB31", "SB35"],
+      "model": "HSB2_second_output",
+      "setup": "paired",
+      "assumed": true,
+      "steps": [
+        {"do": "PUT", "path": "/execution", "body": {"mode": "powersave"}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": true, "mode": "video", "intensity": "subtle", "syncActive": true}, "expect": {"status": 200, "state": {"execution.mode": "video", "execution.hdmiSource": "input1", "execution.video.intensity": "subtle", "behavior.soloMode": 1, "hue.connectionState": "streaming"}}},
+        {"do": "PUT", "path": "/execution", "body": {"hdmiActive": false}, "expect": {"status": 200, "state": {"execution.mode": "powersave", "hue.connectionState": "connected"}}}
+      ]
+    },
+    {
       "id": "SC-BEH-1",
       "title": "behavior flags are 0 and 1",
       "rules": ["SB60"],

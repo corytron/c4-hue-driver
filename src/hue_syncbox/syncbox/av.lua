@@ -133,7 +133,7 @@ av.VIDEO_OUT, av.AUDIO_OUT = 2000, 4000
 av.PARAM_MAX = 40                          -- bytes of a parameter in a text
 -- Design 5.3: the input types that call for Game and for Music.
 av.GAME_TYPES = { xbox = true, playstation = true, nintendoswitch = true, game = true }
-av.MUSIC_TYPES = { avreceiver = true, soundbar = true, music = true }
+av.MUSIC_TYPES = { avreceiver = true, soundbar = true, music = true, speaker = true }
 av.WIRINGS = { in_line = true, behind_receiver = true, second_output = true }
 
 av.TEXT = {
