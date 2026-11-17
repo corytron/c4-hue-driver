@@ -238,6 +238,14 @@ does. Each module has its own spec.
 | `syncbox/offers.lua` | The Sync Box Settings choices and Attention |
 | `syncbox/periods.lua` | The Day, Evening and Night periods: `periods.new(ctx)`, `p:current(now)`, `p:next_boundary(now)`, the sunset source (the Scheduler Agent's daily sunset entry if a driver hears it fire, else the sunset computed from the project's location; a clock time stands in when neither works); and the manual hold |
 
+**Sunset source, decided in stage 4 (#568):** computed on the controller from
+`C4:GetProjectProperty("Latitude"/"Longitude")` (the location Director uses
+for its own sunrise and sunset) with the standard solar formulas; the
+Scheduler Agent's sunset entries are for Composer programming and call no
+driver back. Without a usable location, 19:00 stands in and the row says why.
+The Periods row shows today's sunset, which roughly locates the house: treat
+it as private in public reports.
+
 **Moved into `src/common/`** before the box driver exists (beta stage 1):
 - `common/https.lua`: the bridge's HTTPS core, with its CA bundle, peer
   text and transfer caps as parameters;
