@@ -537,70 +537,140 @@ None of these is written by the drivers.
 
 ## 16. The [assumed] rules and the check that settles each
 
-Each check is a read or a write against the owner's box, done from the VM
-with the drivers' registration or through a development build; "(hands)"
-marks the few that need someone at the box, the TV or the Hue Sync app.
+The owner has a real box (a Play HDMI Sync Box 8K, HSB2) for a few minutes
+only, and does at most a handful of things with his hands. So the 57
+[assumed] rules are settled by the conformance probe,
+`tools/fakebox/conformance.py`, run from the VM against the box, in this
+order:
 
-| Rule | What is assumed | House check |
+1. **Hands-on step 1** (`register --twice`): two presses of the box's
+   button register the probe twice under the same names; the tokens go to
+   `~/.config/c4-hue-driver/fakebox/probe.json` (mode 0600) and nowhere
+   else.
+2. **`run`** (about three minutes, no hands): every rule of table A. The
+   lights and the TV picture change while it runs; it restores the box's
+   settings after each check and everything at the end, and reads the box
+   again to prove it.
+3. **Hands-on steps 2 to 5** (`hands --step N`): the probe sets the box up,
+   prints the one thing to do, reads the box meanwhile and restores it.
+4. **`forget`**: the probe deletes its own registration.
+
+The commands take `--address` (the box's address, never written to the
+repository). Each verdict is confirmed, contradicted (with the box's real
+answer) or not checked (with the reason), in `build/conformance/report.md`,
+with every address, id, name and token replaced by the placeholders; the
+redacted answers are kept under `build/conformance/fixtures/` for folding
+into `tests/fixtures/`. A contradicted rule is rewritten to what the box
+does, with both fakes and the scenarios, and loses its [assumed].
+
+The probe pins the box's root (`src/hue_syncbox/certs/hsb_ca.pem`) and
+checks that the leaf's common name is the `uniqueId` of the unkeyed GET
+`/device` before any token leaves the VM, as `syncbox/identity.lua` does.
+It never sends a bridge change (SB96), a device action, update or
+Bluetooth change (SB111), anything to `/ir` or `/presets` but a GET, a
+DELETE of a registration that is not its own, or a behavior key the box
+lacks (but SB62's one key of another model, sent as 0); a guard refuses
+those before the network. One request at a time, at least 250 ms apart,
+503 and a transient 16 retried after 1, 2 and 4 s.
+
+Counts: table A, 45 rows (42 rules whole, SB63, SB73 and SB78 in part);
+table B, five steps settling 12 rules (SB56, SB63, SB73, SB78 and SB86 for
+the part table A leaves); table C, 5 rules. On the way `run` also checks
+these shown rules: SB1, SB3, SB4, SB10, SB14, SB16, SB17, SB30 to SB32,
+SB34, SB35, SB64, SB72, SB90, SB111 and SB113.
+
+### A. Checked by the VM probe (no hands)
+
+| Rule | What is assumed | How the probe checks it |
 | --- | --- | --- |
-| SB2 | Code 10 for an unknown path; a scalar path is 404 | GET `/api/v1/nothing` and `/api/v1/execution/mode`; note status and code |
-| SB5 | `lastSyncMode` (box and port) change as a sync mode is entered | Start game sync on HDMI 2, stop it, GET `/api/v1`: both read `game` |
-| SB6 | `connected` again when sync stops | Stop sync; read `hue.connectionState` |
-| SB7 | `groupId` follows `hueTarget` | PUT `hueTarget` to the other area; read `hue.groupId` |
-| SB8 | No token in any answer | GET `/api/v1` and `/registrations`; search for the token |
-| SB11 | An accepted PUT answers `{}` | PUT `{"brightness": 100}`; read the body |
-| SB12 | Code 2 without a token | GET `/api/v1` without a token; note the code |
-| SB13 | Code 2 for an unknown token, on `/device` and the POST too | The same three requests with a made-up token |
-| SB15 | 404 code 10 for a method a path does not take | POST `/api/v1/execution`, DELETE `/api/v1/device` |
-| SB18 | 13 for an unknown or read-only key | PUT `/execution` `{"colour": 1}` and `/device` `{"uniqueId": "X"}` |
-| SB19 | 15 for wrong values in general | PUT `{"brightness": 300}` and `{"syncActive": "yes"}` |
-| SB20 | A refused PUT applies nothing | PUT `{"brightness": 120, "mode": "ambient"}`; read brightness |
-| SB21 | The order of the checks | PUT `{"colour": 1, "brightness": 300}`; expect 13 |
-| SB33 | `syncActive: false` outside sync does nothing | In passthrough PUT `{"syncActive": false}`; read the mode |
-| SB36 | A toggle sent as false does nothing | PUT `{"toggleSyncActive": false}` |
-| SB37 | `toggleSyncMode` of the current mode stops sync | Sync video; PUT `{"toggleSyncMode": "video"}` |
-| SB38 | Order video, music, game, wrapping; wakes | Sync video; PUT `{"cycleSyncMode": "next"}` three times; from powersave once |
-| SB39 | Input change keeps the mode; does not wake | While syncing PUT `hdmiSource`; in powersave PUT `hdmiSource` alone (edge-cases §8 check 2) |
-| SB40 | 15 for an input the box lacks | On the 1-input box PUT `{"hdmiSource": "input2"}` |
-| SB41 | Input cycling order and wrapping | PUT `{"cycleHdmiSource": "next"}` on input 4 |
-| SB42 | 15 outside 0 to 200 | PUT `{"brightness": 201}` |
-| SB43 | Clamping; 15 beyond ±200 | Brightness 150, PUT `{"incrementBrightness": 100}`; then `-201` |
-| SB44 | `intensity` outside sync writes `lastSyncMode`'s | In passthrough PUT `{"intensity": "subtle"}`; read the three modes |
-| SB45 | `cycleIntensity` wraps | At `intense` PUT `{"cycleIntensity": "next"}` |
-| SB46 | 15 for background lighting on music | Sync music; PUT `{"backgroundLighting": true}` |
-| SB47 | 13 and 15 inside a mode object | PUT `{"music": {"colour": 1}}`, `{"music": {"palette": "x"}}` |
-| SB48 | The stream moves with `hueTarget` | While syncing PUT the other area; read `hue.groups` |
-| SB49 | 15 for an unknown preset | PUT `{"preset": "999"}` |
-| SB50 | Settings apply in powersave without waking | In powersave PUT `{"brightness": 80}`; read the mode |
-| SB51 | 15 for `ambient` | PUT `{"mode": "ambient"}` |
-| SB55 | The order inside one PUT | In powersave PUT `{"hdmiActive": true, "hdmiSource": "input2", "syncActive": true}`; and `{"mode": "game", "intensity": "subtle"}` |
-| SB56 | Judged on the whole result | While another app streams PUT `{"brightness": 50, "syncActive": true}`; read brightness |
-| SB60 | `true`/`false` refused in `behavior`; no PUT of a part | PUT `/behavior` `{"cecPowersave": true}`, then put the value back; PUT `/behavior/input1` `{"cecInputSwitch": 1}` |
-| SB61 | 15 outside 0 to 10000 | PUT `/behavior` `{"inactivePowersave": 10001}` |
-| SB62 | 13 for a key the model lacks | On the 8K box PUT `/behavior` `{"forceDoviNative": 0}` |
-| SB63 | `behavior` writes act at the next event only | Turn `cecInputSwitch` on; read the input; then wake a source (hands) |
-| SB70 | CEC Active Source wakes the box | In powersave, wake a source with CEC (hands); read the mode |
-| SB71 | Hot plug sets `plugged` and wakes | Plug a source in (hands); read its status and the mode |
-| SB73 | When auto-sync fires; never on a request | Wake the box with `hdmiActive` onto a linked input with auto-sync on; read the mode; switch a source on (hands) |
-| SB78 | `contentSpecs` empty without a link | Turn the source off (hands); read `hdmi` |
-| SB80 | 15 for a missing name | POST `/registrations` `{"appName": "x"}` |
-| SB82 | One registration per press | Press once (hands); POST twice |
-| SB84 | Role `user`, `verified` false for a new one | After pairing GET `/registrations` |
-| SB85 | Same names twice make two | Pair twice with the same names (hands) |
-| SB86 | 2 for another's token; 10 for an unknown id | DELETE another id with the drivers' token; DELETE `/registrations/999` |
-| SB88 | `lastUsed` moves with each request | GET twice a minute apart; read `lastUsed` |
-| SB91 | 16 in every state but connected and streaming | Unplug the bridge (hands); PUT `{"syncActive": true}` |
-| SB93 | What a link change does to a sync | Unplug the bridge while syncing (hands); read the mode |
-| SB94 | The rest of stopping a stream | Stop the box's own area with `{"active": false}`; read the mode |
-| SB95 | 13 for `groupId` below level 10 | Only on a level-9 box; none in the house: leave assumed |
-| SB97 | `hueTarget` refused in standalone; `hue` untouched | Only on a standalone box; none in the house: leave assumed |
-| SB100 | The path and the refusals | PUT `/hdmi/input4` `{"name": "HDMI 4"}`, then `{"status": "linked"}` |
-| SB110 | 15 for an empty name | PUT `/device` `{"name": ""}` |
-| SB114 | Only `ipAddress` changes | After the router moves the box (hands), GET `/api/v1` |
-| SB120 | 30 seconds of silence; the state kept | Restart the box from the Hue Sync app (hands); time it; GET |
-| SB121 | Everything else kept across an update | At the next firmware update, compare GETs before and after |
-| SB122 | The values a new level adds | At the next update that raises `apiLevel`, read the new fields |
+| SB2 | Code 10 for an unknown path; a scalar path is 404 | GET `/execution`, an input, a behavior input, an area and its own registration, each compared with GET `/api/v1`; GET `/nothing`, `/execution/mode` and an input the model lacks → 404 code 10 |
+| SB5 | `lastSyncMode` (box and port) change as a sync mode is entered | From passthrough `{"mode": "game"}`; reads `execution.lastSyncMode` and the input's |
+| SB6 | `connected` again when sync stops | Reads `hue.connectionState` and the area's `active` after a sync starts (streaming, active) and after it stops (connected, inactive) |
+| SB7 | `groupId` follows `hueTarget` | `hueTarget` to the other area, then PUT `/hue` `{"groupId"}` back; reads both each time (one area: that they agree) |
+| SB8 | No token in any answer | Searches every answer of the run for the probe's two tokens |
+| SB11 | An accepted PUT answers `{}` | Every accepted PUT and DELETE of the run |
+| SB12 | Code 2 without a token | GET `/device` without a token (no `wifi`, `update`, `ledMode`, `action`, `pushlink`); GET `/api/v1`, GET `/execution` and PUT `/execution` without one → 401 code 2 |
+| SB13 | Code 2 for an unknown token, on `/device` and the POST too | GET `/device`, GET `/api/v1` and POST `/registrations` with a made-up token → 401 code 2 (a registration made by mistake is deleted at once) |
+| SB15 | 404 code 10 for a method a path does not take | POST `/execution`, PUT `/api/v1` and POST `/device`, each with the current value; no DELETE is tried on a resource |
+| SB18 | 13 for an unknown or read-only key | `{"colour": 1}`, `{"lastSyncMode": …}` and PUT `/device` `{"uniqueId": <its own>}` |
+| SB19 | 15 for wrong values in general | `{"brightness": 300}`, `{"syncActive": "yes"}`, `{"brightness": "100"}` |
+| SB20 | A refused PUT applies nothing | A good brightness with a bad `intensity`, then with a bad `hdmiSource` → 15; brightness unchanged |
+| SB21 | The order of the checks | `{"colour": 1, "brightness": 300}` → 13; the same cut short → 12; POST `/registrations` with an empty `appName` before any press → 15, not 16 |
+| SB33 | `syncActive: false` outside sync does nothing | In passthrough and in powersave; the mode read twice a second apart |
+| SB36 | A toggle sent as false does nothing | `toggleSyncActive` and `toggleHdmiActive` false in passthrough, `toggleSyncActive` false in powersave; then each toggle true, twice |
+| SB37 | `toggleSyncMode` of the current mode stops sync | Syncing game, `{"toggleSyncMode": "game"}` → passthrough; then `video` → video |
+| SB38 | Order video, music, game, wrapping; counted from `lastSyncMode`; wakes | From video `next` three times and `previous` once; `next` from passthrough and from powersave |
+| SB39 | Input change keeps the mode; does not wake | Syncing game, `hdmiSource` to another input: still game, now that input's `lastSyncMode`; in powersave `hdmiSource` alone: still powersave |
+| SB40 | 15 for an input the box lacks | `{"hdmiSource": "input5"}` (`input2` on a one-input box) and `"hdmi1"` |
+| SB41 | Input cycling order and wrapping | On the last input `cycleHdmiSource` `next` → `input1`, then `previous` → the last |
+| SB42 | 15 outside 0 to 200 | 201 and −1 → 15; 0 and 200 read back |
+| SB43 | Clamping; 15 beyond ±200 | 150 + 100 → 200, 50 − 100 → 0, 0 + 30 → 30; ±201 → 15 |
+| SB44 | `intensity` outside sync writes `lastSyncMode`'s | In passthrough `{"intensity": …}`; reads the three modes' intensities |
+| SB45 | `cycleIntensity` wraps | At `intense` `next` → `subtle`, then `previous` → `intense` |
+| SB46 | 15 for background lighting on music | Syncing music, `backgroundLighting` and `toggleBackgroundLighting` → 15; in passthrough both act on `lastSyncMode`'s |
+| SB47 | 13 and 15 inside a mode object | `{"music": {"colour": 1}}` → 13, `{"music": {"palette": "x"}}` → 15, `{"video": {"palette": …}}` → 13; `{"game": {"intensity": …}}` sets game's and keeps the mode |
+| SB48 | The stream moves with `hueTarget`; an unknown area refused | An unknown area → 15; syncing, `hueTarget` to the other area reads as sent, the old area inactive, the new one active |
+| SB49 | 15 for an unknown preset | `{"preset": <an id presets does not hold>}` |
+| SB50 | Settings apply in powersave without waking | In powersave brightness, `video` intensity and the area; each read back with the mode, twice |
+| SB51 | 15 for `ambient` | `{"mode": "ambient"}` and `{"mode": "off"}` (the mode put back at once if one is taken) |
+| SB55 | The order inside one PUT | In powersave `{"hdmiActive": true, "hdmiSource": <another>, "syncActive": true}`; syncing music `{"mode": "game", "intensity": …}` |
+| SB56 | Checked whole; 16 judged on the result | `{"hdmiSource": <another>, "brightness": 300}` → 15 and the input unchanged; the refusal by state: step 4 |
+| SB60 | `true`/`false` refused in `behavior`; no PUT of a part | `{"cecPowersave": true}` → 15 and the number taken; PUT `/behavior/input1` with its current value → 10 |
+| SB61 | 15 outside 0 to 10000 | 10001 and −1 → 15; 10000 and 0 read back |
+| SB62 | 13 for a key the model lacks | The behavior keys against the model and level; `{"forceDoviNative": 0}` on a box without it → 13 |
+| SB63 | (in part) `behavior` writes act at the next event only | CEC, hot-plug and auto-sync switching turned on in passthrough: mode and input unchanged two seconds later; the event half: step 2 |
+| SB73 | (in part) Auto-sync never on a request | With a source on: `linkAutoSync` 1, powersave, then `{"hdmiActive": true}`: passthrough, no sync; the link half: step 2 |
+| SB78 | (in part) `contentSpecs` empty without a link | Each input selected in turn: a linked one shows specs, true and true, another `""`, false and false; with no source on: step 2 |
+| SB80 | 15 for a missing name | POST without `instanceName`, and with an empty `appName`, before any press → 15 |
+| SB84 | Role `user`, `verified` false for a new one | The probe's registrations as GET `/api/v1` lists them |
+| SB86 | 2 for another's token; 10 for an unknown id | DELETE `/registrations/<an id it does not hold>` → 10; step 1's second registration deleted with the first's token → 2 and still listed, then with its own → 200 `{}` and its token refused |
+| SB88 | `lastUsed` moves with each request | Read twice 2 s apart, and against the run's first read |
+| SB94 | The rest of stopping a stream | Syncing, PUT `/hue/groups/<its area>` `{"active": false}` → passthrough and connected; again → 200 and nothing; `{"active": true}` → 15; an unknown area → 10 |
+| SB100 | The path and the refusals | PUT `/hdmi/<last input>` renames it (put back); `status`, `lastSyncMode` → 13; a bad `type`, an empty `name` → 15; an input the model lacks and PUT `/hdmi` → 10 |
+| SB110 | 15 for an empty name | `{"name": ""}` and `{"ledMode": 3}` → 15; the current name and LED mode taken |
 
-Rules not in the table are shown by their sources or are conventions of
-the fakes; SB83, SB92's owner text, SB96, SB111's refusals, SB121's build
+### B. Hands-on, five steps
+
+Each step is one physical action (steps 1 to 4 do it and undo it); the
+probe prints what to do and when, and reads the box once or twice a second
+meanwhile. Steps 2 and 3 need a source on an input of the box whose picture
+reaches the TV, with HDMI-CEC on (most streamers and consoles).
+
+| Step | Physical action | Settles | What the owner does | What the VM reads meanwhile |
+| --- | --- | --- | --- | --- |
+| 1 | Press the box's button twice, about 10 s apart | SB82, SB85; lets `run` check SB84 and SB86's other-token half | While `register --twice` runs, hold the button about 3 s until the LED blinks green; again when the probe asks | POST `/registrations` once a second; after each registration one more POST at once (16 expected: one per press); the second under the same names |
+| 2 | Turn a source off with its own remote, then on again | SB63, SB70, SB73, SB78 (also SB72, SB74) | When asked, the source on input K to standby; when asked again, back on | Sets K's `cecInputSwitch` and `linkAutoSync` to 1 and hot-plug switching off, syncs on K; reads until K stops reading linked (the sync ends, `contentSpecs` empty); puts the box in powersave on another input; reads until K is selected and awake (CEC), then syncing (auto-sync), `contentSpecs` filled |
+| 3 | Pull a source's HDMI cable out of the box, then push it back | SB71 (also SB72) | When asked, the cable of input K out; when asked again, back in | Sets K's `cecInputSwitch` and `linkAutoSync` to 0 and `hpdInputPortSwitch` to 1, powersave on another input; reads K unplugged, then at least plugged, then K selected and the box awake |
+| 4 | Pull the Hue Bridge's network cable (power stays on), then plug it back | SB56, SB91, SB93 | When asked, the bridge's network cable out for about a minute; when asked, back in | Syncs; reads until the link leaves streaming (sync ended, areas inactive); `{"syncActive": true}` → 16; `{"brightness", "syncActive": true}` → 16 and brightness kept; `{"mode": "video", "syncActive": false}` → 200; once connected again: passthrough, no area active, and a sync starts |
+| 5 | Restart the box from the Hue Sync app | SB120 | The app's restart for this box, when asked | Unkeyed GET `/device` every second: how long nothing answers; then GET `/api/v1` with the probe's token: the state, registrations and token as before |
+
+The rules each step settles:
+
+| Rule | Step | What is assumed |
+| --- | --- | --- |
+| SB82 | 1 | One registration per press |
+| SB85 | 1 | The same names registered twice make two |
+| SB86 | 1 | 2 for another registration's token (read by `run`) |
+| SB63 | 2 | The event follows `behavior` values written just before |
+| SB70 | 2 | CEC Active Source selects the input and wakes the box |
+| SB73 | 2 | Auto-sync starts when the selected input and the output link |
+| SB78 | 2 | `contentSpecs` and the two flags with and without a link |
+| SB71 | 3 | Hot plug sets at least `plugged`, selects the input and wakes the box |
+| SB56 | 4 | A refusal by state is judged on the whole PUT's result |
+| SB91 | 4 | 16 in every link state but connected and streaming |
+| SB93 | 4 | What a link change does to a sync |
+| SB120 | 5 | 30 seconds of silence; the state kept |
+
+### C. Accepted without a house check
+
+| Rule | What is assumed | Why the driver is safe either way |
+| --- | --- | --- |
+| SB95 | 13 for `groupId` below level 10 | Only a box below API level 10 shows it (`run` checks it when the box is one). The box driver sends no PUT at all in this stage and reads the area from `hueTarget`, else `groupId` (`tests/spec/syncbox_state_spec.lua`, "takes the area from hue.groupId when execution has no hueTarget") |
+| SB97 | `hueTarget` refused in standalone; `hue` untouched | Only a box run without a bridge (`run` checks it when the box is one). The driver refuses a standalone box in Status and never writes `hueTarget` (`tests/spec/syncbox_driver_spec.lua`, "refuses a standalone HSB3 in Status (O2)") |
+| SB114 | Only `ipAddress` changes with the address | Needs the router to move the box. The driver finds the box again by its id, not its address (`tests/spec/syncbox_driver_spec.lua`, "follows the box to a new address the search finds, after the identity proved it (EC B11)"), and reads the whole state at every poll, so anything else a move changed shows at the next one |
+| SB121 | Everything else kept across a firmware update | Needs an update from Signify, which takes many minutes. The driver keeps nothing of the box's but its id, address and token, and reads the firmware and level at every poll (`tests/spec/syncbox_state_spec.lua`, "writes the firmware with whatever is known"); the restart itself is SB120, step 5 |
+| SB122 | The values a new level adds | Needs an update that raises `apiLevel`. The driver reads every field a level adds as optional (`tests/spec/syncbox_state_spec.lua`, "leaves out what an older box lacks (HSB1 at API level 7)"), so their first values change nothing it does |
+
+Rules in none of the tables are shown by their sources or are conventions
+of the fakes; SB83, SB92's owner text, SB96, SB111's refusals, SB121's build
 number and §12 need no check.
