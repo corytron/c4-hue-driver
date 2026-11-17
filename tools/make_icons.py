@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the Composer icons for the three Hue drivers.
+"""Draw the Composer icons for the Hue drivers (the motion sensor uses stock ones).
 
 Composer shows a driver's icon at 16 px (the project tree and the Items
 pane) and 32 px (List View), 96 DPI (Fundamentals 19, "Driver Icon
@@ -33,6 +33,9 @@ Hue Bridge the Hue Bridge Pro from above: a flat near-black, slightly
            glossy rounded rectangle with a sheen band, a lighter rim and
            three small status LEDs (white, blue, white) with soft halos
            near the front edge.
+Hue Sync Box a wide, low near-black box with one white LED, sitting in a
+           soft glow of several hues spilling out behind it: the light it
+           makes.
 
 Run from the repo root with no arguments:
 
@@ -45,6 +48,8 @@ Writes:
     src/hue_light/www/images/devices_lg/hue_light_32.png
     src/hue_scene/www/images/devices_sm/hue_scene_16.png
     src/hue_scene/www/images/devices_lg/hue_scene_32.png
+    src/hue_syncbox/www/images/devices_sm/hue_syncbox_16.png
+    src/hue_syncbox/www/images/devices_lg/hue_syncbox_32.png
 
     python3 tools/make_icons.py --inspect DIR
 
@@ -52,7 +57,7 @@ also writes the 512 px masters (icons_v2_master_<name>.png) and a sheet
 (icons_v2_sheet.png) showing each icon at 1x, 4x and 8x on white and on
 Composer's #f0f0f0, for eyeballing.
 
-The six icons are drawn at the same time, one process each (up to JOBS,
+The eight icons are drawn at the same time, one process each (up to JOBS,
 environment; default nproc, JOBS=1 one after the other; issue #456).
 
 Pillow only (12.x) plus the standard library. Deterministic: the grain
@@ -86,6 +91,16 @@ def out_path(driver, name, size):
 # the number of master pixels per target pixel, and all geometry arguments
 # are in target pixels so the same drawing code serves both sizes.
 # --------------------------------------------------------------------------
+
+
+def nearest(img, size):
+    """img scaled to size, nearest neighbour. Pillow 12.1.1 (Ubuntu 26.04) fails every NEAREST
+    resize ("returned NULL without setting an exception"); an affine transform with NEAREST
+    samples the same pixel centres."""
+    w, h = size
+    return img.transform(
+        size, Image.Transform.AFFINE, (img.width / w, 0, 0, 0, img.height / h, 0), resample=Image.Resampling.NEAREST
+    )
 
 
 def _clamp(v):
@@ -147,13 +162,13 @@ def lin_grad(S, p0, p1):
     # 8-bit image; add() removes both offsets and clips the sum to 0..255.
     xs = [_clamp(128 + 255 * kx * (x - x0)) for x in range(MASTER)]
     ys = [_clamp(128 + 255 * ky * (y - y0)) for y in range(MASTER)]
-    gx = Image.new("L", (MASTER, 1))
-    gx.putdata(xs)
-    gy = Image.new("L", (1, MASTER))
-    gy.putdata(ys)
+    # Each axis repeated across the canvas byte for byte (what a NEAREST
+    # resize of a one-pixel strip does; Pillow 12.1 fails that resize).
+    gx = Image.frombytes("L", (MASTER, MASTER), bytes(xs) * MASTER)
+    gy = Image.frombytes("L", (MASTER, MASTER), bytes(v for v in ys for _ in range(MASTER)))
     return ImageChops.add(
-        gx.resize((MASTER, MASTER), Image.Resampling.NEAREST),
-        gy.resize((MASTER, MASTER), Image.Resampling.NEAREST),
+        gx,
+        gy,
         1.0,
         -256,
     )
@@ -504,7 +519,7 @@ def scene_glow(S, g, plate_m, remote_m):
         data.append(hsv(h, 0.86, 1.0))
     col = Image.new("RGB", (1, MASTER))
     col.putdata(data)
-    col = col.resize((MASTER, MASTER), Image.Resampling.NEAREST).convert("RGBA")
+    col = nearest(col, (MASTER, MASTER)).convert("RGBA")
     # Falloff: the remote silhouette grown and blurred, minus the remote.
     halo = blur(rrect(S, (rx0 - 0.6, ry0 - 0.6, rx1 + 0.6, ry1 + 0.6), g["remote_r"] + 0.6), 1.3, S)
     halo = ImageChops.lighter(
@@ -626,6 +641,69 @@ def render_bridge(size):
 
 
 # --------------------------------------------------------------------------
+# Hue Sync Box: a wide, low black box with one front LED, sitting in the
+# coloured light it makes: a soft glow of several hues spills out behind it.
+# --------------------------------------------------------------------------
+
+SYNC_GLOW = [(0.95, (255, 64, 160)), (0.62, (64, 120, 255)), (0.38, (40, 220, 200)), (0.10, (255, 170, 40))]
+
+
+def syncbox_geometry(size):
+    if size == 32:
+        return dict(
+            body=(4, 12, 28, 22),
+            r=2.0,
+            led=(15, 19, 17, 20),
+            glow_y=12.5,
+            glow_r=7.5,
+            rim=1.0,
+            shadow=(0.6, 1.0, 1.0, 0.5),
+        )
+    return dict(
+        body=(1, 6, 15, 12),
+        r=1.2,
+        led=(7, 10, 9, 11),
+        glow_y=6.5,
+        glow_r=4.2,
+        rim=1.0,
+        shadow=(0.5, 0.8, 0.7, 0.55),
+    )
+
+
+def render_syncbox(size):
+    S = MASTER // size
+    g = syncbox_geometry(size)
+    bx0, by0, bx1, by1 = g["body"]
+    near, far = (bx0 - 2, by0 - 2), (bx1 + 2, by1 + 2)
+    body_m = rrect(S, g["body"], g["r"])
+
+    H = Image.new("L", (MASTER, MASTER), 0)
+    H = add_height(H, body_m, 170, 0.5, S)
+    H = add_height(H, body_m, 16, 2.0, S)
+
+    img = solid((0, 0, 0, 0))
+    # The light it makes: a glow per hue, spread along the box's top edge.
+    width = bx1 - bx0
+    for frac, colour in SYNC_GLOW:
+        cx = bx0 + width * frac
+        glow = radial(S, (cx, g["glow_y"]), g["glow_r"])
+        img = over(img, layer(glow, colour + (0,), 0.85))
+    sdx, sdy, sr, sa = g["shadow"]
+    img = over(img, drop_shadow(body_m, S, sdx, sdy, sr, sa))
+    img = over(img, grad_fill(body_m, BRIDGE_TL, BRIDGE_BR, S, near, far))
+    img = grain(img, S, 0.06, seed=41, mask=body_m)
+    env = ImageChops.multiply(radial(S, (bx0 + 2, by0 + 1), width * 0.7), body_m)
+    img = over(img, layer(env, (255, 255, 255, 0), 0.14))
+    img = shade(img, H, S, d_px=0.25, gain_hi=1.3, gain_lo=1.2, mask=body_m)
+    img = specular(img, H, S, d_px=0.3, strength=0.7, gloss_mask=body_m, power=2.0, soften=0.1)
+    img = over(img, stroke(S, g["body"], g["r"], g["rim"], BRIDGE_RIM_TL, BRIDGE_RIM_BR, 0.9, near, far))
+    box = g["led"]
+    core = rrect(S, box, (box[2] - box[0]) * 0.3)
+    img = over(img, layer(core, LED_WHITE + (0,), 1.0))
+    return img
+
+
+# --------------------------------------------------------------------------
 # Output.
 # --------------------------------------------------------------------------
 
@@ -668,6 +746,8 @@ def build_all():
         ("hue_light", "hue_light", 32, render_dimmer, (32, False)),
         ("hue_scene", "hue_scene", 16, render_dimmer, (16, True)),
         ("hue_scene", "hue_scene", 32, render_dimmer, (32, True)),
+        ("hue_syncbox", "hue_syncbox", 16, render_syncbox, (16,)),
+        ("hue_syncbox", "hue_syncbox", 32, render_syncbox, (32,)),
     ]
     workers = min(job_count(), len(jobs))
     if workers > 1 and "fork" in multiprocessing.get_all_start_methods():
@@ -708,7 +788,7 @@ def inspection_sheet(results, out_dir):
             y = y_top
             d.text((x, y - 10), "%s %d" % (name, size), fill=(90, 90, 90))
             for s in scales:
-                big = icon.resize((size * s, size * s), Image.Resampling.NEAREST)
+                big = nearest(icon, (size * s, size * s))
                 sheet.paste(big, (x, y + pad), big)
                 y += 32 * s + pad
     path = os.path.join(out_dir, "icons_v2_sheet.png")
