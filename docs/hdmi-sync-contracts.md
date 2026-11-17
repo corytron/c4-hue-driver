@@ -289,6 +289,7 @@ names a box only when exactly one bound box of this bridge has the area.
 | `HUE_SYNCBOX_GOODBYE` | box → bridge | `device_id`, `box_id` | Unbind or removal |
 | `HUE_SYNCBOX_STATE` | box → bridge | `device_id`, `box_id`, `bridge_id`, `area_id`, `syncing` | Stage 4 (#568): the box's sync state changed, or it got an AREA; the stream label and W10's guard read it. HELLO carries `syncing` too |
 | `HUE_SYNCBOX_STOPPED` | bridge → box | `area_id`, `ok`, `reason` (`stopped`, `another_box`, `no_area`, `not_linked`, `failed`, `busy`), `by`, `detail` | Stage 4: the answer to a `STOP_AREA` |
+| `HUE_SYNCBOX_ASK_HELLO` | bridge → box | none | Stage 4: to a device bound on connection 2 the bridge has no hello from (each resync, at most once per device per run, and on binding); the box answers with HELLO, `syncing` included. Only a hint |
 
 The trust rules of #483 apply on both sides:
 - A box acts on bridge messages only as hints.

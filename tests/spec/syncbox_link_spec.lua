@@ -94,6 +94,7 @@ describe("syncbox.link", function()
 			assert.equal("HUE_SYNCBOX_STATE", link.STATE)
 			assert.equal("HUE_SYNCBOX_STOP_AREA", link.STOP_AREA)
 			assert.equal("HUE_SYNCBOX_STOPPED", link.STOPPED)
+			assert.equal("HUE_SYNCBOX_ASK_HELLO", link.ASK_HELLO)
 			assert.equal(64, link.AREAS_MAX)
 		end)
 
@@ -102,10 +103,11 @@ describe("syncbox.link", function()
 			assert.has_error(function() link.new() end)
 		end)
 
-		it("handles the three messages from the bridge, nothing else", function()
+		it("handles the four messages from the bridge, nothing else", function()
 			assert.is_true(link.handles("HUE_SYNCBOX_CONFIGURE"))
 			assert.is_true(link.handles("HUE_SYNCBOX_AREA"))
 			assert.is_true(link.handles("HUE_SYNCBOX_STOPPED"))
+			assert.is_true(link.handles("HUE_SYNCBOX_ASK_HELLO"))
 			assert.is_false(link.handles("HUE_SYNCBOX_HELLO"))
 			assert.is_false(link.handles("HUE_SYNCBOX_STATE"))
 			assert.is_false(link.handles("HUE_SYNCBOX_STOP_AREA"))
@@ -556,6 +558,25 @@ describe("syncbox.link", function()
 		end)
 	end)
 
+	describe("received() ASK_HELLO (#568)", function()
+		it("is the bridge asking for a hello, whatever its parameters, without a log line", function()
+			for _, params in ipairs({ {}, { bridge_id = "junk" }, "text" }) do
+				assert.same({ kind = "ask_hello" }, l:received("HUE_SYNCBOX_ASK_HELLO", params))
+			end
+			assert.same({ kind = "ask_hello" }, l:received("HUE_SYNCBOX_ASK_HELLO", nil))
+			assert.same({}, lines)
+			assert.same({}, sent, "the driver answers, not received()")
+		end)
+
+		it("is answered with a hello whatever the last one said, the sync state included", function()
+			l:update(BOX, BRIDGE, TV, true)
+			assert.is_truthy(l:received("HUE_SYNCBOX_ASK_HELLO", {}))
+			assert.is_true(l:hello(BOX, BRIDGE, TV, true))
+			assert.same({ "HUE_SYNCBOX_HELLO", "true" }, { sent[2].command, sent[2].params.syncing })
+			assert.is_false(l:update(BOX, BRIDGE, TV, true), "nothing new after it")
+		end)
+	end)
+
 	describe("received() of anything else", function()
 		it("is nil, without a log line", function()
 			assert.is_nil(l:received("HUE_SYNCBOX_HELLO", { box_id = BOX }))
@@ -585,16 +606,18 @@ describe("syncbox.link", function()
 				log = log,
 			})
 			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			-- Bound with no hello yet: the bridge asks for one (#568), the box answers.
+			assert.same({ kind = "ask_hello" }, l:received(to_box[1].command, to_box[1].params))
 			l:hello(BOX, BRIDGE, TV)
 			assert.is_true(s:hello(sent[1].params))
 			assert.same({ kind = "configure", bridge_id = BRIDGE, match = true, areas = {
 				{ id = TV, name = 'Tom\'s "Cinema" \\ Ü→', type = "screen", status = "active", lamps = 2,
 					rooms = { "Den", "Living Room" } },
 				{ id = OFFICE, name = "Office", type = "music", status = "inactive", lamps = 1, rooms = {} },
-			} }, l:received(to_box[1].command, to_box[1].params))
+			} }, l:received(to_box[2].command, to_box[2].params))
 			s:on_stream({ id = TV }, true)
 			assert.same({ kind = "area", id = TV, status = "active", streamer = "this_box" },
-				l:received(to_box[2].command, to_box[2].params))
+				l:received(to_box[3].command, to_box[3].params))
 			l:goodbye(BOX)
 			assert.is_true(s:goodbye(sent[2].params))
 			assert.equal(0, s:count())
@@ -635,6 +658,41 @@ describe("syncbox.link", function()
 			assert.equal("HUE_SYNCBOX_STOPPED", reply.command)
 			assert.same({ kind = "stopped", area_id = TV, ok = true, reason = "stopped" },
 				l:received(reply.command, reply.params))
+		end)
+
+		it("a bridge restarted alone asks at its first resync, and then knows the box syncs (W10, #568)", function()
+			local syncboxes = require("bridge.syncboxes")
+			local to_box, puts = {}, {}
+			-- The bridge's memory is empty; Director still shows the box bound.
+			local s = syncboxes.new({
+				send = function(id, command, params)
+					to_box[#to_box + 1] = { id = id, command = command, params = params }
+				end,
+				bridge_id = function() return BRIDGE end,
+				areas = function()
+					return { { id = TV, name = "Living Room TV", kind = "screen", status = "active", lamps = {} } }
+				end,
+				bound = function() return { [DEVICE] = "Hue Sync Box", [2003] = "Hue Sync Box" } end,
+				display_name = function(id) return id == DEVICE and "Living Room Sync Box" or "Den Sync Box" end,
+				http = function(req, cb)
+					puts[#puts + 1] = req
+					cb({ ok = true })
+				end,
+				log = log,
+			})
+			assert.equal(0, s:configure_all())
+			assert.same({ { id = DEVICE, command = "HUE_SYNCBOX_ASK_HELLO", params = {} },
+				{ id = 2003, command = "HUE_SYNCBOX_ASK_HELLO", params = {} } }, to_box)
+			assert.same({ kind = "ask_hello" }, l:received(to_box[1].command, to_box[1].params))
+			assert.is_true(l:hello(BOX, BRIDGE, TV, true))
+			assert.is_true(s:hello(sent[1].params))
+			assert.equal("HUE_SYNCBOX_CONFIGURE", to_box[3].command)
+			assert.equal("Living Room Sync Box", s:label_for(TV))
+			-- The other box asks to take the stream over: refused, the stream is this box's.
+			assert.is_false(s:stop_area({ device_id = "2003", box_id = "0A1B2C3D4E60", bridge_id = BRIDGE, area_id = TV }))
+			assert.same({ area_id = TV, ok = "false", reason = "another_box", by = "Living Room Sync Box" },
+				to_box[#to_box].params)
+			assert.same({}, puts)
 		end)
 	end)
 end)

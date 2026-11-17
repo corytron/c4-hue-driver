@@ -83,9 +83,17 @@ describe("bridge.syncboxes", function()
 		return false
 	end
 
-	-- Bound through OnBindingChanged, as Director reports a new binding.
+	-- Bound through OnBindingChanged, as Director reports a new binding. A
+	-- device without a hello is asked for one (the cases of "asking for
+	-- hellos" below): at most that one ASK_HELLO, set aside here.
 	local function bind(id)
+		local before = #sent
 		assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, id))
+		if #sent > before and sent[#sent].command == "HUE_SYNCBOX_ASK_HELLO" then
+			assert.equal(before + 1, #sent)
+			assert.same({ id = id, command = "HUE_SYNCBOX_ASK_HELLO", params = {} }, sent[#sent])
+			sent[#sent] = nil
+		end
 	end
 
 	before_each(function()
@@ -134,7 +142,7 @@ describe("bridge.syncboxes", function()
 			end })
 			assert.is_true(bare:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
 			assert.is_true(bare:hello({ device_id = tostring(DEVICE), box_id = BOX }))
-			assert.same({ match = "false", areas = "[]" }, sent[1].params, "no bridge id, no areas")
+			assert.same({ match = "false", areas = "[]" }, of("HUE_SYNCBOX_CONFIGURE")[1].params, "no bridge id, no areas")
 			assert.is_nil(bare:label_for(TV))
 			assert.equal(1, bare:configure_all())
 		end)
@@ -1045,6 +1053,110 @@ describe("bridge.syncboxes", function()
 			assert.is_true(stop(DEVICE, OFFICE))
 			assert.is_true(saw("on_stopped failed"))
 			assert.equal("stopped", answers()[2][2].reason)
+		end)
+	end)
+
+	describe("asking for hellos (ASK_HELLO, #568)", function()
+		local ASK = "HUE_SYNCBOX_ASK_HELLO"
+
+		local function asked()
+			local out = {}
+			for _, m in ipairs(of(ASK)) do
+				out[#out + 1] = m.id
+			end
+			return out
+		end
+
+		it("asks a device bound without a hello at its binding, once, with nothing in the message", function()
+			assert.equal("HUE_SYNCBOX_ASK_HELLO", syncboxes.ASK_HELLO)
+			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			assert.same({ { id = DEVICE, command = ASK, params = {} } }, sent)
+			assert.is_true(saw("device 2001 is bound on Hue Sync Boxes without a hello: asking for one"))
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({ DEVICE }, asked(), "once in a run")
+		end)
+
+		it("does not ask a device whose hello waits (it answers it) or is known", function()
+			bound = {}
+			hello(DEVICE, BOX, BRIDGE, TV)
+			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			assert.same({ "HUE_SYNCBOX_CONFIGURE" }, { sent[1].command })
+			assert.is_true(s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE))
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({}, asked())
+		end)
+
+		it("asks every device the lookup shows bound without a hello at each resync, once each", function()
+			bound = { [DEVICE] = "Hue Sync Box", [DEVICE2] = "Hue Sync Box", [DEVICE3] = "Hue Sync Box" }
+			hello(DEVICE, BOX, BRIDGE, TV)
+			sent = {}
+			assert.equal(1, s:configure_all(), "the number told CONFIGURE")
+			assert.same({ "HUE_SYNCBOX_CONFIGURE", ASK, ASK }, { sent[1].command, sent[2].command, sent[3].command })
+			assert.same({ DEVICE2, DEVICE3 }, asked())
+			s:configure_all()
+			assert.same({ DEVICE2, DEVICE3 }, asked(), "not again")
+			sent = {}
+			assert.is_true(hello(DEVICE2, BOX2, BRIDGE, OFFICE, "true"))
+			assert.same({ { id = DEVICE2, command = "HUE_SYNCBOX_CONFIGURE" } },
+				{ { id = sent[1].id, command = sent[1].command } })
+		end)
+
+		it("asks nothing while the lookup is unknown, nor a device OnBindingChanged says is unbound", function()
+			bound = nil
+			assert.equal(0, s:configure_all())
+			assert.same({}, sent)
+			s:binding_changed(2, "HUE_SYNCBOX", false, DEVICE)
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({}, asked())
+		end)
+
+		it("asks a device OnBindingChanged said is bound that the lookup misses (its first ask failed)", function()
+			local fail = true
+			s = new_s({ send = function(id, command, params)
+				if fail and command == ASK then error("gone") end
+				sent[#sent + 1] = { id = id, command = command, params = params }
+			end })
+			bound = {}
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			fail = false
+			s:configure_all()
+			assert.same({ DEVICE }, asked())
+		end)
+
+		it("asks again after an unbind and a new binding", function()
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			s:binding_changed(2, "HUE_SYNCBOX", false, DEVICE)
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			assert.same({ DEVICE, DEVICE }, asked())
+		end)
+
+		it("asks again at the next resync after a send that raised", function()
+			local fail = true
+			s = new_s({ send = function(id, command, params)
+				if fail and command == ASK then error("gone") end
+				sent[#sent + 1] = { id = id, command = command, params = params }
+			end })
+			s:binding_changed(2, "HUE_SYNCBOX", true, DEVICE)
+			assert.is_true(saw("HUE_SYNCBOX_ASK_HELLO to device 2001 failed"))
+			fail = false
+			bound = { [DEVICE] = "Hue Sync Box" }
+			s:configure_all()
+			assert.same({ DEVICE }, asked())
+		end)
+
+		it("asks at most MAX_BOXES devices at a resync, the rest at the next", function()
+			bound = {}
+			for i = 1, syncboxes.MAX_BOXES + 4 do
+				bound[5000 + i] = "Hue Sync Box"
+			end
+			s:configure_all()
+			assert.equal(syncboxes.MAX_BOXES, #asked())
+			s:configure_all()
+			assert.equal(syncboxes.MAX_BOXES + 4, #asked())
 		end)
 	end)
 

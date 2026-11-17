@@ -21,6 +21,9 @@
 --                                          stops on any area
 --                  HUE_SYNCBOX_STOPPED   { area_id, ok, reason, by, detail }   the answer
 --                                          to a STOP_AREA (reasons below)
+--                  HUE_SYNCBOX_ASK_HELLO { }   a device bound on connection 2 the bridge
+--                                          has no hello from: say hello (with the sync
+--                                          state); the box answers with HELLO
 --
 -- Every parameter is a string (contracts C5). `areas` is a JSON list, written
 -- here as a real array (C4:JsonEncode writes Lua arrays as objects with string
@@ -73,6 +76,15 @@
 -- of an area that streams no more changes nothing, and a stale model must
 -- not hold a take-over up.
 --
+-- Asking for hellos (#568): this driver keeps its boxes in memory only, so
+-- after it restarts alone (a driver update that reaches the bridge after the
+-- boxes) it knows none of them until each says hello again. At each resync
+-- (configure_all) and when a device is bound on connection 2 it sends
+-- ASK_HELLO to every device Director shows bound there that it has no hello
+-- (nor a waiting one) from: once per device per run of this driver, again
+-- after an unbind and a new binding, again after a send that raised. The
+-- ask carries nothing, and the box's answer is the hello it sends anyway.
+--
 -- The label (contracts C7): the box of this bridge naming the area that
 -- reports itself syncing; else the one whose sync state is unknown (an older
 -- box, or a stream that started on its area since its last word); never a
@@ -85,10 +97,12 @@
 --   s:goodbye(params)          HUE_SYNCBOX_GOODBYE: forget the box; true when forgotten
 --   s:binding_changed(binding, class, bound, other_id)
 --                              OnBindingChanged; true when it was connection 2 (the
---                              caller then has nothing else to do with it)
+--                              caller then has nothing else to do with it). A device
+--                              bound without a hello waiting is asked for one
 --   s:configure_all()          after each resync: CONFIGURE to every bound box (and a
---                              waiting hello answered once its device shows bound);
---                              returns the number told
+--                              waiting hello answered once its device shows bound), then
+--                              ASK_HELLO to every bound device without a hello not asked
+--                              yet; returns the number told CONFIGURE
 --   s:on_stream(area, started) an area started or stopped streaming (the entertainment
 --                              module's on_stream): AREA to every bound box; returns
 --                              the number told
@@ -155,6 +169,7 @@ syncboxes.AREA = "HUE_SYNCBOX_AREA"
 syncboxes.STATE = "HUE_SYNCBOX_STATE"
 syncboxes.STOP_AREA = "HUE_SYNCBOX_STOP_AREA"
 syncboxes.STOPPED = "HUE_SYNCBOX_STOPPED"
+syncboxes.ASK_HELLO = "HUE_SYNCBOX_ASK_HELLO"
 
 -- Bounds: boxes kept (a house has a few; a hello beyond is refused with a
 -- warning), hellos waiting for their binding, areas and rooms per area told
@@ -272,6 +287,7 @@ function syncboxes.new(deps)
 		bound_ids = {},   -- device id -> true (bound) / false (unbound), as OnBindingChanged said
 		owners = {},      -- area id -> device id (or false: several), the labels last seen
 		stops = {},       -- area id -> a take-over { area_id, devices = { [id] = true }, timer }
+		asked = {},       -- device id -> true: asked for a hello (ASK_HELLO) in this run
 	}, syncboxes)
 end
 
@@ -725,12 +741,59 @@ function syncboxes:binding_changed(binding, class, bound, other_id)
 		local hello = self.pending[id]
 		if hello then
 			self:accept(hello)
+		else
+			self:ask_hello(id)
 		end
 	elseif bound == false or bound == "false" then
 		self.bound_ids[id] = false
+		self.asked[id] = nil
 		self:forget(id, "unbound")
 	end
 	return true
+end
+
+-- Asking for hellos ---------------------------------------------------------------------------------
+
+-- ASK_HELLO to a bound device without a hello (nor a waiting one) that was not
+-- asked yet in this run; true when it went out. A send that raised is asked
+-- again at the next chance.
+function syncboxes:ask_hello(device_id)
+	if self.by_device[device_id] or self.pending[device_id] or self.asked[device_id] then
+		return false
+	end
+	self.asked[device_id] = true
+	self.log.debug("syncboxes: device %d is bound on Hue Sync Boxes without a hello: asking for one", device_id)
+	if not self:send(device_id, syncboxes.ASK_HELLO, {}) then
+		self.asked[device_id] = nil
+		return false
+	end
+	return true
+end
+
+-- Every device bound on connection 2 (the lookup's `set`, and OnBindingChanged's
+-- word over it) without a hello: asked, at most MAX_BOXES a call. Returns how many.
+function syncboxes:ask_unknown(set)
+	local ids = {}
+	for id in pairs(set or {}) do
+		if self.bound_ids[id] ~= false then
+			ids[id] = true
+		end
+	end
+	for id, flag in pairs(self.bound_ids) do
+		if flag == true then
+			ids[id] = true
+		end
+	end
+	local asked = 0
+	for _, id in ipairs(sorted_ids(ids)) do
+		if asked >= syncboxes.MAX_BOXES then
+			break
+		end
+		if self:ask_hello(id) then
+			asked = asked + 1
+		end
+	end
+	return asked
 end
 
 -- After a resync ----------------------------------------------------------------------------------
@@ -761,6 +824,7 @@ function syncboxes:configure_all()
 		end
 	end
 	self:check_labels()
+	self:ask_unknown(set)
 	return told
 end
 

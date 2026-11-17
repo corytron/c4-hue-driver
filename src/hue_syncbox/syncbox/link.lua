@@ -25,6 +25,9 @@
 --                                          streamer ("this_box"/"other"/"none") }
 --                  HUE_SYNCBOX_STOPPED   { area_id, ok ("true"/"false"), reason,
 --                                          by, detail }: the answer to a STOP_AREA
+--                  HUE_SYNCBOX_ASK_HELLO { }: the bridge has no hello from this
+--                                          device (it restarted alone); the driver
+--                                          answers with l:hello(...), syncing included
 --
 -- STOPPED's reasons: "stopped" (ok: the bridge PUT `action: stop` on the area
 -- with its own key), "another_box" (a bound box of this project reports
@@ -48,7 +51,8 @@
 -- driver then reads the box over its pinned connection, and the box's own
 -- answer is the only source of its state. A malformed message is dropped
 -- with one debug line, and so is a STOPPED for an area this box did not ask
--- about. Nothing here carries the box's token or the bridge's key: the
+-- about. ASK_HELLO carries nothing to check: its answer is the hello the box
+-- sends at every binding anyway. Nothing here carries the box's token or the bridge's key: the
 -- bridge stops a stream with its own key, and STOPPED only says whether it
 -- did (contracts C5).
 --
@@ -87,12 +91,14 @@
 --       lamps, rooms = { name... } }... } }
 --     { kind = "area", id, status, streamer }
 --     { kind = "stopped", area_id, ok (a boolean), reason, by (or nil), detail (or nil) }
---   link.handles(command)                true for the three messages received() reads
+--     { kind = "ask_hello" }             whatever its parameters: answer with l:hello
+--   link.handles(command)                true for the four messages received() reads
 --   link.box_id(v), link.bridge_id(v), link.area_id(v)   the checks, for the driver
 --
 -- When the driver sends the hello (contract §3.8): at late init, on binding,
--- and whenever its box's area or bridge id changes (l:update after each read,
--- which sends STATE instead when only the sync state changed).
+-- when the bridge asks (ASK_HELLO), and whenever its box's area or bridge id
+-- changes (l:update after each read, which sends STATE instead when only the
+-- sync state changed).
 
 local num = require("common.num")
 local https = require("common.https")
@@ -112,6 +118,7 @@ link.GOODBYE = "HUE_SYNCBOX_GOODBYE"
 link.CONFIGURE = "HUE_SYNCBOX_CONFIGURE"
 link.AREA = "HUE_SYNCBOX_AREA"
 link.STOPPED = "HUE_SYNCBOX_STOPPED"
+link.ASK_HELLO = "HUE_SYNCBOX_ASK_HELLO"
 
 -- Bounds (research §3.2): ids at most 64 characters, at most 64 areas kept,
 -- the rooms of an area at most 32 (a Control4 project with more rooms under
@@ -143,7 +150,7 @@ local STREAMERS = { this_box = true, other = true, none = true }
 -- STOPPED's reasons when ok is false; any other reads "failed".
 local REFUSALS = { another_box = true, no_area = true, not_linked = true, failed = true, busy = true }
 
-local RECEIVED = { [link.CONFIGURE] = true, [link.AREA] = true, [link.STOPPED] = true }
+local RECEIVED = { [link.CONFIGURE] = true, [link.AREA] = true, [link.STOPPED] = true, [link.ASK_HELLO] = true }
 
 function link.handles(command)
 	return RECEIVED[command] == true
@@ -530,6 +537,9 @@ end
 function link:received(command, params)
 	if not RECEIVED[command] then
 		return nil
+	end
+	if command == link.ASK_HELLO then
+		return { kind = "ask_hello" }
 	end
 	if type(params) ~= "table" then
 		return self:drop(command, "no parameters")
