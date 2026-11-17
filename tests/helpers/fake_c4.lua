@@ -31,6 +31,17 @@
 -- GetBoundConsumerDevices(protocolId, 5001) answers from it [verified:
 -- hardware, docs/edge-cases-control4.md section 0].
 --
+-- A driver.xml with more than one <proxy> (the Hue Sync Box's avswitch and
+-- four uibutton proxies, contracts C1.1 of docs/hdmi-sync-contracts.md) gets
+-- one proxy device per <proxy>, ids handed out in document order. The first
+-- is the device's main proxy, exactly as a single proxy is: the protocol
+-- record's proxy_id and proxy_binding name it, and it shares the device's
+-- Composer name. The others are listed in the record's other_proxies, as
+-- { id, binding } (binding: the element's proxybindingid), and are named
+-- after their <proxy name="..."> [assumed: how Composer names the extra
+-- proxies of a new device]. Every lookup above (bound devices, GetDevices'
+-- proxies, delete, move) covers all of them.
+--
 -- C4:Bind and C4:Unbind deliver OnBindingChanged(binding, class, bound,
 -- otherId, otherBinding) to both drivers when both ends of the binding are
 -- loaded drivers (after fake.pair), provider first; otherwise nothing fires
@@ -71,39 +82,93 @@ local function driver_xml(driver)
 	return xml_cache[driver] or nil
 end
 
+-- A spec's own driver.xml text for a made-up driver name (the fake's own
+-- spec tests multi-proxy parsing this way); nil forgets it.
+function fake.set_driver_xml(driver, xml)
+	xml_cache[driver] = xml
+end
+
+-- Every <proxy> of a driver.xml in document order, as { proxy (the element's
+-- text), binding (its proxybindingid, or nil), name (its name attribute, or
+-- nil) }: "<proxy>" or "<proxy attr=...>", never the enclosing "<proxies>".
+local function xml_proxies(xml)
+	local out = {}
+	local pos = 1
+	while true do
+		local s, e, attrs = xml:find("<proxy([^>]*)>", pos)
+		if not s then break end
+		pos = e + 1
+		if attrs == "" or attrs:match("^%s") then
+			local text, close = xml:match("^(.-)()</proxy>", pos)
+			if text then
+				out[#out + 1] = { proxy = text:match("^%s*(.-)%s*$"),
+					binding = tonumber(attrs:match('proxybindingid="(%d+)"')), name = attrs:match('%sname="([^"]*)"') }
+				pos = close
+			end
+		end
+	end
+	return out
+end
+
 -- What Composer would take from a driver file: its display name and the
--- proxy it declares, if any. Unknown drivers get their base name, no proxy.
+-- proxies it declares, if any (the first is its main proxy: proxy and
+-- proxy_binding; all of them in proxies, as { c4i, binding, name }). Unknown
+-- drivers get their base name, no proxy.
 local function driver_info(file)
 	local base = tostring(file):gsub("%.c4[iz]$", "")
 	local xml = driver_xml(base)
 	if not xml then
-		return { name = base }
+		return { name = base, proxies = {} }
 	end
-	-- "<proxy>" or "<proxy attr=...>", never the enclosing "<proxies>". A
-	-- combo driver's proxy names the driver itself (hue_bridge) and is no
+	-- A combo driver's proxy names the driver itself (hue_bridge) and is no
 	-- separate device: the bridge lists without a proxies key [verified: hardware].
-	local proxy = xml:match("<proxy>(.-)</proxy>") or xml:match("<proxy%s[^>]*>(.-)</proxy>")
-	if proxy == base then proxy = nil end
+	local proxies = {}
+	for i, p in ipairs(xml_proxies(xml)) do
+		if p.proxy ~= base then
+			proxies[#proxies + 1] = { c4i = p.proxy .. ".c4i", binding = p.binding or (5000 + i), name = p.name }
+		end
+	end
+	local main = proxies[1]
 	return {
 		name = xml:match("<name>(.-)</name>") or base,
-		proxy = proxy and (proxy .. ".c4i") or nil,
-		proxy_binding = tonumber(xml:match('<proxy%s[^>]*proxybindingid="(%d+)"')) or 5001,
+		proxy = main and main.c4i or nil,
+		proxy_binding = main and main.binding or 5001,
+		proxies = proxies,
 	}
+end
+
+-- A protocol device record's proxies, the main one first, as { id, binding }
+-- (see the file header); none for a proxy's record or a driver without one.
+local function proxies_of(rec)
+	local list = {}
+	if rec.proxy_id then
+		list[1] = { id = rec.proxy_id, binding = rec.proxy_binding }
+	end
+	for _, p in ipairs(rec.other_proxies or {}) do
+		list[#list + 1] = p
+	end
+	return list
 end
 
 -- A device and its proxy share the Composer name AddDevice gave them, and
 -- both remember the driver's <name> (driver_name), which is what
--- GetBoundConsumerDevices reports [verified: hardware].
+-- GetBoundConsumerDevices reports [verified: hardware]. A further proxy is
+-- named after its <proxy name="..."> (see the file header).
 local function add_device_entry(id, file, name, room_id)
 	local info = driver_info(file)
 	local rec = { name = name or info.name, room_id = room_id, c4i = file, driver_name = info.name }
 	fake.project.devices[id] = rec
-	if info.proxy then
+	for i, p in ipairs(info.proxies) do
 		local pid = fake.project.next_proxy_id
 		fake.project.next_proxy_id = pid + 1
-		rec.proxy_id, rec.proxy_binding = pid, info.proxy_binding
-		fake.project.devices[pid] = { name = rec.name, room_id = room_id, c4i = info.proxy, protocol_id = id,
-			driver_name = info.name }
+		if i == 1 then
+			rec.proxy_id, rec.proxy_binding = pid, p.binding
+		else
+			rec.other_proxies = rec.other_proxies or {}
+			rec.other_proxies[#rec.other_proxies + 1] = { id = pid, binding = p.binding }
+		end
+		fake.project.devices[pid] = { name = (i > 1 and p.name) or rec.name, room_id = room_id, c4i = p.c4i,
+			protocol_id = id, driver_name = info.name }
 	end
 	return rec
 end
@@ -119,7 +184,7 @@ local function remove_device_entry(id)
 	local rec = fake.project.devices[id]
 	if not rec then return nil end
 	fake.project.devices[id] = nil
-	if rec.proxy_id then fake.project.devices[rec.proxy_id] = nil end
+	for _, p in ipairs(proxies_of(rec)) do fake.project.devices[p.id] = nil end
 	return rec, id
 end
 
@@ -139,6 +204,491 @@ local function csv_set(value, what, numeric)
 		set[numeric and tonumber(item) or item] = true
 	end
 	return set
+end
+
+-- The fake Hue Sync Box (2.0 beta stage 2, #534) -----------------------------
+--
+-- docs/hdmi-sync-stage2-design.md §7 and contracts C8. A box answers the
+-- C4:url transfers to its address from tests/fixtures/hue_syncbox.lua's
+-- bodies (F below); transfers to any other address join c4.transfers as
+-- before. The decoy rule (new_transfer, below) runs first, for every address.
+-- R1 is docs/syncbox-api-research.md, R5 docs/syncbox-architecture-research.md.
+--
+--   local h = fake.syncbox(opts)
+--     opts.address        "10.0.2.150" by default (F.ADDRESS)
+--     opts.state          the GET /api/v1 body: a fixture (table) or its JSON
+--                         text; F.state.HSB2 by default. Copied into h.state,
+--                         the box's own: every answer is made from h.state as
+--                         it is then, so a spec changes the box (as the Hue
+--                         Sync app would) by changing h.state.
+--     opts.device         the GET /api/v1/device body without a token (table
+--                         or text), copied into h.device. Without it h.device
+--                         is nil and that answer is F.unkeyed_device(
+--                         h.state.device), the identifying fields, at the time.
+--     opts.button_held    false by default (h.button_held)
+--     opts.registrations  the registrations the box knows, none by default:
+--                         { ["7"] = "TEST-TOKEN-NOT-REAL" }, { ["7"] = { token,
+--                         appName, instanceName, role } } or a list of pairing
+--                         answers ({ F.registration_ok }). Kept as
+--                         h.registrations[id] = { token, appName, instanceName, role }.
+--
+--   What it answers (paths after https://<address>):
+--     GET    /api/v1/device         without a token: h.device (above); with
+--                                   one: h.state.device
+--     POST   /api/v1/registrations  {appName, instanceName}: 400 code 16
+--                                   (F.registration_pending) until the button
+--                                   is held, then 200 {registrationId,
+--                                   accessToken}: "7" and TEST-TOKEN-NOT-REAL
+--                                   (F.registration_ok) for the first, the next
+--                                   free id and TEST-TOKEN-NOT-REAL-<id> after
+--                                   it. A success releases the button: one
+--                                   registration per hold (R1 §2.3).
+--     DELETE /api/v1/registrations/<id>  with that registration's own token
+--                                   (R1 §2.3): 200 {}, and it and its token
+--                                   are gone. Another registration's token:
+--                                   401 [assumed]; an id the box never had: 404.
+--     GET    /api/v1                the whole h.state; GET /api/v1/<resource>
+--                                   [/<part>...] a table inside it, else 404.
+--                                   Its registrations list h.state's and
+--                                   h.registrations' (never a token).
+--     PUT    /api/v1/<resource>...  200 {} [assumed: the answer's body], h.state
+--                                   unchanged: stage 2 writes nothing, the box's
+--                                   rules come with stage 3 (until then a spec
+--                                   changes h.state itself). An empty body:
+--                                   400 code 13 (R1 §2.6).
+--     anything else                 404
+--   Every other request needs a registered token (Authorization: Bearer
+--   <token>, R1 §2.1): 401 without one, and a token the box does not know is
+--   refused with 401 on every path, those two included [assumed]. A body that
+--   is not JSON: 400 code 12; registration names that are not text: 400 code
+--   15 [assumed]. The error bodies are F.error's.
+--
+--   Before the box sees a request, the transport:
+--     - not https, or a port but 443: curl 7 [assumed: HTTPS on 443 only];
+--     - the chain: verified with an ssl_cabundle ending in hsb_ca.pem and
+--       ssl_verify_host false (the leaf names the box id, not the address,
+--       R5 §2.2), or with ssl_verify_peer false; otherwise curl 60. While
+--       c4.tls_ignores_cabundle is set (an OS that ignores the bundle), every
+--       request gets through, the decoy request included, which the box then
+--       answers.
+--   An answer comes at once, inside Get()/Post()/Put()/Delete(), before that
+--   call returns (Director's come later; the decoy rule's come at once too).
+--
+--   h.requests  every request to the box, in order: { method, url, path (the
+--               URL's path, "/api/v1/device"), resource (after /api/v1:
+--               "/device", "" for /api/v1, nil off the API), headers (a copy,
+--               the Authorization value's token replaced by "<redacted>"),
+--               body (the text sent), json (its decoding when a table, else
+--               nil), keyed (an Authorization header was sent), authorized
+--               (its token is registered), registration_id (whose), status
+--               (the HTTP status answered; nil while none), err_code (curl's
+--               code when it ended without an answer) }
+--   h:requests_of(method, path)  those of a method and a path (the URL's
+--               path or the resource); nil matches any
+--   h:hold_button(), h:release_button()  the link button (h.button_held)
+--   h:silence(on)  on (true, the default): requests are recorded and not
+--               answered; each ends with curl 28 when its timeout option
+--               (seconds) has passed on the fake clock (c4.advance or
+--               c4.fire_timers fire it: Director's own timer, in c4.timers
+--               with syncbox = true, no SetTimer call recorded). false: the
+--               box answers again
+--   h:defer(on), h:answer(n)  on (true, the default): requests wait in
+--               h.pending until h:answer(n) answers the first n (all by
+--               default), in order, from h.state as it is then; it returns
+--               how many (a transfer the driver cancelled is skipped)
+--   h:move(address)  the box answers at another address (the ipAddress of
+--               h.state.device and h.device follow)
+--
+--   Boxes belong to the harness run: fake.install_c4 and fake.load_driver
+--   forget them, so make a box after the last of those (as with rooms, see the
+--   file header). A second box at an address replaces the first.
+
+local boxes = {}   -- address -> handle; begin_run empties it
+
+local syncbox_fixtures
+local function box_fixtures()
+	syncbox_fixtures = syncbox_fixtures or require("fixtures.hue_syncbox")
+	return syncbox_fixtures
+end
+
+-- An empty JSON object, as dkjson writes it ({} rather than []).
+local function json_object()
+	return setmetatable({}, { __jsontype = "object" })
+end
+
+-- A deep copy, keeping dkjson's object and array marks.
+local function deep_copy(value)
+	if type(value) ~= "table" then
+		return value
+	end
+	local out = {}
+	for k, v in pairs(value) do
+		out[k] = deep_copy(v)
+	end
+	return setmetatable(out, getmetatable(value))
+end
+
+-- A body given as a table (copied) or as JSON text (decoded).
+local function body_table(value, what)
+	if type(value) == "string" then
+		local decoded, _, err = json.decode(value)
+		assert(type(decoded) == "table", "fake.syncbox: " .. what .. " is not a JSON object: " .. tostring(err))
+		return decoded
+	end
+	assert(type(value) == "table", "fake.syncbox: " .. what .. " should be a table or JSON text")
+	return deep_copy(value)
+end
+
+-- scheme, host, port (or nil) and path of a URL; nil for something else.
+local function parse_url(url)
+	local scheme, rest = tostring(url):match("^(%a[%w+.%-]*)://(.*)$")
+	if not scheme then
+		return nil
+	end
+	local authority, path = rest:match("^([^/?#]*)([^?#]*)")
+	authority = authority:match("^.*@(.*)$") or authority
+	local host, port = authority:match("^(.-):(%d*)$")
+	return scheme:lower(), host or authority, tonumber(port), path ~= "" and path or "/"
+end
+
+-- The path after /api/v1 ("" for /api/v1 itself), nil off the API.
+local function resource_of(path)
+	if path == "/api/v1" then
+		return ""
+	end
+	return path:match("^/api/v1(/.*)$")
+end
+
+local function auth_header(headers)
+	for name, value in pairs(headers or {}) do
+		if type(name) == "string" and name:lower() == "authorization" then
+			return name, tostring(value)
+		end
+	end
+	return nil
+end
+
+-- The registration whose token this is, or nil.
+local function token_owner(box, token)
+	if token == nil then
+		return nil
+	end
+	for id, r in pairs(box.registrations) do
+		if r.token == token then
+			return id
+		end
+	end
+	return nil
+end
+
+-- keyed, authorized and registration_id of a request, from its headers now.
+local function authorize(box, rec, t)
+	local name, value = auth_header(t.headers)
+	rec.keyed = name ~= nil
+	rec.registration_id = name and token_owner(box, value:match("^Bearer (.+)$")) or nil
+	rec.authorized = rec.registration_id ~= nil
+end
+
+local function record_request(box, t, path)
+	local rec = { method = t.method, url = t.url, path = path, resource = resource_of(path), headers = {},
+		body = t.data }
+	local auth = auth_header(t.headers)
+	for name, value in pairs(t.headers or {}) do
+		-- The scheme ("Bearer ") stays; the token never reaches a record.
+		rec.headers[name] = name == auth and ((tostring(value):match("^(%S+%s+)%S") or "") .. "<redacted>") or value
+	end
+	if type(t.data) == "string" and t.data ~= "" then
+		local decoded = json.decode(t.data)
+		rec.json = type(decoded) == "table" and decoded or nil
+	end
+	authorize(box, rec, t)
+	box.requests[#box.requests + 1] = rec
+	return rec
+end
+
+local function box_error(name)
+	local F = box_fixtures()
+	return F.error_status[name], deep_copy(F.error[name])
+end
+
+-- The registrations as GET lists them: h.state's, then h.registrations'
+-- (never a token).
+local function public_registrations(box)
+	local out = json_object()
+	for id, r in pairs(type(box.state.registrations) == "table" and box.state.registrations or {}) do
+		out[id] = r
+	end
+	for id, r in pairs(box.registrations) do
+		out[id] = { appName = r.appName, instanceName = r.instanceName, role = r.role }
+	end
+	return out
+end
+
+-- h.state with its registrations as GET lists them.
+local function box_view(box)
+	local view = {}
+	for k, v in pairs(box.state) do
+		view[k] = v
+	end
+	view.registrations = public_registrations(box)
+	return view
+end
+
+local function find(node, segments)
+	for _, segment in ipairs(segments) do
+		if type(node) ~= "table" then
+			return nil
+		end
+		node = node[segment]
+	end
+	return node
+end
+
+-- The body's table, or the status and error body that refuse it.
+local function body_or_error(rec)
+	if rec.body == nil or rec.body == "" then
+		return nil, box_error("invalid_key")
+	end
+	if type(rec.json) ~= "table" then
+		return nil, box_error("invalid_json")
+	end
+	if next(rec.json) == nil then
+		return nil, box_error("invalid_key")
+	end
+	return rec.json
+end
+
+local function register(box, rec)
+	local body, status, err = body_or_error(rec)
+	if not body then
+		return status, err
+	end
+	for _, key in ipairs({ "appName", "instanceName" }) do
+		if type(body[key]) ~= "string" or body[key] == "" then
+			return box_error("invalid_value")
+		end
+	end
+	if not box.button_held then
+		return box_error("invalid_state")
+	end
+	local F = box_fixtures()
+	local listed = type(box.state.registrations) == "table" and box.state.registrations or {}
+	local n = tonumber(F.REGISTRATION_ID)
+	while box.registrations[tostring(n)] or listed[tostring(n)] do
+		n = n + 1
+	end
+	local id = tostring(n)
+	local token = F.TOKEN
+	if id ~= F.REGISTRATION_ID or token_owner(box, token) then
+		token = F.TOKEN .. "-" .. id
+	end
+	box.registrations[id] = { token = token, appName = body.appName, instanceName = body.instanceName, role = "user" }
+	box.button_held = false
+	return 200, { registrationId = id, accessToken = token }
+end
+
+local function unregister(box, rec, id)
+	if not box.registrations[id] then
+		local listed = type(box.state.registrations) == "table" and box.state.registrations[id]
+		return box_error(listed and "unauthorized" or "not_found")
+	end
+	if rec.registration_id ~= id then
+		return box_error("unauthorized")
+	end
+	box.registrations[id] = nil
+	return 200, json_object()
+end
+
+-- The status and body (a table) the box answers to a recorded request.
+local function box_answer(box, rec)
+	local method, resource = rec.method, rec.resource
+	if resource == nil then
+		return box_error("not_found")
+	end
+	if rec.keyed and not rec.authorized then
+		return box_error("unauthorized")
+	end
+	if method == "GET" and resource == "/device" and not rec.keyed then
+		return 200, box.device or box_fixtures().unkeyed_device(box.state.device or {})
+	end
+	if method == "POST" and resource == "/registrations" then
+		return register(box, rec)
+	end
+	if not rec.authorized then
+		return box_error("unauthorized")
+	end
+	local segments = {}
+	for segment in resource:gmatch("[^/]+") do
+		segments[#segments + 1] = segment
+	end
+	if method == "GET" then
+		local node = find(box_view(box), segments)
+		if type(node) ~= "table" then
+			return box_error("not_found")
+		end
+		return 200, node
+	elseif method == "DELETE" and #segments == 2 and segments[1] == "registrations" then
+		return unregister(box, rec, segments[2])
+	elseif method == "PUT" then
+		local body, status, err = body_or_error(rec)
+		if not body then
+			return status, err
+		end
+		if #segments == 0 or type(find(box.state, segments)) ~= "table" then
+			return box_error("not_found")
+		end
+		return 200, json_object()
+	end
+	return box_error("not_found")
+end
+
+local function box_respond(box, t, rec)
+	authorize(box, rec, t)
+	local status, body = box_answer(box, rec)
+	rec.status = status
+	t:respond(status, json.encode(body), { ["Content-Type"] = "application/json" })
+end
+
+-- See h:silence: Director's own timeout, a timer of the transfer's runtime.
+local function box_timeout(c4, t, rec)
+	local ms = math.max(1, math.floor((tonumber(t.options.timeout) or 15) * 1000))
+	local timer = { delay = ms, repeating = false, active = true, armed_at = c4.now_ms, due = c4.now_ms + ms,
+		syncbox = true }
+	function timer:Cancel()
+		self.active = false
+	end
+	timer.callback = function()
+		if t.cancelled then return end
+		rec.err_code = 28
+		t:done(28, "Timeout was reached")
+	end
+	table.insert(c4.timers, timer)
+end
+
+-- Whether the box's chain verifies with these transfer options (see above).
+local function box_tls_accepts(c4, options)
+	if c4.tls_ignores_cabundle or options.ssl_verify_peer == false then
+		return true
+	end
+	return type(options.ssl_cabundle) == "string" and options.ssl_cabundle:find("hsb_ca%.pem$") ~= nil
+		and options.ssl_verify_host == false
+end
+
+-- A started transfer to a box's address: the box takes it (true), or nil.
+local function route_to_box(c4, t)
+	local scheme, host, port, path = parse_url(t.url)
+	local box = host and boxes[host]
+	if not box then
+		return nil
+	end
+	local rec = record_request(box, t, path)
+	if scheme ~= "https" or (port ~= nil and port ~= 443) then
+		rec.err_code = 7
+		t:done(7, "Couldn't connect to server")
+	elseif not box_tls_accepts(c4, t.options) then
+		rec.err_code = 60
+		t:done(60, "SSL peer certificate or SSH remote key was not OK")
+	elseif box.silent then
+		box_timeout(c4, t, rec)
+	elseif box.deferred then
+		box.pending[#box.pending + 1] = { transfer = t, request = rec }
+	else
+		box_respond(box, t, rec)
+	end
+	return true
+end
+
+local Box = {}
+Box.__index = Box
+
+function Box:hold_button()
+	self.button_held = true
+end
+
+function Box:release_button()
+	self.button_held = false
+end
+
+function Box:silence(on)
+	self.silent = on ~= false
+end
+
+function Box:defer(on)
+	self.deferred = on ~= false
+end
+
+function Box:answer(n)
+	local answered = 0
+	local count = math.min(tonumber(n) or #self.pending, #self.pending)
+	for _ = 1, count do
+		local p = table.remove(self.pending, 1)
+		if not p.transfer.cancelled then
+			box_respond(self, p.transfer, p.request)
+			answered = answered + 1
+		end
+	end
+	return answered
+end
+
+function Box:move(address)
+	assert(type(address) == "string" and address ~= "", "h:move: an address")
+	if boxes[self.address] == self then
+		boxes[self.address] = nil
+	end
+	self.address = address
+	boxes[address] = self
+	if type(self.state.device) == "table" then self.state.device.ipAddress = address end
+	if type(self.device) == "table" then self.device.ipAddress = address end
+end
+
+function Box:requests_of(method, path)
+	local out = {}
+	for _, r in ipairs(self.requests) do
+		if (method == nil or r.method == method) and (path == nil or r.path == path or r.resource == path) then
+			out[#out + 1] = r
+		end
+	end
+	return out
+end
+
+-- One of opts.registrations (see above) into h.registrations.
+local function add_registration(box, key, value)
+	local F = box_fixtures()
+	local id, r
+	if type(value) == "table" then
+		id = value.registrationId or value.id or key
+		r = { token = value.token or value.accessToken, appName = value.appName, instanceName = value.instanceName,
+			role = value.role }
+	else
+		id, r = key, { token = value }
+	end
+	id = tostring(id)
+	assert(type(r.token) == "string" and r.token ~= "", "fake.syncbox: registration " .. id .. " has no token")
+	box.registrations[id] = { token = r.token, appName = r.appName or F.APP_NAME,
+		instanceName = r.instanceName or "Control4", role = r.role or "user" }
+end
+
+-- A fake box (see above).
+function fake.syncbox(opts)
+	opts = opts or {}
+	local F = box_fixtures()
+	local box = setmetatable({
+		address = opts.address or F.ADDRESS,
+		state = body_table(opts.state or F.state.HSB2, "opts.state"),
+		device = opts.device ~= nil and body_table(opts.device, "opts.device") or nil,
+		button_held = opts.button_held == true,
+		registrations = {},
+		requests = {},
+		pending = {},
+		silent = false,
+		deferred = false,
+	}, Box)
+	assert(type(box.address) == "string" and box.address ~= "", "fake.syncbox: opts.address should be text")
+	for key, value in pairs(opts.registrations or {}) do
+		add_registration(box, key, value)
+	end
+	boxes[box.address] = box
+	return box
 end
 
 -- A C4LuaUrl look-alike: records the request, and lets a spec drive the
@@ -199,6 +749,10 @@ local function new_transfer(c4)
 		if tostring(self.options.ssl_cabundle or ""):find("decoy", 1, true) and not c4.tls_ignores_cabundle then
 			table.insert(c4.decoy_transfers, self)
 			self:done(60, "SSL peer certificate or SSH remote key was not OK")
+			return self
+		end
+		-- A fake sync box's address: the box answers (fake.syncbox, above).
+		if route_to_box(c4, self) then
 			return self
 		end
 		table.insert(c4.transfers, self)
@@ -545,9 +1099,11 @@ local function new_c4(env)
 			end
 		end
 		local rec = fake.project.devices[device]
-		if rec and rec.proxy_id and binding == rec.proxy_binding then
-			out[rec.proxy_id] = bound_name(rec.proxy_id)
-			any = true
+		for _, p in ipairs(rec and proxies_of(rec) or {}) do
+			if binding == p.binding then
+				out[p.id] = bound_name(p.id)
+				any = true
+			end
 		end
 		return any and out or nil
 	end
@@ -563,7 +1119,13 @@ local function new_c4(env)
 		local rec = fake.project.devices[device]
 		if rec and rec.protocol_id then
 			local protocol = fake.project.devices[rec.protocol_id]
-			if protocol and binding == protocol.proxy_binding then
+			-- A further proxy answers on its own binding, the main one on the
+			-- main binding (see the file header).
+			local own
+			for _, p in ipairs(protocol and protocol.other_proxies or {}) do
+				if p.id == device then own = p.binding end
+			end
+			if protocol and binding == (own or protocol.proxy_binding) then
 				return rec.protocol_id
 			end
 		end
@@ -594,9 +1156,10 @@ local function new_c4(env)
 		local room = fake.project.rooms[rec.room_id]
 		local out = { deviceName = rec.name, roomId = rec.room_id, roomName = room and room.name or "",
 			driverFileName = rec.c4i }
-		if rec.proxy_id then
-			local proxy = fake.project.devices[rec.proxy_id]
-			out.proxies = { [rec.proxy_id] = { driverFileName = proxy.c4i, deviceName = proxy.name } }
+		for _, p in ipairs(proxies_of(rec)) do
+			local proxy = fake.project.devices[p.id]
+			out.proxies = out.proxies or {}
+			out.proxies[p.id] = { driverFileName = proxy.c4i, deviceName = proxy.name }
 		end
 		if rec.protocol_id then
 			local protocol = fake.project.devices[rec.protocol_id]
@@ -1105,7 +1668,7 @@ local function new_c4(env)
 	return c4
 end
 
-local DRIVER_MODULE_PREFIXES = { "common%.", "bridge%.", "light%." }
+local DRIVER_MODULE_PREFIXES = { "common%.", "bridge%.", "light%.", "syncbox%." }
 
 -- Drop cached driver modules so each load starts clean. common.log is kept so
 -- a spec can silence or capture its sink before loading a driver.
@@ -1158,10 +1721,11 @@ local function drop_stale_self(env)
 	local old = self_registered[env]
 	if old and old.id ~= env.C4.device_id and fake.project.devices[old.id] == old.rec then
 		remove_device_entry(old.id)
-		-- The placeholder's proxy id goes back when it was the last one handed
-		-- out, so a light's proxy is 3001 whichever driver loaded first.
-		if old.rec.proxy_id and old.rec.proxy_id + 1 == fake.project.next_proxy_id then
-			fake.project.next_proxy_id = old.rec.proxy_id
+		-- The placeholder's proxy ids go back when they were the last ones
+		-- handed out, so a light's proxy is 3001 whichever driver loaded first.
+		local proxies = proxies_of(old.rec)
+		if #proxies > 0 and proxies[#proxies].id + 1 == fake.project.next_proxy_id then
+			fake.project.next_proxy_id = proxies[1].id
 		end
 		self_registered[env] = nil
 	end
@@ -1191,9 +1755,10 @@ end
 fake.reset_project()
 
 -- A new runtime starts a new harness run: a fresh project with the loaded
--- runtimes' own devices.
+-- runtimes' own devices, and no fake sync box.
 local function begin_run(env)
 	envs = {}
+	boxes = {}
 	fake.reset_project()
 	add_env(env)
 	register_self(env)
@@ -1360,7 +1925,7 @@ function fake.move_device(id, room_id)
 	local protocol_id = protocol_id_of(id)
 	local rec = assert(fake.project.devices[protocol_id], "fake.move_device: unknown device " .. tostring(id))
 	rec.room_id = room_id
-	if rec.proxy_id then fake.project.devices[rec.proxy_id].room_id = room_id end
+	for _, p in ipairs(proxies_of(rec)) do fake.project.devices[p.id].room_id = room_id end
 end
 
 -- Delete a device (by its protocol or proxy id) as Composer would; see the
@@ -1382,7 +1947,7 @@ function fake.delete_device(id)
 	-- Every binding touching the device or its proxy, in every loaded
 	-- runtime's table (paired runtimes share one).
 	local mine = { [protocol_id] = true }
-	if rec.proxy_id then mine[rec.proxy_id] = true end
+	for _, p in ipairs(proxies_of(rec)) do mine[p.id] = true end
 	local seen = {}
 	local tables = {}
 	for _, e in ipairs(envs) do
