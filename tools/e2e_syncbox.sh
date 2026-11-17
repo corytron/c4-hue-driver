@@ -101,7 +101,7 @@ STATE="$WORK/state"
 FAKEBOX="python3 -I tools/fakebox.py --state-dir $STATE"
 FAKE_PID=""
 
-# shellcheck disable=SC2317 # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap
 cleanup() {
 	if [[ -n "$FAKE_PID" ]]; then
 		kill "$FAKE_PID" 2>/dev/null || true

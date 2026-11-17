@@ -423,6 +423,11 @@ class TestScenarioFile(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("lua5.1"), "lua5.1 is not installed")
     def test_fixtures_json_is_the_export_of_the_lua_fixtures(self):
+        # The fixtures need dkjson, which CI's tooling job lacks; the Lua job checks the
+        # same thing in tests/spec/syncbox_fixtures_json_spec.lua.
+        probe = subprocess.run(["lua5.1", "-e", "require('dkjson')"], capture_output=True, check=False, timeout=60)
+        if probe.returncode != 0:
+            self.skipTest("lua5.1 has no dkjson here; tests/spec/syncbox_fixtures_json_spec.lua checks it")
         result = subprocess.run(["lua5.1", EXPORT], capture_output=True, text=True, check=False, timeout=60)
         self.assertEqual(0, result.returncode, result.stderr)
         with open(FIXTURES, encoding="utf-8") as handle:
