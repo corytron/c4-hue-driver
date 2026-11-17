@@ -279,6 +279,8 @@ names a box only when exactly one bound box of this bridge has the area.
 | `HUE_SYNCBOX_AREA` | bridge → box | `id`, `status` (`active`/`inactive`), `streamer` (`this_box`/`other`/`none`) | A stream starts or stops on any area. The box reads its own state at once; nothing else changes |
 | `HUE_SYNCBOX_STOP_AREA` | box → bridge | `area_id` | When the box reports the bridge busy as it starts syncing (O12, automatic): the bridge PUTs `action: stop` on the area with its own key (check T6), then the box starts its sync and fires Sync Taken Over |
 | `HUE_SYNCBOX_GOODBYE` | box → bridge | `device_id`, `box_id` | Unbind or removal |
+| `HUE_SYNCBOX_STATE` | box → bridge | `device_id`, `box_id`, `bridge_id`, `area_id`, `syncing` | Stage 4 (#568): the box's sync state changed, or it got an AREA; the stream label and W10's guard read it. HELLO carries `syncing` too |
+| `HUE_SYNCBOX_STOPPED` | bridge → box | `area_id`, `ok`, `reason` (`stopped`, `another_box`, `no_area`, `not_linked`, `failed`, `busy`), `by`, `detail` | Stage 4: the answer to a `STOP_AREA` |
 
 The trust rules of #483 apply on both sides:
 - A box acts on bridge messages only as hints.
@@ -314,7 +316,9 @@ The trust rules of #483 apply on both sides:
   - Check T7 settles when Hue's own end state lands, so the restore comes
     after it.
 - **Never written:** areas, and their "light state after streaming"
-  setting. A stream is stopped only through `STOP_AREA` (O12).
+  setting. A stream is stopped only through `STOP_AREA` (O12), which writes
+  only `{"action": "stop"}` to the area, and never for a stream a bound box of
+  this project reports (W10; a 3 s grace when two boxes start together).
 
 ## C7. Lights, zone lights and scenes while lamps stream
 
