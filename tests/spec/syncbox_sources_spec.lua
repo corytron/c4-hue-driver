@@ -134,6 +134,12 @@ describe("syncbox/sources.lua (#557)", function()
 			assert.same({ "music", "kind" }, { second(RADIO) })
 		end)
 
+		it("a CD player is Music by its kind (probe P11 listed a CD player as Video, #557)", function()
+			local CD_DEV, CD = 3901, 3902
+			fake.add_device(CD_DEV, { name = "CD", driver = "cd_generic_ir.c4i", proxy = "cd", proxy_id = CD })
+			assert.same({ "music", "kind" }, { second(CD) })
+		end)
+
 		it("Listen is Music, whatever the device", function()
 			assert.same({ "music", "listen" }, { second(APPLE, "listen") })
 			assert.same({ "music", "listen" }, { second(PS5, "listen") })
