@@ -15,8 +15,9 @@ present, this page and the code win. Brought up to date on 2026-11-13
   discovery, polling and its state in Composer, including the wiring (in
   line, behind a receiver, second output; O17, #531), and the bridge's Hue
   Sync Boxes connection naming the box in the stream label. Read-only to
-  the box apart from registering. To ship as `v2.0-beta.2` with the #527
-  fix (an off names no brightness preset). Open owner questions for stages
+  the box apart from registering. Prerelease **`v2.0-beta.2`, build 682**
+  (2026-11-16), with the #527 fix (an off names no brightness preset), is
+  the house's desired state. Open owner questions for stages
   3 and 4: #536.
 - **2.0 "Luthen" beta stage 1 (#514, #521): `v2.0-beta.1`, build 661**,
   a prerelease of 2026-11-14 (PR #522): entertainment areas on the bridge,
