@@ -143,7 +143,7 @@ Standard library only (plus the `openssl` command for the CA). Python
 - `tools/fakebox/mdns.py` (F2): answers `_huesync._tcp.local` PTR queries
   on 224.0.0.251:5353 (multicast and legacy unicast, the form the drivers'
   `common/mdns.lua` sends) with SRV (the fake's port), TXT (`uniqueid`,
-  `devicetype`, `name`, `path=/api/v1`, as the research lists) and A
+  `devicetype`, `name`, `path=/api`, as the research lists) and A
   records; coexists with avahi (`SO_REUSEADDR`/`SO_REUSEPORT`).
 - Tests: `tools/tests/test_fakebox_model.py`, `test_fakebox_server.py`
   (F1), `test_fakebox_ca.py`, `test_fakebox_mdns.py` (F2). Parallel-safe:
